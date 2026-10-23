@@ -584,22 +584,30 @@ export async function pageOfVisibleRows<T, P>(
 
 // ── refusals ─────────────────────────────────────────────────────────────
 
-/** The error a route built on thrown errors throws for a refusal (the gates' own shape: 403 with the decision id, or 503). */
-export function sessionRefusalError(request: FastifyRequest, refusal: SessionRefusal): Error {
+/**
+ * The error a route built on thrown errors throws for a refusal (the gates' own shape: 403 with the decision id, or
+ * 503). `message` replaces the sentence of a 403 for a route whose request touches several sessions at once.
+ */
+export function sessionRefusalError(request: FastifyRequest, refusal: SessionRefusal, options: { message?: string } = {}): Error {
   if (refusal.status === 404) return Object.assign(new Error('Session not found'), { status: 404, code: 'session_not_found' });
   return resourceRefusalError(request, {
     action: ACTION_OF_NEED[refusal.need],
     level: LEVEL_OF_NEED[refusal.need],
     ...(refusal.decisionId ? { decisionId: refusal.decisionId } : {}),
-    ...(refusal.status === 503 ? { unavailable: true } : { message: SESSION_FORBIDDEN_MESSAGE[refusal.need] }),
+    ...(refusal.status === 503 ? { unavailable: true } : { message: options.message ?? SESSION_FORBIDDEN_MESSAGE[refusal.need] }),
   });
 }
 
 /** The dashboard's reply to a refusal. */
-export function sendSessionRefusal(reply: FastifyReply, request: FastifyRequest, refusal: SessionRefusal): FastifyReply {
+export function sendSessionRefusal(
+  reply: FastifyReply,
+  request: FastifyRequest,
+  refusal: SessionRefusal,
+  options: { message?: string } = {},
+): FastifyReply {
   if (refusal.status === 404) return reply.code(404).send({ error: 'Session not found' });
-  const answered = sendProjectContextError(reply, sessionRefusalError(request, refusal));
-  return answered ?? reply.code(refusal.status).send({ error: SESSION_FORBIDDEN_MESSAGE[refusal.need] });
+  const answered = sendProjectContextError(reply, sessionRefusalError(request, refusal, options));
+  return answered ?? reply.code(refusal.status).send({ error: options.message ?? SESSION_FORBIDDEN_MESSAGE[refusal.need] });
 }
 
 const CLIENT_UNAVAILABLE_MESSAGE = 'Authorization is temporarily unavailable';

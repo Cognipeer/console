@@ -26,6 +26,11 @@ export interface ManifestAuthShape {
     username?: string;
 }
 
+/** An MCP server's auth shape: also `console_identity`, which needs no credential (the importing workspace signs its own tokens). */
+export interface ManifestMcpAuthShape extends Omit<ManifestAuthShape, 'type'> {
+    type: ManifestAuthShape['type'] | 'console_identity';
+}
+
 export interface ManifestSkillResource {
     key: string;
     title: string;
@@ -59,7 +64,7 @@ export interface ManifestMcpResource {
         executionMode: 'subprocess' | 'sandbox';
         sandbox?: { templateKey?: string; resources?: { cpuCores?: number; memoryMb?: number } };
     };
-    auth: ManifestAuthShape;
+    auth: ManifestMcpAuthShape;
 }
 
 export interface ManifestToolResource {
@@ -150,7 +155,7 @@ function mcpResource(server: IMcpServer): ManifestMcpResource | { skip: string }
         key: server.key,
         name: server.name,
         ...(server.description ? { description: server.description } : {}),
-        auth: authShape(server.upstreamAuth),
+        auth: server.upstreamAuth?.type === 'console_identity' ? { type: 'console_identity' as const } : authShape(server.upstreamAuth),
     };
     if (sourceType === 'remote' && server.remoteConfig) {
         return { ...base, sourceType, remoteConfig: { url: server.remoteConfig.url, transport: server.remoteConfig.transport } };

@@ -70,7 +70,7 @@ import {
     type PublicPendingAction,
 } from './agentPendingActions';
 import { createSessionEventWriter, type SessionStopReason } from './sessionEvents';
-import type { IAgentTurnCompaction } from '@/lib/database';
+import type { AgentCompactionEvent, AgentPlanEvent, AgentSubagentEvent } from '@/lib/shared/agentTurnFlow';
 
 const logger = createLogger('agents:action-resolution');
 
@@ -137,6 +137,12 @@ export interface ResolveAgentActionInput {
     authorize: ApprovalAuthorizer;
     /** `background`: queue the continuation as a run instead of running it inline. */
     mode: 'sync' | 'background';
+    /**
+     * Refuse (`agent_inactive`) while the agent is switched off. Client and runtime channels set it;
+     * the dashboard leaves it off so a draft agent can still be tested. The check runs before the
+     * answer is recorded, so the request stays open and can be answered once the agent is back on.
+     */
+    requireActiveAgent?: boolean;
     runtimeContext?: AgentRuntimeContext;
     /**
      * The host page this answer comes from, when the chat is embedded in one: its
@@ -152,7 +158,9 @@ export interface ResolveAgentActionInput {
         onToolEvent?: (event: AgentToolCallEvent) => void;
         onTextChunk?: (text: string) => void;
         onReasoningChunk?: (text: string) => void;
-        onCompaction?: (compaction: IAgentTurnCompaction) => void;
+        onCompaction?: (compaction: AgentCompactionEvent) => void;
+        onPlan?: (plan: AgentPlanEvent) => void;
+        onSubagent?: (event: AgentSubagentEvent) => void;
         signal?: AbortSignal;
     };
     /** Deadline / cancel reference for a continuation that runs under a ceiling. */
@@ -169,6 +177,8 @@ export type ResolveOutcome =
     | { kind: 'unavailable'; decisionId?: string }
     | { kind: 'invalid'; message: string }
     | { kind: 'busy' }
+    /** The agent is switched off and the channel requires it on; nothing was recorded, the request stays open. */
+    | { kind: 'agent_inactive' }
     /** Recorded; other requests of the same pause are still open. `runId`: the paused run that owns the pause. */
     | { kind: 'pending'; pendingActions: PublicPendingAction[]; runId?: string }
     /**
@@ -506,7 +516,7 @@ export async function pendingActionsBlockingMessage(
  * before it announces anything.
  */
 export async function checkAgentPendingActionResolution(
-    input: Pick<ResolveAgentActionInput, 'tenantDbName' | 'tenantId' | 'projectId' | 'conversationId' | 'actionId' | 'agentKey' | 'body' | 'authorize' | 'actor'>,
+    input: Pick<ResolveAgentActionInput, 'tenantDbName' | 'tenantId' | 'projectId' | 'conversationId' | 'actionId' | 'agentKey' | 'body' | 'authorize' | 'actor' | 'requireActiveAgent'>,
 ): Promise<ResolveOutcome | null> {
     const { tenantDbName, tenantId, projectId, conversationId, actor } = input;
     return runWithTenantDb(tenantDbName, async (db) => {
@@ -527,6 +537,11 @@ export async function checkAgentPendingActionResolution(
 
         const verdict = await askAuthorizer(input.authorize, { conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
         if (!verdict.allowed) return forbidden(verdict);
+
+        if (input.requireActiveAgent) {
+            const agent = await db.findAgentByKey(action.agentKey, projectId);
+            if (!agent || agent.status !== 'active') return { kind: 'agent_inactive' };
+        }
 
         const parsed = parseResolution(action, input.body);
         if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
@@ -562,6 +577,13 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
         // 2. Who may answer: the policy engine's decision, asked by the caller (it has the principal).
         const verdict = await askAuthorizer(input.authorize, { conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
         if (!verdict.allowed) return forbidden(verdict);
+
+        // A switched-off agent does not continue, and the answer is not recorded either:
+        // switching it back on lets this same request be answered.
+        if (input.requireActiveAgent) {
+            const agent = await db.findAgentByKey(action.agentKey, projectId);
+            if (!agent || agent.status !== 'active') return { kind: 'agent_inactive' };
+        }
 
         // 3. What they answered.
         const parsed = parseResolution(action, input.body);
@@ -722,6 +744,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
                     ...(input.stream?.onReasoningChunk ? { onReasoningChunk: input.stream.onReasoningChunk } : {}),
                     ...(input.stream?.onCompaction ? { onCompaction: input.stream.onCompaction } : {}),
+                    ...(input.stream?.onPlan ? { onPlan: input.stream.onPlan } : {}),
+                    ...(input.stream?.onSubagent ? { onSubagent: input.stream.onSubagent } : {}),
                     ...(watch ? { signal: watch.signal } : input.stream?.signal ? { signal: input.stream.signal } : {}),
                     onInvokeStart: () => { invoking = true; },
                 });

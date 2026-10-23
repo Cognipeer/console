@@ -91,7 +91,7 @@ const logger = createLogger('api:client-agent-runs');
 const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
 
 const RUN_STATUSES: ReadonlyArray<IAgentRun['status']> = ['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled'];
-const RUN_CHANNELS: ReadonlyArray<NonNullable<IAgentRun['channel']>> = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger'];
+const RUN_CHANNELS: ReadonlyArray<NonNullable<IAgentRun['channel']>> = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger', 'reminder'];
 const LIST_DEFAULT_LIMIT = 20;
 const LIST_MAX_LIMIT = 100;
 const LIST_MAX_METADATA_FILTERS = 3;

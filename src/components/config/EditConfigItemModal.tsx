@@ -1,11 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Select, Switch, TextInput, Textarea } from '@mantine/core';
+import { PasswordInput, Select, Switch, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconEdit } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { ResourceUsageSection } from '@/components/common/confirm';
 import FormShell, {
   Checklist,
   FormField,
@@ -52,17 +53,20 @@ export default function EditConfigItemModal({
       tags: '',
     },
     validate: {
-      name: (v) => (!v.trim() ? 'Name is required' : null),
-      value: (v) => (v === '' ? 'Value is required' : null),
+      name: (v) => (!v.trim() ? t('nameRequired') : null),
     },
   });
+
+  // A stored secret is never sent to the browser (the API returns a mask), so
+  // an empty value on a still-secret item means "keep the stored secret".
+  const keepsSecret = Boolean(item?.isSecret) && form.values.isSecret;
 
   useEffect(() => {
     if (!item) return;
     form.setValues({
       name: item.name || '',
       description: item.description || '',
-      value: item.value || '',
+      value: item.isSecret ? '' : item.value || '',
       valueType: item.valueType || 'string',
       isSecret: item.isSecret,
       tags: (item.tags || []).join(', '),
@@ -84,7 +88,7 @@ export default function EditConfigItemModal({
           body: JSON.stringify({
             name: values.name,
             description: values.description || undefined,
-            value: values.value,
+            ...(keepsSecret && values.value === '' ? {} : { value: values.value }),
             valueType: values.valueType,
             isSecret: values.isSecret,
             tags,
@@ -113,15 +117,15 @@ export default function EditConfigItemModal({
         setLoading(false);
       }
     },
-    [form.values, item, onUpdated, t],
+    [form.values, item, keepsSecret, onUpdated, t],
   );
 
   const v = form.values;
   const validName = v.name.trim().length > 0;
-  const validValue = v.value !== '';
+  const validValue = keepsSecret || v.value !== '';
   const checklist = [
-    { id: 'name', label: 'Name provided', done: validName },
-    { id: 'value', label: 'Value provided', done: validValue },
+    { id: 'name', label: t('itemName'), done: validName },
+    { id: 'value', label: t('value'), done: validValue },
   ];
 
   const summary = (
@@ -129,7 +133,7 @@ export default function EditConfigItemModal({
       <SummaryKV label={t('itemKey')} value={item?.key || '—'} mono />
       <SummaryKV label={t('itemName')} value={v.name || '—'} />
       <SummaryKV label={t('valueType')} value={v.valueType} />
-      <SummaryKV label={t('isSecret')} value={v.isSecret ? 'yes' : 'no'} />
+      <SummaryKV label={t('isSecret')} value={v.isSecret ? t('yes') : t('no')} />
       <Checklist items={checklist} />
     </SummaryGroup>
   );
@@ -142,7 +146,7 @@ export default function EditConfigItemModal({
       title={t('editItem')}
       subtitle={item?.key}
       summary={summary}
-      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      footerStatus={t('ready', { done: checklist.filter((c) => c.done).length, total: checklist.length })}
       primaryAction={{
         label: t('save'),
         icon: <IconCheck size={13} />,
@@ -151,12 +155,12 @@ export default function EditConfigItemModal({
         onClick: () => form.onSubmit(handleSubmit)(),
       }}
     >
-      <FormSection number={1} title="Identity" done={validName}>
+      <FormSection number={1} title={t('identity')} done={validName}>
         <FormRow cols={2}>
           <FormField label={t('itemName')} required>
             <TextInput {...form.getInputProps('name')} />
           </FormField>
-          <FormField label={t('itemKey')} hint="Item key cannot be changed">
+          <FormField label={t('itemKey')} hint={t('itemKeyLocked')}>
             <TextInput value={item?.key || ''} readOnly />
           </FormField>
         </FormRow>
@@ -166,8 +170,19 @@ export default function EditConfigItemModal({
       </FormSection>
 
       <FormSection number={2} title={t('value')} done={validValue}>
-        <FormField label={t('value')} required>
-          <Textarea autosize minRows={2} {...form.getInputProps('value')} />
+        <FormField
+          label={t('value')}
+          required={!keepsSecret}
+          hint={keepsSecret ? t('secretValueSet') : undefined}
+        >
+          {v.isSecret ? (
+            <PasswordInput
+              placeholder={keepsSecret ? t('keepSecretHint') : t('valuePlaceholder')}
+              {...form.getInputProps('value')}
+            />
+          ) : (
+            <Textarea autosize minRows={2} {...form.getInputProps('value')} />
+          )}
         </FormField>
         <FormRow cols={2}>
           <FormField label={t('valueType')}>
@@ -181,7 +196,7 @@ export default function EditConfigItemModal({
               {...form.getInputProps('valueType')}
             />
           </FormField>
-          <FormField label={t('isSecret')} hint="Encrypt the value at rest. Secret values are masked in the UI.">
+          <FormField label={t('isSecret')} hint={t('secretHint')}>
             <Switch mt={6} {...form.getInputProps('isSecret', { type: 'checkbox' })} />
           </FormField>
         </FormRow>
@@ -189,9 +204,15 @@ export default function EditConfigItemModal({
 
       <FormSection number={3} title={t('tags')}>
         <FormField label={t('tags')} optional>
-          <TextInput placeholder="Comma separated: api, credentials" {...form.getInputProps('tags')} />
+          <TextInput placeholder={t('tagsPlaceholder')} {...form.getInputProps('tags')} />
         </FormField>
       </FormSection>
+
+      {item ? (
+        <FormSection number={4} title={t('usageSection')} description={t('usageSectionDescription')}>
+          <ResourceUsageSection type="config-item" id={item._id} />
+        </FormSection>
+      ) : null}
     </FormShell>
   );
 }

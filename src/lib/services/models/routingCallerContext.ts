@@ -30,6 +30,20 @@ export const ROUTING_CHANNELS: readonly RoutingChannel[] = [
   'playground',
 ];
 
+/**
+ * The agent run a model call is made for, stamped on the call's usage row so
+ * every call's tokens and cost are attributable the moment it settles — whatever
+ * becomes of the run. Shared by reference through the scope and filled in as the
+ * run learns it (`noteRoutingRun`): the turn id once the turn is open, the trace
+ * session once its first event is stored.
+ */
+export interface RoutingRunAttribution {
+  conversationId?: string;
+  turnId?: string;
+  runId?: string;
+  traceSessionId?: string;
+}
+
 export interface RoutingCallerContext {
   channel?: RoutingChannel;
   userId?: string;
@@ -39,6 +53,7 @@ export interface RoutingCallerContext {
   portalKey?: string;
   apiTokenId?: string;
   projectId?: string;
+  run?: RoutingRunAttribution;
 }
 
 const storage = new AsyncLocalStorage<RoutingCallerContext>();
@@ -51,6 +66,18 @@ export function runWithRoutingCaller<T>(context: RoutingCallerContext, fn: () =>
 
 export function getRoutingCaller(): RoutingCallerContext | undefined {
   return storage.getStore();
+}
+
+/**
+ * Fills in what the ambient scope's run attribution has learned. A no-op outside
+ * a run scope (a scope opened without `run` is not a run).
+ */
+export function noteRoutingRun(fields: RoutingRunAttribution): void {
+  const run = storage.getStore()?.run;
+  if (!run) return;
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) (run as Record<string, unknown>)[key] = value;
+  }
 }
 
 /** Explicit context wins over the ambient one, field by field. */

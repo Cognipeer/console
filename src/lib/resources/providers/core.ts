@@ -105,6 +105,10 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
   const sandbox = config.sandbox as Doc | undefined;
   if (sandbox && sandbox.enabled === true) edges.add('agent.sandboxTemplate', sandbox.templateKey, 'config.sandbox.templateKey');
 
+  // Config references are edges whether or not the sandbox is switched on: "used by" on a config item has to
+  // show every agent that would break when it is deleted, not only the ones running a sandbox today.
+  if (sandbox) addSandboxConfigEdges(edges, sandbox);
+
   const memory = config.memory as Doc | undefined;
   if (memory && memory.enabled !== false) {
     edges.add('agent.memory', memory.memoryStoreKey, 'config.memory.memoryStoreKey');
@@ -193,6 +197,30 @@ export function extractModelEdges(m: Doc): ResourceEdgeInput[] | undefined {
   }
 
   return edges.done();
+}
+
+/**
+ * `config.sandbox` env/secret references: the item per reference, the group per bound group, and the group of
+ * each referenced item. One group edge per group (bound groups first), so a group used twice is listed once in
+ * its "used by". Ids only, never a value.
+ */
+function addSandboxConfigEdges(edges: EdgeCollector, sandbox: Doc): void {
+  const groups = new Set<unknown>();
+  const addGroup = (groupId: unknown, field: string) => {
+    if (groups.has(groupId)) return;
+    groups.add(groupId);
+    edges.add('agent.configGroup', groupId, field);
+  };
+  asArray(sandbox.groupRefs).forEach((ref, i) => addGroup(ref.groupId, `config.sandbox.groupRefs[${i}].groupId`));
+  for (const mapName of ['envRefs', 'secretRefs'] as const) {
+    const refs = sandbox[mapName];
+    if (!refs || typeof refs !== 'object' || Array.isArray(refs)) continue;
+    for (const [name, ref] of Object.entries(refs as Record<string, Doc | null>)) {
+      const base = `config.sandbox.${mapName}.${name}`;
+      edges.add('agent.configItem', ref?.configId, `${base}.configId`);
+      addGroup(ref?.groupId, `${base}.groupId`);
+    }
+  }
 }
 
 export function mapAgent(a: Record<string, any>): ResourceRecord {

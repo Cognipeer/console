@@ -14,6 +14,7 @@ import {
     resolveTurnOutputSchema,
 } from '@/lib/services/agents/agentRuntimeConfig';
 import { parsePausedState, serializePausedState } from '@/lib/services/agents/agentPendingActions';
+import { decodeStoredState } from '@/lib/services/agents/agentTurnState';
 import type { AgentResponseFormat } from '@/lib/database/provider/types.domain';
 
 const TRIAGE: AgentResponseFormat = {
@@ -132,7 +133,7 @@ describe('the paused state carries the turn options', () => {
 
     it('a turn without options stores none, and an old state without them parses', () => {
         const plain = serializePausedState(state, 'agent')!;
-        expect(JSON.parse(plain).turn).toBeUndefined();
+        expect(JSON.parse(decodeStoredState(plain)).turn).toBeUndefined();
         expect(parsePausedState(plain)!.turn).toBeUndefined();
         expect(parsePausedState(serializePausedState(state, 'agent', undefined, {})!)!.turn).toBeUndefined();
     });

@@ -56,6 +56,7 @@
  * policy shared by three guardrails silently override all three.
  */
 
+import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import type { PiiAction } from '@/lib/database/provider/types.domain';
@@ -289,6 +290,7 @@ function toSafetyFinding(params: {
     code: params.code,
     path: unit?.path,
     span: params.span,
+    confidence: finding.confidence,
   };
 }
 
@@ -312,6 +314,12 @@ export async function runPiiPolicy(input: FamilyRunInput<PiiPolicyConfig>): Prom
   const mutations: Mutation[] = [];
   const degraded: FamilyDegradation[] = [];
   const mutate = isMutating(action);
+
+  // PII detection fails OPEN when its service is switched off: the text passes
+  // through unchanged, and the skip is logged and audited once.
+  if (await safetyCheckSkipped({ tenantId: scope.tenantId, tenantDbName: scope.tenantDbName }, 'pii', { hook })) {
+    return { findings, mutations, degraded };
+  }
 
   const piiPolicyKey = policy.piiPolicyKey?.trim();
   if (!piiPolicyKey) {

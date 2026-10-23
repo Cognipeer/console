@@ -40,13 +40,14 @@ import {
   expiryLabel,
   filesInFolder,
   normalizePrefix,
-  objectsUrl,
   parentPrefix,
   purposeParam,
   sessionHref,
   subFolders,
-} from '@/components/files/fileBrowse';
-import { FolderPath, SessionFileCells } from '@/components/files/FileBrowseParts';
+} from '@/components/files/bucket/fileBrowse';
+import { ExpiryCell, FolderPath, SessionBadge, SessionLinkCell, UploaderCell } from '@/components/files/bucket/FileBrowseParts';
+import { listingQuery } from '@/components/files/bucket/filesTabModel';
+import { filesRoutes } from '@/components/files/filesApi';
 import SessionFilesPanel from '@/components/agents/session/SessionFilesPanel';
 import { AttachmentChips } from '@/components/agents/session/SessionAttachments';
 import { bucketHref, conversionBadge, fileLocation, sessionFileUrl, sessionFilesUrl, type SessionFileItem } from '@/components/agents/session/sessionFilesUi';
@@ -385,8 +386,10 @@ describe('browsing a bucket by folder', () => {
   });
 
   it('asks for one folder at a time, with the session filter when set', () => {
-    expect(objectsUrl('docs', { prefix: '', filter: 'all' })).toBe('/api/files/buckets/docs/objects?limit=50&prefix=');
-    expect(objectsUrl('my bucket', { prefix: 'a/b/', filter: 'session', cursor: 'a/b/k' })).toBe(
+    // The Files tab's listing: the folder is always sent, the session filter becomes `purpose`.
+    const root = { path: '', q: '', type: null, show: 'all' } as const;
+    expect(filesRoutes.objects('docs', listingQuery(root))).toBe('/api/files/buckets/docs/objects?limit=50&prefix=');
+    expect(filesRoutes.objects('my bucket', { ...listingQuery({ ...root, path: 'a/b/', show: 'session' }), cursor: 'a/b/k' })).toBe(
       '/api/files/buckets/my%20bucket/objects?limit=50&prefix=a%2Fb%2F&purpose=conversation&cursor=a%2Fb%2Fk',
     );
     expect(purposeParam('other')).toBe('other');
@@ -413,8 +416,17 @@ describe('browsing a bucket by folder', () => {
 
 describe('session files in the bucket view', () => {
   const now = new Date('2026-10-11T12:00:00Z');
-  const row = (record: Parameters<typeof SessionFileCells>[0]['record'], agentId?: string, locale: 'en' | 'tr' = 'en') =>
-    render(h(Table, null, h(Table.Tbody, null, h(Table.Tr, null, h(SessionFileCells, { record, agentId, now, locale })))), locale);
+  // The three cells of a session file, as the grid places them: one cell each (Session, Expires, Uploaded by).
+  type SessionRecord = Parameters<typeof SessionLinkCell>[0]['record'] & Parameters<typeof ExpiryCell>[0]['record'] & Parameters<typeof UploaderCell>[0]['record'];
+  const row = (record: SessionRecord, agentId?: string, locale: 'en' | 'tr' = 'en') =>
+    render(
+      h(Table, null, h(Table.Tbody, null, h(Table.Tr, null,
+        h(Table.Td, null, h(SessionLinkCell, { record, agentId })),
+        h(Table.Td, null, h(ExpiryCell, { record, now, locale })),
+        h(Table.Td, null, h(UploaderCell, { record })),
+      ))),
+      locale,
+    );
 
   it('links the session page, shows when the file goes and who uploaded it', () => {
     const html = row({ purpose: 'conversation', conversationId: 'conv1', agentKey: 'support', expiresAt: new Date('2026-10-23T12:00:00Z'), uploadedBy: 'user-7' }, 'agent-id-1');
@@ -432,8 +444,8 @@ describe('session files in the bucket view', () => {
   });
 
   it('takes the agent’s id from the row the server sent, not from a second request for every agent', () => {
-    const source = readFileSync(join(__dirname, '../../components/files/FileObjectManager.tsx'), 'utf8');
-    expect(source).toContain('agentId={record.agentId}');
+    const source = readFileSync(join(__dirname, '../../components/files/bucket/BucketFilesTab.tsx'), 'utf8');
+    expect(source).toContain('agentId={row.record.agentId}');
     expect(source).not.toContain("'/api/agents'");
     expect(source).not.toContain('agents-by-key');
   });
@@ -451,8 +463,10 @@ describe('session files in the bucket view', () => {
 
   it('speaks Turkish', () => {
     const html = row({ purpose: 'conversation', conversationId: 'c', agentKey: 'a', expiresAt: new Date('2026-10-23T12:00:00Z') }, 'x', 'tr');
-    expect(html).toContain('Oturum dosyası');
     expect(html).toContain('12 gün sonra');
+    // The "Session file" badge sits beside the file's name, not in the Session column.
+    expect(render(h(SessionBadge), 'tr')).toContain('Oturum dosyası');
+    expect(render(h(SessionBadge))).toContain('Session file');
   });
 
   it('words expiry from the clock it is given', () => {
@@ -741,24 +755,28 @@ describe('strings', () => {
   });
 
   it('defines every key the Files components ask for, in both languages', () => {
-    const files = [
+    // Every .tsx of the Document Store (its components and its pages), however many there are, plus the other files that ask for `files.*` keys.
+    const tsxUnder = (dir: string): string[] => readdirSync(join(__dirname, '../..', dir), { withFileTypes: true }).flatMap((entry) => {
+      const path = `${dir}/${entry.name}`;
+      return entry.isDirectory() ? tsxUnder(path) : entry.name.endsWith('.tsx') ? [path] : [];
+    });
+    const files = [...new Set([
       'components/agents/studio/AgentFilesPanel.tsx',
       'components/agents/session/SessionFilesPanel.tsx',
       'components/agents/session/SessionAttachments.tsx',
-      'components/files/FileBrowseParts.tsx',
-      'components/files/FileObjectManager.tsx',
-      'components/files/FileBucketManager.tsx',
       'components/models/ModelInputModalitiesField.tsx',
-      'app/dashboard/files/page.tsx',
-    ];
+      ...tsxUnder('components/files'),
+      ...tsxUnder('app/dashboard/files'),
+    ])];
     const missing: string[] = [];
     let checked = 0;
     for (const file of files) {
       const source = readFileSync(join(__dirname, '../..', file), 'utf8');
-      const spaces: Record<string, string> = {};
-      for (const match of source.matchAll(/const\s+(\w+)\s*=\s*useTranslations\('([\w.]+)'\)/g)) spaces[match[1]] = match[2];
+      // A Map, not a plain object: a code sample in a page may call `.toString('base64')`, which a plain object would answer.
+      const spaces = new Map<string, string>();
+      for (const match of source.matchAll(/const\s+(\w+)\s*=\s*useTranslations\('([\w.]+)'\)/g)) spaces.set(match[1], match[2]);
       for (const match of source.matchAll(/\b(\w+)\(\s*'([\w.]+)'/g)) {
-        const namespace = spaces[match[1]];
+        const namespace = spaces.get(match[1]);
         if (!namespace) continue;
         checked += 1;
         const key = `${namespace}.${match[2]}`;

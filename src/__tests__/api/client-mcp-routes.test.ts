@@ -29,12 +29,13 @@ vi.mock('@/lib/services/mcp', async (importActual) => ({
   getMcpServerByKey: vi.fn(),
   executeMcpTool: vi.fn(),
   logMcpRequest: vi.fn(),
+  updateMcpServer: vi.fn(),
 }));
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase, type IMcpServer } from '@/lib/database';
 import { getConfigSource, setConfigSource } from '@/lib/core/config';
-import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpToolInputError, McpUpstreamError } from '@/lib/services/mcp';
+import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpServerConfigError, McpToolInputError, McpUnknownToolError, McpUpstreamError, updateMcpServer } from '@/lib/services/mcp';
 import { clientMcpApiPlugin } from '@/server/api/plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from '@/server/api/plugins/client-mcp-console';
 import { createMockDb } from '../helpers/db.mock';
@@ -142,6 +143,63 @@ describe('token MCP routes', () => {
     });
   });
 
+  describe('instructions', () => {
+    const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} };
+
+    it('carries the operator\'s text over the one the source supplied', async () => {
+      vi.mocked(getMcpServerByKey).mockResolvedValue({
+        ...server(),
+        metadata: { instructions: 'Operator text', discoveredInstructions: 'Upstream text' },
+      } as IMcpServer);
+      const body = JSON.parse((await post('/api/client/v1/mcp/crm/message', initialize)).body);
+      expect(body.result.instructions).toBe('Operator text');
+    });
+
+    it('falls back to the source\'s text, and leaves the field out when there is none', async () => {
+      vi.mocked(getMcpServerByKey).mockResolvedValueOnce({
+        ...server(),
+        metadata: { discoveredInstructions: 'Upstream text' },
+      } as IMcpServer);
+      const withSource = JSON.parse((await post('/api/client/v1/mcp/crm/message', initialize)).body);
+      expect(withSource.result.instructions).toBe('Upstream text');
+
+      const without = JSON.parse((await post('/api/client/v1/mcp/crm/message', initialize)).body);
+      expect(without.result).not.toHaveProperty('instructions');
+    });
+
+    it('gives the console server its own text', async () => {
+      const body = JSON.parse((await post('/api/client/v1/mcp/console/message', initialize)).body);
+      expect(body.result.instructions).toContain('get_session');
+    });
+
+    it('turns down instructions that are not text, or too long, with 400', async () => {
+      for (const instructions of [42, 'x'.repeat(8001)]) {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: '/api/client/v1/mcp/crm',
+          headers,
+          payload: JSON.stringify({ instructions }),
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(updateMcpServer).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updating a server', () => {
+    it('answers settings the server cannot take with 400, not 500', async () => {
+      vi.mocked(updateMcpServer).mockRejectedValue(new McpServerConfigError('Console identity is available for remote MCP and OpenAPI servers only'));
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/client/v1/mcp/crm',
+        headers,
+        payload: JSON.stringify({ upstreamAuth: { type: 'console_identity' } }),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toBe('Console identity is available for remote MCP and OpenAPI servers only');
+    });
+  });
+
   describe('the REST execute endpoints', () => {
     it.each([
       ['an ordinary server', '/api/client/v1/mcp/crm/execute'],
@@ -211,8 +269,8 @@ describe('token MCP routes', () => {
       expect(text).not.toContain(SECRET);
     });
 
-    it('reports a rejected call as invalid params (-32602), not as a failed one', async () => {
-      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Unknown tool'));
+    it('reports an unknown tool as invalid params (-32602), not as a failed call', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpUnknownToolError());
       const response = await post('/api/client/v1/mcp/crm/message', callTool('nope'));
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as Rpc & { id: number };
@@ -220,11 +278,95 @@ describe('token MCP routes', () => {
       expect(body.id).toBe(9);
     });
 
+    it('returns a bad argument as a tool result with isError, so the model can correct it', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Missing required path parameter "id"'));
+      const body = JSON.parse((await post('/api/client/v1/mcp/crm/message', callTool())).body) as Rpc;
+      expect(body.error).toBeUndefined();
+      expect(body.result).toEqual({
+        content: [{ type: 'text', text: 'Missing required path parameter "id"' }],
+        isError: true,
+      });
+    });
+
     it('logs the failure with its full text', async () => {
       vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom: details'));
       await post('/api/client/v1/mcp/crm/message', callTool());
       const [, entry] = vi.mocked(logMcpRequest).mock.calls[0];
       expect(entry).toMatchObject({ status: 'error', errorMessage: 'boom: details', callerType: 'api' });
+    });
+  });
+
+  describe('the host\'s _meta in the request log', () => {
+    const META = { 'openai/subject': 'v1/abc123', 'openai/locale': 'en-US' };
+    const callWithMeta = (meta: unknown) => ({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: { name: 'lookup', arguments: {}, _meta: meta },
+    });
+
+    it('is handed to the log write on a successful call, without the address or user agent', async () => {
+      await post('/api/client/v1/mcp/crm/message', callWithMeta(META));
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options).toEqual({ client: { meta: META } });
+    });
+
+    it('is handed to the log write on a failed call', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom'));
+      await post('/api/client/v1/mcp/crm/message', callWithMeta(META));
+      const [, entry, , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(entry.status).toBe('error');
+      expect(options).toEqual({ client: { meta: META } });
+    });
+
+    it('leaves out runtime_context, which is logged by header name only', async () => {
+      await post('/api/client/v1/mcp/crm/message', callWithMeta({
+        ...META,
+        runtime_context: { headers: { 'x-tenant-token': 'never-in-the-log-1234' } },
+      }));
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options).toEqual({ client: { meta: META } });
+    });
+
+    it('carries no meta when the call has no _meta', async () => {
+      await post('/api/client/v1/mcp/crm/message', callTool());
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options?.client).toBeUndefined();
+    });
+
+    it('is not recorded for a REST /execute call, even when the body carries one', async () => {
+      await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup', arguments: {}, _meta: META });
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options?.client).toBeUndefined();
+    });
+  });
+
+  describe('media tool results', () => {
+    const image = {
+      kind: 'tool_output',
+      content: [
+        { type: 'text', text: 'shot' },
+        { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+        { type: 'audio', mimeType: 'audio/wav', data: 'BBBB' },
+      ],
+    };
+
+    it('sends a ToolOutput as native MCP image and audio blocks', async () => {
+      vi.mocked(executeMcpTool).mockResolvedValue({ result: image, latencyMs: 4 } as never);
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const content = JSON.parse(response.body).result.content;
+      expect(content).toEqual([
+        { type: 'text', text: 'shot' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+        { type: 'audio', data: 'BBBB', mimeType: 'audio/wav' },
+      ]);
+    });
+
+    it('keeps a text-only result as one text block', async () => {
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const result = JSON.parse(response.body).result as Rpc['result'];
+      expect(result?.content).toEqual([{ type: 'text', text: '{"found":1}' }]);
+      expect(result?.isError).toBe(false);
     });
   });
 });

@@ -20,9 +20,12 @@ import FormShell, {
   FormRow,
   FormSection,
 } from '@/components/common/ui/FormShell';
+import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import { useTranslations } from '@/lib/i18n';
 
 type Protocol = 'a2a' | 'openai-chat' | 'openai-responses';
+/** `console_identity`: a token Console signs for the person behind each call, instead of a stored key. */
+type AuthMode = 'key' | 'console_identity';
 
 interface ProviderOption {
   key: string;
@@ -41,6 +44,7 @@ interface EditAgent {
       responsePath?: string;
       credentialProviderKey?: string;
       hasApiKey?: boolean;
+      authType?: string;
       headers?: Record<string, string>;
       runtimeHeaders?: { allow?: boolean; allowedNames?: string[] };
     };
@@ -67,6 +71,7 @@ interface FormValues {
   protocol: Protocol;
   url: string;
   model: string;
+  authMode: AuthMode;
   apiKey: string;
   credentialProviderKey: string;
   responsePath: string;
@@ -82,8 +87,10 @@ export default function ConnectAgentModal({
   editAgent,
 }: ConnectAgentModalProps) {
   const t = useTranslations('agents');
+  const tIdentity = useTranslations('consoleIdentity');
   const [submitting, setSubmitting] = useState(false);
   const isEdit = Boolean(editAgent);
+  const [identityInfo, setIdentityInfo] = useState<ConsoleIdentityIssuerInfo | null>(null);
   const hasExistingKey = Boolean(editAgent?.config?.connection?.hasApiKey);
 
   const form = useForm<FormValues>({
@@ -93,6 +100,7 @@ export default function ConnectAgentModal({
       protocol: 'openai-chat',
       url: '',
       model: '',
+      authMode: 'key',
       apiKey: '',
       credentialProviderKey: '',
       responsePath: '',
@@ -122,6 +130,7 @@ export default function ConnectAgentModal({
         protocol: (c.protocol as Protocol) ?? 'openai-chat',
         url: c.url ?? '',
         model: c.model ?? '',
+        authMode: c.authType === 'console_identity' ? 'console_identity' : 'key',
         apiKey: '',
         credentialProviderKey: c.credentialProviderKey ?? '',
         responsePath: c.responsePath ?? '',
@@ -135,6 +144,16 @@ export default function ConnectAgentModal({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, editAgent]);
+
+  // Issuer details for the Console identity option, read once it is chosen.
+  const consoleIdentityChosen = opened && form.values.authMode === 'console_identity';
+  useEffect(() => {
+    if (!consoleIdentityChosen || identityInfo) return;
+    fetch('/api/agents/console-identity', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data?.issuer && data?.jwksUri) setIdentityInfo(data); })
+      .catch(() => undefined);
+  }, [consoleIdentityChosen, identityInfo]);
 
   const handleClose = () => {
     form.reset();
@@ -169,8 +188,12 @@ export default function ConnectAgentModal({
                 protocol: v.protocol,
                 url: v.url.trim(),
                 model: isOpenAi ? v.model.trim() : undefined,
-                apiKey: v.apiKey.trim() || undefined,
-                credentialProviderKey: v.credentialProviderKey || undefined,
+                ...(v.authMode === 'console_identity'
+                  ? { authType: 'console_identity' }
+                  : {
+                    apiKey: v.apiKey.trim() || undefined,
+                    credentialProviderKey: v.credentialProviderKey || undefined,
+                  }),
                 responsePath: v.responsePath.trim() || undefined,
                 headers: Object.keys(headers).length ? headers : undefined,
                 runtimeHeaders: v.allowRuntimeHeaders ? { allow: true } : undefined,
@@ -293,29 +316,45 @@ export default function ConnectAgentModal({
         title={t('connectModal.authSection')}
         description={t('connectModal.authDesc')}
       >
-        <FormField
-          label={t('connectModal.apiKey')}
-          optional
-          hint={hasExistingKey ? t('connectModal.apiKeyKeepHint') : t('connectModal.apiKeyHint')}
-        >
-          <PasswordInput
-            placeholder={hasExistingKey ? '••••••••' : t('connectModal.apiKeyPlaceholder')}
-            {...form.getInputProps('apiKey')}
+        <FormField label={t('connectModal.authMode')}>
+          <ChipPicker<AuthMode>
+            options={[
+              { value: 'key', label: t('connectModal.authModeKey') },
+              { value: 'console_identity', label: tIdentity('optionLabel') },
+            ]}
+            value={form.values.authMode}
+            onChange={(v) => form.setFieldValue('authMode', v as AuthMode)}
           />
         </FormField>
-        <FormField
-          label={t('connectModal.credentialProvider')}
-          optional
-          hint={t('connectModal.credentialProviderHint')}
-        >
-          <Select
-            placeholder={t('connectModal.credentialProviderPlaceholder')}
-            data={providers.map((p) => ({ value: p.key, label: p.label }))}
-            searchable
-            clearable
-            {...form.getInputProps('credentialProviderKey')}
-          />
-        </FormField>
+        {form.values.authMode === 'console_identity' ? (
+          <ConsoleIdentityNote info={identityInfo} />
+        ) : (
+          <>
+            <FormField
+              label={t('connectModal.apiKey')}
+              optional
+              hint={hasExistingKey ? t('connectModal.apiKeyKeepHint') : t('connectModal.apiKeyHint')}
+            >
+              <PasswordInput
+                placeholder={hasExistingKey ? '••••••••' : t('connectModal.apiKeyPlaceholder')}
+                {...form.getInputProps('apiKey')}
+              />
+            </FormField>
+            <FormField
+              label={t('connectModal.credentialProvider')}
+              optional
+              hint={t('connectModal.credentialProviderHint')}
+            >
+              <Select
+                placeholder={t('connectModal.credentialProviderPlaceholder')}
+                data={providers.map((p) => ({ value: p.key, label: p.label }))}
+                searchable
+                clearable
+                {...form.getInputProps('credentialProviderKey')}
+              />
+            </FormField>
+          </>
+        )}
       </FormSection>
 
       <FormSection

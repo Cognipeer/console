@@ -28,7 +28,7 @@ import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { IAgentConversation } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
-import { getConfig } from '@/lib/core/config';
+import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
 import { getAgentByKey } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
@@ -60,12 +60,6 @@ import { loadSessionForPrincipal, sendClientSessionRefusal, type SessionNeed } f
 import { FILES_READ_REQUIRED_MESSAGE, requestBucketOptions, requestHasFilesRead } from './files-permission';
 
 const logger = createLogger('api:agent-session-files');
-
-/** A JSON upload carries the file base64-encoded: a third larger than the file. */
-function uploadBodyLimit(): number {
-  const bytes = Math.max(1, getConfig().limits.fileUploadMaxMb) * 1024 * 1024;
-  return Math.ceil(bytes * (4 / 3)) + 64 * 1024;
-}
 
 interface UploadPayload {
   fileName: string;

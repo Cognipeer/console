@@ -122,7 +122,7 @@ export function RerankerMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        clauses.push('(name LIKE @search OR key LIKE @search)');
+        clauses.push(this.likeAny(['name', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
 

@@ -189,6 +189,8 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
 
   # Builds the Dockerfile's `builder` stage, which runs its own `npm run build`
   # inside the image. It does not use the build job's output, so the two run

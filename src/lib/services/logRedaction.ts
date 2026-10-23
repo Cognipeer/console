@@ -22,6 +22,7 @@
  */
 
 import { SENSITIVE_KEY_PATTERN } from '@/lib/core/logger';
+import { isMediaPayloadRecord, redactMediaPayloads } from '@/lib/services/tools/toolOutput';
 
 export const LOG_SECRET_MASK = '••••••';
 
@@ -166,7 +167,8 @@ export function redactLogPayload<T>(payload: T, opts: RedactOptions = {}): T {
 
   try {
     const secrets = usableSecrets(opts.secretValues);
-    const scrubbed = scrubValue(payload, secrets, 0, new WeakSet()) as T;
+    // Media payloads become size markers first, so logs never hold base64 (and the cap is not eaten by it).
+    const scrubbed = scrubValue(redactMediaPayloads(payload), secrets, 0, new WeakSet()) as T;
     const json = JSON.stringify(scrubbed);
     if (json && json.length > maxBytes) {
       // Preview comes from the already-scrubbed JSON, so it carries no secrets.
@@ -245,12 +247,19 @@ function maskDeep(
   }
 
   seen.add(value);
+  // A base64 payload cannot contain a secret worth masking and is megabytes of work; keep it byte-for-byte.
+  const media = !Array.isArray(value) && isMediaPayloadRecord(value);
   const out = Array.isArray(value)
     ? value.map((item) => maskDeep(item, secrets, mask, depth + 1, seen))
     // fromEntries defines own properties, so an own "__proto__" key survives.
     : Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .map(([key, val]) => [key, maskDeep(val, secrets, mask, depth + 1, seen)]),
+        .map(([key, val]) => [key, media && key === 'data'
+          ? val
+          : media && key === 'resource' && val && typeof val === 'object'
+            ? Object.fromEntries(Object.entries(val as Record<string, unknown>)
+              .map(([k, v]) => [k, k === 'blob' ? v : maskDeep(v, secrets, mask, depth + 2, seen)]))
+            : maskDeep(val, secrets, mask, depth + 1, seen)]),
     );
   seen.delete(value);
   return out;

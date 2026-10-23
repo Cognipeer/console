@@ -6,6 +6,7 @@
  * store and the quota guard are faked).
  */
 
+import { randomBytes } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
@@ -84,7 +85,7 @@ import { normalizeAttachmentsFolder } from '@/lib/services/agents/sessionFilesCo
 import { sessionFileObjectKey } from '@/lib/services/agents/sessionFilesBucket';
 import { InputContentPartError, extractResponseUserInput, namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { isReadOnlyTool, HITL_READ_ONLY_TOOLS } from '@/lib/services/agents/agentHumanInTheLoop';
-import { serializeForStorage, MAX_STATE_BYTES } from '@/lib/services/agents/agentTurnState';
+import { decodeStoredState, serializeForStorage, MAX_STATE_BYTES } from '@/lib/services/agents/agentTurnState';
 import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValidation';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 
@@ -233,8 +234,8 @@ describe('inline or paged', () => {
     const over = await assembleTurnAttachments({ scope, records: [fileRecord('a')], cfg: cfg(99), supportsVision: false });
     expect(over.mode).toBe('paged');
     expect(over.block).not.toContain('xxxx');
-    expect(over.block).toContain('session_files_read');
-    expect(over.block).toContain('(id a, 4 pages)');
+    expect(over.block).toContain('read({ fileId, offset, limit })');
+    expect(over.block).toContain('(id a, 400 characters)');
   });
 
   it('decides for the message as a whole: two files that fit alone but not together are both paged', async () => {
@@ -605,19 +606,19 @@ describe('the Responses input', () => {
 describe('the saved state', () => {
   it('holds an image as a short reference, so it never decides whether a state fits', () => {
     const reference = { type: 'image_url', image_url: { url: 'session-file://pic' }, fileId: 'pic', name: 'cat.png' };
-    const text = serializeForStorage({
+    const text = decodeStoredState(serializeForStorage({
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'look at this' }, reference] },
         { role: 'assistant', content: 'a cat' },
       ],
-    } as never)!;
+    } as never)!);
     expect(text).toContain('session-file://pic');
     expect(text).toContain('look at this');
     expect(text.length).toBeLessThan(400);
   });
 
   it('no longer rewrites image parts to fit: bytes that cannot shrink mean no stored state (the transcript replay takes over)', () => {
-    const inline = { type: 'image_url', image_url: { base64: 'A'.repeat(MAX_STATE_BYTES), media_type: 'image/png' } };
+    const inline = { type: 'image_url', image_url: { base64: randomBytes(MAX_STATE_BYTES).toString('base64'), media_type: 'image/png' } };
     expect(serializeForStorage({ messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, inline] }] } as never)).toBeNull();
   });
 });
@@ -655,8 +656,9 @@ describe('serving a file’s bytes', () => {
 });
 
 describe('approvals and config checks', () => {
-  it('the two file tools are read-only: never asked about by default', () => {
-    expect(HITL_READ_ONLY_TOOLS).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+  it('the file tools are read-only: never asked about by default (the old read names stay for stored configs)', () => {
+    expect(HITL_READ_ONLY_TOOLS).toEqual(expect.arrayContaining(['session_files_list', 'read', 'session_files_read', 'session_files_view_image', 'sandbox_read_file']));
+    expect(isReadOnlyTool('read')).toBe(true);
     expect(isReadOnlyTool('session_files_read')).toBe(true);
     expect(isReadOnlyTool('session_files_list')).toBe(true);
   });

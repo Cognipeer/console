@@ -300,7 +300,14 @@ export const browserScreenshotInputSchema = z.object({
   fullPage: z.boolean().optional(),
   type: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().int().min(1).max(100).optional(),
-}).strict();
+  /** Return the image in the response (`content`) as well. */
+  inline: z.boolean().optional(),
+  /** Save to the artifact bucket (default true, the original behaviour). */
+  persist: z.boolean().optional(),
+}).strict()
+  .refine((value) => value.persist !== false || value.inline === true, {
+    message: 'persist:false needs inline:true, otherwise the screenshot would be discarded',
+  });
 
 export const browserPdfInputSchema = z.object({
   format: z.enum(['A4', 'Letter', 'Legal', 'A3', 'A5']).optional(),

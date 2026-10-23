@@ -46,7 +46,6 @@ import { suites, type SuiteContext } from './suites';
 const REPORT_DIR = join(process.cwd(), 'scripts', 'smoke', 'reports');
 
 interface RegisterResponse {
-  tenant?: { slug?: string };
   user?: { email?: string };
 }
 
@@ -108,7 +107,7 @@ async function main(): Promise<number> {
       body: { email, password: 'definitely-wrong' },
     });
     await loginClient.step('forgot-password (constant time)', 'POST', '/api/auth/forgot-password', [200], {
-      body: { email, slug: register.body?.tenant?.slug ?? companyName },
+      body: { email },
     });
     client.results.push(...loginClient.results);
 

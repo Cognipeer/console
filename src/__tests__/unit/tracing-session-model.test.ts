@@ -22,6 +22,7 @@ import {
 } from '@/components/tracing/sessionModel';
 import { classifySections, createToolTurnKeys, eventResponse, sectionToolArgs, sectionToolResult } from '@/lib/shared/tracingSections';
 import { stepBadge } from '@/components/tracing/stepDisplay';
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 
 const T0 = Date.parse('2026-10-15T12:03:06.301Z');
 const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -389,5 +390,247 @@ describe('context summarization steps', () => {
         ],
       },
     ]);
+  });
+});
+
+// ─── agent-sdk ≥ 0.18: a sub-agent paused for approval is ONE span ──────────
+// Written `pending` at each pause and again, same spanId, when it ends. The
+// Console feed (?includeEventContent=false) carries no `sections`, only the
+// precomputed `human` summary, so these fixtures have none either.
+describe('a sub-agent that paused and resumed', () => {
+  const sub = (sequence: number, status: string, parentSpanId: string, ts: number, durationMs?: number): TraceEventInput => ({
+    id: `sa${sequence}`, sequence, type: 'span', label: 'Sub-agent helper', status, spanId: 'sa', parentSpanId, timestamp: at(ts), durationMs,
+  });
+  const iter = (id: string, sequence: number, n: number, ts: number): TraceEventInput => ({
+    id, sequence, type: 'agent_iteration', label: `Iteration ${n} #${sequence}`, spanId: id, parentSpanId: 'sa', timestamp: at(ts),
+  });
+  const request: TraceEventInput = { id: 'rq', sequence: 5, type: 'tool_approval', label: 'Approval lookup', status: 'pending', spanId: 'rq', parentSpanId: 'ci1', timestamp: at(300), human: { kind: 'approval', key: 'ap1', state: 'pending' } };
+  const decision: TraceEventInput = { id: 'dc', sequence: 8, type: 'tool_approval', label: 'Approval lookup', status: 'success', spanId: 'dc', parentSpanId: 'ci1', timestamp: at(5300), durationMs: 5000, human: { kind: 'approval', key: 'ap1', state: 'approved' } };
+  const head: TraceEventInput[] = [
+    { id: 'pi1', sequence: 1, type: 'agent_iteration', label: 'Iteration 1 #1', spanId: 'pi1', parentSpanId: 'root', timestamp: at(0) },
+    iter('ci1', 4, 1, 100),
+    { id: 'm1', sequence: 3, type: 'ai_call', label: 'Assistant Response #3', model: 'gpt-6-luna', spanId: 'm1', parentSpanId: 'ci1', timestamp: at(280), durationMs: 180, finishReason: 'tool_calls' },
+    request,
+  ];
+  const paused: TraceEventInput[] = [...head, sub(6, 'pending', 'pi1', 310, 310)];
+  const resumed: TraceEventInput[] = [
+    ...paused,
+    decision,
+    iter('ci2', 9, 2, 5400),
+    { id: 'm2', sequence: 10, type: 'ai_call', label: 'Assistant Response #10', model: 'gpt-6-luna', spanId: 'm2', parentSpanId: 'ci2', timestamp: at(5700), durationMs: 280, finishReason: 'stop' },
+    { id: 'dt', sequence: 11, type: 'tool_call', label: 'Tool Execution - delegate_to #11', toolName: 'delegate_to', spanId: 'dt', parentSpanId: 'pi1', timestamp: at(5710), durationMs: 5700 },
+    sub(12, 'success', 'dt', 5710, 5710),
+  ];
+
+  const trails = (nodes: TraceNode[], trail: string[] = []): Array<{ node: TraceNode; trail: string[] }> =>
+    nodes.flatMap((node) => {
+      const here = [...trail, ...node.foldedLabels, node.label];
+      return [{ node, trail: here }, ...trails(node.children, here)];
+    });
+  const groups = (model: ReturnType<typeof buildSessionModel>) =>
+    trails(model.tree).filter(({ node }) => node.label === 'Sub-agent helper' || node.foldedLabels.includes('Sub-agent helper'));
+
+  it('is drawn as one Sub-agent group once finished, with the approval request and decision folded to one step in order', () => {
+    const model = buildSessionModel(resumed, { startedAt: at(0), durationMs: 5710 });
+    const found = groups(model);
+    expect(found).toHaveLength(1);
+    expect(found[0].node.event?.status).toBe('success');
+    const inside = trails(found[0].node.children).map(({ node }) => node);
+    expect(inside.filter((node) => node.event?.type === 'agent_iteration').map((node) => node.label)).toEqual(['Iteration 1', 'Iteration 2']);
+    const humans = inside.filter((node) => node.human);
+    expect(humans).toHaveLength(1);
+    expect(humans[0].human?.state).toBe('approved');
+    const all = trails(model.tree).map(({ node }) => node);
+    expect(all.some((node) => node.waiting)).toBe(false);
+    expect(all.some((node) => node.event?.type === 'span' && node.event.status === 'pending')).toBe(false);
+  });
+
+  it('keeps the approval request and its decision in order inside the group when they are not folded', () => {
+    const unkeyed = resumed.map((event) => (event.human ? { ...event, human: { ...event.human, key: undefined } } : event));
+    const model = buildSessionModel(unkeyed, { startedAt: at(0), durationMs: 5710 });
+    const found = groups(model);
+    expect(found).toHaveLength(1);
+    const humans = trails(found[0].node.children).map(({ node }) => node).filter((node) => node.human);
+    expect(humans.map((node) => node.human?.state)).toEqual(['pending', 'approved']);
+  });
+
+  it('shows one group and one waiting row while it is still paused', () => {
+    const model = buildSessionModel(paused, { startedAt: at(0), durationMs: 310 });
+    expect(groups(model)).toHaveLength(1);
+    const waiting = trails(model.tree).filter(({ node }) => node.waiting);
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].trail.join(' › ')).toContain('Sub-agent helper');
+  });
+
+  it('shows one group after a second pause, however many pending records were written', () => {
+    const twice = [...paused, { ...sub(7, 'pending', 'pi1', 5000, 5000) }];
+    const model = buildSessionModel(twice, { startedAt: at(0), durationMs: 5000 });
+    expect(groups(model)).toHaveLength(1);
+    expect(trails(model.tree).filter(({ node }) => node.event?.type === 'span' && node.event.status === 'pending').length).toBeLessThanOrEqual(1);
+  });
+
+  it('does not change a session without a repeated span id', () => {
+    // Against the input itself, not against a second pass through the fold: a fold that drops a record fails here.
+    expect(new Set(agentSdk.map((event) => event.spanId)).size).toBe(agentSdk.length);
+    expect(foldSupersededSpans(agentSdk)).toEqual(agentSdk);
+    // Every record of the input is still a step of the model.
+    const stepCount = (nodes: TraceNode[]): number => nodes.reduce((total, node) => total + (node.event ? 1 : 0) + stepCount(node.children), 0);
+    expect(stepCount(buildSessionModel(agentSdk).tree)).toBeGreaterThanOrEqual(agentSdk.length);
+  });
+});
+
+// ─── A sub-agent read while it runs ────────────────────────────────────────
+// A hosted run streams its trace as it happens, and agent-sdk writes a
+// sub-agent's span (and the tool call that launched it) only when the
+// sub-agent finishes: until then its turns point at a span nobody has sent.
+// The shapes below are what the SDK streamed for an orchestrator that
+// delegated twice in one call (read from a real run).
+describe('a sub-agent that is still running', () => {
+  const turn = (id: string, sequence: number, n: number, parentSpanId: string, name: string): TraceEventInput => ({
+    id, sequence, type: 'agent_iteration', label: `Iteration ${n} #${sequence}`, spanId: id, parentSpanId,
+    actor: { scope: 'agent', name, role: 'orchestrator' }, timestamp: at(sequence * 100),
+  });
+  const call = (id: string, sequence: number, parentSpanId: string, extra: Partial<TraceEventInput> = {}): TraceEventInput => ({
+    id, sequence, type: 'ai_call', model: 'gpt-6-luna', spanId: id, parentSpanId, timestamp: at(sequence * 100 + 90), durationMs: 80, ...extra,
+  });
+  const span = (id: string, sequence: number, parentSpanId: string): TraceEventInput => ({
+    id: `rec-${id}`, sequence, type: 'span', label: `Sub-agent helper #${sequence}`, status: 'success', spanId: id, parentSpanId,
+    actor: { scope: 'agent', name: 'helper', role: 'subagent' }, timestamp: at(sequence * 100), durationMs: 500, sections: [{ kind: 'metadata', label: 'Sub-agent' }],
+  });
+  const delegation = (id: string, sequence: number): TraceEventInput => ({
+    id, sequence, type: 'tool_call', toolName: 'delegate_to', spanId: id, parentSpanId: 'p1', timestamp: at(sequence * 100), durationMs: 600,
+  });
+
+  // The orchestrator's turn asks for two delegations; A and B start at once.
+  const started: TraceEventInput[] = [
+    turn('p1', 1, 1, 'root', 'orchestrator'),
+    call('m1', 2, 'p1', { responseToolNames: ['delegate_to', 'delegate_to'], responseAnswered: false }),
+    turn('a1', 3, 1, 'saA', 'helper'),
+    turn('b1', 4, 1, 'saB', 'helper'),
+    call('am1', 5, 'a1', { finishReason: 'tool_calls' }),
+    turn('a2', 6, 2, 'saA', 'helper'),
+    call('bm1', 7, 'b1', { responseToolNames: [], responseAnswered: true }),
+  ];
+  // B is done: its span, then the tool call that launched it.
+  const bDone = [...started, span('saB', 8, 'dB'), delegation('dB', 9)];
+  // Both done, and the orchestrator answers.
+  const finished: TraceEventInput[] = [
+    ...bDone,
+    call('am2', 10, 'a2', { responseToolNames: [], responseAnswered: true }),
+    span('saA', 11, 'dA'),
+    delegation('dA', 12),
+    turn('p2', 13, 2, 'root', 'orchestrator'),
+    call('m2', 14, 'p2', { responseToolNames: [], responseAnswered: true }),
+  ];
+
+  const shape = (nodes: TraceNode[]): unknown[] => nodes.map((node) => (node.children.length > 0
+    ? { group: node.label, ...(node.running ? { running: true } : {}), children: shape(node.children) }
+    : node.label));
+
+  it('groups each one under the turn that started it, not at the top as turns of the agent', () => {
+    const { tree } = buildSessionModel(started);
+    expect(shape(tree)).toEqual([
+      {
+        group: 'Iteration 1',
+        children: [
+          'gpt-6-luna',
+          { group: 'Sub-agent helper', running: true, children: [{ group: 'Iteration 1', children: ['gpt-6-luna'] }, 'Iteration 2'] },
+          { group: 'Sub-agent helper', running: true, children: [{ group: 'Iteration 1', children: ['gpt-6-luna'] }] },
+        ],
+      },
+    ]);
+    expect(tree[0].children[1].event).toBeUndefined();
+  });
+
+  it('puts a finished one in its real span and keeps the other running beside it', () => {
+    const { tree } = buildSessionModel(bDone);
+    expect(shape(tree)).toEqual([
+      {
+        group: 'Iteration 1',
+        children: [
+          'gpt-6-luna',
+          { group: 'Sub-agent helper', running: true, children: [{ group: 'Iteration 1', children: ['gpt-6-luna'] }, 'Iteration 2'] },
+          { group: 'delegate_to', children: [{ group: 'Sub-agent helper', children: [{ group: 'Iteration 1', children: ['gpt-6-luna'] }] }] },
+        ],
+      },
+    ]);
+  });
+
+  it('hangs a finished span whose launching tool call is not in yet under the turn', () => {
+    const { tree } = buildSessionModel(bDone.filter((event) => event.id !== 'dB'));
+    const groups = tree[0].children.filter((node) => node.children.length > 0);
+    expect(groups.map((node) => [node.label, Boolean(node.running), node.event?.status])).toEqual([
+      ['Sub-agent helper', true, undefined],
+      ['Sub-agent helper', false, 'success'],
+    ]);
+  });
+
+  it('draws the finished run exactly as the SDK nested it, with nothing standing in', () => {
+    const { tree } = buildSessionModel(finished);
+    expect(shape(tree)).toEqual([
+      {
+        group: 'Iteration 1',
+        children: [
+          'gpt-6-luna',
+          { group: 'delegate_to', children: [{ group: 'Sub-agent helper', children: [{ group: 'Iteration 1', children: ['gpt-6-luna'] }] }] },
+          {
+            group: 'delegate_to',
+            children: [{ group: 'Sub-agent helper', children: [{ group: 'Iteration 1', children: ['gpt-6-luna'] }, { group: 'Iteration 2', children: ['gpt-6-luna'] }] }],
+          },
+        ],
+      },
+      { group: 'Iteration 2', children: ['gpt-6-luna'] },
+    ]);
+    expect(flattenTree(tree).some(({ node }) => node.running)).toBe(false);
+  });
+
+  it('nests a sub-agent a running sub-agent started under that sub-agent\'s turn', () => {
+    const nested: TraceEventInput[] = [
+      turn('p1', 1, 1, 'root', 'orchestrator'),
+      call('m1', 2, 'p1', { responseToolNames: ['delegate_to'], responseAnswered: false }),
+      turn('a1', 3, 1, 'saA', 'helper'),
+      call('am1', 4, 'a1', { responseToolNames: ['spawn_subagent'], responseAnswered: false }),
+      turn('g1', 5, 1, 'saG', 'digger'),
+    ];
+    const { tree } = buildSessionModel(nested);
+    expect(shape(tree)).toEqual([
+      {
+        group: 'Iteration 1',
+        children: [
+          'gpt-6-luna',
+          {
+            group: 'Sub-agent helper',
+            running: true,
+            children: [{ group: 'Iteration 1', children: ['gpt-6-luna', { group: 'Sub-agent digger', running: true, children: ['Iteration 1'] }] }],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('draws the running record agent-sdk 0.19 writes when a child starts, then the finished one in its place', () => {
+    // The same run as above, with each child's span opened just before its first turn.
+    const opened = (spanId: string, sequence: number): TraceEventInput => ({
+      ...span(spanId, sequence, 'p1'), id: `open-${spanId}`, label: 'Sub-agent helper', status: 'running', durationMs: undefined,
+    });
+    // Numbered between the parent's call (2) and each child's first turn (3 and 4).
+    const openings = [opened('saA', 2.3), opened('saB', 2.6)];
+    const live = [...started, ...openings];
+    const { tree } = buildSessionModel(live);
+    const groups = tree[0].children.filter((node) => node.children.length > 0);
+    expect(groups.map((node) => [node.label, Boolean(node.running), node.event?.status])).toEqual([
+      ['Sub-agent helper', false, 'running'],
+      ['Sub-agent helper', false, 'running'],
+    ]);
+    expect(groups.map((node) => node.children.map((child) => child.event?.id))).toEqual([['a1', 'a2'], ['b1']]);
+
+    const done = [...finished, ...openings];
+    expect(shape(buildSessionModel(done).tree)).toEqual(shape(buildSessionModel(finished).tree));
+  });
+
+  it('leaves sessions of other integrations as they were', () => {
+    for (const events of [otlpOrphan, langGraph, claudeSdk, langChainAgent]) {
+      expect(flattenTree(buildSessionModel(events).tree).some(({ node }) => node.running)).toBe(false);
+    }
   });
 });

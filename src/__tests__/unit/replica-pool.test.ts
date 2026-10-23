@@ -4,6 +4,7 @@ import { resetAllCircuits } from '@/lib/core/resilience';
 import {
   listReplicas,
   modelForReplica,
+  primaryReplicaModel,
   replicaOrder,
   shouldTryNextReplica,
 } from '@/lib/services/models/replicaPool';
@@ -122,5 +123,23 @@ describe('shouldTryNextReplica', () => {
   it('reads a status nested under error / response / cause', () => {
     expect(shouldTryNextReplica({ response: { status: 503 } })).toBe(true);
     expect(shouldTryNextReplica({ cause: { error: { status: 400 } } })).toBe(false);
+  });
+});
+
+describe('primaryReplicaModel', () => {
+  it('returns an unpooled model unchanged', () => {
+    const plain = model();
+    expect(primaryReplicaModel(plain)).toBe(plain);
+  });
+
+  it('serves from the first enabled replica in stored order', () => {
+    const pooled = model({
+      replicas: [
+        { providerKey: 'a', modelId: 'x', enabled: false },
+        { providerKey: 'b', modelId: 'y' },
+        { providerKey: 'c', modelId: 'z' },
+      ],
+    });
+    expect(primaryReplicaModel(pooled)).toMatchObject({ providerKey: 'b', modelId: 'y' });
   });
 });

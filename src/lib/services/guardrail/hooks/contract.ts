@@ -59,6 +59,7 @@ import type {
   GuardrailWordFilterPolicyConfig as WordFilterPolicyConfig,
 } from '@/lib/database/provider/types.domain';
 import type { GuardrailFinding } from '../types';
+import { isMediaPayloadRecord } from '@/lib/services/tools/toolOutput';
 
 // The persisted shapes are part of this module's public surface: every other
 // file in the hook plane imports them from here, so `types.domain` stays an
@@ -318,7 +319,17 @@ export function walkStringLeaves(value: unknown, basePath: string): SubjectSegme
     if (!isPlainRecord(node)) return;
     if (seen.has(node)) return;
     seen.add(node);
+    // Base64 media payloads are never scanned or rewritten; their sibling fields (type, mimeType, text) still are.
+    const media = isMediaPayloadRecord(node);
     for (const [key, child] of Object.entries(node)) {
+      if (media && (key === 'data' || (key === 'resource' && isPlainRecord(child)))) {
+        if (key === 'resource') {
+          for (const [k, v] of Object.entries(child as Record<string, unknown>)) {
+            if (k !== 'blob') visit(v, `${path}/resource/${escapePointerToken(k)}`, depth + 2);
+          }
+        }
+        continue;
+      }
       visit(child, `${path}/${escapePointerToken(key)}`, depth + 1);
     }
     seen.delete(node);

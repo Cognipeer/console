@@ -977,13 +977,36 @@ export interface IFileRecord {
   expiresAt?: Date | null;
   /** Who uploaded it (session files); `createdBy` stays the principal the file service was called as. */
   uploadedBy?: string;
-  /** `agent_output`: a file the agent wrote to its sandbox's `/outputs/` and the platform collected after a turn. Absent = an upload. */
-  origin?: 'agent_output';
+  /**
+   * `agent_output`: a file the agent wrote to its sandbox's `/outputs/` and the platform collected after a turn.
+   * `import`: an object that was already in the storage provider and was registered as a record afterwards.
+   * Absent = an upload.
+   */
+  origin?: 'agent_output' | 'import';
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** The fields of a file record that can be empty, and so can be cleared by a patch. */
+type ClearableFileRecordField =
+  | 'contentType'
+  | 'checksum'
+  | 'etag'
+  | 'markdownKey'
+  | 'markdownError'
+  | 'markdownSize'
+  | 'markdownContentType';
+
+/**
+ * What `updateFileRecord` can change. The fields that can be empty also take `null`: it clears what an earlier run
+ * left there - an error a finished conversion left behind, or the type, checksum and Markdown copy of the bytes a
+ * new upload replaced (a field that is left out stays as it is).
+ */
+export type FileRecordPatch =
+  Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'bucketKey' | 'key' | 'createdBy' | ClearableFileRecordField>>
+  & { [Field in ClearableFileRecordField]?: NonNullable<IFileRecord[Field]> | null };
 
 /** Which files a listing keeps: only session files, or only the ones uploaded some other way. */
 export type FileListPurpose = 'conversation' | 'other';
@@ -995,6 +1018,21 @@ export interface IFileEntriesPage {
   items: IFileRecord[];
   /** Pass back as `cursor` for the next page; absent on the last page. */
   nextCursor?: string;
+}
+
+/**
+ * What a file listing can be narrowed to by kind. A file's kind comes from its content type, with the
+ * extension of its name as the fallback (`fileTypeFilter.ts` holds the rules both database providers apply).
+ */
+export type FileTypeFilter = 'pdf' | 'image' | 'text' | 'office' | 'other';
+
+/** One bucket's files added up: the aggregate behind a bucket list's file count and size. */
+export interface IFileBucketStats {
+  providerKey: string;
+  bucketKey: string;
+  fileCount: number;
+  /** Σ(size + markdownSize): the original and its Markdown copy both take room in the provider. */
+  totalBytes: number;
 }
 
 export interface ISemanticCacheConfig {
@@ -1138,7 +1176,36 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   pricingSnapshot?: IModelPricing & IModelUsageCostSnapshot;
   /** Present on Dynamic LLM router rows (route 'chat.completions.router'). */
   routing?: IModelUsageRouting;
+  /** The agent the call ran for, and the door it came through (`RoutingCallerContext`). */
+  agentKey?: string;
+  channel?: string;
+  /**
+   * The agent run the call belongs to (`RoutingRunAttribution`), as known when the
+   * call settled: the ledger of a turn is the sum of its rows, whatever became of
+   * the run.
+   */
+  conversationId?: string;
+  turnId?: string;
+  runId?: string;
+  traceSessionId?: string;
   createdAt?: Date;
+}
+
+/**
+ * What the model calls of one agent turn have cost so far, summed from
+ * `model_usage_logs` — the ledger each call writes when it settles, so it is
+ * complete for a turn that failed, was cut off, or is still running.
+ */
+export interface IAgentTurnUsageSummary {
+  calls: number;
+  errorCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  lastAt?: Date;
 }
 
 /**

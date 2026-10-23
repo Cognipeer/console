@@ -14,6 +14,7 @@ import type {
   IAgentTracingEvent,
 } from '@/lib/database/provider/types.base';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { humanStep, isHumanEventType, type SectionShell } from '@/lib/shared/tracingSections';
 import {
   buildResponseFormatSection,
   normalizeSectionListResponseFormat,
@@ -62,6 +63,8 @@ export interface OtlpSpan {
   startTimeUnixNano?: string;
   endTimeUnixNano?: string;
   attributes?: OtlpKeyValue[];
+  /** W3C trace flags plus the OTLP parent-is-remote bits (0x100 known, 0x200 remote). */
+  flags?: number;
   status?: {
     code?: number;
     message?: string;
@@ -191,6 +194,21 @@ function otlpStatusToString(code?: number): string {
   }
 }
 
+/**
+ * Event statuses the SDK writes that OTLP status cannot carry: UNSET stands for
+ * success, skipped, retry and pending alike, so the SDK repeats the real value in
+ * `cognipeer.event.status`. `error` is deliberately not read from it; the span
+ * status code is the authority for failures.
+ */
+const DECLARED_EVENT_STATUSES = new Set(['success', 'skipped', 'retry', 'pending']);
+
+function otlpEventStatus(span: OtlpSpan): string {
+  if (span.status?.code === 2) return 'error';
+  const declared = getStringAttr(span.attributes, 'cognipeer.event.status');
+  if (declared && DECLARED_EVENT_STATUSES.has(declared)) return declared;
+  return otlpStatusToString(span.status?.code);
+}
+
 // ─── Third-party GenAI semantic conventions ─────────────────────────────────
 //
 // Agent frameworks that are not instrumented by the Cognipeer SDK still reach
@@ -283,14 +301,18 @@ function parseJsonArrayAttr(attrs: OtlpKeyValue[], key: string): unknown[] {
   }
 }
 
-/** Model name across all three conventions. */
-function getConventionModel(attrs: OtlpKeyValue[] | undefined): string | undefined {
-  return firstStringAttr(attrs, [
-    'cognipeer.model',
-    'llm.model_name',
-    'gen_ai.response.model',
-    'gen_ai.request.model',
-  ]);
+/**
+ * Model name across all three conventions.
+ *
+ * Model pricing and the usage rollup match on the name the Model Hub knows, which is the model the caller
+ * asked for. Third-party instrumentations report the resolved model (`gpt-4o-2024-08-06`) and keep winning
+ * here, as before. The Cognipeer SDK writes the Hub-facing name to `cognipeer.model`, but in `gen_ai`-only mode
+ * that attribute is absent, so its own spans prefer `gen_ai.request.model` and fall back to the response model.
+ */
+function getConventionModel(attrs: OtlpKeyValue[] | undefined, fromCognipeerSdk = false): string | undefined {
+  return firstStringAttr(attrs, fromCognipeerSdk
+    ? ['cognipeer.model', 'gen_ai.request.model', 'gen_ai.response.model', 'llm.model_name']
+    : ['cognipeer.model', 'llm.model_name', 'gen_ai.response.model', 'gen_ai.request.model']);
 }
 
 /** Token counts across all three conventions. */
@@ -327,6 +349,7 @@ function getConventionTokens(attrs: OtlpKeyValue[] | undefined) {
     reasoningTokens: firstIntAttr(attrs, [
       'cognipeer.tokens.reasoning',
       'llm.token_count.completion_details.reasoning',
+      'gen_ai.usage.reasoning.output_tokens',
       'gen_ai.usage.reasoning_tokens',
       'gen_ai.usage.output_tokens_details.reasoning_tokens',
     ]),
@@ -355,10 +378,18 @@ function firstOfDelimitedOrJsonArray(value: string | undefined): string | undefi
   return trimmed.split(',')[0]?.trim();
 }
 
+/** First string of an OTLP array attribute (the SDK writes `gen_ai.response.finish_reasons` as one). */
+function firstOfArrayAttr(attrs: OtlpKeyValue[] | undefined, key: string): string | undefined {
+  const found = attrs?.find((a) => a.key === key);
+  const first = found?.value?.arrayValue?.values?.[0]?.stringValue;
+  return first || undefined;
+}
+
 /** Finish reason across all three conventions. */
 function getConventionFinishReason(attrs: OtlpKeyValue[] | undefined): string | undefined {
   const raw = getStringAttr(attrs, 'cognipeer.finish_reason')
     ?? firstOfDelimitedOrJsonArray(getStringAttr(attrs, 'gen_ai.response.finish_reasons'))
+    ?? firstOfArrayAttr(attrs, 'gen_ai.response.finish_reasons')
     ?? getStringAttr(attrs, 'llm.response.finish_reason');
   return normalizeFinishReason(raw);
 }
@@ -552,10 +583,30 @@ function readPartContent(part: unknown): string | undefined {
   return JSON.stringify(content);
 }
 
+/** OTLP span flag: the parent span context is remote (bit 9; bit 8 says the bit is known). */
+const SPAN_FLAGS_PARENT_IS_REMOTE = 0x200;
+
+/**
+ * A run started under an upstream caller's W3C `traceparent` has a root whose parent lives in another
+ * service, so the root has a `parentSpanId` and is not "parentless". The SDK says so with the remote-parent
+ * span flag and always stamps its root-only `cognipeer.session.status`. A span that is one of the SDK's own
+ * events is never taken for the root, whatever its flags say. The flag alone only counts in a trace the Cognipeer
+ * SDK exported (`fromSdk`): newer OTel SDKs set it on every entry span behind an upstream `traceparent`, so in
+ * anyone else's trace it would turn a plain server span into the session root.
+ */
+function isRemoteParentRoot(span: OtlpSpan, fromSdk: boolean): boolean {
+  if (getStringAttr(span.attributes, 'cognipeer.event.type')) return false;
+  if (getStringAttr(span.attributes, 'cognipeer.session.status') !== undefined) return true;
+  if (!fromSdk) return false;
+  const flags = Number(span.flags ?? 0);
+  return Number.isFinite(flags) && (flags & SPAN_FLAGS_PARENT_IS_REMOTE) !== 0;
+}
+
 /** Check if a span is a Cognipeer root session span */
-function isCognipeerRootSpan(span: OtlpSpan): boolean {
+function isCognipeerRootSpan(span: OtlpSpan, fromSdk: boolean): boolean {
   const eventType = getStringAttr(span.attributes, 'cognipeer.event.type');
   const sessionId = getStringAttr(span.attributes, 'cognipeer.session.id');
+  if (isRemoteParentRoot(span, fromSdk)) return true;
   // Root if: name starts with agent_session OR has cognipeer.session.id, AND no parent
   if (!span.parentSpanId && sessionId) return true;
   if (span.name?.startsWith('agent_session')) return true;
@@ -575,10 +626,43 @@ export interface OtlpMappedResult {
    * exported once it finishes, so its arrival is what makes a session terminal.
    */
   endedSessionIds: string[];
+  /**
+   * Events numbered by their position in this request, because the span carries no `cognipeer.event.sequence`
+   * (a gen_ai-only export). The position restarts at 1 in every request, so the ingest route renumbers the
+   * ones it stores after the session's existing events.
+   */
+  positionalSequence: Set<OtlpMappedResult['events'][number]>;
 }
 
-function hasRealRootSpan(spans: OtlpSpan[]): boolean {
-  return spans.some((span) => !span.parentSpanId);
+function hasRealRootSpan(spans: OtlpSpan[], fromSdk: boolean): boolean {
+  return spans.some((span) => !span.parentSpanId || isRemoteParentRoot(span, fromSdk));
+}
+
+/**
+ * An approval or a question and its outcome are two events that share an id. The SDK writes the id into a
+ * metadata section of `cognipeer.sections`, which a run with content logging off does not export, so it also
+ * stamps it as `cognipeer.approval.id` / `cognipeer.question.id`. When the sections do not carry the id, this
+ * puts it back as a metadata section, so the session view pairs the request with its decision either way.
+ */
+function withHumanStepId(
+  sections: Array<Record<string, unknown>> | undefined,
+  span: OtlpSpan,
+  eventType: string,
+  eventStatus: string,
+): Array<Record<string, unknown>> | undefined {
+  const approvalId = getStringAttr(span.attributes, 'cognipeer.approval.id');
+  const questionId = getStringAttr(span.attributes, 'cognipeer.question.id');
+  if (!approvalId && !questionId) return sections;
+  if (!isHumanEventType(eventType)) return sections;
+  if (humanStep({ type: eventType, status: eventStatus, sections: sections as SectionShell[] | undefined })?.key) return sections;
+  return [
+    ...(sections ?? []),
+    {
+      kind: 'metadata',
+      label: questionId ? 'Question' : 'Approval',
+      data: questionId ? { questionId } : { approvalId },
+    },
+  ];
 }
 
 /**
@@ -599,9 +683,10 @@ export function mapOtlpToInternalModels(
   const sessions: OtlpMappedResult['sessions'] = [];
   const events: OtlpMappedResult['events'] = [];
   const endedSessionIds: string[] = [];
+  const positionalSequence: OtlpMappedResult['positionalSequence'] = new Set();
 
   if (!request.resourceSpans?.length) {
-    return { sessions, events, endedSessionIds };
+    return { sessions, events, endedSessionIds, positionalSequence };
   }
 
   // Collect all spans grouped by traceId, with resource context
@@ -624,8 +709,9 @@ export function mapOtlpToInternalModels(
 
   // Process each trace
   for (const [traceId, { spans, resourceAttrs }] of traceMap) {
+    const fromCognipeerSdk = getStringAttr(resourceAttrs, 'telemetry.sdk.name') === 'cognipeer-agent-sdk';
     // Find root span — prioritize Cognipeer root, then any span without parent, then longest span
-    let rootSpan = spans.find((s) => isCognipeerRootSpan(s));
+    let rootSpan = spans.find((s) => isCognipeerRootSpan(s, fromCognipeerSdk));
     if (!rootSpan) {
       rootSpan = spans.find((s) => !s.parentSpanId);
     }
@@ -640,7 +726,7 @@ export function mapOtlpToInternalModels(
 
     if (!rootSpan) continue;
 
-    const realRootExists = hasRealRootSpan(spans);
+    const realRootExists = hasRealRootSpan(spans, fromCognipeerSdk);
 
     // Extract session info from resource + root span attributes
     const serviceName = getStringAttr(resourceAttrs, 'service.name');
@@ -668,7 +754,7 @@ export function mapOtlpToInternalModels(
     const status = otlpStatusToString(rootSpan.status?.code);
     // The chosen span is the session's root (not just the longest span of a
     // partial batch) and carries an end time: the run is over.
-    const rootEnded = (!rootSpan.parentSpanId || isCognipeerRootSpan(rootSpan))
+    const rootEnded = (!rootSpan.parentSpanId || isCognipeerRootSpan(rootSpan, fromCognipeerSdk))
       && Number(rootSpan.endTimeUnixNano) > 0;
     if (rootEnded) endedSessionIds.push(sessionId);
 
@@ -697,8 +783,14 @@ export function mapOtlpToInternalModels(
 
     for (const span of childSpans) {
       sequence++;
+      // The SDK numbers every event of a run once. The position in this payload restarts at 1 in each leg of a
+      // paused run, so it would collide with the earlier legs and scramble the order.
+      const declaredSequence = getIntAttr(span.attributes, 'cognipeer.event.sequence');
+      const explicitSequence = declaredSequence !== undefined && Number.isFinite(declaredSequence) && declaredSequence >= 0
+        ? declaredSequence
+        : undefined;
       const eventType = getStringAttr(span.attributes, 'cognipeer.event.type') || deriveEventType(span);
-      const model = getConventionModel(span.attributes);
+      const model = getConventionModel(span.attributes, fromCognipeerSdk);
       const conventionToolName = getConventionToolName(span.attributes);
       const toolName = getStringAttr(span.attributes, 'cognipeer.actor.name') || conventionToolName;
       const actorScope = getStringAttr(span.attributes, 'cognipeer.actor.scope')
@@ -761,7 +853,8 @@ export function mapOtlpToInternalModels(
         ? eventEndedAt.getTime() - eventStartedAt.getTime()
         : undefined;
 
-      const eventStatus = otlpStatusToString(span.status?.code);
+      const eventStatus = otlpEventStatus(span);
+      sections = withHumanStepId(sections, span, eventType, eventStatus);
 
       // Extract errors from span events
       let eventError: Record<string, unknown> | undefined;
@@ -792,7 +885,7 @@ export function mapOtlpToInternalModels(
         });
       }
 
-      events.push({
+      const mappedEvent: OtlpMappedResult['events'][number] = {
         sessionId,
         traceId,
         spanId: span.spanId,
@@ -802,7 +895,7 @@ export function mapOtlpToInternalModels(
         id: eventId,
         type: eventType,
         label: getStringAttr(span.attributes, 'cognipeer.event.label') || span.name || eventType,
-        sequence,
+        sequence: explicitSequence ?? sequence,
         timestamp: eventStartedAt,
         status: eventStatus,
         actor: actorScope ? { scope: actorScope, name: toolName, role: actorRole } : undefined,
@@ -823,7 +916,9 @@ export function mapOtlpToInternalModels(
         requestBytes,
         responseBytes,
         error: eventError,
-      });
+      };
+      events.push(mappedEvent);
+      if (explicitSequence === undefined) positionalSequence.add(mappedEvent);
     }
 
     // Extract root span errors
@@ -884,7 +979,7 @@ export function mapOtlpToInternalModels(
     eventCount: events.length,
   });
 
-  return { sessions, events, endedSessionIds };
+  return { sessions, events, endedSessionIds, positionalSequence };
 }
 
 // ─── Section Synthesis ──────────────────────────────────────────────────────

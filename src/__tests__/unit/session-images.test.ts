@@ -10,6 +10,7 @@ import {
   withSessionImages,
   type SessionImageSource,
 } from '@/lib/services/agents/sessionImages';
+import { createCompositeImageSource, createToolMediaStore } from '@/lib/services/agents/toolMedia';
 import {
   imageFileIdOf,
   parseSessionFileUrl,
@@ -106,7 +107,7 @@ describe('withSessionImages', () => {
 
     const parts = (calls[0][0] as { content: Array<{ type: string; text?: string }> }).content;
     expect(parts.map((part) => part.type)).toEqual(['text', 'image', 'image']);
-    expect(parts[0].text).toBe('[Image "a.png" (id a) is not shown: a request carries at most 2 images / 12 MB, and newer images took the room. Use session_files_view_image to look at it again.]');
+    expect(parts[0].text).toBe('[Image "a.png" (id a) is not shown: a request carries at most 2 images / 12 MB, and newer images took the room. Use read with fileId "a" to look at it again.]');
     expect(src.read).toHaveBeenCalledTimes(2);
     expect(src.read).not.toHaveBeenCalledWith('a');
   });
@@ -122,7 +123,7 @@ describe('withSessionImages', () => {
     expect(flat).toContain('B64(b)');
     expect(flat).not.toContain('B64(a)');
     expect(flat).toContain('is not shown');
-    expect(flat).not.toContain('session_files_view_image'); // the tool is not offered here
+    expect(flat).not.toContain('Use read with'); // the tool is not offered here
     expect(src.read).toHaveBeenCalledTimes(1);
   });
 
@@ -179,6 +180,64 @@ describe('expandViewedImages', () => {
     expect(out[3].content.filter((part) => part.type === 'image_url')).toHaveLength(1);
   });
 
+  const attached = (name: string, ids: Array<string | { fileId: string; name?: string }>, toolCallId = `t-${name}`) => ({
+    role: 'tool', name, tool_call_id: toolCallId,
+    content: JSON.stringify({ ok: true, attachedImages: ids.map((id) => (typeof id === 'string' ? { fileId: id, name: `${id}.png` } : id)) }),
+  });
+
+  it('shows the images ANY tool result names in attachedImages (the generic marker), after the run of results', () => {
+    const out = expandViewedImages([
+      { role: 'assistant', content: '', tool_calls: [{ id: 't1' }, { id: 't2' }] },
+      attached('browser_screenshot', ['tm_1_aaaaaa'], 't1'),
+      attached('mcp_tool', [{ fileId: 'tm_2_bbbbbb' }, 'tm_1_aaaaaa'], 't2'),
+      { role: 'assistant', content: 'done' },
+    ]) as Array<{ role: string; content: Array<{ type: string; text?: string; fileId?: string; name?: string }> }>;
+
+    expect(out.map((m) => m.role)).toEqual(['assistant', 'tool', 'tool', 'user', 'assistant']);
+    const parts = out[3].content;
+    expect(parts[0].text).toBe('Here are the images you asked to look at.');
+    // Each picture once; a name defaults to the id when the tool gave none.
+    expect(parts.filter((part) => part.type === 'image_url').map((part) => part.fileId)).toEqual(['tm_1_aaaaaa', 'tm_2_bbbbbb']);
+    expect(parts[3].text).toBe('[Image you asked to see: "tm_2_bbbbbb" (id tm_2_bbbbbb)]');
+  });
+
+  it('still understands the legacy session_files_view_image result of an old conversation', () => {
+    const out = expandViewedImages([
+      { role: 'assistant', content: '', tool_calls: [{ id: 't-old' }] },
+      viewResult('old', 'legacy.png'),
+    ]) as Array<{ role: string; content: Array<{ text?: string }> }>;
+    expect(out.map((m) => m.role)).toEqual(['assistant', 'tool', 'user']);
+    expect(out[2].content[1].text).toBe('[Image you asked to see: "legacy.png" (id old)]');
+  });
+
+  it('ignores attachedImages that is malformed, non-JSON content, and caps one result at 16 images', () => {
+    const messages = [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'a' }] },
+      { role: 'tool', name: 'x', tool_call_id: 'a', content: '{"attachedImages":"nope"}' },
+      { role: 'tool', name: 'x', tool_call_id: 'b', content: '{"attachedImages":[{"name":"no id"},{"fileId":""},null,7]}' },
+      { role: 'tool', name: 'x', tool_call_id: 'c', content: '{not json' },
+      { role: 'tool', name: 'x', tool_call_id: 'd', content: 'plain text' },
+    ];
+    expect(expandViewedImages(messages)).toBe(messages);
+
+    const many = Array.from({ length: 20 }, (_, i) => `img${i}`);
+    const out = expandViewedImages([attached('shots', many)]) as Array<{ role: string; content: Array<{ type: string }> }>;
+    expect(out[1].content.filter((part) => part.type === 'image_url')).toHaveLength(16);
+  });
+
+  it('keep() leaves out an image that is gone, and adds no message when nothing is left', () => {
+    const messages = [
+      { role: 'assistant', content: '', tool_calls: [{ id: 't1' }] },
+      attached('shot', ['tm_9_gone00', 'real'], 't1'),
+    ];
+    const kept = expandViewedImages(messages, { keep: (id) => id !== 'tm_9_gone00' }) as Array<{ role: string; content: Array<{ type: string; fileId?: string; text?: string }> }>;
+    expect(kept[2].content[0].text).toBe('Here is the image you asked to look at.');
+    expect(kept[2].content.filter((part) => part.type === 'image_url').map((part) => part.fileId)).toEqual(['real']);
+
+    const none = [{ role: 'assistant', content: '', tool_calls: [{ id: 't1' }] }, attached('shot', ['tm_9_gone00'], 't1')];
+    expect(expandViewedImages(none, { keep: () => false })).toBe(none);
+  });
+
   it('leaves a refusal alone, and returns the same array when nothing is viewed', () => {
     const messages = [
       { role: 'assistant', content: '', tool_calls: [{ id: 't' }] },
@@ -209,7 +268,7 @@ describe('references and the transcript replay', () => {
     const turn = rebuildUserTurn('what are these?', attachments, { supportsVision: true }) as Array<{ type: string; text?: string }>;
     expect(turn[0].text).toBe(
       'what are these?\n\n<attachments source="session-files">\n'
-      + 'The person attached 2 files: 1 document to read with the tools (session_files_list, session_files_read), 1 image shown below.\n'
+      + 'The person attached 2 files: 1 document to read with the tools (session_files_list, read), 1 image shown below.\n'
       + '- "report.pdf" (id d1)\n</attachments>',
     );
     expect(turn[1]).toEqual({ type: 'text', text: '[Attached image: "cat.png" (id i1)]' });
@@ -292,5 +351,70 @@ describe('buildTurnInputState with earlier attachments', () => {
       carried: carried as never, transcript, userMessage: 'and?', attachments: { supportsVision: false, carryRecentImages: 2 },
     });
     expect((textOnly.messages.at(-1) as { content: unknown }).content).toBe('and?');
+  });
+});
+
+describe('tool media through the model wrapper', () => {
+  const toolTurn = (ids: string[]) => [
+    { role: 'user', content: 'screenshot it' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 't1' }] },
+    { role: 'tool', name: 'browser_screenshot', tool_call_id: 't1', content: JSON.stringify({ ok: true, attachedImages: ids.map((id) => ({ fileId: id, name: 'shot.png' })) }) },
+  ];
+
+  it('resolves a tm_ id from the run store through the composite source, and skips one an earlier turn left behind', async () => {
+    const store = createToolMediaStore();
+    const put = store.put({ base64: 'QUJD', mediaType: 'image/png', name: 'shot.png' });
+    const session = source({ s1: { name: 's1.png', size: 5 } });
+    const { model, calls } = fakeModel();
+    const wrapped = withSessionImages(model, { ...options(createCompositeImageSource(store, session)), toolMedia: store });
+
+    await wrapped.invoke(toolTurn([put.id, 'tm_9_gone00']));
+
+    const sent = calls[0] as Array<{ role: string; content: unknown }>;
+    expect(sent.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'user']);
+    const parts = sent[3].content as Array<{ type: string; text?: string; source?: { data: string; mediaType: string } }>;
+    expect(parts.map((part) => part.type)).toEqual(['text', 'text', 'image']);
+    expect(parts[1].text).toBe(`[Image you asked to see: "shot.png" (id ${put.id})]`);
+    expect(parts[2].source).toEqual({ type: 'base64', mediaType: 'image/png', data: 'QUJD' });
+    // The gone tm_ id is not even looked up, and the session source is never asked about a run id.
+    expect(session.find).not.toHaveBeenCalled();
+    // The tool message itself is untouched: no base64 in it.
+    expect(JSON.stringify(sent[2])).not.toContain('QUJD');
+  });
+
+  it('adds no message at all when the only named image is gone (nothing to show, no noise)', async () => {
+    const store = createToolMediaStore();
+    const { model, calls } = fakeModel();
+    const wrapped = withSessionImages(model, { ...options(createCompositeImageSource(store, null)), toolMedia: store });
+    const turn = toolTurn(['tm_3_000000']);
+    await wrapped.invoke(turn);
+    expect(calls[0]).toBe(turn);
+  });
+
+  it('shows a conversation file named by a tool result too (read on a session image)', async () => {
+    const store = createToolMediaStore();
+    const session = source({ file1: { name: 'cat.png', size: 5 } });
+    const { model, calls } = fakeModel();
+    const wrapped = withSessionImages(model, { ...options(createCompositeImageSource(store, session)), toolMedia: store });
+    await wrapped.invoke(toolTurn(['file1']));
+    const parts = (calls[0][3] as { content: Array<{ type: string; source?: { data: string } }> }).content;
+    expect(parts[2].source?.data).toBe('B64(file1)');
+  });
+
+  it('the composite source: tm_ ids to the store, anything else to the session, gone ids are null / reject', async () => {
+    const store = createToolMediaStore();
+    const put = store.put({ base64: 'QUJD', mediaType: 'image/jpeg', name: 'a.jpg' });
+    const session = source({ f: { name: 'f.png', size: 9 } });
+    const composite = createCompositeImageSource(store, session);
+    expect(await composite.find(put.id)).toEqual({ name: 'a.jpg', size: 3 });
+    expect(await composite.read(put.id)).toEqual({ base64: 'QUJD', mediaType: 'image/jpeg' });
+    expect(await composite.find('tm_0_nothin')).toBeNull();
+    await expect(composite.read('tm_0_nothin')).rejects.toThrow(/no longer available/);
+    expect(await composite.find('f')).toEqual({ name: 'f.png', size: 9 });
+    expect((await composite.read('f')).base64).toBe('B64(f)');
+
+    const stateless = createCompositeImageSource(store, null);
+    expect(await stateless.find('f')).toBeNull();
+    await expect(stateless.read('f')).rejects.toThrow(/not available/);
   });
 });

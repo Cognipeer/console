@@ -14,6 +14,7 @@ import FormShell, {
   useAutoSlug,
 } from '@/components/common/ui/FormShell';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { providerRequestError } from '@/components/providers/providerFormModel';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderDomain } from '@/lib/database';
 import { useTranslations } from '@/lib/i18n';
@@ -576,7 +577,11 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
                 : {}),
             }),
           });
-          if (!res.ok) throw new Error(await errorText(res, t('providerModal.createFailed')));
+          if (!res.ok) {
+            // The refusal names the form field it is about: the form marks it, as it does for an edit.
+            const refusal = await res.json().catch(() => null);
+            throw providerRequestError(refusal, t('providerModal.createFailed'));
+          }
           const body = (await res.json()) as { provider?: { _id?: string; label?: string; key?: string; type?: string } };
           const created = body.provider;
           if (created?._id) {

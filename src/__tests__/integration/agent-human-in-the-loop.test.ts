@@ -67,6 +67,8 @@ import {
 } from '@/lib/services/agents/agentActionResolution';
 import { RESUME_TIMEOUT_ACTOR, runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
 import { truncateSessionAfterMessage } from '@/lib/services/agents/sessionTruncate';
+import { parsePausedState } from '@/lib/services/agents/agentPendingActions';
+import { decodeStoredState, encodeStoredState } from '@/lib/services/agents/agentTurnState';
 import { queueAgentRun } from '../helpers/agent-runs';
 
 const DB_NAME = 'tenant_hitl';
@@ -297,13 +299,13 @@ describe('a tool that needs approval pauses the turn', () => {
 
     const stored = await db.findAgentConversationState(id);
     expect(stored?.pausedSnapshot).toBeTruthy();
-    const paused = JSON.parse(stored!.pausedSnapshot!);
+    const paused = JSON.parse(decodeStoredState(stored!.pausedSnapshot!));
     expect(paused.state.pendingApprovals[0]).toMatchObject({ toolName: 'sandbox_exec', status: 'pending' });
     expect(paused.state.ctx.__awaitingApproval).toBeTruthy();
     // The unanswered call stays in the paused transcript; the normal snapshot repaired it away.
     const pausedAssistant = paused.state.messages.find((m: { tool_calls?: unknown }) => m.tool_calls);
     expect(pausedAssistant).toBeTruthy();
-    const normal = JSON.parse(stored!.snapshot);
+    const normal = JSON.parse(decodeStoredState(stored!.snapshot));
     expect(normal.messages.some((m: { tool_calls?: unknown }) => m.tool_calls)).toBe(false);
 
     const after = await storedConversation(id);
@@ -763,12 +765,12 @@ describe('(e) several requests', () => {
 
     // Put a second request into the same pause.
     const stored = (await db.findAgentConversationState(id))!;
-    const paused = JSON.parse(stored.pausedSnapshot!);
+    const paused = JSON.parse(decodeStoredState(stored.pausedSnapshot!));
     paused.state.pendingApprovals.push({
       id: 'sdk-second', toolCallId: 'c2', toolName: 'sandbox_exec', args: { command: 'two' }, status: 'pending',
       requestedAt: new Date().toISOString(),
     });
-    await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(paused) });
+    await db.saveAgentConversationState({ ...stored, pausedSnapshot: encodeStoredState(JSON.stringify(paused)) });
     const [secondAction] = await db.createAgentPendingActions([{
       tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, kind: 'tool_approval',
       sdkId: 'sdk-second', toolCallId: 'c2', toolName: 'sandbox_exec', args: { command: 'two' },
@@ -1066,6 +1068,38 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
     expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
   });
 
+  it('leaves the request open when the channel needs the agent on and it is switched off', async () => {
+    const { id, actionId } = await paused();
+    const agent = await db.findAgentByKey(AGENT_KEY, PROJECT_ID);
+    await db.updateAgent(String(agent!._id), { status: 'inactive' } as never);
+    const modelCalls = hoisted.buildGatewayChatModel.mock.calls.length;
+    const eventsBefore = (await events(id)).length;
+
+    const client = { requireActiveAgent: true };
+    expect(await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, mode: 'sync', ...client,
+    })).toEqual({ kind: 'agent_inactive' });
+    expect(await checkAgentPendingActionResolution({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, ...client,
+    })).toEqual({ kind: 'agent_inactive' });
+    // Nothing was recorded: the same request is still open and the agent was not run.
+    expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
+    expect((await events(id)).length).toBe(eventsBefore);
+    expect(hoisted.buildGatewayChatModel.mock.calls.length).toBe(modelCalls);
+
+    // The dashboard does not ask for it, so a draft agent can still be tested.
+    expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
+
+    // Switched back on, the same approval goes through on the client channel.
+    await db.updateAgent(String(agent!._id), { status: 'active' } as never);
+    expect((await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, mode: 'sync', ...client,
+    })).kind).toBe('resumed');
+  });
+
   it('says invalid for a body the resolve flow would refuse', async () => {
     const { id, actionId } = await paused();
     expect(await check(id, actionId, {})).toMatchObject({ kind: 'invalid' });
@@ -1256,10 +1290,10 @@ describe('background runs', () => {
       const { runId, actionId } = await startPaused(id, true);
       // The stored paused state remembers the flag; take it out so only the run row's mark is left to carry it.
       const stored = (await db.findAgentConversationState(id))!;
-      const envelope = JSON.parse(stored.pausedSnapshot!);
+      const envelope = JSON.parse(decodeStoredState(stored.pausedSnapshot!));
       expect(envelope.turn.variablesInPrompt).toBe(false);
       delete envelope.turn.variablesInPrompt;
-      await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
+      await db.saveAgentConversationState({ ...stored, pausedSnapshot: encodeStoredState(JSON.stringify(envelope)) });
       expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.externalContent).toBe(true);
 
       const outcome = await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
@@ -1334,10 +1368,10 @@ describe('background runs', () => {
         const id = String((await newConversation())._id);
         const { runId, actionId } = await startMixed(id);
         const stored = (await db.findAgentConversationState(id))!;
-        const envelope = JSON.parse(stored.pausedSnapshot!);
+        const envelope = JSON.parse(decodeStoredState(stored.pausedSnapshot!));
         expect(envelope.turn).toMatchObject({ variablesInPrompt: false, literalVariables: ['team'] });
         delete envelope.turn.literalVariables;
-        await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
+        await db.saveAgentConversationState({ ...stored, pausedSnapshot: encodeStoredState(JSON.stringify(envelope)) });
         expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.literalVariables).toEqual(['team']);
 
         expect((await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync')).kind).toBe('resumed');
@@ -1776,5 +1810,42 @@ describe('a paused run follows its pause', () => {
     expect(await statusOf(runId)).toMatchObject({ status: 'succeeded' });
     const running = (await db.listAgentSessionEvents(id, { runId })).filter((event) => event.type === 'session.status_running');
     expect(running.at(-1)?.data).toMatchObject({ trigger: 'timeout' });
+  });
+});
+
+describe('(i) who a continued turn is for', () => {
+  it('stays the person whose turn it is when somebody else approves (Console identity tokens follow it)', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel((call, messages) => {
+      if (call === 0) {
+        return {
+          role: 'assistant',
+          content: '',
+          tool_calls: [toolCall('c1', 'sandbox_exec', { command: 'one' }), toolCall('c2', 'sandbox_exec', { command: 'two' })],
+        };
+      }
+      return { role: 'assistant', content: `ran ${messages.filter((m) => m.role === 'tool').length}` };
+    });
+    const id = String((await newConversation())._id);
+    const pausedFor = async () => parsePausedState((await db.findAgentConversationState(id))!.pausedSnapshot!)!.turn?.identity;
+
+    const first = await chat(id, 'do both', { runtimeContext: { userId: OWNER, source: 'portal' } });
+    expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
+
+    const after = await resolveAgentPendingAction({
+      tenantDbName: DB_NAME,
+      tenantId,
+      projectId: PROJECT_ID,
+      conversationId: id,
+      actionId: first.required_action!.actions[0].id,
+      body: { decision: 'allow' },
+      actor: { userId: 'approver-9', channel: 'dashboard' },
+      authorize: allow,
+      mode: 'sync',
+      runtimeContext: { userId: 'approver-9', tokenId: 'tok-9', source: 'playground' },
+    });
+    expect(after.kind).toBe('resumed');
+    // It paused again, on the second call, and the turn is still the owner's, not the approver's.
+    expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
   });
 });

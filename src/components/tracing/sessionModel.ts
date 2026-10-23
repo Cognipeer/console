@@ -20,6 +20,7 @@
  *      such sessions get gap-based estimates, marked as estimates.
  */
 
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 import { eventResponse, humanStep, isHumanEventType, type HumanStep, type SectionShell } from '@/lib/shared/tracingSections';
 
 export interface TraceEventInput {
@@ -250,7 +251,7 @@ export function resolveTimings(events: readonly TraceEventInput[], sessionStarte
 
 export interface TraceNode {
   key: string;
-  /** Absent for an inferred step, which no SDK sent. */
+  /** Absent for an inferred step and for a running sub-agent, which no SDK sent. */
   event?: TraceEventInput;
   label: string;
   category: StepCategory;
@@ -271,6 +272,12 @@ export interface TraceNode {
   human?: HumanStep;
   /** A request nobody has answered yet: the session is waiting on it. */
   waiting?: boolean;
+  /**
+   * Stands in for a sub-agent that is still running: agent-sdk writes the
+   * sub-agent's own span when it finishes, so until then its steps are
+   * grouped here.
+   */
+  running?: boolean;
 }
 
 /** The person's step an event records, from the summary or its sections. */
@@ -389,19 +396,141 @@ function inferSteps(nodes: TraceNode[]): TraceNode[] {
   return result;
 }
 
+// ─── Sub-agents still running ──────────────────────────────────────────────
+
+/** The tools an agent-sdk agent hands work to its sub-agents with. */
+const DELEGATION_TOOLS = new Set(['delegate_to', 'spawn_subagent', 'spawn_subagents_parallel']);
+
+function isTurn(event: TraceEventInput): boolean {
+  return event.type?.toLowerCase() === 'agent_iteration';
+}
+
+function actorField(event: TraceEventInput, field: 'name' | 'role'): string | undefined {
+  const actor = event.actor && typeof event.actor === 'object' ? event.actor as Record<string, unknown> : undefined;
+  return typeof actor?.[field] === 'string' ? actor[field] as string : undefined;
+}
+
+/**
+ * The turn a running sub-agent was started from. Nothing names it yet (the
+ * tool call that launched the sub-agent is written when it returns), but the
+ * sub-agent started while that turn ran its tools: of each agent's current
+ * turn, the one whose latest model call asked for tools — a delegation tool
+ * before any other — and latest of those. An agent whose own span is in has
+ * finished and starts nothing more. A sibling launched in the same breath has
+ * made no model call yet, so it is never taken for the parent.
+ */
+function launchingTurn(
+  first: TraceEventInput,
+  ordered: readonly TraceEventInput[],
+  position: Map<string, number>,
+  structure: Structure,
+  bySpan: Map<string, TraceEventInput>,
+): TraceEventInput | undefined {
+  const before = position.get(first.id) ?? 0;
+  const current = new Map<string, TraceEventInput>();
+  for (const event of ordered.slice(0, before)) {
+    if (isTurn(event)) current.set(event.parentSpanId ?? '', event);
+  }
+  let best: { turn: TraceEventInput; strength: number; at: number } | undefined;
+  for (const turn of current.values()) {
+    const agent = turn.parentSpanId ? bySpan.get(turn.parentSpanId) : undefined;
+    if (agent && agent.status !== 'pending') continue;
+    let call: TraceEventInput | undefined;
+    for (const child of structure.childrenOf.get(turn.id) ?? []) {
+      const at = position.get(child.id) ?? Number.MAX_SAFE_INTEGER;
+      if (at >= before || stepCategory(child.type) !== 'model' || child.type?.toLowerCase() === 'summarization') continue;
+      if (!call || at > position.get(call.id)!) call = child;
+    }
+    if (!call) continue;
+    const outcome = stepOutcome(call);
+    // Without the response's sections, a call that did not say it answered may have asked for tools.
+    const strength = !outcome ? 1 : outcome.toolNames.some((name) => DELEGATION_TOOLS.has(name)) ? 2 : outcome.toolNames.length > 0 ? 1 : 0;
+    const at = position.get(call.id)!;
+    if (strength > 0 && (!best || strength > best.strength || (strength === best.strength && at > best.at))) {
+      best = { turn, strength, at };
+    }
+  }
+  return best?.turn;
+}
+
+/**
+ * Before 0.19, agent-sdk wrote a sub-agent's span only when the sub-agent
+ * finished (or paused), so while one runs, its turns point at a span nobody has
+ * sent yet. Read live, they would stand at the top of the tree as turns of the
+ * agent itself. Each such span gets a stand-in group, hung under the turn that
+ * started it, until the real span arrives. (0.19+ records the span `running`
+ * when the child starts, so its sessions never need one.) A finished sub-agent's span whose launching tool call
+ * is not in yet (it is written a moment later) is hung there directly.
+ *
+ * Only agent-sdk's shape is touched — turns whose agent span is missing — so
+ * an OTLP root in another service or a LangGraph close-order session stays as
+ * it was. Mutates `structure`; returns the stand-ins by id.
+ */
+function adoptRunningSubagents(events: readonly TraceEventInput[], structure: Structure): Map<string, TraceEventInput> {
+  const standIns = new Map<string, TraceEventInput>();
+  if (!events.some(isTurn)) return standIns;
+  const ordered = [...events].sort((a, b) => bySequence(a, b, structure.order));
+  const position = new Map(ordered.map((event, index) => [event.id, index]));
+  const bySpan = new Map<string, TraceEventInput>();
+  events.forEach((event) => { if (event.spanId) bySpan.set(event.spanId, event); });
+  // The agent's own turns hang off the session's root span, which is never sent.
+  const sessionRoot = ordered.find(isTurn)?.parentSpanId;
+
+  const unparented = new Map<string, TraceEventInput[]>();
+  for (const event of ordered) {
+    const missing = event.parentSpanId;
+    if (!missing || missing === sessionRoot || bySpan.has(missing)) continue;
+    unparented.set(missing, [...(unparented.get(missing) ?? []), event]);
+  }
+
+  const attach = (child: TraceEventInput, parent: TraceEventInput) => {
+    structure.parentOf.set(child.id, parent);
+    structure.childrenOf.set(parent.id, [...(structure.childrenOf.get(parent.id) ?? []), child]);
+  };
+  for (const [spanId, members] of unparented) {
+    const turn = members.find(isTurn);
+    if (turn) {
+      const name = actorField(turn, 'name') ?? turn.actorName ?? 'agent';
+      const standIn: TraceEventInput = {
+        id: `running:${spanId}`,
+        sequence: members[0].sequence,
+        type: 'span',
+        label: `Sub-agent ${name}`,
+        spanId,
+        actor: { scope: 'agent', name, role: 'subagent' },
+      };
+      structure.order.set(standIn.id, structure.order.get(members[0].id) ?? 0);
+      standIns.set(standIn.id, standIn);
+      members.forEach((member) => attach(member, standIn));
+      const home = launchingTurn(members[0], ordered, position, structure, bySpan);
+      if (home) attach(standIn, home);
+      continue;
+    }
+    for (const member of members) {
+      if (member.type?.toLowerCase() !== 'span' || actorField(member, 'role') !== 'subagent') continue;
+      const home = launchingTurn(member, ordered, position, structure, bySpan);
+      if (home) attach(member, home);
+    }
+  }
+  return standIns;
+}
+
 export function buildTraceTree(
   events: readonly TraceEventInput[],
   timings: Map<string, StepTiming>,
 ): TraceNode[] {
   const structure = readStructure(events);
+  const standIns = adoptRunningSubagents(events, structure);
+  const eventOf = (node: TraceNode) => (node.event ?? standIns.get(node.key))!;
 
   const toNode = (event: TraceEventInput): TraceNode => {
     const kids = (structure.childrenOf.get(event.id) ?? []).map(toNode);
-    kids.sort((a, b) => startOf(a) - startOf(b) || bySequence(a.event!, b.event!, structure.order));
+    kids.sort((a, b) => startOf(a) - startOf(b) || bySequence(eventOf(a), eventOf(b), structure.order));
     const children = inferSteps(kids);
+    const running = standIns.has(event.id);
     const node: TraceNode = {
       key: event.id,
-      event,
+      ...(running ? { running } : { event }),
       label: nodeLabel(event),
       category: stepCategory(event.type),
       children,
@@ -410,7 +539,7 @@ export function buildTraceTree(
       timing: children.length > 0 ? containerTiming(timings.get(event.id), children) : timings.get(event.id),
       parallel: maxConcurrency(children),
     };
-    const human = eventHuman(event);
+    const human = running ? undefined : eventHuman(event);
     if (human) {
       node.human = human;
       node.waiting = human.state === 'pending';
@@ -418,7 +547,8 @@ export function buildTraceTree(
     // A wrapper span with one grouped child and nothing of its own is
     // plumbing (graph → node, executor → chain): show it as one row.
     if (
-      node.category === 'span'
+      !running
+      && node.category === 'span'
       && children.length === 1
       && children[0].children.length > 0
       && !children[0].inferred
@@ -430,8 +560,8 @@ export function buildTraceTree(
     return node;
   };
 
-  const roots = events.filter((event) => !structure.parentOf.has(event.id)).map(toNode);
-  roots.sort((a, b) => startOf(a) - startOf(b) || bySequence(a.event!, b.event!, structure.order));
+  const roots = [...events, ...standIns.values()].filter((event) => !structure.parentOf.has(event.id)).map(toNode);
+  roots.sort((a, b) => startOf(a) - startOf(b) || bySequence(eventOf(a), eventOf(b), structure.order));
   return inferSteps(roots);
 }
 
@@ -656,7 +786,7 @@ export function buildSessionModel(
   session?: { startedAt?: string; durationMs?: number },
 ): SessionModel {
   const legacyHandler = isLegacyHandlerSession(events);
-  const steps = foldHumanSteps(events);
+  const steps = foldHumanSteps(foldSupersededSpans(events));
   const timings = resolveTimings(steps, session?.startedAt);
   const tree = buildTraceTree(steps, timings.timings);
   const breakdown = legacyHandler ? undefined : computeBreakdown(tree, session);

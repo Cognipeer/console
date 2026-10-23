@@ -1323,6 +1323,26 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
     expect(child?.providerRequest).toEqual({});
   });
 
+  it('persists the run attribution on usage rows and sums a turn\'s ledger', async () => {
+    const db = getDb();
+    const base = {
+      tenantId, projectId: 'proj-ledger', modelKey: 'gpt-4o', route: 'agent.chat', status: 'success' as const,
+      providerRequest: {}, providerResponse: {}, agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-L', runId: 'run-L',
+    };
+    await db.createModelUsageLog({ ...base, requestId: 'L1', turnId: 'turn-1', traceSessionId: 'sess-L', inputTokens: 100, outputTokens: 20, cachedInputTokens: 10, reasoningTokens: 5, totalTokens: 130, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.25 } });
+    await db.createModelUsageLog({ ...base, requestId: 'L2', turnId: 'turn-1', status: 'error', inputTokens: 50, outputTokens: 0, totalTokens: 50, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.05 } });
+    await db.createModelUsageLog({ ...base, requestId: 'L3', turnId: 'turn-2', inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+
+    const stored = (await db.listModelUsageLogs('gpt-4o', {}, 'proj-ledger')).find((row) => row.requestId === 'L1');
+    expect(stored).toMatchObject({ agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-L', turnId: 'turn-1', runId: 'run-L', traceSessionId: 'sess-L' });
+
+    const turn = await db.summarizeModelUsageForTurn('conv-L', 'turn-1', 'proj-ledger');
+    expect(turn).toMatchObject({ calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 10, reasoningTokens: 5, totalTokens: 180 });
+    expect(turn.costUsd).toBeCloseTo(0.3, 6);
+    expect(turn.lastAt).toBeInstanceOf(Date);
+    expect((await db.summarizeModelUsageForTurn('conv-L', 'turn-none')).calls).toBe(0);
+  });
+
   // Regression: the SQLite provider used to omit every cost field from
   // aggregateModelUsage, so the Model Hub Spend column was permanently empty
   // on SQLite deployments (including the docker-compose quickstart) while the
@@ -2641,6 +2661,25 @@ describeForEachProvider('RAG module teardown + shared index accounting', (getDb)
       await db.countRagModulesByVectorIndexKey('idx-shared', { projectId: 'proj-1', excludeKey: 'm1' }),
     ).toBe(1);
     expect(await db.countRagModulesByVectorIndexKey('idx-nobody')).toBe(0);
+  });
+
+  it('adds to the document/chunk totals atomically and clamps them at 0', async () => {
+    const db = getDb();
+    const created = await db.createRagModule(baseModule('m-totals', 'idx-shared', 'proj-1'));
+    const id = String(created._id);
+
+    // Concurrent ingests into one module: every increment has to land.
+    await Promise.all(
+      Array.from({ length: 20 }, () => db.incrementRagModuleTotals(id, { documents: 1, chunks: 3 })),
+    );
+    let found = await db.findRagModuleById(id);
+    expect(found?.totalDocuments).toBe(20);
+    expect(found?.totalChunks).toBe(60);
+
+    await db.incrementRagModuleTotals(id, { documents: -25, chunks: -100 });
+    found = await db.findRagModuleById(id);
+    expect(found?.totalDocuments).toBe(0);
+    expect(found?.totalChunks).toBe(0);
   });
 
   it('persists the retrieval controls and the re-index handshake on a module', async () => {

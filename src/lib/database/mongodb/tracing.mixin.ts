@@ -1442,6 +1442,23 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       }));
     }
 
+    async getAgentTracingWaitState(
+      sessionId: string,
+      projectId?: string,
+    ): Promise<{ latestStatus?: string; latestHumanStatus?: string }> {
+      await this.ensureTracingIndexes();
+      const events = this.getTenantDb().collection<IAgentTracingEvent>(COLLECTIONS.agentTracingEvents);
+      const scope = projectId ? { sessionId, projectId } : { sessionId };
+      const latest = async (extra: Record<string, unknown>): Promise<string | undefined> => {
+        const doc = await events.findOne({ ...scope, ...extra }, { projection: { status: 1 }, sort: { sequence: -1, timestamp: -1 } });
+        return doc?.status ?? undefined;
+      };
+      return {
+        latestStatus: await latest({}),
+        latestHumanStatus: await latest({ type: { $in: ['tool_approval', 'user_question'] } }),
+      };
+    }
+
     async findAgentTracingEventById(
       sessionId: string,
       eventId: string,

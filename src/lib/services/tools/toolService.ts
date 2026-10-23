@@ -5,6 +5,7 @@
  * Tools are registered centrally and can be bound to agents or called via API.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { currentTurnSignal } from '@/lib/core/turnSignal';
 import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
@@ -22,6 +23,7 @@ import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
+import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
 import { mergeAuthConfigUpdate, openAuthConfig, sealAuthConfig } from './secretVault';
 import type {
   CreateToolInput,
@@ -477,6 +479,7 @@ export async function executeToolAction(
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
+  await assertServiceEnabled({ tenantId: tool.tenantId }, 'tools');
   const action = tool.actions.find((a) => a.key === actionKey);
   if (!action) {
     throw new Error(`Action "${actionKey}" not found on tool "${tool.name}"`);
@@ -632,7 +635,10 @@ async function executeMcpAction(
   // MCP tools/call returns result in data.result.content
   const content = data?.result?.content;
   let result: unknown;
-  if (Array.isArray(content)) {
+  if (contentHasMedia(content)) {
+    // Keep images/audio/resources as a ToolOutput; text-only results keep the legacy unwrap.
+    result = mcpResultToToolOutput(data.result);
+  } else if (Array.isArray(content)) {
     const textParts = content.filter((c: { type: string }) => c.type === 'text');
     result = textParts.length === 1
       ? textParts[0].text

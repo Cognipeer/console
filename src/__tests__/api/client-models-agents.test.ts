@@ -5,7 +5,7 @@
  * a model needs `models` (§5.5). The REAL routes, gate and policy engine over a real SQLite provider; only
  * the token's own authentication is stood in for.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
@@ -45,6 +45,8 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
 import type { FastifyInstance } from 'fastify';
 import type { IUser } from '@/lib/database';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
+import { reloadConfig } from '@/lib/core/config';
+import { clearServiceAvailabilityMemo } from '@/lib/services/availability/serviceAvailability';
 import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
 import { resetEnforceStatsForTests } from '@/lib/iam/enforce';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
@@ -189,5 +191,35 @@ describe('GET /client/v1/models/agent:<key>', () => {
     expect((await get('/client/v1/models/agent:elsewhere', 'tok-both')).status).toBe(404);
     expect((await get('/client/v1/models/agent:nobody', 'tok-both')).status).toBe(404);
     expect((await get('/client/v1/models/agent:support', 'tok-models')).status).toBe(404);
+  });
+});
+
+describe('with the agents service switched off (CONSOLE_DISABLED_SERVICES)', () => {
+  beforeEach(() => {
+    process.env.CONSOLE_DISABLED_SERVICES = 'agents';
+    reloadConfig();
+    clearServiceAvailabilityMemo();
+  });
+  afterEach(() => {
+    delete process.env.CONSOLE_DISABLED_SERVICES;
+    reloadConfig();
+    clearServiceAvailabilityMemo();
+  });
+
+  it('the list answers with the models only, whichever service let the caller in', async () => {
+    const both = await get('/client/v1/models', 'tok-both');
+    expect(both.status, JSON.stringify(both.body)).toBe(200);
+    expect(both.body.data.map((entry: { id: string }) => entry.id)).toEqual(['chat-alpha']);
+    // let in on agents (models is on, so the gate passes the route): no agents, and no models it may not read
+    const agentsOnly = await get('/client/v1/models', 'tok-agents');
+    expect(agentsOnly.status, JSON.stringify(agentsOnly.body)).toBe(200);
+    expect(agentsOnly.body.data).toEqual([]);
+  });
+
+  it('an agent is not found, a model is still served', async () => {
+    expect((await get('/client/v1/models/agent:support', 'tok-both')).status).toBe(404);
+    expect((await get('/client/v1/models/agent:support', 'tok-agents')).status).toBe(404);
+    const id = String((await env.db.findModelByKey('chat-alpha', projectId))!._id);
+    expect((await get(`/client/v1/models/${id}`, 'tok-both')).status).toBe(200);
   });
 });

@@ -36,12 +36,14 @@ const boot = vi.hoisted(() => ({
     cors: { enabled: false },
     logging: { level: 'info' },
     rateLimit: { provider: 'memory' },
+    services: { disabled: [] as string[], enabled: [] as string[] },
   },
   configErrors: [] as Array<{ key: string; message: string }>,
   logged: [] as string[],
 }));
 
-vi.mock('@/lib/core/config', () => ({
+vi.mock('@/lib/core/config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/core/config')>()),
   getConfig: () => boot.config,
   validateConfig: () => boot.configErrors,
 }));

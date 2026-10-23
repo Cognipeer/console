@@ -5,7 +5,7 @@
  * Uses agent-sdk for runtime execution with automatic tracing.
  */
 
-import { channelFromSource, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
+import { channelFromSource, getRoutingCaller, noteRoutingRun, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 import { randomUUID } from 'node:crypto';
 
 import { createLogger } from '@/lib/core/logger';
@@ -48,7 +48,9 @@ import {
     type KnowledgeBindingSource,
     type KnowledgeHit,
 } from './agentKnowledgeBindings';
-import { getDatabase, runWithTenantScope, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { applyServiceAvailability, assertAgentsEnabled, filterChildSources } from './agentServiceAvailability';
+import { getDisabledServices } from '@/lib/services/availability/serviceAvailability';
+import { getDatabase, runWithTenantScope, type AgentResponseFormat, type DatabaseProvider, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
     getRagDocument,
@@ -86,6 +88,7 @@ import type { PluginMessageRewrite } from '@/lib/services/guardrail/sdkAdapter';
 import type { AgentPlugin as AgentSdkPlugin, BaseChatModel } from '@cognipeer/agent-sdk';
 import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/binding';
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
+import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
@@ -123,6 +126,14 @@ import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from '.
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
+import {
+    createCompositeImageSource,
+    createToolMediaStore,
+    withToolMedia,
+    type ToolMediaContext,
+} from './toolMedia';
+import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
+import { isToolOutput } from '@/lib/services/tools/toolOutput';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
@@ -172,6 +183,9 @@ import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type FileOutputTools } from './agentFileOutputTools';
+import { buildReminderTools, reminderApprovalMode, reminderNoteText, remindersPrompt, type ReminderTools, type ReminderWake } from './agentReminderTools';
+import { resolveRemindersConfig } from './agentRemindersConfig';
+import { getConfig } from '@/lib/core/config';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
@@ -180,7 +194,6 @@ import {
     buildCostEstimator,
     buildTurnInputState,
     compactedToolResults,
-    compactionFromEvent,
     describeTurnOutcome,
     endedByCallerAbort,
     buildContinueInputState,
@@ -192,7 +205,9 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
-import { delegatedSubagentName, delegationFailure, isSubagentEvent, nameSubagentOnApprovalStep } from './subagentEvents';
+import { delegatedSubagentName, delegationFailure, isDelegationTool, isSubagentEvent, nameSubagentOnApprovalStep, resumedDelegationIds, subagentStampOf } from './subagentEvents';
+import { createTurnFlowTracker, subagentTargets, type TurnFlowTracker } from './turnFlowTracker';
+import { delegationCallIdOf, type AgentCompactionEvent, type AgentPlanEvent, type AgentSubagentEvent, type AgentToolCallSubagentStamp } from '@/lib/shared/agentTurnFlow';
 import { resolveAgentConfig } from './agentConfigResolution';
 import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
@@ -229,10 +244,11 @@ import {
 } from './agentReasoning';
 import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
-import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
+import { mergeContinuedSessionIdentity, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import {
     AgentResumeError,
     PAUSE_UNAVAILABLE_WARNING,
+    pauseUnavailableOutcome,
     actionRequiredEventData,
     assertNoBlockingPending,
     cancelPendingForNewMessage,
@@ -1169,6 +1185,10 @@ async function buildKnowledgeTools(
         logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: ragModuleKey, projectId });
         return { tools: [], toolDefinitions: [] };
     }
+    if (knowledgeModule.status !== 'active') {
+        logger.warn('Skipping knowledge engine that is switched off', { key: ragModuleKey, projectId });
+        return { tools: [], toolDefinitions: [] };
+    }
     // Every later read re-resolves the module by key; pinning the scope it was
     // found in keeps those reads on this same row ('' = tenant-wide only).
     const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
@@ -1363,6 +1383,10 @@ async function buildCombinedKnowledgeTools(
             logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: binding.key, projectId });
             continue;
         }
+        if (mod.status !== 'active') {
+            logger.warn('Skipping knowledge engine that is switched off', { key: binding.key, projectId });
+            continue;
+        }
         visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '' });
     }
     if (visible.length === 0) return { tools: [], toolDefinitions: [] };
@@ -1503,6 +1527,17 @@ type InternalTraceSession = Omit<TraceSessionFile, 'events'> & {
 };
 
 /**
+ * What the console knows of a run before its first trace event. The session
+ * document opened on that event carries it until the SDK's own session file
+ * (which says the same, and more) replaces it when the run ends.
+ */
+type InternalTraceSeed = {
+    threadId?: string;
+    agent?: { name?: string; version?: string; model?: string };
+    metadata?: Record<string, string>;
+};
+
+/**
  * A guardrail DENY on the plugin plane is not a thrown error — and the console
  * has to turn it back into one.
  *
@@ -1631,13 +1666,15 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
  */
 export const __testables = {
     textStreamOptions,
-    noteTurnCompaction,
+    createTurnFlowSink,
+    turnFlowRecord,
     guardrailDenial,
     guardrailBlockedError,
     buildAgentGuardrailPlugins,
     MessageRewriteLedger,
     persistedUserTurn,
     firstTurnTitle,
+    toToolCallEvent,
 };
 
 /**
@@ -1830,10 +1867,16 @@ type BuildSubagentsInput = {
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
     runtimeContext?: AgentRuntimeContext;
+    /** Who the run is for (Console identity); a referenced child acts under its own agent key. */
+    identity?: ConsoleIdentityCaller;
     /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
     images?: SessionImagesOptions;
+    /** The run's tool-image store: a child's tools show their images the same way (judged by the child's own model). */
+    toolMedia?: ToolMediaContext;
+    /** The parent's model takes images: what a child without a model of its own runs on. */
+    modelTakesImages?: boolean;
     /** Whose run this is, for the usage rows of a sub-agent's model calls. */
     caller?: AgentModelCaller;
     /**
@@ -1877,11 +1920,15 @@ type BuildSubagentsInput = {
  * edit in a leaf agent silently multiply every parent's tool surface. Nesting
  * beyond one level is expressed with the SDK's own `maxDepth`, not by inlining.
  */
-async function buildAgentSubagents(
+export async function buildAgentSubagents(
     input: BuildSubagentsInput,
 ): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
     const entries = input.subagents;
     if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
+    // A child is an agent run of the same tenant: refused with the agents service,
+    // and its own knowledge and tools lose what a switched-off service provided.
+    await assertAgentsEnabled({ tenantId: input.tenantId, tenantDbName: input.tenantDbName });
+    const disabledServices = await getDisabledServices(input.tenantId);
 
     const subagents: AgentSdkSubagentDef[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
@@ -1935,6 +1982,7 @@ async function buildAgentSubagents(
         }
 
         const childTools: AgentSdkToolInterface[] = [];
+        ({ knowledge: knowledgeSource, toolBindings } = filterChildSources(knowledgeSource, toolBindings, disabledServices));
         if (hasKnowledgeConfigured(knowledgeSource)) {
             const knowledge = await buildAgentKnowledgeTools(
                 input.tenantDbName,
@@ -1955,6 +2003,9 @@ async function buildAgentSubagents(
                 input.zod,
                 input.guard,
                 input.runtimeContext,
+                input.identity && entry.kind === 'ref' && entry.agentKey
+                    ? { ...input.identity, agentKey: entry.agentKey }
+                    : input.identity,
             );
             childTools.push(...bound.tools);
             cleanupTasks.push(...bound.cleanupTasks);
@@ -1968,10 +2019,13 @@ async function buildAgentSubagents(
         }
 
         let childModel: unknown;
+        let childTakesImages = input.modelTakesImages === true;
         if (modelKey) {
             const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
             if (built.ok) {
                 childModel = built.chatModel;
+                // Its model is only wrapped to resolve image references when the run has image options.
+                childTakesImages = built.takesImages && Boolean(input.images);
                 models.push(built.model);
             } else {
                 input.onWarning?.(`Sub-agent "${entry.name}" runs on this agent's model: ${built.message}.`);
@@ -1986,7 +2040,9 @@ async function buildAgentSubagents(
             ...(entry.title ? { title: entry.title } : {}),
             header: entry.header || entry.title || entry.name,
             systemPrompt,
-            ...(childTools.length > 0 ? { tools: childTools } : {}),
+            ...(childTools.length > 0
+                ? { tools: input.toolMedia ? childTools.map((tool) => withToolMedia(tool, { ...input.toolMedia!, modelTakesImages: childTakesImages })) : childTools }
+                : {}),
             ...(childModel ? { model: childModel } : {}),
             ...(entry.limits ? { limits: entry.limits } : {}),
             ...(entry.childContextPolicy ? { childContextPolicy: entry.childContextPolicy } : {}),
@@ -2065,7 +2121,7 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
-): Promise<{ ok: true; chatModel: unknown; model: PricedModel } | { ok: false; message: string }> {
+): Promise<{ ok: true; chatModel: unknown; model: PricedModel; takesImages: boolean } | { ok: false; message: string }> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') {
@@ -2092,6 +2148,7 @@ async function buildSubagentModel(
             ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
             model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+            takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
         };
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
@@ -2148,12 +2205,15 @@ export async function buildBoundTools(
     zod: typeof import('zod').z,
     guard: AgentToolGuard,
     runtimeContext?: AgentRuntimeContext,
+    /** Who the run is for, as MCP servers set up for Console identity are told (default: from `runtimeContext`). */
+    identity?: ConsoleIdentityCaller,
 ): Promise<{
     cleanupTasks: Array<() => Promise<void>>;
     tools: AgentSdkToolInterface[];
     definitions: TraceToolDefinition[];
 }> {
     if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [] };
+    const mcpIdentity = identity ?? consoleIdentityCallerOf(runtimeContext, { projectId });
 
     const tools: AgentSdkToolInterface[] = [];
     const definitions: TraceToolDefinition[] = [];
@@ -2235,6 +2295,8 @@ export async function buildBoundTools(
                                     typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
                                     isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
                                 );
+                                // A result with media stays an object: `withToolMedia` shows its images to the model.
+                                if (isToolOutput(result)) return result;
                                 return typeof result === 'string' ? result : JSON.stringify(result);
                             } catch (execError) {
                                 const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
@@ -2296,7 +2358,8 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders);
+                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    if (isToolOutput(result)) return result;
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
@@ -2486,6 +2549,37 @@ export async function reconcileTraceTotals(
 }
 
 /**
+ * Marks a trace session failed for a reason the SDK could not know: it closed
+ * the session as `paused`, but the console could not keep what the pause needs
+ * (the state was too large to store), so the run is over. Without this the
+ * session stays `paused` forever in the tracing views. Best-effort.
+ */
+export async function markTraceSessionFailed(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string | undefined,
+    detail: string,
+): Promise<void> {
+    if (!sessionId) return;
+    try {
+        const db = await getDatabase();
+        await db.switchToTenant(tenantDbName);
+        const session = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (!session) return;
+        await db.updateAgentTracingSession(sessionId, {
+            status: 'error',
+            statusExplicit: true,
+            errors: [
+                ...(session.errors ?? []),
+                { eventId: 'console', type: 'session', message: detail, timestamp: new Date().toISOString() },
+            ],
+        }, projectId);
+    } catch (error) {
+        logger.warn('Could not mark the trace session failed', { sessionId, error: String(error) });
+    }
+}
+
+/**
  * Creates a customSink that saves trace sessions directly to the database,
  * bypassing the HTTP tracing endpoint and its API-token authentication.
  * This is used for internal agent executions (dashboard playground & client API chat).
@@ -2509,13 +2603,231 @@ export async function createInternalTracingSink(
     onSessionSaved?: (sessionId: string) => void,
     /** SDK approval / question id → the sub-agent it came from, learned from the child's forwarded events. */
     approvalSubagents: ReadonlyMap<string, string> = new Map(),
+    /** What is known of the run before its first event; the session document opened on that event carries it. */
+    seed?: InternalTraceSeed,
 ) {
     const { customSink } = await import('@cognipeer/agent-sdk');
     const toolDefinitionsSection = toolDefinitions && toolDefinitions.length > 0
         ? buildToolDefinitionsSection(toolDefinitions)
         : undefined;
 
+    /**
+     * The stored form of one SDK trace event — one mapping for an event written
+     * as it happens and for one saved with the session, so a session is never
+     * shaped two ways.
+     */
+    const buildEventDoc = (sessionId: string, event: InternalTraceEvent): Omit<IAgentTracingEvent, '_id' | 'createdAt'> => {
+        let sections = (Array.isArray(event?.sections)
+            ? event.sections
+            : Array.isArray(event?.data?.sections)
+                ? event.data.sections
+                : []) as Array<Record<string, unknown>>;
+
+        // Attach the bound tool menu to each model-call event
+        // (skipped if the SDK ever emits its own section).
+        if (
+            toolDefinitionsSection
+            && event.type === 'ai_call'
+            && !sections.some((section) => section?.kind === TOOL_DEFINITIONS_SECTION_KIND)
+        ) {
+            sections = [...sections, toolDefinitionsSection];
+        }
+        // Same cap/shape treatment the HTTP ingest gives an SDK
+        // sender's own sections. The two paths write to the same
+        // collection and are read by the same UI, so a section
+        // shaped one way here and another way there is a bug
+        // waiting to be found by whoever reads a mixed session.
+        sections = normalizeSectionListResponseFormat(sections);
+
+        const usage = event?.usage || event?.metadata?.usage || {};
+            const inputTokens = toOptionalNumber(
+                event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens,
+            );
+            const outputTokens = toOptionalNumber(
+                event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens,
+            );
+            const cachedInputTokens = toOptionalNumber(
+                event?.cachedInputTokens ??
+                usage?.cachedInputTokens ??
+                usage?.cached_input_tokens ??
+                usage?.cacheReadInputTokens ??
+                usage?.cache_read_input_tokens,
+            );
+            const diagnostics = extractInternalTraceDiagnostics(event);
+            // Strip the keys `extractInternalTraceDiagnostics` already
+            // consumed so the same value never lands in both the
+            // column and the metadata blob.
+            const restMetadata = { ...(event.metadata ?? {}) } as Record<string, unknown>;
+            delete restMetadata.finishReason;
+            delete restMetadata.stop_reason;
+            delete restMetadata.reasoningTokens;
+
+        const named = nameSubagentOnApprovalStep(
+            { type: event.type, label: event.label, sequence: event.sequence, metadata: restMetadata, sections },
+            approvalSubagents,
+        );
+        const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
+            sessionId,
+            traceId: event.traceId ?? undefined,
+            spanId: event.spanId ?? undefined,
+            parentSpanId: event.parentSpanId ?? undefined,
+            tenantId,
+            projectId,
+            id: event.id ?? undefined,
+            type: event.type ?? undefined,
+            label: named.label ?? undefined,
+            sequence: event.sequence ?? 0,
+            timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
+            status: event.status ?? undefined,
+            actor: event.actor ?? {},
+            // `finishReason` / `reasoningTokens` are real columns now
+            // (see `extractInternalTraceDiagnostics`), mirroring the
+            // HTTP ingest's sibling `extractTraceDiagnostics`
+            // (client-tracing.ts). Without this an agent hosted BY
+            // the console would be the only source missing them,
+            // which is the worst place for a gap: it is the path we
+            // control end to end.
+            metadata: named.metadata,
+            sections,
+            modelNames: event.modelNames ?? [],
+            model: event.model ?? undefined,
+            error: event.error ?? undefined,
+            durationMs: event.durationMs ?? undefined,
+            actorName: event.actor?.name ?? undefined,
+            actorRole: event.actor?.role ?? event.actor?.scope ?? undefined,
+            toolName:
+                event.toolName ??
+                (event.actor?.scope === 'tool' ? event.actor?.name : undefined),
+            toolExecutionId: event.toolExecutionId ?? undefined,
+            inputTokens,
+            outputTokens,
+            cachedInputTokens,
+            totalTokens: event.totalTokens ?? undefined,
+            finishReason: diagnostics.finishReason,
+            reasoningTokens: diagnostics.reasoningTokens,
+            bytesIn: event.bytesIn ?? undefined,
+            bytesOut: event.bytesOut ?? undefined,
+            requestBytes: event.requestBytes ?? undefined,
+            responseBytes: event.responseBytes ?? undefined,
+        };
+
+        return eventDoc;
+    };
+
+    // ── Streaming ───────────────────────────────────────────────────────────
+    // The SDK records every event through `onEvent` as it happens (without awaiting it) and hands the
+    // whole session to `onSession` when the run ends. Writing each event as it arrives means a run that
+    // is cut off (a pod restart, an OOM kill, a timeout) leaves its trace up to that point — the stale
+    // session finalizer closes it as 'abandoned' — and the session is readable while the run is going.
+    // Writes are serialized per session, and `onSession` waits for them before it decides what is left
+    // to insert, so a streamed event is never stored twice and a streamed write that failed is made up
+    // for at the end. The document is built inside the chain, not when the SDK calls: the sub-agent an
+    // approval came from is learned from an SDK event that follows the trace record in the same tick.
+    type SessionStream = { chain: Promise<void>; opened: boolean; written: number; warned: boolean };
+    const streams = new Map<string, SessionStream>();
+
+    /** The session document a streamed run is read through until the SDK's own session file replaces it. */
+    const openStreamedSession = async (db: DatabaseProvider, sessionId: string, event: InternalTraceEvent): Promise<void> => {
+        const existing = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (existing) {
+            // A later part of a run that paused: it is running again.
+            if (existing.status === 'paused') {
+                await db.updateAgentTracingSession(sessionId, { status: 'in_progress', statusExplicit: false }, projectId);
+            }
+            return;
+        }
+        const metadata: Record<string, string> = { ...(seed?.metadata ?? {}), ...(agentKey ? { agentKey } : {}) };
+        const attribution = recordTracingSessionCreated({ tenantDbName, tenantId, projectId, agentName: seed?.agent?.name, metadata });
+        await db.createAgentTracingSession({
+            sessionId,
+            traceId: event.traceId ?? undefined,
+            ...(seed?.threadId ? { threadId: seed.threadId } : {}),
+            tenantId,
+            projectId,
+            source: metadata.source === 'trigger' && typeof metadata.triggerId === 'string' ? 'trigger' : 'custom',
+            agent: { ...(seed?.agent ?? {}) },
+            agentName: seed?.agent?.name,
+            agentVersion: seed?.agent?.version,
+            agentModel: seed?.agent?.model,
+            config: {},
+            metadata,
+            summary: {},
+            status: 'in_progress',
+            statusExplicit: false,
+            startedAt: event.timestamp ? new Date(event.timestamp) : new Date(),
+            errorEvents: 0,
+            toolErrors: 0,
+            aiErrors: 0,
+            errors: [],
+            modelsUsed: [],
+            toolsUsed: [],
+            eventCounts: {},
+            totalEvents: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
+            totalReasoningTokens: 0,
+            truncatedEvents: 0,
+            userId: attribution.userId,
+            apiTokenId: attribution.apiTokenId,
+            actorType: attribution.actorType,
+        });
+    };
+
+    const writeStreamed = async (sessionId: string, event: InternalTraceEvent, stream: SessionStream): Promise<void> => {
+        await runWithTenantScope(tenantDbName, async (db) => {
+            if (!stream.opened) {
+                await openStreamedSession(db, sessionId, event);
+                stream.opened = true;
+                onSessionSaved?.(sessionId);
+            }
+            const doc = buildEventDoc(sessionId, event);
+            await db.createAgentTracingEvent(doc);
+            stream.written += 1;
+            const errorCounts = countTraceErrors([doc]);
+            await db.applyAgentTracingSessionEvent(sessionId, {
+                aiErrors: errorCounts.aiErrors,
+                cachedInputTokens: doc.cachedInputTokens,
+                durationMs: doc.durationMs,
+                errorEvents: errorCounts.errorEvents,
+                eventType: doc.type,
+                finishReason: doc.finishReason,
+                inputTokens: doc.inputTokens,
+                modelsUsed: doc.model ? [doc.model] : [],
+                outputTokens: doc.outputTokens,
+                reasoningTokens: doc.reasoningTokens,
+                toolErrors: errorCounts.toolErrors,
+                toolsUsed: doc.toolName ? [doc.toolName] : [],
+            }, projectId);
+            // Hosted runs feed agent health only; the end-of-run booking knows these were counted here.
+            await recordTraceEventMetrics({ tenantDbName, tenantId, projectId, agentName: seed?.agent?.name, events: [doc], source: 'hosted' });
+        });
+    };
+
+    const onEvent = (event: InternalTraceEvent): void => {
+        const sessionId = typeof event?.sessionId === 'string' ? event.sessionId : '';
+        if (!sessionId) return;
+        let stream = streams.get(sessionId);
+        if (!stream) {
+            stream = { chain: Promise.resolve(), opened: false, written: 0, warned: false };
+            streams.set(sessionId, stream);
+        }
+        const current = stream;
+        current.chain = current.chain
+            .then(() => writeStreamed(sessionId, event, current))
+            .catch((error: unknown) => {
+                if (current.warned) return;
+                current.warned = true;
+                logger.warn('Streaming a trace event failed; the session is completed when the run ends', {
+                    sessionId,
+                    sequence: event?.sequence,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            });
+    };
+
     return customSink({
+        onEvent,
         onSession: async (session: InternalTraceSession) => {
             try {
                 const db = await getDatabase();
@@ -2527,44 +2839,46 @@ export async function createInternalTracingSink(
                 // session-level totals they carry already cover every part.
                 const continuation = readTraceContinuationMarker(session);
                 const existing = await db.findAgentTracingSessionById(session.sessionId, projectId);
-                const stored = continuation && existing
-                    ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sequence: 1 } })
+                const stream = streams.get(session.sessionId);
+                // Every streamed write lands before this save decides what is left to insert.
+                if (stream) await stream.chain;
+                const streamed = Boolean(stream && stream.written > 0);
+                // A later part of a paused run, and a session streamed while it ran, keep the events already
+                // stored and add the rest; any other save replaces what an earlier save of the session left.
+                const appending = Boolean(existing) && (Boolean(continuation) || streamed);
+                const stored = existing
+                    ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sections: 0, metadata: 0 } })
                     : [];
                 const storedSequences = new Set(stored.map((event) => event.sequence));
                 const allEvents = Array.isArray(session.events) ? session.events : [];
-                // A retried part must not insert its events twice.
-                const events = continuation && existing
+                // A retried part, or a streamed event, must not be inserted twice.
+                const events = appending
                     ? allEvents.filter((event) => !storedSequences.has(event?.sequence ?? 0))
                     : allEvents;
+                const eventDocs = events.map((event) => buildEventDoc(session.sessionId, event));
 
-                // Extract models and tools used, plus the diagnostic rollups
-                // (`totalReasoningTokens` / `truncatedEvents`) mirroring what
-                // `applyAgentTracingSessionEvent` would accumulate incrementally
-                // — this sink instead computes the whole session doc in one
-                // pass, so the sums are taken up front over `events`.
+                // Models and tools used, and the diagnostic rollups (`totalReasoningTokens` /
+                // `truncatedEvents`) that `applyAgentTracingSessionEvent` accumulates incrementally —
+                // taken here over the whole session: the stored events (earlier parts, streamed writes)
+                // and this save's own, read from the columns both carry.
+                const counted = appending ? [...stored, ...eventDocs] : eventDocs;
                 const modelsUsed = new Set<string>();
                 const toolsUsed = new Set<string>();
                 let totalReasoningTokens = 0;
                 let truncatedEvents = 0;
-                for (const event of events) {
-                    if (event?.model) modelsUsed.add(event.model);
-                    if (event?.toolName) toolsUsed.add(event.toolName);
-                    if (event?.actor?.scope === 'tool' && event?.actor?.name) {
-                        toolsUsed.add(event.actor.name);
-                    }
-                    const diagnostics = extractInternalTraceDiagnostics(event);
-                    if (diagnostics.reasoningTokens !== undefined) {
-                        totalReasoningTokens += diagnostics.reasoningTokens;
-                    }
-                    if (isTruncatedFinishReason(diagnostics.finishReason)) {
-                        truncatedEvents += 1;
-                    }
+                for (const doc of counted) {
+                    if (doc.model) modelsUsed.add(doc.model);
+                    if (doc.toolName) toolsUsed.add(doc.toolName);
+                    const actorName = doc.actor?.scope === 'tool' ? doc.actor?.name : undefined;
+                    if (typeof actorName === 'string' && actorName) toolsUsed.add(actorName);
+                    if (typeof doc.reasoningTokens === 'number') totalReasoningTokens += doc.reasoningTokens;
+                    if (isTruncatedFinishReason(doc.finishReason)) truncatedEvents += 1;
                 }
                 if (session?.agent?.model) modelsUsed.add(session.agent.model);
 
                 // Same health rule as the HTTP ingest: the SDK's own status stays authoritative; counters and a
                 // derived status fill in when it is absent. SDK sink failures are not run failures.
-                const errorCounts = countTraceErrors(events);
+                const errorCounts = countTraceErrors(counted);
                 const sessionErrors = session.errors ?? [];
                 const nonSinkErrors = sessionErrors.filter((error) => (error as Record<string, unknown> | null)?.type !== 'sink').length;
                 const sessionStatus = deriveSessionStatus({
@@ -2610,7 +2924,7 @@ export async function createInternalTracingSink(
                     modelsUsed: Array.from(modelsUsed),
                     toolsUsed: Array.from(toolsUsed),
                     eventCounts: session.summary?.eventCounts ?? {},
-                    totalEvents: events.length,
+                    totalEvents: counted.length,
                     totalInputTokens: session.summary?.totalInputTokens ?? 0,
                     totalOutputTokens: session.summary?.totalOutputTokens ?? 0,
                     totalCachedInputTokens: session.summary?.totalCachedInputTokens ?? 0,
@@ -2620,12 +2934,9 @@ export async function createInternalTracingSink(
                     totalBytesOut: session.summary?.totalBytesOut ?? undefined,
                 };
 
-                if (continuation && existing) {
-                    mergeContinuedSessionDoc(sessionDoc, existing, {
-                        storedEvents: stored.length,
-                        newEvents: events.length,
-                    });
-                }
+                // The counters above already cover the stored events; what carries over from an earlier
+                // part or from the streamed opening is the identity a later save may lack.
+                if (appending && existing) mergeContinuedSessionIdentity(sessionDoc, existing);
 
                 onSessionSaved?.(session.sessionId);
                 // Upsert session
@@ -2647,115 +2958,18 @@ export async function createInternalTracingSink(
                     });
                 }
 
-                // Replace events — or, for a continued session, add this part's.
-                // A replaced post's previous events are subtracted from the health
-                // counters; an appended part only adds its own events.
-                const appending = Boolean(continuation && existing);
-                const previousEvents = existing && !appending
-                    ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sections: 0, metadata: 0 } })
-                    : [];
+                // Replace the events — or, for a continued or streamed session, add what is not stored yet.
                 if (!appending) {
                     await db.deleteAgentTracingEvents(session.sessionId, projectId);
                 }
-                const eventDocs: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>> = [];
-                for (const event of events) {
-                    let sections = (Array.isArray(event?.sections)
-                        ? event.sections
-                        : Array.isArray(event?.data?.sections)
-                            ? event.data.sections
-                            : []) as Array<Record<string, unknown>>;
-
-                    // Attach the bound tool menu to each model-call event
-                    // (skipped if the SDK ever emits its own section).
-                    if (
-                        toolDefinitionsSection
-                        && event.type === 'ai_call'
-                        && !sections.some((section) => section?.kind === TOOL_DEFINITIONS_SECTION_KIND)
-                    ) {
-                        sections = [...sections, toolDefinitionsSection];
-                    }
-                    // Same cap/shape treatment the HTTP ingest gives an SDK
-                    // sender's own sections. The two paths write to the same
-                    // collection and are read by the same UI, so a section
-                    // shaped one way here and another way there is a bug
-                    // waiting to be found by whoever reads a mixed session.
-                    sections = normalizeSectionListResponseFormat(sections);
-
-                    const usage = event?.usage || event?.metadata?.usage || {};
-                        const inputTokens = toOptionalNumber(
-                            event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens,
-                        );
-                        const outputTokens = toOptionalNumber(
-                            event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens,
-                        );
-                        const cachedInputTokens = toOptionalNumber(
-                            event?.cachedInputTokens ??
-                            usage?.cachedInputTokens ??
-                            usage?.cached_input_tokens ??
-                            usage?.cacheReadInputTokens ??
-                            usage?.cache_read_input_tokens,
-                        );
-                        const diagnostics = extractInternalTraceDiagnostics(event);
-                        // Strip the keys `extractInternalTraceDiagnostics` already
-                        // consumed so the same value never lands in both the
-                        // column and the metadata blob.
-                        const restMetadata = { ...(event.metadata ?? {}) } as Record<string, unknown>;
-                        delete restMetadata.finishReason;
-                        delete restMetadata.stop_reason;
-                        delete restMetadata.reasoningTokens;
-
-                    const named = nameSubagentOnApprovalStep(
-                        { type: event.type, label: event.label, sequence: event.sequence, metadata: restMetadata, sections },
-                        approvalSubagents,
-                    );
-                    const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
-                        sessionId: session.sessionId,
-                        traceId: event.traceId ?? undefined,
-                        spanId: event.spanId ?? undefined,
-                        parentSpanId: event.parentSpanId ?? undefined,
-                        tenantId,
-                        projectId,
-                        id: event.id ?? undefined,
-                        type: event.type ?? undefined,
-                        label: named.label ?? undefined,
-                        sequence: event.sequence ?? 0,
-                        timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
-                        status: event.status ?? undefined,
-                        actor: event.actor ?? {},
-                        // `finishReason` / `reasoningTokens` are real columns now
-                        // (see `extractInternalTraceDiagnostics`), mirroring the
-                        // HTTP ingest's sibling `extractTraceDiagnostics`
-                        // (client-tracing.ts). Without this an agent hosted BY
-                        // the console would be the only source missing them,
-                        // which is the worst place for a gap: it is the path we
-                        // control end to end.
-                        metadata: named.metadata,
-                        sections,
-                        modelNames: event.modelNames ?? [],
-                        model: event.model ?? undefined,
-                        error: event.error ?? undefined,
-                        durationMs: event.durationMs ?? undefined,
-                        actorName: event.actor?.name ?? undefined,
-                        actorRole: event.actor?.role ?? event.actor?.scope ?? undefined,
-                        toolName:
-                            event.toolName ??
-                            (event.actor?.scope === 'tool' ? event.actor?.name : undefined),
-                        toolExecutionId: event.toolExecutionId ?? undefined,
-                        inputTokens,
-                        outputTokens,
-                        cachedInputTokens,
-                        totalTokens: event.totalTokens ?? undefined,
-                        finishReason: diagnostics.finishReason,
-                        reasoningTokens: diagnostics.reasoningTokens,
-                        bytesIn: event.bytesIn ?? undefined,
-                        bytesOut: event.bytesOut ?? undefined,
-                        requestBytes: event.requestBytes ?? undefined,
-                        responseBytes: event.responseBytes ?? undefined,
-                    };
-
+                for (const eventDoc of eventDocs) {
                     await db.createAgentTracingEvent(eventDoc);
-                    eventDocs.push(eventDoc);
                 }
+                // What the health counters already hold for this part: a replaced save's previous events
+                // (subtracted below), or the events this part streamed, booked as they were written.
+                const partStart = continuation?.firstSequence ?? 0;
+                const partStored = appending ? stored.filter((doc) => (doc.sequence ?? 0) >= partStart) : [];
+                const bookedWhileStreaming = streamed && Boolean(seed?.agent?.name);
 
                 // Hosted runs feed agent health only: their model and tool calls are counted where they execute.
                 await recordTraceEventMetrics({
@@ -2763,8 +2977,8 @@ export async function createInternalTracingSink(
                     tenantId,
                     projectId,
                     agentName: sessionDoc.agentName,
-                    events: eventDocs,
-                    previousEvents,
+                    events: appending ? [...partStored, ...eventDocs] : eventDocs,
+                    previousEvents: appending ? (bookedWhileStreaming ? partStored : []) : stored,
                     source: 'hosted',
                 });
                 if (isTerminalSessionStatus(sessionDoc.status)) {
@@ -2775,14 +2989,16 @@ export async function createInternalTracingSink(
                         session: sessionDoc,
                         previousOutcome: existing?.metricsOutcome,
                         source: 'hosted',
-                        events: eventDocs,
+                        events: counted,
                     });
                 }
 
                 logger.info('Internal tracing session saved', {
                     sessionId: session.sessionId,
                     agentName: session.agent?.name,
-                    eventsCount: events.length,
+                    eventsCount: counted.length,
+                    streamedEvents: stream?.written ?? 0,
+                    insertedEvents: eventDocs.length,
                 });
             } catch (err) {
                 logger.error('Failed to save internal tracing session', { error: err });
@@ -2998,6 +3214,10 @@ export async function publishAgent(
     );
     const nextVersion = latestKnownVersion + 1;
 
+    // An imported agent waits as a draft until someone reviews and publishes it, so
+    // publishing turns it on. An agent someone switched off stays inactive.
+    const status = agent.status === 'draft' ? 'active' : agent.status;
+
     const version = await db.createAgentVersion({
         tenantId: agent.tenantId,
         projectId: agent.projectId,
@@ -3008,7 +3228,7 @@ export async function publishAgent(
             name: agent.name,
             description: agent.description,
             config: agent.config,
-            status: agent.status,
+            status,
         },
         changelog,
         publishedBy: userId,
@@ -3018,6 +3238,7 @@ export async function publishAgent(
     await db.updateAgent(agentId, {
         publishedVersion: nextVersion,
         latestVersion: nextVersion,
+        ...(status !== agent.status ? { status } : {}),
         updatedBy: userId,
     });
 
@@ -3374,6 +3595,11 @@ export interface AgentChatRequest {
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
     /**
+     * The reminder this turn is the wake-up of (a run of `channel: 'reminder'`): the turn starts
+     * with a note framed as the agent's own (`reminderNoteText`), stored with `metadata.origin`.
+     */
+    reminder?: ReminderWake;
+    /**
      * No interactive user on this turn (a schedule, an eval or red-team case, an
      * OpenAI-shaped client). An approval-gated tool call or a
      * question then follows the agent's `humanInTheLoop.unattended` setting —
@@ -3497,6 +3723,38 @@ export interface AgentToolCallEvent {
     durationMs?: number;
     /** Filled on `error`. */
     error?: string;
+    /**
+     * Set when a delegated child made the call (a step of its own loop). Absent
+     * on the agent's own calls and on the delegation call that handed the task
+     * over: a child cannot delegate, so it never emits a delegation tool event.
+     * It also names the delegation call it belongs to and whether that ran in
+     * parallel, so a call can be shown under its sub-agent.
+     */
+    subagent?: AgentToolCallSubagentStamp;
+    /**
+     * Set only on the `start` of a delegation call the SDK re-enters after a
+     * child's pause was answered (same call id as in the paused turn).
+     */
+    resumed?: true;
+}
+
+/** The notification for an SDK tool_call event, or undefined for any other event. */
+function toToolCallEvent(event: AgentSdkEvent, resumedCalls?: ReadonlySet<string>): AgentToolCallEvent | undefined {
+    if (event.type !== 'tool_call' || !event.name) return undefined;
+    if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return undefined;
+    const subagent = subagentStampOf(event);
+    const resumed = event.phase === 'start' && !subagent && isDelegationTool(event.name)
+        && typeof event.id === 'string' && Boolean(resumedCalls?.has(event.id));
+    return {
+        phase: event.phase,
+        name: event.name,
+        id: event.id,
+        ...(event.args !== undefined ? { args: event.args } : {}),
+        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+        ...(event.error?.message ? { error: event.error.message } : {}),
+        ...(subagent ? { subagent } : {}),
+        ...(resumed ? { resumed: true as const } : {}),
+    };
 }
 
 /** Ephemeral (playground) chat — no DB conversation required */
@@ -3566,10 +3824,15 @@ export interface AgentPlaygroundChatRequest {
      */
     revealReasoning?: boolean;
     /**
-     * Fires when the agent summarizes its context mid-run. Same relay caveat
-     * as `onToolEvent`.
+     * Fires when the agent summarizes its context mid-run: when a pass starts
+     * (`phase: 'start'`, live only), when it ends, and for a sub-agent's own passes
+     * (`subagent` set). Same relay caveat as `onToolEvent`.
      */
-    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    /** Fires with each plan version the agent writes (manage_plan). Same relay caveat as `onToolEvent`. */
+    onPlan?: (plan: AgentPlanEvent) => void;
+    /** Fires as each sub-agent starts, answers, fails or pauses. Same relay caveat as `onToolEvent`. */
+    onSubagent?: (event: AgentSubagentEvent) => void;
     /**
      * Abort the turn (realtime barge-in). The run RESOLVES with the text
      * produced so far, `stopReason: 'cancelled'` and `stopDetail: 'aborted'`;
@@ -3655,6 +3918,8 @@ export interface AgentChatResponse {
     status: 'completed' | 'failed' | 'incomplete' | 'requires_action';
     /** OpenAI Responses convention: why the response is `incomplete`. */
     incomplete_details?: { reason: string } | null;
+    /** OpenAI Responses convention: present when `status` is `failed` — the run is over and cannot be continued. */
+    error?: { code: string; message: string } | null;
     /** How the agent run ended; `completed` for a normal final answer, `requires_action` while it waits on a person. */
     stop_reason?: AgentStopReason | 'requires_action' | 'budget_reached';
     /** Present when `status` is `requires_action`: the approvals / questions to resolve. */
@@ -3706,16 +3971,20 @@ function agentRelayOptions(request: {
     onTextChunk?: (text: string) => void;
     onReasoningChunk?: (text: string) => void;
     onToolEvent?: (event: AgentToolCallEvent) => void;
-    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    onPlan?: (plan: AgentPlanEvent) => void;
+    onSubagent?: (event: AgentSubagentEvent) => void;
     signal?: AbortSignal;
 }): RelayCallerOptions {
-    const { onTextChunk, onReasoningChunk, onToolEvent, onCompaction } = request;
+    const { onTextChunk, onReasoningChunk, onToolEvent, onCompaction, onPlan, onSubagent } = request;
     return {
         handlers: {
             text: onTextChunk ? (data) => { if (typeof data === 'string') onTextChunk(data); } : undefined,
             reasoning: onReasoningChunk ? (data) => { if (typeof data === 'string') onReasoningChunk(data); } : undefined,
             tool: onToolEvent ? (data) => onToolEvent(data as AgentToolCallEvent) : undefined,
-            compaction: onCompaction ? (data) => onCompaction(data as IAgentTurnCompaction) : undefined,
+            compaction: onCompaction ? (data) => onCompaction(data as AgentCompactionEvent) : undefined,
+            plan: onPlan ? (data) => onPlan(data as AgentPlanEvent) : undefined,
+            subagent: onSubagent ? (data) => onSubagent(data as AgentSubagentEvent) : undefined,
         },
         ...(request.signal ? { signal: request.signal } : {}),
     };
@@ -3730,7 +3999,7 @@ function agentRelayOptions(request: {
  */
 export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
     AgentPlaygroundChatRequest,
-    'onTextChunk' | 'onReasoningChunk' | 'onToolEvent' | 'onCompaction' | 'signal'
+    'onTextChunk' | 'onReasoningChunk' | 'onToolEvent' | 'onCompaction' | 'onPlan' | 'onSubagent' | 'signal'
 > {
     if (!relay) return {};
     return {
@@ -3738,8 +4007,10 @@ export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
         ...(relay.events.has('reasoning') ? { onReasoningChunk: (text: string) => relay.emit('reasoning', text) } : {}),
         ...(relay.events.has('tool') ? { onToolEvent: (event: AgentToolCallEvent) => relay.emit('tool', event) } : {}),
         ...(relay.events.has('compaction')
-            ? { onCompaction: (compaction: IAgentTurnCompaction) => relay.emit('compaction', compaction) }
+            ? { onCompaction: (compaction: AgentCompactionEvent) => relay.emit('compaction', compaction) }
             : {}),
+        ...(relay.events.has('plan') ? { onPlan: (plan: AgentPlanEvent) => relay.emit('plan', plan) } : {}),
+        ...(relay.events.has('subagent') ? { onSubagent: (event: AgentSubagentEvent) => relay.emit('subagent', event) } : {}),
         ...(relay.signal ? { signal: relay.signal } : {}),
     };
 }
@@ -3776,6 +4047,7 @@ export async function executeAgentChat(
     // queue consumer and background worker call the Local variant instead, so
     // a run is never counted twice.
     const caller = agentRunCallerOf(request);
+    await assertAgentsEnabled(request);
     await enforceAgentRunQuota(caller);
 
     // The callback and the signal cannot be serialized over the queue —
@@ -3855,6 +4127,8 @@ async function runExternalAgentTurn(input: {
     history: Array<{ role: string; content: string }>;
     userMessage: string;
     runtimeContext?: AgentRuntimeContext;
+    /** A trigger run's accountable person: a connection set up for Console identity gets a token for them. */
+    accountableUserId?: string;
     source: 'agent' | 'agent-playground';
     onTextChunk?: (text: string) => void;
     signal?: AbortSignal;
@@ -3871,7 +4145,16 @@ async function runExternalAgentTurn(input: {
     const reply = await invokeExternalAgent(
         connection,
         [...input.history, { role: 'user', content: userMessage }],
-        { tenantDbName, tenantId, projectId },
+        {
+            tenantDbName,
+            tenantId,
+            projectId,
+            identity: consoleIdentityCallerOf(input.runtimeContext, {
+                agentKey,
+                projectId,
+                accountableUserId: input.accountableUserId,
+            }),
+        },
         resolveRuntimeHeaders(input.runtimeContext, 'agent', agentKey, connection.runtimeHeaders),
         {
             ...(streamChunks ? { onTextChunk: streamChunks } : {}),
@@ -3961,11 +4244,34 @@ async function buildLocalAgentRun(input: {
     variablesInPrompt?: boolean;
     /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (`AgentChatRequest.literalVariables`). */
     literalVariables?: string[];
+    /**
+     * What the reminder tools need about this turn (agentReminderTools.ts): the run it is, whose it
+     * is, the version a reminder runs on, the reminder that woke it, and whether it starts having
+     * read outside content.
+     */
+    reminders?: {
+        runId?: string;
+        accountableUserId?: string;
+        version?: number;
+        usePublished?: boolean;
+        wake?: ReminderWake;
+        startsTainted?: boolean;
+    };
+    /** A trigger run's accountable person (its `userId` is synthetic): Console identity tokens are minted for them. */
+    accountableUserId?: string;
+    /** The person a continued pause is for (stored with the pause): replaces the runtime context's caller, who may be the approver. */
+    identity?: ConsoleIdentityPerson;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
+    // Who MCP servers and connected agents set up for Console identity are told this run is for.
+    const identity: ConsoleIdentityCaller = input.identity
+        ? { ...input.identity, agentKey, projectId }
+        : consoleIdentityCallerOf(runtimeContext, { agentKey, projectId, accountableUserId: input.accountableUserId });
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
     // published snapshot may still carry it).
-    const config = migrateAgentReasoning(input.config);
+    // Bindings of a switched-off service (knowledge engine, MCP, tools, browser, web search, memory,
+    // files, sandbox) are dropped here, so every builder below sees a config without them.
+    const config = await applyServiceAvailability(tenantId, migrateAgentReasoning(input.config), { agentKey });
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
 
@@ -4069,6 +4375,7 @@ async function buildLocalAgentRun(input: {
         z,
         toolGuard,
         runtimeContext,
+        identity,
     );
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
@@ -4117,43 +4424,36 @@ async function buildLocalAgentRun(input: {
         toolDefinitions.push(...memoryToolDefinitions(allowWrites, mountedStores.map((m) => m.mount.storeKey)));
     }
 
-    // Files attached to the session: the agent can list them and read them page
-    // by page — for what was too long to put in the turn, and for earlier
-    // uploads. Offered whenever the conversation holds a file and the agent takes uploads
-    // or writes files (then they are its own outputs). While it holds an
-    // image and the model takes images, the agent can also look at the image
-    // again (`session_files_view_image`).
+    // Files attached to the session: the agent can list them (`session_files_list`) and read
+    // them, images included, with `read` (built below next to the sandbox). Offered whenever the
+    // conversation holds a file and the agent takes uploads or writes files (then they are its
+    // own outputs).
     const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
     const filesCfg = resolveAttachmentsConfig(config.attachments);
     const sessionFilesScope = { tenantDbName, tenantId, projectId };
     const outputsOn = outputsAvailability(config);
-    let sessionImages: SessionImagesOptions | undefined;
+    // What this run's tools showed the model (screenshots, rendered pages): shared with its sub-agents.
+    const toolMedia: ToolMediaContext = {
+        store: createToolMediaStore(),
+        modelTakesImages,
+        maxImageBytes: Math.min(filesCfg.maxBytes, 5 * 1024 * 1024),
+    };
+    let sessionFacts: Awaited<ReturnType<typeof conversationFileFacts>> = { any: false, images: false };
     if (input.conversation) {
         const conversationId = String(input.conversation._id);
-        const facts = agentTakesAttachments(config) || outputsOn.available
+        sessionFacts = agentTakesAttachments(config) || outputsOn.available
             ? await conversationFileFacts(db, conversationId)
             : { any: false, images: false };
-        const viewImage = facts.images && modelTakesImages;
-        if (facts.any) {
+        if (sessionFacts.any) {
             tools.push(...buildSessionFileTools({
                 createToolFn: createTool,
                 zod: z,
                 guard: toolGuard,
                 scope: sessionFilesScope,
                 conversationId,
-                readPageChars: filesCfg.readPageChars,
-                viewImage,
             }));
-            toolDefinitions.push(...sessionFileToolDefinitions(filesCfg.readPageChars, { viewImage }));
+            toolDefinitions.push(...sessionFileToolDefinitions());
         }
-        // Images in this session's context are references; the bytes are read at the model call.
-        // Wrapped even for an agent that no longer takes files: its saved state can still hold references.
-        sessionImages = {
-            source: createSessionImageSource(sessionFilesScope, conversationId),
-            maxImages: filesCfg.maxImages,
-            maxBytes: filesCfg.maxBytes,
-            viewImageTool: viewImage,
-        };
     }
 
     // Files the agent writes itself (`session_files_create` / `_append`, no sandbox needed): offered to a run with a
@@ -4205,8 +4505,79 @@ async function buildLocalAgentRun(input: {
     tools.push(...sandboxTools.tools);
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
+    // `read`: one tool for the sandbox's files and the conversation's (images, PDFs, video included).
+    const readSession = input.conversation && sessionFacts.any
+        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars }
+        : undefined;
+    const readTool = buildReadTool({
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+        ...(readSession ? { session: readSession } : {}),
+        media: { store: toolMedia.store },
+        modelTakesImages,
+    });
+    if (readTool) {
+        tools.push(readTool);
+        toolDefinitions.push(readToolDefinition({
+            ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+            ...(readSession ? { session: readSession } : {}),
+            media: { store: toolMedia.store },
+        }));
+    }
+    // Images in this session's context are references (a session file, or a tool's image of this run); the
+    // bytes are read at the model call. Wrapped even for an agent that no longer takes files (its saved
+    // state can still hold references) and for a stateless run, which still shows what its tools return.
+    const sessionImages: SessionImagesOptions | undefined = input.conversation || modelTakesImages
+        ? {
+            source: createCompositeImageSource(
+                toolMedia.store,
+                input.conversation ? createSessionImageSource(sessionFilesScope, String(input.conversation._id)) : null,
+            ),
+            maxImages: filesCfg.maxImages,
+            maxBytes: filesCfg.maxBytes,
+            viewImageTool: Boolean(readTool),
+            toolMedia: toolMedia.store,
+        }
+        : undefined;
     if (sandboxTools.promptNote) {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${sandboxTools.promptNote}` : sandboxTools.promptNote;
+    }
+
+    // Reminders the agent sets itself (`reminder_set` / `_list` / `_cancel`): off unless the agent turns them on,
+    // and only for a run with a session to come back to. Built last of the agent's own tools so the watch over the
+    // others (outside content, see agentReminderTools.ts) covers all of them; before the client tools' name reservation.
+    let reminderTools: ReminderTools | undefined;
+    const remindersOn = resolveRemindersConfig(config.reminders, getConfig().agent.reminders);
+    // A wake turn runs as a person (the owner checks need one): never offered to a run without one.
+    if (input.conversation && remindersOn.available && input.userId) {
+        reminderTools = buildReminderTools({
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            scope: { tenantDbName, tenantId, projectId },
+            agentKey,
+            conversationId: String(input.conversation._id),
+            agentConfig: config,
+            settings: remindersOn,
+            creator: {
+                userId: input.userId,
+                ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
+                ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
+                ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
+                ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
+                ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
+                ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),
+            },
+            ...(input.reminders?.wake ? { wake: input.reminders.wake } : {}),
+            startsTainted: input.reminders?.startsTainted === true,
+            approvalMode: reminderApprovalMode(hitl, { unattended: input.unattended, canPause: input.canPause }),
+        });
+        tools.push(...reminderTools.tools);
+        toolDefinitions.push(...reminderTools.definitions);
+        const note = remindersPrompt(remindersOn, input.reminders?.wake);
+        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${note}` : note;
     }
 
     // Tools the CALLER runs. Two sources: the ones the agent declares itself
@@ -4284,10 +4655,9 @@ async function buildLocalAgentRun(input: {
     // own rules are the gateway's business, not this layer's.
     const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
     let traceSessionId: string | undefined;
+    // The run's usage rows name the trace session once it is open (its first streamed event).
+    const callerRun = getRoutingCaller()?.run;
     const approvalSubagents = new Map<string, string>();
-    const tracingSink = await createInternalTracingSink(
-        tenantDbName, tenantId, projectId, toolDefinitions, agentKey, (id) => { traceSessionId = id; }, approvalSubagents,
-    );
 
     const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
         db,
@@ -4299,8 +4669,11 @@ async function buildLocalAgentRun(input: {
         zod: z,
         guard: toolGuard,
         runtimeContext,
+        identity,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
+        toolMedia,
+        modelTakesImages,
         caller: {
             agentKey,
             ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
@@ -4324,6 +4697,20 @@ async function buildLocalAgentRun(input: {
     const tracingMetadata = input.modelChoice
         ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
         : buildTracingMetadata(runtimeContext);
+    // The sink opens the trace session on the run's first event, so it is told what the SDK's session
+    // file will say about the run: the session shows the agent, version and thread while the run is going.
+    const tracingSink = await createInternalTracingSink(
+        tenantDbName, tenantId, projectId, toolDefinitions, agentKey, (id) => { traceSessionId = id; if (callerRun) callerRun.traceSessionId = id; }, approvalSubagents,
+        {
+            ...(input.threadId ? { threadId: input.threadId } : {}),
+            agent: {
+                name: agent.name,
+                ...(input.version != null ? { version: String(input.version) } : {}),
+                ...(input.modelChoice ? { model: input.modelChoice.modelKey } : {}),
+            },
+            ...(tracingMetadata ? { metadata: tracingMetadata } : {}),
+        },
+    );
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
     const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message));
     if (sessionBudgetActive && !costEstimator) {
@@ -4339,17 +4726,27 @@ async function buildLocalAgentRun(input: {
     // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
     // gets an error result, the tool never runs) or runs them as they are
     // (`allow`, the owner's explicit choice).
-    const gatedTools = hitlMode === 'ask'
-        ? applyToolApprovals(tools, hitl, allowedTools)
+    // `read` is exempt from approval by name, so no other tool may carry it (an MCP/custom tool called
+    // `read` could be state-changing): the built-in wins and the other is left out.
+    const approvable = tools.filter((tool) => {
+        const clash = tool !== readTool && (tool as { name?: unknown }).name === READ_TOOL;
+        if (clash) warnings.add(`A tool named "${READ_TOOL}" was left out: the name is reserved for the built-in read tool.`);
+        return !clash;
+    });
+    const ownTools = reminderTools ? reminderTools.watchTools(approvable) : approvable;
+    const policyGated = hitlMode === 'ask'
+        ? applyToolApprovals(ownTools, hitl, allowedTools)
         : hitlMode === 'deny'
-            ? denyUnattendedTools(tools, hitl, allowedTools)
-            : tools;
+            ? denyUnattendedTools(ownTools, hitl, allowedTools)
+            : ownTools;
+    const gatedTools = reminderTools ? reminderTools.gate(policyGated) : policyGated;
+    if (reminderTools) clientTools = reminderTools.watchTools(clientTools);
 
     const sdkAgent = createSmartAgent({
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools, ...clientTools] } : {}),
+        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools.map((tool) => withToolMedia(tool, toolMedia)), ...clientTools] } : {}),
         // Nobody to ask in the other modes, so the question tool is not offered.
         ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
@@ -4380,6 +4777,8 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        /** Who the run's Console identity tokens are for; a pause stores it for its continuation. */
+        identity,
         // Files of both kinds ride on the answer: what the agent left in the sandbox's /outputs/ and what it wrote with the file tools.
         collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
@@ -4387,12 +4786,15 @@ async function buildLocalAgentRun(input: {
         /** After the turn: the trace session's totals take in the sub-agents' calls (see `reconcileTraceTotals`). */
         /** Feed every SDK event: a child's approval / question is remembered so its trace step can name the child. */
         noteSdkEvent: (event: AgentSdkEvent) => {
+            reminderTools?.noteSdkEvent(event);
             const e = event as { type?: string; id?: unknown; subagentName?: unknown };
             if ((e.type === 'tool_approval' || e.type === 'user_question') && typeof e.id === 'string' && typeof e.subagentName === 'string') {
                 approvalSubagents.set(e.id, e.subagentName);
             }
         },
         reconcileTrace: (usage: Parameters<typeof reconcileTraceTotals>[3]) => reconcileTraceTotals(tenantDbName, projectId, traceSessionId, usage),
+        /** The SDK closed the trace as `paused`, but the console cannot continue the run: the trace says it failed, and why. */
+        failTrace: (detail: string) => markTraceSessionFailed(tenantDbName, projectId, traceSessionId, detail),
     };
 }
 
@@ -4490,30 +4892,116 @@ function liveStreamOptions(
 }
 
 /**
- * Records a `summarization` event as a compaction of this turn: kept on the turn's
- * record, announced on the session log and handed to the caller when it listens.
- * A compaction a delegated child made of its OWN context is none of that: it did
- * not touch this turn's messages, and counting it would show the parent's
- * transcript as shortened (and name tool results as compacted) when it was not.
+ * A sub-agent event that names the delegation CALL it belongs to. The SDK keys each
+ * child of `spawn_subagents_parallel` `<call>#<index>` (its pause store is keyed by
+ * it), while the group a run is shown in, the call it is anchored on and the card
+ * that asks for its approval are all matched by the call itself: the suffix is cut
+ * here, once, before the tracker, the session log and the live callbacks see the event.
  */
-function noteTurnCompaction(
-    event: Parameters<typeof compactionFromEvent>[0],
-    turn: {
-        compactions: IAgentTurnCompaction[];
-        turnEvents: Pick<SessionTurnEvents, 'onCompaction'> | undefined;
-        onCompaction?: (compaction: IAgentTurnCompaction) => void;
-        agentKey: string;
-    },
-): void {
-    if (isSubagentEvent(event)) return;
-    const compaction = compactionFromEvent(event);
-    turn.compactions.push(compaction);
-    turn.turnEvents?.onCompaction(compaction);
-    try {
-        turn.onCompaction?.(compaction);
-    } catch (callbackError) {
-        logger.warn('onCompaction callback failed', { agentKey: turn.agentKey, error: callbackError });
-    }
+function onDelegationCall<T extends object>(event: T): T {
+    const parent = (event as { parentToolCallId?: unknown }).parentToolCallId;
+    if (typeof parent !== 'string') return event;
+    const call = delegationCallIdOf(parent);
+    return call === parent ? event : { ...event, parentToolCallId: call };
+}
+
+/**
+ * Feeds one invoke leg's SDK events to its flow tracker and passes on what the
+ * tracker makes of them: the session log rows, and the live callbacks of the
+ * caller (when it listens). The three invoke paths (background/API, playground,
+ * resume) call this for every event, so they record the turn the same way.
+ *
+ * What the tracker keeps apart is what keeps the turn honest: a delegated child's
+ * tool calls and summarization passes are told live and logged with the child's
+ * name, but never counted as the agent's own steps or compactions (a child
+ * compacting its own context did not shorten this turn's messages). A child whose
+ * run the tracker had no room for (past its cap) is not told or logged at all: a
+ * viewer would show a run that never ends.
+ */
+function createTurnFlowSink(options: {
+    tracker: TurnFlowTracker;
+    turnEvents: Pick<SessionTurnEvents, 'onSdkEvent' | 'onCompaction' | 'onPlan' | 'onSubagent'> | undefined;
+    agentKey: string;
+    /** The delegation calls this leg re-enters (marked on their `start`). */
+    resumedCalls?: ReadonlySet<string>;
+    onToolEvent?: (event: AgentToolCallEvent) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    onPlan?: (plan: AgentPlanEvent) => void;
+    onSubagent?: (event: AgentSubagentEvent) => void;
+}): (event: AgentSdkEvent) => void {
+    const { tracker, turnEvents, agentKey } = options;
+    /** A caller's callback must never break the run. */
+    const tell = <T>(name: string, callback: ((value: T) => void) | undefined, value: T) => {
+        if (!callback) return;
+        try {
+            callback(value);
+        } catch (callbackError) {
+            logger.warn(`${name} callback failed`, { agentKey, error: callbackError });
+        }
+    };
+    return (event) => {
+        switch (event.type) {
+            case 'tool_call': {
+                const { stamp, dropped } = tracker.noteToolCall(event);
+                if (dropped) return;
+                turnEvents?.onSdkEvent(event, stamp);
+                if (!options.onToolEvent) return;
+                const payload = toToolCallEvent(event, options.resumedCalls);
+                if (!payload) return;
+                tell('onToolEvent', options.onToolEvent, stamp ? { ...payload, subagent: stamp } : payload);
+                return;
+            }
+            case 'plan': {
+                const plan = tracker.notePlan(event);
+                if (!plan) return;
+                turnEvents?.onPlan(plan);
+                tell('onPlan', options.onPlan, plan);
+                return;
+            }
+            case 'subagent': {
+                const lifecycle = tracker.noteSubagent(onDelegationCall(event));
+                if (!lifecycle) return;
+                turnEvents?.onSubagent(lifecycle);
+                tell('onSubagent', options.onSubagent, lifecycle);
+                return;
+            }
+            case 'summarization': {
+                const note = tracker.noteCompaction(event);
+                if (!note) return;
+                if (note.persist) turnEvents?.onCompaction(note.event);
+                tell('onCompaction', options.onCompaction, note.event);
+                return;
+            }
+            default:
+                return;
+        }
+    };
+}
+
+/**
+ * What a leg's tracker recorded, as the fields of the assistant message (and of
+ * the playground result): only those that happened, so a turn without a plan or
+ * a sub-agent stores nothing extra. A turn that called its plan tool and wrote
+ * no version (a read) stores an empty `plans`: the field says the turn records its
+ * plan versions, so a reader leaves that call out as the live view does, where a
+ * turn without any plan call (or stored before plans were recorded) keeps every
+ * call it made. `compactedToolsOf` finds the whole leg's replaced
+ * tool results by diffing the transcript (see `compactedToolResults`); it is asked
+ * only when a pass happened, and the tracker hands each result to the pass that made it.
+ */
+function turnFlowRecord(
+    tracker: TurnFlowTracker,
+    compactedToolsOf: () => Array<{ toolName: string; toolCallId: string }>,
+): Pick<IAgentConversationMessage, 'plans' | 'subagentRuns' | 'subagentRunsDropped' | 'compactions' | 'compactedTools'> {
+    const { plans, planCalls, subagentRuns, subagentRunsDropped, compactions: passes } = tracker.snapshot();
+    const compactedTools = passes.length > 0 ? compactedToolsOf() : [];
+    const compactions = tracker.finalizeCompactedTools(compactedTools);
+    return {
+        ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools: [...compactedTools] } : {}) } : {}),
+        ...(plans.length > 0 || planCalls > 0 ? { plans } : {}),
+        ...(subagentRuns.length > 0 ? { subagentRuns } : {}),
+        ...(subagentRunsDropped > 0 ? { subagentRunsDropped } : {}),
+    };
 }
 
 /** The reasoning of a finished turn: what streamed (every model step), else the last message's. */
@@ -4685,7 +5173,9 @@ function sessionStopReason(
     settlement?: SessionBudgetSettlement,
 ): SessionStopReason {
     if (settlement?.reached) return 'budget_reached';
-    if (outcome === 'paused') return pause ? 'requires_action' : 'end_turn';
+    // A pause that could not be opened is reported as `error` by the outcome itself
+    // (`pauseUnavailableOutcome`); this fallback only guards a caller that did not.
+    if (outcome === 'paused') return pause ? 'requires_action' : 'error';
     return toSessionStopReason(outcome);
 }
 
@@ -4698,16 +5188,19 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
     return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
-/** What a continuation must apply again: the turn's own structured output and variables. */
+/** What a continuation must apply again: the turn's own structured output and variables, and who the turn is for. */
 function pausedTurnOptions(
     request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt' | 'literalVariables'>,
+    identity?: ConsoleIdentityCaller,
 ): PausedTurnOptions | undefined {
-    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false) return undefined;
+    const person = consoleIdentityPersonOf(identity);
+    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false && !person) return undefined;
     return {
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(request.variablesInPrompt === false && request.literalVariables?.length ? { literalVariables: request.literalVariables } : {}),
+        ...(person ? { identity: person } : {}),
     };
 }
 
@@ -4750,7 +5243,7 @@ function toAgentChatResponse(input: {
                 : []),
             { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content, ...(outputFiles.length > 0 ? { annotations: toFileAnnotations(outputFiles) } : {}) }] },
         ],
-        status: requiresAction ? 'requires_action' : stopped ? 'incomplete' : 'completed',
+        status: requiresAction ? 'requires_action' : stopped ? (stopped.stopReason === 'error' ? 'failed' : 'incomplete') : 'completed',
         ...(requiresAction
             ? {
                 stop_reason: 'requires_action' as const,
@@ -4758,7 +5251,10 @@ function toAgentChatResponse(input: {
             }
             : stopped
             ? {
-                incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) },
+                // OpenAI Responses convention: a `failed` response carries `error`, an `incomplete` one `incomplete_details`.
+                ...(stopped.stopReason === 'error'
+                    ? { error: { code: 'run_failed', message: stopped.stopDetail ?? 'The run failed.' } }
+                    : { incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) } }),
                 stop_reason: stopped.stopReason,
                 ...(stopped.stopDetail ? { stop_detail: stopped.stopDetail } : {}),
             }
@@ -4798,12 +5294,30 @@ export function routingCallerOf(request: AgentChatRequest): RoutingCallerContext
         ...(synthetic ? {} : { userId: request.userId }),
         ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
         ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+        // The run's attribution, stamped on every usage row; the turn and trace ids are noted once known.
+        run: { conversationId: request.conversationId, ...(request.runId ? { runId: request.runId } : {}) },
+    };
+}
+
+/** The resumed leg of a run: the same scope as the turn that paused (see `routingCallerOf`). */
+function resumeCallerOf(request: AgentResumeRequest): RoutingCallerContext {
+    const synthetic = !request.userId || request.userId.startsWith('system:') || request.userId === 'a2a-public';
+    const runtime = request.runtimeContext;
+    return {
+        channel: channelFromSource(runtime?.source) ?? (request.unattended ? 'api' : 'dashboard'),
+        agentKey: request.agentKey,
+        projectId: request.projectId,
+        ...(synthetic ? {} : { userId: request.userId }),
+        ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
+        run: { conversationId: request.conversationId, ...(request.runId ? { runId: request.runId } : {}) },
     };
 }
 
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // The last stop for a turn that arrives without the entry above (a queue worker, a background run).
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
@@ -4831,8 +5345,16 @@ async function runAgentChatTurn(
     // user turn like the words themselves: it is what the model reads, what the
     // transcript stores and what a resume replays.
     const userMessage = neutralizeAttachmentMarker(
-        composeUserMessageWithVariables(request.userMessage, request.variables, { externalContent: request.externalContent }),
+        composeUserMessageWithVariables(
+            request.reminder ? reminderNoteText(request.reminder) : request.userMessage,
+            request.variables,
+            { externalContent: request.externalContent },
+        ),
     );
+    // A reminder's wake turn: screens show the note itself, not the framing the model reads.
+    const reminderMeta = request.reminder
+        ? { origin: 'reminder' as const, reminder: { runId: request.reminder.runId, message: request.reminder.message, setAt: request.reminder.setAt } }
+        : undefined;
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -4882,6 +5404,8 @@ async function runAgentChatTurn(
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: conversation.metadata, background: Boolean(request.runId) })
         : undefined;
     if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
+    // Attachments are judged from this config below, before the agent is built.
+    config = await applyServiceAvailability(tenantId, config, { agentKey });
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -4923,11 +5447,13 @@ async function runAgentChatTurn(
         conversationId,
         ...(request.runId ? { runId: request.runId } : {}),
         userMessage: () => rewriteLedger.resolve(userMessage),
-        trigger: 'message',
+        trigger: request.reminder ? 'reminder' : 'message',
+        ...(reminderMeta ? { userMessageData: reminderMeta } : {}),
         ...(modelChoice ? { model: modelChoice } : {}),
         superseded: () => request.cancellationCell?.abandoned === true,
     });
     scope.events = turnEvents;
+    noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
     if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
         await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
@@ -4966,6 +5492,7 @@ async function runAgentChatTurn(
             history: (conversation.messages || []).map((m) => ({ role: m.role, content: m.content })),
             userMessage,
             runtimeContext: turnRuntimeContext,
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
             source: 'agent',
             onTextChunk,
             signal: request.signal,
@@ -5011,7 +5538,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5024,6 +5551,7 @@ async function runAgentChatTurn(
         source: 'agent',
         route: 'agent.chat',
         userId: request.userId,
+        ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
         version: resolvedVersion,
         conversation,
         memoryConversationId: conversationId,
@@ -5038,6 +5566,14 @@ async function runAgentChatTurn(
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
+        reminders: {
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            ...(request.version !== undefined ? { version: request.version } : {}),
+            ...(request.usePublished !== undefined ? { usePublished: request.usePublished } : {}),
+            ...(request.reminder ? { wake: request.reminder } : {}),
+            startsTainted: request.externalContent === true,
+        },
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -5065,19 +5601,16 @@ async function runAgentChatTurn(
 
     try {
         // 5. Invoke
-        const compactions: IAgentTurnCompaction[] = [];
+        const flow = createTurnFlowTracker({ targets: subagentTargets(activeSubagentEntries(config)) });
+        const flowSink = createTurnFlowSink({ tracker: flow, turnEvents, agentKey });
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
         const streamed = captureStreamedText(onTextChunk);
         const reasoningTap = createReasoningTap(onReasoningChunk, agentKey, agentShowsReasoning(config));
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
-                if (event.type === 'summarization') {
-                    noteTurnCompaction(event, { compactions, turnEvents, agentKey });
-                    return;
-                }
                 reasoningTap.onEvent(event);
                 noteSdkEvent(event);
-                turnEvents.onSdkEvent(event);
+                flowSink(event);
             },
             ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
@@ -5104,7 +5637,7 @@ async function runAgentChatTurn(
             const outcome = { stopReason: 'cancelled' as const, stopDetail: CALLER_ABORT_DETAIL };
             const partialMessages: IAgentConversation['messages'] = [
                 ...(conversation.messages || []),
-                { role: 'user', content: rewriteLedger.resolve(userMessage), timestamp: now },
+                { role: 'user', content: rewriteLedger.resolve(userMessage), ...(reminderMeta ? { metadata: reminderMeta } : {}), timestamp: now },
                 { role: 'assistant', content: streamed.text(), ...outcome, timestamp: new Date() },
             ];
             logger.info('Agent chat aborted by caller mid-call (not persisted)', { agentKey, conversationId });
@@ -5164,12 +5697,10 @@ async function runAgentChatTurn(
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, turnCostUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
-        const outcome = budgetAwareOutcome(turnOutcome, budget);
+        let outcome = budgetAwareOutcome(turnOutcome, budget);
         const outputParsed = result.output;
         const outputError = result.outputError ? describeStructuredOutputError(result.outputError) : undefined;
-        const compactedTools = compactions.length > 0
-            ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
-            : [];
+        const flowRecord = turnFlowRecord(flow, () => compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined));
         // The same per-call detail a dashboard session stores, so a conversation
         // started over the API shows its tool calls when it is opened there.
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
@@ -5199,10 +5730,15 @@ async function runAgentChatTurn(
                 hitl,
                 agentVersion: resolvedVersion,
                 usePublished: Boolean(request.usePublished || request.version !== undefined),
-                turn: pausedTurnOptions(request),
+                turn: pausedTurnOptions(request, identity),
                 createdBy: request.userId,
             });
-            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+            if (!pause) {
+                // The run cannot be continued: it failed, and says so — not a quiet end of turn.
+                warnings.add(PAUSE_UNAVAILABLE_WARNING);
+                outcome = pauseUnavailableOutcome(outcome);
+                await failTrace(PAUSE_UNAVAILABLE_WARNING);
+            }
         }
 
         // 6. Update conversation with new messages — the REWRITTEN user turn,
@@ -5213,6 +5749,7 @@ async function runAgentChatTurn(
                 role: 'user',
                 content: persistedUserMessage,
                 ...(attached.attachments.length > 0 ? { attachments: attached.attachments } : {}),
+                ...(reminderMeta ? { metadata: reminderMeta } : {}),
                 timestamp: now,
             },
             {
@@ -5224,7 +5761,7 @@ async function runAgentChatTurn(
                 ...(outcome.stopReason !== 'completed'
                     ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                     : {}),
-                ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+                ...flowRecord,
                 ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
                 ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
                 ...(usage ? { usage } : {}),
@@ -5309,6 +5846,7 @@ export async function executePlaygroundChat(
     // portals and realtime voice share; the caller is the one the server
     // stamped into the runtime context. See agentQuota.ts.
     const caller = agentRunCallerOf(request);
+    await assertAgentsEnabled(request);
     await enforceAgentRunQuota(caller);
 
     // Callbacks and the signal can't serialize over the queue — kept out of
@@ -5319,6 +5857,8 @@ export async function executePlaygroundChat(
     delete payload.onTextChunk;
     delete payload.onReasoningChunk;
     delete payload.onCompaction;
+    delete payload.onPlan;
+    delete payload.onSubagent;
     delete payload.signal;
     const usage = createRunUsageSink();
     let result: AgentPlaygroundChatResult;
@@ -5440,8 +5980,13 @@ export function extractPlaygroundSteps(
         const rawOutput = entry.rawOutput;
         const rawDiffers = rawOutput !== undefined && rawOutput !== output;
 
+        // A step is named by the call the model made (`tool_call_id`, the id on the live events), not by the
+        // SDK's random `executionId`: the plan versions, sub-agent runs and summarization passes of the turn
+        // anchor on the call id, and a step that carried another id would match none of them.
+        const callId = typeof entry.tool_call_id === 'string' && entry.tool_call_id ? entry.tool_call_id : undefined;
+
         return {
-            id: typeof entry.executionId === 'string' ? entry.executionId : undefined,
+            id: callId ?? (typeof entry.executionId === 'string' ? entry.executionId : undefined),
             name: typeof entry.toolName === 'string' ? entry.toolName : 'tool',
             args: entry.args,
             output,
@@ -5567,6 +6112,7 @@ function describeStructuredOutputError(error: unknown): string {
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         const runtime = request.runtimeContext;
@@ -5577,6 +6123,7 @@ export async function executePlaygroundChatLocal(
             ...(runtime?.userId ? { userId: runtime.userId } : {}),
             ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
             ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+            run: {},
         };
         return await runWithRoutingCaller(caller, () => runPlaygroundChatTurn(request, scope));
     } catch (error) {
@@ -5624,6 +6171,8 @@ async function runPlaygroundChatTurn(
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: sessionConversation?.metadata })
         : undefined;
     if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
+    // Attachments are judged from this config below, before the agent is built.
+    config = await applyServiceAvailability(tenantId, config, { agentKey });
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -5676,6 +6225,7 @@ async function runPlaygroundChatTurn(
         })
         : undefined;
     scope.events = turnEvents;
+    if (turnEvents && sessionConversation) noteRoutingRun({ conversationId: String(sessionConversation._id), turnId: turnEvents.turnId });
     if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
         && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
@@ -5747,7 +6297,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5777,6 +6327,8 @@ async function runPlaygroundChatTurn(
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
         ...(request.revealReasoning ? { revealReasoning: true } : {}),
         ...(request.onReasoningChunk ? { onReasoningChunk: request.onReasoningChunk } : {}),
+        // A reminder set here wakes the session on the config this turn ran: the draft, or the version picked.
+        reminders: ranVersion !== null ? { version: ranVersion, usePublished: true } : { usePublished: false },
     });
 
     const attached = await assembleMessageAttachments({
@@ -5797,8 +6349,11 @@ async function runPlaygroundChatTurn(
     );
 
     // Surface progress to the caller (best-effort; never fails the run).
-    const { onToolEvent, onCompaction, signal } = request;
-    const compactions: IAgentTurnCompaction[] = [];
+    const { onToolEvent, onCompaction, onPlan, onSubagent, signal } = request;
+    // The plan, the sub-agents and the summarization passes of the turn are recorded either way;
+    // forwarded live so a session shows each as it happens.
+    const flow = createTurnFlowTracker({ targets: subagentTargets(activeSubagentEntries(config)) });
+    const flowSink = createTurnFlowSink({ tracker: flow, turnEvents, agentKey, onToolEvent, onCompaction, onPlan, onSubagent });
     const streamed = captureStreamedText(onTextChunk);
     // The operator's playground always sees the thinking the model produced.
     const reasoningTap = createReasoningTap(onReasoningChunk, agentKey);
@@ -5806,27 +6361,7 @@ async function runPlaygroundChatTurn(
         onEvent: (event: AgentSdkEvent) => {
             reasoningTap.onEvent(event);
             noteSdkEvent(event);
-            turnEvents?.onSdkEvent(event);
-            if (event.type === 'summarization') {
-                // Collected for the turn record either way; forwarded live
-                // so a session shows the compaction as it happens.
-                noteTurnCompaction(event, { compactions, turnEvents, onCompaction, agentKey });
-                return;
-            }
-            if (!onToolEvent || event.type !== 'tool_call' || !event.name) return;
-            if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
-            try {
-                onToolEvent({
-                    phase: event.phase,
-                    name: event.name,
-                    id: event.id,
-                    ...(event.args !== undefined ? { args: event.args } : {}),
-                    ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                    ...(event.error?.message ? { error: event.error.message } : {}),
-                });
-            } catch (callbackError) {
-                logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-            }
+            flowSink(event);
         },
         ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
         // The SDK checks it between steps and hands it to the model call.
@@ -5851,7 +6386,7 @@ async function runPlaygroundChatTurn(
                 version: ranVersion,
                 stopReason: 'cancelled',
                 stopDetail: CALLER_ABORT_DETAIL,
-                ...(compactions.length > 0 ? { compactions } : {}),
+                ...turnFlowRecord(flow, () => []),
                 ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
             };
             logger.info('Playground chat aborted by caller mid-call', { agentKey });
@@ -5885,9 +6420,7 @@ async function runPlaygroundChatTurn(
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), signal);
-        const compactedTools = compactions.length > 0
-            ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
-            : [];
+        const flowRecord = turnFlowRecord(flow, () => compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined));
 
         // Priced below; the session budget (if any) is settled once the cost is known.
         let outcome: AgentTurnOutcome = turnOutcome;
@@ -5918,8 +6451,7 @@ async function runPlaygroundChatTurn(
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
-            ...(compactions.length > 0 ? { compactions } : {}),
-            ...(compactedTools.length > 0 ? { compactedTools } : {}),
+            ...flowRecord,
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
             ...(request.previousVersions?.length ? { previousVersions: request.previousVersions.slice(-MAX_PREVIOUS_VERSIONS) } : {}),
         };
@@ -5944,6 +6476,7 @@ async function runPlaygroundChatTurn(
             // The run stopped for a person: keep what it needs to continue.
             let pause: OpenedPause | null = null;
             if (outcome.stopReason === 'paused') {
+                const pausedFor = consoleIdentityPersonOf(identity);
                 pause = await openPause(db, {
                     state: result.state,
                     source: 'agent-playground',
@@ -5954,10 +6487,19 @@ async function runPlaygroundChatTurn(
                     hitl,
                     agentVersion: ranVersion,
                     usePublished: ranVersion !== null,
+                    ...(pausedFor ? { turn: { identity: pausedFor } } : {}),
                     createdBy: runtimeContext?.userId ?? String(sessionConversation.createdBy),
                 });
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
-                else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
+                else {
+                    // The run cannot be continued: it failed, and says so — not a quiet end of turn.
+                    playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
+                    const failed = pauseUnavailableOutcome(outcome);
+                    outcome = failed;
+                    playgroundResult.stopReason = failed.stopReason;
+                    playgroundResult.stopDetail = failed.stopDetail;
+                    await failTrace(PAUSE_UNAVAILABLE_WARNING);
+                }
             }
             // The operator's playground view always gets the thinking text; what is STORED on the
             // session (and read back through the session API) follows the agent's setting.
@@ -6048,6 +6590,10 @@ async function persistSessionTurn(
                 ...(result.stopDetail ? { stopDetail: result.stopDetail } : {}),
                 ...(result.compactions?.length ? { compactions: result.compactions } : {}),
                 ...(result.compactedTools?.length ? { compactedTools: result.compactedTools } : {}),
+                // An empty list is kept: it says the turn recorded its plan versions (and wrote none).
+                ...(Array.isArray(result.plans) ? { plans: result.plans } : {}),
+                ...(result.subagentRuns?.length ? { subagentRuns: result.subagentRuns } : {}),
+                ...(result.subagentRunsDropped ? { subagentRunsDropped: result.subagentRunsDropped } : {}),
                 ...(result.warnings?.length ? { warnings: result.warnings } : {}),
                 ...(result.pendingActions?.length ? { pendingActions: result.pendingActions } : {}),
                 ...(result.previousVersions?.length ? { previousVersions: result.previousVersions } : {}),
@@ -6102,7 +6648,9 @@ export interface AgentResumeRequest {
     onToolEvent?: (event: AgentToolCallEvent) => void;
     onTextChunk?: (text: string) => void;
     onReasoningChunk?: (text: string) => void;
-    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    onPlan?: (plan: AgentPlanEvent) => void;
+    onSubagent?: (event: AgentSubagentEvent) => void;
     /** Called right before the SDK loop is invoked — after this the answers are spent. */
     onInvokeStart?: () => void;
     /** The host page this continuation answers for, when the chat is embedded — see `AgentPlaygroundChatRequest.embedded`. */
@@ -6297,9 +6845,10 @@ export function executeAgentContinueLocal(
  * is no new user message.
  */
 export async function executeAgentResumeLocal(request: AgentResumeRequest): Promise<AgentResumeResult> {
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runAgentResumeTurn(request, scope);
+        return await runWithRoutingCaller(resumeCallerOf(request), () => runAgentResumeTurn(request, scope));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -6400,8 +6949,17 @@ async function runAgentResumeTurn(
 
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+    // A continued pause calls MCP servers and connected agents for the person whose turn it is, never for whoever answered it.
+    const pausedFor = paused
+        ? consoleIdentityOfPausedTurn({
+            stored: paused.turn?.identity,
+            ...(anchorAction?.createdBy ? { startedBy: anchorAction.createdBy } : {}),
+            ...(runtimeContext?.source ? { source: runtimeContext.source } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+        })
+        : undefined;
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6417,6 +6975,8 @@ async function runAgentResumeTurn(
         source,
         route: source === 'agent' ? 'agent.chat' : 'agent.playground',
         userId: request.userId,
+        ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+        ...(pausedFor ? { identity: pausedFor } : {}),
         version,
         conversation,
         memoryConversationId: conversationId,
@@ -6426,6 +6986,13 @@ async function runAgentResumeTurn(
         ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
         ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
+        // A continued turn already holds tool results and answers from outside.
+        reminders: {
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            ...(version != null ? { version, usePublished: true } : { usePublished: false }),
+            startsTainted: true,
+        },
     });
 
     try {
@@ -6441,6 +7008,7 @@ async function runAgentResumeTurn(
             superseded: () => request.cancellationCell?.abandoned === true,
         });
         scope.events = turnEvents;
+        noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
         const onTextChunk = request.onTextChunk
             ? (text: string) => {
                 turnEvents.onText(text);
@@ -6508,8 +7076,20 @@ async function runAgentResumeTurn(
             throw new AgentResumeError(error instanceof Error ? error.message : 'The answers could not be applied.', 400);
         }
 
+        // Read now: the SDK deletes each entry as its delegation completes.
+        const reEntered = resumedDelegationIds(state);
         const inputMessageCount = (state.messages ?? []).length;
-        const compactions: IAgentTurnCompaction[] = [];
+        const flow = createTurnFlowTracker({ resumedDelegationIds: reEntered, targets: subagentTargets(activeSubagentEntries(config)) });
+        const flowSink = createTurnFlowSink({
+            tracker: flow,
+            turnEvents,
+            agentKey,
+            resumedCalls: reEntered,
+            onToolEvent: request.onToolEvent,
+            onCompaction: request.onCompaction,
+            onPlan: request.onPlan,
+            onSubagent: request.onSubagent,
+        });
         const streamed = captureStreamedText(onTextChunk);
         const reasoningTap = createReasoningTap(onReasoningChunk, agentKey, agentShowsReasoning(config) || source === 'agent-playground');
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
@@ -6517,25 +7097,7 @@ async function runAgentResumeTurn(
             onEvent: (event: AgentSdkEvent) => {
                 reasoningTap.onEvent(event);
                 noteSdkEvent(event);
-                turnEvents.onSdkEvent(event);
-                if (event.type === 'summarization') {
-                    noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
-                    return;
-                }
-                if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;
-                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
-                try {
-                    request.onToolEvent({
-                        phase: event.phase,
-                        name: event.name,
-                        id: event.id,
-                        ...(event.args !== undefined ? { args: event.args } : {}),
-                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                        ...(event.error?.message ? { error: event.error.message } : {}),
-                    });
-                } catch (callbackError) {
-                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-                }
+                flowSink(event);
             },
             ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
@@ -6561,6 +7123,7 @@ async function runAgentResumeTurn(
                 version,
                 stopReason: 'cancelled',
                 stopDetail: CALLER_ABORT_DETAIL,
+                ...turnFlowRecord(flow, () => []),
             };
             await turnEvents.finish({ stopReason: 'cancelled', content: aborted.content, detail: CALLER_ABORT_DETAIL });
             return {
@@ -6587,9 +7150,7 @@ async function runAgentResumeTurn(
         const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
-        const compactedTools = compactions.length > 0
-            ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
-            : [];
+        const flowRecord = turnFlowRecord(flow, () => compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined));
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
@@ -6602,12 +7163,14 @@ async function runAgentResumeTurn(
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
-        const outcome = budgetAwareOutcome(turnOutcome, budget);
+        let outcome = budgetAwareOutcome(turnOutcome, budget);
 
         const superseded = isCancellationCellTripped(request.cancellationCell);
         let pause: OpenedPause | null = null;
         if (outcome.stopReason === 'paused' && !superseded) {
             const firstAction = anchorAction;
+            const repausedFor = consoleIdentityPersonOf(identity);
+            const repauseTurn: PausedTurnOptions = { ...turnOptions, ...(repausedFor ? { identity: repausedFor } : {}) };
             pause = await openPause(db, {
                 state: result.state,
                 source,
@@ -6619,10 +7182,15 @@ async function runAgentResumeTurn(
                 hitl,
                 agentVersion: version,
                 usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
-                ...(Object.keys(turnOptions).length > 0 ? { turn: turnOptions } : {}),
+                ...(Object.keys(repauseTurn).length > 0 ? { turn: repauseTurn } : {}),
                 createdBy: firstAction?.createdBy ?? request.userId,
             });
-            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+            if (!pause) {
+                // The run cannot be continued: it failed, and says so — not a quiet end of turn.
+                warnings.add(PAUSE_UNAVAILABLE_WARNING);
+                outcome = pauseUnavailableOutcome(outcome);
+                await failTrace(PAUSE_UNAVAILABLE_WARNING);
+            }
         }
 
         // Files the agent left in /outputs/ while the run continued (never fails the turn).
@@ -6640,7 +7208,7 @@ async function runAgentResumeTurn(
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
-            ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+            ...flowRecord,
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
             ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
             ...(usage ? { usage } : {}),

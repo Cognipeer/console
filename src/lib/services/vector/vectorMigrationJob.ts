@@ -16,6 +16,7 @@
  *     across nodes (the in-memory set only makes it instant on this node).
  */
 
+import { assertServiceEnabled, isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IVectorIndexRecord } from '@/lib/database';
 import type { IVectorMigration } from '@/lib/database/provider/types.base';
@@ -314,6 +315,8 @@ export async function runVectorMigrationJob(
       });
 
       try {
+        // Failed once, in the record, rather than retried by the queue.
+        await assertServiceEnabled({ tenantDbName, tenantId: payload.tenantId }, 'vector');
         await copyVectors(db, payload, migration);
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -342,6 +345,8 @@ export async function resumeInterruptedVectorMigrations(): Promise<number> {
 
   for (const tenant of tenants) {
     if (!tenant.dbName) continue;
+    // Left for the next boot once the service is back on; nothing is consumed here.
+    if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'vector'))) continue;
     try {
       const pending = await runWithTenantScope(tenant.dbName, (db) =>
         db.listVectorMigrations({ statuses: ['queued', 'running'] }),

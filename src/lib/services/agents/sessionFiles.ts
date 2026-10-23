@@ -14,8 +14,8 @@
  *  - The markdown of the files attached to THIS message is put in the user turn
  *    as `<document name="…" id="…">…</document>` blocks when it fits
  *    `inlineMaxTokens` (estimated chars / 4). Otherwise the turn carries a short
- *    note listing the files and the agent reads them in pages with
- *    `session_files_list` / `session_files_read`.
+ *    note listing the files and the agent reads them with
+ *    `session_files_list` / `read` (`readTool.ts`).
  *  - The block opens with a line naming EVERY attachment by kind (documents to
  *    read, images shown), whatever mix the message carries.
  *  - Images become image parts when the model accepts images, else a text note.
@@ -28,10 +28,9 @@
  *  - Files uploaded to the session that no message has carried yet ride along
  *    with the next message (`findUnsentSessionFiles`, `attachNewUploads`).
  *
- * The tools are present whenever the conversation has files — a later turn can
- * read an earlier upload — and all are read-only (`HITL_READ_ONLY_TOOLS`):
- * `session_files_list`, `session_files_read` and, while the session holds an
- * image and the model takes images, `session_files_view_image`.
+ * `session_files_list` is present whenever the conversation has files — a later
+ * turn can read an earlier upload — and is read-only (`HITL_READ_ONLY_TOOLS`).
+ * Reading them, images included, is the `read` tool (`readTool.ts`).
  *
  * Every limit is a stored setting of the agent (`IAgentConfig.attachments`);
  * `SESSION_FILES_DEFAULTS` is only what an unset field falls back to.
@@ -64,7 +63,7 @@ import {
     FILE_OUTPUT_TYPES,
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_LIST_TOOL,
-    SESSION_FILES_READ_TOOL,
+    READ_TOOL,
     SESSION_FILES_VIEW_IMAGE_TOOL,
     agentTakesAttachments,
     attachmentsAvailability,
@@ -92,7 +91,6 @@ import {
     imageReferencePart,
     stripAttachmentBlock,
     unsupportedImageNote,
-    viewImageToolResult,
     wrapAttachmentBlock,
     type ContentPart,
     type ImageReferencePart,
@@ -104,7 +102,7 @@ export { ATTACHMENT_BLOCK_MARKER, stripAttachmentBlock };
 export {
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_LIST_TOOL,
-    SESSION_FILES_READ_TOOL,
+    READ_TOOL,
     SESSION_FILES_VIEW_IMAGE_TOOL,
     agentTakesAttachments,
     attachmentsAvailability,
@@ -836,7 +834,7 @@ export async function readSessionFileContent(
 // ── Reading ─────────────────────────────────────────────────────────────────
 
 /** The file as text: its markdown when converted, else the bytes of a plain-text file, else null. */
-async function readFileText(scope: SessionFileScope, record: IFileRecord): Promise<string | null> {
+export async function readFileText(scope: SessionFileScope, record: IFileRecord): Promise<string | null> {
     if (isImageMime(record.contentType)) return null;
     if (record.markdownStatus === 'succeeded' && record.markdownKey) {
         const markdown = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, { variant: 'markdown' });
@@ -1004,8 +1002,8 @@ export async function assembleTurnAttachments(input: {
         lines.push(
             `The person attached ${readable.length} file${readable.length === 1 ? '' : 's'} that ${readable.length === 1 ? 'is' : 'are'} too long to include here`
             + ` (about ${totalTokens} tokens; the limit for inlining is ${cfg.inlineMaxTokens}). Read ${readable.length === 1 ? 'it' : 'them'} with`
-            + ` ${SESSION_FILES_LIST_TOOL} and ${SESSION_FILES_READ_TOOL}({ fileId, page }):`,
-            ...readable.map((doc) => `- "${escapeAttribute(doc.record.name)}" (id ${doc.id}, ${pageCount(doc.text.length, cfg.readPageChars)} page${pageCount(doc.text.length, cfg.readPageChars) === 1 ? '' : 's'})`),
+            + ` ${SESSION_FILES_LIST_TOOL} and ${READ_TOOL}({ fileId, offset, limit }):`,
+            ...readable.map((doc) => `- "${escapeAttribute(doc.record.name)}" (id ${doc.id}, ${doc.text.length.toLocaleString('en-US')} characters)`),
         );
     }
     for (const doc of unreadable) {
@@ -1052,23 +1050,19 @@ export interface SessionFileToolDeps {
     };
     scope: SessionFileScope;
     conversationId: string;
-    readPageChars: number;
-    /** Offer `session_files_view_image`: the session holds an image and the model takes images. */
-    viewImage?: boolean;
 }
 
 /**
- * `session_files_list` and `session_files_read` — the only way the agent reads
- * a file too long to be in the turn, and a way back to an earlier upload — and,
- * when images can be looked at, `session_files_view_image`. Read-only, and
+ * `session_files_list` — the way back to an earlier upload. Reading a file is the
+ * `read` tool (`readTool.ts`), which takes the id this lists. Read-only, and
  * scoped to this conversation's files.
  */
 export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolInterface[] {
-    const { createToolFn, zod, guard, scope, conversationId, readPageChars } = deps;
+    const { createToolFn, zod, guard, scope, conversationId } = deps;
 
     const list = createToolFn({
         name: SESSION_FILES_LIST_TOOL,
-        description: 'List the files attached to this conversation, with their ids. Use it to find a file before reading it.',
+        description: 'List the files attached to this conversation, with their ids. Use it to find a file before reading it with read.',
         schema: zod.object({}),
         func: guard.protect(
             { name: 'agent.session_files.list', requestedName: SESSION_FILES_LIST_TOOL },
@@ -1087,109 +1081,15 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
         ),
     }) as AgentSdkToolInterface;
 
-    const read = createToolFn({
-        name: SESSION_FILES_READ_TOOL,
-        description: [
-            'Read one page of a file attached to this conversation, as text.',
-            `A page is up to ${readPageChars} characters. The result is { text, page, pages }; ask for the next page until you have what you need.`,
-        ].join(' '),
-        schema: zod.object({
-            fileId: zod.string().describe('The file id, from session_files_list or the attachment note.'),
-            page: zod.number().int().min(1).optional().describe('Page number, starting at 1 (default 1).'),
-        }),
-        func: guard.protect(
-            { name: 'agent.session_files.read', requestedName: SESSION_FILES_READ_TOOL },
-            async (args: { fileId?: string; page?: number }) => {
-                const fileId = typeof args.fileId === 'string' ? args.fileId : '';
-                const record = fileId ? await findSessionFileRecord(scope, conversationId, fileId) : null;
-                if (!record) return `File "${fileId}" is not attached to this conversation. Use ${SESSION_FILES_LIST_TOOL} to see the files.`;
-                let text: string | null;
-                try {
-                    text = await readFileText(scope, record);
-                } catch (error) {
-                    logger.warn('session_files_read failed', { fileId, error: error instanceof Error ? error.message : String(error) });
-                    return 'The file could not be read right now.';
-                }
-                if (text === null) {
-                    if (isSendableImageMime(record.contentType)) {
-                        return deps.viewImage
-                            ? `This file is an image; it has no text to read. Use ${SESSION_FILES_VIEW_IMAGE_TOOL} to look at it.`
-                            : 'This file is an image; it has no text to read.';
-                    }
-                    if (isImageMime(record.contentType)) {
-                        return 'This file is an image in a format the model cannot be shown; it has no text to read.';
-                    }
-                    return 'This file has no readable text (it could not be converted).';
-                }
-                const page = pageText(text, args.page ?? 1, readPageChars);
-                if (!page) return JSON.stringify({ error: `Page ${args.page} is out of range.`, pages: pageCount(text.length, readPageChars) });
-                return JSON.stringify(page);
-            },
-        ),
-    }) as AgentSdkToolInterface;
-
-    const tools = [list, read];
-    if (deps.viewImage) {
-        // The result only names the image; the model wrapper (`sessionImages.ts`) puts the
-        // picture itself in front of the model in a message that follows it — a tool result
-        // can only be text on the providers' wire.
-        tools.push(createToolFn({
-            name: SESSION_FILES_VIEW_IMAGE_TOOL,
-            description: [
-                'Look at an image attached to this conversation again. The image is shown to you in the message that follows the result.',
-                'Use it when an earlier image is no longer visible to you, or to check a detail you are unsure of.',
-            ].join(' '),
-            schema: zod.object({
-                fileId: zod.string().describe('The image file id, from session_files_list or the [Attached image: …] handle.'),
-            }),
-            func: guard.protect(
-                { name: 'agent.session_files.view_image', requestedName: SESSION_FILES_VIEW_IMAGE_TOOL },
-                async (args: { fileId?: string }) => {
-                    const fileId = typeof args.fileId === 'string' ? args.fileId : '';
-                    const record = fileId ? await findSessionFileRecord(scope, conversationId, fileId) : null;
-                    if (!record) return `File "${fileId}" is not attached to this conversation. Use ${SESSION_FILES_LIST_TOOL} to see the files.`;
-                    if (!isSendableImageMime(record.contentType)) {
-                        return isImageMime(record.contentType)
-                            ? `"${record.name}" is an image in a format the model cannot be shown.`
-                            : `"${record.name}" is not an image. Use ${SESSION_FILES_READ_TOOL} to read it.`;
-                    }
-                    return viewImageToolResult(String(record._id), record.name);
-                },
-            ),
-        }) as AgentSdkToolInterface);
-    }
-    return tools;
+    return [list];
 }
 
-export function sessionFileToolDefinitions(readPageChars: number, options: { viewImage?: boolean } = {}): TraceToolDefinition[] {
+export function sessionFileToolDefinitions(): TraceToolDefinition[] {
     return [
         {
             name: SESSION_FILES_LIST_TOOL,
             description: 'List the files attached to this conversation, with their ids.',
             parameters: { type: 'object', properties: {} },
         },
-        {
-            name: SESSION_FILES_READ_TOOL,
-            description: `Read one page (up to ${readPageChars} characters) of an attached file as text.`,
-            parameters: {
-                type: 'object',
-                properties: {
-                    fileId: { type: 'string', description: 'The file id.' },
-                    page: { type: 'number', description: 'Page number, starting at 1 (default 1).' },
-                },
-                required: ['fileId'],
-            },
-        },
-        ...(options.viewImage
-            ? [{
-                name: SESSION_FILES_VIEW_IMAGE_TOOL,
-                description: 'Look at an attached image again; the image is shown in the message that follows.',
-                parameters: {
-                    type: 'object',
-                    properties: { fileId: { type: 'string', description: 'The image file id.' } },
-                    required: ['fileId'],
-                },
-            }]
-            : []),
     ];
 }

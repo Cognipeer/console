@@ -10,7 +10,7 @@
  * caller's own sessions off it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -261,6 +261,89 @@ describe('one session of an agent', () => {
     expect(JSON.stringify(json(refused))).not.toContain('secret');
     // their own session is still theirs
     expect((await dash('other', 'GET', `/agents/${agentId}/sessions/${idOf('others')}`)).statusCode).toBe(200);
+  });
+
+  it('carries the newest plan version the turns recorded, and never reads the carried state for it', async () => {
+    const id = idOf('starters');
+    // No planning on the agent and no plan on any message: nothing to read.
+    expect(json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`)).plan).toBeNull();
+
+    // A later turn that only read the plan (an empty list) changes nothing: the last version of the turn before it stands.
+    const written = [
+      { toolCallId: 'p1', version: 1, operation: 'write', steps: [{ id: 1, title: 'Gather', status: 'in-progress' }, { id: 2, title: 'Write', status: 'not-started' }], at: '2026-10-23T08:30:00.000Z' },
+      {
+        toolCallId: 'p2', version: 2, operation: 'update', completion: 0.5, at: '2026-10-23T09:00:00.000Z',
+        steps: [{ id: 1, title: 'Gather', status: 'completed', evidence: 'done' }, { id: 2, title: 'Write', status: 'in-progress' }],
+      },
+    ];
+    const messages = [
+      { role: 'user', content: 'plan it', timestamp: new Date() },
+      { role: 'assistant', content: 'ok', timestamp: new Date(), plans: written },
+      { role: 'user', content: 'how far are you', timestamp: new Date() },
+      { role: 'assistant', content: 'half way', timestamp: new Date(), plans: [] },
+    ];
+    await db.updateAgentConversation(id, { messages } as never);
+    // A state that disagrees on purpose: were it read, the plan would be version 9.
+    await db.saveAgentConversationState({
+      conversationId: id, tenantId, projectId: p1, agentKey: 'support',
+      snapshot: JSON.stringify({ messages: [], plan: { version: 9, steps: [{ id: 1, step: 'From the state', status: 'blocked' }] }, planVersion: 9 }), messageCount: messages.length, sizeBytes: 10,
+    } as never);
+    const readState = vi.spyOn(db, 'findAgentConversationState');
+    const res = json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`));
+    expect(res.plan).toEqual({
+      version: 2,
+      completion: 0.5,
+      at: '2026-10-23T09:00:00.000Z',
+      steps: [{ id: 1, title: 'Gather', status: 'completed', evidence: 'done' }, { id: 2, title: 'Write', status: 'in-progress' }],
+    });
+    expect(res.session.messages).toHaveLength(4);
+    expect(readState).not.toHaveBeenCalled();
+
+    // Even a transcript that moved on since: the recorded plan is the agent's latest word.
+    await db.updateAgentConversation(id, { messages: [...messages, { role: 'user', content: 'more', timestamp: new Date() }] } as never);
+    expect(json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`)).plan).toMatchObject({ version: 2 });
+    expect(readState).not.toHaveBeenCalled();
+    readState.mockRestore();
+  });
+
+  it('falls back to the plan the carried state holds for turns stored before versions were recorded, or null: a state behind the transcript', async () => {
+    const id = idOf('starters');
+    const plan = {
+      version: 3,
+      steps: [
+        { id: 1, step: 'Gather', owner: 'agent', exitCriteria: 'have data', status: 'completed', evidence: 'done' },
+        { id: 2, step: 'Write', owner: 'agent', exitCriteria: 'draft', status: 'in-progress' },
+      ],
+      adherenceScore: 0.5,
+      lastUpdated: '2026-10-23T09:00:00.000Z',
+    };
+    // No planning on the agent and no plan on any message: nothing to read.
+    expect(json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`)).plan).toBeNull();
+
+    // A turn stored before versions were recorded says it wrote a plan but not which steps; the state says where it stands.
+    const messages = [
+      { role: 'user', content: 'plan it', timestamp: new Date() },
+      { role: 'assistant', content: 'ok', timestamp: new Date(), plans: [{ version: 3, operation: 'update', steps: [], at: 'now' }] },
+    ];
+    await db.updateAgentConversation(id, { messages } as never);
+    await db.saveAgentConversationState({
+      conversationId: id, tenantId, projectId: p1, agentKey: 'support',
+      snapshot: JSON.stringify({ messages: [], plan, planVersion: 3 }), messageCount: messages.length, sizeBytes: 10,
+    } as never);
+    const res = json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`));
+    expect(res.plan).toMatchObject({
+      version: 3,
+      completion: 0.5,
+      at: '2026-10-23T09:00:00.000Z',
+      steps: [{ id: 1, title: 'Gather', status: 'completed', evidence: 'done' }, { id: 2, title: 'Write', status: 'in-progress' }],
+    });
+    expect(res.session.messages).toHaveLength(2);
+
+    // The transcript moved on without the state: the plan is unknown, the page still opens.
+    await db.updateAgentConversation(id, { messages: [...messages, { role: 'user', content: 'more', timestamp: new Date() }] } as never);
+    const behind = await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`);
+    expect(behind.statusCode).toBe(200);
+    expect(json(behind).plan).toBeNull();
   });
 
   it('carries the owner and, for the open requests, what the viewer may do with each', async () => {
@@ -628,7 +711,7 @@ describe('tracing: a thread of an agent is its session', () => {
 });
 
 describe('the Document Store, for the files a session holds', () => {
-  async function sessionFile(conversation: keyof typeof sessions, key: string) {
+  async function sessionFile(conversation: keyof typeof sessions, key: string, over: Record<string, unknown> = {}) {
     if (!(await db.findProviderByKey(tenantId, 'local', p1))) {
       await db.createProvider({ tenantId, projectId: p1, key: 'local', type: 'file', driver: 'local-filesystem', label: 'Local', status: 'active', credentialsEnc: encryptObject({}), settings: { basePath: tmpDir }, createdBy: 'x' });
       await db.createFileBucket({ tenantId, projectId: p1, key: 'docs', name: 'Docs', providerKey: 'local', status: 'active', createdBy: 'x' } as never);
@@ -636,6 +719,7 @@ describe('the Document Store, for the files a session holds', () => {
     await db.createFileRecord({
       tenantId, projectId: p1, providerKey: 'local', bucketKey: 'docs', key, name: key, size: 3, markdownStatus: 'none',
       purpose: 'conversation', conversationId: idOf(conversation), agentKey: 'support', createdBy: 'x', uploadedBy: 'x',
+      ...over,
     } as never);
   }
 
@@ -649,6 +733,34 @@ describe('the Document Store, for the files a session holds', () => {
     expect((await dash('other', 'DELETE', '/files/buckets/docs/objects/agent-sessions/support/s1/notes.txt')).statusCode).toBe(403);
     // a person the rules leave alone reads it
     expect((await dash('padmin', 'GET', '/files/buckets/docs/objects/agent-sessions/support/s1/notes.txt')).statusCode).toBe(200);
+  });
+
+  it('a preview is a read like the others: refused for somebody else\'s session before the object is touched, shown to whoever may view it', async () => {
+    await sessionFile('starters', 'agent-sessions/support/s1/p.txt', { contentType: 'text/plain', size: 5 });
+    // The object itself, where the local disk provider keeps it: <base>/<tenant>/<provider>/<bucket prefix>/<key>.
+    const stored = path.join(tmpDir, tenantId, 'local', 'docs', 'agent-sessions', 'support', 's1', 'p.txt');
+    mkdirSync(path.dirname(stored), { recursive: true });
+    writeFileSync(stored, 'hello');
+    await deny('agent.session_view_others', 'other');
+    const url = '/files/buckets/docs/objects/agent-sessions/support/s1/p.txt';
+
+    for (const query of ['preview=1', 'preview=1&variant=markdown', 'preview=true', 'download=1', 'download=markdown']) {
+      const refused = await dash('other', 'GET', `${url}?${query}`);
+      expect(refused.statusCode, query).toBe(403);
+      expect(json(refused), query).toMatchObject({ code: 'forbidden' });
+      // Nothing of the file leaks into the refusal.
+      expect(refused.body, query).not.toContain('hello');
+    }
+
+    for (const who of ['padmin', 'starter'] as const) {
+      const shown = await dash(who, 'GET', `${url}?preview=1`);
+      expect(shown.statusCode, who).toBe(200);
+      expect(shown.body, who).toBe('hello');
+      expect(shown.headers['content-type'], who).toBe('text/plain; charset=utf-8');
+      expect(String(shown.headers['content-disposition']), who).toMatch(/^inline;/);
+      expect(shown.headers['x-content-type-options'], who).toBe('nosniff');
+      expect(shown.headers['content-security-policy'], who).toBe('sandbox');
+    }
   });
 
   it('a listing leaves out the files of sessions the caller may not view, and shows ordinary files to everybody', async () => {
@@ -676,5 +788,87 @@ describe('the Document Store, for the files a session holds', () => {
     expect((await viaToken('DELETE', `/client/v1/files/buckets/docs/objects/${encodeURIComponent('agent-sessions/support/s1/c.txt')}`)).statusCode).toBe(200); // deleting is acting: a separate action this rule does not touch
     const list = await viaToken('GET', '/client/v1/files/buckets/docs/objects');
     expect(list.statusCode).toBe(200);
+  });
+
+  describe('an upload through the client Files API under the key of a session file', () => {
+    const KEY = 'agent-sessions/support/s1/c.txt';
+    const SESSION_BYTES = 'what the session wrote';
+    const objectOf = (key: string) => path.join(tmpDir, tenantId, 'local', 'docs', ...key.split('/'));
+    const upload = (keyHint: string, content = 'bytes of the caller') => viaToken('POST', '/client/v1/files/buckets/docs/objects', {
+      fileName: 'upload.txt', contentType: 'text/plain', data: Buffer.from(content).toString('base64'), keyHint,
+    });
+    const recordsUnder = async (key: string) => {
+      await db.switchToTenant(dbName);
+      return db.listFileRecordsByKeys({ providerKey: 'local', bucketKey: 'docs', projectId: p1, keys: [key] });
+    };
+
+    beforeEach(async () => {
+      // The file of the session of `starter`, with the object it holds.
+      await sessionFile('starters', KEY, { size: SESSION_BYTES.length, contentType: 'text/plain' });
+      mkdirSync(path.dirname(objectOf(KEY)), { recursive: true });
+      writeFileSync(objectOf(KEY), SESSION_BYTES);
+    });
+
+    it('is refused to a token whose owner a rule stops from changing that session: the object and its record stay as the session left them', async () => {
+      await deny('agent.session_manage_others', 'other');
+      await tokenOf('other');
+
+      const refused = await upload(KEY);
+      expect(refused.statusCode).toBe(403);
+      expect(json(refused).error).toMatchObject({ code: 'session_forbidden' });
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+      const records = await recordsUnder(KEY);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ purpose: 'conversation', conversationId: idOf('starters'), size: SESSION_BYTES.length });
+    });
+
+    it.each([
+      ['a doubled slash', 'agent-sessions//support/s1/c.txt'],
+      ['backslashes', 'agent-sessions\\support\\s1\\c.txt'],
+      ['a leading slash', '/agent-sessions/support/s1/c.txt'],
+      ['spaces around it', `  ${KEY}  `],
+    ])('is refused when the key is spelled with %s: the key looked up is the key the object lands on', async (_label, spelled) => {
+      await deny('agent.session_manage_others', 'other');
+      await tokenOf('other');
+
+      const refused = await upload(spelled);
+      expect(refused.statusCode).toBe(403);
+      expect(json(refused).error).toMatchObject({ code: 'session_forbidden' });
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+      expect(await recordsUnder(KEY)).toHaveLength(1);
+    });
+
+    it('is allowed to the owner of the session, whatever a rule says about other people\'s sessions, and replaces the file', async () => {
+      await deny('agent.session_manage_others', 'starter');
+      await tokenOf('starter');
+
+      const written = await upload(KEY, 'the owner writes again');
+      expect(written.statusCode).toBe(201);
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe('the owner writes again');
+      expect(await recordsUnder(KEY)).toHaveLength(1);
+    });
+
+    it('is allowed to a token whose owner may change every session, while somebody a rule stops is refused', async () => {
+      await deny('agent.session_manage_others', 'other');
+
+      await tokenOf('other');
+      expect((await upload(KEY, 'refused')).statusCode).toBe(403);
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+
+      await tokenOf('padmin');
+      const written = await upload(KEY, 'a teammate\'s edit');
+      expect(written.statusCode).toBe(201);
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe('a teammate\'s edit');
+    });
+
+    it('is not the session\'s business under a key that holds no session file', async () => {
+      await deny('agent.session_manage_others', 'other');
+      await tokenOf('other');
+
+      const written = await upload('plain.txt');
+      expect(written.statusCode).toBe(201);
+      expect(readFileSync(objectOf('plain.txt'), 'utf8')).toBe('bytes of the caller');
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+    });
   });
 });

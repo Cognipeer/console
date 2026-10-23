@@ -29,7 +29,8 @@
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "test:e2e:triage": "tsx scripts/e2e/incident-triage/run.ts",
-    "test:e2e:agent-findings": "tsx scripts/e2e/agent-findings/run.ts"
+    "test:e2e:agent-findings": "tsx scripts/e2e/agent-findings/run.ts",
+    "test:e2e:agent-flow": "tsx scripts/e2e/agent-flow/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.901.0",
@@ -39,8 +40,9 @@
     "@aws-sdk/client-textract": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
     "@azure/search-documents": "^12.2.0",
+    "@azure/storage-blob": "12.33.0",
     "@cedar-policy/cedar-wasm": "4.13.0",
-    "@cognipeer/agent-sdk": "^0.16.0",
+    "@cognipeer/agent-sdk": "^0.20.0",
     "@cognipeer/guardrail": "^0.1.0",
     "@cognipeer/pii": "^0.1.1",
     "@cognipeer/to-markdown": "^3.4.2",
@@ -72,7 +74,7 @@
     "dayjs": "^1.11.18",
     "exceljs": "^4.4.0",
     "fast-uri": "^3.1.2",
-    "fastify": "^5.12.5",
+    "fastify": "^5.12.6",
     "gpt-tokenizer": "^3.4.0",
     "handlebars": "^4.7.8",
     "iconv-lite": "^0.6.3",
@@ -85,7 +87,7 @@
     "mime-types": "^2.1.35",
     "mongodb": "^6.20.0",
     "mustache": "^4.2.0",
-    "next": "^15.5.18",
+    "next": "^15.5.28",
     "nodemailer": "^9.1.1",
     "onnxruntime-node": "^1.30.0",
     "pdf-to-img": "^6.1.0",

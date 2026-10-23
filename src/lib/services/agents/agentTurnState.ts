@@ -24,6 +24,8 @@
  * the run already has.
  */
 
+import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from 'node:zlib';
+
 import { parseOutputLimitNotice } from './outputLimitNotice';
 import { clientToolMeta } from './agentClientTools';
 import type {
@@ -34,6 +36,7 @@ import type {
     SummarizationEvent as AgentSdkSummarizationEvent,
 } from '@cognipeer/agent-sdk';
 
+import { DEFAULT_AGENT_STATE_MAX_BYTES, getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type {
     DatabaseProvider,
@@ -57,14 +60,48 @@ const logger = createLogger('agent-turn-state');
 // ── Persistence ─────────────────────────────────────────────────────────────
 
 /**
- * Upper bound for a stored state. Cosmos DB (Mongo API) caps a document at
- * 2 MB; staying well under it leaves room for the envelope and for UTF-8
- * multi-byte text measured as characters.
+ * Default upper bound for a stored state AS STORED (see `encodeStoredState`).
+ * Cosmos DB for MongoDB (RU) caps a document at 2 MB; staying well under it
+ * leaves room for the envelope and for UTF-8 multi-byte text measured as
+ * characters. `AGENT_STATE_MAX_BYTES` raises it where the database allows
+ * (MongoDB, Cosmos vCore: 16 MB) — see `maxStateBytes`.
  */
-export const MAX_STATE_BYTES = 1_500_000;
+export const MAX_STATE_BYTES = DEFAULT_AGENT_STATE_MAX_BYTES;
+
+/** The cap in force for this deployment (`AGENT_STATE_MAX_BYTES`, `MAX_STATE_BYTES` unless set). */
+export function maxStateBytes(): number {
+    return getConfig().agent.stateMaxBytes;
+}
 
 /** Tool payloads above this are cut when a state has to shrink to fit. */
 const TRIMMED_TOOL_TEXT_CHARS = 8_000;
+
+/** Marks a stored state that is Brotli-compressed and base64-encoded. */
+const STORED_STATE_PREFIX = 'br64:';
+
+/**
+ * What goes in the document: the JSON Brotli-compressed and base64-encoded
+ * behind a prefix a reader recognises. Transcripts and tool outputs compress
+ * 5–8×, so the document cap holds several MB of state instead of 1.5 — a
+ * long run's pause (which stores the state twice) used to find no room left.
+ * Quality 5 keeps a 1.5 MB state under ~50 ms. A row written before this
+ * holds plain JSON and still reads back (`decodeStoredState`).
+ */
+export function encodeStoredState(json: string): string {
+    const compressed = brotliCompressSync(Buffer.from(json, 'utf8'), {
+        params: {
+            [zlibConstants.BROTLI_PARAM_QUALITY]: 5,
+            [zlibConstants.BROTLI_PARAM_SIZE_HINT]: Buffer.byteLength(json, 'utf8'),
+        },
+    });
+    return `${STORED_STATE_PREFIX}${compressed.toString('base64')}`;
+}
+
+/** The JSON of a stored state, whether it was stored compressed or (older rows) as plain text. */
+export function decodeStoredState(stored: string): string {
+    if (!stored.startsWith(STORED_STATE_PREFIX)) return stored;
+    return brotliDecompressSync(Buffer.from(stored.slice(STORED_STATE_PREFIX.length), 'base64')).toString('utf8');
+}
 
 /**
  * The state fields that describe the conversation. Everything else on
@@ -226,8 +263,37 @@ function truncateText(value: unknown, limit: number): unknown {
 }
 
 /**
- * Shrinks a state to fit `MAX_STATE_BYTES`, cheapest loss first:
- *  1. the untouched `rawOutput` copies (the model worked from `output`);
+ * Drops a tool entry's `rawOutput` when it is the same as its `output`. The SDK
+ * reads `rawOutput ?? output`, so nothing is lost — and a long run's history
+ * was carrying every tool result twice, the largest share of a stored state
+ * (a 12-minute sandbox run: 1.0 MB of a 1.4 MB state). A `rawOutput` that
+ * differs (the model saw a reduced `output`) is kept.
+ */
+function dropDuplicateRawOutput(carried: CarriedState): CarriedState {
+    const out: CarriedState = { ...carried };
+    for (const key of ['toolHistory', 'toolHistoryArchived'] as const) {
+        const entries: unknown = out[key];
+        if (!Array.isArray(entries)) continue;
+        (out as Record<string, unknown>)[key] = entries.map((entry) => {
+            if (!entry || typeof entry !== 'object' || !('rawOutput' in entry)) return entry;
+            const { rawOutput, output } = entry as { rawOutput?: unknown; output?: unknown };
+            if (rawOutput === undefined || rawOutput === null) return entry;
+            const same = rawOutput === output
+                || (typeof rawOutput === 'object' && typeof output === 'object' && JSON.stringify(rawOutput) === JSON.stringify(output));
+            if (!same) return entry;
+            const rest = { ...(entry as Record<string, unknown>) };
+            delete rest.rawOutput;
+            return rest;
+        });
+    }
+    return out;
+}
+
+/**
+ * The stored form of a state (see `encodeStoredState`), shrunk to fit
+ * the cap (`maxStateBytes`) when it must, cheapest loss first:
+ *  0. a `rawOutput` that only repeats `output` (lossless, always);
+ *  1. the remaining `rawOutput` copies (the model worked from `output`);
  *  2. long tool outputs in the tool history;
  *  3. long tool results in the transcript itself.
  * Returns null when even that does not fit — the caller then stores nothing
@@ -238,10 +304,12 @@ function truncateText(value: unknown, limit: number): unknown {
  * characters each and cannot be what makes a state too large.
  */
 export function serializeForStorage(carried: CarriedState): string | null {
-    let text = JSON.stringify(carried);
-    if (text.length <= MAX_STATE_BYTES) return text;
+    const cap = maxStateBytes();
+    const deduped = dropDuplicateRawOutput(carried);
+    let stored = encodeStoredState(JSON.stringify(deduped));
+    if (stored.length <= cap) return stored;
 
-    const shrunk: CarriedState = { ...carried };
+    const shrunk: CarriedState = { ...deduped };
     const eachToolEntry = (fn: (entry: Record<string, unknown>) => Record<string, unknown>) => {
         for (const key of ['toolHistory', 'toolHistoryArchived'] as const) {
             const entries: unknown = shrunk[key];
@@ -256,18 +324,18 @@ export function serializeForStorage(carried: CarriedState): string | null {
         delete entry.rawOutput;
         return entry;
     });
-    text = JSON.stringify(shrunk);
-    if (text.length <= MAX_STATE_BYTES) return text;
+    stored = encodeStoredState(JSON.stringify(shrunk));
+    if (stored.length <= cap) return stored;
 
     eachToolEntry((entry) => ({ ...entry, output: truncateText(entry.output, TRIMMED_TOOL_TEXT_CHARS) }));
-    text = JSON.stringify(shrunk);
-    if (text.length <= MAX_STATE_BYTES) return text;
+    stored = encodeStoredState(JSON.stringify(shrunk));
+    if (stored.length <= cap) return stored;
 
     shrunk.messages = (shrunk.messages ?? []).map((message) => message.role === 'tool'
         ? { ...message, content: truncateText(message.content, TRIMMED_TOOL_TEXT_CHARS) as string }
         : message);
-    text = JSON.stringify(shrunk);
-    return text.length <= MAX_STATE_BYTES ? text : null;
+    stored = encodeStoredState(JSON.stringify(shrunk));
+    return stored.length <= cap ? stored : null;
 }
 
 type StateStore = Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState' | 'deleteAgentConversationState'>;
@@ -294,7 +362,7 @@ export async function loadConversationState(
             });
             return null;
         }
-        const parsed = JSON.parse(stored.snapshot) as CarriedState;
+        const parsed = JSON.parse(decodeStoredState(stored.snapshot)) as CarriedState;
         return pickCarried(parsed as AgentSdkSmartState);
     } catch (error) {
         logger.warn('Stored agent state could not be read; replaying the transcript instead', {
@@ -476,7 +544,9 @@ export type AgentStopReason =
     /** The run was cancelled. */
     | 'cancelled'
     /** The run is waiting for input no console channel can deliver (approval, a question). */
-    | 'paused';
+    | 'paused'
+    /** The run stopped for a person but cannot be continued (its paused state could not be stored). */
+    | 'error';
 
 export interface AgentTurnOutcome {
     stopReason: AgentStopReason;
@@ -583,6 +653,8 @@ export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTu
     const extra = event as AgentSdkSummarizationEvent & {
         model?: string;
         droppedDirectives?: Array<{ directive: string; reason: string; sourceQuote?: string }>;
+        /** agent-sdk ≥ 0.20: `fallback` when the summarizer call failed and a local summary was used. */
+        status?: string;
     };
     const directiveSources = structured?.user_directive_sources;
     return {
@@ -614,7 +686,7 @@ export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTu
         ...(notes.length > 0 ? { integrityNotes: notes } : {}),
         // The SDK reports a failed summarizer call as a summarization event
         // whose token count did not move — the fallback summary was local.
-        ...(notes.some((note) => /fallback/i.test(note)) ? { failed: true } : {}),
+        ...(extra.status === 'fallback' || notes.some((note) => /fallback/i.test(note)) ? { failed: true } : {}),
     };
 }
 

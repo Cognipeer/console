@@ -7,6 +7,7 @@
  * a single instance firing each tick. Mirrors the alert scheduler.
  */
 
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
@@ -34,6 +35,9 @@ async function runOnce(): Promise<void> {
     const tenants = await mainDb.listTenants();
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
+      // Switched off for this tenant: skip the tick without claiming or advancing
+      // anything, so the work runs on a later tick once the service is back on.
+      if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'analysis'))) continue;
       try {
         // Timer context: bind the tenant for the whole per-tenant run —
         // switchToTenant alone would fall back to the process-global handle

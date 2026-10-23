@@ -226,9 +226,7 @@
         "/api/client/v1/browser/browsers",
         "/api/client/v1/browser/browsers/*",
         "/api/client/v1/browser/sessions",
-        "/api/client/v1/browser/sessions/*",
-        "/api/client/v1/browser/*/mcp/sse",
-        "/api/client/v1/browser/*/mcp/message"
+        "/api/client/v1/browser/sessions/*"
       ]
     },
     "CRAWLER": {

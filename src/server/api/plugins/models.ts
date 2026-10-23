@@ -1,5 +1,4 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 import {
   createDynamicModel,
   createModel,
@@ -47,6 +46,7 @@ import {
   requireProjectContextForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -293,9 +293,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
-      if (error instanceof ProviderEndpointError) {
-        return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
-      }
+      if (sendProviderConfigError(reply, error)) return reply;
       logger.error('Create model provider error', { error });
       // A duplicate provider key is a client conflict, not a server error —
       // mirror the generic POST /providers route which returns 409.

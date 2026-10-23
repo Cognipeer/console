@@ -73,6 +73,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_user_createdAt' } },
     // Dynamic LLM analytics: routed rows by router.
     { key: { 'routing.routerKey': 1, createdAt: -1 }, options: { name: 'idx_routing_routerKey_createdAt' } },
+    // Agent run ledger: the model calls of one turn (conversation + turn), newest first.
+    { key: { conversationId: 1, turnId: 1, createdAt: -1 }, options: { name: 'idx_conversation_turn_createdAt' } },
   ],
   // usage_daily's unique dimension index is created by the usage mixin's own
   // ensure routine; these are the report-query indexes.
@@ -228,6 +230,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_createdAt' } },
     { key: { projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_agent_createdAt' } },
     { key: { projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_status_createdAt' } },
+    // The dashboard's cross-agent Sessions list: a project's sessions by last activity.
+    { key: { projectId: 1, updatedAt: -1, _id: -1 }, options: { name: 'idx_project_updatedAt' } },
     // A chat-completions client that resends its transcript is matched back to its session by the transcript's digest.
     { key: { projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, options: { name: 'idx_transcript_hash' } },
   ],

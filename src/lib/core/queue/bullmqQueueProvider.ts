@@ -8,7 +8,7 @@
  * so the node accepts both targeted and load-balanced jobs.
  */
 
-import { Queue, QueueEvents, Worker, type ConnectionOptions, type Job } from 'bullmq';
+import { Queue, QueueEvents, UnrecoverableError, Worker, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { createLogger } from '../logger';
 import { getThisNodeName } from '../cluster/nodeRegistry';
@@ -21,6 +21,7 @@ import type {
   QueueProvider,
   QueuePayload,
 } from './queueProvider.interface';
+import { isNonRetryableJobError } from './queueProvider.interface';
 
 const log = createLogger('queue.bullmq');
 
@@ -255,7 +256,15 @@ export class BullMQQueueProvider implements QueueProvider {
           data: job.data as QueuePayload,
           attemptsMade: job.attemptsMade,
         };
-        return handler(ctx);
+        try {
+          return await handler(ctx);
+        } catch (error) {
+          // BullMQ retries any other error until `attempts` is spent.
+          if (isNonRetryableJobError(error)) {
+            throw new UnrecoverableError(error instanceof Error ? error.message : String(error));
+          }
+          throw error;
+        }
       },
       {
         concurrency,

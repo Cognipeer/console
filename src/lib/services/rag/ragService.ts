@@ -5,6 +5,8 @@
  * retrieval (query → embed → vector query) using existing services.
  */
 
+import { assertServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
+import { RagModuleInactiveError } from './errors';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -839,6 +841,7 @@ export async function ingestDocument(
   projectId: string | undefined,
   request: RagIngestRequest,
 ): Promise<RagDocument> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -929,10 +932,7 @@ export async function ingestDocument(
       lastIndexedAt,
     });
 
-    await db.updateRagModule(String(ragModule._id), {
-      totalDocuments: (ragModule.totalDocuments ?? 0) + 1,
-      totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
-    } as Partial<IRagModule>);
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
 
     return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
   } catch (error) {
@@ -972,6 +972,17 @@ export async function indexPendingRagDocument(
     return;
   }
   if (doc.status === 'indexed') return;
+
+  // A queued document whose service has been switched off is failed, not
+  // retried: the job is acknowledged and re-ingesting is the operator's call
+  // once the service is back.
+  const off = await serviceOffReason({ tenantDbName, tenantId }, 'rag');
+  if (off) {
+    const refusal = new ServiceDisabledError(off);
+    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}` });
+    logger.warn('Deferred Knowledge Engine ingest refused: service is off', { documentId, ragModuleKey, code: refusal.code });
+    return;
+  }
 
   const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
   if (!ragModule) {
@@ -1013,10 +1024,7 @@ export async function indexPendingRagDocument(
       lastIndexedAt: new Date(),
     });
 
-    await db.updateRagModule(String(ragModule._id), {
-      totalDocuments: (ragModule.totalDocuments ?? 0) + 1,
-      totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
-    } as Partial<IRagModule>);
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Ingestion failed';
     await db.updateRagDocument(documentId, { status: 'failed', errorMessage: msg });
@@ -1099,6 +1107,7 @@ export async function ingestFile(
     createdBy: string;
   },
 ): Promise<RagDocument> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const isPlainText = isPlainTextFile(request.fileName, request.contentType);
 
   let textContent: string;
@@ -1216,6 +1225,7 @@ export async function queryRag(
   request: RagQueryRequest,
   options?: { signal?: AbortSignal },
 ): Promise<RagQueryResult> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const startTime = Date.now();
   const state: RagQueryState = { moduleFound: false };
   try {
@@ -1267,6 +1277,9 @@ async function runRagQuery(
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+  // A switched-off module is not queried. Checked before moduleFound is set so
+  // the refusal is not recorded as a health fault of the knowledge base.
+  if (ragModule.status !== 'active') throw new RagModuleInactiveError();
   state.moduleFound = true;
   state.key = ragModule.key;
   state.projectId = ragModule.projectId;
@@ -1594,10 +1607,7 @@ export async function deleteRagDocument(
   await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
   // Update module stats
-  await db.updateRagModule(String(ragModule._id), {
-    totalDocuments: Math.max(0, (ragModule.totalDocuments ?? 0) - 1),
-    totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - chunkCount),
-  } as Partial<IRagModule>);
+  await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
 
   return db.deleteRagDocument(request.documentId);
 }
@@ -1715,6 +1725,7 @@ export async function reingestDocument(
     updatedBy: string;
   },
 ): Promise<RagDocument> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -1852,9 +1863,7 @@ export async function reingestDocument(
       ...sourceFields,
     });
 
-    await db.updateRagModule(String(ragModule._id), {
-      totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - oldChunkCount + chunkCount),
-    } as Partial<IRagModule>);
+    await db.incrementRagModuleTotals(String(ragModule._id), { chunks: chunkCount - oldChunkCount });
 
     logger.debug('Re-indexed document', {
       documentId: request.documentId,
@@ -1917,3 +1926,5 @@ export async function aggregateRagQueryScoreDistribution(
   await db.switchToTenant(tenantDbName);
   return db.aggregateRagQueryScoreDistribution(ragModuleKey, options);
 }
+
+export { RagModuleInactiveError };

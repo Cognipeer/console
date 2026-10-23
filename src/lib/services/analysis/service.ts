@@ -14,6 +14,7 @@
  * testable without live model calls.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -462,6 +463,7 @@ async function createPendingRun(
   params: RunDefinitionParams,
   mode: IAnalysisRun['mode'],
 ): Promise<{ run: WithId<IAnalysisRun>; conversationKeys: string[] }> {
+  await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'analysis');
   const { tenantDbName, tenantId, projectId, createdBy, definitionKey, target } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -523,6 +525,9 @@ export async function executeRun(
   await db.switchToTenant(tenantDbName);
 
   try {
+    // Inside the try so the run is recorded as failed rather than left pending
+    // when the service has been switched off since it was queued.
+    await assertServiceEnabled({ tenantDbName, tenantId }, 'analysis');
     const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
     if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
     const sources = await selectRunItems(db, projectId, params);

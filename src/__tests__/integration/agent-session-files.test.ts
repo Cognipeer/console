@@ -62,6 +62,7 @@ import {
   executePlaygroundChatLocal,
 } from '@/lib/services/agents/agentService';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { decodeStoredState, encodeStoredState } from '@/lib/services/agents/agentTurnState';
 import {
   cleanupExpiredSessionFiles,
   deleteSessionFile,
@@ -385,7 +386,7 @@ describe('a turn with attachments', () => {
     expect(shown.content).toContain('Quarterly notes: revenue up.');
     // Inline: nothing to page through, but the tools exist once the session holds a file.
     expect(shown.content).not.toContain('too long to include');
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'read']));
 
     const after = await stored(id);
     // The transcript holds what the person typed — not the document.
@@ -412,18 +413,22 @@ describe('a turn with attachments', () => {
     expect((await stored(id)).messages[2]).not.toHaveProperty('attachments');
   });
 
-  it('points a long document at the paging tools, and the agent reads it page by page', async () => {
+  it('points a long document at the read tool, and the agent reads it in windows of numbered lines', async () => {
     await createAgent({ attachments: { inlineMaxTokens: 100, readPageChars: 500 } });
     const conversation = await newConversation();
     const id = String(conversation._id);
-    const body = Array.from({ length: 40 }, (_, i) => `Line ${String(i).padStart(2, '0')} of the long report.`).join('\n'); // ~1.4k chars
+    const lines = Array.from({ length: 40 }, (_, i) => `Line ${String(i).padStart(2, '0')} of the long report.`);
+    const body = lines.join('\n'); // ~1.4k chars
     const file = await attach(conversation, 'report.txt', body, 'text/plain');
-    const pages = Math.ceil(body.length / 500);
-    expect(pages).toBeGreaterThan(2);
 
     const model = scriptModel((call, messages) => {
-      if (call === 0) return toolCall('session_files_read', { fileId: file.id, page: 2 });
-      if (call === 1) return toolCall('session_files_read', { fileId: file.id, page: pages + 5 });
+      if (call === 0) return toolCall('read', { fileId: file.id });
+      if (call === 1) {
+        // Continue where the first window said to.
+        const first = String(messages.filter((m) => m.role === 'tool').at(-1)?.content);
+        return toolCall('read', { fileId: file.id, offset: Number(/continue with offset=(\d+)/.exec(first)![1]), limit: 2 });
+      }
+      if (call === 2) return toolCall('read', { fileId: file.id, offset: 500 });
       return answer(`read: ${JSON.stringify(messages.filter((m) => m.role === 'tool').map((m) => m.content))}`);
     });
 
@@ -431,14 +436,26 @@ describe('a turn with attachments', () => {
 
     const shown = userTurn(model.seen[0]).content as string;
     expect(shown).toContain('too long to include');
-    expect(shown).toContain(`id ${file.id}, ${pages} pages`);
+    expect(shown).toContain(`id ${file.id}, ${body.length.toLocaleString('en-US')} characters`);
+    expect(shown).toContain('read({ fileId, offset, limit })');
     expect(shown).not.toContain('Line 05');
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'read']));
 
-    const toolResults = model.seen[2].filter((m) => m.role === 'tool').map((m) => String(m.content));
-    const page2 = JSON.parse(toolResults[0]) as { text: string; page: number; pages: number };
-    expect(page2).toEqual({ text: body.slice(500, 1000), page: 2, pages });
-    expect(JSON.parse(toolResults[1])).toEqual({ error: `Page ${pages + 5} is out of range.`, pages });
+    const toolResults = model.seen[3].filter((m) => m.role === 'tool').map((m) => String(m.content));
+    // The agent's page size caps one window (500 characters): a prefix of the lines, numbered, with where to continue.
+    const header = /^\[report\.txt — lines 1-(\d+) of 40; continue with offset=(\d+)\]\n/.exec(toolResults[0])!;
+    const next = Number(header[2]);
+    expect(Number(header[1])).toBe(next - 1);
+    expect(next).toBeGreaterThan(5);
+    expect(next).toBeLessThan(40);
+    expect(toolResults[0]).toContain('     1\tLine 00 of the long report.');
+    expect(toolResults[0].length).toBeLessThanOrEqual(500 + header[0].length);
+    expect(toolResults[1]).toBe([
+      `[report.txt — lines ${next}-${next + 1} of 40; continue with offset=${next + 2}]`,
+      `${String(next).padStart(6)}\t${lines[next - 1]}`,
+      `${String(next + 1).padStart(6)}\t${lines[next]}`,
+    ].join('\n'));
+    expect(toolResults[2]).toBe('Error: offset 500 is past the end of "report.txt" (40 lines).');
     expect(response.status).toBe('completed');
     // The persisted user message is still only the typed text.
     expect((await stored(id)).messages[0].content).toBe('Summarise the report');
@@ -579,7 +596,7 @@ describe('files nobody has sent yet (attachNewUploads)', () => {
     await chat(id, 'hello');
 
     expect(userTurn(model.seen[0]).content).toBe('hello');
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'read']));
     expect((await stored(id)).messages[0]).not.toHaveProperty('attachments');
   });
 
@@ -724,7 +741,7 @@ describe('back-compat: no attachments', () => {
     expect(response.status).toBe('completed');
     expect(userTurn(model.seen[0]).content).toBe('hello there');
     // No file to read: none of the read tools (the agent's own file-writing tools are a separate feature).
-    expect(model.toolNames.filter((name) => ['session_files_list', 'session_files_read', 'session_files_view_image'].includes(name))).toEqual([]);
+    expect(model.toolNames.filter((name) => ['session_files_list', 'read', 'session_files_read', 'session_files_view_image'].includes(name))).toEqual([]);
     const after = await stored(id);
     expect(after.messages[0]).not.toHaveProperty('attachments');
     expect(after.messages[0].content).toBe('hello there');
@@ -752,14 +769,14 @@ describe('back-compat: no attachments', () => {
 });
 
 describe('approvals do not gate reading a file', () => {
-  it('session_files_read runs without pausing even when every tool needs approval', async () => {
+  it('read runs without pausing even when every tool needs approval', async () => {
     await createAgent({
       humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always' } },
       attachments: { inlineMaxTokens: 100, readPageChars: 500 },
     });
     const conversation = await newConversation();
     const file = await attach(conversation, 'big.txt', 'word '.repeat(400), 'text/plain');
-    scriptModel((call) => (call === 0 ? toolCall('session_files_read', { fileId: file.id }) : answer('read it')));
+    scriptModel((call) => (call === 0 ? toolCall('read', { fileId: file.id }) : answer('read it')));
 
     const response = await chat(String(conversation._id), 'read the file', [file.id]);
 
@@ -922,7 +939,7 @@ describe('images are seen, survive compaction and later turns', () => {
   const partsOf = (message: { content: unknown }) => message.content as Part[];
   const imageUrls = (messages: Seen) => messages.flatMap((m) => (Array.isArray(m.content) ? partsOf(m as never) : []))
     .filter((part) => part.type === 'image_url').map((part) => part.image_url?.url);
-  const snapshotOf = async (id: string) => (await db.findAgentConversationState(id))!.snapshot;
+  const snapshotOf = async (id: string) => decodeStoredState((await db.findAgentConversationState(id))!.snapshot);
 
   async function vision(config: Partial<IAgentConfig> = {}) {
     setModel({ isMultimodal: true });
@@ -1038,7 +1055,7 @@ describe('images are seen, survive compaction and later turns', () => {
     const earlier = model.seen[1].filter((m) => m.role === 'user')[0];
     const parts = partsOf(earlier);
     expect(parts[0].text).toContain('what are these?');
-    expect(parts[0].text).toContain('The person attached 2 files: 1 document to read with the tools (session_files_list, session_files_read), 1 image shown below.');
+    expect(parts[0].text).toContain('The person attached 2 files: 1 document to read with the tools (session_files_list, read), 1 image shown below.');
     expect(parts[0].text).toContain(`- "notes.txt" (id ${doc.id})`);
     const at = parts.findIndex((part) => part.type === 'image_url');
     expect(parts[at - 1].text).toBe(`[Attached image: "cat.png" (id ${cat.id})]`);
@@ -1080,7 +1097,7 @@ describe('images are seen, survive compaction and later turns', () => {
     expect(shown.filter((part) => part.type === 'image_url')).toHaveLength(2);
     const placeholder = shown.find((part) => part.type === 'text' && part.text!.startsWith('[Image "one.png"'))!;
     expect(placeholder.text).toContain(`(id ${files[0].id}) is not shown`);
-    expect(placeholder.text).toContain('session_files_view_image');
+    expect(placeholder.text).toContain(`Use read with fileId "${files[0].id}" to look at it again.`);
     // The saved state still holds all three references.
     const snapshot = await snapshotOf(id);
     for (const file of files) expect(snapshot).toContain(`session-file://${file.id}`);
@@ -1117,7 +1134,7 @@ describe('images are seen, survive compaction and later turns', () => {
     expect(imageUrls(model.seen[1])).toEqual([]);
   });
 
-  it('the agent can look again: session_files_view_image puts the picture in a message after the tool result', async () => {
+  it('the agent can look again: read on a picture puts it in a message after the tool result', async () => {
     await vision({ attachments: { maxImages: 1 } });
     const conversation = await newConversation();
     const id = String(conversation._id);
@@ -1128,10 +1145,11 @@ describe('images are seen, survive compaction and later turns', () => {
     await chat(id, 'first', [cat.id]);
 
     // maxImages 1: the dog (newest) wins, the cat is a placeholder — until the agent asks for it.
-    const model = scriptModel((call) => (call === 0 ? toolCall('session_files_view_image', { fileId: cat.id }) : answer('looked')));
+    const model = scriptModel((call) => (call === 0 ? toolCall('read', { fileId: cat.id }) : answer('looked')));
     await chat(id, 'now the dog', [dog.id]);
 
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read', 'session_files_view_image']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'read']));
+    expect(model.toolNames).not.toContain('session_files_view_image'); // replaced by read
     const second = model.seen[1];
     const roles = second.map((m) => m.role);
     const toolAt = roles.lastIndexOf('tool');
@@ -1143,46 +1161,53 @@ describe('images are seen, survive compaction and later turns', () => {
     expect(await snapshotOf(id)).not.toContain('Image you asked to see');
   });
 
-  it('offers session_files_view_image only while the session holds an image and the model takes images', async () => {
+  it('offers read whenever the session holds a file — and a text-only model is told it cannot see a picture', async () => {
     await vision();
     const conversation = await newConversation();
     const id = String(conversation._id);
     const doc = await attach(conversation, 'notes.txt', 'text', 'text/plain');
     let model = scriptModel(() => answer('ok'));
     await chat(id, 'a document only', [doc.id]);
+    expect(model.toolNames).toContain('read');
     expect(model.toolNames).not.toContain('session_files_view_image');
 
     const cat = await attach(conversation, 'cat.png', photo(), 'image/png');
     model = scriptModel(() => answer('ok'));
     await chat(id, 'now a picture', [cat.id]);
-    expect(model.toolNames).toContain('session_files_view_image');
+    expect(model.toolNames).toContain('read');
 
     setModel({ isMultimodal: false, modelId: 'in-house-llm-7b' });
-    model = scriptModel(() => answer('ok'));
+    model = scriptModel((call) => (call === 0 ? toolCall('read', { fileId: cat.id }) : answer('ok')));
     await chat(id, 'text-only model');
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'read']));
     expect(model.toolNames).not.toContain('session_files_view_image');
+    const note = model.seen[1].filter((m) => m.role === 'tool').map((m) => String(m.content)).at(-1)!;
+    expect(note).toBe('[cat.png — image image/png, 4 KB] This model cannot view images.');
+    expect(JSON.stringify(model.seen[1])).not.toContain('Image you asked to see');
   });
 
-  it('session_files_read on a picture points at the view tool; a document is refused by the view tool', async () => {
+  it('read on a picture shows it (once, after the result); on a document it returns the numbered lines', async () => {
     await vision();
     const conversation = await newConversation();
     const id = String(conversation._id);
     const cat = await attach(conversation, 'cat.png', photo(), 'image/png');
     const doc = await attach(conversation, 'notes.txt', 'text', 'text/plain');
     const model = scriptModel((call, messages) => {
-      if (call === 0) return toolCall('session_files_read', { fileId: cat.id });
-      if (call === 1) return toolCall('session_files_view_image', { fileId: doc.id });
+      if (call === 0) return toolCall('read', { fileId: cat.id });
+      if (call === 1) return toolCall('read', { fileId: doc.id });
       return answer(JSON.stringify(messages.filter((m) => m.role === 'tool').map((m) => m.content)));
     });
 
     await chat(id, 'look', [cat.id, doc.id]);
 
     const results = model.seen[2].filter((m) => m.role === 'tool').map((m) => String(m.content));
-    expect(results[0]).toBe('This file is an image; it has no text to read. Use session_files_view_image to look at it.');
-    expect(results[1]).toContain('is not an image');
-    // A refusal is plain text: no picture follows it.
-    expect(imageUrls(model.seen[2]).filter((url) => url !== undefined).length).toBe(1); // only the one attached to the turn
+    const picture = JSON.parse(results[0]) as { ok: boolean; text: string; attachedImages: Array<{ fileId: string; name: string }>; note: string };
+    expect(picture).toMatchObject({ ok: true, text: '[cat.png — image image/png, 4 KB]', attachedImages: [{ fileId: cat.id, name: 'cat.png', mimeType: 'image/png' }] });
+    expect(picture.note).toBe('The image is shown to you in the next message.');
+    expect(results[0]).not.toContain('base64');
+    expect(results[1]).toBe('[notes.txt — lines 1-1 of 1]\n     1\ttext');
+    // The picture of the turn, and the one the tool result asked for.
+    expect(imageUrls(model.seen[1])).toHaveLength(2);
   });
 
   it('shows the last carryRecentImages picture-bearing messages again when the agent no longer holds them', async () => {
@@ -1197,9 +1222,10 @@ describe('images are seen, survive compaction and later turns', () => {
 
     // The SDK's window dropped the picture: simulate by taking it out of the saved state.
     const saved = (await db.findAgentConversationState(id))!;
-    const trimmed = JSON.parse(saved.snapshot) as { messages: Array<{ role: string; content: unknown }> };
+    const trimmed = JSON.parse(decodeStoredState(saved.snapshot)) as { messages: Array<{ role: string; content: unknown }> };
     trimmed.messages = trimmed.messages.map((m) => (Array.isArray(m.content) ? { ...m, content: 'what is this? [summarised]' } : m));
-    await db.saveAgentConversationState({ ...saved, snapshot: JSON.stringify(trimmed), sizeBytes: JSON.stringify(trimmed).length });
+    const snapshot = encodeStoredState(JSON.stringify(trimmed));
+    await db.saveAgentConversationState({ ...saved, snapshot, sizeBytes: snapshot.length });
 
     const model = scriptModel(() => answer('it was a cat'));
     await chat(id, 'what colour was the animal?');
@@ -1356,7 +1382,7 @@ describe('review findings: image formats, sizes, typed markers and titles', () =
   type Part = { type: string; text?: string; image_url?: { url?: string } };
   const partsOf = (message: { content: unknown }) => message.content as Part[];
   const allParts = (messages: Seen) => messages.flatMap((m) => (Array.isArray(m.content) ? partsOf(m as never) : []));
-  const snapshotOf = async (id: string) => (await db.findAgentConversationState(id))!.snapshot;
+  const snapshotOf = async (id: string) => decodeStoredState((await db.findAgentConversationState(id))!.snapshot);
 
   async function vision(config: Partial<IAgentConfig> = {}) {
     setModel({ isMultimodal: true });
@@ -1391,7 +1417,7 @@ describe('review findings: image formats, sizes, typed markers and titles', () =
     expect((await stored(id)).messages[0].attachments).toHaveLength(4);
   });
 
-  it('F2-05: an unsupported picture is not carried again, replayed, offered to the view tool or counted as an image', async () => {
+  it('F2-05: an unsupported picture is not carried again, replayed, or counted as an image', async () => {
     await vision({ attachments: { carryRecentImages: 2 } });
     const conversation = await newConversation();
     const id = String(conversation._id);
@@ -1413,25 +1439,23 @@ describe('review findings: image formats, sizes, typed markers and titles', () =
     expect(userTurn(model.seen[0]).content).toBe('again?');
   });
 
-  it('F2-05: the read and view tools say an unsupported picture cannot be shown', async () => {
+  it('F2-05: the read tool says an unsupported picture cannot be shown', async () => {
     await vision();
     const conversation = await newConversation();
     const id = String(conversation._id);
     const tiff = await attach(conversation, 'scan.tiff', photo(200), 'image/tiff');
     const cat = await attach(conversation, 'cat.png', photo(300), 'image/png');
     const model = scriptModel((call, messages) => {
-      if (call === 0) return toolCall('session_files_read', { fileId: tiff.id });
-      if (call === 1) return toolCall('session_files_view_image', { fileId: tiff.id });
-      if (call === 2) return toolCall('session_files_list', {});
+      if (call === 0) return toolCall('read', { fileId: tiff.id });
+      if (call === 1) return toolCall('session_files_list', {});
       return answer(JSON.stringify(messages.filter((m) => m.role === 'tool').map((m) => m.content)));
     });
 
     await chat(id, 'look', [cat.id]);
 
-    const results = model.seen[3].filter((m) => m.role === 'tool').map((m) => String(m.content));
-    expect(results[0]).toBe('This file is an image in a format the model cannot be shown; it has no text to read.');
-    expect(results[1]).toContain('is an image in a format the model cannot be shown');
-    const listed = JSON.parse(results[2]) as Array<{ name: string; image?: boolean; readable: boolean }>;
+    const results = model.seen[2].filter((m) => m.role === 'tool').map((m) => String(m.content));
+    expect(results[0]).toBe('"scan.tiff" is an image in a format (image/tiff) the model cannot be shown; it has no text to read.');
+    const listed = JSON.parse(results[1]) as Array<{ name: string; image?: boolean; readable: boolean }>;
     expect(listed.find((file) => file.name === 'scan.tiff')).toMatchObject({ readable: false });
     expect(listed.find((file) => file.name === 'scan.tiff')).not.toHaveProperty('image');
     expect(listed.find((file) => file.name === 'cat.png')).toMatchObject({ image: true });

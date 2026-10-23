@@ -73,6 +73,11 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     };
 });
 
+vi.mock('@/lib/services/agents/agentReminders', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentReminders')>();
+    return { ...actual, activeRemindersBySession: vi.fn(async () => new Map()) };
+});
+
 vi.mock('@/lib/services/agents/manifestResources', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/manifestResources')>();
     return {
@@ -225,6 +230,7 @@ describe('code export', () => {
 
 describe('sessions', () => {
     it('GET /agents/:agentId/sessions returns summaries, not transcripts', async () => {
+        mockFn(listAgentRuns).mockResolvedValue([]);
         mockFn(listConversations).mockResolvedValue([{
             _id: 'c1', title: 'Incident', agentKey: 'field-ops', projectId: 'proj-1', metadata: {},
             messages: [
@@ -424,6 +430,19 @@ describe('sandbox capabilities', () => {
         const res = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
         expect(res.statusCode).toBe(200);
         expect(parseJsonBody(res.body)).toEqual({ available: false, reason: 'license', templates: [] });
+    });
+});
+
+describe('Console identity details', () => {
+    it('GET /agents/console-identity answers the issuer and key set of the caller\'s workspace', async () => {
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/console-identity' });
+        expect(res.statusCode).toBe(200);
+        const body = parseJsonBody<{ issuer: string; jwksUri: string; discoveryUri: string; algorithm: string; lifetimeSeconds: number }>(res.body);
+        expect(body.issuer).toMatch(/\/api\/public\/identity\/tenant-1$/);
+        expect(body.jwksUri).toBe(`${body.issuer}/.well-known/jwks.json`);
+        expect(body.discoveryUri).toBe(`${body.issuer}/.well-known/openid-configuration`);
+        expect(body).toMatchObject({ algorithm: 'RS256', lifetimeSeconds: 300 });
     });
 });
 

@@ -41,7 +41,6 @@ import RunDetailModal from '@/components/crawler/RunDetailModal';
 import type {
   CrawlerView,
   CrawlJobView,
-  CrawlResultView,
 } from '@/lib/services/crawler';
 
 interface PlanForm {
@@ -119,8 +118,7 @@ export default function CrawlerDetailPage() {
   const [singleCrawlUrl, setSingleCrawlUrl] = useState('');
   const [openJob, setOpenJob] = useState<CrawlJobView | null>(null);
   const [cancelingJob, setCancelingJob] = useState(false);
-  const [jobResults, setJobResults] = useState<CrawlResultView[]>([]);
-  const [resultsLoading, setResultsLoading] = useState(false);
+  const [resultsRefreshKey, setResultsRefreshKey] = useState(0);
   const [syncingToRag, setSyncingToRag] = useState(false);
   const [jobQuery, setJobQuery] = useState('');
   const [jobStatusFilter, setJobStatusFilter] = useState('all');
@@ -687,7 +685,7 @@ export default function CrawlerDetailPage() {
         message: `${summary.indexed} indexed, ${summary.skipped} skipped, ${summary.failed} failed (of ${summary.total} pages)`,
       });
       if (openJob?.id === jobId) {
-        await openJobModal(openJob);
+        setResultsRefreshKey((k) => k + 1);
       }
     } catch (err) {
       notifications.show({
@@ -724,49 +722,6 @@ export default function CrawlerDetailPage() {
         title: 'Error',
         message: err instanceof Error ? err.message : 'Failed',
       });
-    }
-  }
-
-  async function openJobModal(job: CrawlJobView) {
-    setOpenJob(job);
-    setResultsLoading(true);
-    setJobResults([]);
-    try {
-      if (!job.id) {
-        throw new Error('Job is missing its id (data not serialized correctly)');
-      }
-      // A single `limit=200` request silently truncated the table for any
-      // job with more than 200 results (e.g. 232 pages + 5 files + 2 errors
-      // = 239) — the Runs tab looked complete but was missing the tail end.
-      // Page through with skip/limit until a short page confirms we've
-      // reached the end, so jobs of any size are fully shown.
-      const pageSize = 200;
-      const all: CrawlResultView[] = [];
-      let skip = 0;
-      for (;;) {
-        const res = await fetch(
-          `/api/crawler/jobs/${job.id}/results?limit=${pageSize}&skip=${skip}`,
-          { cache: 'no-store' },
-        );
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || `Server returned ${res.status}`);
-        }
-        const data = await res.json();
-        const batch: CrawlResultView[] = data.results ?? [];
-        all.push(...batch);
-        if (batch.length < pageSize) break;
-        skip += pageSize;
-      }
-      setJobResults(all);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Failed to load results',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    } finally {
-      setResultsLoading(false);
     }
   }
 
@@ -1393,7 +1348,7 @@ Content-Type: application/json
           <DataGrid<CrawlJobView>
             records={filteredJobs}
             rowKey={(j) => j.id}
-            onRowClick={(j) => void openJobModal(j)}
+            onRowClick={(j) => setOpenJob(j)}
             columns={jobColumns}
             onRefresh={loadJobs}
             search={{
@@ -1446,18 +1401,14 @@ Content-Type: application/json
 
       <RunDetailModal
         job={openJob}
-        results={jobResults}
-        loading={resultsLoading}
+        refreshKey={resultsRefreshKey}
         canceling={cancelingJob}
         onCancel={(jobId) => void cancelJob(jobId)}
         ragModules={ragModules}
         defaultRagModuleKey={crawler?.rag?.ragModuleKey}
         onSyncToRag={syncJobToRag}
         syncingToRag={syncingToRag}
-        onClose={() => {
-          setOpenJob(null);
-          setJobResults([]);
-        }}
+        onClose={() => setOpenJob(null)}
       />
 
       {crawler ? (

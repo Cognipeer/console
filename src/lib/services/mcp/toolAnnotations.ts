@@ -22,6 +22,8 @@ export interface ResolvedMcpToolAnnotations {
 
 export interface McpToolDescriptor {
   name: string;
+  /** Display name (MCP `Tool.title`); always the same text as `annotations.title`. */
+  title: string;
   description: string;
   inputSchema: Record<string, unknown>;
   annotations: ResolvedMcpToolAnnotations;
@@ -29,6 +31,7 @@ export interface McpToolDescriptor {
 
 interface AnnotatableTool {
   name: string;
+  title?: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
   annotations?: IMcpToolAnnotations;
@@ -63,7 +66,8 @@ export function resolveToolAnnotations(
   const openWorldHint = declared.openWorldHint ?? defaults.openWorldHint ?? true;
 
   return {
-    title: declared.title ?? defaults.title ?? tool.name,
+    // MCP display precedence: `Tool.title`, then `annotations.title` (an operator's override sets both).
+    title: tool.title ?? declared.title ?? defaults.title ?? tool.name,
     readOnlyHint,
     destructiveHint,
     idempotentHint,
@@ -76,11 +80,13 @@ export function describeMcpTool(
   tool: AnnotatableTool,
   defaults?: IMcpToolAnnotations,
 ): McpToolDescriptor {
+  const annotations = resolveToolAnnotations(tool, defaults);
   return {
     name: tool.name,
+    title: annotations.title,
     description: tool.description ?? '',
     inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
-    annotations: resolveToolAnnotations(tool, defaults),
+    annotations,
   };
 }
 

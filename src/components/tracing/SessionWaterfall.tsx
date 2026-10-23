@@ -114,6 +114,7 @@ export default function SessionWaterfall({ nodes, windowStart, windowEnd, select
                 {node.parallel > 1 ? <Text size="10px" c="dimmed" style={{ flexShrink: 0 }}>∥{node.parallel}</Text> : null}
                 {node.resumed ? <Text size="10px" c="yellow.8" fw={600} style={{ flexShrink: 0 }}>resumed</Text> : null}
                 {node.waiting ? <Text size="10px" c="yellow.8" fw={600} style={{ flexShrink: 0 }}>waiting</Text> : null}
+                {node.running ? <Text size="10px" c="blue.7" fw={600} style={{ flexShrink: 0 }}>running</Text> : null}
               </Group>
 
               <Tooltip label={tooltip} withArrow openDelay={150} multiline maw={360}>

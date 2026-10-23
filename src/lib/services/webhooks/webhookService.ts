@@ -24,6 +24,7 @@ import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { IWebhookDelivery, IWebhookEndpoint, WebhookDisabledReason } from '@/lib/database';
 import { decryptObject } from '@/lib/utils/crypto';
+import { isServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { eventMatches } from './webhookEvents';
 import { sendSignedWebhook, type WebhookSendResult } from './webhookDeliverer';
 
@@ -109,6 +110,11 @@ export interface PublishWebhookEventInput {
  */
 export async function publishWebhookEvent(input: PublishWebhookEventInput): Promise<{ eventId: string | null; deliveries: number }> {
   try {
+    // Webhooks switched off for this tenant: publish nothing, so no delivery
+    // rows pile up that could never be sent.
+    if (!(await isServiceEnabled({ tenantDbName: input.tenantDbName, tenantId: input.tenantId }, 'webhooks'))) {
+      return { eventId: null, deliveries: 0 };
+    }
     return await inTenant(input.tenantDbName, async (db) => {
       const scopes: Array<string | null> = input.projectId ? [input.projectId, null] : [null];
       const endpoints = await db.listWebhookEndpoints(input.tenantId, { projectScopes: scopes, status: 'active' });
@@ -276,6 +282,16 @@ export async function deliverWebhookJob(job: WebhookDeliveryJob): Promise<void> 
     const claimed = await db.claimWebhookDelivery(job.deliveryId, now, leaseUntil);
     // Not due, already delivered, or another worker holds it.
     if (!claimed) return;
+    // Queued before the service was switched off: failed on the row and the
+    // job acknowledged, never retried.
+    const off = await serviceOffReason({ tenantDbName: job.tenantDbName, tenantId: claimed.tenantId }, 'webhooks');
+    if (off) {
+      const refusal = new ServiceDisabledError(off);
+      await db.updateWebhookDelivery(job.deliveryId, {
+        status: 'failed', nextAttemptAt: null, lastError: `${refusal.code}: ${refusal.message}`,
+      });
+      return;
+    }
     await runClaimedWebhookDelivery(db, claimed);
   });
 }

@@ -27,6 +27,7 @@ import {
 } from './openaiAudioHelpers';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { createVlmOcrRuntime } from './vlmOcrHelpers';
+import { normalizeAnthropicBaseUrl } from './anthropicBaseUrl';
 import { OPENAI_REALTIME_TRANSCRIPTION_URL } from './openaiRealtimeTranscription';
 
 interface OpenAiCredentials {
@@ -723,7 +724,7 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
             type: 'text',
             required: false,
             placeholder: 'https://api.anthropic.com',
-            description: 'Leave empty for Anthropic. Set it to point at a proxy or a gateway that speaks the Messages API.',
+            description: 'Leave empty for Anthropic. For Azure AI Foundry use https://<resource>.services.ai.azure.com/anthropic (no /v1/messages: the client adds it), and the deployment name as the model id.',
             scope: 'settings',
           },
         ],
@@ -732,9 +733,7 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
   },
   createRuntime: ({ credentials, settings }) => {
     const apiKey = ensureValue(credentials.apiKey, 'Anthropic API key is required.');
-    const baseUrl = typeof settings.baseUrl === 'string' && settings.baseUrl.trim()
-      ? settings.baseUrl.trim()
-      : undefined;
+    const baseUrl = normalizeAnthropicBaseUrl(typeof settings.baseUrl === 'string' ? settings.baseUrl : undefined);
 
     const runtime: ModelProviderRuntime = {
       ...nativeClientMethods('anthropic', () => runtime),

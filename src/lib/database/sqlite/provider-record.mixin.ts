@@ -83,9 +83,9 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
       let sql: string;
       if (projectId) {
         // Support legacy single-project providers (projectId) and multi-assigned providers (projectIds JSON array)
-        sql = `SELECT * FROM ${TABLES.providers} WHERE tenantId = @tenantId AND key = @key AND (projectId = @projectId OR projectIds LIKE @projectIdLike)`;
+        sql = `SELECT * FROM ${TABLES.providers} WHERE tenantId = @tenantId AND key = @key AND (projectId = @projectId OR ${this.likeAny(['projectIds'], '@projectIdLike')})`;
         params.projectId = projectId;
-        params.projectIdLike = `%"${projectId}"%`;
+        params.projectIdLike = this.likePattern(`"${projectId}"`);
       } else {
         sql = `SELECT * FROM ${TABLES.providers} WHERE tenantId = @tenantId AND key = @key`;
       }
@@ -105,9 +105,9 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
       if (filters?.driver) { clauses.push('driver = @driver'); params.driver = filters.driver; }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.projectId) {
-        clauses.push('(projectId = @projectId OR projectIds LIKE @projectIdLike)');
+        clauses.push(`(projectId = @projectId OR ${this.likeAny(['projectIds'], '@projectIdLike')})`);
         params.projectId = filters.projectId;
-        params.projectIdLike = `%"${filters.projectId}"%`;
+        params.projectIdLike = this.likePattern(`"${filters.projectId}"`);
       }
 
       const where = `WHERE ${clauses.join(' AND ')}`;

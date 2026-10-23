@@ -2328,6 +2328,29 @@ describe('handleEmbeddingRequest', () => {
     ).rejects.toThrow('`input` must be a string or an array of strings');
   });
 
+  it('serves from the first enabled replica and skips a disabled one', async () => {
+    const model = {
+      ...makeEmbeddingModel(),
+      replicas: [
+        { providerKey: 'off-provider', modelId: 'off-model', enabled: false },
+        { providerKey: 'on-provider', modelId: 'on-model' },
+      ],
+    };
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model);
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: makeEmbeddingRuntime([[0.1]]),
+    });
+
+    await handleEmbeddingRequest({
+      tenantDbName: 'tenant_acme',
+      modelKey: 'emb-model',
+      projectId: 'proj-1',
+      body: { input: 'hello' },
+    });
+
+    expect((buildModelRuntime as ReturnType<typeof vi.fn>).mock.calls[0][2]).toBe('on-provider');
+  });
+
   it('returns embeddings for a single string input', async () => {
     const model = makeEmbeddingModel();
     const vectors = [[0.1, 0.2, 0.3]];

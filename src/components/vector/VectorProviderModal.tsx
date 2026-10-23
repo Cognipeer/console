@@ -20,6 +20,7 @@ import { IconAlertCircle } from '@tabler/icons-react';
 import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
 import type { VectorProviderView } from '@/lib/services/vector';
 import ProviderFormRenderer from '../providers/ProviderFormRenderer';
+import { partitionProviderValues } from '../providers/providerFormModel';
 
 interface VectorProviderModalProps {
   opened: boolean;
@@ -33,44 +34,6 @@ interface FormValues extends Record<string, unknown> {
   label: string;
   description?: string;
   status: boolean;
-}
-
-interface FieldBuckets {
-  credentials: Record<string, unknown>;
-  settings: Record<string, unknown>;
-  metadata: Record<string, unknown>;
-}
-
-function partitionValues(
-  schema: ProviderFormSchema | null,
-  values: FormValues,
-): FieldBuckets {
-  const buckets: FieldBuckets = {
-    credentials: {},
-    settings: {},
-    metadata: {},
-  };
-
-  if (!schema) {
-    return buckets;
-  }
-
-  schema.sections.forEach((section) => {
-    section.fields.forEach((field) => {
-      const scope = field.scope ?? 'credentials';
-      const value = values[field.name];
-      if (
-        value === undefined ||
-        value === null ||
-        (typeof value === 'string' && value.trim() === '')
-      ) {
-        return;
-      }
-      buckets[scope as keyof FieldBuckets][field.name] = value;
-    });
-  });
-
-  return buckets;
 }
 
 export default function VectorProviderModal({
@@ -205,7 +168,7 @@ export default function VectorProviderModal({
       return;
     }
 
-    const buckets = partitionValues(schema, values);
+    const buckets = partitionProviderValues(schema, values);
 
     try {
       const response = await fetch('/api/vector/providers', {

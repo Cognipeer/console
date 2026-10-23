@@ -62,6 +62,7 @@ import McpToolsPanel from '@/components/mcp/McpToolsPanel';
 import McpMembersPanel from '@/components/mcp/McpMembersPanel';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
+import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
 
 const AUTH_LABELS: Record<string, string> = {
@@ -69,6 +70,7 @@ const AUTH_LABELS: Record<string, string> = {
   token: 'Bearer Token',
   header: 'Custom Header',
   basic: 'Basic Auth',
+  console_identity: 'Console identity',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -86,6 +88,7 @@ const INTERNAL_PROVIDER_LINKS: Record<string, (instanceKey: string) => { href: s
     label: 'Knowledge Engine',
   }),
   'agent-observability': () => ({ href: '/dashboard/tracing', label: 'Agent Observability' }),
+  browser: () => ({ href: '/dashboard/browser', label: 'Browser' }),
 };
 
 function getInternalServiceLink(server: McpServerView): { href: string; label: string } | null {
@@ -184,6 +187,7 @@ export default function McpDetailPage() {
     stdioSandbox: { available: boolean };
     guardrail?: { available: boolean };
     aegis?: { hookAvailable: boolean };
+    consoleIdentity?: ConsoleIdentityIssuerInfo;
   } | null>(null);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
   const [savingGuardrail, setSavingGuardrail] = useState(false);
@@ -213,6 +217,7 @@ export default function McpDetailPage() {
     initialValues: {
       name: '',
       description: '',
+      instructions: '',
       upstreamBaseUrl: '',
       authType: 'none' as string,
       authToken: '',
@@ -258,6 +263,7 @@ export default function McpDetailPage() {
       form.setValues({
         name: data.server.name || '',
         description: data.server.description || '',
+        instructions: data.server.instructions || '',
         upstreamBaseUrl: data.server.upstreamBaseUrl || '',
         authType: data.server.upstreamAuth?.type || 'none',
         // Secrets come back masked (••••••) when present. Prefill the masked
@@ -570,6 +576,10 @@ export default function McpDetailPage() {
         name: values.name,
         description: values.description || undefined,
       };
+      // Blank clears the operator's text, so the source's own instructions apply again.
+      if (values.instructions.trim() !== (server?.instructions ?? '')) {
+        update.instructions = values.instructions.trim() || null;
+      }
 
       // Upstream auth applies to openapi/remote sources; stdio talks over
       // stdin/stdout and authenticates via env vars instead.
@@ -2099,6 +2109,35 @@ async with sse_client(
               />
             </FormField>
           </FormRow>
+          <FormRow cols={1}>
+            <FormField
+              label="Instructions"
+              optional
+              hint={server.discoveredInstructions
+                ? 'Sent to MCP clients when they connect; clients may add it to the model\'s system prompt. '
+                  + 'Leave empty to send the instructions this server\'s source provides.'
+                : 'Sent to MCP clients when they connect; clients may add it to the model\'s system prompt. '
+                  + 'Say how the tools fit together — which to call first, limits, scope.'}
+              action={server.discoveredInstructions && !form.values.instructions.trim() ? (
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() => form.setFieldValue('instructions', server.discoveredInstructions ?? '')}
+                >
+                  Edit source text
+                </Button>
+              ) : undefined}
+            >
+              <Textarea
+                placeholder={server.discoveredInstructions ?? 'e.g. Call search first; pass the documentId it returns to read_document.'}
+                minRows={3}
+                maxRows={12}
+                autosize
+                maxLength={8000}
+                {...form.getInputProps('instructions')}
+              />
+            </FormField>
+          </FormRow>
         </FormSection>
 
         <FormSection
@@ -2222,6 +2261,10 @@ async with sse_client(
                     { value: 'token', label: 'Bearer Token' },
                     { value: 'header', label: 'Custom Header' },
                     { value: 'basic', label: 'Basic Auth' },
+                    // Console identity needs an upstream URL to mint the token for: remote and OpenAPI servers.
+                    ...(server.sourceType === 'remote' || (server.sourceType ?? 'openapi') === 'openapi'
+                      ? [{ value: 'console_identity', label: 'Console identity' }]
+                      : []),
                   ]}
                   {...form.getInputProps('authType')}
                 />
@@ -2256,6 +2299,10 @@ async with sse_client(
                   <PasswordInput {...form.getInputProps('authPassword')} />
                 </FormField>
               </FormRow>
+            )}
+
+            {form.values.authType === 'console_identity' && (
+              <ConsoleIdentityNote info={caps?.consoleIdentity} />
             )}
           </FormSection>
         ) : null}

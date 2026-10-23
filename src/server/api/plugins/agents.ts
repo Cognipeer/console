@@ -8,8 +8,9 @@ import {
 } from '@/lib/services/agents/import/importService';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
-import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentSessionBudget, IUser } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentConversationActivityRow, IAgentConversationMessageTally, IAgentRun, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { consoleIdentityIssuerInfo } from '@/lib/iam/consoleIdentity';
 import {
   createAgentRecord,
   createConversation,
@@ -50,6 +51,7 @@ import {
   AgentManifestError,
   manifestErrorStatus,
   applyAgentManifest,
+  ConfigReferenceForbiddenError,
   buildAgentManifest,
   parseAgentManifest,
   previewAgentImport,
@@ -76,6 +78,7 @@ import {
 import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
+import { readSessionPlan } from '@/lib/services/agents/sessionPlan';
 import { DASHBOARD_AGENT_HITL_DEFAULTS } from '@/lib/services/agents/agentHumanInTheLoop';
 import {
   pendingActionsBlockingMessage,
@@ -116,6 +119,16 @@ import {
   type SessionNeed,
 } from './agent-session-access';
 import { resolveSessionOwners, type SessionOwner } from '@/lib/services/agents/sessionOwners';
+import { decodeActivityCursor, listProjectSessions, SESSION_LIST_MAX_LIMIT } from '@/lib/services/agents/sessionList';
+import { isRunInFlight, isSessionActive, isSessionOngoing } from '@/lib/services/agents/sessionActivityState';
+import {
+  activeRemindersBySession,
+  cancelReminder,
+  fireReminderNow,
+  listReminders,
+  reminderPlatformLimits,
+  serializeReminder,
+} from '@/lib/services/agents/agentReminders';
 import {
   applyStreamHeaders,
   readJsonBody,
@@ -128,6 +141,7 @@ import {
   applyConfigGuardrailBindings,
   bucketNamingForbiddenBody,
   connectedConfigForUpdate,
+  prepareConnectedAgentIdentity,
   invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
@@ -139,6 +153,7 @@ import {
   validateNativeConfigUpdate,
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
+import { configReadRequiredBody, requestHasConfigRead } from './config-permission';
 import { sessionHasAgentsPermission } from './agents-permission';
 import {
   FeedbackError,
@@ -286,7 +301,7 @@ async function answerabilityOfRow(
   request: FastifyRequest,
   tenantDbName: string,
   agent: Pick<IAgent, '_id' | 'key'>,
-  conversation: IAgentConversation,
+  conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus'>,
   actor: { tenantDbName: string; projectId: string; userId: string },
 ): Promise<{ canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null> {
   if (conversation.runtimeStatus !== 'requires_action') return null;
@@ -632,7 +647,9 @@ function openLazyEventStream(reply: FastifyReply, enabled: boolean) {
 const WAITING_ROWS_ANSWERABILITY_LIMIT = 50;
 
 function summariseConversation(
-  conversation: IAgentConversation,
+  // A full conversation or a list row that carries only message tallies - all a summary reads.
+  conversation: Pick<IAgentConversation, '_id' | 'title' | 'createdAt' | 'updatedAt' | 'metadata' | 'createdBy' | 'runtimeStatus' | 'budget' | 'spentUsd'>
+    & { messages?: ReadonlyArray<IAgentConversationMessageTally> },
   owner?: SessionOwner,
   answerability?: { canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null,
   viewerId?: string,
@@ -707,6 +724,93 @@ function summariseConversation(
   };
 }
 
+/** The `channel` values a run can carry (the runs list filters on them). */
+const RUN_CHANNEL_VALUES = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger', 'reminder'] as const satisfies ReadonlyArray<NonNullable<IAgentRun['channel']>>;
+
+/** A session row's run that is waiting for its time, queued or running. */
+interface ActiveRunRow { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }
+
+/** The run each session of the agent (of the whole project without `agentKey`) is waiting on or running now (a reminder's own wait is not one), newest first. */
+async function activeRunsBySession(
+  tenantDbName: string,
+  filter: { tenantId: string; projectId: string; agentKey?: string },
+): Promise<Map<string, ActiveRunRow>> {
+  const runs = await listAgentRuns(tenantDbName, {
+    ...filter,
+    excludeModes: ['sync'],
+    status: ['scheduled', 'queued', 'running'],
+    limit: 500,
+  });
+  const out = new Map<string, ActiveRunRow>();
+  for (const run of runs) {
+    if (out.has(run.conversationId)) continue;
+    if (run.status === 'scheduled' && run.channel === 'reminder') continue;
+    out.set(run.conversationId, {
+      id: `run_${String(run._id)}`,
+      status: run.status,
+      ...(run.notBefore ? { scheduledFor: Math.floor(new Date(run.notBefore).getTime() / 1000) } : {}),
+      cancelRequested: Boolean(run.cancelRequestedAt),
+    });
+  }
+  return out;
+}
+
+/** What the Sessions list says of a session's agent (the dashboard opens a session through it). */
+type SessionAgent = Pick<IAgent, '_id' | 'key' | 'name'>;
+
+/**
+ * The agents the given sessions ran on, by key. Those of the project first; a key it does not hold is looked
+ * for once among the tenant's agents (one stored without a project is tenant-wide). A session whose agent is
+ * not found stays out of the map: every session route is addressed through an agent, so nothing could open it.
+ */
+async function agentsOfSessions(
+  tenantDbName: string,
+  projectId: string,
+  sessions: ReadonlyArray<Pick<IAgentConversation, 'agentKey'>>,
+): Promise<Map<string, SessionAgent>> {
+  const agents = new Map<string, SessionAgent>();
+  for (const agent of await listAgents(tenantDbName, { projectId })) agents.set(agent.key, agent);
+  if (sessions.some((entry) => !agents.has(entry.agentKey))) {
+    for (const agent of await listAgents(tenantDbName)) {
+      if (agents.has(agent.key)) continue;
+      if (!agent.projectId || String(agent.projectId) === String(projectId)) agents.set(agent.key, agent);
+    }
+  }
+  return agents;
+}
+
+/** The sessions a trigger's runs ran in, newest first (Triggers → history). */
+async function sessionsOfTrigger(
+  tenantDbName: string,
+  filter: { tenantId: string; projectId: string; agentKey: string; triggerId: string; createdBy?: string },
+): Promise<IAgentConversation[]> {
+  const runs = await listAgentRuns(tenantDbName, {
+    tenantId: filter.tenantId,
+    projectId: filter.projectId,
+    agentKey: filter.agentKey,
+    triggerId: filter.triggerId,
+    excludeModes: ['sync'],
+    limit: 100,
+  });
+  const ids = [...new Set(runs.map((run) => run.conversationId))];
+  const found = await Promise.all(ids.map((id) => getConversationById(tenantDbName, id).catch(() => null)));
+  return found.filter((conversation): conversation is IAgentConversation => Boolean(conversation)
+    && conversation!.projectId === filter.projectId
+    && conversation!.agentKey === filter.agentKey
+    && (!filter.createdBy || conversation!.createdBy === filter.createdBy));
+}
+
+/** Session titles for the reminders list (at most 50 sessions are looked up). */
+async function sessionTitles(tenantDbName: string, projectId: string, ids: string[]): Promise<Map<string, string>> {
+  const distinct = [...new Set(ids)].slice(0, 50);
+  const found = await Promise.all(distinct.map((id) => getConversationById(tenantDbName, id).catch(() => null)));
+  const out = new Map<string, string>();
+  for (const conversation of found) {
+    if (conversation && conversation.projectId === projectId && conversation.title) out.set(String(conversation._id), conversation.title);
+  }
+  return out;
+}
+
 export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents', withApiRequestContext(async (request, reply) => {
     try {
@@ -741,6 +845,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         user,
         canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+        canReferenceConfig: () => requestHasConfigRead(request, projectId),
       });
       if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
@@ -815,6 +920,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           if (bindingError) {
             return reply.code(400).send({ error: bindingError });
           }
+          await prepareConnectedAgentIdentity(externalConfig, session.tenantDbName);
           body.config = externalConfig;
         } else if (existing.config?.kind === 'external') {
           // Guard: never let a native-shaped config silently clobber a stored
@@ -827,6 +933,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             projectId,
             user,
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+            canReferenceConfig: () => requestHasConfigRead(request, projectId),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('conflict' in checked) return reply.code(409).send(checked.conflict);
@@ -1028,6 +1135,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           allowMissingDependencies: body.allowMissingDependencies,
           // Importing is a config write like any other: naming a bucket takes the right to name it.
           canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+          canReferenceConfig: () => requestHasConfigRead(request, projectId),
         },
       );
 
@@ -1035,8 +1143,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         agent: redactAgent(result.agent),
         action: result.action,
         missing: result.missing,
+        warnings: result.warnings,
       });
     } catch (error) {
+      if (error instanceof ConfigReferenceForbiddenError) {
+        return reply.code(403).send(configReadRequiredBody(error.field));
+      }
       if (error instanceof BucketNamingForbiddenError) {
         return reply.code(403).send(bucketNamingForbiddenBody(error));
       }
@@ -1058,6 +1170,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   const sendImportError = (reply: FastifyReply, error: unknown) => {
     if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
     if (error instanceof BucketNamingForbiddenError) return reply.code(403).send(bucketNamingForbiddenBody(error));
+    if (error instanceof ConfigReferenceForbiddenError) return reply.code(403).send(configReadRequiredBody(error.field));
     if (error instanceof AgentImportError) {
       return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
     }
@@ -1098,6 +1211,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           projectId,
           userId: String(user._id),
           canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+          canReferenceConfig: () => requestHasConfigRead(request, projectId),
         },
         body,
       );
@@ -1230,6 +1344,17 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // What a connected agent set up for Console identity verifies its tokens
+  // against (shown on the connect and settings screens).
+  app.get('/agents/console-identity', withApiRequestContext(async (request, reply) => {
+    try {
+      const { session } = await requireProjectContextForRequest(request);
+      return reply.code(200).send(consoleIdentityIssuerInfo(session.tenantId));
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent Console identity error', 'Failed to read Console identity details');
+    }
+  }));
+
   // Effective run limits for this tenant/project (env ∧ quota). Agents have no
   // say in them any more; the Studio shows them for reference.
   app.get('/agents/execution/limits', withApiRequestContext(async (request, reply) => {
@@ -1261,8 +1386,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; triggerId?: string; trigger?: string };
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; triggerId?: string; trigger?: string; channel?: string };
       const trigger = AGENT_RUN_TRIGGERS.find((value) => value === query.trigger);
+      const channels = (query.channel ?? '').split(',').filter((value): value is NonNullable<IAgentRun['channel']> => (RUN_CHANNEL_VALUES as readonly string[]).includes(value));
       const allowed = new Set(['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
       const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'scheduled' | 'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
@@ -1289,10 +1415,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         // A trigger's history (Studio's Triggers list links here).
         ...(query.triggerId ? { triggerId: query.triggerId } : {}),
         ...(trigger ? { trigger } : {}),
+        ...(channels.length === 1 ? { channel: channels[0] } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });
-      return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
+      const shown = channels.length > 1 ? runs.filter((run) => run.channel && channels.includes(run.channel)) : runs;
+      return reply.code(200).send({ runs: shown.map(serializeAgentRun) });
     } catch (error) {
       return sendRouteError(reply, error, 'List agent runs error', 'Failed to list runs');
     }
@@ -1337,6 +1465,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           }
         }
       }
+      if (existing.channel === 'reminder' && existing.status === 'scheduled') {
+        const canceled = await cancelReminder(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+          runId,
+          { agentKey: agent.key, actor: { userId: session.userId, via: 'dashboard' } },
+        );
+        if (canceled.kind === 'canceled') return reply.code(200).send({ run: serializeAgentRun(canceled.run) });
+      }
       const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
       if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
       if (outcome.kind === 'already_terminal') {
@@ -1345,6 +1481,95 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ run: serializeAgentRun(outcome.run) });
     } catch (error) {
       return sendRouteError(reply, error, 'Cancel agent run error', 'Failed to cancel run');
+    }
+  }));
+
+  // A reminder that has not fired yet, started now (Sessions → Reminders "Fire now").
+  app.post('/agents/:agentId/runs/:runId/fire', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const { runId } = request.params as { runId: string };
+      const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
+      if (!existing || existing.agentKey !== agent.key || existing.channel !== 'reminder') {
+        return reply.code(404).send({ error: 'Reminder not found' });
+      }
+      // Firing a reminder runs a turn in its session: the session's owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const conversation = await getConversationById(session.tenantDbName, existing.conversationId);
+      if (!conversation || conversation.projectId !== projectId) return reply.code(404).send({ error: 'Reminder not found' });
+      const access = await decideSessionAccess(request, conversation, {
+        need: 'manage',
+        agent,
+        actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        alsoOwnedBy: [existing.userId],
+      });
+      if (!access.ok) return sendSessionRefusal(reply, request, access);
+      const outcome = await fireReminderNow(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        runId,
+        { agentKey: agent.key, actor: { userId: session.userId, via: 'dashboard' } },
+      );
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Reminder not found' });
+      if (outcome.kind === 'not_scheduled') return reply.code(409).send({ error: `The reminder is already ${outcome.run.status}` });
+      if (outcome.kind === 'busy') return reply.code(409).send({ error: outcome.message });
+      return reply.code(200).send({ run: serializeAgentRun(outcome.run), reminder: serializeReminder(outcome.run) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Fire agent reminder error', 'Failed to fire the reminder');
+    }
+  }));
+
+  // The reminders the agent set itself, newest first (Sessions → Reminders; a session's own with `sessionId`).
+  app.get('/agents/:agentId/reminders', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const query = (request.query ?? {}) as { status?: string; limit?: string; sessionId?: string };
+      const actor = { tenantDbName: session.tenantDbName, projectId, userId: session.userId };
+      const reminderScope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const scope = await sessionListScope(request, { agent, projectId, actor });
+      if (query.sessionId) {
+        const loaded = await loadSessionForPrincipal(request, query.sessionId, { need: 'view', agentKey: agent.key, agent, projectId, actor });
+        if (!loaded.ok) return sendSessionRefusal(reply, request, loaded);
+      }
+      // Somebody who may not view other people's sessions sees the reminders of their own (one session they may view: all of it).
+      const ownOnly = !query.sessionId && scope.ownOnly ? { userId: scope.userId } : {};
+      const limit = Math.min(Math.max(Number(query.limit) || 100, 1), 500);
+      const [runs, active] = await Promise.all([
+        listReminders(reminderScope, {
+          agentKey: agent.key,
+          ...(query.sessionId ? { conversationId: query.sessionId } : {}),
+          active: query.status !== 'all',
+          ...ownOnly,
+          limit,
+        }),
+        listReminders(reminderScope, { agentKey: agent.key, ...(query.sessionId ? { conversationId: query.sessionId } : {}), active: true, ...ownOnly, limit: 500 }),
+      ]);
+      const owners = await resolveSessionOwners(runs.map((run) => run.userId));
+      const titles = await sessionTitles(session.tenantDbName, projectId, runs.map((run) => run.conversationId));
+      return reply.code(200).send({
+        reminders: runs.map((run) => {
+          const owner = run.userId ? owners.get(run.userId) : undefined;
+          const title = titles.get(run.conversationId);
+          return { ...serializeReminder(run), ...(owner ? { owner } : {}), ...(title ? { session_title: title } : {}) };
+        }),
+        summary: { active: active.length },
+        scope: { viewOthers: !scope.ownOnly },
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent reminders error', 'Failed to list reminders');
+    }
+  }));
+
+  // The platform ceilings of agent reminders (env), for the Configure hints.
+  app.get('/agents/reminder-limits', withApiRequestContext(async (request, reply) => {
+    try {
+      await requireProjectContextForRequest(request);
+      return reply.code(200).send({ limits: reminderPlatformLimits() });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent reminder limits error', 'Failed to read reminder limits');
     }
   }));
 
@@ -1399,6 +1624,121 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // A Session is the conversation record, presented under the name the
   // Sessions page uses.
 
+  // Every agent's sessions of the project in one list (Agents → Sessions): `view=active` holds the ones in
+  // progress or waiting on someone (running ones first; `hasMore` without a cursor says some were left out),
+  // `view=all` pages through everything by last activity. Static, so it wins over `/agents/:agentId`.
+  app.get('/agents/sessions', withApiRequestContext(async (request, reply) => {
+    try {
+      const query = (request.query ?? {}) as { view?: unknown; limit?: unknown; cursor?: unknown };
+      const view = query.view ?? 'all';
+      if (view !== 'active' && view !== 'all') return reply.code(400).send({ error: 'view must be "active" or "all"' });
+      const limit = query.limit === undefined ? 50 : typeof query.limit === 'string' && /^\d+$/.test(query.limit) ? Number(query.limit) : 0;
+      if (limit < 1 || limit > SESSION_LIST_MAX_LIMIT) {
+        return reply.code(400).send({ error: `limit must be an integer between 1 and ${SESSION_LIST_MAX_LIMIT}` });
+      }
+      // The Active list is not paged, so it has no cursor to follow.
+      let before: { updatedAt: Date; id: string } | undefined;
+      if (view === 'all' && query.cursor !== undefined && query.cursor !== '') {
+        const decoded = typeof query.cursor === 'string' ? decodeActivityCursor(query.cursor) : null;
+        if (!decoded) return reply.code(400).send({ error: 'cursor is not valid' });
+        before = decoded;
+      }
+
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const actor = { tenantDbName: session.tenantDbName, projectId, userId: session.userId };
+      // Without an agent: the viewer's scope across the project's agents (their own sessions, plus every
+      // session of the agents they may view), applied in the database before the page is cut.
+      const scope = await sessionListScope(request, { projectId, actor });
+
+      const reminderScope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      // What each row is waiting on or running, best effort: the list itself never fails over it.
+      const decoration = <T,>(what: string) => (error: unknown): Map<string, T> => {
+        logger.warn(`Project sessions list: ${what} not shown`, { error: error instanceof Error ? error.message : String(error) });
+        return new Map();
+      };
+      const [activeRuns, reminders] = await Promise.all([
+        activeRunsBySession(session.tenantDbName, { tenantId: session.tenantId, projectId })
+          .catch(decoration<ActiveRunRow>('active runs')),
+        activeRemindersBySession(reminderScope)
+          .catch(decoration<{ active: number; nextAt: Date }>('reminders')),
+      ]);
+
+      // Sessions with a run queued or running: their "running" status is not questioned (no stale-run lookup per row).
+      const knownInFlight = new Set([...activeRuns].filter(([, run]) => isRunInFlight(run)).map(([id]) => id));
+
+      let rows: IAgentConversationActivityRow[];
+      let hasMore = false;
+      let nextCursor: string | undefined;
+      if (view === 'all') {
+        ({ sessions: rows, hasMore, nextCursor } = await listProjectSessions(session.tenantDbName, { projectId, ownOnly: scope.ownOnly, limit, before, knownInFlight }));
+      } else {
+        // Running sessions and waiting ones are asked apart, so a crowd of waiting sessions (a status flip does not
+        // bump `updatedAt`) cannot push a running one out of its query; plus the sessions with a run queued or
+        // running that has not marked its session yet. A session whose turn died is read as idle and falls out below.
+        const common = { projectId, ownOnly: scope.ownOnly, limit: SESSION_LIST_MAX_LIMIT, knownInFlight };
+        const [running, waiting] = await Promise.all([
+          listProjectSessions(session.tenantDbName, { ...common, runtimeStatuses: ['running'] }),
+          listProjectSessions(session.tenantDbName, { ...common, runtimeStatuses: ['requires_action', 'budget_paused'] }),
+        ]);
+        const listed = new Set([...running.sessions, ...waiting.sessions].map((entry) => String(entry._id)));
+        const unlisted = [...knownInFlight].filter((id) => !listed.has(id));
+        const byRun = unlisted.length > 0
+          ? await listProjectSessions(session.tenantDbName, { ...common, ids: unlisted.slice(0, SESSION_LIST_MAX_LIMIT) })
+          : { sessions: [], hasMore: false };
+        const stamp = (entry: IAgentConversationActivityRow) => new Date(entry.updatedAt ?? 0).getTime();
+        const newestFirst = (a: IAgentConversationActivityRow, b: IAgentConversationActivityRow) => stamp(b) - stamp(a) || (String(a._id) < String(b._id) ? 1 : -1);
+        const seen = new Set<string>();
+        const active = [...running.sessions, ...byRun.sessions, ...waiting.sessions].filter((entry) => {
+          const id = String(entry._id);
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return isSessionActive({ runtimeStatus: entry.runtimeStatus, activeRun: activeRuns.get(id) });
+        });
+        const isOngoing = (entry: IAgentConversationActivityRow) => isSessionOngoing({ runtimeStatus: entry.runtimeStatus, activeRun: activeRuns.get(String(entry._id)) });
+        // Ongoing sessions are kept before waiting ones when the cap cuts, then everything is shown newest first.
+        const ranked = [...active.filter(isOngoing).sort(newestFirst), ...active.filter((entry) => !isOngoing(entry)).sort(newestFirst)];
+        rows = ranked.slice(0, SESSION_LIST_MAX_LIMIT).sort(newestFirst);
+        // No cursor: the Active list is not paged, but it says when sessions were left out.
+        hasMore = running.hasMore || waiting.hasMore || byRun.hasMore || unlisted.length > SESSION_LIST_MAX_LIMIT || ranked.length > SESSION_LIST_MAX_LIMIT;
+      }
+
+      const agents = await agentsOfSessions(session.tenantDbName, projectId, rows);
+      rows = rows.filter((entry) => agents.has(entry.agentKey));
+      const owners = await resolveSessionOwners(rows.map((entry) => entry.createdBy));
+      // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
+      const waiting = rows.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
+      const answerable = new Map<string, Awaited<ReturnType<typeof answerabilityOfRow>>>();
+      for (const entry of waiting) {
+        answerable.set(String(entry._id), await answerabilityOfRow(request, session.tenantDbName, agents.get(entry.agentKey)!, entry, actor));
+      }
+      return reply.code(200).send({
+        sessions: rows.map((entry) => {
+          const id = String(entry._id);
+          const agent = agents.get(entry.agentKey)!;
+          const run = activeRuns.get(id);
+          const due = reminders.get(id);
+          return {
+            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId),
+            agentId: String(agent._id),
+            agentKey: agent.key,
+            agentName: agent.name,
+            ...(run ? { activeRun: run } : {}),
+            ...(due ? { reminders: { active: due.active, nextAt: due.nextAt.toISOString() } } : {}),
+          };
+        }),
+        hasMore,
+        ...(nextCursor ? { nextCursor } : {}),
+        // Everybody's sessions or only the caller's own; `partial` = their own plus those of the agents they may view.
+        scope: {
+          viewOthers: !scope.ownOnly,
+          ...(scope.ownOnly && (scope.ownOnly.viewableAgentKeys?.length ?? 0) > 0 ? { partial: true } : {}),
+        },
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List project sessions error', 'Failed to list sessions');
+    }
+  }));
+
   app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
@@ -1408,11 +1748,26 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
       // database, before the page, so a busy teammate cannot push theirs off it (one decision per request).
       const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      const sessions = await listConversations(session.tenantDbName, agent.key, {
-        limit: 100,
-        projectId,
-        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
-      });
+      const { triggerId } = (request.query ?? {}) as { triggerId?: string };
+      const sessions = triggerId
+        ? await sessionsOfTrigger(session.tenantDbName, { tenantId: session.tenantId, projectId, agentKey: agent.key, triggerId, ...(scope.ownOnly ? { createdBy: scope.userId } : {}) })
+        : await listConversations(session.tenantDbName, agent.key, {
+          limit: 100,
+          projectId,
+          ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
+        });
+      const reminderScope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      // What each row is waiting on or running, best effort: the list itself never fails over it.
+      const decoration = <T,>(what: string) => (error: unknown): Map<string, T> => {
+        logger.warn(`Sessions list: ${what} not shown`, { agentKey: agent.key, error: error instanceof Error ? error.message : String(error) });
+        return new Map();
+      };
+      const [activeRuns, reminders] = await Promise.all([
+        activeRunsBySession(session.tenantDbName, { tenantId: session.tenantId, projectId, agentKey: agent.key })
+          .catch(decoration<ActiveRunRow>('active runs')),
+        activeRemindersBySession(reminderScope, agent.key)
+          .catch(decoration<{ active: number; nextAt: Date }>('reminders')),
+      ]);
       const owners = await resolveSessionOwners(sessions.map((entry) => entry.createdBy));
       // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
       const waiting = sessions.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
@@ -1425,7 +1780,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       // sent so the list can render a row count. The session PAGE fetches the
       // one transcript it actually shows.
       return reply.code(200).send({
-        sessions: sessions.map((entry) => summariseConversation(entry, owners.get(entry.createdBy), answerable.get(String(entry._id)), session.userId)),
+        sessions: sessions.map((entry) => {
+          const id = String(entry._id);
+          const run = activeRuns.get(id);
+          const due = reminders.get(id);
+          return {
+            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId),
+            ...(run ? { activeRun: run } : {}),
+            ...(due ? { reminders: { active: due.active, nextAt: due.nextAt.toISOString() } } : {}),
+          };
+        }),
         // Whether this is everybody's sessions of the agent or only the caller's own.
         scope: { viewOthers: !scope.ownOnly },
       });
@@ -1488,13 +1852,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       // Whose it is, and which of its open requests THIS caller could answer (the page shows the server's
       // verdict instead of deriving one from the agent's setting and the viewer's role).
-      const [owners, actions] = await Promise.all([
+      const [owners, actions, plan] = await Promise.all([
         resolveSessionOwners([found.createdBy]),
         openActionsOf(session.tenantDbName, String(found._id)),
+        // Where the agent's plan stands now (the newest version its turns recorded, else the carried state); null when it has none.
+        runWithTenantDb(session.tenantDbName, (db) => readSessionPlan(db, found, agent.config)).catch(() => null),
       ]);
       const ability = await describeAnswerAbility(request, { tenantDbName: session.tenantDbName, conversation: found, actions, agent, actor: { tenantDbName: session.tenantDbName, projectId: scoped.projectId, userId: session.userId } });
       return reply.code(200).send({
         session: found,
+        plan,
         owner: owners.get(found.createdBy) ?? null,
         // The caller started it: nothing more than the route's own check was needed.
         ownSession: scoped.owner,
@@ -1645,6 +2012,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             onTextChunk: stream.live('text', (text: string) => ({ text })),
             onReasoningChunk: stream.live('reasoning', (text: string) => ({ text })),
             onCompaction: stream.live('summary', (compaction) => compaction),
+            onPlan: stream.live('plan', (plan) => plan),
+            onSubagent: stream.live('subagent', (event) => event),
           }
           : {}),
       });
@@ -1915,6 +2284,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
               onTextChunk: live('text', (text: string) => ({ text })),
               onReasoningChunk: live('reasoning', (text: string) => ({ text })),
               onCompaction: live('summary', (compaction) => compaction),
+              onPlan: live('plan', (plan) => plan),
+              onSubagent: live('subagent', (event) => event),
             },
           }
           : {}),
@@ -2066,6 +2437,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         // The agent summarized its context mid-run: shown in the transcript
         // as it happens, not only once the turn is over.
         onCompaction: (compaction) => send('summary', compaction),
+        // The agent's plan and its sub-agents' lifecycle (additive events: older clients ignore them).
+        onPlan: (plan) => send('plan', plan),
+        onSubagent: (event) => send('subagent', event),
       }));
 
       settleAgentRun(quotaCaller, usage, result.usage?.totalTokens);

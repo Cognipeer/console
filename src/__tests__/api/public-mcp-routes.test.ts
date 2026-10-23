@@ -28,6 +28,7 @@ import {
   executeMcpTool,
   logMcpRequest,
   McpToolInputError,
+  McpUnknownToolError,
   McpUpstreamError,
 } from '@/lib/services/mcp';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
@@ -464,13 +465,35 @@ describe('public MCP routes', () => {
       }
     });
 
-    it('passes a tool-input error through as invalid params (-32602)', async () => {
+    it('passes an unknown tool through as invalid params (-32602)', async () => {
       await start();
-      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Unknown tool'));
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpUnknownToolError());
       const response = await post(callTool('nope'));
       expect(response.statusCode).toBe(200);
       expect(json(response).error).toEqual({ code: -32602, message: 'Unknown tool' });
       expect(json(response).id).toBe(1);
+    });
+
+    it('returns a bad argument as a tool result with isError and its message, without a reference', async () => {
+      await start();
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Missing required path parameter "id"'));
+      const response = await post(callTool());
+      expect(json(response).error).toBeUndefined();
+      expect(json(response).result).toEqual({
+        content: [{ type: 'text', text: 'Missing required path parameter "id"' }],
+        isError: true,
+      });
+    });
+
+    it('carries the server\'s instructions in initialize', async () => {
+      await start();
+      current = server({ metadata: { discoveredInstructions: 'Call echo with text.' } });
+      const withText = json(await post(rpc('initialize', {}))).result as Record<string, unknown>;
+      expect(withText.instructions).toBe('Call echo with text.');
+
+      current = server();
+      const without = json(await post(rpc('initialize', {}))).result as Record<string, unknown>;
+      expect(without).not.toHaveProperty('instructions');
     });
 
     it('omits the reference when the request log could not be written', async () => {
@@ -522,6 +545,42 @@ describe('public MCP routes', () => {
       expect(vi.mocked(logMcpRequest).mock.calls[0][3]?.payloadLimitBytes).toBe(4096);
     });
 
+    describe('the host\'s _meta', () => {
+      const META = { 'openai/subject': 'v1/abc123', 'openai/userLocation': { city: 'Istanbul' } };
+      const callWithMeta = (name = 'echo') => rpc('tools/call', { name, arguments: {}, _meta: META });
+
+      it('is handed to the log write raw, next to where the call came from', async () => {
+        await start();
+        await post(callWithMeta(), { remoteAddress: '198.51.100.20' });
+        const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(options?.client?.meta).toEqual(META);
+        expect(options?.client?.ip).toBe('198.51.100.20');
+      });
+
+      it('is carried by the log of a failed call too', async () => {
+        await start();
+        vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom'));
+        await post(callWithMeta());
+        const [, entry, , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(entry.status).toBe('error');
+        expect(options?.client?.meta).toEqual(META);
+      });
+
+      it('is carried by the streamable-HTTP POST on the /sse URL', async () => {
+        await start();
+        await post(callWithMeta(), { url: `${BASE}/sse` });
+        const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(options?.client?.meta).toEqual(META);
+      });
+
+      it('is absent when the call carries none', async () => {
+        await start();
+        await post(callTool());
+        const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(options?.client?.meta).toBeUndefined();
+      });
+    });
+
     it('applies the same bound to the log of a failed call', async () => {
       await start();
       vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom'));
@@ -570,6 +629,68 @@ describe('public MCP routes', () => {
       expect(response.statusCode).toBe(404);
       expect(response.headers['x-mcp-session-id']).toBeUndefined();
       expect(sseSessionCount()).toBe(before);
+    });
+  });
+
+  describe('media tool results', () => {
+    it('sends a ToolOutput as a native MCP image block', async () => {
+      await start();
+      vi.mocked(executeMcpTool).mockResolvedValue({
+        result: { kind: 'tool_output', content: [{ type: 'text', text: 'shot' }, { type: 'image', mimeType: 'image/png', data: 'AAAA' }] },
+        latencyMs: 5,
+      } as never);
+      const body = json(await post(callTool()));
+      expect(body.result?.content).toEqual([
+        { type: 'text', text: 'shot' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+      ]);
+    });
+
+    it('keeps a text-only result as one text block', async () => {
+      await start();
+      const body = json(await post(callTool()));
+      expect(body.result?.content).toEqual([{ type: 'text', text: '{"echoed":true}' }]);
+    });
+  });
+
+  describe('a browser behind the endpoint', () => {
+    const browserMember = server({
+      _id: 'srv-browser',
+      sourceType: 'internal',
+      endpointSlug: undefined,
+      exposure: { protocols: ['streamable-http'], accessMode: 'token' },
+      metadata: { internal: { provider: 'browser', instanceKey: 'back-office', config: {} } },
+    });
+    const composite = (memberId: string) => server({
+      sourceType: 'composite',
+      metadata: { composite: { members: [{ serverId: memberId }] } },
+    });
+
+    it('is not served, even when the stored server says public', async () => {
+      current = server({ sourceType: 'internal', metadata: browserMember.metadata });
+      await start();
+      for (const body of [rpc('tools/list'), callTool()]) {
+        expect((await post(body)).statusCode).toBe(404);
+      }
+      expect(executeMcpTool).not.toHaveBeenCalled();
+    });
+
+    it('is not served through a public composite', async () => {
+      db.findMcpServerById.mockImplementation(async (id: string) => (id === 'srv-browser' ? browserMember : null) as never);
+      current = composite('srv-browser');
+      await start();
+      expect((await post(callTool())).statusCode).toBe(404);
+      expect(executeMcpTool).not.toHaveBeenCalled();
+    });
+
+    it('leaves a public composite without a browser served', async () => {
+      db.findMcpServerById.mockImplementation(async (id: string) => (id === 'srv-other'
+        ? server({ _id: 'srv-other', sourceType: 'internal', metadata: { internal: { provider: 'agent-observability' } } })
+        : null) as never);
+      current = composite('srv-other');
+      await start();
+      expect((await post(callTool())).statusCode).toBe(200);
+      expect(executeMcpTool).toHaveBeenCalledTimes(1);
     });
   });
 });

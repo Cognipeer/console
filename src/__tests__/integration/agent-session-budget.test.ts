@@ -61,6 +61,7 @@ import {
 } from '@/lib/services/agents/agentService';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
+import { decodeStoredState } from '@/lib/services/agents/agentTurnState';
 import {
   queueAgentRunContinue,
   runAgentJobLocal,
@@ -240,7 +241,7 @@ describe('a session budget that pauses', () => {
     expect(after.messages[1]).toMatchObject({ role: 'assistant', stopReason: 'limit' });
     expect(after.messages[1].usage?.costUsd).toBeCloseTo(3 * REQUEST_COST, 8);
     // The state survived: the tool calls and results are what a continuation resumes from.
-    expect(JSON.parse((await db.findAgentConversationState(id))!.snapshot).messages.at(-1)).toMatchObject({ role: 'tool' });
+    expect(JSON.parse(decodeStoredState((await db.findAgentConversationState(id))!.snapshot)).messages.at(-1)).toMatchObject({ role: 'tool' });
 
     expect(await eventTypes(id)).toEqual([
       'user.message', 'session.status_running',
@@ -701,7 +702,7 @@ describe('agent spend counts toward the tenant spend limits', () => {
   });
 
   it('a resumed turn (after an approval) and a continued session are gated too', async () => {
-    // `sandbox_read_file` is read-only, so ask for it explicitly: the first turn pauses after one request.
+    // `read` is read-only, so ask for it explicitly: the first turn pauses after one request.
     await createAgent({
       humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always', tools: { sandbox_read_file: 'always' } } },
     });

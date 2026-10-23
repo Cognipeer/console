@@ -6,12 +6,14 @@
  * the queue consumer).
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall, queueNameFor } from '@/lib/core/cluster';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type {
+  CrawlResultFilters,
   ICrawler,
   ICrawlerHttpConfig,
   ICrawlerScope,
@@ -36,6 +38,7 @@ import type {
   CreateCrawlerInput,
   CrawlerContext,
   CrawlJobView,
+  CrawlResultPageView,
   CrawlResultView,
   CrawlRunSummary,
   CrawlerView,
@@ -366,6 +369,7 @@ export async function runCrawler(
   idOrKey: string,
   options: RunCrawlerOptions,
 ): Promise<CrawlRunSummary> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
   const db = await withTenantDb(ctx.tenantDbName);
   const crawler = await loadCrawler(db, ctx, idOrKey);
   if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
@@ -417,6 +421,7 @@ export async function runAdhocCrawl(
   ctx: CrawlerContext,
   input: AdhocCrawlInput,
 ): Promise<CrawlRunSummary> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
   const db = await withTenantDb(ctx.tenantDbName);
   const plan: ICrawlPlanSnapshot = {
     seeds: input.seeds,
@@ -550,6 +555,35 @@ export async function listCrawlJobResults(
   const db = await withTenantDb(ctx.tenantDbName);
   const records = await db.listCrawlResults(jobId, options);
   return records.map((r) => serializeResult(r));
+}
+
+/**
+ * A filtered page of a job's results without `bodyMarkdown`, plus the totals
+ * the run browser needs — callers fetch a row's body via `getCrawlResult`.
+ */
+export async function listCrawlJobResultsPage(
+  ctx: CrawlerContext,
+  jobId: string,
+  options: CrawlResultFilters & { limit: number; skip: number },
+): Promise<CrawlResultPageView> {
+  const job = await getCrawlJob(ctx, jobId);
+  if (!job) throw new Error(`Crawl job ${jobId} not found`);
+  const db = await withTenantDb(ctx.tenantDbName);
+  const filters: CrawlResultFilters = {
+    type: options.type,
+    ragStatus: options.ragStatus,
+    search: options.search,
+  };
+  const [records, total, byType] = await Promise.all([
+    db.listCrawlResults(jobId, { ...filters, limit: options.limit, skip: options.skip, omitBody: true }),
+    db.countCrawlResults(jobId, filters),
+    db.countCrawlResultsByType(jobId),
+  ]);
+  return {
+    results: records.map((r) => serializeResult(r)),
+    total,
+    counts: { html: byType.html ?? 0, file: byType.file ?? 0, error: byType.error ?? 0 },
+  };
 }
 
 export async function getCrawlResult(

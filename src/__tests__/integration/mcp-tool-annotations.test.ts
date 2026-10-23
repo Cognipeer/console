@@ -99,8 +99,9 @@ describe('MCP tool annotation overrides', () => {
     server = updated!;
 
     expect(getToolAnnotationOverrides(server)).toEqual({});
+    // Back to the operation's own title: its summary.
     const createPet = listMcpToolDescriptors(server).find((t) => t.name === 'createPet');
-    expect(createPet?.annotations.title).toBe('createPet');
+    expect(createPet?.annotations.title).toBe('Create pet');
   });
 
   it('overrides the tool description and restores it when cleared', async () => {

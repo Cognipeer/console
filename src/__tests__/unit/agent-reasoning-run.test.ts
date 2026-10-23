@@ -431,6 +431,13 @@ describe('what a sub-agent forwards is not the turn\'s own', () => {
     db.updateAgentConversation.mockClear();
     await executePlaygroundChatLocal({ ...base, onCompaction: (c: unknown) => live.push(c) });
     expect((persistedAssistantTurn().compactions as Array<{ messagesCompressed: number }>).map((c) => c.messagesCompressed)).toEqual([4]);
-    expect(live).toHaveLength(1);
+    // The caller is told of both, the child's with its name; the child's pass sits on its own run.
+    expect(live).toHaveLength(2);
+    expect(live[0]).toMatchObject({ messagesCompressed: 12, subagent: { id: 'sa_1', name: 'helper' } });
+    expect(live[1]).toMatchObject({ messagesCompressed: 4, index: 1, afterToolCallId: null });
+    expect(live[1]).not.toHaveProperty('subagent');
+    const runs = persistedAssistantTurn().subagentRuns as Array<{ id: string; compactions?: Array<{ messagesCompressed: number }> }>;
+    expect(runs.map((run) => run.id)).toEqual(['sa_1']);
+    expect(runs[0].compactions?.map((c) => c.messagesCompressed)).toEqual([12]);
   });
 });

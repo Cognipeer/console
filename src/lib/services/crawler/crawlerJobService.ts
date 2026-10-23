@@ -7,6 +7,7 @@
  * and end-of-run webhooks, and updates job counters as work progresses.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { ICrawlJob, ICrawlPlanSnapshot } from '@/lib/database';
@@ -125,16 +126,94 @@ async function runCrawlJobInner(
   let limitReached = false;
   let failureMessage: string | undefined;
 
+  // Pages are persisted as concurrently as the engine fetches them (same
+  // clamp as the engine's). Persisting is the expensive half when RAG is on —
+  // chunk + embed + vector upsert takes as long as a fetch or longer — so
+  // awaiting it page by page held the whole run to one page at a time,
+  // whatever maxConcurrency said.
+  const pageConcurrency = Math.min(Math.max(1, plan.http.maxConcurrency ?? 5), 16);
+  const persisting = new Set<Promise<void>>();
+  let persistFailure: unknown;
+
+  // Progress counters go through one serialized, coalescing writer: pages now
+  // finish out of order, and parallel writes of absolute counters could land
+  // an older (smaller) snapshot last. One write runs, at most one more waits,
+  // and the waiting one reads the counters when it actually runs.
+  let progress: Promise<void> = Promise.resolve();
+  let progressQueued = false;
+  const writeProgress = (): void => {
+    if (progressQueued) return;
+    progressQueued = true;
+    progress = progress
+      .then(async () => {
+        progressQueued = false;
+        const updated = await db.updateCrawlJob(jobId, {
+          pagesProcessed,
+          filesProcessed,
+          errorsCount,
+          limitReached,
+        });
+        // Cross-node cancellation: a cancel request may have been recorded by
+        // a different node than the one running this job. `cancelRequestedAt`
+        // rides along on the progress update (no extra DB round trip), so it's
+        // observed here even without any pub/sub between nodes.
+        if (updated?.cancelRequestedAt && !cancelRequested.has(jobId)) {
+          logger.info('Cross-node cancel request observed; aborting crawl', { jobId });
+          cancelRequested.add(jobId);
+          abort.abort();
+        }
+      })
+      .catch((err: unknown) => {
+        persistFailure ??= err;
+      });
+  };
+
+  const handlePage = async (page: PageResult): Promise<void> => {
+    const written = await persistPage(db, ctx, job, page);
+    if (page.type === 'html') pagesProcessed += 1;
+    else if (page.type === 'file') filesProcessed += 1;
+    else if (page.type === 'error') {
+      errorsCount += 1;
+      // Page-level errors were previously only ever persisted to
+      // `crawl_results` (visible if someone happens to open this exact
+      // job's result row in the UI) and never written to the
+      // application logs — logging them here means they show up
+      // alongside every other server-side log line during the run.
+      logger.error('Crawl page failed', {
+        jobId,
+        url: page.url,
+        parentUrl: page.parentUrl,
+        error: page.errorMessage,
+      });
+    }
+
+    if (plan.maxPages > 0 && pagesProcessed + filesProcessed >= plan.maxPages) {
+      limitReached = true;
+    }
+    writeProgress();
+
+    if (page.type === 'html' || page.type === 'file') {
+      // A failed per-page webhook delivery used to vanish with no trace at
+      // all (neither logs nor DB) — log it so a misconfigured/unreachable
+      // webhook endpoint is actually visible instead of silently dropped.
+      await fireWebhook(job, page, written.ragDocumentId, 'page').catch((err) => {
+        logger.warn('Per-page webhook delivery failed', {
+          jobId,
+          url: page.url,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  };
+
   // The for-await loop below only gets a chance to check `cancelRequested`
-  // BETWEEN pages the engine yields — but the engine processes a batch of
-  // up to `maxConcurrency` fetches with `Promise.all`, so if a cancel is
-  // requested while a batch is in flight, `abort.signal` (which is what
-  // actually interrupts in-flight axios/Playwright requests) would not be
-  // aborted until that whole batch finishes on its own. That's exactly the
-  // "I clicked Cancel and it just stays Running" symptom. Poll the
-  // same-node flag on a short timer instead, so `abort.abort()` fires
-  // within a fraction of a second of the button being clicked, regardless
-  // of what the generator is doing.
+  // BETWEEN pages the engine yields, while up to `maxConcurrency` fetches are
+  // in flight inside it. `abort.signal` is what actually interrupts those
+  // axios/Playwright requests, so waiting for the next page to arrive before
+  // aborting is exactly the "I clicked Cancel and it just stays Running"
+  // symptom. Poll the same-node flag on a short timer instead, so
+  // `abort.abort()` fires within a fraction of a second of the button being
+  // clicked, regardless of what the generator is doing.
   const cancelPollTimer = setInterval(() => {
     if (!abort.signal.aborted && cancelRequested.has(jobId)) {
       abort.abort();
@@ -142,6 +221,9 @@ async function runCrawlJobInner(
   }, 250);
 
   try {
+    // After the claim and inside the try: a queued job whose service has been
+    // switched off ends as failed (summary webhook included) and is not retried.
+    await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
     for await (const page of crawl(plan, {
       logger: {
         info: (m, meta) => logger.info(m, { jobId, ...meta }),
@@ -155,62 +237,29 @@ async function runCrawlJobInner(
         break;
       }
 
-      const written = await persistPage(db, ctx, job, page);
-      if (page.type === 'html') pagesProcessed += 1;
-      else if (page.type === 'file') filesProcessed += 1;
-      else if (page.type === 'error') {
-        errorsCount += 1;
-        // Page-level errors were previously only ever persisted to
-        // `crawl_results` (visible if someone happens to open this exact
-        // job's result row in the UI) and never written to the
-        // application logs — logging them here means they show up
-        // alongside every other server-side log line during the run.
-        logger.error('Crawl page failed', {
-          jobId,
-          url: page.url,
-          parentUrl: page.parentUrl,
-          error: page.errorMessage,
-        });
-      }
-
-      if (plan.maxPages > 0 && pagesProcessed + filesProcessed >= plan.maxPages) {
-        limitReached = true;
-      }
-
-      const updated = await db.updateCrawlJob(jobId, {
-        pagesProcessed,
-        filesProcessed,
-        errorsCount,
-        limitReached,
-      });
-      // Cross-node cancellation: a cancel request may have been recorded by
-      // a different node than the one running this job. `cancelRequestedAt`
-      // rides along on the per-page update above (no extra DB round trip),
-      // so it's observed here even without any pub/sub between nodes.
-      if (updated?.cancelRequestedAt && !cancelRequested.has(jobId)) {
-        logger.info('Cross-node cancel request observed; aborting crawl', { jobId });
-        cancelRequested.add(jobId);
-        abort.abort();
-      }
-
-      if (page.type === 'html' || page.type === 'file') {
-        // A failed per-page webhook delivery used to vanish with no trace at
-        // all (neither logs nor DB) — log it so a misconfigured/unreachable
-        // webhook endpoint is actually visible instead of silently dropped.
-        await fireWebhook(job, page, written.ragDocumentId, 'page').catch((err) => {
-          logger.warn('Per-page webhook delivery failed', {
-            jobId,
-            url: page.url,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
+      const task: Promise<void> = handlePage(page)
+        .catch((err: unknown) => {
+          persistFailure ??= err;
+        })
+        .finally(() => persisting.delete(task));
+      persisting.add(task);
+      // Pulling the next page only once a slot is free is the backpressure:
+      // the engine stops fetching ahead while every slot is busy persisting.
+      if (persisting.size >= pageConcurrency) await Promise.race(persisting);
+      if (persistFailure) throw persistFailure;
     }
+    await Promise.all(persisting);
+    await progress;
+    if (persistFailure) throw persistFailure;
   } catch (err) {
     failureMessage = err instanceof Error ? err.message : String(err);
     errorsCount += 1;
     logger.error('Crawl job failed', { jobId, error: failureMessage });
   } finally {
+    // Pages already handed to a persist belong to this run even when it ended
+    // early (cancel, failure): let them land so the final counters include them.
+    await Promise.allSettled(persisting);
+    await progress;
     clearInterval(cancelPollTimer);
     const endedAt = new Date();
     const durationMs = endedAt.getTime() - startedAt.getTime();

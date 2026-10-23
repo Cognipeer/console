@@ -22,6 +22,12 @@ vi.mock('@/lib/services/pii', () => ({
   parseCustomPatternsInput: vi.fn((input: unknown) =>
     input === undefined ? {} : Array.isArray(input) ? { patterns: input } : { error: 'customPatterns must be an array' },
   ),
+  // Pass-through stub of the detection validator: undefined → absent, object → accepted.
+  parseDetectionInput: vi.fn((input: unknown) =>
+    input === undefined ? {} : typeof input === 'object' && input !== null && !Array.isArray(input)
+      ? { detection: input }
+      : { error: 'detection must be an object' },
+  ),
   buildDefaultPolicyCategories: vi.fn().mockReturnValue({ email: true, phone: true }),
   createPiiPolicy: vi.fn(),
   deletePiiPolicy: vi.fn(),
@@ -53,6 +59,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
       projectId: 'proj-1',
       project: { _id: 'proj-1', key: 'default', name: 'Default' },
       userProject: null,
+      user: { _id: 'user-1', role: 'owner' },
     }),
   };
 });
@@ -61,12 +68,14 @@ import { piiApiPlugin } from '@/server/api/plugins/pii';
 import {
   createPiiPolicy,
   detectPii,
+  getPiiPolicy,
   listPiiPolicies,
   maskPii,
   redactPii,
   tokenizePii,
   detokenizePii,
   scanWithPolicy,
+  updatePiiPolicy,
 } from '@/lib/services/pii';
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
@@ -212,6 +221,50 @@ describe('POST /api/pii/policies', () => {
     expect(res.statusCode).toBe(201);
     expect(createPiiPolicy).toHaveBeenCalled();
   });
+
+  it('forwards detection to the service', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/policies',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { name: 'X', defaultAction: 'block', detection: { minConfidence: 0.6 } },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(createPiiPolicy).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'user-1', expect.objectContaining({
+      detection: { minConfidence: 0.6 },
+    }));
+  });
+
+  it('rejects an invalid detection with 400', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/policies',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { name: 'X', defaultAction: 'block', detection: 'high' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(createPiiPolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /api/pii/policies/:id', () => {
+  it('forwards detection to the service', async () => {
+    (getPiiPolicy as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_POLICY);
+    (updatePiiPolicy as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_POLICY);
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/pii/policies/p-1',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { detection: { minConfidence: 0.8, contextBoost: false } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(updatePiiPolicy).toHaveBeenCalledWith('tenant_acme', 'p-1', 'user-1', expect.objectContaining({
+      detection: { minConfidence: 0.8, contextBoost: false },
+    }));
+  });
 });
 
 describe('POST /api/pii/detect', () => {
@@ -236,6 +289,18 @@ describe('POST /api/pii/detect', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(detectPii).toHaveBeenCalled();
+  });
+
+  it('forwards an unsaved detection (the test panel\'s draft threshold)', async () => {
+    const app = await createFastifyApiTestApp(piiApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pii/detect',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: { text: 'a@b.com', engine: 'cognipeer', detection: { minConfidence: 0.5 } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(detectPii).toHaveBeenCalledWith(expect.objectContaining({ engine: 'cognipeer', detection: { minConfidence: 0.5 } }));
   });
 });
 

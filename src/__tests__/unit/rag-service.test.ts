@@ -699,9 +699,9 @@ describe('RAG Service', () => {
 
     it('updates module total counts', async () => {
       await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
-      expect(db.updateRagModule).toHaveBeenCalledWith(
+      expect(db.incrementRagModuleTotals).toHaveBeenCalledWith(
         'ragmod-1',
-        expect.objectContaining({ totalDocuments: 1 }),
+        expect.objectContaining({ documents: 1 }),
       );
     });
 
@@ -900,6 +900,12 @@ describe('RAG Service', () => {
         { vectorId: 'my-rag:ragdoc-1:0', content: 'Chunk content here', tenantId: TENANT_ID, ragModuleKey: 'my-rag', documentId: 'ragdoc-1', chunkIndex: 0 },
       ]);
       db.createRagQueryLog.mockResolvedValue({ tenantId: TENANT_ID, ragModuleKey: 'my-rag', query: 'what is AI?', topK: 3, matchCount: 1 });
+    });
+
+    it('does not query a module that is not active', async () => {
+      db.findRagModuleByKey.mockResolvedValue({ ...mockModule, status: 'disabled' });
+      await expect(queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq)).rejects.toThrow(/not active/i);
+      expect(queryVectorIndex).not.toHaveBeenCalled();
     });
 
     it('throws if RAG module not found', async () => {
@@ -1463,10 +1469,7 @@ describe('RAG Service', () => {
 
     it('updates module stats after deletion', async () => {
       await deleteRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, deleteReq);
-      expect(db.updateRagModule).toHaveBeenCalledWith(
-        'ragmod-1',
-        expect.objectContaining({ totalDocuments: 2, totalChunks: 7 }),
-      );
+      expect(db.incrementRagModuleTotals).toHaveBeenCalledWith('ragmod-1', { documents: -1, chunks: -3 });
     });
 
     it('deletes the document record and returns true', async () => {

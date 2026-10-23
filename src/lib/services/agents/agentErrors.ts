@@ -15,6 +15,7 @@
 
 import { MODEL_PARAMETER_UNSUPPORTED_CODE, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
+import { ServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 import { formatUsd } from '@/lib/utils/formatUsd';
 
 export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
@@ -310,6 +311,12 @@ export function classifyAgentRunError(
     // Same shape the inference path answers a refused budget with.
     if (error instanceof AgentSpendLimitError) {
         return { status: 429, error: { message: error.message, type: 'rate_limit_error', code: 'spend_limit_exceeded' } };
+    }
+
+    // A service the run needs is switched off (environment or license): the refusal every route answers with,
+    // not a provider's permission error.
+    if (error instanceof ServiceDisabledError) {
+        return { status: error.status, error: { message: error.message, type: 'permission_error', code: error.code } };
     }
 
     // Another turn (sync or background) already holds this conversation.

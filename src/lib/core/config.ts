@@ -37,6 +37,15 @@ class EnvConfigSource implements ConfigSource {
 export interface AppConfig {
   nodeEnv: string;
 
+  /**
+   * Services switched off for the whole deployment (see
+   * src/lib/services/availability/serviceAvailability.ts). Both empty = nothing off.
+   */
+  services: {
+    disabled: string[];
+    enabled: string[];
+  };
+
   deployment: {
     /** saas = Cognipeer-hosted, onprem = customer-hosted. */
     mode: 'saas' | 'onprem';
@@ -314,6 +323,16 @@ export interface AppConfig {
      * `.suffix` entries matching any subdomain (e.g. `.internal.example.com`).
      */
     allowedHosts: string[];
+    /**
+     * Private networks a provider endpoint may reach even though private targets are blocked, per organization.
+     * Raw `PROVIDER_PRIVATE_NETWORKS` entries (`<tenantId or *>=<cidr>[,<cidr>...]`, separated by `;`). Read and
+     * checked by `lib/security/providerPrivateNetworks`; nothing is opened unless an entry is valid.
+     */
+    providerPrivateNetworks: string[];
+    /**
+     * CIDR ranges (`PROVIDER_PRIVATE_NETWORKS_DENY`) that stay refused even inside an opened network.
+     */
+    providerPrivateNetworksDeny: string[];
     /** Default timeout applied to guarded outbound requests (ms). */
     defaultTimeoutMs: number;
   };
@@ -384,6 +403,13 @@ export interface AppConfig {
     runRetentionDays: number;
     /** Retention TTL for `agent_session_events` (the append-only session event log). */
     sessionEventRetentionDays: number;
+    /**
+     * Cap on one stored conversation state document (the turn snapshot plus, while a run is paused, the
+     * paused copy) AS STORED: compressed and base64. The default suits Cosmos DB for MongoDB (RU, 2 MB
+     * document limit); MongoDB and Cosmos vCore (16 MB) can go up to 15 MB. A state over the cap is
+     * trimmed, and a pause that still does not fit fails the run.
+     */
+    stateMaxBytes: number;
     /** How often a background worker writes heartbeatAt while a run is `running`. */
     runHeartbeatIntervalMs: number;
     /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
@@ -420,6 +446,15 @@ export interface AppConfig {
       bodyLimitBytes: number;
       /** Runs one trigger's webhook starts per minute; 0 = off. */
       rateLimitPerMinute: number;
+    };
+    /** Reminders agents set for themselves (`reminder_set`): the platform ceilings over every agent's own settings. */
+    reminders: {
+      /** Off = the reminder tools are never offered and due reminders are not run. */
+      enabled: boolean;
+      minDelaySeconds: number;
+      maxHorizonHours: number;
+      maxActivePerSession: number;
+      maxFiresPerSession: number;
     };
   };
 
@@ -459,6 +494,10 @@ export interface AppConfig {
     logToolNameMaxChars: number;
     /** Longest caller user-agent (chars) stored with an MCP request-log row. Min 16. */
     logUserAgentMaxChars: number;
+    /** Store the `params._meta` an MCP host sends with a tool call in the request-log row's `_client.meta`. */
+    logClientMeta: boolean;
+    /** Largest serialized `_client.meta` (bytes) kept per request-log row; keys beyond it are dropped. Min 256. */
+    logClientMetaMaxBytes: number;
 
     /** The SSE transport: `GET .../sse` opens a stream, `POST .../message?sessionId=` feeds it. */
     sse: {
@@ -540,6 +579,14 @@ function boundedAgentRunConfig(source: ConfigSource) {
       bodyLimitBytes: Math.min(atLeast(int(source, 'AGENT_WEBHOOK_BODY_LIMIT_BYTES', 5_242_880), 16_384), 26_214_400),
       rateLimitPerMinute: atLeast(int(source, 'AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE', 60), 0),
     },
+    reminders: {
+      enabled: bool(source, 'AGENT_REMINDERS_ENABLED', true),
+      minDelaySeconds: atLeast(int(source, 'AGENT_REMINDER_MIN_DELAY_SECONDS', 60), 30),
+      // A scheduled run may start at most 30 days ahead.
+      maxHorizonHours: Math.min(atLeast(int(source, 'AGENT_REMINDER_MAX_HORIZON_HOURS', 168), 1), 720),
+      maxActivePerSession: atLeast(int(source, 'AGENT_REMINDER_MAX_ACTIVE_PER_SESSION', 10), 1),
+      maxFiresPerSession: atLeast(int(source, 'AGENT_REMINDER_MAX_FIRES_PER_SESSION', 100), 1),
+    },
   };
 }
 
@@ -608,6 +655,13 @@ function list(source: ConfigSource, key: string, fallback: string[]): string[] {
   const raw = source.get(key);
   if (!raw || raw.trim() === '') return fallback;
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Like `list`, split on `;` (for entries whose own value is a comma-separated list). */
+function semicolonList(source: ConfigSource, key: string, fallback: string[]): string[] {
+  const raw = source.get(key);
+  if (!raw || raw.trim() === '') return fallback;
+  return raw.split(';').map((s) => s.trim()).filter(Boolean);
 }
 
 function oneOf<T extends string>(
@@ -693,6 +747,11 @@ function buildConfig(source: ConfigSource): AppConfig {
     deployment: {
       mode: deploymentMode,
       isOnPrem: deploymentMode === 'onprem',
+    },
+
+    services: {
+      disabled: list(source, 'CONSOLE_DISABLED_SERVICES', []),
+      enabled: list(source, 'CONSOLE_ENABLED_SERVICES', []),
     },
 
     license: {
@@ -856,6 +915,8 @@ function buildConfig(source: ConfigSource): AppConfig {
     outboundHttp: {
       blockPrivateNetwork: bool(source, 'OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK', true),
       allowedHosts: list(source, 'OUTBOUND_HTTP_ALLOWED_HOSTS', []),
+      providerPrivateNetworks: semicolonList(source, 'PROVIDER_PRIVATE_NETWORKS', []),
+      providerPrivateNetworksDeny: list(source, 'PROVIDER_PRIVATE_NETWORKS_DENY', []),
       defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),
     },
 
@@ -904,6 +965,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
       runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
       sessionEventRetentionDays: Math.max(int(source, 'AGENT_SESSION_EVENT_RETENTION_DAYS', 30), 1),
+      stateMaxBytes: Math.min(Math.max(int(source, 'AGENT_STATE_MAX_BYTES', DEFAULT_AGENT_STATE_MAX_BYTES), 100_000), 15_000_000),
       ...boundedAgentRunConfig(source),
     },
 
@@ -921,6 +983,8 @@ function buildConfig(source: ConfigSource): AppConfig {
       lastErrorThrottleMs: Math.max(int(source, 'MCP_LAST_ERROR_THROTTLE_MS', 60_000), 0),
       logToolNameMaxChars: Math.max(int(source, 'MCP_LOG_TOOL_NAME_MAX_CHARS', 200), 16),
       logUserAgentMaxChars: Math.max(int(source, 'MCP_LOG_USER_AGENT_MAX_CHARS', 300), 16),
+      logClientMeta: bool(source, 'MCP_LOG_CLIENT_META', true),
+      logClientMetaMaxBytes: Math.max(int(source, 'MCP_LOG_CLIENT_META_MAX_BYTES', 2048), 256),
       sse: {
         maxSessions: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS', 2000), 0),
         maxSessionsPerIp: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS_PER_IP', 50), 0),
@@ -1068,6 +1132,9 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
 
   return errors;
 }
+
+/** Default of `AGENT_STATE_MAX_BYTES` (see `agent.stateMaxBytes`). */
+export const DEFAULT_AGENT_STATE_MAX_BYTES = 1_500_000;
 
 /* ------------------------------------------------------------------ */
 /*  Singleton                                                         */

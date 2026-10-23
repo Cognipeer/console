@@ -112,7 +112,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.enabled !== undefined) { clauses.push('enabled = @enabled'); params.enabled = this.toBoolInt(filters.enabled); }
       if (filters?.search) {
-        clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)');
+        clauses.push(this.likeAny(['name', 'description', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';

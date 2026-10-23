@@ -9,7 +9,10 @@ const db = {
   findToolByKey: vi.fn(async () => null),
   findModelByKey: vi.fn(async () => ({ key: 'gpt' })),
 };
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (d: typeof db) => unknown) => fn(db)),
+}));
 
 import { applyAgentManifest, AgentManifestError, manifestErrorStatus } from '@/lib/services/agents/agentManifest';
 

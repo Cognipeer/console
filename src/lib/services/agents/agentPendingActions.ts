@@ -21,6 +21,7 @@ import type {
     UserQuestionItem,
 } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
+import type { ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 import type {
     AgentResponseFormat,
     DatabaseProvider,
@@ -30,9 +31,17 @@ import type {
     IAgentPendingActionResolution,
     IAgentUserQuestion,
 } from '@/lib/database';
+import { delegationCallIdOf } from '@/lib/shared/agentTurnFlow';
 import { AgentPendingActionError } from './agentErrors';
 import { CLIENT_TOOL_SERVER_GRACE_SECONDS, clientToolMeta } from './agentClientTools';
-import { MAX_STATE_BYTES, serializeCarriedState, toPlainMessage } from './agentTurnState';
+import {
+    maxStateBytes,
+    decodeStoredState,
+    encodeStoredState,
+    serializeCarriedState,
+    toPlainMessage,
+    type AgentTurnOutcome,
+} from './agentTurnState';
 import type { ResolvedHitlConfig } from './agentHumanInTheLoop';
 import type { SessionEventWriter } from './sessionEvents';
 import { closePausedTrace, type PausedTraceClosure, type PausedTraceDb } from './pausedTraceClosure';
@@ -48,6 +57,8 @@ export interface PublicPendingAction {
     toolName?: string;
     /** The sub-agent whose tool call or question this is; absent for the agent's own. */
     subagent?: string;
+    /** The delegation tool call the sub-agent's pause belongs to. */
+    delegationToolCallId?: string;
     args?: unknown;
     questions?: IAgentPendingAction['questions'];
     allowFreeText?: boolean;
@@ -64,6 +75,7 @@ export function toPublicPendingAction(action: IAgentPendingAction): PublicPendin
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
         ...(action.subagent ? { subagent: action.subagent } : {}),
+        ...(action.delegationToolCallId ? { delegationToolCallId: action.delegationToolCallId } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -81,6 +93,7 @@ export function toMessagePendingAction(action: IAgentPendingAction): IAgentMessa
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
         ...(action.subagent ? { subagent: action.subagent } : {}),
+        ...(action.delegationToolCallId ? { delegationToolCallId: action.delegationToolCallId } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -97,6 +110,7 @@ export function actionRequiredEventData(action: IAgentPendingAction): Record<str
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
         ...(action.subagent ? { subagent: action.subagent } : {}),
+        ...(action.delegationToolCallId ? { delegationToolCallId: action.delegationToolCallId } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -137,6 +151,8 @@ export interface PausedTurnOptions {
     variablesInPrompt?: boolean;
     /** With `variablesInPrompt: false`: the names of `variables` that still fill the system prompt. */
     literalVariables?: string[];
+    /** Who the turn is for: MCP servers and connected agents set up for Console identity get tokens for this person, not the approver. */
+    identity?: ConsoleIdentityPerson;
 }
 
 interface PausedEnvelope {
@@ -166,12 +182,12 @@ const PAUSED_STATE_FIELDS = [
  * Serializes the state of a paused run, or null when it does not fit in
  * `maxBytes` — the caller then does not pause (see `openPause`). The paused
  * copy shares a document with the normal snapshot, so `openPause` passes what
- * is left of `MAX_STATE_BYTES` after that one.
+ * is left of the cap (`maxStateBytes`) after that one.
  */
 export function serializePausedState(
     state: AgentSdkSmartState | undefined,
     source: PauseSource,
-    maxBytes: number = MAX_STATE_BYTES,
+    maxBytes: number = maxStateBytes(),
     turn?: PausedTurnOptions,
 ): string | null {
     if (!state) return null;
@@ -192,14 +208,15 @@ export function serializePausedState(
     }
     stored.ctx = resumeCtx;
 
-    const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false));
-    const text = JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope);
+    const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false || turn.identity));
+    // Stored compressed like the normal snapshot; `maxBytes` is a budget on the stored form.
+    const text = encodeStoredState(JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope));
     return text.length <= maxBytes ? text : null;
 }
 
 export function parsePausedState(text: string): { source: PauseSource; state: AgentSdkSmartState; turn?: PausedTurnOptions } | null {
     try {
-        const parsed = JSON.parse(text) as PausedEnvelope;
+        const parsed = JSON.parse(decodeStoredState(text)) as PausedEnvelope;
         if (!parsed || parsed.v !== 1 || typeof parsed.state !== 'object' || !parsed.state) return null;
         return {
             source: parsed.source === 'agent-playground' ? 'agent-playground' : 'agent',
@@ -220,6 +237,8 @@ interface PauseEntry {
     toolName?: string;
     /** The sub-agent that asked, when the SDK surfaced a child's pause. */
     subagent?: string;
+    /** The delegating tool call the child's pause belongs to (`__subagent.parentToolCallId`). */
+    delegationToolCallId?: string;
     args?: unknown;
     questions?: IAgentUserQuestion[];
     allowFreeText?: boolean;
@@ -227,10 +246,18 @@ interface PauseEntry {
     timeoutSeconds?: number;
 }
 
-/** The sub-agent the SDK tagged a surfaced child pause with. */
-function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string } {
-    const tag = entry.metadata?.__subagent as { name?: unknown } | undefined;
-    return typeof tag?.name === 'string' && tag.name ? { subagent: tag.name } : {};
+/**
+ * The sub-agent the SDK tagged a surfaced child pause with. The delegation it names is the
+ * CALL (what a page matches it to): the SDK's own key for one child of a parallel call,
+ * `<call>#<index>`, is cut back to the call.
+ */
+function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string; delegationToolCallId?: string } {
+    const tag = entry.metadata?.__subagent as { name?: unknown; parentToolCallId?: unknown } | undefined;
+    if (typeof tag?.name !== 'string' || !tag.name) return {};
+    return {
+        subagent: tag.name,
+        ...(typeof tag.parentToolCallId === 'string' && tag.parentToolCallId ? { delegationToolCallId: delegationCallIdOf(tag.parentToolCallId) } : {}),
+    };
 }
 
 /** The approvals, questions and client tool calls the SDK state is waiting on. */
@@ -306,6 +333,16 @@ export const PAUSE_UNAVAILABLE_WARNING =
     'The run stopped for a human but its state is too large to keep, so it cannot be continued.';
 
 /**
+ * The outcome of a turn whose pause could not be opened: the run is over, not
+ * "waiting" and not a quiet end of turn — the message, the session and the API
+ * response all say it failed, and why. A paused run with no action to answer
+ * used to end as `end_turn` with the reason buried in a warning line.
+ */
+export function pauseUnavailableOutcome(outcome: AgentTurnOutcome): AgentTurnOutcome & { stopReason: 'error'; stopDetail: string } {
+    return { ...outcome, stopReason: 'error', stopDetail: PAUSE_UNAVAILABLE_WARNING, partial: true };
+}
+
+/**
  * Creates one `agent_pending_actions` row per pending SDK approval / question
  * and returns them with the paused state to store. Null — nothing is created —
  * when the run cannot be continued: the state does not fit, or the SDK stopped
@@ -315,15 +352,21 @@ export const PAUSE_UNAVAILABLE_WARNING =
 export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<OpenedPause | null> {
     const entries = collectPauseEntries(input.state);
     if (entries.length === 0) return null;
-    // Both copies are stored in one document capped at MAX_STATE_BYTES. A normal
+    // Both copies are stored in one document capped at `maxStateBytes()`. A normal
     // snapshot that does not fit is deleted on save, which would drop the paused
     // copy too — so neither case may leave approval cards that cannot be resumed.
+    const cap = maxStateBytes();
     const normal = serializeCarriedState(input.state);
     const snapshot = normal === null
         ? null
-        : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length, input.turn);
+        : serializePausedState(input.state, input.source, cap - normal.length, input.turn);
     if (!snapshot) {
-        logger.warn('Paused run state is too large to store; not pausing', { conversationId: input.conversationId });
+        logger.warn('Paused run state is too large to store; not pausing', {
+            conversationId: input.conversationId,
+            normalSnapshotBytes: normal?.length ?? null,
+            pausedBudgetBytes: normal === null ? 0 : cap - normal.length,
+            maxStateBytes: cap,
+        });
         return null;
     }
     const now = new Date();
@@ -341,6 +384,7 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
         ...(entry.toolCallId ? { toolCallId: entry.toolCallId } : {}),
         ...(entry.toolName ? { toolName: entry.toolName } : {}),
         ...(entry.subagent ? { subagent: entry.subagent } : {}),
+        ...(entry.delegationToolCallId ? { delegationToolCallId: entry.delegationToolCallId } : {}),
         ...(entry.args !== undefined ? { args: entry.args } : {}),
         ...(entry.questions ? { questions: entry.questions } : {}),
         ...(entry.allowFreeText !== undefined ? { allowFreeText: entry.allowFreeText } : {}),

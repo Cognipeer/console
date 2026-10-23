@@ -291,10 +291,10 @@ describe('the routes agree with the table', () => {
     }
   });
 
-  it('puts the BUCKET KEY, and for the dashboard the file provider key, in the context of file calls', () => {
-    expect(read('server/api/plugins/client-files.ts')).toMatch(/domain: 'file' as const[\s\S]*?resourceKey: bucketKey/);
-    const dashboard = read('server/api/plugins/files.ts');
-    expect(dashboard).toMatch(/domain: 'file' as const[\s\S]*?providerKey: \(body\.providerKey as string \| undefined\) \?\? undefined,\s*resourceKey: bucketKey/);
+  it('puts the BUCKET KEY and the file provider key OF THAT BUCKET in the context of file calls, on both upload routes', () => {
+    // Both routes read the bucket first and report its provider, not whatever the request body says.
+    expect(read('server/api/plugins/client-files.ts')).toMatch(/domain: 'file' as const[\s\S]*?providerKey: bucket\.providerKey,\s*resourceKey: bucketKey/);
+    expect(read('server/api/plugins/files.ts')).toMatch(/domain: 'file' as const[\s\S]*?providerKey: bucket\.providerKey,\s*resourceKey: bucketKey/);
   });
 
   it('puts the AGENT NAME in the context of tracing calls and the AGENT KEY in the context of agent runs', () => {

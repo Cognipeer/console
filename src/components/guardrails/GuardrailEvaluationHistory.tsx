@@ -373,7 +373,9 @@ export default function GuardrailEvaluationHistory({
                       {topFinding ? (
                         <Tooltip label={topFinding.message}>
                           <Text size="xs" truncate style={{ maxWidth: 160 }}>
-                            {topFinding.type}
+                            {typeof topFinding.confidence === 'number'
+                              ? `${topFinding.category} · ${topFinding.confidence.toFixed(2)}`
+                              : topFinding.type}
                             {log.findings.length > 1 && ` +${log.findings.length - 1}`}
                           </Text>
                         </Tooltip>

@@ -34,7 +34,7 @@ COPY . .
 # killed at it. Raising this number is usually the wrong fix; if the build runs
 # out of memory again, reduce Next's build parallelism instead — peak usage is
 # roughly workers x heap.
-ARG NODE_BUILD_HEAP_MB=4096
+ARG NODE_BUILD_HEAP_MB=8096
 RUN NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP_MB}" npm run build \
   && rm -rf .next/cache
 

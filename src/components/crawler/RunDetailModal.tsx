@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { ActionIcon, Badge, Button, Code, Loader, Modal, Select, Tooltip } from '@mantine/core';
+import { useEffect, useRef, useState } from 'react';
+import { ActionIcon, Badge, Button, Code, Loader, Modal, Pagination, Select, Tooltip } from '@mantine/core';
+import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
@@ -14,12 +15,17 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import type { CrawlJobView, CrawlResultView } from '@/lib/services/crawler';
+import type { CrawlJobView, CrawlResultPageView, CrawlResultView } from '@/lib/services/crawler';
+
+const PAGE_SIZE = 50;
+/** Bodies kept in memory per open run — enough to flip back and forth cheaply. */
+const BODY_CACHE_LIMIT = 50;
+const EMPTY_PAGE: CrawlResultPageView = { results: [], total: 0, counts: { html: 0, file: 0, error: 0 } };
 
 interface RunDetailModalProps {
   job: CrawlJobView | null;
-  results: CrawlResultView[];
-  loading: boolean;
+  /** Bump to re-fetch the open run's results, e.g. after a Knowledge Engine sync. */
+  refreshKey: number;
   canceling: boolean;
   onCancel: (jobId: string) => void;
   onClose: () => void;
@@ -55,10 +61,18 @@ function formatBytes(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
+  const res = await fetch(url, { cache: 'no-store', signal });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Server returned ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export default function RunDetailModal({
   job,
-  results,
-  loading,
+  refreshKey,
   canceling,
   onCancel,
   onClose,
@@ -67,65 +81,134 @@ export default function RunDetailModal({
   onSyncToRag,
   syncingToRag,
 }: RunDetailModalProps) {
+  const jobId = job?.id;
   const [query, setQuery] = useState('');
+  const [debouncedQuery] = useDebouncedValue(query.trim(), 300);
   const [typeFilter, setTypeFilter] = useState<'all' | 'html' | 'file' | 'error'>('all');
   const [ragFilter, setRagFilter] = useState<'all' | 'indexed' | 'pending' | 'skipped' | 'failed' | 'none'>('all');
+  const [page, setPage] = useState(1);
+  const [listing, setListing] = useState<CrawlResultPageView>(EMPTY_PAGE);
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<CrawlResultView | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [syncModuleKey, setSyncModuleKey] = useState<string | null>(null);
+  const bodyCache = useRef(new Map<string, CrawlResultView>());
 
   // Reset transient view state whenever a different job is opened.
   useEffect(() => {
     setQuery('');
     setTypeFilter('all');
     setRagFilter('all');
+    setPage(1);
+    setListing(EMPTY_PAGE);
     setSelectedId(null);
-    setSyncModuleKey(defaultRagModuleKey || null);
-  }, [job?.id, defaultRagModuleKey]);
+  }, [jobId]);
 
-  const counts = useMemo(() => {
-    let html = 0;
-    let file = 0;
-    let error = 0;
-    for (const r of results) {
-      if (r.type === 'html') html += 1;
-      else if (r.type === 'file') file += 1;
-      else if (r.type === 'error') error += 1;
-    }
-    return { html, file, error };
-  }, [results]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return results.filter((r) => {
-      if (typeFilter !== 'all' && r.type !== typeFilter) return false;
-      if (ragFilter !== 'all') {
-        if (ragFilter === 'none' ? Boolean(r.ragStatus) : r.ragStatus !== ragFilter) return false;
-      }
-      if (q) {
-        const hay = `${r.url} ${r.title ?? ''} ${r.errorMessage ?? ''}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [results, query, typeFilter, ragFilter]);
-
-  // Keep a valid selection: default to the first filtered row, and drop a
-  // selection that the current filter has hidden.
+  // The sync target follows the default module without discarding the loaded listing.
   useEffect(() => {
-    if (filtered.length === 0) {
+    setSyncModuleKey(defaultRagModuleKey || null);
+  }, [jobId, defaultRagModuleKey]);
+
+  // A new search starts back on the first page.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedQuery]);
+
+  // Bodies are re-read after a refresh (a sync can change ragStatus/errorMessage).
+  useEffect(() => {
+    bodyCache.current.clear();
+  }, [jobId, refreshKey]);
+
+  // One page of rows, filtered and searched server-side, without markdown bodies.
+  useEffect(() => {
+    if (!jobId) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      skip: String((page - 1) * PAGE_SIZE),
+    });
+    if (typeFilter !== 'all') params.set('type', typeFilter);
+    if (ragFilter !== 'all') params.set('ragStatus', ragFilter);
+    if (debouncedQuery) params.set('search', debouncedQuery);
+    setListLoading(true);
+    setListError(null);
+    fetchJson<CrawlResultPageView>(`/api/crawler/jobs/${jobId}/results?${params}`, controller.signal)
+      .then((data) => {
+        setListing(data);
+        setListLoading(false);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        setListing(EMPTY_PAGE);
+        setListError(err instanceof Error ? err.message : 'Failed to load results');
+        setListLoading(false);
+      });
+    return () => controller.abort();
+  }, [jobId, debouncedQuery, typeFilter, ragFilter, page, refreshKey]);
+
+  const rows = listing.results;
+  const totalPages = Math.max(1, Math.ceil(listing.total / PAGE_SIZE));
+
+  // A refresh can shrink the result set below the current page.
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  // Keep a valid selection: default to the first row of the page, and drop a
+  // selection that the current page or filter no longer shows.
+  useEffect(() => {
+    if (rows.length === 0) {
       setSelectedId(null);
       return;
     }
-    if (!selectedId || !filtered.some((r) => r.id === selectedId)) {
-      setSelectedId(filtered[0].id);
+    if (!selectedId || !rows.some((r) => r.id === selectedId)) {
+      setSelectedId(rows[0].id);
     }
-  }, [filtered, selectedId]);
+  }, [rows, selectedId]);
 
-  const selected = useMemo(
-    () => filtered.find((r) => r.id === selectedId) ?? null,
-    [filtered, selectedId],
-  );
+  // The selected row's markdown body, loaded on demand.
+  useEffect(() => {
+    setDetailError(null);
+    if (!jobId || !selectedId) {
+      setDetail(null);
+      setDetailLoading(false);
+      return;
+    }
+    const cached = bodyCache.current.get(selectedId);
+    if (cached) {
+      setDetail(cached);
+      setDetailLoading(false);
+      return;
+    }
+    setDetail(null);
+    setDetailLoading(true);
+    const controller = new AbortController();
+    fetchJson<{ result: CrawlResultView }>(
+      `/api/crawler/jobs/${jobId}/results/${selectedId}`,
+      controller.signal,
+    )
+      .then(({ result }) => {
+        const cache = bodyCache.current;
+        cache.set(selectedId, result);
+        if (cache.size > BODY_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
+        setDetail(result);
+        setDetailLoading(false);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        setDetailError(err instanceof Error ? err.message : 'Failed to load page content');
+        setDetailLoading(false);
+      });
+    return () => controller.abort();
+  }, [jobId, selectedId, refreshKey]);
 
+  const selected = rows.find((r) => r.id === selectedId) ?? null;
+  const body = detail?.id === selectedId ? detail?.bodyMarkdown : undefined;
+  const { counts } = listing;
+  const allCount = counts.html + counts.file + counts.error;
   const active = job?.status === 'queued' || job?.status === 'running';
   const hasFetchablePages = counts.html + counts.file > 0;
 
@@ -265,11 +348,14 @@ export default function RunDetailModal({
                   <select
                     className="ds-select"
                     value={typeFilter}
-                    onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)}
+                    onChange={(e) => {
+                      setTypeFilter(e.target.value as typeof typeFilter);
+                      setPage(1);
+                    }}
                     style={{ flex: 1 }}
                     aria-label="Filter by type"
                   >
-                    <option value="all">All types ({results.length})</option>
+                    <option value="all">All types ({allCount})</option>
                     <option value="html">Pages ({counts.html})</option>
                     <option value="file">Files ({counts.file})</option>
                     <option value="error">Errors ({counts.error})</option>
@@ -277,7 +363,10 @@ export default function RunDetailModal({
                   <select
                     className="ds-select"
                     value={ragFilter}
-                    onChange={(e) => setRagFilter(e.target.value as typeof ragFilter)}
+                    onChange={(e) => {
+                      setRagFilter(e.target.value as typeof ragFilter);
+                      setPage(1);
+                    }}
                     style={{ flex: 1 }}
                     aria-label="Filter by Knowledge Engine status"
                   >
@@ -291,17 +380,28 @@ export default function RunDetailModal({
                 </div>
               </div>
 
-              <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-                {loading ? (
+              <div
+                style={{
+                  flex: 1,
+                  overflow: 'auto',
+                  minHeight: 0,
+                  opacity: listLoading && rows.length > 0 ? 0.55 : 1,
+                }}
+              >
+                {listLoading && rows.length === 0 ? (
                   <div className="ds-col" style={{ alignItems: 'center', padding: 40 }}>
                     <Loader size="sm" color="teal" />
                   </div>
-                ) : filtered.length === 0 ? (
+                ) : listError ? (
+                  <div style={{ padding: 20, fontSize: 13, color: 'var(--mantine-color-red-6)' }}>
+                    {listError}
+                  </div>
+                ) : rows.length === 0 ? (
                   <div className="ds-faint" style={{ padding: 20, fontSize: 13 }}>
-                    {results.length === 0 ? 'No results in this run yet.' : 'No results match your filters.'}
+                    {allCount === 0 ? 'No results in this run yet.' : 'No results match your filters.'}
                   </div>
                 ) : (
-                  filtered.map((r) => {
+                  rows.map((r) => {
                     const meta = TYPE_META[r.type];
                     const Icon = meta.icon;
                     const isSel = r.id === selectedId;
@@ -355,14 +455,29 @@ export default function RunDetailModal({
               </div>
 
               <div
-                className="ds-faint"
+                className="ds-row-between"
                 style={{
                   padding: '8px 12px',
                   borderTop: '1px solid var(--ds-border-soft)',
-                  fontSize: 12,
+                  gap: 8,
                 }}
               >
-                Showing {filtered.length} of {results.length}
+                <span className="ds-faint ds-row ds-gap-sm" style={{ fontSize: 12 }}>
+                  {listing.total > 0
+                    ? `${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, listing.total)} of ${listing.total}`
+                    : '0 results'}
+                  {listLoading && rows.length > 0 ? <Loader size={10} color="gray" /> : null}
+                </span>
+                {totalPages > 1 ? (
+                  <Pagination
+                    size="xs"
+                    total={totalPages}
+                    value={page}
+                    onChange={setPage}
+                    siblings={0}
+                    boundaries={1}
+                  />
+                ) : null}
               </div>
             </div>
 
@@ -386,12 +501,12 @@ export default function RunDetailModal({
                         {selected.url}
                       </a>
                       <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>
-                        {selected.bodyMarkdown ? (
+                        {body ? (
                           <Tooltip label="Copy markdown" withArrow>
                             <ActionIcon
                               variant="default"
                               radius="md"
-                              onClick={() => void copyBody(selected.bodyMarkdown ?? '')}
+                              onClick={() => void copyBody(body)}
                               aria-label="Copy markdown"
                             >
                               <IconCopy size={15} />
@@ -443,11 +558,17 @@ export default function RunDetailModal({
 
                   <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 18 }}>
                     {selected.errorMessage ? (
-                      <Code block color="red" style={{ marginBottom: selected.bodyMarkdown ? 12 : 0 }}>
+                      <Code block color="red" style={{ marginBottom: body || detailLoading ? 12 : 0 }}>
                         {selected.errorMessage}
                       </Code>
                     ) : null}
-                    {selected.bodyMarkdown ? (
+                    {detailLoading ? (
+                      <div className="ds-col" style={{ alignItems: 'center', padding: 40 }}>
+                        <Loader size="sm" color="teal" />
+                      </div>
+                    ) : detailError ? (
+                      <div style={{ fontSize: 13, color: 'var(--mantine-color-red-6)' }}>{detailError}</div>
+                    ) : body ? (
                       <pre
                         className="ds-mono"
                         style={{
@@ -459,7 +580,7 @@ export default function RunDetailModal({
                           color: 'var(--ds-text)',
                         }}
                       >
-                        {selected.bodyMarkdown}
+                        {body}
                       </pre>
                     ) : selected.type === 'file' ? (
                       <div className="ds-faint" style={{ fontSize: 13 }}>
@@ -474,7 +595,7 @@ export default function RunDetailModal({
                 </>
               ) : (
                 <div className="ds-faint" style={{ padding: 40, fontSize: 13 }}>
-                  {loading ? 'Loading results…' : 'Select a result on the left to preview it.'}
+                  {listLoading ? 'Loading results…' : 'Select a result on the left to preview it.'}
                 </div>
               )}
             </div>

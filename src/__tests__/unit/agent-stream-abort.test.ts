@@ -143,6 +143,7 @@ vi.mock('@cognipeer/agent-sdk', () => {
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
 import {
+  __testables,
   agentRelayCallbacks,
   executeAgentChat,
   executeAgentChatLocal,
@@ -520,8 +521,10 @@ describe('routed entry points', () => {
     const onTextChunk = vi.fn();
     const onToolEvent = vi.fn();
     const onCompaction = vi.fn();
+    const onPlan = vi.fn();
+    const onSubagent = vi.fn();
 
-    await executePlaygroundChat(playground({ onTextChunk, onToolEvent, onCompaction, signal: controller.signal }));
+    await executePlaygroundChat(playground({ onTextChunk, onToolEvent, onCompaction, onPlan, onSubagent, signal: controller.signal }));
 
     const [ctx, payload, , options] = hoisted.routeInstanceCall.mock.calls[0] as [
       { jobName: string },
@@ -530,16 +533,20 @@ describe('routed entry points', () => {
       { relay: { handlers: Record<string, (d: unknown) => void>; signal?: AbortSignal } },
     ];
     expect(ctx.jobName).toBe('playground');
-    for (const key of ['onTextChunk', 'onToolEvent', 'onCompaction', 'signal']) expect(payload).not.toHaveProperty(key);
+    for (const key of ['onTextChunk', 'onToolEvent', 'onCompaction', 'onPlan', 'onSubagent', 'signal']) expect(payload).not.toHaveProperty(key);
     expect(JSON.parse(JSON.stringify(payload))).toEqual(payload); // plain data only
     expect(options.relay.signal).toBe(controller.signal);
 
     options.relay.handlers.text('chunk');
     options.relay.handlers.tool({ phase: 'start', name: 'search' });
     options.relay.handlers.compaction({ at: 'now' });
+    options.relay.handlers.plan({ version: 1, operation: 'write', steps: [], at: 'now' });
+    options.relay.handlers.subagent({ phase: 'start', id: 'sa_1', name: 'helper', at: 'now' });
     expect(onTextChunk).toHaveBeenCalledWith('chunk');
     expect(onToolEvent).toHaveBeenCalledWith({ phase: 'start', name: 'search' });
     expect(onCompaction).toHaveBeenCalledWith({ at: 'now' });
+    expect(onPlan).toHaveBeenCalledWith({ version: 1, operation: 'write', steps: [], at: 'now' });
+    expect(onSubagent).toHaveBeenCalledWith({ phase: 'start', id: 'sa_1', name: 'helper', at: 'now' });
   });
 
   it('executePlaygroundChat without callbacks offers the relay nothing to listen for', async () => {
@@ -582,6 +589,39 @@ describe('routed entry points', () => {
   });
 });
 
+describe('toToolCallEvent', () => {
+  const { toToolCallEvent } = __testables;
+  const start = { type: 'tool_call', phase: 'start', name: 'search', id: 'c1', args: { q: 'x' } } as never;
+
+  it('an unstamped event keeps today\'s shape, with no subagent or resumed key', () => {
+    expect(toToolCallEvent(start)).toStrictEqual({ phase: 'start', name: 'search', id: 'c1', args: { q: 'x' } });
+  });
+
+  it('a stamped event carries the sub-agent; errors keep their message', () => {
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'success', name: 'lookup', id: 'c2', subagentName: 'helper', subagentId: 's1', durationMs: 5 } as never))
+      .toMatchObject({ subagent: { id: 's1', name: 'helper' }, durationMs: 5 });
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'error', name: 'lookup', subagentName: 'helper', error: new Error('boom') } as never))
+      .toMatchObject({ error: 'boom', subagent: { name: 'helper' } });
+  });
+
+  it('other events and phases produce nothing', () => {
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'skipped', name: 'x' } as never)).toBeUndefined();
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'start' } as never)).toBeUndefined();
+    expect(toToolCallEvent({ type: 'summarization', name: 'x' } as never)).toBeUndefined();
+  });
+
+  it('marks only the start of a re-entered delegation call', () => {
+    const resumedSet = new Set(['d1']);
+    const delegate = { type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1' } as never;
+    expect(toToolCallEvent(delegate, resumedSet)).toMatchObject({ resumed: true });
+    expect(toToolCallEvent(delegate, new Set(['other']))).not.toHaveProperty('resumed');
+    expect(toToolCallEvent(delegate)).not.toHaveProperty('resumed');
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'success', name: 'delegate_to', id: 'd1' } as never, resumedSet)).not.toHaveProperty('resumed');
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', subagentName: 'helper' } as never, resumedSet)).not.toHaveProperty('resumed');
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'start', name: 'lookup', id: 'd1' } as never, resumedSet)).not.toHaveProperty('resumed');
+  });
+});
+
 describe('agentRelayCallbacks (worker side)', () => {
   function fakeRelay(events: string[], signal?: AbortSignal) {
     const emitted: Array<[string, unknown]> = [];
@@ -606,6 +646,18 @@ describe('agentRelayCallbacks (worker side)', () => {
     expect(callbacks.signal).toBe(signal);
     callbacks.onTextChunk!('hi');
     expect(emitted).toEqual([['text', 'hi']]);
+  });
+
+  it('plan and sub-agent events publish under their relay names, and only when listened for', () => {
+    const { relay, emitted } = fakeRelay(['plan', 'subagent']);
+    const callbacks = agentRelayCallbacks(relay);
+    expect(Object.keys(callbacks).sort()).toEqual(['onPlan', 'onSubagent']);
+    callbacks.onPlan!({ version: 2, operation: 'update', steps: [], at: 't' });
+    callbacks.onSubagent!({ phase: 'result', id: 'sa_1', name: 'helper', at: 't' });
+    expect(emitted).toEqual([
+      ['plan', { version: 2, operation: 'update', steps: [], at: 't' }],
+      ['subagent', { phase: 'result', id: 'sa_1', name: 'helper', at: 't' }],
+    ]);
   });
 
   it('tool and compaction events publish under their relay names', () => {

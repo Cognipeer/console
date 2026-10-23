@@ -152,44 +152,12 @@ export default function AgentSubagentsPanel({
 
     return (
         <Stack gap="md">
-            <Group justify="space-between" align="flex-start">
-                <Stack gap={2}>
-                    <Text size="sm" fw={600}>{t('title')}</Text>
-                    <Text size="xs" c="dimmed">{t('intro')}</Text>
-                </Stack>
-                <Menu position="bottom-end">
-                    <Menu.Target>
-                        <Button
-                            size="xs"
-                            disabled={!enabled}
-                            leftSection={<IconPlus size={14} />}
-                            rightSection={<IconChevronDown size={12} />}
-                        >
-                            {t('addButton')}
-                        </Button>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                        <Menu.Item
-                            leftSection={<IconUsers size={14} />}
-                            onClick={() => setEditing({ index: -1, draft: { ...EMPTY_INLINE } })}
-                        >
-                            {t('defineInline')}
-                            <Text size="xs" c="dimmed">{t('defineInlineHint')}</Text>
-                        </Menu.Item>
-                        <Menu.Item
-                            leftSection={<IconLink size={14} />}
-                            disabled={refOptions.length === 0}
-                            onClick={() => setEditing({ index: -1, draft: { kind: 'ref', name: '', header: '' } })}
-                        >
-                            {t('useExisting')}
-                            <Text size="xs" c="dimmed">
-                                {refOptions.length === 0 ? t('noOtherAgents') : t('useExistingHint')}
-                            </Text>
-                        </Menu.Item>
-                    </Menu.Dropdown>
-                </Menu>
-            </Group>
+            <Stack gap={2}>
+                <Text size="sm" fw={600}>{t('title')}</Text>
+                <Text size="xs" c="dimmed">{t('intro')}</Text>
+            </Stack>
 
+            {/* The master switch comes first; the roster and its Add button follow it. */}
             <Card withBorder padding="sm" radius="md">
                 <Stack gap="xs">
                     <Switch
@@ -284,6 +252,40 @@ export default function AgentSubagentsPanel({
                     ))}
                 </Stack>
             )}
+
+            <Group>
+                <Menu position="bottom-start">
+                    <Menu.Target>
+                        <Button
+                            size="xs"
+                            disabled={!enabled}
+                            leftSection={<IconPlus size={14} />}
+                            rightSection={<IconChevronDown size={12} />}
+                        >
+                            {t('addButton')}
+                        </Button>
+                    </Menu.Target>
+                    <Menu.Dropdown>
+                        <Menu.Item
+                            leftSection={<IconUsers size={14} />}
+                            onClick={() => setEditing({ index: -1, draft: { ...EMPTY_INLINE } })}
+                        >
+                            {t('defineInline')}
+                            <Text size="xs" c="dimmed">{t('defineInlineHint')}</Text>
+                        </Menu.Item>
+                        <Menu.Item
+                            leftSection={<IconLink size={14} />}
+                            disabled={refOptions.length === 0}
+                            onClick={() => setEditing({ index: -1, draft: { kind: 'ref', name: '', header: '' } })}
+                        >
+                            {t('useExisting')}
+                            <Text size="xs" c="dimmed">
+                                {refOptions.length === 0 ? t('noOtherAgents') : t('useExistingHint')}
+                            </Text>
+                        </Menu.Item>
+                    </Menu.Dropdown>
+                </Menu>
+            </Group>
 
             {enabled ? (
                 <Card withBorder padding="sm" radius="md">

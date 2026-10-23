@@ -40,7 +40,7 @@ Each event:
 { "seq": 38, "type": "agent.tool_result", "data": { "tool_call_id": "call_1", "name": "sandbox_exec", "ok": true, "duration_ms": 812 }, "run_id": "run_3f9c…", "created_at": "2026-10-01T12:00:03.120Z" }
 ```
 
-`run_id` is the run id as `GET /agents/runs/{runId}` and the 202 of a background call return it (`run_` plus the id), so an event joins to its run directly. A run that paused keeps its events across the pause: the answer (`action.resolved`, also when a timeout denies or ends the request, and a client tool's `agent.tool_result`) and the continuation, inline or in the background, carry the same `run_id`, so `GET /agents/runs/{runId}/events` reads `action.required`, `action.resolved` and what follows in order and does not stop at the pause. Events written outside a run carry none (the pause of a dashboard turn, for instance). `seq` is unique and ascending within the session. `data` larger than 16 KB is cut and carries `_truncated: true`. Field names are `snake_case`, like the rest of the agent endpoints; the tool `args` inside an event are the tool's own and are left as they are.
+`run_id` is the run id as `GET /agents/runs/{runId}` and the 202 of a background call return it (`run_` plus the id), so an event joins to its run directly. A run that paused keeps its events across the pause: the answer (`action.resolved`, also when a timeout denies or ends the request, and a client tool's `agent.tool_result`) and the continuation, inline or in the background, carry the same `run_id`, so `GET /agents/runs/{runId}/events` reads `action.required`, `action.resolved` and what follows in order and does not stop at the pause. Events written outside a run carry none (the pause of a dashboard turn, for instance). `seq` is unique and strictly increasing within the session, and it may skip numbers: some events of the log are not exposed to API clients, so a gap is not a lost event. Use it as a position to resume from (`after`, `Last-Event-ID`), never as a count. `data` larger than 16 KB is cut and carries `_truncated: true`. Field names are `snake_case`, like the rest of the agent endpoints; the tool `args` inside an event are the tool's own and are left as they are.
 
 ### Event types
 
@@ -57,8 +57,8 @@ Each event:
 | `agent.message` | `content`, `message_index?`, `stop_reason?`, `usage?` |
 | `session.usage` | `turn_cost_usd`, `spent_usd`, `budget` (sessions with a [budget](/guide/agent-session-budgets)) |
 | `budget.reached` | `spent_usd`, `max_cost_usd` |
-| `session.status_idle` | `stop_reason`, `pending_action_ids?`, `detail?` |
-| `session.error` | `message`, `code?` |
+| `session.status_idle` | `stop_reason`, `pending_action_ids?`, `detail?`, `usage?` (only when the turn ended without a usage of its own — cancelled, timed out: what its model calls cost by the usage ledger, `source: ledger`) |
+| `session.error` | `message`, `code?`, `usage?` (what the failed turn's model calls had cost, from the usage ledger; absent when it made none) |
 | `session.work_done` | none; right after an idle with `stop_reason: end_turn` |
 | `session.truncated` | `reason` (`truncate`, `regenerate` or `edit`), `kept_messages`, `removed_messages`, `removed_from`, `cancelled_actions`, `by`, `channel`: messages were cut from the transcript ([details](/guide/agent-feedback)) |
 
@@ -68,7 +68,7 @@ Each event:
 
 Context summarization compresses **tool results**. An agent that has no tools (no tool bindings, knowledge, sub-agents, skills, memory, sandbox or client tools) never summarizes, so no `agent.compaction` event is emitted for it. With the default `hybrid` context policy such an agent keeps only the last `lastTurnsToKeep` turns once the context grows, and older turns are dropped without a summary: facts from them are lost. Saving an agent configured this way returns a warning. Give the agent a tool, raise `lastTurnsToKeep`, or use the `raw` policy if older turns must stay.
 
-A turn is bracketed by `session.status_running` and `session.status_idle`. A new event type can appear in a future version: ignore the ones you do not know.
+A turn is bracketed by `session.status_running` and `session.status_idle`. Every model call a turn makes writes its own usage row the moment it settles (`model_usage_logs`, stamped with the agent, conversation, turn, run and trace session), so what a turn spent is known even when the turn failed or was cut off; the `usage` on `session.error` / `session.status_idle` is the sum of those rows. A new event type can appear in a future version: ignore the ones you do not know.
 
 ## Following a turn live
 

@@ -85,6 +85,15 @@ describe('client wire spelling', () => {
     });
   });
 
+  it('keeps the delegating call id off the client event, as on the pending action', () => {
+    expect(toClientEventData({ actionId: 'act_3', kind: 'tool_approval', toolName: 'lookup', subagent: 'helper', delegationToolCallId: 'd1' })).toEqual({
+      action_id: 'act_3', kind: 'tool_approval', tool_name: 'lookup', subagent: 'helper',
+    });
+    expect(toClientPendingAction({
+      id: 'act_3', kind: 'tool_approval', toolName: 'lookup', subagent: 'helper', delegationToolCallId: 'd1', status: 'pending',
+    } as never)).not.toHaveProperty('delegation_tool_call_id');
+  });
+
   it('reads the answer in either spelling, snake_case first', () => {
     expect(normalizeClientResolveBody({ decision: 'allow', approved_args: { a: 1 }, remember_for_session: true })).toEqual({
       decision: 'allow', approvedArgs: { a: 1 }, rememberForSession: true,

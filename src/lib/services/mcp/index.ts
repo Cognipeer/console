@@ -23,18 +23,22 @@ export {
   getToolAnnotationOverrides,
   getToolDescriptionOverrides,
   getToolNameOverrides,
+  resolveMcpInstructions,
   resolveMcpToolName,
   serializeMcpServer,
   serializeMcpServerFull,
   parseOpenApiSpec,
   resolveExposure,
   resolveSourceType,
+  isBrowserServer,
+  reachesBrowser,
   DEFAULT_MCP_EXPOSURE,
 } from './mcpService';
 
 export type { McpServerMonitorEntry, McpRequestClientInfo } from './mcpService';
 
-export { McpToolInputError, McpUpstreamError, isMcpToolInputError, isMcpUpstreamError } from './errors';
+export { MCP_INSTRUCTIONS_MAX_CHARS, mcpInstructionsInputError } from './discovery';
+export { McpServerConfigError, McpToolInputError, McpUnknownToolError, McpUpstreamError, isMcpServerConfigError, isMcpToolInputError, isMcpUnknownToolError, isMcpUpstreamError } from './errors';
 
 export {
   defaultAnnotationsForSource,

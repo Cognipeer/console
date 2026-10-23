@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
@@ -11,14 +12,23 @@ import type {
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import {
+  CONSOLE_IDENTITY_AUTH_TYPE,
+  consoleIdentityCallerOf,
+  isConsoleIdentityRefusal,
+} from '@/lib/iam/consoleIdentity';
 import { maskSecretValues } from '@/lib/services/logRedaction';
 import {
   createMcpServer,
   deleteMcpServer,
   executeMcpTool,
   getMcpServerByKey,
+  isMcpServerConfigError,
   isMcpToolInputError,
+  isMcpUnknownToolError,
   listEnabledMcpTools,
+  mcpInstructionsInputError,
+  resolveMcpInstructions,
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
@@ -56,7 +66,7 @@ import {
 
 const logger = createLogger('api:client-mcp');
 
-const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
+const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
 
 // Local parse helpers replicated from the dashboard `mcp.ts` plugin (they are
@@ -242,11 +252,17 @@ async function runToolCall(
     caller: CallerInfo;
     sessionId?: string;
     runtimeContext?: AgentRuntimeContext;
+    /** The JSON-RPC `params._meta` of a `tools/call`, raw; the log write bounds and scrubs it. */
+    clientMeta?: unknown;
   },
 ): Promise<
   | { ok: true; result: unknown; latencyMs: number }
-  /** `inputError`: the call itself was wrong (unknown tool, bad argument), as opposed to failing. */
-  | { ok: false; error: string; inputError: boolean }
+  /**
+   * `inputError`: the call itself was wrong (unknown tool, bad argument), as opposed to failing.
+   * `unknownTool`: the input error is a tool name the server does not advertise.
+   * `refused`: the server takes Console identity and there was no person to mint a token for.
+   */
+  | { ok: false; error: string; inputError: boolean; unknownTool: boolean; refused: boolean }
 > {
   const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
   // Header names only — values never reach the log payload.
@@ -254,8 +270,17 @@ async function runToolCall(
   // Values (runtime headers + static upstream credential) that must be scrubbed
   // from an echoed response before it is persisted.
   const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
+  // Only the host's `_meta` is recorded here, not who called: the address and
+  // user agent stay out of token-caller rows.
+  const logOptions = log.clientMeta === undefined ? undefined : { client: { meta: log.clientMeta } };
   try {
-    const { latencyMs, result } = await executeMcpTool(server, toolName, args, runtimeHeaders);
+    const { latencyMs, result } = await executeMcpTool(
+      server,
+      toolName,
+      args,
+      runtimeHeaders,
+      consoleIdentityCallerOf(log.runtimeContext, { projectId: log.projectId ?? server.projectId }),
+    );
     void logMcpRequest(log.tenantDbName, {
       tenantId: log.tenantId,
       projectId: log.projectId,
@@ -278,7 +303,7 @@ async function runToolCall(
       transport: log.transport,
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
-    }, secretValues);
+    }, secretValues, logOptions);
     return { ok: true, result, latencyMs };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
@@ -302,15 +327,29 @@ async function runToolCall(
       transport: log.transport,
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
-    }, secretValues);
+    }, secretValues, logOptions);
     return {
       ok: false,
       // The executors mask what they throw; this is the same scrub once more on
       // the way out, for errors that did not come through them.
       error: maskSecretValues(errorMessage, secretValues, { maxChars: getConfig().mcp.errorMessageMaxChars }),
       inputError: isMcpToolInputError(error),
+      unknownTool: isMcpUnknownToolError(error),
+      refused: isConsoleIdentityRefusal(error),
     };
   }
+}
+
+/**
+ * What of a call's `_meta` goes to the request log. `runtime_context` is this
+ * gateway's own channel for runtime headers; it is recorded as header names
+ * only (`_runtimeAuth`), so its values must not come back in through here.
+ */
+function loggableClientMeta(meta: unknown): unknown {
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return meta;
+  const rest = { ...(meta as Record<string, unknown>) };
+  delete rest.runtime_context;
+  return rest;
 }
 
 /**
@@ -379,12 +418,14 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
     if (!protocolEnabled(server, requiredProtocol)) {
       return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
     }
+    const instructions = resolveMcpInstructions(server);
     return respond(jsonRpcOk(id, {
       capabilities: {
         tools: { listChanged: false },
       },
       protocolVersion: MCP_PROTOCOL_VERSION,
       serverInfo: SERVER_INFO,
+      ...(instructions ? { instructions } : {}),
     }));
   }
 
@@ -443,6 +484,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         userId: ctx.user?._id?.toString(),
       },
       sessionId: sessionId ?? undefined,
+      clientMeta: loggableClientMeta(meta),
       runtimeContext: buildRuntimeContextFromRequest(meta?.runtime_context, request.headers, {
         userId: ctx.user?._id?.toString(),
         tokenId: ctx.tokenRecord._id?.toString(),
@@ -451,6 +493,9 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
     });
 
     if (outcome.ok) {
+      if (isToolOutput(outcome.result)) {
+        return respond(jsonRpcOk(id, toMcpCallResult(outcome.result, MCP_PROTOCOL_VERSION)));
+      }
       return respond(jsonRpcOk(id, {
         content: [
           {
@@ -461,8 +506,9 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         isError: false,
       }));
     }
-    // An unknown tool or a bad argument is a malformed call, not a failed one.
-    if (outcome.inputError) {
+    // An unknown tool is a malformed call. Anything else — a bad argument
+    // included — is a failed call whose message the model reads and can act on.
+    if (outcome.unknownTool) {
       return respond(jsonRpcError(id, -32602, outcome.error));
     }
     return respond(jsonRpcOk(id, {
@@ -527,7 +573,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       if (!outcome.ok) {
-        return reply.code(outcome.inputError ? 400 : 502).send({ error: outcome.error });
+        return reply.code(outcome.refused ? 403 : outcome.inputError ? 400 : 502).send({ error: outcome.error });
       }
 
       return reply.code(200).send({
@@ -692,9 +738,15 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const authType = (body.upstreamAuth as { type?: unknown }).type;
       if (!VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
         return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
         });
       }
+      if (authType === CONSOLE_IDENTITY_AUTH_TYPE && sourceType !== 'remote' && sourceType !== 'openapi') {
+        return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
+      }
+
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
       const server = await createMcpServer(
         ctx.tenantDbName,
@@ -703,6 +755,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.projectId,
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
+          instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
           name: body.name.trim(),
           key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
@@ -745,7 +798,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         : undefined;
       if (authType !== undefined && !VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
         return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
         });
       }
 
@@ -787,6 +840,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
+
       const updated = await updateMcpServer(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, {
         key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
@@ -805,6 +861,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
+        instructions: body.instructions as string | null | undefined,
       }, auditContextFor(request, ctx.tokenRecord.userId));
 
       if (!updated) {
@@ -813,6 +870,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ server: serializeMcpServer(updated) });
     } catch (error) {
+      if (isMcpServerConfigError(error)) return reply.code(400).send({ error: error.message });
       logger.error('Update client MCP server error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',

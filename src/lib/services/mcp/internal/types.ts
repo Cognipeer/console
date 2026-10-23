@@ -13,6 +13,8 @@ export interface InternalMcpProviderContext {
   tenantDbName: string;
   tenantId: string;
   projectId?: string;
+  /** Key of the MCP server the call came through. Set for `execute` only. */
+  serverKey?: string;
 }
 
 /** One selectable instance of a provider, e.g. a single RAG module. */
@@ -38,6 +40,8 @@ export interface InternalMcpBuiltTools {
   /** Suggested server name when the user leaves the name blank. */
   suggestedName: string;
   suggestedDescription?: string;
+  /** MCP `instructions`: how the tools fit together, served unless the operator writes their own. */
+  instructions?: string;
 }
 
 export interface InternalMcpProvider {

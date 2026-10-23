@@ -11,6 +11,7 @@ import type {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
+import { CONSOLE_IDENTITY_AUTH_TYPE, consoleIdentityCallerOf, consoleIdentityIssuerInfo } from '@/lib/iam/consoleIdentity';
 import {
   aggregateMcpRequestLogs,
   countMcpRequestLogs,
@@ -19,6 +20,8 @@ import {
   executeMcpTool,
   getMcpMonitorSnapshot,
   getMcpServer,
+  isMcpServerConfigError,
+  mcpInstructionsInputError,
   listMcpAuditLogs,
   listMcpRequestLogs,
   listMcpServers,
@@ -62,7 +65,7 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:mcp');
-const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
+const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal', 'composite'] as const;
 
 /**
@@ -357,6 +360,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           enterpriseBuild: IS_ENTERPRISE_BUILD,
           licenseEnterprise,
         },
+        // What a server set up for Console identity verifies its tokens against.
+        consoleIdentity: consoleIdentityIssuerInfo(session.tenantId),
         internalProviders: INTERNAL_MCP_PROVIDERS.map((p) => ({
           id: p.id,
           label: p.label,
@@ -488,9 +493,15 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       const authType = (body.upstreamAuth as { type?: unknown }).type;
       if (!VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
         return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
         });
       }
+      if (authType === CONSOLE_IDENTITY_AUTH_TYPE && sourceType !== 'remote' && sourceType !== 'openapi') {
+        return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
+      }
+
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
       const server = await createMcpServer(
         session.tenantDbName,
@@ -499,6 +510,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
+          instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
           name: body.name.trim(),
           key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite',
@@ -526,6 +538,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         server: serializeMcpServer(server),
       });
     } catch (error) {
+      if (isMcpServerConfigError(error)) return reply.code(400).send({ error: error.message });
       logger.error('Create MCP server error', { error });
       return sendProjectContextError(reply, error)
         ?? sendEndpointSlugError(reply, error)
@@ -595,7 +608,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         : undefined;
       if (authType !== undefined && !VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
         return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
         });
       }
 
@@ -632,6 +645,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(400).send({ error: 'compositeConfig.members must include at least one member server' });
         }
       }
+
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
       // not turn on persistent sandbox execution via edit. The guardrail
@@ -676,6 +692,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
         toolNames: body.toolNames as UpdateMcpServerInput['toolNames'],
+        instructions: body.instructions as string | null | undefined,
       }, auditContextFor(request, session.userId));
 
       if (!updated) {
@@ -684,6 +701,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ server: serializeMcpServerFull(updated) });
     } catch (error) {
+      if (isMcpServerConfigError(error)) return reply.code(400).send({ error: error.message });
       logger.error('Update MCP server error', { error });
       return sendProjectContextError(reply, error)
         ?? sendEndpointSlugError(reply, error)
@@ -868,7 +886,13 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       try {
-        const { result, latencyMs } = await executeMcpTool(server, toolName, args, runtimeHeaders);
+        const { result, latencyMs } = await executeMcpTool(
+          server,
+          toolName,
+          args,
+          runtimeHeaders,
+          consoleIdentityCallerOf(runtimeContext, { projectId: server.projectId }),
+        );
 
         void logMcpRequest(session.tenantDbName, {
           tenantId: session.tenantId,

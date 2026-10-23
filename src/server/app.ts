@@ -136,6 +136,25 @@ export async function registerNextHandoff(
   });
 }
 
+/**
+ * The longest URL parameter the router takes, counted as it is written in the URL (percent-encoded). Fastify's own
+ * default of 100 characters refuses anything longer (414), and the client Files API addresses a file by its key as one
+ * parameter (`/objects/:objectKey`): a key may be 1024 characters, and a character outside ASCII takes up to nine in
+ * the URL (`%E6%97%A5`), so a file stored through the Document Store could not be read back.
+ * The request line itself is bounded by Node's header limit (16 KB), which is the real ceiling.
+ */
+export const MAX_URL_PARAM_LENGTH = 12_288;
+
+/** The Fastify instance with the server's own options: body limit, proxy trust and the URL parameter length. */
+export function createFastifyInstance(config = getConfig()): FastifyInstance {
+  return Fastify({
+    bodyLimit: parseBodySize(config.limits.bodySize),
+    logger: false,
+    routerOptions: { maxParamLength: MAX_URL_PARAM_LENGTH },
+    trustProxy: resolveTrustProxyOption(config.network.trustedProxies),
+  });
+}
+
 export async function createServer(dev: boolean): Promise<FastifyInstance> {
   const nextApp = next({
     dev,
@@ -160,12 +179,7 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
 
   await nextApp.prepare();
 
-  const config = getConfig();
-  const app = Fastify({
-    bodyLimit: parseBodySize(config.limits.bodySize),
-    logger: false,
-    trustProxy: resolveTrustProxyOption(config.network.trustedProxies),
-  });
+  const app = createFastifyInstance();
 
   await app.register(cookie);
   registerBodyParsers(app);

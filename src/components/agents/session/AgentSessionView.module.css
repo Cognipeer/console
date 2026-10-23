@@ -488,3 +488,176 @@
 [data-mantine-color-scheme='dark'] .compactionDirective {
   background: var(--mantine-color-dark-6);
 }
+
+/*
+ * The flow of a turn: plan versions, sub-agent groups and summarization
+ * dividers drawn in the order they happened. They use the theme's own border
+ * and body colors, so they follow light and dark without overrides; the
+ * summarization divider keeps the indigo of the card it opens to.
+ */
+.flowAnchor {
+  scroll-margin-top: 16px;
+}
+
+.flowDivider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0;
+}
+
+.flowDividerLine {
+  flex: 1;
+  min-width: 16px;
+  border-top: 1px dashed var(--mantine-color-indigo-3);
+}
+
+.flowDividerPill {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 3px 12px;
+  border: 1px dashed var(--mantine-color-indigo-3);
+  border-radius: 999px;
+  background: var(--mantine-color-indigo-0);
+}
+
+.flowDividerPill[data-tone='orange'] {
+  border-color: var(--mantine-color-orange-3);
+  background: var(--mantine-color-orange-0);
+}
+
+button.flowDividerPill {
+  cursor: pointer;
+}
+
+.flowDividerBody {
+  margin-top: 6px;
+  border: 1px dashed var(--mantine-color-indigo-3);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-indigo-0);
+}
+
+.flowDividerBody[data-tone='orange'] {
+  border-color: var(--mantine-color-orange-3);
+  background: var(--mantine-color-orange-0);
+}
+
+.flowDividerBody .compactionBody {
+  padding: 10px 12px 12px;
+}
+
+.planCard {
+  background: var(--mantine-color-gray-light);
+}
+
+.planStep {
+  line-height: 1.4;
+}
+
+.planStepIcon {
+  display: flex;
+  flex-shrink: 0;
+  width: 18px;
+  padding-top: 2px;
+  justify-content: center;
+}
+
+.planUpdateHeader {
+  display: block;
+  width: 100%;
+}
+
+.planDock {
+  background: var(--mantine-color-gray-light);
+}
+
+.planDockHeader {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+}
+
+.subagentGroup {
+  padding: 8px 10px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+}
+
+.subagentGroup[data-nested='true'] {
+  background: var(--mantine-color-gray-light);
+}
+
+.subagentGroup[data-status='paused'] {
+  border-color: var(--mantine-color-orange-4);
+}
+
+.subagentGroup[data-status='failed'] {
+  border-color: var(--mantine-color-red-4);
+}
+
+.subagentHeader {
+  display: block;
+  width: 100%;
+}
+
+.subagentAvatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 50%;
+  background: var(--mantine-color-gray-light);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.subagentResultLine {
+  padding-left: 52px;
+  margin-top: 2px;
+}
+
+.subagentRail {
+  margin: 8px 0 2px 12px;
+  padding-left: 14px;
+  border-left: 2px solid var(--mantine-color-default-border);
+}
+
+.subagentStep {
+  padding: 4px 8px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  background: var(--mantine-color-body);
+}
+
+.subagentStepButton {
+  display: block;
+  width: 100%;
+}
+
+.subagentStepLine {
+  min-height: 20px;
+}
+
+[data-mantine-color-scheme='dark'] .flowDividerLine,
+[data-mantine-color-scheme='dark'] .flowDividerPill,
+[data-mantine-color-scheme='dark'] .flowDividerBody {
+  border-color: var(--mantine-color-indigo-8);
+}
+
+[data-mantine-color-scheme='dark'] .flowDividerPill,
+[data-mantine-color-scheme='dark'] .flowDividerBody {
+  background: rgba(76, 110, 245, 0.08);
+}
+
+[data-mantine-color-scheme='dark'] .flowDividerPill[data-tone='orange'],
+[data-mantine-color-scheme='dark'] .flowDividerBody[data-tone='orange'] {
+  border-color: var(--mantine-color-orange-8);
+  background: rgba(253, 126, 20, 0.08);
+}

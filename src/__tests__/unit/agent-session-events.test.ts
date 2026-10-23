@@ -384,6 +384,30 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
 });
 
 describe('session turn recorder', () => {
+  it('a turn that throws, or ends without a usage of its own, reports what its ledger says it spent', async () => {
+    const ledger = { calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 0, reasoningTokens: 0, totalTokens: 170, costUsd: 0.3 };
+    const db = Object.assign(fakeDb(), { summarizeModelUsageForTurn: vi.fn(async () => ledger) });
+    const { bus } = recordingBus();
+    const failed = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await failed.fail(new Error('provider down'));
+    expect(db.summarizeModelUsageForTurn).toHaveBeenCalledWith(ids.conversationId, failed.turnId, ids.projectId);
+    const error = db.rows.find((r) => r.type === 'session.error');
+    expect(error?.data).toMatchObject({ usage: { totalTokens: 170, costUsd: 0.3, calls: 2, source: 'ledger' } });
+    // The turn's id is the one the conversation's runtime fields carry.
+    expect(db.updateAgentConversationRuntime.mock.calls[0][1]).toMatchObject({ runtimeTurnId: failed.turnId });
+
+    db.rows.length = 0;
+    const cancelled = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await cancelled.finish({ stopReason: 'cancelled', content: 'partial' });
+    expect(db.rows.find((r) => r.type === 'session.status_idle')?.data).toMatchObject({ stopReason: 'cancelled', usage: { totalTokens: 170 } });
+
+    // A turn with a usage of its own does not read the ledger.
+    db.summarizeModelUsageForTurn.mockClear();
+    const done = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await done.finish({ stopReason: 'end_turn', content: 'answer', usage: { totalTokens: 3 } });
+    expect(db.summarizeModelUsageForTurn).not.toHaveBeenCalled();
+  });
+
   it('writes the turn in order, holds the user message until the model call is out, and stamps the conversation', async () => {
     const db = fakeDb();
     const { bus, frames } = recordingBus();
@@ -464,6 +488,146 @@ describe('session turn recorder', () => {
     await turn.finish({ stopReason: 'end_turn', content: 'ok' });
     expect(db.rows.map((r) => r.type)).toEqual(['session.status_running', 'agent.message', 'session.status_idle', 'session.work_done']);
     expect(db.rows[0].data).toEqual({ trigger: 'resume' });
+  });
+});
+
+describe('session turn recorder: plan, sub-agents and passes', () => {
+  const plan = (version: number) => ({ version, operation: 'write' as const, steps: [{ id: 1, title: 'Step', status: 'in-progress' as const }], at: '2026-10-23T10:00:00.000Z' });
+
+  it('writes a plan version once, and every sub-agent lifecycle step', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    turn.onPlan(plan(1));
+    turn.onPlan(plan(1));
+    turn.onPlan(plan(2));
+    for (const phase of ['start', 'paused', 'result', 'error'] as const) {
+      turn.onSubagent({ phase, id: 'sa_1', name: 'helper', at: '2026-10-23T10:00:00.000Z' });
+    }
+    await turn.finish({ stopReason: 'end_turn', content: 'ok' });
+    expect(db.rows.filter((r) => r.type === 'agent.plan').map((r) => r.data.version)).toEqual([1, 2]);
+    expect(db.rows.find((r) => r.type === 'agent.plan')?.data).toMatchObject({ steps: [{ id: 1, title: 'Step', status: 'in-progress' }] });
+    expect(db.rows.filter((r) => r.type === 'agent.subagent').map((r) => r.data.phase)).toEqual(['start', 'paused', 'result', 'error']);
+  });
+
+  it('a plan too big for a row sheds owner, criteria and evidence, then title length, and stays a list of steps', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    const big = {
+      ...plan(1),
+      steps: Array.from({ length: 100 }, (_, i) => ({
+        id: i + 1, title: `Step ${i + 1} ${'t'.repeat(150)}`, status: 'not-started' as const, owner: 'agent', exitCriteria: 'c'.repeat(400), evidence: 'e'.repeat(400),
+      })),
+    };
+    turn.onPlan(big);
+    await turn.finish({ stopReason: 'end_turn', content: 'ok' });
+    const row = db.rows.find((r) => r.type === 'agent.plan')!;
+    const steps = row.data.steps as Array<Record<string, unknown>>;
+    expect(row.data).not.toHaveProperty('_truncated');
+    expect(steps).toHaveLength(100);
+    expect(steps[0]).not.toHaveProperty('exitCriteria');
+    expect(steps[0]).toMatchObject({ id: 1, status: 'not-started' });
+    expect((steps[0].title as string).length).toBeLessThanOrEqual(80);
+  });
+
+  it('a resumed leg does not write a plan version the earlier leg wrote', async () => {
+    const db = fakeDb();
+    const first = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    first.onPlan(plan(1));
+    await first.finish({ stopReason: 'requires_action', content: '', pendingActionIds: ['act_1'] });
+    const second = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });
+    second.onPlan(plan(1));
+    second.onPlan(plan(2));
+    await second.finish({ stopReason: 'end_turn', content: 'ok' });
+    expect(db.rows.filter((r) => r.type === 'agent.plan').map((r) => r.data.version)).toEqual([1, 2]);
+  });
+
+  it('a resumed leg reads only this turn\'s plan versions: an earlier turn\'s do not hide its own', async () => {
+    // The SDK numbers plan versions from 1 again when the session's state was reset, so a version an earlier
+    // turn wrote says nothing about this one.
+    const db = fakeDb();
+    const earlier = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'first' });
+    earlier.onPlan({ ...plan(1), toolCallId: 'p_old1' });
+    earlier.onPlan({ ...plan(2), toolCallId: 'p_old2' });
+    await earlier.finish({ stopReason: 'end_turn', content: 'done' });
+    const paused = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'second' });
+    paused.onPlan({ ...plan(1), toolCallId: 'p_new1' });
+    await paused.finish({ stopReason: 'requires_action', content: '', pendingActionIds: ['act_1'] });
+
+    const resumed = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });
+    resumed.onPlan({ ...plan(1), toolCallId: 'p_new1' });
+    resumed.onPlan({ ...plan(2), toolCallId: 'p_new2' });
+    await resumed.finish({ stopReason: 'end_turn', content: 'ok' });
+
+    // The leg's repeat of what its own turn wrote is skipped; its version 2 is new to this turn, though an earlier turn had one.
+    expect(db.rows.filter((r) => r.type === 'agent.plan').map((r) => [r.data.version, r.data.toolCallId])).toEqual([
+      [1, 'p_old1'], [2, 'p_old2'], [1, 'p_new1'], [2, 'p_new2'],
+    ]);
+  });
+
+  it('a resumed leg does not take an earlier turn\'s row for its own, even one that carries the same version and call id', async () => {
+    // Some providers number their calls from the start in every reply, so the key alone cannot tell the turns apart:
+    // only the rows after this turn's own user message are the earlier legs'.
+    const db = fakeDb();
+    const earlier = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'first' });
+    earlier.onPlan({ ...plan(1), toolCallId: 'call_1' });
+    await earlier.finish({ stopReason: 'end_turn', content: 'done' });
+    const paused = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'second' });
+    await paused.finish({ stopReason: 'requires_action', content: '', pendingActionIds: ['act_1'] });
+
+    const resumed = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });
+    resumed.onPlan({ ...plan(1), toolCallId: 'call_1' });
+    await resumed.finish({ stopReason: 'end_turn', content: 'ok' });
+
+    expect(db.rows.filter((r) => r.type === 'agent.plan').map((r) => [r.data.version, r.data.toolCallId])).toEqual([[1, 'call_1'], [1, 'call_1']]);
+  });
+
+  it('tells plan versions of the same number apart by the call that wrote them', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    turn.onPlan({ ...plan(1), toolCallId: 'p1' });
+    turn.onPlan({ ...plan(1), toolCallId: 'p1' });
+    turn.onPlan({ ...plan(1), toolCallId: 'p2' });
+    await turn.finish({ stopReason: 'end_turn', content: 'ok' });
+    expect(db.rows.filter((r) => r.type === 'agent.plan').map((r) => r.data.toolCallId)).toEqual(['p1', 'p2']);
+  });
+
+  it('a resumed leg with no user message in the log (its events expired) still skips what the log holds', async () => {
+    const db = fakeDb([
+      { ...ids, seq: 1, type: 'agent.plan', data: { version: 1, toolCallId: 'p1' }, createdAt: new Date() },
+    ]);
+    const resumed = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });
+    resumed.onPlan({ ...plan(1), toolCallId: 'p1' });
+    resumed.onPlan({ ...plan(2), toolCallId: 'p2' });
+    await resumed.finish({ stopReason: 'end_turn', content: 'ok' });
+    expect(db.rows.filter((r) => r.type === 'agent.plan').map((r) => r.data.toolCallId)).toEqual(['p1', 'p2']);
+  });
+
+  it('a child\'s tool rows name its id and its delegation; the agent\'s own rows do not', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    turn.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'lookup', id: 'c1', subagentName: 'helper', subagentId: 'sa_1' } as never, {
+      id: 'sa_1', name: 'helper', parentToolCallId: 'd1', parallel: true,
+    });
+    turn.onSdkEvent({ type: 'tool_call', phase: 'success', name: 'lookup', id: 'c1', subagentName: 'helper', subagentId: 'sa_1' } as never, {
+      id: 'sa_1', name: 'helper', parentToolCallId: 'd1', parallel: true,
+    });
+    turn.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'search', id: 'p1' } as never);
+    await turn.finish({ stopReason: 'end_turn', content: 'ok' });
+    const [use, result, own] = db.rows.filter((r) => r.type.startsWith('agent.tool_'));
+    expect(use.data).toMatchObject({ toolCallId: 'c1', subagent: 'helper', subagentId: 'sa_1', parentToolCallId: 'd1', parallel: true });
+    expect(result.data).toMatchObject({ toolCallId: 'c1', ok: true, subagent: 'helper', subagentId: 'sa_1', parentToolCallId: 'd1', parallel: true });
+    for (const key of ['subagent', 'subagentId', 'parentToolCallId', 'parallel']) expect(own.data).not.toHaveProperty(key);
+  });
+
+  it('writes a pass with its position, and a child\'s pass with its name', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    turn.onCompaction({ at: 't', id: 'pass-1', index: 1, afterToolCallId: null, trigger: 'pre_leg' });
+    turn.onCompaction({ at: 't', id: 'pass-sa_1-1', index: 1, subagent: { id: 'sa_1', name: 'helper' } });
+    await turn.finish({ stopReason: 'end_turn', content: 'ok' });
+    const rows = db.rows.filter((r) => r.type === 'agent.compaction');
+    expect(rows[0].data).toMatchObject({ id: 'pass-1', index: 1, afterToolCallId: null, trigger: 'pre_leg' });
+    expect(rows[1].data).toMatchObject({ subagent: { id: 'sa_1', name: 'helper' } });
   });
 });
 

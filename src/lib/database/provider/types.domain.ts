@@ -1,5 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type { EntityMetricType, IUsageAttributionFields } from './types.base';
+import type { IConfigGroupRef, IConfigValueRef } from './types.extended';
 
 // ── Guardrail types ────────────────────────────────────────────────────────
 
@@ -2319,6 +2320,12 @@ export interface IExternalAgentConnection {
   apiKeyEnc?: string;
   /** Provider key holding encrypted credentials for the endpoint (alternative to inline key). */
   credentialProviderKey?: string;
+  /**
+   * `console_identity`: no stored credential. Every call carries a short-lived token Console signs
+   * for the person behind it, for this `url` (lib/iam/consoleIdentity.ts). Absent: `apiKeyEnc` /
+   * `credentialProviderKey`, as before.
+   */
+  authType?: 'console_identity';
   /** Dot-path used to pull the assistant text out of a non-standard JSON response. */
   responsePath?: string;
   /**
@@ -2614,6 +2621,33 @@ export interface IAgentVariable {
 }
 
 /**
+ * Reminders the agent sets for itself (`reminder_set`): a one-shot wake-up that
+ * later starts a new turn in the SAME session. Each reminder is a scheduled
+ * agent run (`channel: 'reminder'`). Off unless switched on; every limit is
+ * also capped by the platform (`AGENT_REMINDER_*`).
+ */
+export interface IAgentRemindersConfig {
+  /** Absent / false = the reminder tools are not offered and due reminders are not run. */
+  enabled?: boolean;
+  /** Shortest delay the agent may ask for (default 60 s). */
+  minDelaySeconds?: number;
+  /** Furthest ahead the agent may schedule (default 72 h). */
+  maxHorizonHours?: number;
+  /** Scheduled reminders one session may hold at once (default 3). */
+  maxActivePerSession?: number;
+  /** Reminders one session may ever create — stops a reminder that keeps re-arming itself (default 20). */
+  maxFiresPerSession?: number;
+  /** Run class of the wake-up turn (default `deferred`). */
+  runClass?: 'default' | 'deferred';
+  /** When the session is busy or waits on a person at fire time: wait (`postpone`, default) or drop it (`skip`). */
+  whenBusy?: 'postpone' | 'skip';
+  /** A reminder set after the run read outside content (web, MCP, tool output, webhook): ask (default), refuse or allow. */
+  afterUntrustedContent?: 'approve' | 'deny' | 'allow';
+  /** Extra guidance on when to set reminders, added to the reminders prompt section. */
+  instructions?: string;
+}
+
+/**
  * Files a user attaches to a session (the composer's paperclip, the client
  * API's `input_file` / `input_image`). Every field is a stored setting; absent
  * limits take the defaults in `SESSION_FILES_DEFAULTS` (sessionFilesConfig.ts).
@@ -2645,7 +2679,7 @@ export interface IAgentAttachmentsConfig {
   allowedMimeTypes?: string[];
   /** A message's attachments are put in the user turn when their text is at most this many tokens (estimated chars/4); otherwise the agent reads them in pages. Default 30000. */
   inlineMaxTokens?: number;
-  /** Characters per page of `session_files_read`. Default 20000. */
+  /** Characters per page of `read` on a session file. Default 20000. */
   readPageChars?: number;
   /** Days a file lives after upload before the cleanup removes it. Default 30. */
   retentionDays?: number;
@@ -2659,7 +2693,7 @@ export interface IAgentAttachmentsConfig {
    * Most images ONE model request carries. Images travel as references and are
    * read from the bucket at the model call; beyond this the oldest ones become a
    * text placeholder naming the file (the agent can look again with
-   * `session_files_view_image`). Default 6.
+   * `read`). Default 6.
    */
   maxImages?: number;
   /** Most image bytes (before base64) one model request carries, oldest dropped first. Default 12000000. */
@@ -2813,6 +2847,8 @@ export interface IAgentConfig {
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
   /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
+  /** Reminders the agent may set for itself. Absent = off. */
+  reminders?: IAgentRemindersConfig;
   /**
    * Tools the agent calls but the CALLER runs: a portal's host page, or the
    * integrating backend (answers on the actions endpoint or from the agent's
@@ -2957,6 +2993,18 @@ export interface IAgentSandboxConfig {
   secretsSealed?: string;
   /** Set on agent reads only (never stored): secrets are stored but cannot be decrypted, see `agentSandboxSecrets.ts`. */
   secretsUnreadable?: boolean;
+  /**
+   * Environment variables whose value comes from a config item. Set on the sandbox machine like `env`, so only
+   * non-secret items are accepted (a secret item belongs in `secretRefs`). A name is set here or in `env`, not both.
+   */
+  envRefs?: Record<string, IConfigValueRef>;
+  /** Secrets whose value comes from a config item; passed to each command like `secrets`. A name is set here or in `secrets`, not both. */
+  secretRefs?: Record<string, IConfigValueRef>;
+  /**
+   * Whole config groups: every item becomes a variable named after its key. Secret items are passed like
+   * `secrets`, the others are set like `env`. A variable set by name in any of the fields above wins.
+   */
+  groupRefs?: IConfigGroupRef[];
   /** Which tool groups to give the agent. All on by default. */
   tools?: { exec?: boolean; code?: boolean; files?: boolean };
   /**
@@ -3201,6 +3249,11 @@ export interface IAgentVersion {
 
 /** One tool call as a debug session shows it — see `IAgentConversationMessage`. */
 export interface IAgentConversationStep {
+  /**
+   * The tool call's id, as the model made it and the live events name it: what a plan version, a
+   * sub-agent run and a summarization pass of the turn anchor on. The SDK's execution id for a call
+   * recorded without one.
+   */
   id?: string;
   name: string;
   args?: unknown;
@@ -3257,7 +3310,7 @@ export interface IAgentMessageAttachment {
 export interface IAgentMessageVersion {
   content: string;
   timestamp: Date;
-  stopReason?: 'limit' | 'cancelled' | 'paused';
+  stopReason?: 'limit' | 'cancelled' | 'paused' | 'error';
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
 }
 
@@ -3303,15 +3356,26 @@ export interface IAgentConversationMessage {
    * The model that answered, for an agent that offers several: `model` is the key the run used
    * (the Dynamic LLM's key when it is one), `routedModel` the concrete model it routed to.
    */
-  metadata?: { model?: string; routedModel?: string };
+  metadata?: {
+    model?: string;
+    routedModel?: string;
+    /**
+     * A user message the server wrote, not the person: `reminder` = the wake-up
+     * turn of a reminder the agent set. `content` then holds the framed note the
+     * model reads; `reminder.message` is what the agent wrote, for display.
+     */
+    origin?: 'reminder';
+    reminder?: { runId: string; message: string; setAt?: string };
+  };
   /** Wall-clock time the turn took, measured server-side. */
   latencyMs?: number;
   /**
    * Set when the run ended WITHOUT a final answer: a `limits` budget, a
-   * cancellation, or a pause no channel can resume. `content` is then the
-   * last text the agent wrote, if any. Absent on a normal answer.
+   * cancellation, a pause no channel can resume, or a pause the console could
+   * not keep (`error`). `content` is then the last text the agent wrote, if
+   * any. Absent on a normal answer.
    */
-  stopReason?: 'limit' | 'cancelled' | 'paused';
+  stopReason?: 'limit' | 'cancelled' | 'paused' | 'error';
   /** The runtime's wording, e.g. "maxWallClockMs (30000ms) exceeded". */
   stopDetail?: string;
   /**
@@ -3324,6 +3388,17 @@ export interface IAgentConversationMessage {
   compactions?: IAgentTurnCompaction[];
   /** The tool results those summarizations replaced with a placeholder. */
   compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+  /**
+   * Every plan version the agent wrote during this turn, oldest first (at most 30). An empty list says
+   * the turn called its plan tool and wrote nothing (a read): a reader leaves that call out, as the
+   * live view does. Absent when the turn made no plan call, and on turns stored before plans were
+   * recorded, which keep every call they made.
+   */
+  plans?: IAgentTurnPlanSnapshot[];
+  /** The sub-agents this turn ran, in start order, each with its own steps. */
+  subagentRuns?: IAgentTurnSubagentRun[];
+  /** Sub-agent runs past the per-message cap: counted, not stored. */
+  subagentRunsDropped?: number;
   /**
    * Things that went wrong without failing the turn — a memory lookup that
    * failed, a knowledge search that errored — so an answer built without them
@@ -3362,6 +3437,97 @@ export interface IAgentTurnCompaction {
   integrityNotes?: string[];
   /** The summarizer call failed and a local fallback summary was used. */
   failed?: boolean;
+  /** The pass's id: agent-sdk ≥ 0.20 sends one (its summarize_context call id); Console makes one otherwise. */
+  id?: string;
+  /** 1-based pass number within this message (a resumed leg is a new message and starts again at 1). */
+  index?: number;
+  /**
+   * Where the pass happened: the last tool call of the agent's own that had
+   * finished before it, or `null` when none had yet in this message. Absent on
+   * passes stored before positions existed; those are placed by `at`.
+   */
+  afterToolCallId?: string | null;
+  /** Which check started the pass (agent-sdk ≥ 0.20). */
+  trigger?: 'pre_leg' | 'mid_leg' | 'post_tools';
+  /** The tool results THIS pass replaced. The message's `compactedTools` is the whole turn's. */
+  compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+}
+
+export type AgentPlanStepStatus = 'not-started' | 'in-progress' | 'completed' | 'blocked';
+
+/** One step of the agent's plan (the SDK's PlanStepRecord, text clipped). */
+export interface IAgentPlanStep {
+  id: number | string;
+  title: string;
+  status: AgentPlanStepStatus;
+  owner?: string;
+  exitCriteria?: string;
+  evidence?: string;
+}
+
+/** One version of the agent's plan, as a manage_plan write or update left it. */
+export interface IAgentTurnPlanSnapshot {
+  /** The manage_plan / manage_todo_list call that wrote it. */
+  toolCallId?: string;
+  version: number;
+  operation: 'write' | 'update';
+  steps: IAgentPlanStep[];
+  /** Completed steps over all steps, 0..1 (the SDK names it `adherenceScore`). */
+  completion?: number;
+  /** When Console received it (ISO). */
+  at: string;
+}
+
+/** One tool call a sub-agent made, kept short on the parent's message. */
+export interface IAgentSubagentStep {
+  id?: string;
+  name: string;
+  status: 'running' | 'success' | 'error';
+  /** Clipped to about 1 KB; `_truncated` marks a step whose args or output were cut. */
+  args?: unknown;
+  output?: unknown;
+  error?: string;
+  durationMs?: number;
+  timestamp?: string;
+  _truncated?: boolean;
+}
+
+export type AgentSubagentRunPhase = 'start' | 'result' | 'error' | 'paused';
+
+/** One sub-agent a turn ran: its header, its own tool calls and its own summarization passes. */
+export interface IAgentTurnSubagentRun {
+  /** The SDK's spawn id (`sa_…`); a resumed run keeps it. */
+  id: string;
+  name: string;
+  mode?: 'registry' | 'adhoc';
+  /** The delegate_to / spawn_subagent / spawn_subagents_parallel call that started it. */
+  parentToolCallId?: string;
+  /** Started by spawn_subagents_parallel. */
+  parallel?: boolean;
+  /** This message continues a run an earlier message of the turn started (it paused for a person); `steps` holds this leg's only. */
+  resumed?: boolean;
+  /** The latest lifecycle event seen. */
+  phase: AgentSubagentRunPhase;
+  /** The SDK's status: ok | incomplete | blocked | needs_input | cancelled | error. */
+  status?: string;
+  note?: string;
+  /** The task it was given, clipped to 2 KB. */
+  input?: string;
+  /** What it answered, clipped to 2 KB. */
+  result?: string;
+  error?: string;
+  durationMs?: number;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  /** The registry entry it ran, when Console knows it. */
+  target?: { kind: 'ref' | 'inline'; agentName?: string; version?: number };
+  startedAt?: string;
+  endedAt?: string;
+  /** Its own tool calls, in order (at most 50). */
+  steps: IAgentSubagentStep[];
+  /** Steps past the cap: counted, not stored. */
+  stepsDropped?: number;
+  /** Its own summarization passes. They never count as the parent's. */
+  compactions?: IAgentTurnCompaction[];
 }
 
 /** Why a turn stopped, as the session API reports it (conversation + events). */
@@ -3429,6 +3595,8 @@ export interface IAgentMessagePendingAction {
   toolName?: string;
   /** The sub-agent whose tool call or question this is. */
   subagent?: string;
+  /** The delegating tool call the sub-agent's pause belongs to. */
+  delegationToolCallId?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
@@ -3457,6 +3625,8 @@ export interface IAgentPendingAction {
   toolName?: string;
   /** The sub-agent whose tool call or question this is (a child's pause surfaced by the SDK). */
   subagent?: string;
+  /** The delegating tool call the sub-agent's pause belongs to. */
+  delegationToolCallId?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
@@ -3531,7 +3701,9 @@ export interface AgentMessageFeedbackTotals {
 
 /**
  * One entry of the append-only session event log (`agent_session_events`).
- * `seq` is dense and increasing per conversation; `(conversationId, seq)` is unique.
+ * `seq` is increasing per conversation and numbers the stored events one after the other;
+ * `(conversationId, seq)` is unique. A reader shown only some of the rows (the client API
+ * leaves out the dashboard-only ones) sees numbers skip: it is a position, not a count.
  */
 export interface IAgentSessionEvent {
   _id?: ObjectId | string;
@@ -3599,6 +3771,14 @@ export interface IAgentConversation {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** What a summary counts of one message - never its content, steps' arguments or outputs. */
+export type IAgentConversationMessageTally =
+  Pick<IAgentConversationMessage, 'role' | 'usage' | 'latencyMs' | 'stopReason' | 'outputError'>
+  & { steps?: Array<Pick<IAgentConversationStep, 'status' | 'error'>> };
+
+/** A list row that carries what a summary counts (one tally per message, so the same length), never the transcript itself. */
+export type IAgentConversationActivityRow = Omit<IAgentConversation, 'messages'> & { messages: IAgentConversationMessageTally[] };
 
 /** A conversation as a list shows it: no transcript, just how many messages it holds. */
 export type IAgentConversationListItem = Omit<IAgentConversation, 'messages'> & { messageCount: number };
@@ -4414,6 +4594,15 @@ export interface ICrawlResult {
   createdAt?: Date;
 }
 
+/** Row filters shared by the crawl-result list and count queries. */
+export interface CrawlResultFilters {
+  type?: string;
+  /** Knowledge Engine outcome; `'none'` matches rows that were never sent. */
+  ragStatus?: string;
+  /** Case-insensitive substring match over url, title and errorMessage. */
+  search?: string;
+}
+
 // ── PII Service types ───────────────────────────────────────────────────────
 
 /**
@@ -4647,6 +4836,9 @@ export type AgentRunErrorReason =
   | 'canceled_by_caller'
   /** The agent was disabled/deleted, or the submitting API token revoked, before the worker started it. */
   | 'precondition_failed'
+  /** The agents service was switched off for the deployment (`service_disabled`) or left out of the tenant's license (`service_not_licensed`) before the worker started the run. */
+  | 'service_disabled'
+  | 'service_not_licensed'
   /** The user who started the run was disabled before the worker started it. */
   | 'owner_disabled'
   /** The owner's account state could not be read, so the run was refused (fail closed). */
@@ -4803,7 +4995,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
   metadata?: Record<string, string> | null;
   /** The surface that created the run. */
-  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | null;
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | 'reminder' | null;
   triggerId?: string | null;
   trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
   /**

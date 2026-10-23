@@ -11,6 +11,7 @@ import {
 import {
   captureLiveScreenshot,
   captureScreenshot,
+  captureScreenshotOutput,
   captureSnapshot,
   closeBrowserSession,
   createBrowser,
@@ -340,11 +341,26 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionKey } = request.params as { sessionKey: string };
       const input = browserScreenshotInputSchema.parse(readJsonBody<unknown>(request));
-      const result = await captureScreenshot(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        sessionKey,
-        { ...input, createdBy: session.userEmail ?? session.userId },
-      );
+      const { inline, persist, ...capture } = input;
+      const sessionCtx = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const createdBy = session.userEmail ?? session.userId;
+      if (inline) {
+        // One capture serves both the inline image and (optionally) the saved artifact.
+        const out = await captureScreenshotOutput(sessionCtx, sessionKey, {
+          ...capture,
+          persist: persist !== false,
+          createdBy,
+        });
+        const structured = (out.structuredContent ?? {}) as { artifact?: unknown };
+        return reply.code(structured.artifact ? 201 : 200).send({
+          ...(structured.artifact ? { artifact: structured.artifact, eventId: out.eventId } : {}),
+          // A caller that asked for the capture to be saved can tell it was not (no bucket, upload failed).
+          ...(persist !== false && !structured.artifact ? { persisted: false } : {}),
+          content: out.content,
+          structured,
+        });
+      }
+      const result = await captureScreenshot(sessionCtx, sessionKey, { ...capture, createdBy });
       return reply.code(201).send(result);
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;

@@ -1,7 +1,8 @@
 /**
  * Errors raised while validating a tools/call request (unknown tool, bad or
- * missing arguments). They map to JSON-RPC "invalid params" and their message
- * is safe to return to any caller, anonymous public callers included.
+ * missing arguments). Their message is safe to return to any caller, anonymous
+ * public callers included. REST surfaces answer them with 400; JSON-RPC
+ * surfaces see `McpUnknownToolError` below.
  */
 export class McpToolInputError extends Error {
   readonly rpcCode = -32602;
@@ -14,6 +15,23 @@ export class McpToolInputError extends Error {
 
 export function isMcpToolInputError(error: unknown): error is McpToolInputError {
   return error instanceof McpToolInputError;
+}
+
+/**
+ * A tools/call naming a tool the server does not advertise. Over JSON-RPC this
+ * is the one input error that stays a protocol error (-32602); every other
+ * input error is returned as a tool result with `isError: true`, so the model
+ * reads the message and can correct its arguments (MCP 2025-11-25, SEP-1303).
+ */
+export class McpUnknownToolError extends McpToolInputError {
+  constructor(message = 'Unknown tool') {
+    super(message);
+    this.name = 'McpUnknownToolError';
+  }
+}
+
+export function isMcpUnknownToolError(error: unknown): error is McpUnknownToolError {
+  return error instanceof McpUnknownToolError;
 }
 
 /**
@@ -31,4 +49,16 @@ export class McpUpstreamError extends Error {
 
 export function isMcpUpstreamError(error: unknown): error is McpUpstreamError {
   return error instanceof McpUpstreamError;
+}
+
+/** Settings a server cannot be saved with (an auth type its source does not support). Its message is safe to return. */
+export class McpServerConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'McpServerConfigError';
+  }
+}
+
+export function isMcpServerConfigError(error: unknown): error is McpServerConfigError {
+  return error instanceof McpServerConfigError;
 }

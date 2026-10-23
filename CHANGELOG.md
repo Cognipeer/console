@@ -25,6 +25,57 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `GET`/`POST /agents/:agentId/conversations` routes are removed; the live API is under `/api/client/v1` and the
   Sessions routes.
 - `@cognipeer/console-sdk` 4 drops `agents.chat` (use `agents.responses` or the runs API).
+- **File providers follow the deployment's endpoint rules.** On the hosted service (`DEPLOYMENT_MODE=saas`) the address
+  of a file provider (the endpoint of an S3, S3-compatible or Azure Blob provider, the URI of a GridFS provider) must be
+  a public one, or lie in a private network that the operator has opened for the organization with
+  `PROVIDER_PRIVATE_NETWORKS` (see [Provider endpoints and private networks](#provider-endpoints-and-private-networks)).
+  Any other private, loopback, link-local, carrier-grade NAT or cloud metadata address is refused when the provider is
+  saved or tested **and whenever its storage client is built**, so an existing provider that points at such an address
+  stops working there until its network is opened: its calls answer `502 storage_failure` and `field` names the setting
+  to change. A hosted deployment accepts `mongodb+srv://` GridFS URIs (every host in the SRV record is checked the same
+  way), **Skip TLS verification** and plain `http://` endpoints on S3, S3-compatible and Azure Blob providers (the
+  address rules apply to them either way, and Microsoft Entra ID sign-in still needs https). It refuses local sockets,
+  the `tlsCAFile`, `tlsCertificateKeyFile` and `tlsCRLFile` options and the sign-in methods that use the identity of the
+  server (`MONGODB-OIDC`, `GSSAPI`, `MONGODB-X509`, `MONGODB-AWS` without a key in the URI) in a GridFS URI. A
+  self-hosted install (`DEPLOYMENT_MODE=onprem`) accepts private addresses unless `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK`
+  is set to `true` (`OUTBOUND_HTTP_ALLOWED_HOSTS` then lists the exceptions). See [Which endpoints a provider may
+  use](docs/guide/files.md#which-endpoints-a-provider-may-use).
+- **Self-hosted installs on MongoDB: set `DEPLOYMENT_MODE=onprem`.** The mode defaults to `onprem` on SQLite and to `saas`
+  on MongoDB (`docker-compose.yml` sets `onprem`), and a value other than `saas` or `onprem` is ignored. A self-hosted
+  MongoDB install that does not set it is treated as the hosted service, which now also decides the file-provider rules
+  above. Setting it changes the default of `MONGODB_SINGLE_DATABASE` to `true`, so an install whose tenants live in
+  per-tenant databases must also set `MONGODB_SINGLE_DATABASE=false`. See
+  [Deployment mode](docs/guide/configuration.md#deployment-mode).
+- **The client Files API answers more exactly.** A missing bucket or file is `404` (`bucket_not_found`,
+  `file_not_found`) where most routes answered `500`. A failure of the storage provider is `502`, `503` or `504` with a
+  sentence made for people (`storage_failure`, `storage_unavailable`, `storage_timeout`) instead of `500` with whatever
+  the store said. A `keyHint` with a `.` or `..` segment, a control character, an unpaired surrogate or more than 512
+  characters is `400` before anything is stored or counted, and so is a key the store cannot hold (a name over its
+  limit, a part over 255 bytes on MinIO or a local disk): `400 invalid_request`, not a storage failure. Creating a
+  provider under a key that is already used is `409 duplicate_key` (it was `500`). See
+  [Files API](docs/api/files.md#errors).
+- **A switched-off bucket is read-only, and a bucket's prefix is fixed once it holds files.** The files of a disabled
+  bucket can still be listed, fetched, downloaded and zipped (a listing is read from the console's database, so it does
+  not need the provider), and only a write (an upload, a delete, an import) answers `409 bucket_inactive`; before, every
+  call on a disabled bucket was refused and the client API answered `500`. A bucket's prefix can be changed only while
+  the bucket has no files (`409 prefix_locked`): it could be changed through the API before, which left the files behind
+  in the old location.
+- **Provider keys and the local disk driver are checked when a provider is created.** A new provider's key, for every
+  kind of provider and not only file providers, cannot be `.` or `..` and cannot hold `/`, `\` or a control character,
+  because it names the provider's folder in the store (`400 provider_settings_invalid`, `field: "key"`). The local
+  filesystem driver takes a **Base directory** only on a self-hosted install and only from an owner or an admin (through
+  the API, the person the call acts for), and a **Subdirectory** only as a relative folder inside it: no `..`, no
+  leading `/` or `\`, no drive letter. The subdirectory rule, and the rule that the key stays inside the organization's
+  folder, are applied again whenever a stored local provider is used, so a provider saved with a subdirectory such as
+  `/files` answers `502 storage_failure` (`field: "subdirectory"`) until it is edited. See
+  [Local filesystem](docs/guide/files.md#local-filesystem).
+- Agents get one `read` tool instead of `sandbox_read_file`, `session_files_read` and `session_files_view_image`. The
+  name `read` is reserved: a custom or MCP tool with that name is left out, with a warning. Stored approval policies that
+  name the old tools apply to `read` at run time.
+- The per-browser MCP endpoint (`/api/client/v1/browser/:browserKey/mcp/sse` and `/mcp/message`) and the browser page's
+  **Get MCP URL** are removed: publish a browser as an internal MCP server instead (see
+  [Browsers through the MCP module](#browsers-through-the-mcp-module)). `@cognipeer/console-sdk` 4 drops
+  `client.browserMcp`.
 
 ### Agent runs and run classes
 
@@ -184,6 +235,70 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
   breaks).
 
+### File storage
+
+- **S3-compatible storage and Azure Blob Storage** are new file providers. `s3-compatible-files` serves MinIO, Ceph RGW,
+  SeaweedFS, Garage, Cloudflare R2, Backblaze B2, Wasabi and other stores with an S3 API at their own endpoint:
+  path-style addressing is on by default, the region is optional, request checksums are sent only where an operation
+  needs them (older stores reject the newer default), and an internal CA is trusted for this provider only with **CA
+  certificate (PEM)**; **Skip TLS verification** is available on every deployment and off by default. `azure-blob-files`
+  signs in with an account key, a SAS token, a connection string or a Microsoft Entra service principal, and also serves
+  sovereign clouds, Azure Stack Hub and Azurite. The Amazon S3 driver (1.1.0) shares the S3 code: a provider that
+  already carries a custom endpoint keeps every setting and gains the same messages and TLS options. See [Storage
+  providers](docs/guide/files.md#storage-providers).
+- **Provider form and Test connection.** Each driver's form is split into sections with a **Pre-flight** checklist, and a
+  stored secret shows *Stored — leave blank to keep*. Credentials and settings are checked when a provider is saved and
+  when it is tested; a refused value comes back as `400` with `code` (`provider_settings_invalid` or
+  `provider_endpoint_not_allowed`) and the `field` to change, in the console and on `POST /files/providers` alike.
+  **Test connection** lists, writes a test object, reads it back and deletes it within 10 seconds, names the step that
+  failed in plain words (a wrong access key, a region or path-style mismatch, a missing bucket or container, an expired
+  SAS, an untrusted certificate) and never blocks saving. The last result is kept and shown in the bucket list. See
+  [Testing a connection](docs/guide/files.md#testing-a-connection).
+- **The Document Store screens are rebuilt** (Data → Document Store). The bucket list shows usage tiles and the last
+  connection test of each bucket's provider; a bucket opens on **Files**, **Settings** and **API** tabs. Files appear in
+  folders with search and type filters, a file drawer (Preview, Markdown, Details), selection with **Download as .zip** (up
+  to 50 files) and bulk delete, and an upload form with a queue, a destination folder and the effective limits. **Import
+  from storage** registers objects that are already in the provider. A bucket can be deleted together with its files by a
+  background job that carries on after an error (**Delete again**) and that the console queues again at start when a
+  restart interrupted it; that is refused (`409 bucket_in_use`) while an agent keeps session files in the bucket or a
+  Knowledge Engine module keeps the sources of its documents there. When asking again is refused because another
+  bucket keeps files in the same folder (`409 storage_location_shared`), **Delete the bucket only** is the way out of
+  a deletion that seems stuck: it leaves the files where they are. Reading needs *Read* on Files and changing needs
+  *Write*. See [The Document Store](docs/guide/files.md#the-document-store).
+- **Markdown copies in the Document Store** are made by a background job on the `files` queue, so an upload never waits
+  for the converter: the row shows *Converting…* and updates itself, a failed conversion shows its reason and can be
+  retried, and one that stays pending for five minutes can be started again. Images, audio, archives and Markdown files
+  are not converted. The client API still converts before it answers when `convertToMarkdown` is true. See
+  [Markdown copies](docs/guide/files.md#markdown-copies).
+- **Files API.** A `keyHint` that ends in `/` names a folder. `X-File-Metadata` carries metadata in any language as
+  ASCII with `\uXXXX` escapes, which `JSON.parse` reads back; the header is left out when the escaped JSON is longer than
+  8,192 characters (the record has all of it). `Content-Disposition` carries the file name in ASCII and, percent-encoded,
+  in `filename*`, and every download carries `Cache-Control: private, no-store`. A download, preview or zip of an object
+  larger than the larger of twice `FILE_UPLOAD_MAX_MB` and 100 MB answers `413 object_too_large`. The name part of a key
+  the console generates is at most 200 bytes of UTF-8 (a longer file name is shortened before the timestamp, and an
+  extension is kept up to 32 bytes). An upload to the whole key of a session's file asks the same session permission as
+  deleting it (`403 session_forbidden`); the answers about a session's file use the nested
+  `{ "error": { "type", "message", "code" } }` form. The OpenAPI schemas `FileObject`, `FileBucket` and `FileProvider` now
+  describe what the API returns (`id`, `name`, `size`, `markdownStatus`, `providerKey`, `hasCredentials` and the rest) and
+  no longer list fields it never sent (`fileName`, `originalName`, `sizeBytes`, `markdownContent`, `credentials`); the
+  examples use the real driver ids (`aws-s3-files`, not `s3`). The Files API page is rewritten from the routes: see
+  [Files API](docs/api/files.md).
+- **Storage calls fail and recover per tenant and provider.** The circuit breaker key is
+  `file-<operation>:<tenantId>:<providerKey>` for upload, download, delete and list (before, two tenants that used the
+  same provider key shared one circuit). A failure that says nothing about the store's health (a missing bucket or file, a
+  rejected credential, a refused setting, a file that is too large) goes back to the caller without counting against the
+  circuit. A change to a provider's settings (bucket, endpoint, authentication method) now reaches the next call: the
+  pooled storage client is rebuilt when anything in its configuration changes (before, only a change of credentials did,
+  and a settings edit seemed ignored until the cache entry expired), concurrent first uses share one build, and a client
+  that is replaced is closed after `PROVIDER_RUNTIME_DISPOSE_GRACE_SECONDS`. See [Resilience](docs/guide/core-resilience.md)
+  and [Runtime pool](docs/guide/core-runtime-pool.md).
+- **Retry rules** are stricter for every caller of `withResilience` (file storage, model, vector, rerank, web search,
+  decision and guardrail calls). HTTP 413 joins 400, 401, 403, 404, 409 and 422 as an answer that is not retried, the
+  status is read from `status`, `statusCode` or an AWS SDK error's `$metadata.httpStatusCode` (AWS SDK failures with one of
+  those statuses were retried before), Node's `ERR_INVALID_CHAR`, `ERR_INVALID_HTTP_TOKEN`, `ENOENT`, `ENOTDIR` and
+  `EISDIR` end a call at once, and an error that carries `retryable: false` or `true` is trusted over the guesses made from
+  its message.
+
 ### Sandbox
 
 - An agent's sandbox secrets are kept out of tool output, out of files written back into the session and out of publish
@@ -199,6 +314,56 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   next to no URL is accepted and dropped). The field is gone from the saved config: a callback sent as `{}`, with an
   empty `url` or as `null` is no longer stored as an empty object (or as a secret with nothing to sign), and the agent
   reads back without `callback`.
+- An agent's sandbox environment variables and secrets can come from Config items (Config references) instead of
+  values typed into the agent. Instances record how their environment was delivered (`envDelivery`), and snapshots
+  record their environment fields. Secret values a sandbox launch carries are masked in tool output.
+
+### Reminders and sessions
+
+- **Reminders** (off by default; `AGENT_REMINDERS_ENABLED`, then per agent under Build → Advanced → Reminders). An
+  agent sets a reminder for itself with `reminder_set`; the reminder wakes the same session later as a scheduled run on
+  the `reminder` channel. The session page shows the wake turn live, and its Reminders tab fires a reminder now or
+  cancels it. The client API lists and cancels reminders, `AGENT_REMINDER_MIN_DELAY_SECONDS`,
+  `AGENT_REMINDER_MAX_HORIZON_HOURS`, `AGENT_REMINDER_MAX_ACTIVE_PER_SESSION` and
+  `AGENT_REMINDER_MAX_FIRES_PER_SESSION` bound them, and an inactive agent cannot set one.
+- **Agents → Sessions → Active / All** lists the sessions of every agent in the project: Active shows the sessions that
+  are running or waiting for an approval, an answer or a budget raise (it refreshes on its own), All shows every session,
+  most recent activity first. A row opens the session inspector on the agent page.
+- A sub-agent that paused for an approval and resumed is one trace group (`@cognipeer/agent-sdk` 0.18 OTLP export).
+  Sub-agent tool events carry a stamp, and a pending action names the delegating call (`delegationToolCallId`).
+
+### Service switches
+
+- An operator can switch services off for the whole deployment with `CONSOLE_DISABLED_SERVICES` or
+  `CONSOLE_ENABLED_SERVICES`, or for one organization with the license `services` claim. Dependent services follow:
+  switching off models also switches off agents, RAG and evaluations; switching off agents also switches off portals.
+- The switch holds on every entry point: a dashboard or client API route of an off service answers
+  `403 service_disabled` (or `402 service_not_licensed`), and realtime, schedulers and runtime paths skip it. Pages that
+  read several services leave the off one out, and scheduled runs that fall due while agents are off stay scheduled.
+  The License page lists each service as on or off, with the reason.
+
+### Browsers through the MCP module
+
+- A browser is published from **MCP Servers → New MCP server → Internal service → Browser** and gets the MCP module's
+  endpoints, tool toggles and renames, guardrail binding, logs and hubs. The `browser` provider exposes the browser
+  agent tools plus `browser_open_session`, which returns the `sessionKey` every page tool takes; a session is driven only
+  through the MCP server that opened it. Flow tools need no session.
+- A browser server, and a composite server that includes one, is called with an API token only: creating or updating
+  one with `accessMode: "public"` answers `400`, and the public MCP endpoint does not serve one.
+- The browser's network rules (`BROWSER_BLOCK_PRIVATE_NETWORK`, the session allow and block lists) also apply to every
+  redirect hop and to WebSockets. A redirect hop to a refused host closes the session and the action fails with the
+  reason; a WebSocket to a refused host is closed with code `1008` before it connects.
+- The browser forms pick the **Artifact bucket** from the project's file buckets.
+
+### Media from tools
+
+- The `read` tool reads text, images, PDFs (text and page images) and videos (one contact sheet). A model that sends
+  every argument (strict tool calling) can fill both `path` and `fileId`: the `fileId` is read when it names a tool
+  image or a conversation file, otherwise the `path`.
+- Images from tools, MCP servers and browser screenshots reach the model in a message after the tool results; text-only
+  results are unchanged. The MCP endpoints pass image, audio and resource blocks through, by protocol version, and a
+  browser screenshot can return the image inline (REST and MCP).
+- New **web-e2e** sandbox template (Playwright, Chromium, ffmpeg); the sandbox base image adds `poppler-utils`.
 
 ### Configuration
 
@@ -209,6 +374,34 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - `openapi.yaml` in the repository root is the one canonical OpenAPI description of the client API (the copy under
   `docs/public` is gone; the docs build publishes the root file), and CI (`npm run test:openapi`) checks that its
   paths and the registered routes agree.
+- [Configuration](docs/guide/configuration.md#deployment-mode) now documents `DEPLOYMENT_MODE` (`saas` or `onprem`): how it
+  defaults, and what it changes (the file-provider endpoint rules, whether LDAP is offered, the default of
+  `MONGODB_SINGLE_DATABASE`, support entry points and the IAM engine statistics). `FILE_UPLOAD_MAX_MB` and
+  `FILE_UPLOAD_ALLOWED_MIME_TYPES` have a *Files* table, and `PROVIDER_RUNTIME_DISPOSE_GRACE_SECONDS` is listed with the
+  other provider-runtime settings. `PROVIDER_RUNTIME_CACHE_TTL_SECONDS=0` means entries never expire.
+
+### Provider endpoints and private networks
+
+- **SaaS can reach private networks that the operator opens per organization.** `PROVIDER_PRIVATE_NETWORKS` lists, per
+  tenant ID (or `*` for every organization), the CIDR ranges that the providers of an organization may use, and
+  `PROVIDER_PRIVATE_NETWORKS_DENY` lists ranges that stay refused inside them. It covers model, embedding, image, speech,
+  moderation, decision and file providers, so an S3-compatible store (MinIO, Ceph), an Azure Blob endpoint or a GridFS
+  MongoDB in a customer's network can be used over a VPN or peering that the operator has set up. Both settings are read
+  at startup on every process: restart after changing them. Loopback, link-local, cloud metadata, multicast and reserved
+  addresses, Console's own addresses and the deny ranges are never opened. An entry that cannot be read opens nothing,
+  and a deny list that cannot be read closes every opened network until it is fixed. A self-hosted install is not
+  affected unless it sets `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK=true`; the same rules then apply to it. See
+  [Private networks on SaaS](docs/guide/providers.md#private-networks-on-saas) and
+  [Provider private networks](docs/guide/configuration.md#provider-private-networks).
+- **`mongodb+srv://` connection strings are accepted on SaaS** when every host in the SRV record passes the same network
+  check: Console resolves the record when the provider is saved or tested and checks each target, and checks the
+  connections again when it connects.
+- **Skip TLS verification and plain `http://` endpoints are available on every deployment.** Both are the provider's own
+  choice (S3, S3-compatible and Azure Blob providers; GridFS has the connection-string options `tlsInsecure`,
+  `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames`), and the address rules apply to them either way. A
+  provider that uses Microsoft Entra ID with an `http://` endpoint is refused when it is saved, because Entra ID needs
+  https. Certificate files, local sockets and server-identity sign-in methods in a GridFS connection string remain for
+  self-hosted installs.
 
 ### Authorization
 
@@ -342,6 +535,24 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `via: { kind: "delegated", issuer }` where a record has a metadata field. A person's drawer in the IAM center has a new
   **Activity** section.
 
+### Console identity for MCP servers and connected agents
+
+- New upstream auth option **Console identity** for remote and OpenAPI MCP servers (`upstreamAuth.type:
+  "console_identity"`) and connected agents (`connection.authType: "console_identity"`). No secret is stored: every
+  call carries `Authorization: Bearer <token>`, an RS256 JWT (`typ: at+jwt`, five minutes) that Console signs for the
+  person behind the call, with `aud` = the server's URL, `sub` = the Console user id, the person's email and name, the SSO
+  subject (`idp`, `idp_sub`) for an SSO account, `src`, `via` (`session`, `api_token`, `delegated`, `trigger`) and
+  `act` (the calling agent). Trigger runs act for the trigger's accountable person; a call with nobody behind it
+  (public MCP / A2A, internal actors), or for an unknown or disabled account, is refused before anything is sent. A
+  turn that continues after an approval or an answer keeps calling for the person the turn is for, not the approver.
+- One RSA key per workspace (`iam_meta`, private half encrypted), created when the option is first saved. Public key set
+  and discovery document, without a token: `GET /api/public/identity/{tenantId}/.well-known/jwks.json` and
+  `.../openid-configuration`; the issuer is built from `APP_URL`. The create and settings screens show the issuer and
+  key set URL. See `docs/console/guide/govern/iam/console-identity` in the docs.
+- Agent manifests that embed MCP servers keep `console_identity` as their auth shape; importing one asks for no credential.
+- Updating an MCP server with settings its source cannot take (Console identity on an npx / uvx, internal or composite
+  server) answers `400` instead of `500`.
+
 ### Portals (Enterprise)
 
 - Opening a portal and running an agent through it are decided by the policy engine. A portal's access list is its
@@ -448,3 +659,14 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   workspace owners and admins. The default rules use it.
 - **Deleting a project** now deletes its alert rules, so they no longer evaluate and notify under "Unknown Project", and
   closes its open incidents. Its alert history is kept.
+
+### Crawler throughput
+
+- A crawler's **Max concurrency** (`http.maxConcurrency`, 1–16) now applies to the whole run. Fetches run as a sliding
+  pool that refills as each one finishes, instead of in fixed batches that waited for the slowest URL. Fetching goes on
+  while earlier pages are still being saved, and pages are saved and ingested into the Knowledge Engine with the same
+  concurrency, instead of one at a time. On a 100-page test site with one slow page in twenty, a run at concurrency 16
+  takes 5 s instead of 36 s.
+- `maxPages` is a hard cap: a run returns at most that many pages, and downloaded files count toward it as documented.
+- Knowledge Engine document and chunk totals are now updated atomically, so concurrent ingests into one module no
+  longer overwrite each other's counts.

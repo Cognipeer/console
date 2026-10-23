@@ -74,11 +74,19 @@ describe('password reset and canLogin=false', () => {
   });
 
   describe('POST /api/auth/forgot-password', () => {
+    // The address is in Acme's directory, so every request reaches the account lookup.
+    beforeEach(() => {
+      db.listTenantsForUser.mockResolvedValue([
+        { email: baseUser.email, tenantId: tenant._id, tenantSlug: tenant.slug, tenantDbName: tenant.dbName, tenantCompanyName: tenant.companyName },
+      ]);
+      db.findTenantById.mockResolvedValue(tenant as never);
+    });
+
     const forgot = () => app.inject({
       method: 'POST',
       url: '/api/auth/forgot-password',
       headers: { 'content-type': 'application/json' },
-      payload: JSON.stringify({ email: baseUser.email, slug: tenant.slug }),
+      payload: JSON.stringify({ email: baseUser.email }),
     });
 
     it('answers the generic 200 and sends nothing for a login-disabled account', async () => {
