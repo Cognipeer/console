@@ -25,13 +25,18 @@ import {
     Tooltip,
     UnstyledButton,
 } from '@mantine/core';
-import { IconCheck, IconCopy } from '@tabler/icons-react';
+import { IconCheck, IconCopy, IconGitFork, IconListCheck } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
-import { stepFailed, type ChatMessage, type PlaygroundStep, type TurnCompaction } from './sessionTypes';
+import { stepFailed, type ChatMessage, type PlaygroundStep } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import ContextCompactionCard, { compactionShrinkLabel } from './ContextCompactionCard';
 import SessionActivity from './SessionActivity';
+import SessionPlanPanel from './SessionPlanPanel';
+import { countEventRows, sessionContextPasses, sessionEventRows, type ContextPassEntry } from './sideFlowUi';
+import { planHistory, type CurrentPlan } from './planUi';
+import { planAnchorId } from './turnFlowUi';
+import { subagentStatusStyle } from './subagentUi';
 import SessionFilesPanel from './SessionFilesPanel';
 import SessionRemindersPanel from './SessionRemindersPanel';
 import type { AgentReminderView } from '../studio/reminderUi';
@@ -77,6 +82,13 @@ export interface SessionSidePanelProps {
     messages: ChatMessage[];
     /** Jumps the transcript to the turn an event belongs to. */
     onGoToTurn: (index: number) => void;
+    /**
+     * Jumps to a place inside a turn (a plan version, a summarization divider, a sub-agent group) by its DOM id.
+     * Without it a click only goes to the turn.
+     */
+    onGoToAnchor?: (turnIndex: number, anchorId: string) => void;
+    /** The session's current plan (the running turn's, else the latest stored, else the carried one); the Plan tab shows only with one. */
+    plan?: CurrentPlan | null;
     /** The session's files as the server lists them (null = not loaded yet); omitted for an agent that has no files. */
     files?: {
         items: SessionFileItem[] | null;
@@ -116,6 +128,8 @@ export default function SessionSidePanel({
     readOnly,
     messages,
     onGoToTurn,
+    onGoToAnchor,
+    plan = null,
     files,
 }: SessionSidePanelProps) {
     const th = useTranslations('agents.hitl');
@@ -125,6 +139,7 @@ export default function SessionSidePanel({
     const tp = useTranslations('agents.sessionPage');
     const tsa = useTranslations('agents.sessionAccess');
     const tr = useTranslations('agents.reminders');
+    const tfl = useTranslations('agents.sessionFlow');
     const [tab, setTab] = useState<string | null>('session');
     // The tab shows only when the agent uses reminders or this session has some.
     const showReminders = remindersEnabled || (reminders?.length ?? 0) > 0;
@@ -145,6 +160,15 @@ export default function SessionSidePanel({
         });
         return flat;
     }, [messages]);
+
+    // The Events tab follows each turn's order: child steps under their sub-agent, plan versions and summaries between calls.
+    const eventRows = useMemo(() => sessionEventRows(messages), [messages]);
+    const eventCount = countEventRows(eventRows);
+    const goToAnchor = (turnIndex: number, anchorId: string | undefined) => {
+        if (anchorId && onGoToAnchor) onGoToAnchor(turnIndex, anchorId);
+        else onGoToTurn(turnIndex);
+    };
+    const history = useMemo(() => planHistory(messages), [messages]);
 
     /**
      * Every tool the agent can call, annotated with how often it did.
@@ -186,22 +210,32 @@ export default function SessionSidePanel({
     const unnamedSurfaces = countUnnamedToolSurfaces(agentConfig);
 
     /**
-     * Every summarization in the session, oldest first. The LAST one is what
-     * the agent works from now: its summary is the agent's memory of
-     * everything before it.
+     * Every summarization in the session, oldest first. The LAST one of the
+     * agent's own is what the agent works from now: its summary is the agent's
+     * memory of everything before it. A sub-agent's passes are listed too (they
+     * shrank its context, not the agent's), but they are not counted in the totals.
      */
-    const compactions = useMemo(() => {
-        const flat: Array<{ turnIndex: number; compaction: TurnCompaction }> = [];
-        messages.forEach((message, turnIndex) => {
-            message.compactions?.forEach((compaction) => flat.push({ turnIndex, compaction }));
-        });
-        return flat;
-    }, [messages]);
+    const contextPasses = useMemo(() => sessionContextPasses(messages), [messages]);
+    const compactions = useMemo(
+        () => contextPasses.filter((entry) => entry.kind === 'agent'),
+        [contextPasses],
+    );
     const reclaimedTokens = compactions.reduce(
         (sum, { compaction }) => sum + Math.max(0, (compaction.tokensBefore ?? 0) - (compaction.tokensAfter ?? 0)),
         0,
     );
     const latestCompaction = compactions[compactions.length - 1]?.compaction;
+    /** "Turn 2 · pass 1 · after web_search", "Turn 2 · researcher", "Turn 2" for a turn stored before positions. */
+    const passLabel = (entry: ContextPassEntry): string => {
+        const turn = Math.floor(entry.turnIndex / 2) + 1;
+        if (entry.kind === 'subagent') return tfl('contextSubagentPass', { turn, name: entry.subagentName ?? '' });
+        switch (entry.placement.kind) {
+            case 'turn_start': return tfl('contextPassStart', { turn, pass: entry.pass });
+            case 'after_tool': return tfl('contextPassAfterTool', { turn, pass: entry.pass, after: entry.placement.toolName });
+            case 'after_subagents': return tfl('contextPassAfterSubagents', { turn, pass: entry.pass, after: entry.placement.names.join(', ') });
+            default: return tfl('contextPassPlain', { turn });
+        }
+    };
 
     /** Per-turn cost bars — the shape of the spend, not just its total. */
     const costSeries = useMemo(() => {
@@ -250,7 +284,7 @@ export default function SessionSidePanel({
             <Tabs.List grow>
                 <Tabs.Tab value="session">{tp('tabSession')}</Tabs.Tab>
                 <Tabs.Tab value="events">
-                    {tp('tabEvents')}{events.length > 0 ? <span className={classes.tabCount}>{events.length}</span> : null}
+                    {tp('tabEvents')}{eventCount > 0 ? <span className={classes.tabCount}>{eventCount}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="tools">
                     {tp('tabTools')}{tools.length > 0 ? <span className={classes.tabCount}>{tools.length}</span> : null}
@@ -259,6 +293,11 @@ export default function SessionSidePanel({
                     {tp('tabContext')}{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="activity">{ta('tabLabel')}</Tabs.Tab>
+                {plan ? (
+                    <Tabs.Tab value="plan">
+                        {tfl('planTab')}<span className={classes.tabCount}>{plan.plan.steps.length}</span>
+                    </Tabs.Tab>
+                ) : null}
                 {files ? (
                     <Tabs.Tab value="files">
                         {tf('tab')}{files.items && files.items.length > 0 ? <span className={classes.tabCount}>{files.items.length}</span> : null}
@@ -353,53 +392,108 @@ export default function SessionSidePanel({
                 </Tabs.Panel>
 
                 <Tabs.Panel value="events" p="md">
-                    {events.length === 0 ? (
+                    {eventRows.length === 0 ? (
                         <Text size="xs" c="dimmed">No tool calls in this session yet.</Text>
                     ) : (
                         <Stack gap={4}>
-                            {events.map(({ turnIndex, step, stepIndex }) => (
-                                <UnstyledButton
-                                    key={`${turnIndex}-${stepIndex}`}
-                                    onClick={() => onGoToTurn(turnIndex)}
-                                    className={classes.eventRow}
-                                >
-                                    <Group gap="xs" wrap="nowrap">
-                                        <Badge
-                                            size="xs"
-                                            variant="light"
-                                            color={stepFailed(step) ? 'red' : 'blue'}
-                                            className={classes.eventBadge}
-                                        >
-                                            {stepIndex + 1}
-                                        </Badge>
-                                        <Box className={classes.eventName}>
-                                            <Text size="xs" ff="monospace" truncate>{step.name}</Text>
-                                            <Group gap={4}>
-                                                {step.subagent ? (
-                                                    <Text size="10px" c="violet.6">via {step.subagent}</Text>
-                                                ) : null}
-                                                {step.status && step.status !== 'success' ? (
-                                                    <Text size="10px" c={stepFailed(step) ? 'red' : 'dimmed'}>
-                                                        {step.status}
+                            {eventRows.map((row) => {
+                                switch (row.kind) {
+                                    case 'step': {
+                                        const { step } = row;
+                                        return (
+                                            <UnstyledButton key={row.key} onClick={() => onGoToTurn(row.turnIndex)} className={classes.eventRow}>
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Badge
+                                                        size="xs"
+                                                        variant="light"
+                                                        color={stepFailed(step) ? 'red' : 'blue'}
+                                                        className={classes.eventBadge}
+                                                    >
+                                                        {row.number}
+                                                    </Badge>
+                                                    <Box className={classes.eventName}>
+                                                        <Text size="xs" ff="monospace" truncate>{step.name}</Text>
+                                                        <Group gap={4}>
+                                                            {step.subagent ? (
+                                                                <Text size="10px" c="violet.6">via {step.subagent}</Text>
+                                                            ) : null}
+                                                            {step.status && step.status !== 'success' ? (
+                                                                <Text size="10px" c={stepFailed(step) ? 'red' : 'dimmed'}>
+                                                                    {step.status}
+                                                                </Text>
+                                                            ) : null}
+                                                            {step.fromCache ? (
+                                                                <Text size="10px" c="dimmed">cached</Text>
+                                                            ) : null}
+                                                            {step.summarized ? (
+                                                                <Text size="10px" c="orange.7">summarized</Text>
+                                                            ) : null}
+                                                        </Group>
+                                                    </Box>
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    }
+                                    case 'plan':
+                                        return (
+                                            <UnstyledButton key={row.key} onClick={() => goToAnchor(row.turnIndex, row.anchorId)} className={classes.eventRow}>
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Badge size="xs" variant="light" color="gray" className={classes.eventBadge}>
+                                                        <IconListCheck size={10} />
+                                                    </Badge>
+                                                    <Text size="xs" ff="monospace" truncate>
+                                                        {tfl('eventsPlan', { tool: row.toolName, version: row.version })}
                                                     </Text>
-                                                ) : null}
-                                                {step.fromCache ? (
-                                                    <Text size="10px" c="dimmed">cached</Text>
-                                                ) : null}
-                                                {step.summarized ? (
-                                                    <Text size="10px" c="orange.7">summarized</Text>
-                                                ) : null}
-                                            </Group>
-                                        </Box>
-                                    </Group>
-                                </UnstyledButton>
-                            ))}
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    case 'subagent': {
+                                        const style = subagentStatusStyle(row.status);
+                                        return (
+                                            <UnstyledButton key={row.key} onClick={() => goToAnchor(row.turnIndex, row.anchorId)} className={classes.eventRow}>
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Badge size="xs" variant="light" color="violet" className={classes.eventBadge}>
+                                                        <IconGitFork size={10} />
+                                                    </Badge>
+                                                    <Box className={classes.eventName}>
+                                                        <Text size="xs" c="violet.6" truncate>{tfl('eventsSubagent', { name: row.name })}</Text>
+                                                        <Text size="10px" c={style.color === 'gray' || style.color === 'teal' ? 'dimmed' : style.color}>
+                                                            {tfl(style.labelKey)}{row.stepsNotRecorded ? ` · ${tfl('eventsNotRecorded')}` : ''}
+                                                        </Text>
+                                                    </Box>
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    }
+                                    case 'child':
+                                        return (
+                                            <UnstyledButton key={row.key} onClick={() => onGoToTurn(row.turnIndex)} className={classes.eventRow} pl={24}>
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Text size="xs" ff="monospace" truncate c={row.row.status === 'error' ? 'red' : undefined}>
+                                                        {row.row.name}
+                                                    </Text>
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    case 'compaction':
+                                        return (
+                                            <UnstyledButton key={row.key} onClick={() => goToAnchor(row.turnIndex, row.anchorId)} className={classes.eventRow}>
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Badge size="xs" variant="light" color={row.failed ? 'orange' : 'indigo'} className={classes.eventBadge}>
+                                                        {row.index}
+                                                    </Badge>
+                                                    <Text size="xs" truncate>{tfl('eventsCompaction', { index: row.index })}</Text>
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                }
+                            })}
                         </Stack>
                     )}
                 </Tabs.Panel>
 
                 <Tabs.Panel value="context" p="md">
-                    {compactions.length === 0 ? (
+                    {contextPasses.length === 0 ? (
                         <Text size="xs" c="dimmed">
                             The agent has not summarized its context in this session — everything said and every
                             tool result is still in front of it. When a run outgrows its context budget, the
@@ -424,44 +518,57 @@ export default function SessionSidePanel({
                                     <Text size="10px" c="dimmed" mb="xs">
                                         The latest summary stands in for everything before it.
                                     </Text>
-                                    <ContextCompactionCard compaction={latestCompaction} defaultOpen />
+                                    <ContextCompactionCard compaction={latestCompaction} compactedTools={latestCompaction.compactedTools} defaultOpen />
                                 </Box>
                             ) : null}
 
                             <Box>
                                 <Text size="xs" fw={600} mb={6}>History</Text>
                                 <Stack gap={4}>
-                                    {compactions.map(({ turnIndex, compaction }, index) => (
-                                        <UnstyledButton
-                                            key={`${turnIndex}-${index}`}
-                                            onClick={() => onGoToTurn(turnIndex)}
-                                            className={classes.eventRow}
-                                        >
-                                            <Group gap="xs" wrap="nowrap">
-                                                <Badge
-                                                    size="xs"
-                                                    variant="light"
-                                                    color={compaction.failed ? 'orange' : 'indigo'}
-                                                    className={classes.eventBadge}
-                                                >
-                                                    {index + 1}
-                                                </Badge>
-                                                <Box className={classes.eventName}>
-                                                    <Text size="xs">{compactionShrinkLabel(compaction) ?? 'Context summarized'}</Text>
-                                                    <Text size="10px" c="dimmed">
-                                                        Turn {Math.floor(turnIndex / 2) + 1}
-                                                        {compaction.messagesCompressed ? ` · ${compaction.messagesCompressed} results compacted` : ''}
-                                                        {compaction.failed ? ' · fallback' : ''}
-                                                    </Text>
-                                                </Box>
-                                            </Group>
-                                        </UnstyledButton>
-                                    ))}
+                                    {contextPasses.map((entry) => {
+                                        const { compaction } = entry;
+                                        return (
+                                            <UnstyledButton
+                                                key={entry.key}
+                                                onClick={() => goToAnchor(entry.turnIndex, entry.anchorId)}
+                                                className={classes.eventRow}
+                                            >
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Badge
+                                                        size="xs"
+                                                        variant="light"
+                                                        color={compaction.failed ? 'orange' : entry.kind === 'subagent' ? 'violet' : 'indigo'}
+                                                        className={classes.eventBadge}
+                                                    >
+                                                        {entry.kind === 'subagent' ? <IconGitFork size={10} /> : entry.pass}
+                                                    </Badge>
+                                                    <Box className={classes.eventName}>
+                                                        <Text size="xs">{compactionShrinkLabel(compaction) ?? 'Context summarized'}</Text>
+                                                        <Text size="10px" c="dimmed">
+                                                            {passLabel(entry)}
+                                                            {compaction.messagesCompressed ? ` · ${compaction.messagesCompressed} results compacted` : ''}
+                                                            {compaction.failed ? ' · fallback' : ''}
+                                                        </Text>
+                                                    </Box>
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    })}
                                 </Stack>
                             </Box>
                         </Stack>
                     )}
                 </Tabs.Panel>
+
+                {plan ? (
+                    <Tabs.Panel value="plan" p="md">
+                        <SessionPlanPanel
+                            current={plan}
+                            history={history}
+                            onGoTo={(entry) => goToAnchor(entry.messageIndex, planAnchorId(entry.plan.version))}
+                        />
+                    </Tabs.Panel>
+                ) : null}
 
                 <Tabs.Panel value="activity" p="md">
                     <SessionActivity

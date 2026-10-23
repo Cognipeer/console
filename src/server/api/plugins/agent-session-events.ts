@@ -12,7 +12,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { IAgentConversation, IAgentPendingAction, IAgentSessionEvent } from '@/lib/database';
 import { toPublicPendingAction, type PublicPendingAction } from '@/lib/services/agents/agentPendingActions';
 import { runWithTenantDb } from '@/lib/services/agents/agentRunService';
-import { toClientEventData, toClientEventFrame, toPublicRunId } from '@/lib/services/agents/clientWire';
+import { isClientSessionEvent, toClientEventData, toClientEventFrame, toPublicRunId } from '@/lib/services/agents/clientWire';
 import { followSessionEvents, parseResumeSeq } from '@/lib/services/agents/sessionEvents';
 import { applyStreamHeaders } from '../fastify-utils';
 
@@ -44,7 +44,7 @@ export function serializeSessionEvent(event: IAgentSessionEvent, wire: SessionEv
   return {
     seq: event.seq,
     type: event.type,
-    data: wire === 'client' ? toClientEventData(event.data) : event.data,
+    data: wire === 'client' ? toClientEventData(event.data, event.type) : event.data,
     ...(event.runId ? { run_id: wire === 'client' ? toPublicRunId(event.runId) : event.runId } : {}),
     created_at: new Date(event.createdAt).toISOString(),
   };
@@ -84,8 +84,11 @@ export async function listSessionEvents(
     ...(filter.runId ? { runId: filter.runId } : {}),
   }));
   const page = rows.slice(0, limit);
+  // A client does not see the rows only the dashboard reads; the page's end is still
+  // the unfiltered one, so `last_seq` / `has_more` page past them correctly.
+  const visible = wire === 'client' ? page.filter((event) => isClientSessionEvent(event.type, event.data)) : page;
   return {
-    events: page.map((event) => serializeSessionEvent(event, wire)),
+    events: visible.map((event) => serializeSessionEvent(event, wire)),
     has_more: rows.length > limit,
     last_seq: page.length > 0 ? page[page.length - 1].seq : afterSeq,
   };
@@ -174,9 +177,12 @@ export async function streamSessionEvents(
       ...(types ? { types } : {}),
       ...(filter.runId ? { runId: filter.runId } : {}),
       signal: controller.signal,
-      write: (frame) => writeRaw(
-        `${frame.id !== undefined ? `id: ${frame.id}\n` : ''}event: ${frame.event}\ndata: ${JSON.stringify(wire === 'client' ? toClientEventFrame(frame.data) : frame.data)}\n\n`,
-      ),
+      write: (frame) => {
+        if (wire === 'client' && !isClientSessionEvent(frame.data.type, frame.data.data)) return;
+        writeRaw(
+          `${frame.id !== undefined ? `id: ${frame.id}\n` : ''}event: ${frame.event}\ndata: ${JSON.stringify(wire === 'client' ? toClientEventFrame(frame.data) : frame.data)}\n\n`,
+        );
+      },
       writePing: () => writeRaw(': ping\n\n'),
       ...(recheck ? {
         recheck,

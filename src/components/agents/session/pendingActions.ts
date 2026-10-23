@@ -13,6 +13,7 @@ import type {
     IAgentPendingActionResolution,
     IAgentUserQuestion,
 } from '@/lib/database/provider/types.domain';
+import { delegationCallIdOf } from '@/lib/shared/agentTurnFlow';
 import type { ChatMessage } from './sessionTypes';
 
 export type PendingActionView = IAgentMessagePendingAction;
@@ -132,6 +133,24 @@ export function resolvedKind(action: PendingActionView): ResolvedKind | null {
     if (action.kind === 'user_question') return resolution?.cancelled ? 'skipped' : 'answered';
     if (resolution?.decision === 'deny') return 'denied';
     return resolution?.approvedArgs ? 'approved_edited' : 'approved';
+}
+
+// ── Raised inside a sub-agent ────────────────────────────────────────────
+
+/**
+ * Where "Show in group" takes the person from a request a sub-agent raised: the delegation call it was raised
+ * under, and the sub-agent when the request names one. The child of a parallel spawn raises its requests under its
+ * own key (`<call>#<n>`), but the group on screen is the call's, so it is the call's id that is handed over.
+ * `null` for a request that was not raised inside a delegation (it has no group to show).
+ */
+export function showInGroupTarget(
+    action: Pick<PendingActionView, 'delegationToolCallId' | 'subagent'>,
+): { delegationToolCallId: string; subagent?: string } | null {
+    if (!action.delegationToolCallId) return null;
+    return {
+        delegationToolCallId: delegationCallIdOf(action.delegationToolCallId),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
+    };
 }
 
 // ── Tool approval ────────────────────────────────────────────────────────

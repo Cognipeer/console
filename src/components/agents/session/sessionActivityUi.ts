@@ -8,6 +8,7 @@
  * values to fill in), resolved by the component.
  */
 
+import { planProgress } from '@/lib/shared/agentTurnFlow';
 import { formatCost } from './sessionUsage';
 
 export type SessionStatusKind = 'running' | 'waiting' | 'budget_paused' | 'idle';
@@ -127,6 +128,13 @@ function excerpt(value: unknown): string | undefined {
     return text.length > DETAIL_CHARS ? `${text.slice(0, DETAIL_CHARS)}…` : text;
 }
 
+/** The sub-agent a log row names: a name string, or `{ id?, name }`. */
+function subagentNameOf(value: unknown): string | undefined {
+    if (typeof value === 'string') return value.trim() || undefined;
+    const name = asRecord(value).name;
+    return typeof name === 'string' && name.trim() ? name.trim() : undefined;
+}
+
 function money(value: unknown): string {
     return typeof value === 'number' && Number.isFinite(value) ? formatCost(value) : '—';
 }
@@ -164,8 +172,25 @@ export function describeSessionEvent(event: SessionLogEvent): EventView | null {
             return data.ok === false
                 ? { key: 'evToolFailed', values: { name }, tone: 'red', detail: excerpt(data.error) }
                 : { key: 'evToolResult', values: { name }, tone: 'violet' };
-        case 'agent.compaction':
-            return { key: 'evCompaction', values: {}, tone: 'gray' };
+        case 'agent.compaction': {
+            // A pass a sub-agent made of its own context carries the sub-agent: it reads as that sub-agent's.
+            const child = subagentNameOf(data.subagent);
+            return child
+                ? { key: 'evSubagentCompaction', values: { name: child }, tone: 'gray' }
+                : { key: 'evCompaction', values: {}, tone: 'gray' };
+        }
+        case 'agent.plan': {
+            const { done, total } = planProgress({ steps: Array.isArray(data.steps) ? (data.steps as never[]) : [] });
+            return { key: 'evPlan', values: { version: typeof data.version === 'number' ? data.version : '?', done, total }, tone: 'blue' };
+        }
+        case 'agent.subagent': {
+            const failed = data.phase === 'error' || data.status === 'error';
+            if (failed) return { key: 'evSubagentFailed', values: { name }, tone: 'red', detail: excerpt(data.error) };
+            if (data.phase === 'paused') return { key: 'evSubagentPaused', values: { name }, tone: 'orange' };
+            return data.phase === 'start'
+                ? { key: 'evSubagentStarted', values: { name }, tone: 'violet' }
+                : { key: 'evSubagentFinished', values: { name }, tone: 'green' };
+        }
         case 'action.required':
             if (data.kind === 'client_tool') {
                 return { key: 'evClientToolRequested', values: { name: typeof data.toolName === 'string' ? data.toolName : '?' }, tone: 'blue' };

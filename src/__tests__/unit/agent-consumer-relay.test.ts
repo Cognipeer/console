@@ -167,6 +167,32 @@ describe('agent queue consumer + stream relay', () => {
     expect(received).toEqual([event]);
   });
 
+  it('plan, sub-agent and compaction frames reach the caller that listens for them, and only those are wired', async () => {
+    const received: Array<[string, unknown]> = [];
+    const plan = { version: 1, operation: 'write', steps: [{ id: 1, title: 'Step', status: 'in-progress' }], at: 't' };
+    const lifecycle = { phase: 'start', id: 'sa_1', name: 'helper', parentToolCallId: 'd1', at: 't' };
+    const pass = { at: 't', id: 'pass-1', index: 1, afterToolCallId: null };
+    const caller = await openCallerRelay({
+      handlers: {
+        plan: (d) => received.push(['plan', d]),
+        subagent: (d) => received.push(['subagent', d]),
+        compaction: (d) => received.push(['compaction', d]),
+      },
+      signal: new AbortController().signal,
+    });
+    hoisted.executePlaygroundChatLocal.mockImplementation(async (request: Record<string, unknown>) => {
+      expect(request).not.toHaveProperty('onToolEvent'); // the caller did not ask for it
+      expect(request).not.toHaveProperty('onTextChunk');
+      (request.onPlan as (e: unknown) => void)(plan);
+      (request.onSubagent as (e: unknown) => void)(lifecycle);
+      (request.onCompaction as (e: unknown) => void)(pass);
+      return { content: 'ok' };
+    });
+    await handler()({ name: 'playground', data: { ...BASE, [STREAM_RELAY_PAYLOAD_KEY]: caller!.descriptor } });
+    await caller!.finish();
+    expect(received).toEqual([['plan', plan], ['subagent', lifecycle], ['compaction', pass]]);
+  });
+
   it('chat job: only onTextChunk and signal are wired', async () => {
     const caller = await openCallerRelay({
       handlers: { text: vi.fn(), tool: vi.fn() },

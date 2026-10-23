@@ -78,6 +78,7 @@ import {
 import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
+import { readSessionPlan } from '@/lib/services/agents/sessionPlan';
 import { DASHBOARD_AGENT_HITL_DEFAULTS } from '@/lib/services/agents/agentHumanInTheLoop';
 import {
   pendingActionsBlockingMessage,
@@ -1851,13 +1852,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       // Whose it is, and which of its open requests THIS caller could answer (the page shows the server's
       // verdict instead of deriving one from the agent's setting and the viewer's role).
-      const [owners, actions] = await Promise.all([
+      const [owners, actions, plan] = await Promise.all([
         resolveSessionOwners([found.createdBy]),
         openActionsOf(session.tenantDbName, String(found._id)),
+        // Where the agent's plan stands now (the newest version its turns recorded, else the carried state); null when it has none.
+        runWithTenantDb(session.tenantDbName, (db) => readSessionPlan(db, found, agent.config)).catch(() => null),
       ]);
       const ability = await describeAnswerAbility(request, { tenantDbName: session.tenantDbName, conversation: found, actions, agent, actor: { tenantDbName: session.tenantDbName, projectId: scoped.projectId, userId: session.userId } });
       return reply.code(200).send({
         session: found,
+        plan,
         owner: owners.get(found.createdBy) ?? null,
         // The caller started it: nothing more than the route's own check was needed.
         ownSession: scoped.owner,
@@ -2008,6 +2012,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             onTextChunk: stream.live('text', (text: string) => ({ text })),
             onReasoningChunk: stream.live('reasoning', (text: string) => ({ text })),
             onCompaction: stream.live('summary', (compaction) => compaction),
+            onPlan: stream.live('plan', (plan) => plan),
+            onSubagent: stream.live('subagent', (event) => event),
           }
           : {}),
       });
@@ -2278,6 +2284,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
               onTextChunk: live('text', (text: string) => ({ text })),
               onReasoningChunk: live('reasoning', (text: string) => ({ text })),
               onCompaction: live('summary', (compaction) => compaction),
+              onPlan: live('plan', (plan) => plan),
+              onSubagent: live('subagent', (event) => event),
             },
           }
           : {}),
@@ -2429,6 +2437,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         // The agent summarized its context mid-run: shown in the transcript
         // as it happens, not only once the turn is over.
         onCompaction: (compaction) => send('summary', compaction),
+        // The agent's plan and its sub-agents' lifecycle (additive events: older clients ignore them).
+        onPlan: (plan) => send('plan', plan),
+        onSubagent: (event) => send('subagent', event),
       }));
 
       settleAgentRun(quotaCaller, usage, result.usage?.totalTokens);

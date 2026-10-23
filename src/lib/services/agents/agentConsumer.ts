@@ -7,7 +7,7 @@
  * node via BullMQ.
  *
  * A routed chat/playground turn may carry a stream-relay descriptor: the
- * caller's `onTextChunk` / `onToolEvent` / `onCompaction` and its abort
+ * caller's `onTextChunk` / `onToolEvent` / `onCompaction` / `onPlan` / `onSubagent` and its abort
  * signal, bridged over Redis pub/sub (`withWorkerRelay`). The local entry
  * point then runs with callbacks that publish back to the caller, and with a
  * signal the caller's cancel aborts.
@@ -102,7 +102,7 @@ export async function startAgentQueueConsumer(): Promise<void> {
     if (ctx.name === 'chat') {
       return withWorkerRelay(ctx.data, (relay, data) => {
         // `onTextChunk`, `onReasoningChunk` + `signal` are all a chat turn takes;
-        // tool/compaction events are a playground-only surface.
+        // tool/compaction/plan/sub-agent events are a playground-only surface.
         const { onTextChunk, onReasoningChunk, signal } = agentRelayCallbacks(relay);
         return executeAgentChatLocal({
           ...(data as unknown as AgentChatRequest),

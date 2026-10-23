@@ -43,6 +43,7 @@ import {
     parseEditedArgs,
     pickOption,
     resolvedKind,
+    showInGroupTarget,
     typeAnswer,
     type AnswerBlockedReason,
     type ApprovalResolveBody,
@@ -64,6 +65,29 @@ interface CardProps {
      * reason (already worded). Absent = the viewer may answer, or the server could not tell (it decides again).
      */
     lockedReason?: string;
+    /**
+     * Takes the transcript to the sub-agent group the request came from (it was raised inside a delegation).
+     * Absent, or on a request that was not raised by a sub-agent, no link is shown.
+     */
+    onShowInGroup?: (delegationToolCallId: string, subagent?: string) => void;
+}
+
+/** "Show in group ›": the way from a request back to the sub-agent group that raised it. */
+function ShowInGroupLink({ action, onShowInGroup }: { action: PendingActionView; onShowInGroup?: CardProps['onShowInGroup'] }) {
+    const tf = useTranslations('agents.sessionFlow');
+    const target = showInGroupTarget(action);
+    if (!onShowInGroup || !target) return null;
+    return (
+        <Button
+            size="compact-xs"
+            variant="subtle"
+            color="gray"
+            mr="auto"
+            onClick={() => onShowInGroup(target.delegationToolCallId, target.subagent)}
+        >
+            {tf('showInGroup')} ›
+        </Button>
+    );
 }
 
 export function ToolApprovalCard({
@@ -71,6 +95,7 @@ export function ToolApprovalCard({
     busy,
     resolving,
     lockedReason,
+    onShowInGroup,
     onResolve,
 }: CardProps & { onResolve: (body: ApprovalResolveBody) => void }) {
     const t = useTranslations('agents.hitl');
@@ -170,6 +195,7 @@ export function ToolApprovalCard({
                 />
 
                 <Group justify="flex-end" gap="xs">
+                    <ShowInGroupLink action={action} onShowInGroup={onShowInGroup} />
                     <Button
                         size="xs"
                         variant="default"
@@ -203,6 +229,7 @@ export function QuestionCard({
     busy,
     resolving,
     lockedReason,
+    onShowInGroup,
     onResolve,
 }: CardProps & { onResolve: (body: QuestionResolveBody) => void }) {
     const t = useTranslations('agents.hitl');
@@ -222,6 +249,7 @@ export function QuestionCard({
                     <Badge size="xs" variant="light" color="orange" leftSection={<IconHelp size={10} />}>
                         {t('questionNeeded')}
                     </Badge>
+                    {action.subagent ? <Badge size="xs" variant="outline" color="violet">{t('askedBySubagent', { name: action.subagent })}</Badge> : null}
                 </Group>
 
                 {questions.map((question, index) => {
@@ -314,6 +342,7 @@ export function QuestionCard({
                 {!built.ok ? <Text size="xs" c="dimmed">{t('answerRequired')}</Text> : null}
 
                 <Group justify="flex-end" gap="xs">
+                    <ShowInGroupLink action={action} onShowInGroup={onShowInGroup} />
                     <Button
                         size="xs"
                         variant="default"
@@ -500,10 +529,12 @@ export interface PendingActionListProps {
      * single `blocked` verdict applies to every open card.
      */
     blockedById?: Readonly<Record<string, AnswerBlockedReason>>;
+    /** A request raised inside a sub-agent's delegation links back to its group: the transcript opens the group and scrolls to it. */
+    onShowInGroup?: (delegationToolCallId: string, subagent?: string) => void;
 }
 
 /** The approvals and questions a paused turn is waiting on, open ones as cards and the rest as one-liners. */
-export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked, blockedById }: PendingActionListProps) {
+export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked, blockedById, onShowInGroup }: PendingActionListProps) {
     const t = useTranslations('agents.hitl');
     if (actions.length === 0) return null;
     const open = actions.some((action) => action.status === 'pending');
@@ -539,6 +570,7 @@ export default function PendingActionList({ actions, busy, resolvingId, onResolv
                         busy={busy}
                         resolving={resolvingId === action.id}
                         lockedReason={lockedReasonOf(action)}
+                        onShowInGroup={onShowInGroup}
                         onResolve={(body) => onResolve(action.id, body)}
                     />
                 ) : (
@@ -548,6 +580,7 @@ export default function PendingActionList({ actions, busy, resolvingId, onResolv
                         busy={busy}
                         resolving={resolvingId === action.id}
                         lockedReason={lockedReasonOf(action)}
+                        onShowInGroup={onShowInGroup}
                         onResolve={(body) => onResolve(action.id, body)}
                     />
                 );

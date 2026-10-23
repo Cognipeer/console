@@ -19,10 +19,13 @@
  *
  * Properties this keeps:
  *
- *  - `seq` is dense and increasing per conversation. The conversation is locked
- *    for the whole turn, so the writer is the only producer: it reads the max
- *    seq once and counts locally. A unique-index conflict (a producer that did
- *    not take the lock) re-reads the max and retries once.
+ *  - `seq` is increasing per conversation, and the stored log numbers its events
+ *    one after the other. The conversation is locked for the whole turn, so the
+ *    writer is the only producer: it reads the max seq once and counts locally.
+ *    A unique-index conflict (a producer that did not take the lock) re-reads
+ *    the max and retries once. A reader is not shown every row (the client API
+ *    leaves out the ones only the dashboard uses: plan versions, sub-agent steps),
+ *    so what it sees may skip numbers: `seq` is where to resume, never a count.
  *  - A frame reaches the bus only once its row exists, so a consumer that
  *    replays from the DB after subscribing can never see a seq on the bus that
  *    the DB does not yet have — and an event it replayed AND receives live is
@@ -51,6 +54,8 @@ export type SessionEventType =
   | 'agent.tool_use'
   | 'agent.tool_result'
   | 'agent.compaction'
+  | 'agent.plan'
+  | 'agent.subagent'
   | 'action.required'
   | 'action.resolved'
   | 'agent.output_file'

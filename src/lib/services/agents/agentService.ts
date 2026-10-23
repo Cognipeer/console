@@ -50,7 +50,7 @@ import {
 } from './agentKnowledgeBindings';
 import { applyServiceAvailability, assertAgentsEnabled, filterChildSources } from './agentServiceAvailability';
 import { getDisabledServices } from '@/lib/services/availability/serviceAvailability';
-import { getDatabase, runWithTenantScope, type AgentResponseFormat, type DatabaseProvider, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type AgentResponseFormat, type DatabaseProvider, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
     getRagDocument,
@@ -194,7 +194,6 @@ import {
     buildCostEstimator,
     buildTurnInputState,
     compactedToolResults,
-    compactionFromEvent,
     describeTurnOutcome,
     endedByCallerAbort,
     buildContinueInputState,
@@ -207,6 +206,8 @@ import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/fin
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
 import { delegatedSubagentName, delegationFailure, isDelegationTool, isSubagentEvent, nameSubagentOnApprovalStep, resumedDelegationIds, subagentStampOf } from './subagentEvents';
+import { createTurnFlowTracker, subagentTargets, type TurnFlowTracker } from './turnFlowTracker';
+import { delegationCallIdOf, type AgentCompactionEvent, type AgentPlanEvent, type AgentSubagentEvent, type AgentToolCallSubagentStamp } from '@/lib/shared/agentTurnFlow';
 import { resolveAgentConfig } from './agentConfigResolution';
 import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
@@ -1665,7 +1666,8 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
  */
 export const __testables = {
     textStreamOptions,
-    noteTurnCompaction,
+    createTurnFlowSink,
+    turnFlowRecord,
     guardrailDenial,
     guardrailBlockedError,
     buildAgentGuardrailPlugins,
@@ -3725,8 +3727,10 @@ export interface AgentToolCallEvent {
      * Set when a delegated child made the call (a step of its own loop). Absent
      * on the agent's own calls and on the delegation call that handed the task
      * over: a child cannot delegate, so it never emits a delegation tool event.
+     * It also names the delegation call it belongs to and whether that ran in
+     * parallel, so a call can be shown under its sub-agent.
      */
-    subagent?: { id?: string; name: string };
+    subagent?: AgentToolCallSubagentStamp;
     /**
      * Set only on the `start` of a delegation call the SDK re-enters after a
      * child's pause was answered (same call id as in the paused turn).
@@ -3820,10 +3824,15 @@ export interface AgentPlaygroundChatRequest {
      */
     revealReasoning?: boolean;
     /**
-     * Fires when the agent summarizes its context mid-run. Same relay caveat
-     * as `onToolEvent`.
+     * Fires when the agent summarizes its context mid-run: when a pass starts
+     * (`phase: 'start'`, live only), when it ends, and for a sub-agent's own passes
+     * (`subagent` set). Same relay caveat as `onToolEvent`.
      */
-    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    /** Fires with each plan version the agent writes (manage_plan). Same relay caveat as `onToolEvent`. */
+    onPlan?: (plan: AgentPlanEvent) => void;
+    /** Fires as each sub-agent starts, answers, fails or pauses. Same relay caveat as `onToolEvent`. */
+    onSubagent?: (event: AgentSubagentEvent) => void;
     /**
      * Abort the turn (realtime barge-in). The run RESOLVES with the text
      * produced so far, `stopReason: 'cancelled'` and `stopDetail: 'aborted'`;
@@ -3962,16 +3971,20 @@ function agentRelayOptions(request: {
     onTextChunk?: (text: string) => void;
     onReasoningChunk?: (text: string) => void;
     onToolEvent?: (event: AgentToolCallEvent) => void;
-    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    onPlan?: (plan: AgentPlanEvent) => void;
+    onSubagent?: (event: AgentSubagentEvent) => void;
     signal?: AbortSignal;
 }): RelayCallerOptions {
-    const { onTextChunk, onReasoningChunk, onToolEvent, onCompaction } = request;
+    const { onTextChunk, onReasoningChunk, onToolEvent, onCompaction, onPlan, onSubagent } = request;
     return {
         handlers: {
             text: onTextChunk ? (data) => { if (typeof data === 'string') onTextChunk(data); } : undefined,
             reasoning: onReasoningChunk ? (data) => { if (typeof data === 'string') onReasoningChunk(data); } : undefined,
             tool: onToolEvent ? (data) => onToolEvent(data as AgentToolCallEvent) : undefined,
-            compaction: onCompaction ? (data) => onCompaction(data as IAgentTurnCompaction) : undefined,
+            compaction: onCompaction ? (data) => onCompaction(data as AgentCompactionEvent) : undefined,
+            plan: onPlan ? (data) => onPlan(data as AgentPlanEvent) : undefined,
+            subagent: onSubagent ? (data) => onSubagent(data as AgentSubagentEvent) : undefined,
         },
         ...(request.signal ? { signal: request.signal } : {}),
     };
@@ -3986,7 +3999,7 @@ function agentRelayOptions(request: {
  */
 export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
     AgentPlaygroundChatRequest,
-    'onTextChunk' | 'onReasoningChunk' | 'onToolEvent' | 'onCompaction' | 'signal'
+    'onTextChunk' | 'onReasoningChunk' | 'onToolEvent' | 'onCompaction' | 'onPlan' | 'onSubagent' | 'signal'
 > {
     if (!relay) return {};
     return {
@@ -3994,8 +4007,10 @@ export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
         ...(relay.events.has('reasoning') ? { onReasoningChunk: (text: string) => relay.emit('reasoning', text) } : {}),
         ...(relay.events.has('tool') ? { onToolEvent: (event: AgentToolCallEvent) => relay.emit('tool', event) } : {}),
         ...(relay.events.has('compaction')
-            ? { onCompaction: (compaction: IAgentTurnCompaction) => relay.emit('compaction', compaction) }
+            ? { onCompaction: (compaction: AgentCompactionEvent) => relay.emit('compaction', compaction) }
             : {}),
+        ...(relay.events.has('plan') ? { onPlan: (plan: AgentPlanEvent) => relay.emit('plan', plan) } : {}),
+        ...(relay.events.has('subagent') ? { onSubagent: (event: AgentSubagentEvent) => relay.emit('subagent', event) } : {}),
         ...(relay.signal ? { signal: relay.signal } : {}),
     };
 }
@@ -4877,30 +4892,116 @@ function liveStreamOptions(
 }
 
 /**
- * Records a `summarization` event as a compaction of this turn: kept on the turn's
- * record, announced on the session log and handed to the caller when it listens.
- * A compaction a delegated child made of its OWN context is none of that: it did
- * not touch this turn's messages, and counting it would show the parent's
- * transcript as shortened (and name tool results as compacted) when it was not.
+ * A sub-agent event that names the delegation CALL it belongs to. The SDK keys each
+ * child of `spawn_subagents_parallel` `<call>#<index>` (its pause store is keyed by
+ * it), while the group a run is shown in, the call it is anchored on and the card
+ * that asks for its approval are all matched by the call itself: the suffix is cut
+ * here, once, before the tracker, the session log and the live callbacks see the event.
  */
-function noteTurnCompaction(
-    event: Parameters<typeof compactionFromEvent>[0],
-    turn: {
-        compactions: IAgentTurnCompaction[];
-        turnEvents: Pick<SessionTurnEvents, 'onCompaction'> | undefined;
-        onCompaction?: (compaction: IAgentTurnCompaction) => void;
-        agentKey: string;
-    },
-): void {
-    if (isSubagentEvent(event)) return;
-    const compaction = compactionFromEvent(event);
-    turn.compactions.push(compaction);
-    turn.turnEvents?.onCompaction(compaction);
-    try {
-        turn.onCompaction?.(compaction);
-    } catch (callbackError) {
-        logger.warn('onCompaction callback failed', { agentKey: turn.agentKey, error: callbackError });
-    }
+function onDelegationCall<T extends object>(event: T): T {
+    const parent = (event as { parentToolCallId?: unknown }).parentToolCallId;
+    if (typeof parent !== 'string') return event;
+    const call = delegationCallIdOf(parent);
+    return call === parent ? event : { ...event, parentToolCallId: call };
+}
+
+/**
+ * Feeds one invoke leg's SDK events to its flow tracker and passes on what the
+ * tracker makes of them: the session log rows, and the live callbacks of the
+ * caller (when it listens). The three invoke paths (background/API, playground,
+ * resume) call this for every event, so they record the turn the same way.
+ *
+ * What the tracker keeps apart is what keeps the turn honest: a delegated child's
+ * tool calls and summarization passes are told live and logged with the child's
+ * name, but never counted as the agent's own steps or compactions (a child
+ * compacting its own context did not shorten this turn's messages). A child whose
+ * run the tracker had no room for (past its cap) is not told or logged at all: a
+ * viewer would show a run that never ends.
+ */
+function createTurnFlowSink(options: {
+    tracker: TurnFlowTracker;
+    turnEvents: Pick<SessionTurnEvents, 'onSdkEvent' | 'onCompaction' | 'onPlan' | 'onSubagent'> | undefined;
+    agentKey: string;
+    /** The delegation calls this leg re-enters (marked on their `start`). */
+    resumedCalls?: ReadonlySet<string>;
+    onToolEvent?: (event: AgentToolCallEvent) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    onPlan?: (plan: AgentPlanEvent) => void;
+    onSubagent?: (event: AgentSubagentEvent) => void;
+}): (event: AgentSdkEvent) => void {
+    const { tracker, turnEvents, agentKey } = options;
+    /** A caller's callback must never break the run. */
+    const tell = <T>(name: string, callback: ((value: T) => void) | undefined, value: T) => {
+        if (!callback) return;
+        try {
+            callback(value);
+        } catch (callbackError) {
+            logger.warn(`${name} callback failed`, { agentKey, error: callbackError });
+        }
+    };
+    return (event) => {
+        switch (event.type) {
+            case 'tool_call': {
+                const { stamp, dropped } = tracker.noteToolCall(event);
+                if (dropped) return;
+                turnEvents?.onSdkEvent(event, stamp);
+                if (!options.onToolEvent) return;
+                const payload = toToolCallEvent(event, options.resumedCalls);
+                if (!payload) return;
+                tell('onToolEvent', options.onToolEvent, stamp ? { ...payload, subagent: stamp } : payload);
+                return;
+            }
+            case 'plan': {
+                const plan = tracker.notePlan(event);
+                if (!plan) return;
+                turnEvents?.onPlan(plan);
+                tell('onPlan', options.onPlan, plan);
+                return;
+            }
+            case 'subagent': {
+                const lifecycle = tracker.noteSubagent(onDelegationCall(event));
+                if (!lifecycle) return;
+                turnEvents?.onSubagent(lifecycle);
+                tell('onSubagent', options.onSubagent, lifecycle);
+                return;
+            }
+            case 'summarization': {
+                const note = tracker.noteCompaction(event);
+                if (!note) return;
+                if (note.persist) turnEvents?.onCompaction(note.event);
+                tell('onCompaction', options.onCompaction, note.event);
+                return;
+            }
+            default:
+                return;
+        }
+    };
+}
+
+/**
+ * What a leg's tracker recorded, as the fields of the assistant message (and of
+ * the playground result): only those that happened, so a turn without a plan or
+ * a sub-agent stores nothing extra. A turn that called its plan tool and wrote
+ * no version (a read) stores an empty `plans`: the field says the turn records its
+ * plan versions, so a reader leaves that call out as the live view does, where a
+ * turn without any plan call (or stored before plans were recorded) keeps every
+ * call it made. `compactedToolsOf` finds the whole leg's replaced
+ * tool results by diffing the transcript (see `compactedToolResults`); it is asked
+ * only when a pass happened, and the tracker hands each result to the pass that made it.
+ */
+function turnFlowRecord(
+    tracker: TurnFlowTracker,
+    compactedToolsOf: () => Array<{ toolName: string; toolCallId: string }>,
+): Pick<IAgentConversationMessage, 'plans' | 'subagentRuns' | 'subagentRunsDropped' | 'compactions' | 'compactedTools'> {
+    const { plans, planCalls, subagentRuns, subagentRunsDropped, compactions: passes } = tracker.snapshot();
+    const compactedTools = passes.length > 0 ? compactedToolsOf() : [];
+    const compactions = tracker.finalizeCompactedTools(compactedTools);
+    return {
+        ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools: [...compactedTools] } : {}) } : {}),
+        ...(plans.length > 0 || planCalls > 0 ? { plans } : {}),
+        ...(subagentRuns.length > 0 ? { subagentRuns } : {}),
+        ...(subagentRunsDropped > 0 ? { subagentRunsDropped } : {}),
+    };
 }
 
 /** The reasoning of a finished turn: what streamed (every model step), else the last message's. */
@@ -5500,19 +5601,16 @@ async function runAgentChatTurn(
 
     try {
         // 5. Invoke
-        const compactions: IAgentTurnCompaction[] = [];
+        const flow = createTurnFlowTracker({ targets: subagentTargets(activeSubagentEntries(config)) });
+        const flowSink = createTurnFlowSink({ tracker: flow, turnEvents, agentKey });
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
         const streamed = captureStreamedText(onTextChunk);
         const reasoningTap = createReasoningTap(onReasoningChunk, agentKey, agentShowsReasoning(config));
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
-                if (event.type === 'summarization') {
-                    noteTurnCompaction(event, { compactions, turnEvents, agentKey });
-                    return;
-                }
                 reasoningTap.onEvent(event);
                 noteSdkEvent(event);
-                turnEvents.onSdkEvent(event);
+                flowSink(event);
             },
             ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
@@ -5602,9 +5700,7 @@ async function runAgentChatTurn(
         let outcome = budgetAwareOutcome(turnOutcome, budget);
         const outputParsed = result.output;
         const outputError = result.outputError ? describeStructuredOutputError(result.outputError) : undefined;
-        const compactedTools = compactions.length > 0
-            ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
-            : [];
+        const flowRecord = turnFlowRecord(flow, () => compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined));
         // The same per-call detail a dashboard session stores, so a conversation
         // started over the API shows its tool calls when it is opened there.
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
@@ -5665,7 +5761,7 @@ async function runAgentChatTurn(
                 ...(outcome.stopReason !== 'completed'
                     ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                     : {}),
-                ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+                ...flowRecord,
                 ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
                 ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
                 ...(usage ? { usage } : {}),
@@ -5761,6 +5857,8 @@ export async function executePlaygroundChat(
     delete payload.onTextChunk;
     delete payload.onReasoningChunk;
     delete payload.onCompaction;
+    delete payload.onPlan;
+    delete payload.onSubagent;
     delete payload.signal;
     const usage = createRunUsageSink();
     let result: AgentPlaygroundChatResult;
@@ -5882,8 +5980,13 @@ export function extractPlaygroundSteps(
         const rawOutput = entry.rawOutput;
         const rawDiffers = rawOutput !== undefined && rawOutput !== output;
 
+        // A step is named by the call the model made (`tool_call_id`, the id on the live events), not by the
+        // SDK's random `executionId`: the plan versions, sub-agent runs and summarization passes of the turn
+        // anchor on the call id, and a step that carried another id would match none of them.
+        const callId = typeof entry.tool_call_id === 'string' && entry.tool_call_id ? entry.tool_call_id : undefined;
+
         return {
-            id: typeof entry.executionId === 'string' ? entry.executionId : undefined,
+            id: callId ?? (typeof entry.executionId === 'string' ? entry.executionId : undefined),
             name: typeof entry.toolName === 'string' ? entry.toolName : 'tool',
             args: entry.args,
             output,
@@ -6246,8 +6349,11 @@ async function runPlaygroundChatTurn(
     );
 
     // Surface progress to the caller (best-effort; never fails the run).
-    const { onToolEvent, onCompaction, signal } = request;
-    const compactions: IAgentTurnCompaction[] = [];
+    const { onToolEvent, onCompaction, onPlan, onSubagent, signal } = request;
+    // The plan, the sub-agents and the summarization passes of the turn are recorded either way;
+    // forwarded live so a session shows each as it happens.
+    const flow = createTurnFlowTracker({ targets: subagentTargets(activeSubagentEntries(config)) });
+    const flowSink = createTurnFlowSink({ tracker: flow, turnEvents, agentKey, onToolEvent, onCompaction, onPlan, onSubagent });
     const streamed = captureStreamedText(onTextChunk);
     // The operator's playground always sees the thinking the model produced.
     const reasoningTap = createReasoningTap(onReasoningChunk, agentKey);
@@ -6255,21 +6361,7 @@ async function runPlaygroundChatTurn(
         onEvent: (event: AgentSdkEvent) => {
             reasoningTap.onEvent(event);
             noteSdkEvent(event);
-            turnEvents?.onSdkEvent(event);
-            if (event.type === 'summarization') {
-                // Collected for the turn record either way; forwarded live
-                // so a session shows the compaction as it happens.
-                noteTurnCompaction(event, { compactions, turnEvents, onCompaction, agentKey });
-                return;
-            }
-            if (!onToolEvent) return;
-            const payload = toToolCallEvent(event);
-            if (!payload) return;
-            try {
-                onToolEvent(payload);
-            } catch (callbackError) {
-                logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-            }
+            flowSink(event);
         },
         ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
         // The SDK checks it between steps and hands it to the model call.
@@ -6294,7 +6386,7 @@ async function runPlaygroundChatTurn(
                 version: ranVersion,
                 stopReason: 'cancelled',
                 stopDetail: CALLER_ABORT_DETAIL,
-                ...(compactions.length > 0 ? { compactions } : {}),
+                ...turnFlowRecord(flow, () => []),
                 ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
             };
             logger.info('Playground chat aborted by caller mid-call', { agentKey });
@@ -6328,9 +6420,7 @@ async function runPlaygroundChatTurn(
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), signal);
-        const compactedTools = compactions.length > 0
-            ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
-            : [];
+        const flowRecord = turnFlowRecord(flow, () => compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined));
 
         // Priced below; the session budget (if any) is settled once the cost is known.
         let outcome: AgentTurnOutcome = turnOutcome;
@@ -6361,8 +6451,7 @@ async function runPlaygroundChatTurn(
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
-            ...(compactions.length > 0 ? { compactions } : {}),
-            ...(compactedTools.length > 0 ? { compactedTools } : {}),
+            ...flowRecord,
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
             ...(request.previousVersions?.length ? { previousVersions: request.previousVersions.slice(-MAX_PREVIOUS_VERSIONS) } : {}),
         };
@@ -6501,6 +6590,10 @@ async function persistSessionTurn(
                 ...(result.stopDetail ? { stopDetail: result.stopDetail } : {}),
                 ...(result.compactions?.length ? { compactions: result.compactions } : {}),
                 ...(result.compactedTools?.length ? { compactedTools: result.compactedTools } : {}),
+                // An empty list is kept: it says the turn recorded its plan versions (and wrote none).
+                ...(Array.isArray(result.plans) ? { plans: result.plans } : {}),
+                ...(result.subagentRuns?.length ? { subagentRuns: result.subagentRuns } : {}),
+                ...(result.subagentRunsDropped ? { subagentRunsDropped: result.subagentRunsDropped } : {}),
                 ...(result.warnings?.length ? { warnings: result.warnings } : {}),
                 ...(result.pendingActions?.length ? { pendingActions: result.pendingActions } : {}),
                 ...(result.previousVersions?.length ? { previousVersions: result.previousVersions } : {}),
@@ -6555,7 +6648,9 @@ export interface AgentResumeRequest {
     onToolEvent?: (event: AgentToolCallEvent) => void;
     onTextChunk?: (text: string) => void;
     onReasoningChunk?: (text: string) => void;
-    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    onCompaction?: (compaction: AgentCompactionEvent) => void;
+    onPlan?: (plan: AgentPlanEvent) => void;
+    onSubagent?: (event: AgentSubagentEvent) => void;
     /** Called right before the SDK loop is invoked — after this the answers are spent. */
     onInvokeStart?: () => void;
     /** The host page this continuation answers for, when the chat is embedded — see `AgentPlaygroundChatRequest.embedded`. */
@@ -6984,7 +7079,17 @@ async function runAgentResumeTurn(
         // Read now: the SDK deletes each entry as its delegation completes.
         const reEntered = resumedDelegationIds(state);
         const inputMessageCount = (state.messages ?? []).length;
-        const compactions: IAgentTurnCompaction[] = [];
+        const flow = createTurnFlowTracker({ resumedDelegationIds: reEntered, targets: subagentTargets(activeSubagentEntries(config)) });
+        const flowSink = createTurnFlowSink({
+            tracker: flow,
+            turnEvents,
+            agentKey,
+            resumedCalls: reEntered,
+            onToolEvent: request.onToolEvent,
+            onCompaction: request.onCompaction,
+            onPlan: request.onPlan,
+            onSubagent: request.onSubagent,
+        });
         const streamed = captureStreamedText(onTextChunk);
         const reasoningTap = createReasoningTap(onReasoningChunk, agentKey, agentShowsReasoning(config) || source === 'agent-playground');
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
@@ -6992,19 +7097,7 @@ async function runAgentResumeTurn(
             onEvent: (event: AgentSdkEvent) => {
                 reasoningTap.onEvent(event);
                 noteSdkEvent(event);
-                turnEvents.onSdkEvent(event);
-                if (event.type === 'summarization') {
-                    noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
-                    return;
-                }
-                if (!request.onToolEvent) return;
-                const payload = toToolCallEvent(event, reEntered);
-                if (!payload) return;
-                try {
-                    request.onToolEvent(payload);
-                } catch (callbackError) {
-                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-                }
+                flowSink(event);
             },
             ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
@@ -7030,6 +7123,7 @@ async function runAgentResumeTurn(
                 version,
                 stopReason: 'cancelled',
                 stopDetail: CALLER_ABORT_DETAIL,
+                ...turnFlowRecord(flow, () => []),
             };
             await turnEvents.finish({ stopReason: 'cancelled', content: aborted.content, detail: CALLER_ABORT_DETAIL });
             return {
@@ -7056,9 +7150,7 @@ async function runAgentResumeTurn(
         const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
-        const compactedTools = compactions.length > 0
-            ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
-            : [];
+        const flowRecord = turnFlowRecord(flow, () => compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined));
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
@@ -7116,7 +7208,7 @@ async function runAgentResumeTurn(
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
-            ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+            ...flowRecord,
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
             ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
             ...(usage ? { usage } : {}),

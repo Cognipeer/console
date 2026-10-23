@@ -57,18 +57,11 @@ export default function ContextCompactionCard({
     defaultOpen = false,
 }: ContextCompactionCardProps) {
     const [open, setOpen] = useState(defaultOpen);
-    const summary = compaction.summary ?? {};
-    const hasDetail = Boolean(
-        summary.userDirectives?.length || summary.facts?.length || summary.goals?.length
-        || summary.openQuestions?.length || summary.discarded?.length
-        || compaction.droppedDirectives?.length
-        || compaction.integrityNotes?.length || compactedTools?.length,
-    );
+    const hasDetail = compactionHasDetail(compaction, compactedTools);
     const tone = compaction.failed ? 'orange' : 'indigo';
     const afterRatio = compaction.tokensBefore && compaction.tokensAfter !== undefined
         ? Math.min(1, compaction.tokensAfter / compaction.tokensBefore)
         : undefined;
-    const toolCounts = countTools(compactedTools);
 
     return (
         <Box className={`${classes.compactionCard} ${compaction.failed ? classes.compactionCardWarn : ''}`} mb="sm">
@@ -124,123 +117,153 @@ export default function ContextCompactionCard({
             </UnstyledButton>
 
             <Collapse in={open}>
-                <Stack gap="sm" className={classes.compactionBody}>
-                    {compaction.failed ? (
-                        <Group gap={6} wrap="nowrap" align="flex-start">
-                            <IconAlertTriangle size={13} color="var(--mantine-color-orange-6)" />
-                            <Text size="xs" c="dimmed">
-                                The summarizer call failed, so a local fallback summary was used. The agent may have
-                                lost detail from the compacted results.
-                            </Text>
-                        </Group>
-                    ) : null}
-
-                    {summary.userDirectives?.length ? (
-                        <Box>
-                            <SectionTitle
-                                icon={<IconBookmark size={12} />}
-                                title="Standing instructions"
-                                count={summary.userDirectives.length}
-                                hint="Kept verbatim — they apply to every later turn"
-                            />
-                            <Stack gap={3} mt={4}>
-                                {summary.userDirectives.map((directive) => (
-                                    <Box key={directive}>
-                                        <Text size="xs" className={classes.compactionDirective}>{directive}</Text>
-                                        {summary.directiveSources?.[directive] ? (
-                                            <Text size="10px" c="dimmed" className={classes.preWrap}>
-                                                User said: “{summary.directiveSources[directive]}”
-                                            </Text>
-                                        ) : null}
-                                    </Box>
-                                ))}
-                            </Stack>
-                        </Box>
-                    ) : null}
-                    {compaction.droppedDirectives?.length ? (
-                        <Box>
-                            <SectionTitle
-                                icon={<IconAlertTriangle size={12} />}
-                                title="Instructions not kept"
-                                count={compaction.droppedDirectives.length}
-                                hint="The summarizer listed them, but no user message says so"
-                            />
-                            <Stack gap={3} mt={4}>
-                                {compaction.droppedDirectives.map((dropped) => (
-                                    <Box key={dropped.directive}>
-                                        <Text size="xs" c="dimmed" td="line-through" className={classes.preWrap}>{dropped.directive}</Text>
-                                        {dropped.sourceQuote ? (
-                                            <Text size="10px" c="dimmed" className={classes.preWrap}>
-                                                Claimed source not found: “{dropped.sourceQuote}”
-                                            </Text>
-                                        ) : null}
-                                    </Box>
-                                ))}
-                            </Stack>
-                        </Box>
-                    ) : null}
-                    {summary.facts?.length ? (
-                        <Box>
-                            <SectionTitle icon={<IconListCheck size={12} />} title="What the agent remembers" count={summary.facts.length} />
-                            <Stack gap={2} mt={4}>
-                                {summary.facts.map((fact) => (
-                                    <Group key={fact.key} gap={6} wrap="nowrap" align="flex-start">
-                                        <Text size="xs" ff="monospace" c="dimmed" className={classes.compactionFactKey}>{fact.key}</Text>
-                                        <Text size="xs" className={classes.preWrap}>{fact.value}</Text>
-                                    </Group>
-                                ))}
-                            </Stack>
-                        </Box>
-                    ) : null}
-                    <CompactionSection icon={<IconTarget size={12} />} title="Active goals" items={summary.goals} />
-                    <CompactionSection icon={<IconQuestionMark size={12} />} title="Open questions" items={summary.openQuestions} />
-                    <CompactionSection
-                        icon={<IconTrashX size={12} />}
-                        title="Dropped as obsolete"
-                        items={summary.discarded}
-                        muted
-                    />
-
-                    {toolCounts.length > 0 ? (
-                        <Box>
-                            <SectionTitle
-                                icon={<IconArrowsMinimize size={12} />}
-                                title="Tool results replaced by the summary"
-                                count={compactedTools?.length}
-                            />
-                            <Group gap={4} mt={4}>
-                                {toolCounts.map(([name, count]) => (
-                                    <Badge key={name} size="xs" variant="outline" color="gray" ff="monospace">
-                                        {name}{count > 1 ? ` ×${count}` : ''}
-                                    </Badge>
-                                ))}
-                            </Group>
-                            <Text size="10px" c="dimmed" mt={4}>
-                                The full results are still in the tool calls above; the agent can page them back in if it needs them.
-                            </Text>
-                        </Box>
-                    ) : null}
-
-                    {compaction.integrityNotes?.length ? (
-                        <Box>
-                            <SectionTitle icon={<IconAlertTriangle size={12} />} title="Integrity repairs" />
-                            <Stack gap={2} mt={4}>
-                                {compaction.integrityNotes.map((note) => (
-                                    <Text key={note} size="xs" c="orange.7">{note}</Text>
-                                ))}
-                            </Stack>
-                        </Box>
-                    ) : null}
-
-                    {compaction.inputTokens || compaction.outputTokens ? (
-                        <Text size="10px" c="dimmed">
-                            Summarizer call{compaction.model ? ` (${compaction.model})` : ''}: {compaction.inputTokens ?? 0} in / {compaction.outputTokens ?? 0} out tokens
-                            (included in this turn’s usage)
-                        </Text>
-                    ) : null}
-                </Stack>
+                <ContextCompactionBody compaction={compaction} compactedTools={compactedTools} />
             </Collapse>
         </Box>
+    );
+}
+
+/** True when the card has anything to open: a summary, dropped instructions, repairs or replaced tool results. */
+export function compactionHasDetail(compaction: TurnCompaction, compactedTools?: ContextCompactionCardProps['compactedTools']): boolean {
+    const summary = compaction.summary ?? {};
+    return Boolean(
+        summary.userDirectives?.length || summary.facts?.length || summary.goals?.length
+        || summary.openQuestions?.length || summary.discarded?.length
+        || compaction.droppedDirectives?.length
+        || compaction.integrityNotes?.length || compactedTools?.length,
+    );
+}
+
+/**
+ * What the agent now remembers in place of what was dropped: the part of the
+ * card that opens. Exported so the divider in the flow can show the same
+ * content under its own header.
+ */
+export function ContextCompactionBody({
+    compaction,
+    compactedTools,
+}: {
+    compaction: TurnCompaction;
+    compactedTools?: ContextCompactionCardProps['compactedTools'];
+}) {
+    const summary = compaction.summary ?? {};
+    const toolCounts = countTools(compactedTools);
+    return (
+        <Stack gap="sm" className={classes.compactionBody}>
+            {compaction.failed ? (
+                <Group gap={6} wrap="nowrap" align="flex-start">
+                    <IconAlertTriangle size={13} color="var(--mantine-color-orange-6)" />
+                    <Text size="xs" c="dimmed">
+                        The summarizer call failed, so a local fallback summary was used. The agent may have
+                        lost detail from the compacted results.
+                    </Text>
+                </Group>
+            ) : null}
+
+            {summary.userDirectives?.length ? (
+                <Box>
+                    <SectionTitle
+                        icon={<IconBookmark size={12} />}
+                        title="Standing instructions"
+                        count={summary.userDirectives.length}
+                        hint="Kept verbatim — they apply to every later turn"
+                    />
+                    <Stack gap={3} mt={4}>
+                        {summary.userDirectives.map((directive) => (
+                            <Box key={directive}>
+                                <Text size="xs" className={classes.compactionDirective}>{directive}</Text>
+                                {summary.directiveSources?.[directive] ? (
+                                    <Text size="10px" c="dimmed" className={classes.preWrap}>
+                                        User said: “{summary.directiveSources[directive]}”
+                                    </Text>
+                                ) : null}
+                            </Box>
+                        ))}
+                    </Stack>
+                </Box>
+            ) : null}
+            {compaction.droppedDirectives?.length ? (
+                <Box>
+                    <SectionTitle
+                        icon={<IconAlertTriangle size={12} />}
+                        title="Instructions not kept"
+                        count={compaction.droppedDirectives.length}
+                        hint="The summarizer listed them, but no user message says so"
+                    />
+                    <Stack gap={3} mt={4}>
+                        {compaction.droppedDirectives.map((dropped) => (
+                            <Box key={dropped.directive}>
+                                <Text size="xs" c="dimmed" td="line-through" className={classes.preWrap}>{dropped.directive}</Text>
+                                {dropped.sourceQuote ? (
+                                    <Text size="10px" c="dimmed" className={classes.preWrap}>
+                                        Claimed source not found: “{dropped.sourceQuote}”
+                                    </Text>
+                                ) : null}
+                            </Box>
+                        ))}
+                    </Stack>
+                </Box>
+            ) : null}
+            {summary.facts?.length ? (
+                <Box>
+                    <SectionTitle icon={<IconListCheck size={12} />} title="What the agent remembers" count={summary.facts.length} />
+                    <Stack gap={2} mt={4}>
+                        {summary.facts.map((fact) => (
+                            <Group key={fact.key} gap={6} wrap="nowrap" align="flex-start">
+                                <Text size="xs" ff="monospace" c="dimmed" className={classes.compactionFactKey}>{fact.key}</Text>
+                                <Text size="xs" className={classes.preWrap}>{fact.value}</Text>
+                            </Group>
+                        ))}
+                    </Stack>
+                </Box>
+            ) : null}
+            <CompactionSection icon={<IconTarget size={12} />} title="Active goals" items={summary.goals} />
+            <CompactionSection icon={<IconQuestionMark size={12} />} title="Open questions" items={summary.openQuestions} />
+            <CompactionSection
+                icon={<IconTrashX size={12} />}
+                title="Dropped as obsolete"
+                items={summary.discarded}
+                muted
+            />
+
+            {toolCounts.length > 0 ? (
+                <Box>
+                    <SectionTitle
+                        icon={<IconArrowsMinimize size={12} />}
+                        title="Tool results replaced by the summary"
+                        count={compactedTools?.length}
+                    />
+                    <Group gap={4} mt={4}>
+                        {toolCounts.map(([name, count]) => (
+                            <Badge key={name} size="xs" variant="outline" color="gray" ff="monospace">
+                                {name}{count > 1 ? ` ×${count}` : ''}
+                            </Badge>
+                        ))}
+                    </Group>
+                    <Text size="10px" c="dimmed" mt={4}>
+                        The full results are still in the tool calls above; the agent can page them back in if it needs them.
+                    </Text>
+                </Box>
+            ) : null}
+
+            {compaction.integrityNotes?.length ? (
+                <Box>
+                    <SectionTitle icon={<IconAlertTriangle size={12} />} title="Integrity repairs" />
+                    <Stack gap={2} mt={4}>
+                        {compaction.integrityNotes.map((note) => (
+                            <Text key={note} size="xs" c="orange.7">{note}</Text>
+                        ))}
+                    </Stack>
+                </Box>
+            ) : null}
+
+            {compaction.inputTokens || compaction.outputTokens ? (
+                <Text size="10px" c="dimmed">
+                    Summarizer call{compaction.model ? ` (${compaction.model})` : ''}: {compaction.inputTokens ?? 0} in / {compaction.outputTokens ?? 0} out tokens
+                    (included in this turn’s usage)
+                </Text>
+            ) : null}
+        </Stack>
     );
 }
 

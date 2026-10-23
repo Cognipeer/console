@@ -97,7 +97,7 @@ describe('Studio live view', () => {
     segments = applyLiveToolEvent(segments, { phase: 'start', name: 'search', id: 'c1' });
     segments = appendLiveReasoning(segments, '\n\nc');
     segments = appendLiveText(segments, 'answer');
-    expect(segments.map((s) => (s.kind === 'tools' ? 'tools' : `${s.kind}:${s.text}`))).toEqual([
+    expect(segments.map((s) => (s.kind === 'text' || s.kind === 'reasoning' ? `${s.kind}:${s.text}` : s.kind))).toEqual([
       'reasoning:ab', 'tools', 'reasoning:c', 'text:answer',
     ]);
   });

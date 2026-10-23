@@ -818,7 +818,7 @@ describe('live turn order', () => {
         segments = applyLiveToolEvent(segments, { phase: 'error', name: 'fetch', error: 'boom' });
         segments = appendLiveText(segments, 'Answer');
 
-        expect(segments.map((segment) => (segment.kind === 'text' || segment.kind === 'reasoning' ? segment.text : segment.calls.map((call) => `${call.name}${call.running ? '…' : call.error ? '!' : ''}`).join(',')))).toEqual([
+        expect(segments.map((segment) => (segment.kind === 'text' || segment.kind === 'reasoning' ? segment.text : segment.kind !== 'tools' ? segment.kind : segment.calls.map((call) => `${call.name}${call.running ? '…' : call.error ? '!' : ''}`).join(',')))).toEqual([
             'Let me search.', 'web_search,web_search', 'Found it.', 'fetch!', 'Answer',
         ]);
     });

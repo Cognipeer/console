@@ -263,6 +263,89 @@ describe('one session of an agent', () => {
     expect((await dash('other', 'GET', `/agents/${agentId}/sessions/${idOf('others')}`)).statusCode).toBe(200);
   });
 
+  it('carries the newest plan version the turns recorded, and never reads the carried state for it', async () => {
+    const id = idOf('starters');
+    // No planning on the agent and no plan on any message: nothing to read.
+    expect(json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`)).plan).toBeNull();
+
+    // A later turn that only read the plan (an empty list) changes nothing: the last version of the turn before it stands.
+    const written = [
+      { toolCallId: 'p1', version: 1, operation: 'write', steps: [{ id: 1, title: 'Gather', status: 'in-progress' }, { id: 2, title: 'Write', status: 'not-started' }], at: '2026-10-23T08:30:00.000Z' },
+      {
+        toolCallId: 'p2', version: 2, operation: 'update', completion: 0.5, at: '2026-10-23T09:00:00.000Z',
+        steps: [{ id: 1, title: 'Gather', status: 'completed', evidence: 'done' }, { id: 2, title: 'Write', status: 'in-progress' }],
+      },
+    ];
+    const messages = [
+      { role: 'user', content: 'plan it', timestamp: new Date() },
+      { role: 'assistant', content: 'ok', timestamp: new Date(), plans: written },
+      { role: 'user', content: 'how far are you', timestamp: new Date() },
+      { role: 'assistant', content: 'half way', timestamp: new Date(), plans: [] },
+    ];
+    await db.updateAgentConversation(id, { messages } as never);
+    // A state that disagrees on purpose: were it read, the plan would be version 9.
+    await db.saveAgentConversationState({
+      conversationId: id, tenantId, projectId: p1, agentKey: 'support',
+      snapshot: JSON.stringify({ messages: [], plan: { version: 9, steps: [{ id: 1, step: 'From the state', status: 'blocked' }] }, planVersion: 9 }), messageCount: messages.length, sizeBytes: 10,
+    } as never);
+    const readState = vi.spyOn(db, 'findAgentConversationState');
+    const res = json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`));
+    expect(res.plan).toEqual({
+      version: 2,
+      completion: 0.5,
+      at: '2026-10-23T09:00:00.000Z',
+      steps: [{ id: 1, title: 'Gather', status: 'completed', evidence: 'done' }, { id: 2, title: 'Write', status: 'in-progress' }],
+    });
+    expect(res.session.messages).toHaveLength(4);
+    expect(readState).not.toHaveBeenCalled();
+
+    // Even a transcript that moved on since: the recorded plan is the agent's latest word.
+    await db.updateAgentConversation(id, { messages: [...messages, { role: 'user', content: 'more', timestamp: new Date() }] } as never);
+    expect(json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`)).plan).toMatchObject({ version: 2 });
+    expect(readState).not.toHaveBeenCalled();
+    readState.mockRestore();
+  });
+
+  it('falls back to the plan the carried state holds for turns stored before versions were recorded, or null: a state behind the transcript', async () => {
+    const id = idOf('starters');
+    const plan = {
+      version: 3,
+      steps: [
+        { id: 1, step: 'Gather', owner: 'agent', exitCriteria: 'have data', status: 'completed', evidence: 'done' },
+        { id: 2, step: 'Write', owner: 'agent', exitCriteria: 'draft', status: 'in-progress' },
+      ],
+      adherenceScore: 0.5,
+      lastUpdated: '2026-10-23T09:00:00.000Z',
+    };
+    // No planning on the agent and no plan on any message: nothing to read.
+    expect(json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`)).plan).toBeNull();
+
+    // A turn stored before versions were recorded says it wrote a plan but not which steps; the state says where it stands.
+    const messages = [
+      { role: 'user', content: 'plan it', timestamp: new Date() },
+      { role: 'assistant', content: 'ok', timestamp: new Date(), plans: [{ version: 3, operation: 'update', steps: [], at: 'now' }] },
+    ];
+    await db.updateAgentConversation(id, { messages } as never);
+    await db.saveAgentConversationState({
+      conversationId: id, tenantId, projectId: p1, agentKey: 'support',
+      snapshot: JSON.stringify({ messages: [], plan, planVersion: 3 }), messageCount: messages.length, sizeBytes: 10,
+    } as never);
+    const res = json(await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`));
+    expect(res.plan).toMatchObject({
+      version: 3,
+      completion: 0.5,
+      at: '2026-10-23T09:00:00.000Z',
+      steps: [{ id: 1, title: 'Gather', status: 'completed', evidence: 'done' }, { id: 2, title: 'Write', status: 'in-progress' }],
+    });
+    expect(res.session.messages).toHaveLength(2);
+
+    // The transcript moved on without the state: the plan is unknown, the page still opens.
+    await db.updateAgentConversation(id, { messages: [...messages, { role: 'user', content: 'more', timestamp: new Date() }] } as never);
+    const behind = await dash('starter', 'GET', `/agents/${agentId}/sessions/${id}`);
+    expect(behind.statusCode).toBe(200);
+    expect(json(behind).plan).toBeNull();
+  });
+
   it('carries the owner and, for the open requests, what the viewer may do with each', async () => {
     const res = json(await dash('other', 'GET', `/agents/${agentId}/sessions/${idOf('waiting')}`));
     expect(res.ownSession).toBe(false);
