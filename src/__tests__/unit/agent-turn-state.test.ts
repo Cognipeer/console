@@ -226,8 +226,9 @@ describe('carried state across turns (real agent-sdk)', () => {
         const pull = await runTurn({ agent, store, transcript, userMessage: 'Pull the timeout logs.', events });
         await runTurn({ agent, store, transcript, userMessage: 'Short status?' });
 
-        // A summarization happened, and it is reportable.
-        const summarizations = events.filter((e) => e.type === 'summarization');
+        // A summarization happened, and it is reportable. (agent-sdk 0.20 also
+        // reports when a pass starts; only a finished pass carries the summary.)
+        const summarizations = events.filter((e) => e.type === 'summarization' && e.phase !== 'start' && e.phase !== 'skipped');
         expect(summarizations.length).toBeGreaterThan(0);
         const compaction = compactionFromEvent(summarizations[0] as never);
         expect(compaction.summary?.userDirectives).toEqual(['Always answer in Turkish.']);
