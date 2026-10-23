@@ -10,6 +10,7 @@ import {
   hasUnvettableEndpoint,
 } from './providerEndpointGuard';
 import { validateProviderSettings } from './providerSettingsValidation';
+import { normalizeAnthropicBaseUrl } from '@/lib/providers/contracts/anthropicBaseUrl';
 
 /** A "Test connection" never waits longer than this. */
 export const PROVIDER_TEST_TIMEOUT_MS = 10_000;
@@ -135,9 +136,9 @@ function httpProbeFor(driver: string, credentials: Record<string, unknown>, sett
       };
     }
     case 'anthropic': {
-      const base = trimSlash(asString(settings.baseUrl) || 'https://api.anthropic.com');
+      const base = normalizeAnthropicBaseUrl(asString(settings.baseUrl)) ?? 'https://api.anthropic.com';
       return {
-        url: `${base.endsWith('/v1') ? base : `${base}/v1`}/models?limit=20`,
+        url: `${base}/v1/models?limit=20`,
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         parse: modelsOf('data', 'id'),
       };
