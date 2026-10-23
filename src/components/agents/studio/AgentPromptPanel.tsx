@@ -217,10 +217,7 @@ export default function AgentPromptPanel({
                         onChange={(event) => onSystemPromptChange(event.currentTarget.value)}
                         styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 13 } }}
                     />
-                    <Group justify="space-between">
-                        <Button onClick={() => void onSaveAgentConfig()} size="sm">
-                            Save
-                        </Button>
+                    <Group justify="flex-end">
                         <Tooltip
                             label="Moves this text into the Prompts module as its own record — reusable, versioned, editable right here afterward."
                             multiline
