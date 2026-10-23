@@ -29,6 +29,7 @@ import {
   IconHeartbeat,
   IconHistory,
   IconLayoutDashboard,
+  IconListCheck,
   IconMessage,
   IconMessages,
   IconMicrophone,
@@ -291,7 +292,9 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
         p === '/dashboard/analysis' ||
         (p.startsWith('/dashboard/analysis') &&
           !p.startsWith('/dashboard/analysis/conversations') &&
-          !p.startsWith('/dashboard/analysis/runs')),
+          !p.startsWith('/dashboard/analysis/runs') &&
+          !p.startsWith('/dashboard/analysis/review') &&
+          !p.startsWith('/dashboard/analysis/results')),
     },
     {
       id: 'conversations',
@@ -306,6 +309,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/analysis/runs',
       icon: IconReportAnalytics,
       matcher: (p) => p.startsWith('/dashboard/analysis/runs'),
+    },
+    {
+      id: 'review',
+      label: 'Review',
+      href: '/dashboard/analysis/review',
+      icon: IconListCheck,
+      matcher: (p) => p.startsWith('/dashboard/analysis/review') || p.startsWith('/dashboard/analysis/results'),
     },
   ],
   tracing: [

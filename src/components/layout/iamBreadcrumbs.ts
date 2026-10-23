@@ -84,6 +84,7 @@ export function iamCrumbPlan(segments: string[], lastListUrl?: string | null): C
  */
 export const NO_PAGE_PATHS: ReadonlySet<string> = new Set([
   'analysis/definitions',
+  'analysis/results',
   'evaluations/targets',
   'evaluations/snapshots',
   'prompt-optimizer/runs',

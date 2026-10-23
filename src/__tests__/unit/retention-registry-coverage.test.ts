@@ -24,6 +24,7 @@ const NOT_LOGS: Record<string, string> = {
   config_items: 'Tenant configuration values.',
   evaluation_dataset_items: 'Evaluation dataset rows a user wrote or imported.',
   memory_items: 'Agent memory a user or agent stored on purpose; deleted with its memory store.',
+  analysis_results: 'Latest decision per conversation and its human review; calibration history must not age out.',
 };
 
 /** Written by enterprise modules, which register their own retention entries (console-ee). */

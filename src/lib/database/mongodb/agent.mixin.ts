@@ -511,6 +511,83 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       return docs.map((doc) => withoutTurnOwner({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationActivityRow[];
     }
 
+    async listAgentConversationsForAnalysis(filters: {
+      projectId: string;
+      agentKeys?: string[];
+      ids?: string[];
+      updatedFrom?: Date;
+      updatedTo?: Date;
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+      before?: { updatedAt: Date; id: string };
+      limit: number;
+      fields: 'meta' | 'full';
+    }): Promise<IAgentConversation[]> {
+      // Narrowing lists that cannot match anything need no query.
+      if (filters.agentKeys?.length === 0 || filters.ids?.length === 0) return [];
+      const match: Record<string, unknown> = { projectId: filters.projectId };
+      if (filters.agentKeys) match.agentKey = { $in: filters.agentKeys };
+      if (filters.ids) {
+        const objectIds = filters.ids.filter((id) => ObjectId.isValid(id)).map((id) => new ObjectId(id));
+        if (objectIds.length === 0) return [];
+        match._id = { $in: objectIds };
+      }
+      if (filters.updatedFrom || filters.updatedTo) {
+        match.updatedAt = {
+          ...(filters.updatedFrom ? { $gte: filters.updatedFrom } : {}),
+          ...(filters.updatedTo ? { $lt: filters.updatedTo } : {}),
+        };
+      }
+      // Conditions that are themselves a $or, so they are combined with $and rather than overwriting each other.
+      const all: Record<string, unknown>[] = [];
+      if (filters.ownOnly) {
+        // Same rule as listProjectAgentConversations: the caller's own sessions plus every session of viewable agents.
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) match.createdBy = filters.ownOnly.userId;
+        else all.push({ $or: [{ createdBy: filters.ownOnly.userId }, { agentKey: { $in: keys } }] });
+      }
+      if (filters.before) {
+        // Keyset on (updatedAt, _id), newest first.
+        all.push({
+          $or: ObjectId.isValid(filters.before.id)
+            ? [
+              { updatedAt: { $lt: filters.before.updatedAt } },
+              { updatedAt: filters.before.updatedAt, _id: { $lt: new ObjectId(filters.before.id) } },
+            ]
+            : [{ updatedAt: { $lt: filters.before.updatedAt } }],
+        });
+      }
+      if (all.length > 0) match.$and = all;
+      const limit = Math.min(Math.max(Math.trunc(filters.limit), 1), 500);
+      // Sorted and limited BEFORE the transcript is touched. 'meta' cuts each message down to role and
+      // timestamp inside the pipeline, so steps and content never leave the database.
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .aggregate([
+          { $match: match },
+          { $sort: { updatedAt: -1, _id: -1 } },
+          { $limit: limit },
+          ...(filters.fields === 'meta'
+            ? [{
+              $addFields: {
+                messages: {
+                  $map: {
+                    input: { $cond: [{ $isArray: '$messages' }, '$messages', []] },
+                    as: 'm',
+                    in: { role: '$$m.role', content: '', timestamp: '$$m.timestamp' },
+                  },
+                },
+              },
+            }]
+            : []),
+          { $project: { runtimeTurnId: 0 } },
+        ])
+        .toArray();
+      return docs.map((doc) => {
+        const row = withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as Record<string, unknown>;
+        return row as unknown as IAgentConversation;
+      });
+    }
+
     async searchAgentConversations(filters: {
       projectId: string;
       search: string;

@@ -51,6 +51,7 @@ export const COLLECTIONS = {
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
   analysisRuns: 'analysis_runs',
+  analysisResults: 'analysis_results',
   piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',

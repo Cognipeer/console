@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group } from '@mantine/core';
+import { Button, Group, SegmentedControl } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
@@ -30,7 +30,8 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import CreateDefinitionModal from '@/components/analysis/CreateDefinitionModal';
 import IngestConversationsModal from '@/components/analysis/IngestConversationsModal';
-import RunDefinitionModal, { type RunSelectionPayload } from '@/components/analysis/RunDefinitionModal';
+import AgentSessionsPanel from '@/components/analysis/AgentSessionsPanel';
+import RunDefinitionModal, { type RunPayload } from '@/components/analysis/RunDefinitionModal';
 import type {
   AnalysisConversationView,
   AnalysisDefinitionView,
@@ -39,6 +40,8 @@ import type {
 } from '@/components/analysis/types';
 
 export type AnalysisSection = 'definitions' | 'conversations' | 'runs';
+
+type ConversationSource = 'imported' | 'agent_sessions';
 
 const RUN_STATUS_BADGE: Record<string, string> = {
   completed: 'ds-badge-teal',
@@ -73,6 +76,7 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
   const [editDefinition, setEditDefinition] = useState<AnalysisDefinitionView | null>(null);
   const [runModalDef, setRunModalDef] = useState<AnalysisDefinitionView | null>(null);
   const [ingestModal, setIngestModal] = useState(false);
+  const [conversationSource, setConversationSource] = useState<ConversationSource>('imported');
 
   const loadAll = async () => {
     setRefreshing(true);
@@ -104,13 +108,13 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
     void loadAll();
   }, []);
 
-  // Kick off a run with an explicit conversation selection (from the Run modal).
+  // Kick off a run with an explicit selection and target (from the Run modal).
   // Returns the new run id (and navigates to its live view) or null on failure.
-  const runWithSelection = async (definitionKey: string, selection: RunSelectionPayload): Promise<string | null> => {
+  const runWithSelection = async (definitionKey: string, payload: RunPayload): Promise<string | null> => {
     const res = await fetch(`/api/analysis/definitions/${encodeURIComponent(definitionKey)}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selection }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -167,6 +171,7 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
     { key: 'modes', label: 'Modes', render: (d) => (
       <Group gap={4}>
         <span className="ds-badge ds-badge-info">extract</span>
+        {d.decisionModelKey ? <span className="ds-badge ds-badge-grape">decision</span> : null}
         {d.modes.store ? <span className="ds-badge">store</span> : null}
         {d.modes.judge ? <span className="ds-badge ds-badge-teal">judge</span> : null}
         {d.modes.accuracy ? <span className="ds-badge ds-badge-teal">accuracy</span> : null}
@@ -212,12 +217,14 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
         </Button>
       );
     }
+    // Agent sessions are read in place, so there is nothing to ingest.
+    if (conversationSource === 'agent_sessions') return null;
     return (
       <Button color="teal" size="sm" leftSection={<IconUpload size={14} stroke={1.7} />} onClick={() => setIngestModal(true)}>
         Ingest conversations
       </Button>
     );
-  }, [section]);
+  }, [section, conversationSource]);
 
   return (
     <PageContainer>
@@ -263,6 +270,23 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
       )}
 
       {section === 'conversations' && (
+        <SegmentedControl
+          size="xs"
+          mb="sm"
+          value={conversationSource}
+          onChange={(v) => setConversationSource(v as ConversationSource)}
+          data={[
+            { value: 'imported', label: 'Imported' },
+            { value: 'agent_sessions', label: 'Agent sessions' },
+          ]}
+        />
+      )}
+
+      {section === 'conversations' && conversationSource === 'agent_sessions' && (
+        <AgentSessionsPanel definitions={definitions} onNewDefinition={() => setDefinitionModal(true)} />
+      )}
+
+      {section === 'conversations' && conversationSource === 'imported' && (
         <DataGrid<AnalysisConversationView>
           records={conversationsCtl.records}
           loading={loading}

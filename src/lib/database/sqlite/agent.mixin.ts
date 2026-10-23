@@ -532,6 +532,67 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       });
     }
 
+    async listAgentConversationsForAnalysis(filters: {
+      projectId: string;
+      agentKeys?: string[];
+      ids?: string[];
+      updatedFrom?: Date;
+      updatedTo?: Date;
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+      before?: { updatedAt: Date; id: string };
+      limit: number;
+      fields: 'meta' | 'full';
+    }): Promise<IAgentConversation[]> {
+      // An empty narrowing list matches nothing.
+      if (filters.agentKeys?.length === 0 || filters.ids?.length === 0) return [];
+      const conditions: string[] = ['projectId = @projectId'];
+      const params: Record<string, unknown> = {
+        projectId: filters.projectId,
+        limit: Math.min(500, Math.max(1, Math.floor(filters.limit))),
+      };
+      if (filters.agentKeys) {
+        const names = filters.agentKeys.map((key, i) => { params[`agentKey${i}`] = key; return `@agentKey${i}`; });
+        conditions.push(`agentKey IN (${names.join(', ')})`);
+      }
+      if (filters.ids) {
+        const names = filters.ids.slice(0, 500).map((id, i) => { params[`id${i}`] = id; return `@id${i}`; });
+        conditions.push(`id IN (${names.join(', ')})`);
+      }
+      if (filters.updatedFrom) { conditions.push('updatedAt >= @updatedFrom'); params.updatedFrom = filters.updatedFrom.toISOString(); }
+      if (filters.updatedTo) { conditions.push('updatedAt < @updatedTo'); params.updatedTo = filters.updatedTo.toISOString(); }
+      if (filters.ownOnly) {
+        // Same visibility as listProjectAgentConversations.
+        params.ownOnlyUser = filters.ownOnly.userId;
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) {
+          conditions.push('createdBy = @ownOnlyUser');
+        } else {
+          const names = keys.map((key, i) => { params[`ownOnlyKey${i}`] = key; return `@ownOnlyKey${i}`; });
+          conditions.push(`(createdBy = @ownOnlyUser OR agentKey IN (${names.join(', ')}))`);
+        }
+      }
+      if (filters.before) {
+        conditions.push('(updatedAt < @beforeUpdatedAt OR (updatedAt = @beforeUpdatedAt AND id < @beforeId))');
+        params.beforeUpdatedAt = filters.before.updatedAt.toISOString();
+        params.beforeId = filters.before.id;
+      }
+      const rows = this.getTenantDb().prepare(
+        `SELECT * FROM ${TABLES.agentConversations}
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY updatedAt DESC, id DESC
+         LIMIT @limit`,
+      ).all(params) as SqliteRow[];
+      return rows.map((row) => {
+        const conversation = this.mapConversation(row);
+        if (filters.fields === 'full') return conversation;
+        // Messages live in one JSON column, so meta parses them whole and drops the text here.
+        return {
+          ...conversation,
+          messages: conversation.messages.map((m) => ({ role: m.role, content: '', timestamp: m.timestamp })),
+        };
+      });
+    }
+
     async searchAgentConversations(filters: {
       projectId: string;
       search: string;

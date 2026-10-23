@@ -32,7 +32,14 @@ export async function enqueueDefinitionRun(params: RunDefinitionParams): Promise
 
   // Pin the job to the exact resolved keys so a random/unanalyzed selection is
   // sampled once (at enqueue time) and not re-sampled by the consumer.
-  const payload: AnalysisRunJobPayload = { ...params, selection: undefined, conversationKeys, runId: run.id };
+  // The target is the one the run row resolved (e.g. an agent-session window), not the caller's request.
+  const payload: AnalysisRunJobPayload = {
+    ...params,
+    ...(run.target ? { target: run.target } : {}),
+    selection: undefined,
+    conversationKeys,
+    runId: run.id,
+  };
   const queue = await getQueue();
   await queue.publish(ANALYSIS_RUN_QUEUE, ANALYSIS_RUN_JOB, payload, { attempts: 1, backoffMs: 5000 });
   logger.info('Analysis run enqueued', { runId: run.id, definitionKey: params.definitionKey });

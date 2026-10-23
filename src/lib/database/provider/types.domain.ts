@@ -1277,7 +1277,7 @@ export interface IRedTeamCustomProbe {
 
 // ── Analysis types ───────────────────────────────────────────────────────────
 
-export type AnalysisFieldType = 'string' | 'number' | 'boolean' | 'enum';
+export type AnalysisFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'score';
 export type AnalysisRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type AnalysisRunMode = 'sync' | 'async';
 export type AnalysisConversationSource = 'imported' | 'platform' | 'manual';
@@ -1287,7 +1287,36 @@ export interface IAnalysisFieldDef {
   type: AnalysisFieldType;
   description?: string;
   enumValues?: string[];
+  /** `score` only: ordered level labels, lowest first. */
+  levels?: string[];
   required?: boolean;
+  /**
+   * Decision fields only: answers below this confidence are flagged for review.
+   * Overrides the definition's `review.threshold`.
+   */
+  reviewBelow?: number;
+}
+
+/** Where a definition's runs read conversations from. Absent = the imported corpus. */
+export type IAnalysisSource =
+  | { kind: 'conversations' }
+  | {
+      kind: 'agent_sessions';
+      /** The agents whose sessions are analyzed (at least one). */
+      agentKeys: string[];
+      /** Skip sessions with fewer user/assistant messages than this. Default 2. */
+      minMessages?: number;
+      /** Leave a session alone until it has been idle this long. Default 30. */
+      idleMinutes?: number;
+      /** How far back a run looks by default. Default 7. */
+      days?: number;
+    };
+
+export interface IAnalysisReviewSettings {
+  /** Decision answers below this confidence are flagged. Default 0.7. */
+  threshold?: number;
+  /** Share (0-100) of confident results also sent to review, to keep calibration honest. Default 0. */
+  spotCheckPct?: number;
 }
 
 export interface IAnalysisModes {
@@ -1313,6 +1342,14 @@ export interface IAnalysisDefinition {
   extractionModelKey?: string;
   /** Model used to back the llm-judge mode. */
   judgeModelKey?: string;
+  /**
+   * Model Hub `decision` model. When set, Yes/No, Choice and Score fields are answered
+   * by it (with probabilities) instead of being extracted.
+   */
+  decisionModelKey?: string;
+  /** Absent = the imported conversation corpus. */
+  source?: IAnalysisSource;
+  review?: IAnalysisReviewSettings;
   runConfig?: { concurrency?: number };
   /** Optional cron schedule for unattended (e.g. nightly) runs. */
   schedule?: { cron: string; enabled: boolean };
@@ -1358,6 +1395,24 @@ export interface IAnalysisFieldAccuracy {
   match: boolean;
 }
 
+/** One decision-model answer. */
+export interface IAnalysisDecision {
+  /** Choice key, yes/no (boolean) or score level label. Absent when the model refused. */
+  answer?: string | boolean;
+  /** `score` only: expected level index (sum of i * p_i), 0-based. */
+  score?: number;
+  /** choice: key -> p; score: level label -> p; boolean: { yes: p, no: 1 - p }. */
+  probabilities?: Record<string, number>;
+  /** 0..1; 0 when refused. */
+  confidence: number;
+  /** Where the confidence came from; 'self_reported' = the structured emulator's own claim. */
+  confidenceSource?: 'native' | 'logprobs' | 'self_reported';
+  refused?: boolean;
+  needsReview?: boolean;
+}
+
+export type AnalysisReviewReason = 'low_confidence' | 'spot_check';
+
 export interface IAnalysisItemResult {
   conversationKey: string;
   extractedFields: Record<string, unknown>;
@@ -1366,6 +1421,23 @@ export interface IAnalysisItemResult {
   accuracy?: { score: number; perField: Record<string, IAnalysisFieldAccuracy>; comparedCount: number };
   passed: boolean;
   error?: string;
+  /** Decision answers without probabilities (kept small: a run can hold 5,000 items). */
+  decisions?: Record<string, Omit<IAnalysisDecision, 'probabilities'>>;
+  needsReview?: boolean;
+  reviewReason?: AnalysisReviewReason;
+  /** The analysis_results row this item was written to. */
+  resultId?: string;
+}
+
+export interface IAnalysisDecisionAggregate {
+  answered: number;
+  refused: number;
+  needsReview: number;
+  /** Answer -> count (choice key, 'yes'/'no', or score level label). */
+  counts: Record<string, number>;
+  avgConfidence: number | null;
+  /** `score` only: mean expected level index. */
+  avgScore?: number | null;
 }
 
 export interface IAnalysisRunAggregate {
@@ -1376,6 +1448,10 @@ export interface IAnalysisRunAggregate {
   passRate: number;
   avgJudgeScore: number | null;
   avgExtractionAccuracy: number | null;
+  /** Items flagged for human review (absent on runs from before the decision layer). */
+  needsReview?: number;
+  /** Per decision field; present only when the run used a decision model. */
+  decisions?: Record<string, IAnalysisDecisionAggregate>;
 }
 
 /**
@@ -1386,7 +1462,16 @@ export interface IAnalysisRunAggregate {
  */
 export type IAnalysisRunTarget =
   | { kind: 'conversations' }
-  | { kind: 'dataset'; datasetId: string; datasetKey?: string; datasetName?: string };
+  | { kind: 'dataset'; datasetId: string; datasetKey?: string; datasetName?: string }
+  | {
+      kind: 'agent_sessions';
+      agentKeys: string[];
+      minMessages: number;
+      idleMinutes: number;
+      /** ISO window on the session's updatedAt. */
+      from: string;
+      to: string;
+    };
 
 export interface IAnalysisRun {
   _id?: ObjectId | string;
@@ -1406,6 +1491,65 @@ export interface IAnalysisRun {
   createdBy: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export type AnalysisResultSourceKind = 'conversation' | 'agent_session';
+
+export interface IAnalysisResultReview {
+  /** Human answer per decision field key (choice key, boolean, or score level label). */
+  values: Record<string, unknown>;
+  by: string;
+  /** ISO timestamp (kept as a string: it lives inside a JSON column on SQLite). */
+  at: string;
+}
+
+/** The latest analysis of one conversation by one definition (collection `analysis_results`). */
+export interface IAnalysisResult {
+  _id?: ObjectId | string;
+  tenantId: string;
+  /** '' when the definition is not project-scoped (never undefined: part of a unique key). */
+  projectId: string;
+  definitionKey: string;
+  sourceKind: AnalysisResultSourceKind;
+  /** Analysis conversation key, or the agent conversation id. */
+  sourceId: string;
+  title?: string;
+  agentKey?: string;
+  /** Agent sessions only: who started the session (visibility). */
+  ownerId?: string;
+  /** Agent sessions only: what the analysis saw, to tell a changed session. */
+  sourceVersion?: { messageCount: number; lastMessageAt?: string };
+  runId: string;
+  decisions: Record<string, IAnalysisDecision>;
+  extractedFields: Record<string, unknown>;
+  judge?: { score: number; passed?: boolean; reasoning?: string; error?: string };
+  accuracy?: { score: number; perField: Record<string, IAnalysisFieldAccuracy>; comparedCount: number };
+  rationale?: string;
+  needsReview: boolean;
+  /** Why it was flagged; kept after the review (calibration tells spot-checks apart). */
+  reviewReason?: AnalysisReviewReason;
+  /** Lowest decision confidence (0 = a refusal); 1 when the result has no decisions. Orders the review queue. */
+  minConfidence: number;
+  review?: IAnalysisResultReview | null;
+  analyzedAt: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface AnalysisResultFilter {
+  projectId: string;
+  definitionKey?: string;
+  sourceKind?: AnalysisResultSourceKind;
+  /** At most 500; callers chunk. */
+  sourceIds?: string[];
+  needsReview?: boolean;
+  /** true = has a review, false = has none. */
+  reviewed?: boolean;
+  /**
+   * Restricted viewer: agent_session rows only where agentKey is one of `agentKeys`
+   * or `ownerId` is `userId`. Rows of other kinds are unaffected.
+   */
+  viewer?: { userId: string; agentKeys: string[] };
 }
 
 export interface IInferenceServerMetrics {

@@ -10,6 +10,8 @@ import type {
   IAnalysisDefinition,
   IAnalysisFieldDef,
   IAnalysisModes,
+  IAnalysisSource,
+  IAnalysisReviewSettings,
   IAnalysisConversation,
   IAnalysisTranscriptMessage,
   IAnalysisRun,
@@ -18,6 +20,12 @@ import type {
   IAnalysisRunTarget,
   AnalysisConversationSource,
   AnalysisRunStatus,
+  IAnalysisResult,
+  IAnalysisResultReview,
+  IAnalysisDecision,
+  AnalysisResultFilter,
+  AnalysisResultSourceKind,
+  AnalysisReviewReason,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
@@ -41,9 +49,11 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       db.prepare(`
         INSERT INTO ${TABLES.analysisDefinitions}
         (id, tenantId, projectId, key, name, description, fieldSet, extractionInstructions,
-         modes, extractionModelKey, judgeModelKey, runConfig, schedule, metadata, createdBy, updatedBy, createdAt, updatedAt)
+         modes, extractionModelKey, judgeModelKey, decisionModelKey, source, review, runConfig, schedule, metadata,
+         createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @fieldSet, @extractionInstructions,
-         @modes, @extractionModelKey, @judgeModelKey, @runConfig, @schedule, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @modes, @extractionModelKey, @judgeModelKey, @decisionModelKey, @source, @review, @runConfig, @schedule, @metadata,
+         @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: definition.tenantId,
@@ -56,6 +66,9 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         modes: this.toJson(definition.modes ?? {}),
         extractionModelKey: definition.extractionModelKey ?? null,
         judgeModelKey: definition.judgeModelKey ?? null,
+        decisionModelKey: definition.decisionModelKey ?? null,
+        source: definition.source ? this.toJson(definition.source) : null,
+        review: definition.review ? this.toJson(definition.review) : null,
         runConfig: this.toJson(definition.runConfig ?? {}),
         schedule: definition.schedule ? this.toJson(definition.schedule) : null,
         metadata: this.toJson(definition.metadata ?? {}),
@@ -81,6 +94,10 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (data.modes !== undefined) { sets.push('modes = @modes'); params.modes = this.toJson(data.modes); }
       if (data.extractionModelKey !== undefined) { sets.push('extractionModelKey = @extractionModelKey'); params.extractionModelKey = data.extractionModelKey; }
       if (data.judgeModelKey !== undefined) { sets.push('judgeModelKey = @judgeModelKey'); params.judgeModelKey = data.judgeModelKey; }
+      // A present-but-undefined key clears the decision model, as the Mongo $set does.
+      if ('decisionModelKey' in data) { sets.push('decisionModelKey = @decisionModelKey'); params.decisionModelKey = data.decisionModelKey || null; }
+      if (data.source !== undefined) { sets.push('source = @source'); params.source = data.source ? this.toJson(data.source) : null; }
+      if (data.review !== undefined) { sets.push('review = @review'); params.review = data.review ? this.toJson(data.review) : null; }
       if (data.runConfig !== undefined) { sets.push('runConfig = @runConfig'); params.runConfig = this.toJson(data.runConfig); }
       if (data.schedule !== undefined) { sets.push('schedule = @schedule'); params.schedule = data.schedule ? this.toJson(data.schedule) : null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
@@ -298,6 +315,174 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAnalysisRunRow(r));
     }
 
+    // ── Results (latest analysis per source, with its review) ───────────
+
+    async upsertAnalysisResult(
+      result: Omit<IAnalysisResult, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IAnalysisResult> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const projectId = result.projectId ?? '';
+      // createdAt and id only count on insert: the conflict branch leaves them alone.
+      db.prepare(`
+        INSERT INTO ${TABLES.analysisResults}
+        (id, tenantId, projectId, definitionKey, sourceKind, sourceId, title, agentKey, ownerId, sourceVersion,
+         runId, decisions, extractedFields, judge, accuracy, rationale, needsReview, reviewReason, minConfidence,
+         review, analyzedAt, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @definitionKey, @sourceKind, @sourceId, @title, @agentKey, @ownerId, @sourceVersion,
+         @runId, @decisions, @extractedFields, @judge, @accuracy, @rationale, @needsReview, @reviewReason, @minConfidence,
+         @review, @analyzedAt, @createdAt, @updatedAt)
+        ON CONFLICT(projectId, definitionKey, sourceKind, sourceId) DO UPDATE SET
+          tenantId = excluded.tenantId,
+          title = excluded.title,
+          agentKey = excluded.agentKey,
+          ownerId = excluded.ownerId,
+          sourceVersion = excluded.sourceVersion,
+          runId = excluded.runId,
+          decisions = excluded.decisions,
+          extractedFields = excluded.extractedFields,
+          judge = excluded.judge,
+          accuracy = excluded.accuracy,
+          rationale = excluded.rationale,
+          needsReview = excluded.needsReview,
+          reviewReason = excluded.reviewReason,
+          minConfidence = excluded.minConfidence,
+          review = excluded.review,
+          analyzedAt = excluded.analyzedAt,
+          updatedAt = excluded.updatedAt
+      `).run({
+        id: this.newId(),
+        tenantId: result.tenantId,
+        projectId,
+        definitionKey: result.definitionKey,
+        sourceKind: result.sourceKind,
+        sourceId: result.sourceId,
+        title: result.title ?? null,
+        agentKey: result.agentKey ?? null,
+        ownerId: result.ownerId ?? null,
+        sourceVersion: result.sourceVersion ? this.toJson(result.sourceVersion) : null,
+        runId: result.runId,
+        decisions: this.toJson(result.decisions ?? {}),
+        extractedFields: this.toJson(result.extractedFields ?? {}),
+        judge: result.judge ? this.toJson(result.judge) : null,
+        accuracy: result.accuracy ? this.toJson(result.accuracy) : null,
+        rationale: result.rationale ?? null,
+        needsReview: this.toBoolInt(result.needsReview),
+        reviewReason: result.reviewReason ?? null,
+        minConfidence: result.minConfidence,
+        review: result.review ? this.toJson(result.review) : null,
+        analyzedAt: toIso(result.analyzedAt) ?? now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const row = db.prepare(`
+        SELECT * FROM ${TABLES.analysisResults}
+        WHERE projectId = @projectId AND definitionKey = @definitionKey AND sourceKind = @sourceKind AND sourceId = @sourceId
+      `).get({ projectId, definitionKey: result.definitionKey, sourceKind: result.sourceKind, sourceId: result.sourceId }) as SqliteRow;
+      return this.mapAnalysisResultRow(row);
+    }
+
+    async findAnalysisResultById(id: string): Promise<IAnalysisResult | null> {
+      const row = this.getTenantDb().prepare(`SELECT * FROM ${TABLES.analysisResults} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
+      return row ? this.mapAnalysisResultRow(row) : null;
+    }
+
+    async listAnalysisResults(
+      filters: AnalysisResultFilter & { sort?: 'recent' | 'confidence'; limit?: number; skip?: number },
+    ): Promise<IAnalysisResult[]> {
+      const built = this.buildAnalysisResultWhere(filters);
+      if (!built) return [];
+      const limit = Math.min(5000, Math.max(1, Math.floor(filters.limit ?? 50)));
+      const skip = Math.max(0, Math.floor(filters.skip ?? 0));
+      // id breaks ties so paging is stable.
+      const order = filters.sort === 'confidence'
+        ? 'minConfidence ASC, analyzedAt DESC, id DESC'
+        : 'analyzedAt DESC, id DESC';
+      const rows = this.getTenantDb().prepare(`
+        SELECT * FROM ${TABLES.analysisResults}
+        WHERE ${built.where}
+        ORDER BY ${order}
+        LIMIT ${limit} OFFSET ${skip}
+      `).all(built.params) as SqliteRow[];
+      return rows.map((r) => this.mapAnalysisResultRow(r));
+    }
+
+    async countAnalysisResults(filters: AnalysisResultFilter): Promise<number> {
+      const built = this.buildAnalysisResultWhere(filters);
+      if (!built) return 0;
+      const row = this.getTenantDb().prepare(
+        `SELECT COUNT(*) AS n FROM ${TABLES.analysisResults} WHERE ${built.where}`,
+      ).get(built.params) as SqliteRow;
+      return Number(row.n ?? 0);
+    }
+
+    async updateAnalysisResultReview(id: string, review: IAnalysisResultReview): Promise<IAnalysisResult | null> {
+      const db = this.getTenantDb();
+      const changes = db.prepare(`
+        UPDATE ${TABLES.analysisResults}
+        SET review = @review, needsReview = 0, updatedAt = @updatedAt
+        WHERE id = @id
+      `).run({ id, review: this.toJson(review), updatedAt: this.now() }).changes;
+      if (changes === 0) return null;
+      return this.findAnalysisResultById(id);
+    }
+
+    async deleteAnalysisResultsForDefinition(projectId: string, definitionKey: string): Promise<number> {
+      return this.getTenantDb().prepare(
+        `DELETE FROM ${TABLES.analysisResults} WHERE projectId = @projectId AND definitionKey = @definitionKey`,
+      ).run({ projectId: projectId ?? '', definitionKey }).changes;
+    }
+
+    /** WHERE clause for result filters; null when a narrowing list is empty (matches nothing). */
+    private buildAnalysisResultWhere(filters: AnalysisResultFilter): { where: string; params: Record<string, unknown> } | null {
+      if (filters.sourceIds && filters.sourceIds.length === 0) return null;
+      const conditions: string[] = ['projectId = @projectId'];
+      const params: Record<string, unknown> = { projectId: filters.projectId ?? '' };
+      if (filters.definitionKey) { conditions.push('definitionKey = @definitionKey'); params.definitionKey = filters.definitionKey; }
+      if (filters.sourceKind) { conditions.push('sourceKind = @sourceKind'); params.sourceKind = filters.sourceKind; }
+      if (filters.sourceIds) {
+        const names = filters.sourceIds.slice(0, 500).map((id, i) => { params[`sourceId${i}`] = id; return `@sourceId${i}`; });
+        conditions.push(`sourceId IN (${names.join(', ')})`);
+      }
+      if (filters.needsReview !== undefined) { conditions.push('needsReview = @needsReview'); params.needsReview = this.toBoolInt(filters.needsReview); }
+      if (filters.reviewed !== undefined) conditions.push(filters.reviewed ? 'review IS NOT NULL' : 'review IS NULL');
+      if (filters.viewer) {
+        // Restricts agent sessions only; other kinds stay visible.
+        params.viewerUser = filters.viewer.userId;
+        const names = filters.viewer.agentKeys.slice(0, 500).map((key, i) => { params[`viewerKey${i}`] = key; return `@viewerKey${i}`; });
+        conditions.push(`(sourceKind != 'agent_session' OR ownerId = @viewerUser${names.length ? ` OR agentKey IN (${names.join(', ')})` : ''})`);
+      }
+      return { where: conditions.join(' AND '), params };
+    }
+
+    protected mapAnalysisResultRow(r: SqliteRow): IAnalysisResult {
+      return {
+        _id: r.id as string,
+        tenantId: r.tenantId as string,
+        projectId: (r.projectId as string | null) ?? '',
+        definitionKey: r.definitionKey as string,
+        sourceKind: r.sourceKind as AnalysisResultSourceKind,
+        sourceId: r.sourceId as string,
+        title: (r.title as string | null) ?? undefined,
+        agentKey: (r.agentKey as string | null) ?? undefined,
+        ownerId: (r.ownerId as string | null) ?? undefined,
+        sourceVersion: r.sourceVersion ? this.parseJson<IAnalysisResult['sourceVersion']>(r.sourceVersion, undefined) : undefined,
+        runId: r.runId as string,
+        decisions: this.parseJson<Record<string, IAnalysisDecision>>(r.decisions, {}),
+        extractedFields: this.parseJson<Record<string, unknown>>(r.extractedFields, {}),
+        judge: r.judge ? this.parseJson<IAnalysisResult['judge']>(r.judge, undefined) : undefined,
+        accuracy: r.accuracy ? this.parseJson<IAnalysisResult['accuracy']>(r.accuracy, undefined) : undefined,
+        rationale: (r.rationale as string | null) ?? undefined,
+        needsReview: this.fromBoolInt(r.needsReview),
+        reviewReason: (r.reviewReason as AnalysisReviewReason | null) ?? undefined,
+        minConfidence: Number(r.minConfidence ?? 1),
+        review: r.review ? this.parseJson<IAnalysisResultReview | null>(r.review, null) : null,
+        analyzedAt: this.toDate(r.analyzedAt) as Date,
+        createdAt: this.toDate(r.createdAt),
+        updatedAt: this.toDate(r.updatedAt),
+      };
+    }
+
     // ── Row mappers ──────────────────────────────────────────────────
 
     protected mapAnalysisDefinitionRow(r: SqliteRow): IAnalysisDefinition {
@@ -313,6 +498,9 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         modes: this.parseJson<IAnalysisModes>(r.modes, {}),
         extractionModelKey: (r.extractionModelKey as string | null) ?? undefined,
         judgeModelKey: (r.judgeModelKey as string | null) ?? undefined,
+        decisionModelKey: (r.decisionModelKey as string | null) || undefined,
+        source: r.source ? this.parseJson<IAnalysisSource>(r.source, { kind: 'conversations' }) : undefined,
+        review: r.review ? this.parseJson<IAnalysisReviewSettings>(r.review, {}) : undefined,
         runConfig: this.parseJson(r.runConfig, {}),
         schedule: r.schedule ? this.parseJson<{ cron: string; enabled: boolean }>(r.schedule, { cron: '', enabled: false }) : undefined,
         metadata: this.parseJson(r.metadata, {}),
