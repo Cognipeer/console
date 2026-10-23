@@ -29,7 +29,8 @@
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "test:e2e:triage": "tsx scripts/e2e/incident-triage/run.ts",
-    "test:e2e:agent-findings": "tsx scripts/e2e/agent-findings/run.ts"
+    "test:e2e:agent-findings": "tsx scripts/e2e/agent-findings/run.ts",
+    "test:e2e:agent-flow": "tsx scripts/e2e/agent-flow/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.901.0",
