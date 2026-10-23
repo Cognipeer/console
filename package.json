@@ -134,7 +134,7 @@
     "eslint-plugin-prettier": "^5.5.4",
     "intl-messageformat": "^10.7.18",
     "mongodb-memory-server": "^11.2.0",
-    "msw": "^2.12.10",
+    "msw": "^2.15.0",
     "prettier": "^3.6.2",
     "tailwindcss": "^4",
     "typescript": "^5",
