@@ -34,7 +34,6 @@ import {
     Center,
     Code,
     Collapse,
-    CopyButton,
     Group,
     Loader,
     Paper,
@@ -51,11 +50,9 @@ import {
 import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
-    IconCheck,
     IconChevronDown,
     IconChevronRight,
     IconClock,
-    IconCopy,
     IconCoin,
     IconHandStop,
     IconInfoCircle,
@@ -66,7 +63,6 @@ import {
     IconSearch,
     IconPlayerStopFilled,
     IconSend,
-    IconTimeline,
     IconTrash,
     IconUser,
     IconZoomIn,
@@ -90,9 +86,23 @@ import SessionSidePanel from './SessionSidePanel';
 import SessionStatusBadge from './SessionStatusBadge';
 import StopNotice from './StopNotice';
 import TurnTimeline, { DEFAULT_TIMELINE_ZOOM, TIMELINE_ZOOM_LEVELS } from './TurnTimeline';
-import LiveToolCalls, {
-    appendLiveReasoning, appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
-} from './LiveToolCalls';
+import {
+    appendLiveReasoning,
+    appendLiveText,
+    applyLiveCompaction,
+    applyLivePlan,
+    applyLiveSubagent,
+    applyLiveToolEvent,
+    type LiveSegment,
+    type LiveToolEvent,
+} from './liveFlow';
+import LiveTurnFlow from './LiveTurnFlow';
+import StoredTurnFlow from './StoredTurnFlow';
+import { PlanDock } from './PlanCard';
+import { currentPlanOf, type SessionPlanRecord } from './planUi';
+import { buildTurnFlow, delegationAnchorId, previousPlansOf, showInGroupExpansion } from './turnFlowUi';
+import type { AgentCompactionEvent, AgentPlanEvent, AgentSubagentEvent } from '@/lib/shared/agentTurnFlow';
+import type { IAgentTurnPlanSnapshot } from '@/lib/database/provider/types.domain';
 import ReasoningBlock from './ReasoningBlock';
 import { consumeSse } from './consumeSse';
 import PendingActionList from './PendingActionCards';
@@ -108,9 +118,9 @@ import {
     type ResolveBody,
     type ServerPendingAction,
 } from './pendingActions';
+import { assistantFromResult } from './assistantFromResult';
 import { sessionStatusKind } from './sessionActivityUi';
 import { interpretSessionEvent } from './sessionFollow';
-import ContextCompactionCard from './ContextCompactionCard';
 import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
 import { budgetPatchBody, sessionBudgetView, shouldContinueAfterBudgetChange } from './sessionBudgetUi';
 import { AttachButton, AttachmentChips, MessageAttachments } from './SessionAttachments';
@@ -129,9 +139,7 @@ import { sessionLoadFailure, type SessionLoadFailure } from './sessionLoadFailur
 import { sessionFileLinks, sessionFilesUrl, sessionFileUrl, toAttachmentViews, type SessionFileItem } from './sessionFilesUi';
 import { useAgentModelVision } from './agentModelVision';
 import type { AgentToolConfig } from './sessionTools';
-import {
-    stepFailed, type ChatMessage, type PlaygroundStep, type SessionRecord, type TurnCompaction,
-} from './sessionTypes';
+import { type ChatMessage, type SessionRecord } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import classes from './AgentSessionView.module.css';
 
@@ -152,8 +160,8 @@ export interface AgentSessionViewProps {
     sessionId: string;
 }
 
-/** How much of a payload is shown before "Show the whole payload". */
-const PAYLOAD_CLIP_CHARS = 1200;
+/** How close to the bottom the transcript must be for a growing live turn to keep it there. */
+const AUTOSCROLL_WITHIN_PX = 120;
 
 /** A failed run, with the server's classification of what failed. */
 class TurnFailure extends Error {
@@ -170,45 +178,6 @@ const FAILURE_HINTS: Record<string, string> = {
     rate_limit_error: 'The provider is rate limiting. Wait a moment and retry.',
     guardrail_block: 'A guardrail blocked this message.',
 };
-
-/**
- * The assistant message a turn's `result` event describes — shared by a normal
- * turn and by the continuation of a paused one, which are the same shape.
- */
-function assistantFromResult(data: Record<string, unknown>, startedAt: number): ChatMessage {
-    return {
-        role: 'assistant',
-        content: String(data.content ?? ''),
-        ...(typeof data.reasoning === 'string' && data.reasoning ? { reasoning: data.reasoning } : {}),
-        ...(Array.isArray(data.steps) && data.steps.length > 0
-            ? { steps: data.steps as PlaygroundStep[] }
-            : {}),
-        ...(Array.isArray(data.attachments) && data.attachments.length > 0
-            ? { attachments: data.attachments as ChatMessage['attachments'] }
-            : {}),
-        ...(data.output !== undefined ? { output: data.output } : {}),
-        ...(data.outputError ? { outputError: String(data.outputError) } : {}),
-        ...(data.usage ? { usage: data.usage as ChatMessage['usage'] } : {}),
-        ...(typeof data.stopReason === 'string' ? { stopReason: data.stopReason as ChatMessage['stopReason'] } : {}),
-        ...(typeof data.stopDetail === 'string' ? { stopDetail: data.stopDetail } : {}),
-        ...(Array.isArray(data.compactions) && data.compactions.length > 0
-            ? { compactions: data.compactions as TurnCompaction[] }
-            : {}),
-        ...(Array.isArray(data.compactedTools) && data.compactedTools.length > 0
-            ? { compactedTools: data.compactedTools as ChatMessage['compactedTools'] }
-            : {}),
-        ...(Array.isArray(data.warnings) && data.warnings.length > 0
-            ? { warnings: data.warnings as string[] }
-            : {}),
-        ...(Array.isArray(data.pendingActions) && data.pendingActions.length > 0
-            ? { pendingActions: data.pendingActions as ChatMessage['pendingActions'] }
-            : {}),
-        version: (data.version as number | null) ?? null,
-        // The server times the invoke itself; the round trip is the
-        // fallback for an older response that carries no latency.
-        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : Date.now() - startedAt,
-    };
-}
 
 /** Pause again after a continuation? Then the session is still waiting. */
 function runtimeStatusAfter(message: ChatMessage): 'idle' | 'requires_action' {
@@ -256,8 +225,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [pinnedVersion, setPinnedVersion] = useState(searchParams.get('version') ?? '');
     const [deleting, setDeleting] = useState(false);
     const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([]);
-    const generating = isGenerating(liveSegments);
-    const [liveCompactions, setLiveCompactions] = useState<TurnCompaction[]>([]);
+    // The plan the carried state holds (`GET …/sessions/:id` → `plan`): the dock and the Plan tab read it when no turn of this page has written one.
+    const [sessionPlan, setSessionPlan] = useState<SessionPlanRecord | null>(null);
     // A request (tool approval / question) is being sent, and which one.
     const [resolvingId, setResolvingId] = useState<string | null>(null);
     // Following a turn this page did not start: it shows the same live view as
@@ -488,6 +457,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setPickedModel(typeof rememberedModel === 'string' ? rememberedModel : '');
             setSession(sessionData.session);
             setServerActions(Array.isArray(sessionData.pendingActions) ? sessionData.pendingActions : []);
+            setSessionPlan(sessionData.plan ?? null);
             // A resumed turn's version badge, tokens and cost should read "what
             // this turn actually did", which the stored record already carries
             // — nothing to recompute here.
@@ -536,7 +506,32 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     }, [messages]);
 
+    // A running turn grows below the fold: follow it, unless the person scrolled up to read. "Near the bottom" is
+    // judged when they scroll (before the new content makes the page taller), not after it has grown.
+    const nearBottom = useRef(true);
+    const trackScroll = useCallback(() => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        nearBottom.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= AUTOSCROLL_WITHIN_PX;
+    }, []);
+    useEffect(() => {
+        const viewport = viewportRef.current;
+        if (viewport && liveSegments.length > 0 && nearBottom.current) viewport.scrollTop = viewport.scrollHeight;
+    }, [liveSegments]);
+
     const totals = useMemo(() => summariseSession(messages), [messages]);
+
+    // The plan the dock and the Plan tab show: the running turn's newest version, else the newest a stored turn
+    // recorded, else the one the session carries. None = the agent does not plan here, and neither is drawn.
+    const currentPlan = useMemo(() => currentPlanOf({ live: liveSegments, messages, sessionPlan }), [liveSegments, messages, sessionPlan]);
+    // The plan as it stood before the running turn: what the turn's first plan version is compared against.
+    const basePlanRef = useRef<IAgentTurnPlanSnapshot | null>(null);
+    const planBeforeTurn = useMemo(() => currentPlanOf({ messages, sessionPlan })?.plan ?? null, [messages, sessionPlan]);
+    useEffect(() => {
+        basePlanRef.current = planBeforeTurn;
+    }, [planBeforeTurn]);
+    // Each stored turn compares its first plan version with the latest one an earlier turn recorded.
+    const previousPlans = useMemo(() => previousPlansOf(messages), [messages]);
 
     /**
      * Only assistant turns have a duration, so the strip is one segment per
@@ -565,6 +560,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     };
 
+    /** Scrolls to a place inside a turn (a plan version, a summarization divider, a sub-agent group); the turn itself when it is not drawn. */
+    const goToAnchor = (turnIndex: number, anchorId: string) => {
+        const node = document.getElementById(anchorId);
+        if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        else goToTurn(turnIndex);
+    };
+
     /** Marks the session as no longer running / waiting once a turn's result lands. */
     const settleSession = (message: ChatMessage) => {
         setSession((current) => current && {
@@ -584,8 +586,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
      * paused one arrive in the same dialect (`/chat/stream`); `onResult` is the
      * only thing that differs — where the final answer is placed.
      *
-     * `action` and `status` events are not handled here: the `result` that
-     * closes the stream already carries the pending actions it raised.
+     * `plan`, `subagent` and `summary` (a pass starting, being skipped or done, the
+     * agent's own or a sub-agent's) go to the live reducers, which place each where
+     * it happened. `action` and `status` events are not handled here: the `result`
+     * that closes the stream already carries the pending actions it raised.
      */
     const handleTurnEvent = (onResult: (data: Record<string, unknown>) => void) => (event: string, data: unknown) => {
         if (event === 'tool') {
@@ -595,7 +599,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         } else if (event === 'reasoning') {
             setLiveSegments((current) => appendLiveReasoning(current, String((data as { text?: string }).text ?? '')));
         } else if (event === 'summary') {
-            setLiveCompactions((current) => [...current, data as TurnCompaction]);
+            setLiveSegments((current) => applyLiveCompaction(current, data as AgentCompactionEvent));
+        } else if (event === 'plan') {
+            setLiveSegments((current) => applyLivePlan(current, data as AgentPlanEvent, basePlanRef.current));
+        } else if (event === 'subagent') {
+            setLiveSegments((current) => applyLiveSubagent(current, data as AgentSubagentEvent));
         } else if (event === 'result') {
             onResult(data as Record<string, unknown>);
         } else if (event === 'error') {
@@ -611,6 +619,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             if (!res.ok) return;
             const data = await res.json();
             setSession(data.session);
+            if ('plan' in data) setSessionPlan(data.plan ?? null);
         } catch {
             // The next turn refreshes it again.
         }
@@ -624,6 +633,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const data = await res.json();
             setSession(data.session);
             setMessages(data.session.messages ?? []);
+            setSessionPlan(data.plan ?? null);
             return data.session as SessionRecord;
         } catch {
             return null;
@@ -662,7 +672,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         setInput('');
         setAttached([]);
         setLiveSegments([]);
-        setLiveCompactions([]);
 
         // Under `cancel_pending` this message cancels what the agent waits on;
         // the cards show that right away rather than after the round trip.
@@ -746,7 +755,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             fail(err);
         } finally {
             setSending(false);
-            setLiveCompactions([]);
             // Cleared only now: dropping it the moment `result` lands would
             // blank the answer for the frame between the two state updates.
             setLiveSegments([]);
@@ -769,7 +777,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         setResolvingId(actionId);
         setSending(true);
         setLiveSegments([]);
-        setLiveCompactions([]);
 
         let accepted = messages;
         let recorded = false;
@@ -833,7 +840,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         } finally {
             setResolvingId(null);
             setSending(false);
-            setLiveCompactions([]);
             setLiveSegments([]);
         }
     };
@@ -877,7 +883,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         const startedAt = Date.now();
         setSending(true);
         setLiveSegments([]);
-        setLiveCompactions([]);
         try {
             const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/continue?stream=1`, {
                 method: 'POST',
@@ -903,7 +908,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             void refreshSessionMeta();
         } finally {
             setSending(false);
-            setLiveCompactions([]);
             setLiveSegments([]);
         }
     };
@@ -935,7 +939,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         setFollowing(true);
         setFollowedUser(null);
         setLiveSegments([]);
-        setLiveCompactions([]);
 
         const stopped = { current: false };
         void (async () => {
@@ -953,7 +956,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     else if (step.kind === 'tool') setLiveSegments((current) => applyLiveToolEvent(current, step.event));
                     else if (step.kind === 'text') setLiveSegments((current) => appendLiveText(current, step.text));
                     else if (step.kind === 'reasoning') setLiveSegments((current) => appendLiveReasoning(current, step.text));
-                    else if (step.kind === 'compaction') setLiveCompactions((current) => [...current, step.compaction as unknown as TurnCompaction]);
+                    else if (step.kind === 'compaction') setLiveSegments((current) => applyLiveCompaction(current, step.compaction));
+                    else if (step.kind === 'plan') setLiveSegments((current) => applyLivePlan(current, step.plan, basePlanRef.current));
+                    else if (step.kind === 'subagent') setLiveSegments((current) => applyLiveSubagent(current, step.event));
                     else if (step.kind === 'idle' || step.kind === 'error') {
                         stopped.current = true;
                         controller.abort();
@@ -975,7 +980,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         setFollowing(false);
                         setFollowedUser(null);
                         setLiveSegments([]);
-                        setLiveCompactions([]);
                     }
                 }
             }
@@ -987,7 +991,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setFollowing(false);
             setFollowedUser(null);
             setLiveSegments([]);
-            setLiveCompactions([]);
         };
     }, [loading, sending, followDismissed, followedStatus, followedSeq, agentId, sessionId, refreshSession]);
 
@@ -1262,7 +1265,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                     </Stack>
                                 </Center>
                             ) : (
-                                <ScrollArea className={classes.chatScroll} viewportRef={viewportRef} px="md" py="sm">
+                                <ScrollArea className={classes.chatScroll} viewportRef={viewportRef} onScrollPositionChange={trackScroll} px="md" py="sm">
                                     <Stack gap="lg">
                                         {messages.map((msg, i) => {
                                             if (matchedIndexes && !matchedIndexes.has(i)) return null;
@@ -1297,6 +1300,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                             {msg.role === 'assistant' ? (
                                                                 <AssistantTurn
                                                                     message={msg}
+                                                                    messageIndex={i}
+                                                                    previousPlan={previousPlans[i]}
                                                                     busy={liveActive || Boolean(resolvingId)}
                                                                     resolvingId={resolvingId}
                                                                     onResolve={(actionId, body) => void resolveAction(actionId, body)}
@@ -1358,36 +1363,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                         </>
                                                     ) : null}
                                                 </Group>
-                                                {liveCompactions.map((compaction, index) => (
-                                                    <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
-                                                ))}
                                                 {liveSegments.length === 0 ? (
                                                     <Group gap="xs">
                                                         <Loader size="xs" />
                                                         <Text size="xs" c="dimmed">The agent is working…</Text>
                                                     </Group>
                                                 ) : (
-                                                    <Stack gap="xs">
-                                                        {liveSegments.map((segment, index) => (segment.kind === 'reasoning' ? (
-                                                            <Box key={`reasoning-${index}`} className={classes.chatMarkdown}>
-                                                                <ReasoningBlock
-                                                                    reasoning={segment.text}
-                                                                    streaming={index === liveSegments.length - 1}
-                                                                    testId="agent-live-reasoning"
-                                                                />
-                                                            </Box>
-                                                        ) : segment.kind === 'tools' ? (
-                                                            <LiveToolCalls
-                                                                key={`tools-${index}`}
-                                                                calls={segment.calls}
-                                                                generating={generating && index === liveSegments.length - 1}
-                                                            />
-                                                        ) : (
-                                                            <Box key={`text-${index}`} className={classes.chatMarkdown}>
-                                                                <Markdown text={segment.text} />
-                                                            </Box>
-                                                        )))}
-                                                    </Stack>
+                                                    <LiveTurnFlow segments={liveSegments} />
                                                 )}
                                             </Box>
                                         ) : null}
@@ -1407,6 +1389,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             ) : null}
 
                             <Box p="sm" className={classes.composer}>
+                                {currentPlan ? (
+                                    <Box mb="xs">
+                                        <PlanDock plan={currentPlan.plan} />
+                                    </Box>
+                                ) : null}
                                 <AttachmentChips
                                     files={attached}
                                     uploading={uploadingNames}
@@ -1526,6 +1513,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             readOnly={readOnly}
                             messages={messages}
                             onGoToTurn={goToTurn}
+                            onGoToAnchor={goToAnchor}
+                            plan={currentPlan}
                             // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
                             files={isConnected || !(filesConfigured || (sessionFiles?.length ?? 0) > 0) ? undefined : {
                                 items: sessionFiles,
@@ -1650,6 +1639,8 @@ function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () =
 
 function AssistantTurn({
     message,
+    messageIndex,
+    previousPlan,
     busy,
     resolvingId,
     onResolve,
@@ -1659,6 +1650,10 @@ function AssistantTurn({
     budgetStops,
 }: {
     message: ChatMessage;
+    /** The message's place in the session: it keeps the "go to" ids of its summarization dividers apart from other turns'. */
+    messageIndex: number;
+    /** The plan as an earlier turn left it, for what this turn's first plan version changed. */
+    previousPlan?: IAgentTurnPlanSnapshot;
     busy: boolean;
     resolvingId: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
@@ -1668,21 +1663,31 @@ function AssistantTurn({
     /** The session budget stops the session instead of pausing it. */
     budgetStops: boolean;
 }) {
+    // What the turn did, in the order it happened: narration, tool calls, plan versions, sub-agent groups, summaries.
+    const flow = useMemo(() => buildTurnFlow(message, { previousPlan, messageIndex }), [message, previousPlan, messageIndex]);
+    // Which sub-agent groups are open is held here, so "Show in group" on a request card below can open one.
+    const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+    const expansion = useMemo(
+        () => ({
+            state: openGroups,
+            set: (key: string, open: boolean) => setOpenGroups((current) => ({ ...current, [key]: open })),
+        }),
+        [openGroups],
+    );
+    const showInGroup = (delegationToolCallId: string, subagent?: string) => {
+        setOpenGroups((current) => ({ ...current, ...showInGroupExpansion(flow, delegationToolCallId, subagent) }));
+        // The group is still folded when this runs; scroll once it has had a frame to open.
+        requestAnimationFrame(() => {
+            document.getElementById(delegationAnchorId(delegationToolCallId))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+    };
+
     return (
         <Box className={classes.chatMarkdown}>
             {message.reasoning ? (
                 <ReasoningBlock reasoning={message.reasoning} />
             ) : null}
-            {message.steps?.length ? <NarratedSteps steps={message.steps} /> : null}
-            {message.compactions?.map((compaction, index) => (
-                <ContextCompactionCard
-                    key={`${compaction.at}-${index}`}
-                    compaction={compaction}
-                    // The tool list is per turn; shown on the last pass so it
-                    // is not repeated.
-                    compactedTools={index === message.compactions!.length - 1 ? message.compactedTools : undefined}
-                />
-            ))}
+            {flow.length > 0 ? <StoredTurnFlow blocks={flow} message={message} expansion={expansion} /> : null}
             {/* A pause with cards says what it waits for on the cards themselves. */}
             {message.stopReason && !(message.stopReason === 'paused' && message.pendingActions?.length)
                 ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} budgetStops={budgetStops} />
@@ -1696,6 +1701,7 @@ function AssistantTurn({
                     onResolve={onResolve}
                     blocked={blocked}
                     blockedById={blockedById}
+                    onShowInGroup={showInGroup}
                 />
             ) : null}
             {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}
@@ -1714,198 +1720,6 @@ function AssistantTurn({
                     </Stack>
                 </Alert>
             ) : null}
-        </Box>
-    );
-}
-
-/**
- * A turn's tool calls with what the model wrote before each batch ("Let me
- * search…"), in the order it happened — the same order the live view showed.
- * A turn with no such text keeps the single collapsed timeline.
- */
-function NarratedSteps({ steps }: { steps: PlaygroundStep[] }) {
-    if (!steps.some((step) => step.narration)) return <StepTimeline steps={steps} />;
-    const groups: Array<{ narration?: string; offset: number; steps: PlaygroundStep[] }> = [];
-    steps.forEach((step, index) => {
-        const current = groups[groups.length - 1];
-        if (!current || step.narration) groups.push({ narration: step.narration, offset: index, steps: [step] });
-        else current.steps.push(step);
-    });
-    return (
-        <>
-            {groups.map((group) => (
-                <Box key={group.offset}>
-                    {group.narration ? <Markdown text={group.narration} /> : null}
-                    <StepTimeline steps={group.steps} offset={group.offset} />
-                </Box>
-            ))}
-        </>
-    );
-}
-
-/**
- * The tool calls a turn made, in order.
- *
- * Collapsed, because by the time a turn is in the transcript the calls have
- * already been watched live (LiveToolCalls) and the answer is what the reader
- * came back for. The summary line keeps them one click away, and a failure
- * colours it red so a turn that went wrong still announces itself.
- */
-function StepTimeline({ steps, offset = 0 }: { steps: PlaygroundStep[]; offset?: number }) {
-    const [open, setOpen] = useState(false);
-    const failed = steps.filter(stepFailed).length;
-
-    return (
-        <Box mb="sm">
-            <Button
-                size="compact-xs"
-                variant="subtle"
-                color={failed > 0 ? 'red' : 'gray'}
-                leftSection={<IconTimeline size={12} />}
-                rightSection={open ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
-                onClick={() => setOpen((value) => !value)}
-            >
-                {steps.length} tool call{steps.length === 1 ? '' : 's'}
-                {failed > 0 ? ` · ${failed} failed` : ''}
-            </Button>
-            <Collapse in={open}>
-                <Stack gap={6} mt="xs">
-                    {steps.map((step, index) => (
-                        <StepCard key={step.id ?? index} step={step} index={offset + index} />
-                    ))}
-                </Stack>
-            </Collapse>
-        </Box>
-    );
-}
-
-/** One tool call: what was asked, what came back, and how the run treated it. */
-function StepCard({ step, index }: { step: PlaygroundStep; index: number }) {
-    const failed = stepFailed(step);
-
-    return (
-        <Paper withBorder p="xs" radius="sm">
-            <Group gap="xs" mb={6} wrap="wrap">
-                <Badge size="xs" variant="light" color={failed ? 'red' : 'blue'}>{index + 1}</Badge>
-                <Text size="xs" fw={600} ff="monospace">{step.name}</Text>
-                {step.status && step.status !== 'success' ? (
-                    <Badge size="xs" variant="light" color={failed ? 'red' : 'yellow'}>{step.status}</Badge>
-                ) : null}
-                {step.subagent ? (
-                    <Badge size="xs" variant="outline" color="violet">via {step.subagent}</Badge>
-                ) : null}
-                {step.fromCache ? (
-                    <Tooltip label="Served from the response cache — the tool was not actually called" withArrow>
-                        <Badge size="xs" variant="outline" color="gray">cached</Badge>
-                    </Tooltip>
-                ) : null}
-                {step.summarized ? (
-                    <Tooltip
-                        label={step.originalTokenCount
-                            ? `The model saw a compaction of this result (originally ~${step.originalTokenCount} tokens)`
-                            : 'The model saw a compaction of this result'}
-                        withArrow
-                    >
-                        <Badge size="xs" variant="outline" color="orange">summarized</Badge>
-                    </Tooltip>
-                ) : null}
-                {step.timestamp ? (
-                    <Text size="10px" c="dimmed">{new Date(step.timestamp).toLocaleTimeString()}</Text>
-                ) : null}
-            </Group>
-
-            {step.args !== undefined ? <StepPayload label="args" value={step.args} /> : null}
-            {step.error ? (
-                <Box mb={4}>
-                    <Text size="10px" c="dimmed" tt="uppercase" fw={600}>error</Text>
-                    <Text size="xs" c="red" className={classes.preWrap}>{step.error}</Text>
-                </Box>
-            ) : null}
-            {step.output !== undefined ? (
-                <StepPayload
-                    // Naming matters once the two can differ: with the console's
-                    // default retention the model may have read a compaction, and
-                    // calling that "result" hid the substitution entirely.
-                    label={step.rawOutput !== undefined ? 'what the model saw' : 'result'}
-                    value={step.output}
-                />
-            ) : null}
-            {step.rawOutput !== undefined ? (
-                <StepPayload label="full tool result" value={step.rawOutput} defaultOpen={false} />
-            ) : null}
-        </Paper>
-    );
-}
-
-/**
- * One payload inside a step.
- *
- * Long values open clipped with the rest one click away, rather than being
- * truncated outright: a 50KB tool result pasted into the transcript makes the
- * whole session unreadable, but "… 48000 more characters" with no way to see
- * them made the playground useless for the exact debugging it exists for.
- */
-function StepPayload({
-    label,
-    value,
-    defaultOpen = true,
-}: {
-    label: string;
-    value: unknown;
-    defaultOpen?: boolean;
-}) {
-    const [expanded, setExpanded] = useState(false);
-    const [open, setOpen] = useState(defaultOpen);
-
-    const text = useMemo(() => {
-        if (typeof value === 'string') return value;
-        try {
-            return JSON.stringify(value, null, 2);
-        } catch {
-            return String(value);
-        }
-    }, [value]);
-
-    const clipped = text.length > PAYLOAD_CLIP_CHARS && !expanded;
-    const shown = clipped ? text.slice(0, PAYLOAD_CLIP_CHARS) : text;
-
-    return (
-        <Box mb={6}>
-            <Group gap={6} mb={2}>
-                <UnstyledButton onClick={() => setOpen((value) => !value)}>
-                    <Group gap={3}>
-                        {open ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
-                        <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
-                    </Group>
-                </UnstyledButton>
-                <Text size="10px" c="dimmed">{text.length.toLocaleString()} chars</Text>
-                <CopyButton value={text}>
-                    {({ copied, copy }) => (
-                        <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
-                            <ActionIcon size={14} variant="subtle" color="gray" onClick={copy}>
-                                {copied ? <IconCheck size={10} /> : <IconCopy size={10} />}
-                            </ActionIcon>
-                        </Tooltip>
-                    )}
-                </CopyButton>
-            </Group>
-            <Collapse in={open}>
-                <Code block className={classes.payloadCode}>
-                    {shown}
-                    {clipped ? `\n… ${(text.length - PAYLOAD_CLIP_CHARS).toLocaleString()} more characters` : ''}
-                </Code>
-                {text.length > PAYLOAD_CLIP_CHARS ? (
-                    <Button
-                        size="compact-xs"
-                        variant="subtle"
-                        color="gray"
-                        mt={2}
-                        onClick={() => setExpanded((value) => !value)}
-                    >
-                        {expanded ? 'Collapse' : 'Show the whole payload'}
-                    </Button>
-                ) : null}
-            </Collapse>
         </Box>
     );
 }
