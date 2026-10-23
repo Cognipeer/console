@@ -8,7 +8,7 @@ import type { agentChannelsSetupEn } from './agentChannelsSetup.en';
 export const agentChannelsSetupTr: typeof agentChannelsSetupEn = {
   setup: {
     title: 'Kanal ekle',
-    subtitle: 'Ajanlarınızı Slack veya Microsoft Teams ile adım adım bağlayın.',
+    subtitle: 'Bir ajanı Slack veya Microsoft Teams ile adım adım bağlayın.',
     titleDraft: 'Kanal ekle · {name}',
     titleGuide: 'Kurulum rehberi · {name}',
     draftSaved: 'Taslak kaydedildi. Pencereyi kapatıp istediğiniz zaman kanal sayfasından devam edebilirsiniz.',
@@ -23,13 +23,28 @@ export const agentChannelsSetupTr: typeof agentChannelsSetupEn = {
     actions: {
       next: 'İleri: kurulum',
       finish: 'Bitir',
-      finishAndAddAgent: 'Bitir ve ajan ekle',
       undo: 'Geri al',
       continue: 'Devam et',
     },
+    agent: {
+      title: 'Hangi ajan?',
+      hint: 'Bu kanalın çalıştıracağı yayınlanmış ajanı seçin. Başka bir ajan için başka bir kanal gerekir.',
+      check: 'Ajan seçildi',
+      readOnly: 'Ajan değiştirilemez. Başka bir ajan kullanmak için yeni bir kanal oluşturun.',
+      search: 'Ajan ara',
+      searchPlaceholder: 'Ad ya da proje',
+      list: 'Yayınlanmış ajanlar',
+      published: 'v{version} yayında',
+      publishedOnly: 'Kanalda ajanın her zaman yayınlanmış sürümü çalışır.',
+      loading: 'Ajanlar yükleniyor…',
+      loadFailed: 'Ajanlar yüklenemedi.',
+      none: 'Henüz yayınlanmış ajan yok. Önce birini yayınlayın, sonra buraya dönün.',
+      openAgents: 'Ajanları aç',
+      noMatch: '“{query}” ile eşleşen ajan yok.',
+    },
     platform: {
       title: 'Platform ve ad',
-      hint: 'Ajanlarınızın nerede yanıt vereceğini seçin ve kanala bir ad verin.',
+      hint: 'Ajanın nerede yanıt vereceğini seçin ve bota bir ad verin.',
       choose: 'Platform',
       check: 'Kanal oluşturuldu',
       checks: {
@@ -50,8 +65,8 @@ export const agentChannelsSetupTr: typeof agentChannelsSetupEn = {
       name: {
         label: 'Kanal adı',
         placeholder: 'Acme Asistan',
-        hintSlack: 'Slack uygulaması ve botu adını buradan alır. Slack, uygulama adı için en fazla 35 karakter kabul eder.',
-        hintTeams: "Teams'te insanların gördüğü uygulama adı da budur.",
+        hintSlack: 'Slack uygulaması ve botu adını buradan alır. Ad, ajanın adıyla başlar. Slack, uygulama adı için en fazla 35 karakter kabul eder.',
+        hintTeams: "Teams'te insanların gördüğü uygulama adı da budur. Ad, ajanın adıyla başlar.",
         previewSlack: 'Slack uygulaması: {app} · bot kullanıcısı: {bot}',
         cut: 'Slack uygulama adını 35 karaktere kısaltır.',
       },
@@ -63,12 +78,13 @@ export const agentChannelsSetupTr: typeof agentChannelsSetupEn = {
       },
       locale: {
         label: 'Bot dili',
-        hint: 'Botun kendi mesajlarının dili: giriş bağlantıları, ajan seçiciler ve ret mesajları. Ajan, kullandığı dilde yanıt verir.',
+        hint: 'Botun kendi mesajlarının dili, ör. ret mesajları. Ajan, kullandığı dilde yanıt verir.',
       },
       readOnly: 'Adı, açıklamayı ve dili kanal sayfasından değiştirebilirsiniz.',
     },
     summary: {
       channel: 'Kanal',
+      agent: 'Ajan',
       platform: 'Platform',
       name: 'Ad',
       language: 'Bot dili',
@@ -91,10 +107,10 @@ export const agentChannelsSetupTr: typeof agentChannelsSetupEn = {
       healthy: 'Kayıtlı kimlik bilgileri çalışıyor.',
     },
     done: {
-      title: 'Ajan eklemeye hazır',
+      title: 'Hazır',
       connected: 'Kanal bağlandı.',
       pending: 'Kanalı bağlamak için yukarıdaki adımları bitirin.',
-      next: 'Sıradaki adım: bu kanalda yanıt verecek ajanları ekleyip kimlerin kullanabileceğini seçmek. Bunu istediğiniz zaman kanal sayfasındaki **Ajan ekle** ile yapabilirsiniz.',
+      next: 'Kanal, herkese doğrudan mesajlarda ve botun bulunduğu tüm kanallarda yanıt verir. Nerede yanıt vereceğini ve kimlerin kullanabileceğini kanal sayfasından daraltabilirsiniz.',
     },
   },
 
@@ -172,9 +188,9 @@ export const agentChannelsSetupTr: typeof agentChannelsSetupEn = {
     invite: {
       title: 'Botu kanallara davet edin',
       description: "DM'ler hemen çalışır. Bir kanalda yanıt verebilmesi için botun o kanalda olması gerekir.",
-      command: 'Ajanların yanıt vermesini istediğiniz her kanalda şunu yazın:',
+      command: 'Ajanın yanıt vermesini istediğiniz her kanalda şunu yazın:',
       mention: "Kanallarda bot yalnızca @ ile andığınız mesajları görür ve yanıtı her zaman thread'de verir.",
-      picker: 'Sonra ajan eklerken kanal listesinde yalnızca botun davet edildiği kanallar çıkar.',
+      picker: 'Sonra kanal seçerken listede yalnızca botun davet edildiği kanallar çıkar.',
       tick: 'Botu davet ettim',
     },
     done: {

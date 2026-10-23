@@ -11,7 +11,7 @@
 export const agentChannelsSetupEn = {
   setup: {
     title: 'Add channel',
-    subtitle: 'Connect your agents to Slack or Microsoft Teams, step by step.',
+    subtitle: 'Connect an agent to Slack or Microsoft Teams, step by step.',
     titleDraft: 'Add channel · {name}',
     titleGuide: 'Setup guide · {name}',
     draftSaved: 'Draft saved. You can close this and continue from the channel page at any time.',
@@ -26,13 +26,28 @@ export const agentChannelsSetupEn = {
     actions: {
       next: 'Next: setup',
       finish: 'Finish',
-      finishAndAddAgent: 'Finish and add an agent',
       undo: 'Undo',
       continue: 'Continue',
     },
+    agent: {
+      title: 'Which agent?',
+      hint: 'Choose the published agent this channel runs. Another agent needs another channel.',
+      check: 'Agent chosen',
+      readOnly: 'The agent cannot be changed. Create another channel to use another agent.',
+      search: 'Find an agent',
+      searchPlaceholder: 'Name or project',
+      list: 'Published agents',
+      published: 'v{version} published',
+      publishedOnly: 'The channel always runs the published version of the agent.',
+      loading: 'Loading agents…',
+      loadFailed: 'The agents could not be loaded.',
+      none: 'No agent is published yet. Publish one first, then come back here.',
+      openAgents: 'Open agents',
+      noMatch: 'No agent matches “{query}”.',
+    },
     platform: {
       title: 'Platform and name',
-      hint: 'Choose where your agents answer, and name the channel.',
+      hint: 'Choose where the agent answers, and name the bot.',
       choose: 'Platform',
       check: 'Channel created',
       checks: {
@@ -53,8 +68,8 @@ export const agentChannelsSetupEn = {
       name: {
         label: 'Channel name',
         placeholder: 'Acme Assistant',
-        hintSlack: 'The Slack app and its bot take their names from this. Slack allows at most 35 characters for the app name.',
-        hintTeams: 'Also the name of the Teams app that people see.',
+        hintSlack: "The Slack app and its bot take their names from this. It starts as the agent's name. Slack allows at most 35 characters for the app name.",
+        hintTeams: "Also the name of the Teams app that people see. It starts as the agent's name.",
         previewSlack: 'Slack app: {app} · bot user: {bot}',
         cut: 'Slack will cut the app name to 35 characters.',
       },
@@ -66,12 +81,13 @@ export const agentChannelsSetupEn = {
       },
       locale: {
         label: 'Bot language',
-        hint: "The language of the bot's own messages: login links, agent pickers and refusals. The agent answers in whatever language it uses.",
+        hint: "The language of the bot's own messages, such as refusals. The agent answers in whatever language it uses.",
       },
       readOnly: 'You can change the name, description and language on the channel page.',
     },
     summary: {
       channel: 'Channel',
+      agent: 'Agent',
       platform: 'Platform',
       name: 'Name',
       language: 'Bot language',
@@ -94,10 +110,10 @@ export const agentChannelsSetupEn = {
       healthy: 'The saved credentials work.',
     },
     done: {
-      title: 'Ready to add agents',
+      title: 'Ready',
       connected: 'The channel is connected.',
       pending: 'Finish the steps above to connect the channel.',
-      next: 'Next, add the agents that answer here and choose who may use them. You can do this any time with **Add agent** on the channel page.',
+      next: 'The channel answers in direct messages and in every channel the bot is in, for everyone. Narrow down where it answers and who may use it on the channel page.',
     },
   },
 
@@ -175,9 +191,9 @@ export const agentChannelsSetupEn = {
     invite: {
       title: 'Invite the bot to channels',
       description: 'Direct messages work right away. To answer in a channel, the bot has to be in it.',
-      command: 'Type this in every channel where agents should answer:',
+      command: 'Type this in every channel where the agent should answer:',
       mention: 'In channels the bot only sees messages that @mention it, and it always answers in a thread.',
-      picker: 'When you add an agent later, the channel list only offers the channels the bot has been invited to.',
+      picker: 'When you choose channels later, the list only offers the channels the bot has been invited to.',
       tick: 'I invited the bot',
     },
     done: {

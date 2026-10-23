@@ -1,41 +1,22 @@
 /**
- * Agent channels: adding / editing an agent on a channel (where it answers, who may use it).
+ * Agent channels: editing where a channel answers and who may use it (the `access` form of a channel's page).
  * Spread into the `agentChannels` namespace in `en.ts`; the shared words are in agentChannels.en.ts (`common`).
+ * The file keeps its old name (`Deploy`): `en.ts` imports it by that name.
  *
  * "Channel" in a title is the Slack app / Teams bot a workspace connected (Agents › Channels); the channels people
  * pick inside it (#sales) are the platform's own.
  */
 export const agentChannelsDeployEn = {
-  deploy: {
-    createTitle: 'Add an agent to {name}',
-    editTitle: 'Edit the agent on {name}',
+  access: {
+    editTitle: 'Where and who · {name}',
     subtitle: '{platform} · {workspace}',
-    create: 'Add agent',
     save: 'Save changes',
-    added: 'Agent added',
-    updated: 'Changes saved',
+    saved: 'Changes saved',
     ready: '{done} of {total} ready',
-
-    agent: {
-      title: 'Agent',
-      description: 'Published agents only. They can come from any project.',
-      search: 'Find an agent',
-      searchPlaceholder: 'Name or project',
-      list: 'Published agents',
-      published: 'v{version} published',
-      alreadyHere: 'Already on this channel',
-      publishedOnly: 'The agent always runs its published version here.',
-      loading: 'Loading agents…',
-      loadFailed: 'The agents could not be loaded.',
-      none: 'No agent is published yet. Publish one first, then add it here.',
-      openAgents: 'Open agents',
-      noMatch: 'No agent matches “{query}”.',
-      fixed: 'The agent cannot be changed. To use another agent, add it to this channel and remove this one.',
-    },
 
     where: {
       title: 'Where does it answer?',
-      description: 'In each place, people are offered the agents that answer there and that they may use.',
+      description: 'The channel answers in these places, for the people who may use it.',
       dm: 'Direct messages (DM)',
       dmHint: 'People can write to the bot in a private chat.',
       channels: 'Channels (when someone @mentions the bot)',
@@ -61,18 +42,18 @@ export const agentChannelsDeployEn = {
 
     who: {
       title: 'Who can use it?',
-      description: 'Everyone else is told that no agent is available to them here.',
+      description: 'Everyone else is told to ask an admin.',
       mode: 'Access',
       everyone: 'Everyone',
       selected: 'Selected groups and people',
-      everyoneHint: 'Everyone = every person whose chat account is linked to Console.',
+      everyoneHint: 'Everyone = every person whose verified email matches a Console user.',
       groups: 'Groups',
       groupsPlaceholder: 'Search groups',
       users: 'People',
       usersPlaceholder: 'Search people by name or email',
-      nobody: 'No group or person selected: nobody can use this agent.',
+      nobody: 'No group or person selected: nobody can use this channel.',
       tooMany: 'At most {max} groups and people can be on the list.',
-      policyNote: 'The list is this agent’s built-in access rule on the channel, as with portals. Deny rules in IAM can still block people.',
+      policyNote: 'The list is the agent’s built-in access rule on this channel, as with portals. Deny rules in IAM can still block people.',
       openIam: 'Open IAM',
       missing: 'No longer exist: {names}.',
       dropMissing: 'Remove them from the list',
@@ -86,36 +67,19 @@ export const agentChannelsDeployEn = {
       body: 'Tools that need approval follow the agent’s rule for runs nobody can answer. With “Pause”, the approval is given in Studio and the result is posted to the thread.',
       link: 'Change in agent settings',
     },
-    enabled: {
-      label: 'Enabled',
-      description: 'Switch off to keep the settings but stop answering for now.',
-    },
 
     summary: {
       title: 'Summary',
-      agent: 'Agent',
-      agentVersion: '{name} (v{version})',
       where: 'Where',
       who: 'Who',
-      status: 'Status',
       dm: 'DM',
       allChannels: 'Every channel',
       everyone: 'Everyone',
       nobody: 'Nobody yet',
-      on: 'Enabled',
-      off: 'Off',
-      offNote: 'Switched off: the agent answers nowhere until you enable it.',
       more: '+{count} more',
-    },
-    overlap: {
-      title: 'Shared with other agents',
-      dm: 'direct messages',
-      allChannels: 'every channel',
-      note: 'People who can use both agents are asked which one should answer. Their choice is remembered for the thread.',
     },
     checks: {
       title: 'Checklist',
-      agent: 'Agent chosen',
       where: 'Somewhere to answer',
       who: 'Who can use it',
     },

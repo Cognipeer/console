@@ -1,41 +1,11 @@
 /**
- * Agent channels: the channel list (Agents › Channels) and a channel's detail page.
+ * Agent channels: a channel's modal and the Channels section of an agent's Ship tab (there is no Channels page).
  * Spread into the `agentChannels` namespace in `en.ts`; the shared words are in agentChannels.en.ts (`common`).
  */
 export const agentChannelsListEn = {
   list: {
     // Names the thing in the shared delete dialog ("Delete channel?").
     noun: 'channel',
-    title: 'Channels',
-    subtitle: 'Connect your agents to Slack and Microsoft Teams. Each channel is a Slack app or Teams bot that you create; it can hold several agents.',
-    add: 'Add channel',
-    guide: 'Setup guide',
-    search: 'Search by channel name',
-    filters: {
-      platform: 'Filter by platform',
-      platformAll: 'All platforms',
-      state: 'Filter by state',
-      stateAll: 'All states',
-    },
-    columns: {
-      name: 'Name',
-      platform: 'Platform',
-      state: 'State',
-      agents: 'Agents',
-      lastMessage: 'Last message',
-    },
-    agents: {
-      none: 'No agents',
-      one: '1 agent',
-      other: '{count} agents',
-    },
-    actions: {
-      open: 'Open',
-      guide: 'Setup guide',
-      disable: 'Disable',
-      enable: 'Enable',
-      delete: 'Delete',
-    },
     disable: {
       title: 'Disable {name}?',
       message: 'The connection closes and the bot stops answering until you enable the channel again.',
@@ -47,25 +17,15 @@ export const agentChannelsListEn = {
       confirm: 'Enable',
     },
     delete: {
-      warning: 'The linked chat accounts and the channel record are deleted. Session history stays in Console.',
+      warning: 'The channel record is deleted. Session history stays in Console.',
     },
     notify: {
       enabled: 'Channel enabled',
       disabled: 'Channel disabled',
       deleted: 'Channel deleted',
     },
-    empty: {
-      title: 'Move your agents to Slack or Teams',
-      description: 'Connect your own Slack app or Azure bot in about 10 minutes. Every step is explained on screen.',
-    },
-    noMatch: {
-      title: 'No channel matches',
-      description: 'Change the search or the filters.',
-    },
-    footer: 'Showing {shown} of {total} channels',
   },
   detail: {
-    back: 'Back to channels',
     loading: 'Loading channel…',
     meta: {
       connectionsOne: '1 connection open',
@@ -109,53 +69,10 @@ export const agentChannelsListEn = {
       failed: 'Some checks failed',
       dismiss: 'Dismiss',
     },
-    agents: {
-      title: 'Agents',
-      add: 'Add agent',
-      columns: {
-        agent: 'Agent',
-        where: 'Where',
-        who: 'Who',
-        enabled: 'On',
-        actions: 'Actions',
-      },
-      version: 'v{version}',
-      skipped: 'This agent is skipped until it is ready: the channel does not answer with it.',
-      where: {
-        dm: 'DM',
-        dmOnly: 'Direct messages only',
-        allChannels: 'All channels',
-        nowhere: 'Nowhere',
-      },
-      who: {
-        everyone: 'Everyone',
-        nobody: 'Nobody',
-        group: '{name} (group)',
-        unknownGroup: 'A group',
-        unknownPerson: 'A person',
-      },
-      more: '+{count}',
-      moreAria: '{count} more: {names}',
-      toggleAria: 'Answer with {name}',
-      toggleFailed: 'The agent could not be switched',
-      empty: {
-        title: 'No agents on this channel yet',
-        description: 'Add the published agents that should answer here.',
-      },
-      remove: {
-        title: 'Remove {name} from this channel?',
-        message: 'The agent stops answering here. The agent itself and its sessions stay in Console.',
-        done: 'Agent removed from the channel',
-      },
-    },
-    // The line under the agents table: where two agents would answer the same message.
-    overlap: {
-      dm: 'direct messages',
-      allChannels: 'every channel',
-      more: '{count} more',
-      line: 'In {places}, {count} agents are on ({agents}): the person is asked which one answers.',
-      moreGroups: '{count} more places have several agents on.',
-      note: 'A person is only asked about the agents they may use.',
+    access: {
+      title: 'Where and who',
+      where: 'Where it answers',
+      who: 'Who may use it',
     },
     people: {
       title: 'People matching',
@@ -171,8 +88,7 @@ export const agentChannelsListEn = {
         invalid: '“{value}” is not a domain name. Use something like example.com.',
       },
       notes: {
-        link: 'A person who cannot be matched gets a private, one-time login link, valid for 10 minutes.',
-        noAccount: 'A person without a Console account is told to ask their admin.',
+        noAccount: 'A person who cannot be matched to a Console user is told to ask their admin.',
       },
       saved: 'People matching updated',
     },
@@ -219,7 +135,7 @@ export const agentChannelsListEn = {
       sectionLanguageHint: "The language of the bot's own messages.",
       language: 'Language',
       languageAria: 'Bot language',
-      languageHint: "The bot writes login links, agent pickers and refusals in this language. Answers come in the agent's language.",
+      languageHint: "The bot writes its own messages (such as refusals) in this language. Answers come in the agent's language.",
       summary: {
         channel: 'Channel',
         platform: 'Platform',
@@ -234,5 +150,36 @@ export const agentChannelsListEn = {
       ready: '{done} of {total} ready',
       saved: 'Channel updated',
     },
+  },
+  // The cells the list and the channel page share (agent, where, who).
+  cells: {
+    agent: {
+      skipped: 'This agent is not ready: the channel does not answer until it is.',
+    },
+    where: {
+      dm: 'DM',
+      dmOnly: 'Direct messages only',
+      allChannels: 'All channels',
+      nowhere: 'Nowhere',
+    },
+    who: {
+      everyone: 'Everyone',
+      nobody: 'Nobody',
+      group: '{name} (group)',
+      unknownGroup: 'A group',
+      unknownPerson: 'A person',
+    },
+    more: '+{count}',
+    moreAria: '{count} more: {names}',
+  },
+  // The Channels section of an agent's Ship tab.
+  ship: {
+    title: 'Channels',
+    description: 'Slack and Microsoft Teams channels where this agent answers.',
+    add: 'Add channel',
+    empty: 'This agent is not connected to Slack or Microsoft Teams yet.',
+    loadFailed: 'The channels could not be loaded.',
+    retry: 'Try again',
+    openAria: 'Open {name}',
   },
 };

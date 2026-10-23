@@ -8,7 +8,6 @@ import { IconAlertTriangle, IconKey } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { requestJson } from '@/components/account/accountApi';
 import { parseMe, type AccountMe } from '@/components/account/accountModel';
-import EnterpriseAccountSections from '@/components/account/EnterpriseAccountSections';
 import PasswordCard from '@/components/account/PasswordCard';
 import ProfileCard from '@/components/account/ProfileCard';
 import { TOKENS_HREF } from '@/components/iam/links';
@@ -84,7 +83,6 @@ export default function AccountPage() {
               </Button>
             </Group>
           </Paper>
-          <EnterpriseAccountSections />
         </Stack>
       )}
     </PageContainer>

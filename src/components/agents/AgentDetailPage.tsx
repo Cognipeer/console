@@ -93,6 +93,7 @@ import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
+import EnterpriseAgentShipSections from './EnterpriseAgentShipSections';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
 import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
@@ -130,6 +131,7 @@ interface Agent {
   _id: string;
   tenantId: string;
   key: string;
+  projectId?: string;
   name: string;
   description?: string;
   // The API never returns the encrypted key — only whether one is stored.
@@ -235,6 +237,7 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   versions: { top: 'deploy', sub: 'versions' },
   publish: { top: 'deploy', sub: 'publish' },
   triggers: { top: 'deploy', sub: 'triggers' },
+  channels: { top: 'deploy', sub: 'channels' },
   // The section triggers replaced; old links land on it.
   schedules: { top: 'deploy', sub: 'triggers' },
   export: { top: 'deploy', sub: 'export' },
@@ -1801,6 +1804,10 @@ export default function AgentDetailPage() {
                   }}
                 />
               </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <EnterpriseAgentShipSections agentKey={agent.key} projectId={agent.projectId ? String(agent.projectId) : ''} agentName={agent.name} />
             ) : null}
 
             <ConfigSection

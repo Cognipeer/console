@@ -1,37 +1,17 @@
 import type { agentChannelsDeployEn } from './agentChannelsDeploy.en';
 
-/** Ajan kanalları: kanala ajan ekleme / düzenleme (nerede yanıtlar, kimler kullanır). Bkz. agentChannelsDeploy.en.ts. */
+/** Ajan kanalları: kanalın nerede yanıt vereceğini ve kimlerin kullanabileceğini düzenleme. Bkz. agentChannelsDeploy.en.ts. */
 export const agentChannelsDeployTr: typeof agentChannelsDeployEn = {
-  deploy: {
-    createTitle: '{name} kanalına ajan ekle',
-    editTitle: '{name} kanalındaki ajanı düzenle',
+  access: {
+    editTitle: 'Nerede ve kimler · {name}',
     subtitle: '{platform} · {workspace}',
-    create: 'Ajanı ekle',
     save: 'Değişiklikleri kaydet',
-    added: 'Ajan eklendi',
-    updated: 'Değişiklikler kaydedildi',
+    saved: 'Değişiklikler kaydedildi',
     ready: '{done} / {total} hazır',
-
-    agent: {
-      title: 'Ajan',
-      description: 'Yalnızca yayınlanmış ajanlar. Herhangi bir projeden olabilir.',
-      search: 'Ajan ara',
-      searchPlaceholder: 'Ad ya da proje',
-      list: 'Yayınlanmış ajanlar',
-      published: 'v{version} yayında',
-      alreadyHere: 'Bu kanalda zaten var',
-      publishedOnly: 'Burada ajanın her zaman yayınlanmış sürümü çalışır.',
-      loading: 'Ajanlar yükleniyor…',
-      loadFailed: 'Ajanlar yüklenemedi.',
-      none: 'Henüz yayınlanmış ajan yok. Önce birini yayınlayın, sonra buraya ekleyin.',
-      openAgents: 'Ajanları aç',
-      noMatch: '“{query}” ile eşleşen ajan yok.',
-      fixed: 'Ajan değiştirilemez. Başka bir ajan kullanmak için onu bu kanala ekleyip bunu kaldırın.',
-    },
 
     where: {
       title: 'Nerede yanıt versin?',
-      description: 'Her yerde kişilere, orada yanıt veren ve kullanma izni olan ajanlar sunulur.',
+      description: 'Kanal, bu yerlerde kullanma izni olan kişilere yanıt verir.',
       dm: 'Doğrudan mesajlar (DM)',
       dmHint: 'Kişiler bota özel sohbetten yazabilir.',
       channels: 'Kanallar (biri botu @ ile andığında)',
@@ -57,18 +37,18 @@ export const agentChannelsDeployTr: typeof agentChannelsDeployEn = {
 
     who: {
       title: 'Kimler kullanabilir?',
-      description: 'Diğer kişilere burada kendileri için ajan olmadığı söylenir.',
+      description: 'Diğer kişilere yöneticilerine başvurmaları söylenir.',
       mode: 'Erişim',
       everyone: 'Herkes',
       selected: 'Seçili gruplar ve kişiler',
-      everyoneHint: 'Herkes = sohbet hesabı Console’a bağlı tüm kişiler.',
+      everyoneHint: 'Herkes = doğrulanmış e-postası bir Console kullanıcısıyla eşleşen tüm kişiler.',
       groups: 'Gruplar',
       groupsPlaceholder: 'Grup ara',
       users: 'Kişiler',
       usersPlaceholder: 'Ada veya e-postaya göre kişi ara',
-      nobody: 'Grup veya kişi seçilmedi: bu ajanı kimse kullanamaz.',
+      nobody: 'Grup veya kişi seçilmedi: bu kanalı kimse kullanamaz.',
       tooMany: 'Listede en fazla {max} grup ve kişi olabilir.',
-      policyNote: 'Liste, bu ajanın kanaldaki yerleşik erişim kuralıdır (portallardaki gibi). IAM’deki engelleme kuralları kişileri yine de engelleyebilir.',
+      policyNote: 'Liste, ajanın bu kanaldaki yerleşik erişim kuralıdır (portallardaki gibi). IAM’deki engelleme kuralları kişileri yine de engelleyebilir.',
       openIam: 'IAM’i aç',
       missing: 'Artık yok: {names}.',
       dropMissing: 'Listeden kaldır',
@@ -82,36 +62,19 @@ export const agentChannelsDeployTr: typeof agentChannelsDeployEn = {
       body: 'Onay gerektiren araçlar, ajanın kimsenin yanıtlayamadığı çalıştırmalar için belirlediği kurala uyar. “Duraklat” ise onay Studio’da verilir, sonuç thread’e yazılır.',
       link: 'Ajan ayarlarında değiştir',
     },
-    enabled: {
-      label: 'Açık',
-      description: 'Ayarlar kalsın, şimdilik yanıt vermesin diye kapatın.',
-    },
 
     summary: {
       title: 'Özet',
-      agent: 'Ajan',
-      agentVersion: '{name} (v{version})',
       where: 'Nerede',
       who: 'Kimler',
-      status: 'Durum',
       dm: 'DM',
       allChannels: 'Tüm kanallar',
       everyone: 'Herkes',
       nobody: 'Henüz kimse',
-      on: 'Açık',
-      off: 'Kapalı',
-      offNote: 'Kapalı: siz açana kadar ajan hiçbir yerde yanıt vermez.',
       more: '+{count} daha',
-    },
-    overlap: {
-      title: 'Diğer ajanlarla ortak yerler',
-      dm: 'doğrudan mesajlar',
-      allChannels: 'tüm kanallar',
-      note: 'İkisini de kullanabilen kişilere hangisinin yanıtlayacağı sorulur. Seçimleri o thread için hatırlanır.',
     },
     checks: {
       title: 'Kontrol listesi',
-      agent: 'Ajan seçildi',
       where: 'Yanıt verilecek yer',
       who: 'Kimlerin kullanacağı',
     },

@@ -46,7 +46,6 @@ const SEGMENT_KEYS: Record<string, string> = {
   providers: 'providers',
   tokens: 'tokens',
   webhooks: 'webhooks',
-  channels: 'channels',
   incidents: 'incidents',
   guardrails: 'guardrails',
   pii: 'pii',
