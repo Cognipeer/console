@@ -73,7 +73,27 @@ type LoginBody = {
   email?: string;
   password?: string;
   slug?: string;
+  /**
+   * The workspace a portal's own address belongs to (the login page passes it on). Unlike `slug` it
+   * only decides which of the person's workspaces is tried first with the password; it never selects
+   * an external authenticator, so a link cannot send a typed password to another workspace's directory.
+   */
+  workspace?: string;
 };
+
+/** The person's workspaces, the hinted one (by slug) first; the order is otherwise kept. */
+async function preferWorkspace<T extends { tenantId: string }>(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  entries: T[],
+  workspace: string | undefined,
+): Promise<T[]> {
+  const slug = typeof workspace === 'string' ? workspace.trim().toLowerCase() : '';
+  if (!slug || entries.length < 2) return entries;
+  const hinted = await db.findTenantBySlug(slug);
+  const hintedId = hinted?._id ? String(hinted._id) : '';
+  if (!hintedId) return entries;
+  return [...entries.filter((e) => e.tenantId === hintedId), ...entries.filter((e) => e.tenantId !== hintedId)];
+}
 
 type RegisterBody = {
   accessCode?: string;
@@ -272,7 +292,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           .send({ error: 'Too many login attempts. Please try again later.' });
       }
 
-      const { email, password, slug } = readJsonBody<LoginBody>(request);
+      const { email, password, slug, workspace } = readJsonBody<LoginBody>(request);
       if (!email || !password) {
         return reply
           .code(400)
@@ -351,7 +371,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
         user = slugAuthResult;
       } else {
-        const tenantEntries = await db.listTenantsForUser(normalizedEmail);
+        const tenantEntries = await preferWorkspace(db, await db.listTenantsForUser(normalizedEmail), workspace);
         const checkedTenantIds = new Set<string>();
 
         for (const entry of tenantEntries) {

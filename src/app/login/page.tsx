@@ -4,6 +4,7 @@ import { Suspense, useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
+  Alert,
   Button,
   Center,
   Divider,
@@ -24,6 +25,12 @@ import AuthShell from '@/components/layout/AuthShell';
 import { ssoErrorMessageKey, ssoErrorNeedsAdmin } from '@/lib/auth/ssoLoginErrors';
 import { useTranslations } from '@/lib/i18n';
 import { assignIfPortal, buildChangePasswordPath, buildLoginPath, safeReturnTo } from '@/lib/security/returnTo';
+
+/** A workspace slug as a link may carry it (`?workspace=`), or '' for anything else. */
+function workspaceHint(value: string | null): string {
+  const slug = (value ?? '').trim().toLowerCase();
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug) ? slug : '';
+}
 
 type SsoDiscovery =
   | { available: false }
@@ -48,6 +55,12 @@ function LoginPageContent() {
   const returnTo = safeReturnTo(searchParams.get('returnTo'));
   const afterLoginPath = (mustChangePassword?: boolean) =>
     mustChangePassword ? buildChangePasswordPath(returnTo) : returnTo;
+  // The sign-in of a portal's own address names the workspace the portal belongs to: a password
+  // sign-in tries the account there first (only an order, never a choice of authenticator).
+  // `prompt=login`: the person is signed in to another workspace, so the form is shown instead
+  // of passing straight on with the session they have.
+  const workspace = workspaceHint(searchParams.get('workspace'));
+  const promptLogin = searchParams.get('prompt') === 'login';
 
   const form = useForm({
     initialValues: { email: '', password: '' },
@@ -60,6 +73,10 @@ function LoginPageContent() {
   });
 
   useEffect(() => {
+    if (promptLogin) {
+      setCheckingAuth(false);
+      return;
+    }
     const checkAuth = async () => {
       try {
         const response = await fetch('/api/auth/session', {
@@ -80,7 +97,7 @@ function LoginPageContent() {
       }
     };
     void checkAuth();
-  }, [router, returnTo]);
+  }, [router, returnTo, promptLogin]);
 
   useEffect(() => {
     const discover = async () => {
@@ -144,6 +161,7 @@ function LoginPageContent() {
         body: JSON.stringify({
           email: values.email.trim().toLowerCase(),
           password: values.password,
+          ...(workspace ? { workspace } : {}),
         }),
       });
       const data = await response.json();
@@ -248,6 +266,11 @@ function LoginPageContent() {
       ) : (
         <form onSubmit={form.onSubmit(handleSubmit)}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {promptLogin ? (
+              <Alert color="blue" variant="light">
+                {t('otherWorkspace')}
+              </Alert>
+            ) : null}
             <TextInput
               label={t('form.email.label')}
               placeholder={t('form.email.placeholder')}

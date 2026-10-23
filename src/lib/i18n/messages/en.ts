@@ -525,6 +525,8 @@ export const en = {
       },
       submit: 'Sign In',
     },
+    otherWorkspace:
+      'You are signed in to another workspace. To open this portal, sign in with your account in the workspace it belongs to.',
     sso: {
       button: 'Sign in with SSO',
       divider: 'or',

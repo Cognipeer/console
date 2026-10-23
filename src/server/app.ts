@@ -3,13 +3,34 @@ import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import { drainAgentRunsBeforeHttpClose } from './httpShutdown';
 import { createLogger } from '@/lib/core/logger';
+import { isPortalHostApiPath, matchPortalHost, requestHostOf } from '@/lib/portalHost/host';
+import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import cookie from '@fastify/cookie';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import next from 'next';
 import { fastifyApiPlugin } from './api/plugin';
 import { bootstrapApplication } from './bootstrap';
 
 const logger = createLogger('server');
+
+/**
+ * A portal host (see `@/lib/portalHost/host`) serves the portal and nothing else. Of the API only the
+ * portal runtime and its own sign-in answer there (the middleware does the same for the pages), so a
+ * Console API reached through a portal host's name is a 404, whatever credentials the request carries.
+ * The embed's frame (`/api-embed/...`, which the middleware does not see) is the Console host's too.
+ */
+export async function portalHostApiGuard(request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> {
+  const header = (name: string) => {
+    const value = request.headers[name];
+    return Array.isArray(value) ? value[0] : value;
+  };
+  if (!matchPortalHost(requestHostOf(header))) return undefined;
+  const path = canonicalizeRequestPathname(request.raw.url);
+  if ((path === '/api' || path.startsWith('/api/') || path.startsWith('/api-embed/')) && !isPortalHostApiPath(path)) {
+    return reply.code(404).send({ error: `No route ${request.method} ${path}`, type: 'not_found', code: 'route_not_found' });
+  }
+  return undefined;
+}
 
 /**
  * Fastify's `trustProxy` accepts a boolean or an IP/CIDR list.
@@ -181,6 +202,7 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
 
   const app = createFastifyInstance();
 
+  app.addHook('onRequest', portalHostApiGuard);
   await app.register(cookie);
   registerBodyParsers(app);
   await app.register(fastifyApiPlugin, { prefix: '/api' });

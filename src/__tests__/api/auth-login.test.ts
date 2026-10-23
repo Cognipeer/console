@@ -284,6 +284,30 @@ describe('POST /api/auth/login', () => {
       expect(body.message).toBe('Login successful');
     });
 
+    it('tries the workspace a portal address names first, with the password and nothing else', async () => {
+      const beta = { ...mockTenant, _id: 'tenant-2', slug: 'beta', dbName: 'tenant_beta', companyName: 'Beta' };
+      db.listTenantsForUser.mockResolvedValue([
+        { tenantId: 'tenant-1', tenantSlug: 'acme-corp', tenantDbName: 'tenant_acme-corp', tenantCompanyName: 'Acme Corp', email: 'admin@acme.com' },
+        { tenantId: 'tenant-2', tenantSlug: 'beta', tenantDbName: 'tenant_beta', tenantCompanyName: 'Beta', email: 'admin@acme.com' },
+      ]);
+      db.findTenantBySlug.mockResolvedValue(beta);
+      db.findTenantById.mockImplementation(async (id: string) => (id === 'tenant-2' ? beta : mockTenant));
+      db.findUserByEmail.mockResolvedValue({ ...mockUser, tenantId: 'tenant-2' });
+
+      const res = await login({ email: 'admin@acme.com', password: 'password123', workspace: 'beta' });
+      expect(res.statusCode).toBe(200);
+      // The directory search ran (no slug sign-in, so no external authenticator), the hinted workspace first.
+      expect(db.findTenantById.mock.calls[0]?.[0]).toBe('tenant-2');
+      expect(TokenManager.generateToken).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-2', tenantSlug: 'beta' }));
+    });
+
+    it('keeps the usual order for a hint that names no workspace of the person', async () => {
+      db.findTenantBySlug.mockResolvedValue(null);
+      const res = await login({ email: 'admin@acme.com', password: 'password123', workspace: 'nowhere' });
+      expect(res.statusCode).toBe(200);
+      expect(TokenManager.generateToken).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-1' }));
+    });
+
     it('returns 401 when user not found in any tenant', async () => {
       db.listTenantsForUser.mockResolvedValue([]);
       db.listTenants.mockResolvedValue([]);

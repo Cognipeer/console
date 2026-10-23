@@ -416,6 +416,18 @@ How long logs are kept and how the central retention engine runs. See [Data Rete
 | `PROVIDER_RUNTIME_CACHE_TTL_SECONDS` | Runtime pool entry TTL. `0` turns expiry off (entries are still replaced when a provider's configuration changes). | `300` |
 | `PROVIDER_RUNTIME_DISPOSE_GRACE_SECONDS` | How long an evicted runtime keeps its connections open before they are closed, so a request that still holds it can finish. `0` closes immediately. See [Runtime Pool](/guide/core-runtime-pool). | `300` |
 
+### Portal Address
+
+Enterprise portals open at `/p/{portalKey}` on the Console host. With one of these settings they get an address of their own, and `/p` links are sent on to it.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORTAL_BASE_DOMAIN` | Each workspace's portals at `https://<workspace slug>.<base>/{portalKey}`, with the portal chooser at `/`. Needs a wildcard DNS record and certificate for `*.<base>`. Must not contain the Console host (`APP_URL`). | *(empty)* |
+| `PORTAL_HOST` | One fixed host without a wildcard, for example `assistant.example.com`. Must not be the Console host. | *(empty)* |
+| `PORTAL_HOST_TENANT` | The slug of the workspace `PORTAL_HOST` serves. Empty: the workspace of the person's session, as `/p` does. | *(empty)* |
+
+People still sign in on the Console host (password, LDAP and SSO are unchanged, so identity providers need no new redirect URI). The portal host keeps its own session cookie, and signing out there also ends the Console session.
+
 ### Files
 
 | Variable | Description | Default |
