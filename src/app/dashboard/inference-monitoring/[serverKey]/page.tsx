@@ -8,7 +8,6 @@ import {
   Center,
   Group,
   Loader,
-  Modal,
   NumberInput,
   Paper,
   SimpleGrid,
@@ -31,6 +30,7 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import DetailShell from '@/components/common/ui/DetailShell';
+import FormShell, { FormField, FormSection } from '@/components/common/ui/FormShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
@@ -596,40 +596,42 @@ export default function InferenceServerDetailPage() {
         </Paper>
       ) : null}
 
-      {/* Edit Modal */}
-      <Modal opened={editOpened} onClose={editHandlers.close} title={t('editServer')} size="md">
-        <form onSubmit={editForm.onSubmit(handleEdit)}>
-          <Stack gap="md">
+      {/* Edit Server */}
+      <FormShell
+        open={editOpened}
+        onClose={editHandlers.close}
+        title={t('editServer')}
+        icon={<IconEdit size={18} />}
+        primaryAction={{
+          label: 'Save',
+          loading: saving,
+          disabled: saving,
+          onClick: () => { void editForm.onSubmit(handleEdit)(); },
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: editHandlers.close }}
+      >
+        <FormSection number={1} title={t('serverDetail.title')}>
+          <FormField label={t('serverName')} required>
+            <TextInput {...editForm.getInputProps('name')} />
+          </FormField>
+          <FormField label={t('baseUrl')} required>
+            <TextInput {...editForm.getInputProps('baseUrl')} />
+          </FormField>
+          <FormField label={t('apiKey')} optional>
             <TextInput
-              label={t('serverName')}
-              required
-              {...editForm.getInputProps('name')}
-            />
-            <TextInput
-              label={t('baseUrl')}
-              required
-              {...editForm.getInputProps('baseUrl')}
-            />
-            <TextInput
-              label={t('apiKey')}
               placeholder={t('form.apiKeyPlaceholder')}
               {...editForm.getInputProps('apiKey')}
             />
+          </FormField>
+          <FormField label={t('pollInterval')} hint={t('form.pollIntervalHelp')}>
             <NumberInput
-              label={t('pollInterval')}
-              description={t('form.pollIntervalHelp')}
               min={10}
               max={3600}
               {...editForm.getInputProps('pollIntervalSeconds')}
             />
-            <Group justify="flex-end" mt="md">
-              <Button variant="light" onClick={editHandlers.close}>Cancel</Button>
-              <Button type="submit" loading={saving}>Save</Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
-
+          </FormField>
+        </FormSection>
+      </FormShell>
     </DetailShell>
   );
 }

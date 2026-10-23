@@ -369,7 +369,7 @@ export default function AlertsPage() {
           <Text size="sm" fw={600} lineClamp={1}>
             {rule.name}
             {rule.template ? (
-              <Badge size="xs" variant="outline" color="gray" ml={6} style={{ verticalAlign: 'middle' }}>
+              <Badge component="span" size="xs" variant="outline" color="gray" ml={6} style={{ verticalAlign: 'middle' }}>
                 {t('templates.templateBadge')}
               </Badge>
             ) : null}

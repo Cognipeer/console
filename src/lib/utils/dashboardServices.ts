@@ -321,6 +321,20 @@ export const DASHBOARD_SUBPAGES: ReadonlyArray<DashboardSubpage> = [
 export const ALL_DASHBOARD_SERVICES: ReadonlyArray<DashboardServiceDefinition> =
   DASHBOARD_SERVICE_DEFINITIONS;
 
+/**
+ * Enterprise pages that sit outside their module's service href, with the module whose upsell they
+ * show (Abacus is the cost module's recommendation engine; its API is the `abacus` module).
+ */
+const ENTERPRISE_PAGES_OUTSIDE_SERVICE: ReadonlyArray<readonly [string, string]> = [['/dashboard/abacus', 'cost']];
+
+/** The enterprise module that owns a dashboard page, if any (the service with `enterpriseModule` it lives under). */
+export function enterpriseModuleForPath(pathname: string): string | undefined {
+  const under = (prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
+  const service = DASHBOARD_SERVICE_DEFINITIONS.find((s) => s.enterpriseModule && under(s.href));
+  if (service) return service.enterpriseModule;
+  return ENTERPRISE_PAGES_OUTSIDE_SERVICE.find(([prefix]) => under(prefix))?.[1];
+}
+
 /** Lookup by service id. */
 export function findDashboardService(
   id: string,

@@ -82,7 +82,16 @@ export default function DetailShell({
         </Tooltip>
         {icon ? <div className="detail-icon">{icon}</div> : null}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="detail-title-row">{title}</div>
+          <div className="detail-title-row">
+            {/* A plain-text title gets the page heading the composed titles bring themselves. */}
+            {typeof title === 'string' || typeof title === 'number' ? (
+              <h1 className="ds-h2" style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>
+                {title}
+              </h1>
+            ) : (
+              title
+            )}
+          </div>
           {meta ? <div className="detail-meta-row">{meta}</div> : null}
         </div>
         {actions ? (

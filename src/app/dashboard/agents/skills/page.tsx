@@ -2,7 +2,7 @@
 
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -22,6 +22,7 @@ import type { SkillView } from '@/components/skills/types';
 
 export default function SkillsPage() {
   const tConfirm = useTranslations('common.confirm');
+  const tFeedback = useTranslations('navigationFeedback');
   const deleteResource = useDeleteResource();
   const [skills, setSkills] = useState<SkillView[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,24 +31,25 @@ export default function SkillsPage() {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
-  const loadSkills = async () => {
+  const loadSkills = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/skills', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setSkills(data.skills ?? []);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSkills(data.skills ?? []);
     } catch (err) {
       console.error('Failed to load skills', err);
+      // An empty list would read as "none yet"; say the load failed instead.
+      notifications.show({ color: 'red', message: tFeedback('loadFailed') });
     } finally {
       setLoading(false);
     }
-  };
+  }, [tFeedback]);
 
   useEffect(() => {
     void loadSkills();
-  }, []);
+  }, [loadSkills]);
 
   const toggleStatus = async (skill: SkillView) => {
     try {

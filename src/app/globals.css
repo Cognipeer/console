@@ -1716,11 +1716,20 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   margin-bottom: 14px;
 }
 .form-row:last-child { margin-bottom: 0; }
+/* Phones: side-by-side fields stack (FormRow sets its columns inline, hence !important). */
+@media (max-width: 640px) {
+  .form-row { grid-template-columns: minmax(0, 1fr) !important; }
+}
 
 .form-field {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+/* Fields stacked straight in a section (not in a FormRow) get the row rhythm; without it a label sat on the input above. */
+.form-section-body > .form-field + .form-field,
+.form-section-body > .form-field + .form-row {
+  margin-top: 14px;
 }
 .form-field-label {
   display: flex;

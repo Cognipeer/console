@@ -9,6 +9,8 @@ import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { isSupportEntryPointEnabled } from '@/lib/services/support/supportHandoff';
+import { LicenseManager } from '@/lib/license/license-manager';
+import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 
 interface DashboardRouteLayoutProps {
   children: ReactNode;
@@ -68,10 +70,22 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
     }
   }
 
+  // The same live license the API guard decides enterprise routes by, so an enterprise page is
+  // offered as an upsell instead of loading into a row of 402s. Unknown (lookup failed) gates nothing.
+  const enterpriseLicensed = await (async () => {
+    try {
+      const license = await resolveLiveLicenseForTenant(tenantId);
+      return LicenseManager.isEnterpriseActive(license.licenseType, license.licenseExpiresAt);
+    } catch {
+      return undefined;
+    }
+  })();
+
   return (
     <DashboardLayout
       supportEnabled={isSupportEntryPointEnabled()}
       isOnPrem={getConfig().deployment.isOnPrem}
+      enterpriseLicensed={enterpriseLicensed}
       user={{
         name: user.name || (email ? email.split('@')[0] : 'Account'),
         email,

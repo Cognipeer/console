@@ -47,6 +47,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import FormShell, { FormField, FormSection } from '@/components/common/ui/FormShell';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import type { ToolView, ToolRequestLogView } from '@/lib/services/tools';
 import type { IToolAction } from '@/lib/database';
@@ -1162,78 +1163,99 @@ export default function ToolDetailPage() {
         )}
       </Modal>
 
-      {/* ── Edit Modal ── */}
-      <Modal
-        opened={editOpen}
+      {/* ── Edit Tool ── */}
+      <FormShell
+        open={editOpen}
         onClose={() => setEditOpen(false)}
-        title="Edit Tool"
-        centered
-        size="lg"
+        icon={<IconSettings size={16} />}
+        title="Edit tool"
+        subtitle={tool.name}
+        primaryAction={{
+          label: 'Save',
+          loading: saving,
+          disabled: !form.values.name.trim(),
+          onClick: () => void handleSave(),
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: () => setEditOpen(false) }}
       >
-        <Stack gap="md">
-          <TextInput label="Name" required {...form.getInputProps('name')} />
-          <Textarea label="Description" rows={2} {...form.getInputProps('description')} />
+        <FormSection number={1} title="Details" description="How this tool is named and where it connects.">
+          <FormField label="Name" required>
+            <TextInput {...form.getInputProps('name')} />
+          </FormField>
+          <FormField label="Description" optional>
+            <Textarea rows={2} {...form.getInputProps('description')} />
+          </FormField>
 
           {tool.type === 'openapi' && (
-            <TextInput
-              label="Upstream Base URL"
-              placeholder="https://api.example.com"
-              {...form.getInputProps('upstreamBaseUrl')}
-            />
+            <FormField label="Upstream Base URL" optional>
+              <TextInput
+                placeholder="https://api.example.com"
+                {...form.getInputProps('upstreamBaseUrl')}
+              />
+            </FormField>
           )}
 
           {tool.type === 'mcp' && (
             <>
-              <TextInput
-                label="MCP Endpoint"
-                placeholder="https://mcp-server.example.com/mcp"
-                {...form.getInputProps('mcpEndpoint')}
-              />
-              <Select
-                label="Transport"
-                data={[
-                  { value: 'streamable-http', label: 'Streamable HTTP' },
-                  { value: 'sse', label: 'SSE' },
-                ]}
-                {...form.getInputProps('mcpTransport')}
-              />
+              <FormField label="MCP Endpoint">
+                <TextInput
+                  placeholder="https://mcp-server.example.com/mcp"
+                  {...form.getInputProps('mcpEndpoint')}
+                />
+              </FormField>
+              <FormField label="Transport">
+                <Select
+                  data={[
+                    { value: 'streamable-http', label: 'Streamable HTTP' },
+                    { value: 'sse', label: 'SSE' },
+                  ]}
+                  {...form.getInputProps('mcpTransport')}
+                />
+              </FormField>
             </>
           )}
+        </FormSection>
 
-          <Select
-            label="Update Authentication"
-            description="Leave as 'None' to keep existing auth unchanged"
-            data={[
-              { value: 'none', label: 'None (keep existing)' },
-              { value: 'token', label: 'Bearer Token' },
-              { value: 'header', label: 'Custom Header' },
-              { value: 'basic', label: 'Basic Auth' },
-            ]}
-            {...form.getInputProps('authType')}
-          />
+        <FormSection number={2} title="Authentication" description="Leave as 'None' to keep existing auth unchanged.">
+          <FormField label="Update Authentication">
+            <Select
+              data={[
+                { value: 'none', label: 'None (keep existing)' },
+                { value: 'token', label: 'Bearer Token' },
+                { value: 'header', label: 'Custom Header' },
+                { value: 'basic', label: 'Basic Auth' },
+              ]}
+              {...form.getInputProps('authType')}
+            />
+          </FormField>
 
           {form.values.authType === 'token' && (
-            <PasswordInput label="Bearer Token" {...form.getInputProps('authToken')} />
+            <FormField label="Bearer Token">
+              <PasswordInput {...form.getInputProps('authToken')} />
+            </FormField>
           )}
           {form.values.authType === 'header' && (
             <>
-              <TextInput label="Header Name" {...form.getInputProps('authHeaderName')} />
-              <PasswordInput label="Header Value" {...form.getInputProps('authHeaderValue')} />
+              <FormField label="Header Name">
+                <TextInput {...form.getInputProps('authHeaderName')} />
+              </FormField>
+              <FormField label="Header Value">
+                <PasswordInput {...form.getInputProps('authHeaderValue')} />
+              </FormField>
             </>
           )}
           {form.values.authType === 'basic' && (
             <>
-              <TextInput label="Username" {...form.getInputProps('authUsername')} />
-              <PasswordInput label="Password" {...form.getInputProps('authPassword')} />
+              <FormField label="Username">
+                <TextInput {...form.getInputProps('authUsername')} />
+              </FormField>
+              <FormField label="Password">
+                <PasswordInput {...form.getInputProps('authPassword')} />
+              </FormField>
             </>
           )}
-
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button loading={saving} onClick={handleSave}>Save</Button>
-          </Group>
-        </Stack>
-      </Modal>
+        </FormSection>
+      </FormShell>
     </>
   );
 }

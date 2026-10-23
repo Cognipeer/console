@@ -28,6 +28,7 @@ const MODULE_LABELS: Record<string, string> = {
   ldap: 'LDAP Directory',
   portals: 'Portals',
   health: 'Entity Health',
+  cost: 'Cost & Optimization',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {
@@ -48,7 +49,7 @@ export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {
       <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: 1, opacity: 0.6, textTransform: 'uppercase' }}>
         Enterprise
       </div>
-      <h2 style={{ margin: 0 }}>{label} is an Enterprise feature</h2>
+      <h1 className="ds-h1" style={{ margin: 0 }}>{label} is an Enterprise feature</h1>
       <p style={{ maxWidth: 520, opacity: 0.75 }}>
         This module is available in the Cognipeer Console Enterprise edition. Activate an
         Enterprise license to enable {label}.
@@ -56,7 +57,7 @@ export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {
       <Link
         href="/dashboard/license"
         style={{
-          background: '#111',
+          background: 'var(--ds-accent)',
           borderRadius: 8,
           color: '#fff',
           fontWeight: 600,

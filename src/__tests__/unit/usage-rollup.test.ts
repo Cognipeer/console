@@ -13,12 +13,16 @@ import path from 'node:path';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 
 let provider: SQLiteProvider;
+let databaseDown = false;
 
 vi.mock('@/lib/database', async () => {
   const actual = await vi.importActual<typeof import('@/lib/database')>('@/lib/database');
   return {
     ...actual,
-    getDatabase: async () => provider,
+    getDatabase: async () => {
+      if (databaseDown) throw new Error('database unavailable');
+      return provider;
+    },
   };
 });
 
@@ -124,5 +128,31 @@ describe('usage rollup end-to-end', () => {
     expect(rows[0].apiTokenId).toBe('');
     expect(rows[0].source).toBe('system');
     expect(rows[0].units).toMatchObject({ runtimeMinutes: 12 });
+  });
+
+  it('keeps the rows buffered when the database is unavailable and writes them on the next flush', async () => {
+    recordUsageEvent({
+      tenantDbName: TENANT_DB,
+      tenantId: 't-1',
+      projectId: 'proj-7',
+      service: 'crawler',
+      refKey: 'crawl-1',
+      status: 'success',
+      attribution: { userId: 'owner-2', actorType: 'system' },
+    });
+
+    databaseDown = true;
+    try {
+      await expect(flushUsageRollup()).resolves.toBeUndefined();
+    } finally {
+      databaseDown = false;
+    }
+
+    await flushUsageRollup();
+
+    await provider.switchToTenant(TENANT_DB);
+    const rows = await provider.listUsageDaily({ service: 'crawler' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].requests).toBe(1);
   });
 });

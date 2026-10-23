@@ -91,7 +91,7 @@ export default function TopbarV2({
         <Image
           src="/images/cognipeer-logo-d.png"
           alt="Cognipeer"
-          width={130}
+          width={125}
           height={28}
           className={classes.logoDark}
           priority
@@ -99,7 +99,7 @@ export default function TopbarV2({
         <Image
           src="/images/cognipeer-logo-w.png"
           alt="Cognipeer"
-          width={130}
+          width={125}
           height={28}
           className={classes.logoLight}
           priority

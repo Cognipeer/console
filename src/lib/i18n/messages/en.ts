@@ -461,7 +461,7 @@ export const en = {
     guardrails: 'Guardrail',
     pii: 'PII Service',
     alerts: 'Alerts & Incidents',
-    cost: 'Cost Management',
+    cost: 'Cost & Optimization',
     automations: 'Automations',
     cluster: 'Cluster',
     nodes: 'Nodes',

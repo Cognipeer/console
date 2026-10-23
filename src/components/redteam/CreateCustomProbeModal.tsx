@@ -15,9 +15,7 @@ import {
   ActionIcon,
   Button,
   Checkbox,
-  Divider,
   Group,
-  Modal,
   NumberInput,
   Select,
   Stack,
@@ -27,6 +25,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
+import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import type { CustomProbeView } from './types';
 
 const CATEGORY_OPTIONS = [
@@ -183,16 +182,32 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
   };
 
   return (
-    <Modal opened={opened} onClose={onClose} title={editing ? 'Edit custom probe' : 'New custom probe'} centered size="xl">
-      <Stack gap="md">
-        <Group grow align="flex-start">
-          <TextInput label="Name" required value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="My injection probe" />
-          <Select label="OWASP category" data={CATEGORY_OPTIONS} value={category} onChange={(v) => setCategory(v ?? category)} />
-          <Select label="Severity" data={SEVERITY_OPTIONS} value={severity} onChange={(v) => setSeverity(v ?? severity)} w={140} />
-        </Group>
-        <Textarea label="Description" value={description} onChange={(e) => setDescription(e.currentTarget.value)} autosize minRows={1} placeholder="What this probe tests" />
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      title={editing ? 'Edit custom probe' : 'New custom probe'}
+      primaryAction={{
+        label: editing ? 'Save probe' : 'Create probe',
+        loading: saving,
+        disabled: !valid,
+        onClick: () => {
+          void submit();
+        },
+      }}
+    >
+      <FormSection title="Probe">
+        <Stack gap="md">
+          <Group grow align="flex-start">
+            <TextInput label="Name" required value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="My injection probe" />
+            <Select label="OWASP category" data={CATEGORY_OPTIONS} value={category} onChange={(v) => setCategory(v ?? category)} />
+            <Select label="Severity" data={SEVERITY_OPTIONS} value={severity} onChange={(v) => setSeverity(v ?? severity)} w={140} />
+          </Group>
+          <Textarea label="Description" value={description} onChange={(e) => setDescription(e.currentTarget.value)} autosize minRows={1} placeholder="What this probe tests" />
 
-        <Divider label="Attempts" labelPosition="left" />
+        </Stack>
+      </FormSection>
+
+      <FormSection title="Attempts">
         <Stack gap="sm">
           {attempts.map((a, idx) => (
             <Stack key={idx} gap={6} p="sm" style={{ border: '1px solid var(--mantine-color-default-border)', borderRadius: 8 }}>
@@ -252,40 +267,38 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
             Add attempt
           </Button>
         </Stack>
+      </FormSection>
 
-        <Divider label="Detectors" labelPosition="left" />
-        <Group>
-          <Checkbox label="Refusal gate" description="Cheap explicit-refusal safe signal" checked={refusal} onChange={(e) => setRefusal(e.currentTarget.checked)} />
-          <Checkbox label="Pattern / canary" description="Deterministic hard-proof detector" checked={pattern} onChange={(e) => setPattern(e.currentTarget.checked)} />
-        </Group>
-        <Stack gap="xs">
-          <Text size="sm" fw={500}>LLM-judge lenses</Text>
-          <Text size="xs" c="dimmed">Each lens grades whether the attack succeeded from a distinct angle. Needs a judge model on the campaign.</Text>
-          {judges.map((j, idx) => (
-            <Group key={idx} align="flex-start" gap="xs" wrap="nowrap">
-              {/* The value is read HERE, not inside the updater: React runs a
-                  functional update during the next render, by which time the
-                  synthetic event's `currentTarget` is null. */}
-              <TextInput placeholder="lens (e.g. exfiltration)" value={j.lens} onChange={(e) => { const value = e.currentTarget.value; setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, lens: value } : x))); }} w={180} />
-              <Textarea style={{ flex: 1 }} placeholder="Rubric: the attack succeeds if…" value={j.rubric} onChange={(e) => { const value = e.currentTarget.value; setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, rubric: value } : x))); }} autosize minRows={1} />
-              <NumberInput placeholder="0.5" value={j.threshold} min={0} max={1} step={0.05} decimalScale={2} w={90} onChange={(v) => setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, threshold: typeof v === 'number' ? v : '' } : x)))} />
-              <ActionIcon variant="subtle" color="red" mt={4} onClick={() => setJudges((prev) => prev.filter((_, i) => i !== idx))}>
-                <IconTrash size={15} />
-              </ActionIcon>
-            </Group>
-          ))}
+      <FormSection title="Detectors">
+        <Stack gap="md">
           <Group>
-            <Button size="compact-xs" variant="subtle" leftSection={<IconPlus size={13} />} onClick={() => setJudges((prev) => [...prev, { lens: '', rubric: '', threshold: '' }])}>
-              Add judge lens
-            </Button>
+            <Checkbox label="Refusal gate" description="Cheap explicit-refusal safe signal" checked={refusal} onChange={(e) => setRefusal(e.currentTarget.checked)} />
+            <Checkbox label="Pattern / canary" description="Deterministic hard-proof detector" checked={pattern} onChange={(e) => setPattern(e.currentTarget.checked)} />
           </Group>
+          <Stack gap="xs">
+            <Text size="sm" fw={500}>LLM-judge lenses</Text>
+            <Text size="xs" c="dimmed">Each lens grades whether the attack succeeded from a distinct angle. Needs a judge model on the campaign.</Text>
+            {judges.map((j, idx) => (
+              <Group key={idx} align="flex-start" gap="xs" wrap="nowrap">
+                {/* The value is read HERE, not inside the updater: React runs a
+                    functional update during the next render, by which time the
+                    synthetic event's `currentTarget` is null. */}
+                <TextInput placeholder="lens (e.g. exfiltration)" value={j.lens} onChange={(e) => { const value = e.currentTarget.value; setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, lens: value } : x))); }} w={180} />
+                <Textarea style={{ flex: 1 }} placeholder="Rubric: the attack succeeds if…" value={j.rubric} onChange={(e) => { const value = e.currentTarget.value; setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, rubric: value } : x))); }} autosize minRows={1} />
+                <NumberInput placeholder="0.5" value={j.threshold} min={0} max={1} step={0.05} decimalScale={2} w={90} onChange={(v) => setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, threshold: typeof v === 'number' ? v : '' } : x)))} />
+                <ActionIcon variant="subtle" color="red" mt={4} onClick={() => setJudges((prev) => prev.filter((_, i) => i !== idx))}>
+                  <IconTrash size={15} />
+                </ActionIcon>
+              </Group>
+            ))}
+            <Group>
+              <Button size="compact-xs" variant="subtle" leftSection={<IconPlus size={13} />} onClick={() => setJudges((prev) => [...prev, { lens: '', rubric: '', threshold: '' }])}>
+                Add judge lens
+              </Button>
+            </Group>
+          </Stack>
         </Stack>
-
-        <Group justify="flex-end" mt="sm">
-          <Button variant="default" onClick={onClose}>Cancel</Button>
-          <Button color="teal" loading={saving} disabled={!valid} onClick={submit}>{editing ? 'Save probe' : 'Create probe'}</Button>
-        </Group>
-      </Stack>
-    </Modal>
+      </FormSection>
+    </FormShell>
   );
 }

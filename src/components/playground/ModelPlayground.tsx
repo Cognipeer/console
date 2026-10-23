@@ -140,12 +140,16 @@ export default function ModelPlayground({
       const reader = res.body?.getReader();
       if (!reader) throw new Error('No response body');
       const decoder = new TextDecoder();
+      let sseBuffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
+        // A frame can straddle two reads: keep the unfinished tail for the next one.
+        sseBuffer += decoder.decode(value, { stream: true });
+        const sseLines = sseBuffer.split('\n');
+        sseBuffer = sseLines.pop() ?? '';
+        for (const line of sseLines) {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6);
           if (data === '[DONE]') continue;

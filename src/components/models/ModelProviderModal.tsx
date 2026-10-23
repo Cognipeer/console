@@ -1,13 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
-  Button,
   Divider,
   Group,
   Loader,
-  Modal,
   Select,
   Stack,
   Switch,
@@ -20,6 +18,7 @@ import { notifications } from '@mantine/notifications';
 import { IconAlertCircle } from '@tabler/icons-react';
 import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
 import type { ModelProviderView } from '@/lib/services/models/types';
+import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import ProviderFormRenderer from '@/components/providers/ProviderFormRenderer';
 import { partitionProviderValues } from '@/components/providers/providerFormModel';
 
@@ -43,6 +42,8 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
   const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [selectedDriver, setSelectedDriver] = useState('');
 
   const form = useForm<FormValues>({
@@ -170,6 +171,7 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
 
     const buckets = partitionProviderValues(schema, values);
 
+    setSubmitting(true);
     try {
       const response = await fetch('/api/models/providers', {
         method: 'POST',
@@ -206,85 +208,92 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
         title: 'Unable to create provider',
         message: error instanceof Error ? error.message : 'Unexpected error occurred',
       });
+    } finally {
+      setSubmitting(false);
     }
   });
 
   return (
-    <Modal opened={opened} onClose={handleClose} title="Add Model Provider" size="lg">
-      <form onSubmit={handleSubmit}>
-        <Stack gap="md">
-          <Stack gap="sm">
-            <Select
-              label="Driver"
-              placeholder={driversLoading ? 'Loading drivers…' : 'Select a provider driver'}
-              data={driverOptions}
-              value={selectedDriver}
-              onChange={(value) => {
-                const next = value ?? '';
-                setSelectedDriver(next);
-                setFieldValue('driver', next);
-              }}
-              required
-              disabled={driversLoading}
-            />
-            <Text size="xs" c="dimmed">
-              Choose the integration driver and configure provider credentials below.
-            </Text>
-            <Divider my="sm" label="Provider details" labelPosition="left" />
-            <TextInput
-              label="Key"
-              placeholder="unique-provider-key"
-              required
-              {...form.getInputProps('key')}
-            />
-            <TextInput
-              label="Label"
-              placeholder="Provider name"
-              required
-              {...form.getInputProps('label')}
-            />
-            <Textarea
-              label="Description"
-              placeholder="Optional description"
-              autosize
-              minRows={2}
-              {...form.getInputProps('description')}
-            />
-            <Switch
-              label="Active"
-              description="Inactive providers cannot be used to create models."
-              {...form.getInputProps('status', { type: 'checkbox' })}
-            />
+    <FormShell
+      open={opened}
+      onClose={handleClose}
+      title="Add Model Provider"
+      primaryAction={{
+        label: 'Create Provider',
+        loading: submitting,
+        disabled: driversLoading || schemaLoading || submitting,
+        onClick: () => formRef.current?.requestSubmit(),
+      }}
+      secondaryAction={{ label: 'Cancel', onClick: handleClose, disabled: submitting }}
+    >
+      <form ref={formRef} onSubmit={handleSubmit}>
+        <FormSection title="Provider">
+          <Stack gap="md">
+            <Stack gap="sm">
+              <Select
+                label="Driver"
+                placeholder={driversLoading ? 'Loading drivers…' : 'Select a provider driver'}
+                data={driverOptions}
+                value={selectedDriver}
+                onChange={(value) => {
+                  const next = value ?? '';
+                  setSelectedDriver(next);
+                  setFieldValue('driver', next);
+                }}
+                required
+                disabled={driversLoading}
+              />
+              <Text size="xs" c="dimmed">
+                Choose the integration driver and configure provider credentials below.
+              </Text>
+              <Divider my="sm" label="Provider details" labelPosition="left" />
+              <TextInput
+                label="Key"
+                placeholder="unique-provider-key"
+                required
+                {...form.getInputProps('key')}
+              />
+              <TextInput
+                label="Label"
+                placeholder="Provider name"
+                required
+                {...form.getInputProps('label')}
+              />
+              <Textarea
+                label="Description"
+                placeholder="Optional description"
+                autosize
+                minRows={2}
+                {...form.getInputProps('description')}
+              />
+              <Switch
+                label="Active"
+                description="Inactive providers cannot be used to create models."
+                {...form.getInputProps('status', { type: 'checkbox' })}
+              />
+            </Stack>
+
+            <Divider label="Configuration" labelPosition="left" />
+
+            {schemaLoading && (
+              <Group justify="center" py="md">
+                <Loader size="sm" />
+              </Group>
+            )}
+
+            {schemaError && (
+              <Alert icon={<IconAlertCircle size={16} />} color="red" title="Configuration unavailable">
+                {schemaError}
+              </Alert>
+            )}
+
+            {schema && !schemaLoading && !schemaError && (
+              <ProviderFormRenderer schema={schema} form={form} />
+            )}
+
           </Stack>
-
-          <Divider label="Configuration" labelPosition="left" />
-
-          {schemaLoading && (
-            <Group justify="center" py="md">
-              <Loader size="sm" />
-            </Group>
-          )}
-
-          {schemaError && (
-            <Alert icon={<IconAlertCircle size={16} />} color="red" title="Configuration unavailable">
-              {schemaError}
-            </Alert>
-          )}
-
-          {schema && !schemaLoading && !schemaError && (
-            <ProviderFormRenderer schema={schema} form={form} />
-          )}
-
-          <Group justify="flex-end">
-            <Button variant="default" onClick={handleClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={driversLoading || schemaLoading}>
-              Create Provider
-            </Button>
-          </Group>
-        </Stack>
+        </FormSection>
       </form>
-    </Modal>
+    </FormShell>
   );
 }

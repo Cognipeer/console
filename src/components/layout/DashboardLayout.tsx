@@ -39,9 +39,11 @@ import { useNavigationFeedback } from '@/components/common/navigation/useNavigat
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 import {
   canUseDashboardService,
+  enterpriseModuleForPath,
   getDashboardServices,
   SETTINGS_NAV_SECTION,
 } from '@/lib/utils/dashboardServices';
+import { EnterpriseUpsell } from '@/components/enterprise/EnterpriseUpsell';
 import type { PermissionService, UserServicePermissions } from '@/lib/security/rbac';
 
 /** Display order of the Settings section items in the left nav. */
@@ -61,6 +63,8 @@ interface DashboardLayoutProps {
   children: ReactNode;
   supportEnabled?: boolean;
   isOnPrem?: boolean;
+  /** Whether the tenant holds an active ENTERPRISE license; undefined when it could not be read. */
+  enterpriseLicensed?: boolean;
   user?: {
     name: string;
     email: string;
@@ -72,7 +76,7 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, user }: DashboardLayoutProps) {
+export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, enterpriseLicensed, user }: DashboardLayoutProps) {
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
   const pathname = usePathname() ?? '';
@@ -236,6 +240,13 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const activeService = useMemo(
     () => findServiceForPath(allowedServices, pathname),
     [allowedServices, pathname],
+  );
+
+  // An enterprise module's pages on a tenant without the license: the upsell, not a page whose
+  // every request is refused with 402.
+  const lockedModule = useMemo(
+    () => (enterpriseLicensed === false ? enterpriseModuleForPath(pathname) : undefined),
+    [enterpriseLicensed, pathname],
   );
 
   useEffect(() => {
@@ -411,7 +422,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               <div className={classes.mainBreadcrumb}>
                 <DashboardBreadcrumbs />
               </div>
-              {children}
+              {lockedModule ? <EnterpriseUpsell module={lockedModule} /> : children}
             </main>
           </div>
 

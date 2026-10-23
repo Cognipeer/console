@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
@@ -95,6 +95,7 @@ export default function AgentsPage() {
   const t = useTranslations('agents');
   const tTemplates = useTranslations('agentTemplates');
   const tConfirm = useTranslations('common.confirm');
+  const tFeedback = useTranslations('navigationFeedback');
   const deleteResource = useDeleteResource();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<Model[]>([]);
@@ -109,20 +110,21 @@ export default function AgentsPage() {
   const [publishFilter, setPublishFilter] = useState<PublishFilter>('all');
   const [modelFilter, setModelFilter] = useState('all');
 
-  const loadAgents = async () => {
+  const loadAgents = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/agents', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setAgents(data.agents ?? []);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setAgents(data.agents ?? []);
     } catch (err) {
       console.error('Failed to load agents', err);
+      // An empty list would read as "none yet"; say the load failed instead.
+      notifications.show({ color: 'red', message: tFeedback('loadFailed') });
     } finally {
       setLoading(false);
     }
-  };
+  }, [tFeedback]);
 
   const loadModels = async () => {
     try {
@@ -152,7 +154,7 @@ export default function AgentsPage() {
     void loadAgents();
     void loadModels();
     void loadProviders();
-  }, []);
+  }, [loadAgents]);
 
   const handleCreated = (agentId: string) => {
     setCreateModalOpen(false);

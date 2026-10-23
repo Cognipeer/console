@@ -6,29 +6,11 @@ import LoadingState from '@/components/common/LoadingState';
 
 export default function Home() {
   const router = useRouter();
-  // Check if user is already authenticated
+  // Every outcome of the old auth probe ended at the overview (an unauthenticated visit is
+  // sent on to /login by the middleware), so go there once, replacing "/" in the history
+  // so that Back does not bounce through this redirect again.
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        // Try to access a protected endpoint to check if user is authenticated
-        const response = await fetch('/api/tokens', {
-          method: 'GET',
-          credentials: 'include', // Include cookies
-        });
-
-        if (response.ok) {
-          // User is authenticated, redirect to dashboard
-          router.push('/dashboard/overview');
-          return;
-        }
-      } catch {
-        router.push('/dashboard/overview');
-      } finally {
-        router.push('/dashboard/overview');
-      }
-    };
-
-    checkAuth();
+    router.replace('/dashboard/overview');
   }, [router]);
 
   return (

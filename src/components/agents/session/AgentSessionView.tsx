@@ -1096,7 +1096,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 icon={<IconMessageCircle size={16} />}
                 title={
                     <>
-                        <span className="detail-title">{session?.title || 'Session'}</span>
+                        <h1 className="ds-h2" style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{session?.title || 'Session'}</h1>
                         <SessionStatusBadge status={status} waitingElsewhere={Boolean(blockedReason)} />
                         <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
                             {agent.name}

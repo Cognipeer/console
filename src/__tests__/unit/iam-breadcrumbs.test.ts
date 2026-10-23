@@ -118,6 +118,13 @@ describe('hasNoPage', () => {
     expect(hasNoPage(seg('/dashboard/redteam/campaigns/c1'), 3)).toBe(false);
     expect(hasNoPage(seg('/dashboard/models/m1'), 2)).toBe(false);
   });
+
+  it('knows the dynamic folder without a page, not the static page beside it', () => {
+    expect(hasNoPage(seg('/dashboard/vector/pinecone/idx-1'), 2)).toBe(true);
+    expect(hasNoPage(seg('/dashboard/vector/pinecone/idx-1'), 3)).toBe(false);
+    expect(hasNoPage(seg('/dashboard/vector/migrations/m1'), 2)).toBe(false);
+    expect(hasNoPage(seg('/dashboard/prompt-optimizer/runs/r1'), 2)).toBe(true);
+  });
 });
 
 describe('the remembered list view', () => {

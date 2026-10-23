@@ -142,10 +142,12 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     path: ['mcp'],
     buildUrl: (id) => `/api/mcp/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'server'),
-    excludeValues: ['new'],
+    // Pages of the MCP menu, not server ids (`hubs` is the enterprise MCP Hubs page).
+    excludeValues: ['new', 'monitor', 'hubs'],
   }),
   createStandardResolver({
-    path: ['tools'],
+    // Tools live under the Agents menu: /dashboard/agents/tools/:id.
+    path: ['agents', 'tools'],
     buildUrl: (id) => `/api/tools/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'tool'),
     excludeValues: ['new'],
@@ -160,8 +162,8 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     path: ['agents'],
     buildUrl: (id) => `/api/agents/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'agent'),
-    // `webhooks` and `sessions` are pages of the Agents menu, not agent ids.
-    excludeValues: ['new', 'webhooks', 'sessions'],
+    // Pages of the Agents menu, not agent ids.
+    excludeValues: ['new', 'webhooks', 'sessions', 'skills', 'tools', 'templates'],
   }),
   createStandardResolver({
     path: ['portals'],
@@ -174,7 +176,8 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     path: ['browser'],
     buildUrl: (id) => `/api/browser/browsers/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'browser'),
-    excludeValues: ['new'],
+    // Pages of the Browser menu, not browser ids.
+    excludeValues: ['new', 'playground', 'sessions', 'flows'],
   }),
   createStandardResolver({
     path: ['config'],

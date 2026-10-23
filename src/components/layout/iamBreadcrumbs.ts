@@ -86,9 +86,22 @@ export const NO_PAGE_PATHS: ReadonlySet<string> = new Set([
   'analysis/definitions',
   'evaluations/targets',
   'evaluations/snapshots',
+  'prompt-optimizer/runs',
   'redteam/campaigns',
 ]);
 
+/**
+ * Dynamic folders without a page: `vector/[providerKey]` only holds `[externalId]` (an index page),
+ * so `/dashboard/vector/<provider>` is a 404 — except for the static pages beside it.
+ */
+const NO_PAGE_DYNAMIC: ReadonlyArray<{ parent: string; except: readonly string[] }> = [
+  { parent: 'vector', except: ['migrations'] },
+];
+
 export function hasNoPage(segments: string[], index: number): boolean {
-  return NO_PAGE_PATHS.has(segments.slice(1, index + 1).join('/'));
+  const path = segments.slice(1, index + 1);
+  if (NO_PAGE_PATHS.has(path.join('/'))) return true;
+  return NO_PAGE_DYNAMIC.some(
+    ({ parent, except }) => path.length === 2 && path[0] === parent && !except.includes(path[1]),
+  );
 }
