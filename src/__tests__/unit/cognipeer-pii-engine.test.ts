@@ -36,6 +36,16 @@ describe('scanWithCognipeer', () => {
     expect(findings).toEqual([]);
   });
 
+  it('reports person/organization/location only when the categories map enables them', async () => {
+    const text = 'Sayın Ayşe Yılmaz, işvereni Koç Holding, Kadıköy.';
+    const off = await scanWithCognipeer(text, { categories: { person: false, organization: false, location: false }, languages: ['tr'] }, 'detect');
+    expect(off.findings).toEqual([]);
+    const unset = await scanWithCognipeer(text, { languages: ['tr'] }, 'detect');
+    expect(unset.findings).toEqual([]);
+    const on = await scanWithCognipeer(text, { categories: { person: true, organization: true, location: false }, languages: ['tr'] }, 'detect');
+    expect(on.findings.map((f) => f.category).sort()).toEqual(['organization', 'person']);
+  });
+
   it('applies a custom pattern alongside the built-in catalog', async () => {
     const { findings } = await scanWithCognipeer(
       'Order CUS-12345 for pickup',
@@ -68,6 +78,12 @@ describe('piiService ad-hoc functions · engine dispatch', () => {
     const masked = await maskPii({ text: 'hello@example.com', engine: 'cognipeer' });
     expect(masked.outputText).not.toBe('hello@example.com');
     expect(masked.outputText).toContain('@example.com');
+  });
+
+  it('leaves disabled name categories in the output text', async () => {
+    const text = 'Sayın Ayşe Yılmaz mail: jane@gmail.com';
+    const { outputText } = await tokenizePii({ text, engine: 'cognipeer', categories: { email: true, person: false } });
+    expect(outputText).toBe('Sayın Ayşe Yılmaz mail: [EMAIL_1]');
   });
 
   it('tokenizePii round-trips through detokenizePii regardless of engine', async () => {

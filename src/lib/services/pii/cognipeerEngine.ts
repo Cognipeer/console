@@ -40,6 +40,9 @@ function getPii() {
 
 const DEFAULT_MODE = 'pattern+dictionary' as const;
 
+/** Dictionary-only categories: the package's dictionary pass emits them without consulting `categories`. */
+const DICTIONARY_CATEGORIES = new Set(['person', 'organization', 'location']);
+
 export interface CognipeerScanOptions {
   categories?: Record<string, boolean>;
   customPatterns?: IPiiCustomPattern[];
@@ -86,7 +89,9 @@ export async function scanWithCognipeer(
       ? await pii.maskAsync(text, callOptions)
       : await pii.detectAsync(text, callOptions);
 
-  const findings: PiiFinding[] = scan.findings.map((f) => ({
+  // shortcut: filters after the package's fusion, so a disabled name span that out-scored an overlapping enabled finding hides it; move the filter into @cognipeer/pii's dictionary pass when the package is next released.
+  const enabled = scan.findings.filter((f) => !DICTIONARY_CATEGORIES.has(f.category) || options.categories?.[f.category] === true);
+  const findings: PiiFinding[] = enabled.map((f) => ({
     category: f.category,
     source: f.source,
     severity: f.severity,
