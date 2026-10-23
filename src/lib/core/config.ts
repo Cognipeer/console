@@ -256,6 +256,26 @@ export interface AppConfig {
     shutdownTimeoutMs: number;
   };
 
+  /**
+   * The portals' own address (see `@/lib/portalHost/host`). Both hosts empty: portals stay at
+   * `/p/{key}` on the Console host.
+   */
+  portalHost: {
+    /**
+     * `PORTAL_BASE_DOMAIN`, e.g. `portal.cognipeer.com`: every workspace's portals at
+     * `<workspace slug>.<base>` (a wildcard DNS record and certificate for `*.<base>`).
+     */
+    baseDomain: string;
+    /**
+     * `PORTAL_HOST`, e.g. `asistan.example.com`: one host without a wildcard. It serves the portals
+     * of one workspace (`PORTAL_HOST_TENANT`), or, like `/p` on the Console host, those of the
+     * workspace the person signed in to.
+     */
+    fixedHost: string;
+    /** `PORTAL_HOST_TENANT`: the slug of the workspace `PORTAL_HOST` serves; empty = the workspace of the person's session. */
+    fixedHostTenant: string;
+  };
+
   providerRuntime: {
     cacheTtlSeconds: number;
     /**
@@ -730,6 +750,64 @@ function resolveAppUrl(source: ConfigSource): string {
     || DEFAULT_APP_URL;
 }
 
+/** A host name as written in a setting: lower-case, without a leading `*.` or surrounding dots. */
+function hostSetting(source: ConfigSource, key: string): string {
+  return (source.get(key) ?? '').trim().toLowerCase().replace(/^\*\./, '').replace(/^\.+|\.+$/g, '');
+}
+
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Why a configured host name is not one (a scheme, a port, a path or a bad label), or null. */
+function hostNameProblem(value: string): string | null {
+  if (value.length > 253) return 'is longer than 253 characters';
+  const labels = value.split('.');
+  if (labels.length < 2) return 'must have at least two labels (e.g. portal.example.com)';
+  if (!labels.every((label) => DNS_LABEL.test(label))) {
+    return 'must be a host name only: letters, digits and hyphens per label, no scheme, port or path';
+  }
+  return null;
+}
+
+/** Lower-case host of a URL, or '' when it does not parse. */
+function urlHost(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/** The portal host settings that cannot work: a bad name, or one that would swallow the Console host. */
+function validatePortalHost(cfg: AppConfig): ConfigValidationError[] {
+  const errors: ConfigValidationError[] = [];
+  const { baseDomain, fixedHost, fixedHostTenant } = cfg.portalHost;
+  const consoleHost = urlHost(cfg.app.url);
+  if (baseDomain) {
+    const problem = hostNameProblem(baseDomain);
+    if (problem) {
+      errors.push({ key: 'PORTAL_BASE_DOMAIN', message: `PORTAL_BASE_DOMAIN ${problem}.` });
+    } else if (consoleHost === baseDomain || consoleHost.endsWith(`.${baseDomain}`)) {
+      // `console.example.com` under `example.com` would be read as the portals of a workspace named "console".
+      errors.push({
+        key: 'PORTAL_BASE_DOMAIN',
+        message: `PORTAL_BASE_DOMAIN must not contain the Console host (${consoleHost}, from APP_URL). Use a domain of its own, e.g. portal.${baseDomain}.`,
+      });
+    }
+  }
+  if (fixedHost) {
+    const problem = hostNameProblem(fixedHost);
+    if (problem) {
+      errors.push({ key: 'PORTAL_HOST', message: `PORTAL_HOST ${problem}.` });
+    } else if (fixedHost === consoleHost) {
+      errors.push({ key: 'PORTAL_HOST', message: 'PORTAL_HOST must not be the Console host (APP_URL): portals need a host of their own.' });
+    }
+  }
+  if (fixedHostTenant && !fixedHost) {
+    errors.push({ key: 'PORTAL_HOST_TENANT', message: 'PORTAL_HOST_TENANT is set without PORTAL_HOST.' });
+  }
+  return errors;
+}
+
 function validateProductionAppUrl(value: string): string | null {
   let parsed: URL;
   try {
@@ -935,6 +1013,12 @@ function buildConfig(source: ConfigSource): AppConfig {
     app: {
       url: resolveAppUrl(source),
       shutdownTimeoutMs: int(source, 'SHUTDOWN_TIMEOUT_MS', 15000),
+    },
+
+    portalHost: {
+      baseDomain: hostSetting(source, 'PORTAL_BASE_DOMAIN'),
+      fixedHost: hostSetting(source, 'PORTAL_HOST'),
+      fixedHostTenant: str(source, 'PORTAL_HOST_TENANT', '').trim().toLowerCase(),
     },
 
     providerRuntime: {
@@ -1152,6 +1236,8 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
       message: `CACHE_PROVIDER must be ${cfg.rateLimit.provider} when RATE_LIMIT_PROVIDER=${cfg.rateLimit.provider}`,
     });
   }
+
+  errors.push(...validatePortalHost(cfg));
 
   // Hard-fail if request/response body logging is enabled in production.
   // These flags expose secrets (auth headers, API keys, prompts) to logs.

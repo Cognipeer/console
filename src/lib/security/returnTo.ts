@@ -86,11 +86,14 @@ export function buildChangePasswordPath(returnTo: string): string {
  * Full page load for the portal. A soft router.push from /login would keep the
  * Mantine notification host (the "Login successful" toast would follow the user
  * onto the portal) and let the dashboard stylesheet bleed into a page that ships
- * its own CSS reset. Returns true when it navigated; the caller falls back to
- * router.push/replace otherwise. Browser-only.
+ * its own CSS reset. The same for a way back through the server (`/api/...`, e.g.
+ * the portal host's sign-in, which redirects on to the portal's own address):
+ * the client router has no page there. Returns true when it navigated; the
+ * caller falls back to router.push/replace otherwise. Browser-only.
  */
 export function assignIfPortal(path: string): boolean {
-  if (typeof window === 'undefined' || !isPortalPagePath(path.split(/[?#]/, 1)[0])) return false;
+  const pathname = path.split(/[?#]/, 1)[0];
+  if (typeof window === 'undefined' || !(isPortalPagePath(pathname) || pathname.startsWith('/api/'))) return false;
   window.location.assign(path);
   return true;
 }

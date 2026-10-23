@@ -113,6 +113,15 @@ describe('assignIfPortal', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
+  it('does a full page load for a way back through the server (the portal host sign-in)', () => {
+    const assign = vi.fn();
+    vi.stubGlobal('window', { location: { assign } });
+    const start = '/api/portal-host/start?host=acme.portal.cognipeer.com&path=%2Fik&state=s';
+    expect(assignIfPortal(start)).toBe(true);
+    expect(assign).toHaveBeenCalledWith(start);
+    expect(safeReturnTo(start)).toBe(start);
+  });
+
   it('does nothing outside a browser', () => {
     expect(assignIfPortal('/p/x')).toBe(false);
   });
