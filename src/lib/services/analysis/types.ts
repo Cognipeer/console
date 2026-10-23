@@ -12,7 +12,14 @@
  *   - store    : (persistence intent) keep the extracted fields
  *   - judge    : grade conversation quality against a rubric (LLM judge)
  *   - accuracy : compare extracted fields against reference (ground-truth)
+ *
+ * With a decision model, Yes/No, Choice and Score fields are answered by a
+ * Model Hub `decision` model instead of being extracted: one call per
+ * conversation, with a probability per option, and low-confidence answers are
+ * flagged for human review.
  */
+
+import type { DecisionAnswer, DecisionQuestion } from '@/lib/providers/domains/decision';
 
 export interface AnalysisMessage {
   /** Speaker role — flexible to support IVR transcripts (caller/agent/ivr). */
@@ -29,7 +36,7 @@ export interface AnalysisConversation {
   referenceFields?: Record<string, unknown>;
 }
 
-export type FieldType = 'string' | 'number' | 'boolean' | 'enum';
+export type FieldType = 'string' | 'number' | 'boolean' | 'enum' | 'score';
 
 export interface FieldDef {
   key: string;
@@ -37,7 +44,11 @@ export interface FieldDef {
   description?: string;
   /** Allowed values when type is 'enum'. */
   enumValues?: string[];
+  /** Ordered level labels, lowest first, when type is 'score'. */
+  levels?: string[];
   required?: boolean;
+  /** Decision fields: flag answers below this confidence (overrides the spec's review threshold). */
+  reviewBelow?: number;
 }
 
 export type FieldSet = FieldDef[];
@@ -54,12 +65,58 @@ export interface AnalysisModes {
   accuracy?: boolean;
 }
 
+export interface AnalysisReviewSpec {
+  /** Decision answers below this confidence are flagged. Default 0.7. */
+  threshold?: number;
+  /** Share (0-100) of confident items also flagged, picked deterministically. Default 0. */
+  spotCheckPct?: number;
+}
+
 export interface AnalysisSpec {
   fieldSet: FieldSet;
   /** Extra extraction instructions appended to the prompt. */
   extractionInstructions?: string;
   modes: AnalysisModes;
+  /** Route Yes/No, Choice and Score fields to the decision invoker. */
+  useDecisionModel?: boolean;
+  review?: AnalysisReviewSpec;
+  /** Salt for the deterministic spot-check pick (the definition key). */
+  spotCheckSalt?: string;
 }
+
+/** One decision-model answer, normalized for Analysis. */
+export interface AnalysisDecision {
+  /** Choice key, yes/no (boolean) or score level label. Absent when the model refused. */
+  answer?: string | boolean;
+  /** `score` only: expected level index (sum of i * p_i), 0-based. */
+  score?: number;
+  /** choice: key -> p; score: level label -> p; boolean: { yes: p, no: 1 - p }. */
+  probabilities?: Record<string, number>;
+  /** 0..1; 0 when refused. */
+  confidence: number;
+  confidenceSource?: 'native' | 'logprobs' | 'self_reported';
+  refused?: boolean;
+  needsReview?: boolean;
+}
+
+export type ReviewReason = 'low_confidence' | 'spot_check';
+
+/** What the engine hands the injected decision invoker: one call per conversation. */
+export interface DecisionInvocation {
+  input: string;
+  questions: Record<string, DecisionQuestion>;
+  includeRationale: boolean;
+}
+
+export interface DecisionInvocationResult {
+  answers: Record<string, DecisionAnswer>;
+  rationale?: string;
+  /** 'structured' = an emulated decision model whose confidence is self-reported. */
+  backendKind: 'native' | 'structured';
+}
+
+/** Injected decision-model call (Model Hub `decision` category). */
+export type DecisionInvoker = (request: DecisionInvocation) => Promise<DecisionInvocationResult>;
 
 export interface ExtractionResult {
   fields: Record<string, unknown>;
@@ -98,6 +155,24 @@ export interface AnalysisItemResult {
   /** Extraction succeeded with all required fields present (and judge passed). */
   passed: boolean;
   error?: string;
+  /** Decision answers by field key (decision fields only). */
+  decisions?: Record<string, AnalysisDecision>;
+  needsReview?: boolean;
+  reviewReason?: ReviewReason;
+  rationale?: string;
+  /** Lowest decision confidence; 1 when there are no decisions. */
+  minConfidence?: number;
+}
+
+export interface DecisionAggregate {
+  answered: number;
+  refused: number;
+  needsReview: number;
+  /** Answer -> count (choice key, 'yes'/'no', or score level label). */
+  counts: Record<string, number>;
+  avgConfidence: number | null;
+  /** `score` only: mean expected level index. */
+  avgScore?: number | null;
 }
 
 export interface AnalysisAggregate {
@@ -113,6 +188,10 @@ export interface AnalysisAggregate {
   avgJudgeScore: number | null;
   /** Mean accuracy over conversations with a reference, or null. */
   avgExtractionAccuracy: number | null;
+  /** Items flagged for human review. */
+  needsReview: number;
+  /** Per decision field; present only when some item has decisions. */
+  decisions?: Record<string, DecisionAggregate>;
 }
 
 export interface AnalysisResult {

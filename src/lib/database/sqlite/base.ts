@@ -63,6 +63,7 @@ export const TABLES = {
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
   analysisRuns: 'analysis_runs',
+  analysisResults: 'analysis_results',
   piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
@@ -1199,6 +1200,10 @@ export class SQLiteProviderBase {
     // The sub-agent a surfaced child pause belongs to.
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'subagent', 'subagent TEXT');
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'delegationToolCallId', 'delegationToolCallId TEXT');
+    // Analysis decision layer: the decision model, where runs read from (JSON) and the review settings (JSON).
+    this.ensureTableColumn(db, TABLES.analysisDefinitions, 'decisionModelKey', 'decisionModelKey TEXT');
+    this.ensureTableColumn(db, TABLES.analysisDefinitions, 'source', 'source TEXT');
+    this.ensureTableColumn(db, TABLES.analysisDefinitions, 'review', 'review TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);

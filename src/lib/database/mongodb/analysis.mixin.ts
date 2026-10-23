@@ -5,19 +5,30 @@
  * nested structures natively. Mirrors the evaluation mixin conventions.
  */
 
-import { ObjectId } from 'mongodb';
+import { ObjectId, type Db } from 'mongodb';
 import type {
   IAnalysisDefinition,
   IAnalysisConversation,
   IAnalysisRun,
+  IAnalysisResult,
+  IAnalysisResultReview,
+  AnalysisResultFilter,
   AnalysisConversationSource,
   AnalysisRunStatus,
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
+/** IAnalysisResult fields a re-analysis may drop; removed when the new result lacks them. */
+const ANALYSIS_RESULT_OPTIONAL_FIELDS = [
+  'title', 'agentKey', 'ownerId', 'sourceVersion', 'judge', 'accuracy', 'rationale', 'reviewReason',
+] as const;
+
 export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AnalysisOps extends Base {
+    private analysisResultIndexesReady = new Set<string>();
+    private analysisResultIndexInit = new Map<string, Promise<void>>();
+
     // ── Definitions ──────────────────────────────────────────────────
 
     async createAnalysisDefinition(
@@ -197,6 +208,164 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         .limit(filters?.limit ?? 50)
         .toArray();
       return docs as unknown as IAnalysisRun[];
+    }
+
+    // ── Results (latest decision per conversation) ───────────────────
+
+    /**
+     * Created lazily on the write path: the unique key must hold from the very first upsert, and the
+     * boot-time manifest only runs at process start. Names/keys are identical to indexManifest.ts.
+     */
+    private async ensureAnalysisResultIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.analysisResultIndexesReady.has(dbName)) return;
+      const existing = this.analysisResultIndexInit.get(dbName);
+      if (existing) {
+        await existing;
+        return;
+      }
+      const coll = db.collection(COLLECTIONS.analysisResults);
+      const setup = Promise.all([
+        coll.createIndex(
+          { projectId: 1, definitionKey: 1, sourceKind: 1, sourceId: 1 },
+          { name: 'uniq_analysis_result_source', unique: true },
+        ),
+        coll.createIndex(
+          { projectId: 1, definitionKey: 1, needsReview: 1, minConfidence: 1, analyzedAt: -1 },
+          { name: 'idx_analysis_result_review' },
+        ),
+        coll.createIndex(
+          { projectId: 1, definitionKey: 1, analyzedAt: -1 },
+          { name: 'idx_analysis_result_definition' },
+        ),
+        coll.createIndex({ projectId: 1, analyzedAt: -1 }, { name: 'idx_analysis_result_project' }),
+      ])
+        .then(() => {
+          this.analysisResultIndexesReady.add(dbName);
+        })
+        .finally(() => {
+          this.analysisResultIndexInit.delete(dbName);
+        });
+      this.analysisResultIndexInit.set(dbName, setup);
+      await setup;
+    }
+
+    private buildAnalysisResultFilter(filters: AnalysisResultFilter): Record<string, unknown> {
+      const filter: Record<string, unknown> = { projectId: filters.projectId };
+      if (filters.definitionKey !== undefined) filter.definitionKey = filters.definitionKey;
+      if (filters.sourceKind !== undefined) filter.sourceKind = filters.sourceKind;
+      if (filters.sourceIds !== undefined) filter.sourceId = { $in: filters.sourceIds };
+      if (filters.needsReview !== undefined) filter.needsReview = filters.needsReview;
+      // `review` is stored as null when absent, so "no review" is an equality match.
+      if (filters.reviewed === true) filter.review = { $ne: null };
+      else if (filters.reviewed === false) filter.review = null;
+      if (filters.viewer) {
+        // Agent-session rows only where the viewer may see the agent or started the session; other kinds pass.
+        filter.$or = [
+          { sourceKind: { $ne: 'agent_session' } },
+          { agentKey: { $in: filters.viewer.agentKeys } },
+          { ownerId: filters.viewer.userId },
+        ];
+      }
+      return filter;
+    }
+
+    private toAnalysisResult(doc: Record<string, unknown>): IAnalysisResult {
+      return { ...doc, _id: (doc._id as ObjectId | string | undefined)?.toString() } as unknown as IAnalysisResult;
+    }
+
+    async upsertAnalysisResult(
+      result: Omit<IAnalysisResult, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<IAnalysisResult> {
+      const db = this.getTenantDb();
+      await this.ensureAnalysisResultIndexes(db);
+      const now = new Date();
+      const set: Record<string, unknown> = { ...result, review: result.review ?? null, updatedAt: now };
+      delete set._id;
+      delete set.createdAt;
+      // A full replace, like the SQLite upsert: an optional field the new result
+      // lacks (no rationale, no judge, no longer flagged) must not keep the old value.
+      const unset: Record<string, ''> = {};
+      for (const key of ANALYSIS_RESULT_OPTIONAL_FIELDS) {
+        if (set[key] === undefined) {
+          delete set[key];
+          unset[key] = '';
+        }
+      }
+      const coll = db.collection(COLLECTIONS.analysisResults);
+      const run = () =>
+        coll.findOneAndUpdate(
+          {
+            projectId: result.projectId,
+            definitionKey: result.definitionKey,
+            sourceKind: result.sourceKind,
+            sourceId: result.sourceId,
+          },
+          { $set: set, $setOnInsert: { createdAt: now }, ...(Object.keys(unset).length ? { $unset: unset } : {}) },
+          { upsert: true, returnDocument: 'after' },
+        );
+      let doc;
+      try {
+        doc = await run();
+      } catch (error) {
+        // Two runs upserting the same conversation concurrently: the loser hits the unique index;
+        // the retry then matches the winner's doc.
+        if ((error as { code?: number })?.code !== 11000) throw error;
+        doc = await run();
+      }
+      return this.toAnalysisResult(doc as unknown as Record<string, unknown>);
+    }
+
+    async findAnalysisResultById(id: string): Promise<IAnalysisResult | null> {
+      if (!ObjectId.isValid(id)) return null;
+      const doc = await this.getTenantDb()
+        .collection(COLLECTIONS.analysisResults)
+        .findOne({ _id: new ObjectId(id) });
+      return doc ? this.toAnalysisResult(doc as unknown as Record<string, unknown>) : null;
+    }
+
+    async listAnalysisResults(
+      filters: AnalysisResultFilter & { sort?: 'recent' | 'confidence'; limit?: number; skip?: number },
+    ): Promise<IAnalysisResult[]> {
+      if (filters.sourceIds?.length === 0) return [];
+      const sort: Record<string, 1 | -1> =
+        filters.sort === 'confidence' ? { minConfidence: 1, analyzedAt: -1 } : { analyzedAt: -1 };
+      const limit = Math.min(Math.max(Math.trunc(filters.limit ?? 50), 1), 5000);
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.analysisResults)
+        .find(this.buildAnalysisResultFilter(filters))
+        // _id last keeps pages stable when analyzedAt ties.
+        .sort({ ...sort, _id: -1 })
+        .skip(Math.max(filters.skip ?? 0, 0))
+        .limit(limit)
+        .toArray();
+      return docs.map((doc) => this.toAnalysisResult(doc as unknown as Record<string, unknown>));
+    }
+
+    async countAnalysisResults(filters: AnalysisResultFilter): Promise<number> {
+      if (filters.sourceIds?.length === 0) return 0;
+      return this.getTenantDb()
+        .collection(COLLECTIONS.analysisResults)
+        .countDocuments(this.buildAnalysisResultFilter(filters));
+    }
+
+    async updateAnalysisResultReview(id: string, review: IAnalysisResultReview): Promise<IAnalysisResult | null> {
+      if (!ObjectId.isValid(id)) return null;
+      const doc = await this.getTenantDb()
+        .collection(COLLECTIONS.analysisResults)
+        .findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set: { review, needsReview: false, updatedAt: new Date() } },
+          { returnDocument: 'after' },
+        );
+      return doc ? this.toAnalysisResult(doc as unknown as Record<string, unknown>) : null;
+    }
+
+    async deleteAnalysisResultsForDefinition(projectId: string, definitionKey: string): Promise<number> {
+      const result = await this.getTenantDb()
+        .collection(COLLECTIONS.analysisResults)
+        .deleteMany({ projectId, definitionKey });
+      return result.deletedCount ?? 0;
     }
   };
 }

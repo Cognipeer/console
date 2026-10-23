@@ -1252,6 +1252,9 @@ export const TENANT_SCHEMA_SQL = `
     modes TEXT DEFAULT '{}',
     extractionModelKey TEXT,
     judgeModelKey TEXT,
+    decisionModelKey TEXT,
+    source TEXT,
+    review TEXT,
     runConfig TEXT DEFAULT '{}',
     schedule TEXT,
     metadata TEXT DEFAULT '{}',
@@ -1305,6 +1308,36 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_analysis_runs_definitionKey ON analysis_runs(definitionKey);
   CREATE INDEX IF NOT EXISTS idx_analysis_runs_createdAt ON analysis_runs(createdAt);
+
+  -- Latest analysis of one source (conversation / agent session) per definition, with its human review
+  CREATE TABLE IF NOT EXISTS analysis_results (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL DEFAULT '',
+    definitionKey TEXT NOT NULL,
+    sourceKind TEXT NOT NULL,
+    sourceId TEXT NOT NULL,
+    title TEXT,
+    agentKey TEXT,
+    ownerId TEXT,
+    sourceVersion TEXT,
+    runId TEXT NOT NULL,
+    decisions TEXT NOT NULL DEFAULT '{}',
+    extractedFields TEXT NOT NULL DEFAULT '{}',
+    judge TEXT,
+    accuracy TEXT,
+    rationale TEXT,
+    needsReview INTEGER NOT NULL DEFAULT 0,
+    reviewReason TEXT,
+    minConfidence REAL NOT NULL DEFAULT 1,
+    review TEXT,
+    analyzedAt TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_results_source ON analysis_results(projectId, definitionKey, sourceKind, sourceId);
+  CREATE INDEX IF NOT EXISTS idx_analysis_results_review ON analysis_results(projectId, definitionKey, needsReview, minConfidence);
+  CREATE INDEX IF NOT EXISTS idx_analysis_results_analyzedAt ON analysis_results(projectId, definitionKey, analyzedAt);
 
   -- PII policies (standalone service)
   CREATE TABLE IF NOT EXISTS pii_policies (
@@ -1767,6 +1800,8 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
+  -- Analysis walks a project's sessions newest-updated first, per agent.
+  CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_updated ON agent_conversations(projectId, agentKey, updatedAt);
   -- A caller who may not see other people's sessions lists only their own: one agent's, by creator, newest first.
   CREATE INDEX IF NOT EXISTS idx_aconv_agent_creator ON agent_conversations(agentKey, createdBy, updatedAt);
 

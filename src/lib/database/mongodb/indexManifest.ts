@@ -232,8 +232,18 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_status_createdAt' } },
     // The dashboard's cross-agent Sessions list: a project's sessions by last activity.
     { key: { projectId: 1, updatedAt: -1, _id: -1 }, options: { name: 'idx_project_updatedAt' } },
+    // Analysis over agent sessions: the chosen agents' sessions in an updatedAt window, newest first.
+    { key: { projectId: 1, agentKey: 1, updatedAt: -1, _id: -1 }, options: { name: 'idx_project_agent_updatedAt' } },
     // A chat-completions client that resends its transcript is matched back to its session by the transcript's digest.
     { key: { projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, options: { name: 'idx_transcript_hash' } },
+  ],
+  // Latest analysis of one conversation per definition. The unique key is the upsert guard (the analysis mixin
+  // also ensures all of these on its first write - names/keys IDENTICAL); the rest serve the review queue and lists.
+  analysis_results: [
+    { key: { projectId: 1, definitionKey: 1, sourceKind: 1, sourceId: 1 }, options: { name: 'uniq_analysis_result_source', unique: true } },
+    { key: { projectId: 1, definitionKey: 1, needsReview: 1, minConfidence: 1, analyzedAt: -1 }, options: { name: 'idx_analysis_result_review' } },
+    { key: { projectId: 1, definitionKey: 1, analyzedAt: -1 }, options: { name: 'idx_analysis_result_definition' } },
+    { key: { projectId: 1, analyzedAt: -1 }, options: { name: 'idx_analysis_result_project' } },
   ],
   agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
   // Append-only session event log. The unique pair is the sequence guard; the

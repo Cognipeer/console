@@ -21,9 +21,10 @@ export function renderTranscript(conversation: AnalysisConversation): string {
 
 function describeField(field: FieldDef): string {
   const enumPart = field.type === 'enum' && field.enumValues?.length ? `: one of ${field.enumValues.join(' | ')}` : '';
+  const levelsPart = field.type === 'score' && field.levels?.length ? `: one of ${field.levels.join(' | ')}, lowest first` : '';
   const req = field.required ? ' [required]' : '';
   const desc = field.description ? ` — ${field.description}` : '';
-  return `- "${field.key}" (${field.type}${enumPart})${req}${desc}`;
+  return `- "${field.key}" (${field.type}${enumPart}${levelsPart})${req}${desc}`;
 }
 
 export function buildExtractionPrompt(
@@ -81,6 +82,16 @@ export function coerceField(value: unknown, field: FieldDef): { value: unknown; 
       if (exact) return { value: exact, valid: true };
       const ci = allowed.find((e) => e.toLowerCase() === s.toLowerCase());
       return ci ? { value: ci, valid: true } : { value: null, valid: false };
+    }
+    case 'score': {
+      // Extracted like an enum over the levels; a 0-based index maps to its label.
+      const levels = field.levels ?? [];
+      const s = String(value).trim();
+      const label = levels.find((l) => l === s) ?? levels.find((l) => l.toLowerCase() === s.toLowerCase());
+      if (label) return { value: label, valid: true };
+      const index = typeof value === 'number' ? value : s === '' ? NaN : Number(s);
+      if (Number.isInteger(index) && index >= 0 && index < levels.length) return { value: levels[index], valid: true };
+      return { value: null, valid: false };
     }
     default: {
       const s = typeof value === 'string' ? value : JSON.stringify(value);

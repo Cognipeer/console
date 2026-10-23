@@ -1,28 +1,37 @@
 /**
- * Analysis runner — orchestrates extraction + (optional) judge + (optional)
- * accuracy across a batch of conversations with bounded concurrency, then
- * aggregates pass-rate / avg judge score / avg extraction accuracy. Pure with
- * respect to the platform: the model is injected.
+ * Analysis runner — orchestrates extraction and/or decision-model answers +
+ * (optional) judge + (optional) accuracy across a batch of conversations with
+ * bounded concurrency, then aggregates pass-rate / avg judge score / avg
+ * extraction accuracy / decision answers. Pure with respect to the platform:
+ * the models are injected.
  */
 
 import type {
   AnalysisAggregate,
   AnalysisConversation,
+  AnalysisDecision,
   AnalysisItemResult,
   AnalysisResult,
   AnalysisRunConfig,
   AnalysisSpec,
+  DecisionAggregate,
+  DecisionInvoker,
+  ExtractionResult,
+  FieldSet,
   ModelInvoker,
 } from './types';
 import { extractFields } from './extraction';
+import { applyReviewFlags, decideFields, isDecisionField, type DecisionFieldsResult } from './decision';
 import { judgeConversation } from './judge';
 import { scoreAccuracy } from './accuracy';
 
 export interface RunAnalysisParams {
   conversations: AnalysisConversation[];
   spec: AnalysisSpec;
-  /** Model used for field extraction. */
-  invokeExtraction: ModelInvoker;
+  /** Model used for field extraction (not needed when every field goes to the decision model). */
+  invokeExtraction?: ModelInvoker;
+  /** Decision model for Yes/No, Choice and Score fields (used when spec.useDecisionModel is set). */
+  invokeDecision?: DecisionInvoker;
   /** Model used for the LLM judge (required when modes.judge is set). */
   invokeJudge?: ModelInvoker;
   config?: AnalysisRunConfig;
@@ -30,7 +39,7 @@ export interface RunAnalysisParams {
 }
 
 export async function runAnalysis(params: RunAnalysisParams): Promise<AnalysisResult> {
-  const { conversations, spec, invokeExtraction, invokeJudge, config, onItem } = params;
+  const { conversations, spec, invokeExtraction, invokeDecision, invokeJudge, config, onItem } = params;
   const concurrency = Math.max(1, config?.concurrency ?? 4);
   const results = new Array<AnalysisItemResult>(conversations.length);
 
@@ -40,7 +49,7 @@ export async function runAnalysis(params: RunAnalysisParams): Promise<AnalysisRe
       const index = cursor;
       cursor += 1;
       if (index >= conversations.length) return;
-      const result = await analyseOne(conversations[index], spec, invokeExtraction, invokeJudge);
+      const result = await analyseOne(conversations[index], spec, invokeExtraction, invokeDecision, invokeJudge);
       results[index] = result;
       onItem?.(result, index);
     }
@@ -49,24 +58,61 @@ export async function runAnalysis(params: RunAnalysisParams): Promise<AnalysisRe
   const poolSize = Math.min(concurrency, conversations.length || 1);
   await Promise.all(Array.from({ length: poolSize }, () => worker()));
 
-  return { aggregate: aggregate(results), items: results };
+  return { aggregate: aggregateItems(results, spec.fieldSet, spec), items: results };
 }
 
 async function analyseOne(
   conversation: AnalysisConversation,
   spec: AnalysisSpec,
-  invokeExtraction: ModelInvoker,
+  invokeExtraction: ModelInvoker | undefined,
+  invokeDecision: DecisionInvoker | undefined,
   invokeJudge: ModelInvoker | undefined,
 ): Promise<AnalysisItemResult> {
-  const extraction = await extractFields(conversation, spec.fieldSet, spec.extractionInstructions, invokeExtraction);
+  // Decision fields without a decision invoker fall back to extraction.
+  const routing = { useDecisionModel: !!spec.useDecisionModel && !!invokeDecision };
+  const decisionFields = spec.fieldSet.filter((f) => isDecisionField(f, routing));
+  const extractionFields = spec.fieldSet.filter((f) => !isDecisionField(f, routing));
+
+  // An empty field-set still runs extraction, as it always has.
+  const needsExtraction = extractionFields.length > 0 || decisionFields.length === 0;
+  const requiredKeys = extractionFields.filter((f) => f.required).map((f) => f.key);
+
+  const [extraction, decision] = await Promise.all([
+    needsExtraction
+      ? invokeExtraction
+        ? extractFields(conversation, extractionFields, spec.extractionInstructions, invokeExtraction)
+        : Promise.resolve<ExtractionResult>({ fields: {}, missing: requiredKeys, error: 'No extraction model configured' })
+      : Promise.resolve<ExtractionResult | undefined>(undefined),
+    decisionFields.length > 0 && invokeDecision
+      ? decideFields(conversation, decisionFields, spec, invokeDecision)
+      : Promise.resolve<DecisionFieldsResult | undefined>(undefined),
+  ]);
+
+  // Merge in field-set order so the item reads like the definition.
+  const values: Record<string, unknown> = { ...extraction?.fields, ...decision?.fields };
+  const fields: Record<string, unknown> = {};
+  for (const field of spec.fieldSet) {
+    if (field.key in values) fields[field.key] = values[field.key];
+  }
+  const missing = [...(extraction?.missing ?? []), ...(decision?.missing ?? [])];
+  const errors = [extraction?.error, decision?.error].filter((e): e is string => !!e);
 
   const result: AnalysisItemResult = {
     conversationId: conversation.id,
-    extractedFields: extraction.fields,
-    missing: extraction.missing,
+    extractedFields: fields,
+    missing,
     passed: false,
-    error: extraction.error,
+    error: errors.length ? errors.join('; ') : undefined,
   };
+
+  if (decision && Object.keys(decision.decisions).length > 0) {
+    const flags = applyReviewFlags(decision.decisions, decisionFields, spec, conversation.id);
+    result.decisions = flags.decisions;
+    result.needsReview = flags.needsReview;
+    result.minConfidence = flags.minConfidence;
+    if (flags.reviewReason) result.reviewReason = flags.reviewReason;
+    if (decision.rationale) result.rationale = decision.rationale;
+  }
 
   if (spec.modes.judge && invokeJudge) {
     result.judge = await judgeConversation(
@@ -78,17 +124,68 @@ async function analyseOne(
   }
 
   if (spec.modes.accuracy && conversation.referenceFields) {
-    result.accuracy = scoreAccuracy(extraction.fields, conversation.referenceFields, spec.fieldSet);
+    result.accuracy = scoreAccuracy(fields, conversation.referenceFields, spec.fieldSet);
   }
 
-  const extractionOk = !extraction.error && extraction.missing.length === 0;
+  const extractionOk = errors.length === 0 && missing.length === 0;
   const judgeOk = result.judge ? result.judge.passed !== false && !result.judge.error : true;
   result.passed = extractionOk && judgeOk;
 
   return result;
 }
 
-function aggregate(items: AnalysisItemResult[]): AnalysisAggregate {
+function decisionKey(answer: AnalysisDecision['answer']): string {
+  return typeof answer === 'boolean' ? (answer ? 'yes' : 'no') : String(answer);
+}
+
+/** Per decision field: answer counts, refusals, flags and mean confidence (and mean level for scores). */
+function aggregateDecisions(
+  items: AnalysisItemResult[],
+  fieldSet: FieldSet,
+  spec: Pick<AnalysisSpec, 'useDecisionModel'>,
+): Record<string, DecisionAggregate> | undefined {
+  if (!items.some((i) => i.decisions && Object.keys(i.decisions).length > 0)) return undefined;
+
+  const out: Record<string, DecisionAggregate> = {};
+  for (const field of fieldSet) {
+    if (!isDecisionField(field, spec)) continue;
+    const agg: DecisionAggregate = { answered: 0, refused: 0, needsReview: 0, counts: {}, avgConfidence: null };
+    let confidenceSum = 0;
+    let scoreSum = 0;
+    let scored = 0;
+    for (const item of items) {
+      const d = item.decisions?.[field.key];
+      if (!d) continue;
+      if (d.needsReview) agg.needsReview += 1;
+      if (d.refused || d.answer === undefined) {
+        agg.refused += 1;
+        continue;
+      }
+      agg.answered += 1;
+      confidenceSum += d.confidence;
+      const key = decisionKey(d.answer);
+      agg.counts[key] = (agg.counts[key] ?? 0) + 1;
+      if (typeof d.score === 'number') {
+        scoreSum += d.score;
+        scored += 1;
+      }
+    }
+    agg.avgConfidence = agg.answered ? confidenceSum / agg.answered : null;
+    if (field.type === 'score') agg.avgScore = scored ? scoreSum / scored : null;
+    out[field.key] = agg;
+  }
+  return out;
+}
+
+/**
+ * Aggregate item results. Exported so the service can aggregate a run that it
+ * processed in chunks.
+ */
+export function aggregateItems(
+  items: AnalysisItemResult[],
+  fieldSet: FieldSet,
+  spec: Pick<AnalysisSpec, 'useDecisionModel'>,
+): AnalysisAggregate {
   const total = items.length;
   const completedItems = items.filter((i) => !i.error);
   const completed = completedItems.length;
@@ -105,6 +202,8 @@ function aggregate(items: AnalysisItemResult[]): AnalysisAggregate {
     ? scoredAccuracy.reduce((sum, i) => sum + (i.accuracy?.score ?? 0), 0) / scoredAccuracy.length
     : null;
 
+  const decisions = aggregateDecisions(items, fieldSet, spec);
+
   return {
     total,
     completed,
@@ -113,5 +212,7 @@ function aggregate(items: AnalysisItemResult[]): AnalysisAggregate {
     passRate: completed ? passed / completed : 0,
     avgJudgeScore,
     avgExtractionAccuracy,
+    needsReview: items.filter((i) => i.needsReview).length,
+    ...(decisions ? { decisions } : {}),
   };
 }

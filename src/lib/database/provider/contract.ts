@@ -202,6 +202,9 @@ import type {
   IAnalysisDefinition,
   IAnalysisConversation,
   IAnalysisRun,
+  IAnalysisResult,
+  IAnalysisResultReview,
+  AnalysisResultFilter,
   AnalysisConversationSource,
   AnalysisRunStatus,
 } from './types';
@@ -1102,6 +1105,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     skip?: number;
   }): Promise<IAnalysisRun[]>;
 
+  /** Insert or replace the result of (projectId, definitionKey, sourceKind, sourceId); createdAt survives. */
+  upsertAnalysisResult(
+    result: Omit<IAnalysisResult, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAnalysisResult>;
+  findAnalysisResultById(id: string): Promise<IAnalysisResult | null>;
+  /**
+   * `sort: 'confidence'` = minConfidence ascending, then analyzedAt descending (the review queue);
+   * `'recent'` (default) = analyzedAt descending. `limit` defaults to 50, at most 5000.
+   */
+  listAnalysisResults(
+    filters: AnalysisResultFilter & { sort?: 'recent' | 'confidence'; limit?: number; skip?: number },
+  ): Promise<IAnalysisResult[]>;
+  countAnalysisResults(filters: AnalysisResultFilter): Promise<number>;
+  /** Sets `review` and clears `needsReview`. */
+  updateAnalysisResultReview(id: string, review: IAnalysisResultReview): Promise<IAnalysisResult | null>;
+  deleteAnalysisResultsForDefinition(projectId: string, definitionKey: string): Promise<number>;
+
   // ── PII policy operations (tenant-specific) ──
   createPiiPolicy(
     policy: Omit<IPiiPolicy, '_id' | 'createdAt' | 'updatedAt'>,
@@ -1789,6 +1809,25 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     before?: { updatedAt: Date; id: string };
     limit: number;
   }): Promise<IAgentConversationActivityRow[]>;
+  /**
+   * A project's conversations for Analysis, most recently updated first (`updatedAt`, then id).
+   * `agentKeys` narrows to those agents and `ids` to those conversations (at most 500); an empty list
+   * matches nothing. `ownOnly` as in `listAgentConversationPage`; `before` is the keyset of the last row
+   * of the previous page. `fields: 'meta'` returns every message as `{ role, content: '', timestamp }`
+   * (enough to count and version a transcript); `'full'` returns the transcript. Step payloads stay.
+   */
+  listAgentConversationsForAnalysis(filters: {
+    projectId: string;
+    agentKeys?: string[];
+    ids?: string[];
+    updatedFrom?: Date;
+    updatedTo?: Date;
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+    before?: { updatedAt: Date; id: string };
+    /** 1..500 */
+    limit: number;
+    fields: 'meta' | 'full';
+  }): Promise<IAgentConversation[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
   /** Upsert by `conversationId`. */

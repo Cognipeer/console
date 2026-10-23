@@ -41,10 +41,29 @@ function csvEscape(value: string): string {
   return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** Build a CSV string: status/judge/accuracy columns + one column per field. */
+/** Stable union of decision field keys across a run's items, in first-seen order. */
+export function collectDecisionKeys(items: AnalysisRunItemView[]): string[] {
+  const set = new Set<string>();
+  for (const item of items) {
+    for (const key of Object.keys(item.decisions ?? {})) set.add(key);
+  }
+  return Array.from(set);
+}
+
+/**
+ * Build a CSV string: status/judge/accuracy columns + one column per field.
+ * Runs with decision answers add a `needs_review` column and a
+ * `<key>_confidence` column per decision field (the answer itself is already
+ * in the field column).
+ */
 export function itemsToCsv(items: AnalysisRunItemView[]): string {
   const fieldKeys = collectFieldKeys(items);
-  const header = ['conversation', 'result', 'missing', 'judge_score', 'accuracy_score', ...fieldKeys];
+  const decisionKeys = collectDecisionKeys(items);
+  const header = [
+    'conversation', 'result', 'missing', 'judge_score', 'accuracy_score',
+    ...(decisionKeys.length > 0 ? ['needs_review', ...decisionKeys.map((k) => `${k}_confidence`)] : []),
+    ...fieldKeys,
+  ];
   const rows = items.map((i) => {
     const result = i.error ? 'error' : i.passed ? 'pass' : 'fail';
     const cols = [
@@ -53,6 +72,9 @@ export function itemsToCsv(items: AnalysisRunItemView[]): string {
       (i.missing ?? []).join(' '),
       i.judge && !i.judge.error ? String(i.judge.score) : '',
       i.accuracy && i.accuracy.comparedCount > 0 ? String(i.accuracy.score) : '',
+      ...(decisionKeys.length > 0
+        ? [i.needsReview ? 'yes' : 'no', ...decisionKeys.map((k) => (i.decisions?.[k] ? String(Math.round(i.decisions[k].confidence * 100) / 100) : ''))]
+        : []),
       ...fieldKeys.map((k) => cellValue(i.extractedFields?.[k])),
     ];
     return cols.map((c) => csvEscape(c)).join(',');
@@ -69,10 +91,13 @@ export interface FieldDistribution {
   total: number;
 }
 
-/** Per-field value frequency across the run (skips errored items). */
-export function fieldDistributions(items: AnalysisRunItemView[]): FieldDistribution[] {
+/**
+ * Per-field value frequency across the run (skips errored items).
+ * `excludeKeys` drops fields shown elsewhere (the decision fields have their own card).
+ */
+export function fieldDistributions(items: AnalysisRunItemView[], excludeKeys: ReadonlySet<string> = new Set()): FieldDistribution[] {
   const ok = items.filter((i) => !i.error);
-  const fieldKeys = collectFieldKeys(ok);
+  const fieldKeys = collectFieldKeys(ok).filter((k) => !excludeKeys.has(k));
   return fieldKeys.map((key) => {
     const counts = new Map<string, number>();
     let emptyCount = 0;

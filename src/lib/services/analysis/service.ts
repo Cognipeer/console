@@ -5,10 +5,15 @@
  * persists the run + aggregate. When the definition's `store` mode is on, the
  * latest extracted fields are written back onto each conversation.
  *
- * A run has a TARGET: the conversation corpus (default) or an evaluation
+ * A run has a TARGET: the conversation corpus (default), the platform's own
+ * agent sessions (read in place, see agentSessions.ts) or an evaluation
  * dataset. With a dataset target the same engine becomes an AI labeler —
  * extracted fields land on each item as `labels` (see datasetLabeling.ts), so
  * traffic captured into a dataset can be sliced by segment afterwards.
+ *
+ * Corpus and agent-session runs also write one `analysis_results` row per
+ * conversation (the latest answer, flags and the human review); results.ts reads
+ * and reviews them.
  *
  * Model invokers are injectable (RunDefinitionDeps) so orchestration is
  * testable without live model calls.
@@ -24,14 +29,29 @@ import type {
   IAnalysisConversation,
   IAnalysisTranscriptMessage,
   IAnalysisItemResult,
+  IAnalysisResult,
   IAnalysisRun,
   IAnalysisRunTarget,
+  IAnalysisSource,
+  IAnalysisReviewSettings,
   IEvaluationDatasetItem,
   AnalysisConversationSource,
+  AnalysisResultSourceKind,
 } from '@/lib/database';
-import { runAnalysis } from './runner';
-import type { AnalysisConversation, AnalysisItemResult, AnalysisSpec } from './types';
-import { buildModelInvoker, type AnalysisModelContext } from './adapters';
+import { aggregateItems, runAnalysis } from './runner';
+import { isDecisionField } from './decision';
+import type { AnalysisConversation, AnalysisItemResult, AnalysisSpec, DecisionInvoker, ModelInvoker } from './types';
+import { buildDecisionInvoker, buildModelInvoker, type AnalysisModelContext } from './adapters';
+import {
+  agentConversationToAnalysis,
+  buildAgentSessionTarget,
+  conversationId,
+  loadResultsBySource,
+  sameVersion,
+  selectAgentSessionIds,
+  sourceVersionOf,
+  type SourceVersion,
+} from './agentSessions';
 import { datasetItemToConversation, isHumanLabeled } from './datasetLabeling';
 import { isDue } from './schedulePlanner';
 
@@ -61,7 +81,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 
 export type WithId<T> = Omit<T, '_id'> & { id: string };
 
-function toView<T extends { _id?: string | object }>(record: T): WithId<T> {
+export function toView<T extends { _id?: string | object }>(record: T): WithId<T> {
   const { _id, ...rest } = record as T & { _id?: unknown };
   const id =
     typeof _id === 'string'
@@ -84,7 +104,19 @@ async function generateUniqueKey(desired: string, exists: (key: string) => Promi
   throw new Error(`Could not generate a unique key for "${desired}"`);
 }
 
-function toRunItem(result: AnalysisItemResult): IAnalysisItemResult {
+/** Decision answers without their probabilities: run items stay small (a run holds up to 5,000). */
+export function stripProbabilities<T extends { probabilities?: unknown }>(decisions: Record<string, T>): Record<string, Omit<T, 'probabilities'>> {
+  const out: Record<string, Omit<T, 'probabilities'>> = {};
+  for (const [key, decision] of Object.entries(decisions)) {
+    const copy = { ...decision };
+    delete copy.probabilities;
+    out[key] = copy;
+  }
+  return out;
+}
+
+function toRunItem(result: AnalysisItemResult, resultId?: string): IAnalysisItemResult {
+  const decisions = result.decisions ? stripProbabilities(result.decisions) : undefined;
   return {
     conversationKey: result.conversationId,
     extractedFields: result.extractedFields,
@@ -93,6 +125,9 @@ function toRunItem(result: AnalysisItemResult): IAnalysisItemResult {
     accuracy: result.accuracy,
     passed: result.passed,
     error: result.error,
+    ...(decisions ? { decisions } : {}),
+    ...(result.needsReview ? { needsReview: true, reviewReason: result.reviewReason } : {}),
+    ...(resultId ? { resultId } : {}),
   };
 }
 
@@ -106,6 +141,11 @@ export interface CreateDefinitionInput {
   modes: IAnalysisModes;
   extractionModelKey?: string;
   judgeModelKey?: string;
+  /** Model Hub `decision` model that answers the Yes/No, Choice and Score fields. */
+  decisionModelKey?: string;
+  /** Absent = the imported conversation corpus. */
+  source?: IAnalysisSource;
+  review?: IAnalysisReviewSettings;
   runConfig?: { concurrency?: number };
   schedule?: { cron: string; enabled: boolean };
   projectId?: string;
@@ -131,6 +171,9 @@ export async function createDefinition(
     modes: input.modes,
     extractionModelKey: input.extractionModelKey,
     judgeModelKey: input.judgeModelKey,
+    ...(input.decisionModelKey ? { decisionModelKey: input.decisionModelKey } : {}),
+    ...(input.source ? { source: input.source } : {}),
+    ...(input.review ? { review: input.review } : {}),
     runConfig: input.runConfig,
     schedule: input.schedule,
     createdBy,
@@ -158,7 +201,7 @@ export async function updateDefinition(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IAnalysisDefinition, 'name' | 'description' | 'fieldSet' | 'extractionInstructions' | 'modes' | 'extractionModelKey' | 'judgeModelKey' | 'runConfig' | 'schedule' | 'projectId'>>,
+  data: Partial<Pick<IAnalysisDefinition, 'name' | 'description' | 'fieldSet' | 'extractionInstructions' | 'modes' | 'extractionModelKey' | 'judgeModelKey' | 'decisionModelKey' | 'source' | 'review' | 'runConfig' | 'schedule' | 'projectId'>>,
 ): Promise<WithId<IAnalysisDefinition> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -169,7 +212,11 @@ export async function updateDefinition(
 export async function deleteDefinition(tenantDbName: string, id: string): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.deleteAnalysisDefinition(id);
+  const definition = await db.findAnalysisDefinitionById(id);
+  const deleted = await db.deleteAnalysisDefinition(id);
+  // Results belong to their definition: drop them with it (reviews included).
+  if (deleted && definition) await db.deleteAnalysisResultsForDefinition(definition.projectId ?? '', definition.key);
+  return deleted;
 }
 
 // ── Conversations ────────────────────────────────────────────────────────────
@@ -270,6 +317,7 @@ export async function getRun(tenantDbName: string, id: string): Promise<WithId<I
 
 export interface RunDefinitionDeps {
   buildModelInvoker?: typeof buildModelInvoker;
+  buildDecisionInvoker?: typeof buildDecisionInvoker;
 }
 
 /**
@@ -278,9 +326,10 @@ export interface RunDefinitionDeps {
  *   - tag        : conversations carrying a given tag
  *   - random     : a random sample of `sampleSize` from the corpus (optionally tag-filtered)
  *   - unanalyzed : only conversations never analyzed yet (lastAnalyzedAt unset)
- *   - keys       : an explicit list of conversation keys
+ *   - changed    : only what has no result yet (imported) or is new/changed since its result (agent sessions)
+ *   - keys       : an explicit list of conversation keys (agent sessions: session ids)
  */
-export type RunSelectionStrategy = 'all' | 'tag' | 'random' | 'unanalyzed' | 'keys';
+export type RunSelectionStrategy = 'all' | 'tag' | 'random' | 'unanalyzed' | 'changed' | 'keys';
 
 export interface RunSelection {
   strategy: RunSelectionStrategy;
@@ -288,6 +337,15 @@ export interface RunSelection {
   sampleSize?: number;
   conversationKeys?: string[];
 }
+
+/** What a caller may ask for to analyze agent sessions: the rest comes from the definition's source. */
+export interface AgentSessionTargetRequest {
+  kind: 'agent_sessions';
+  /** Look-back in days; defaults to the source's. */
+  days?: number;
+}
+
+type AgentSessionTarget = Extract<IAnalysisRunTarget, { kind: 'agent_sessions' }>;
 
 export interface RunDefinitionParams {
   tenantDbName: string;
@@ -298,8 +356,11 @@ export interface RunDefinitionParams {
   /** @deprecated prefer `selection`; kept for back-compat (treated as a keys selection). */
   conversationKeys?: string[];
   selection?: RunSelection;
-  /** What to analyze. Defaults to the conversation corpus. */
-  target?: IAnalysisRunTarget;
+  /**
+   * What to analyze. Defaults to what the definition's source says: the
+   * conversation corpus, or its agent sessions.
+   */
+  target?: IAnalysisRunTarget | AgentSessionTargetRequest;
 }
 
 /**
@@ -307,25 +368,46 @@ export interface RunDefinitionParams {
  * the run's items are keyed by (conversation key / dataset item id) and
  * `writeBack` persists the result for that source.
  */
-interface RunSourceItem {
+export interface RunSourceItem {
   key: string;
   conversation: AnalysisConversation;
   /** Provider id used by the write-back (conversation `_id`; unused for items). */
   recordId: string;
   /** Dataset items only: labels are human-owned, so an AI run must not clobber them. */
   humanLabeled?: boolean;
+  /** Imported conversations: the display title of the result row. */
+  title?: string;
 }
 
-function isDatasetTarget(target?: IAnalysisRunTarget): target is Extract<IAnalysisRunTarget, { kind: 'dataset' }> {
+type Db = Awaited<ReturnType<typeof getDatabase>>;
+
+function isDatasetTarget(target?: { kind: string }): target is Extract<IAnalysisRunTarget, { kind: 'dataset' }> {
   return target?.kind === 'dataset';
 }
 
 /** Two runs collide only if they cover the same target. */
 function sameTarget(a?: IAnalysisRunTarget, b?: IAnalysisRunTarget): boolean {
-  if (isDatasetTarget(a) || isDatasetTarget(b)) {
-    return isDatasetTarget(a) && isDatasetTarget(b) && a.datasetId === b.datasetId;
-  }
+  if ((a?.kind ?? 'conversations') !== (b?.kind ?? 'conversations')) return false;
+  if (isDatasetTarget(a) && isDatasetTarget(b)) return a.datasetId === b.datasetId;
   return true;
+}
+
+/**
+ * Turn what a caller asked for into a concrete target. Without one, the
+ * definition's source decides; an agent-session target needs a definition that
+ * has an agent-session source (the agents, thresholds and window live there).
+ */
+function resolveRunTarget(
+  definition: IAnalysisDefinition,
+  target: RunDefinitionParams['target'],
+  now: Date,
+): IAnalysisRunTarget | undefined {
+  const source = definition.source?.kind === 'agent_sessions' ? definition.source : undefined;
+  if (!target) return source ? buildAgentSessionTarget(source, now) : undefined;
+  if (target.kind !== 'agent_sessions') return target;
+  if ('agentKeys' in target) return target;
+  if (!source) throw new Error('This definition does not analyze agent sessions');
+  return buildAgentSessionTarget(source, now, target.days);
 }
 
 /** Deterministic-free shuffle (app code, not a workflow) — Fisher–Yates. */
@@ -347,8 +429,9 @@ function resolveSelection(selection: RunSelection | undefined, legacyKeys: strin
 
 /** Resolve the conversations a run will cover from its selection strategy. */
 async function selectConversations(
-  db: Awaited<ReturnType<typeof getDatabase>>,
+  db: Db,
   projectId: string | undefined,
+  definitionKey: string,
   selection: RunSelection | undefined,
   legacyKeys: string[] | undefined,
 ): Promise<IAnalysisConversation[]> {
@@ -371,13 +454,20 @@ async function selectConversations(
     return candidates.filter((c) => !c.lastAnalyzedAt).slice(0, MAX_RUN_CONVERSATIONS);
   }
 
+  if (sel.strategy === 'changed') {
+    // An imported conversation never changes, so "changed" is "no result by this definition yet".
+    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+    const existing = await loadResultsBySource(db, projectId ?? '', definitionKey, 'conversation', candidates.map((c) => c.key));
+    return candidates.filter((c) => !existing.has(c.key));
+  }
+
   // 'all' or 'tag'
   return db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
 }
 
 /** Page through a dataset's items, applying the label filter server-side. */
 async function loadDatasetItems(
-  db: Awaited<ReturnType<typeof getDatabase>>,
+  db: Db,
   datasetId: string,
   onlyUnlabeled: boolean,
 ): Promise<IEvaluationDatasetItem[]> {
@@ -405,7 +495,7 @@ async function loadDatasetItems(
  * labeler, and the write-back leaves their labels untouched.
  */
 async function selectDatasetItems(
-  db: Awaited<ReturnType<typeof getDatabase>>,
+  db: Db,
   datasetId: string,
   selection: RunSelection | undefined,
   legacyKeys: string[] | undefined,
@@ -425,11 +515,12 @@ async function selectDatasetItems(
   return byTag;
 }
 
-/** Resolve the work a run will cover, whichever source it targets. */
+/** Resolve the work a run will cover for the corpus or a dataset (agent sessions are resolved by id). */
 async function selectRunItems(
-  db: Awaited<ReturnType<typeof getDatabase>>,
+  db: Db,
   projectId: string | undefined,
-  params: Pick<RunDefinitionParams, 'selection' | 'conversationKeys' | 'target'>,
+  definitionKey: string,
+  params: Pick<RunDefinitionParams, 'selection' | 'conversationKeys'> & { target?: IAnalysisRunTarget },
 ): Promise<RunSourceItem[]> {
   if (isDatasetTarget(params.target)) {
     const items = await selectDatasetItems(db, params.target.datasetId, params.selection, params.conversationKeys);
@@ -440,10 +531,11 @@ async function selectRunItems(
       humanLabeled: isHumanLabeled(item),
     }));
   }
-  const convos = await selectConversations(db, projectId, params.selection, params.conversationKeys);
+  const convos = await selectConversations(db, projectId, definitionKey, params.selection, params.conversationKeys);
   return convos.map((c) => ({
     key: c.key,
     recordId: toView(c).id,
+    title: c.name || c.key,
     conversation: {
       id: c.key,
       transcript: c.transcript,
@@ -451,6 +543,39 @@ async function selectRunItems(
       occurredAt: c.occurredAt?.toISOString(),
     },
   }));
+}
+
+/** What a run would cover, resolved the way a real run resolves it (no run row is created). */
+export type ResolvedRun =
+  | { kind: 'agent_sessions'; target: AgentSessionTarget; ids: string[] }
+  | { kind: 'items'; target?: IAnalysisRunTarget; items: RunSourceItem[] };
+
+/**
+ * Resolve a run's target and selection. Agent sessions resolve to ids only (the
+ * transcripts are loaded chunk by chunk at execution); the corpus and datasets
+ * resolve to their loaded items.
+ */
+export async function resolveRun(
+  db: Db,
+  definition: IAnalysisDefinition,
+  params: RunDefinitionParams,
+  now: Date = new Date(),
+): Promise<ResolvedRun> {
+  const target = resolveRunTarget(definition, params.target, now);
+  if (target?.kind === 'agent_sessions') {
+    if (definition.source?.kind !== 'agent_sessions') throw new Error('This definition does not analyze agent sessions');
+    const ids = await selectAgentSessionIds(db, {
+      projectId: params.projectId ?? '',
+      definitionKey: definition.key,
+      target,
+      selection: params.selection,
+      legacyKeys: params.conversationKeys,
+      max: MAX_RUN_CONVERSATIONS,
+    });
+    return { kind: 'agent_sessions', target, ids };
+  }
+  const items = await selectRunItems(db, params.projectId, definition.key, { ...params, target });
+  return { kind: 'items', ...(target ? { target } : {}), items };
 }
 
 /**
@@ -464,19 +589,25 @@ async function createPendingRun(
   mode: IAnalysisRun['mode'],
 ): Promise<{ run: WithId<IAnalysisRun>; conversationKeys: string[] }> {
   await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'analysis');
-  const { tenantDbName, tenantId, projectId, createdBy, definitionKey, target } = params;
+  const { tenantDbName, tenantId, projectId, createdBy, definitionKey } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
   const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
   if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
 
-  const sources = await selectRunItems(db, projectId, params);
-  if (sources.length === 0) {
+  const resolved = await resolveRun(db, definition, params);
+  const target = resolved.target;
+  const conversationKeys = resolved.kind === 'agent_sessions' ? resolved.ids : resolved.items.map((s) => s.key);
+  if (conversationKeys.length === 0) {
     throw new Error(
       isDatasetTarget(target)
         ? 'No dataset items to label with this selection.'
-        : 'No conversations to analyze — ingest conversations first (Conversations tab → Ingest).',
+        : target?.kind === 'agent_sessions'
+          ? (params.selection?.strategy ?? 'changed') === 'changed'
+            ? 'No conversations to analyze: no agent session is new or changed since its last analysis.'
+            : 'No conversations to analyze with this selection.'
+          : 'No conversations to analyze — ingest conversations first (Conversations tab → Ingest).',
     );
   }
 
@@ -507,11 +638,234 @@ async function createPendingRun(
     ...(target ? { target } : {}),
     status: 'pending',
     mode,
-    progress: { total: sources.length, completed: 0, failed: 0 },
+    progress: { total: conversationKeys.length, completed: 0, failed: 0 },
     items: [],
     createdBy,
   });
-  return { run: toView(run), conversationKeys: sources.map((s) => s.key) };
+  return { run: toView(run), conversationKeys };
+}
+
+/** The engine spec and live invokers of a definition's run. Invokers are only built where a field needs them. */
+function buildRunEngine(
+  definition: IAnalysisDefinition,
+  ctx: AnalysisModelContext,
+  deps: RunDefinitionDeps,
+): {
+  spec: AnalysisSpec;
+  invokeExtraction?: ModelInvoker;
+  invokeDecision?: DecisionInvoker;
+  invokeJudge?: ModelInvoker;
+} {
+  const makeInvoker = deps.buildModelInvoker ?? buildModelInvoker;
+  const makeDecision = deps.buildDecisionInvoker ?? buildDecisionInvoker;
+  const spec: AnalysisSpec = {
+    fieldSet: definition.fieldSet,
+    extractionInstructions: definition.extractionInstructions,
+    modes: definition.modes,
+    useDecisionModel: !!definition.decisionModelKey,
+    review: definition.review,
+    spotCheckSalt: definition.key,
+  };
+  // Without a decision model every field is extracted, exactly as before. With
+  // one, the extraction model is only needed when some field is not a decision field.
+  const needsExtraction = !definition.decisionModelKey || definition.fieldSet.some((f) => !isDecisionField(f, spec));
+  return {
+    spec,
+    invokeExtraction: needsExtraction ? makeInvoker(definition.extractionModelKey, ctx, 'extraction') : undefined,
+    invokeDecision: definition.decisionModelKey ? makeDecision(definition.decisionModelKey, ctx) : undefined,
+    invokeJudge: definition.modes.judge ? makeInvoker(definition.judgeModelKey, ctx, 'judge') : undefined,
+  };
+}
+
+interface ResultEntry {
+  item: AnalysisItemResult;
+  sourceKind: AnalysisResultSourceKind;
+  sourceId: string;
+  title?: string;
+  agentKey?: string;
+  ownerId?: string;
+  sourceVersion?: SourceVersion;
+}
+
+/**
+ * Write the latest result of each analyzed conversation (errored items are not
+ * written: the previous result stays). A human review is carried over while it
+ * still describes what was analyzed: always for an imported conversation, and
+ * for a session only while it has not changed since. A carried review clears
+ * the review flag, on the row and on the engine item (so the run's count matches
+ * the queue); a changed session starts over.
+ * Returns the written row id per source id.
+ */
+async function writeResults(
+  db: Db,
+  base: { tenantId: string; projectId: string; definitionKey: string; runId: string },
+  sourceKind: AnalysisResultSourceKind,
+  entries: ResultEntry[],
+): Promise<Map<string, string>> {
+  const ids = new Map<string, string>();
+  const analyzedAt = new Date();
+  const writable = entries.filter((e) => !e.item.error);
+  // Read the rows right before writing, not before the model calls: a review
+  // saved while they ran must not be overwritten.
+  const existing = await loadResultsBySource(db, base.projectId, base.definitionKey, sourceKind, writable.map((e) => e.sourceId));
+  await mapLimit(
+    writable,
+    WRITE_BACK_CONCURRENCY,
+    async ({ item, sourceId, title, agentKey, ownerId, sourceVersion }) => {
+      const prev = existing.get(sourceId);
+      const keep = !!prev && (sourceKind === 'conversation' || sameVersion(prev.sourceVersion, sourceVersion));
+      const review = keep && prev?.review ? prev.review : null;
+      const reviewReason = item.reviewReason ?? (review ? prev?.reviewReason : undefined);
+      if (review) item.needsReview = false;
+      const saved = await db.upsertAnalysisResult({
+        tenantId: base.tenantId,
+        projectId: base.projectId,
+        definitionKey: base.definitionKey,
+        sourceKind,
+        sourceId,
+        ...(title ? { title } : {}),
+        ...(agentKey ? { agentKey } : {}),
+        ...(ownerId ? { ownerId } : {}),
+        ...(sourceVersion ? { sourceVersion } : {}),
+        runId: base.runId,
+        decisions: item.decisions ?? {},
+        extractedFields: item.extractedFields,
+        ...(item.judge ? { judge: item.judge } : {}),
+        ...(item.accuracy ? { accuracy: item.accuracy } : {}),
+        ...(item.rationale ? { rationale: item.rationale } : {}),
+        needsReview: review ? false : (item.needsReview ?? false),
+        ...(reviewReason ? { reviewReason } : {}),
+        minConfidence: item.minConfidence ?? 1,
+        review,
+        analyzedAt,
+      });
+      ids.set(sourceId, String(saved._id ?? ''));
+    },
+  );
+  return ids;
+}
+
+/** Throttled progress writer shared by both execution paths. */
+function progressFlusher(db: Db, runId: string, total: number) {
+  const partial: AnalysisItemResult[] = [];
+  let lastFlush = 0;
+  return {
+    onItem(item: AnalysisItemResult): void {
+      partial.push(item);
+      const now = Date.now();
+      if (now - lastFlush >= 1500) {
+        lastFlush = now;
+        const completed = partial.filter((p) => !p.error).length;
+        const failed = partial.filter((p) => p.error).length;
+        void db
+          .updateAnalysisRun(runId, {
+            progress: { total, completed, failed },
+            items: partial.map((p) => toRunItem(p)),
+          })
+          .catch(() => {});
+      }
+    },
+  };
+}
+
+/** Sessions are loaded and analyzed in chunks of this size so a 5,000-session run never holds all transcripts. */
+const SESSION_CHUNK = 100;
+
+/**
+ * Run a definition over its agent sessions: the pinned session ids are loaded
+ * chunk by chunk, analyzed, and each result is upserted (with the session's
+ * version, so a later run can tell it changed).
+ */
+async function executeAgentSessionRun(
+  db: Db,
+  params: RunDefinitionParams & { runId: string },
+  definition: IAnalysisDefinition,
+  target: AgentSessionTarget,
+  deps: RunDefinitionDeps,
+): Promise<WithId<IAnalysisRun>> {
+  const { tenantDbName, tenantId, projectId, runId } = params;
+  const pid = projectId ?? '';
+  const ids =
+    params.conversationKeys ??
+    (await selectAgentSessionIds(db, {
+      projectId: pid,
+      definitionKey: definition.key,
+      target,
+      selection: params.selection,
+      max: MAX_RUN_CONVERSATIONS,
+    }));
+
+  await db.updateAnalysisRun(runId, { status: 'running', startedAt: new Date() });
+
+  const ctx: AnalysisModelContext = { tenantDbName, tenantId, projectId: pid };
+  const { spec, invokeExtraction, invokeDecision, invokeJudge } = buildRunEngine(definition, ctx, deps);
+  const flusher = progressFlusher(db, runId, ids.length);
+  const allItems: AnalysisItemResult[] = [];
+  const runItems: IAnalysisItemResult[] = [];
+
+  for (let i = 0; i < ids.length; i += SESSION_CHUNK) {
+    const chunk = ids.slice(i, i + SESSION_CHUNK);
+    const sessions = await db.listAgentConversationsForAnalysis({
+      projectId: pid,
+      agentKeys: target.agentKeys,
+      ids: chunk,
+      limit: chunk.length,
+      fields: 'full',
+    });
+    if (sessions.length === 0) continue;
+    const existing = await loadResultsBySource(db, pid, definition.key, 'agent_session', chunk);
+    const sessionById = new Map(sessions.map((s) => [conversationId(s), s]));
+    // A review is a reference only for the transcript it was given on: a session
+    // that changed since is scored without it (and loses it when written).
+    const conversations = sessions.map((s) => {
+      const prev = existing.get(conversationId(s));
+      const reviewed = prev && sameVersion(prev.sourceVersion, sourceVersionOf(s)) ? prev.review?.values : undefined;
+      return agentConversationToAnalysis(s, reviewed);
+    });
+
+    const result = await runAnalysis({
+      conversations,
+      spec,
+      invokeExtraction,
+      invokeDecision,
+      invokeJudge,
+      config: { concurrency: definition.runConfig?.concurrency },
+      onItem: (item) => flusher.onItem(item),
+    });
+
+    const entries: ResultEntry[] = result.items.map((item) => {
+      const session = sessionById.get(item.conversationId)!;
+      return {
+        item,
+        sourceKind: 'agent_session',
+        sourceId: item.conversationId,
+        title: session.title,
+        agentKey: session.agentKey,
+        ownerId: session.createdBy,
+        sourceVersion: sourceVersionOf(session),
+      };
+    });
+    const written = await writeResults(
+      db,
+      { tenantId, projectId: pid, definitionKey: definition.key, runId },
+      'agent_session',
+      entries,
+    );
+    for (const item of result.items) {
+      allItems.push(item);
+      runItems.push(toRunItem(item, written.get(item.conversationId)));
+    }
+  }
+
+  const aggregate = aggregateItems(allItems, definition.fieldSet, spec);
+  const updated = await db.updateAnalysisRun(runId, {
+    status: 'completed',
+    progress: { total: aggregate.total, completed: aggregate.completed, failed: aggregate.failed },
+    aggregate,
+    items: runItems,
+    finishedAt: new Date(),
+  });
+  return toView(updated ?? (await db.findAnalysisRunById(runId))!);
 }
 
 /** Execute an already-created analysis run to completion. Throws on fatal error. */
@@ -519,7 +873,7 @@ export async function executeRun(
   params: RunDefinitionParams & { runId: string },
   deps: RunDefinitionDeps = {},
 ): Promise<WithId<IAnalysisRun>> {
-  const { tenantDbName, tenantId, projectId, createdBy, definitionKey, target, runId } = params;
+  const { tenantDbName, tenantId, projectId, createdBy, definitionKey, runId } = params;
   void createdBy;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -530,57 +884,76 @@ export async function executeRun(
     await assertServiceEnabled({ tenantDbName, tenantId }, 'analysis');
     const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
     if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
-    const sources = await selectRunItems(db, projectId, params);
+
+    // The run row holds the resolved target (a queued job may only carry the
+    // caller's request, e.g. "agent sessions, 30 days").
+    const stored = await db.findAnalysisRunById(runId);
+    const target = stored?.target ?? resolveRunTarget(definition, params.target, new Date());
+    if (target?.kind === 'agent_sessions') {
+      return await executeAgentSessionRun(db, params, definition, target, deps);
+    }
+
+    const sources = await selectRunItems(db, projectId, definition.key, { ...params, target });
 
     await db.updateAnalysisRun(runId, { status: 'running', startedAt: new Date() });
 
     const ctx: AnalysisModelContext = { tenantDbName, tenantId, projectId: projectId ?? '' };
-    const makeInvoker = deps.buildModelInvoker ?? buildModelInvoker;
+    const { spec, invokeExtraction, invokeDecision, invokeJudge } = buildRunEngine(definition, ctx, deps);
+    const isDataset = isDatasetTarget(target);
+    const resultProjectId = projectId ?? '';
 
-    const spec: AnalysisSpec = {
-      fieldSet: definition.fieldSet,
-      extractionInstructions: definition.extractionInstructions,
-      modes: definition.modes,
-    };
-    const conversations: AnalysisConversation[] = sources.map((s) => s.conversation);
+    // A human review of an earlier run is the best reference there is: accuracy
+    // mode scores against it. (Datasets keep their own labels and have no results.)
+    const existing = isDataset
+      ? new Map<string, IAnalysisResult>()
+      : await loadResultsBySource(db, resultProjectId, definition.key, 'conversation', sources.map((s) => s.key));
+    const conversations: AnalysisConversation[] = sources.map((s) => {
+      const reviewed = existing.get(s.key)?.review?.values;
+      return reviewed && Object.keys(reviewed).length > 0
+        ? { ...s.conversation, referenceFields: { ...s.conversation.referenceFields, ...reviewed } }
+        : s.conversation;
+    });
 
     // Persist incremental progress so the dashboard can show step-by-step
     // results live (throttled to avoid hammering the DB on large corpora).
-    const partial: AnalysisItemResult[] = [];
-    let lastFlush = 0;
+    const flusher = progressFlusher(db, runId, conversations.length);
     const result = await runAnalysis({
       conversations,
       spec,
-      invokeExtraction: makeInvoker(definition.extractionModelKey, ctx, 'extraction'),
-      invokeJudge: definition.modes.judge ? makeInvoker(definition.judgeModelKey, ctx, 'judge') : undefined,
+      invokeExtraction,
+      invokeDecision,
+      invokeJudge,
       config: { concurrency: definition.runConfig?.concurrency },
-      onItem: (item) => {
-        partial.push(item);
-        const now = Date.now();
-        if (now - lastFlush >= 1500) {
-          lastFlush = now;
-          const completed = partial.filter((p) => !p.error).length;
-          const failed = partial.filter((p) => p.error).length;
-          void db
-            .updateAnalysisRun(runId, {
-              progress: { total: conversations.length, completed, failed },
-              items: partial.map(toRunItem),
-            })
-            .catch(() => {});
-        }
-      },
-    });
-
-    const updated = await db.updateAnalysisRun(runId, {
-      status: 'completed',
-      progress: { total: result.aggregate.total, completed: result.aggregate.completed, failed: result.aggregate.failed },
-      aggregate: result.aggregate,
-      items: result.items.map(toRunItem),
-      finishedAt: new Date(),
+      onItem: (item) => flusher.onItem(item),
     });
 
     const sourceByKey = new Map(sources.map((s) => [s.key, s]));
     const succeeded = result.items.filter((item) => !item.error);
+
+    // Datasets keep labels, not results. For the corpus, record the latest result of each conversation.
+    const written = isDataset
+      ? new Map<string, string>()
+      : await writeResults(
+          db,
+          { tenantId, projectId: resultProjectId, definitionKey: definition.key, runId },
+          'conversation',
+          result.items.map((item) => ({
+            item,
+            sourceKind: 'conversation' as const,
+            sourceId: item.conversationId,
+            title: sourceByKey.get(item.conversationId)?.title,
+          })),
+        );
+    // Carried reviews cleared some review flags: count what the queue will show.
+    const aggregate = isDataset ? result.aggregate : aggregateItems(result.items, definition.fieldSet, spec);
+
+    const updated = await db.updateAnalysisRun(runId, {
+      status: 'completed',
+      progress: { total: aggregate.total, completed: aggregate.completed, failed: aggregate.failed },
+      aggregate,
+      items: result.items.map((item) => toRunItem(item, written.get(item.conversationId))),
+      finishedAt: new Date(),
+    });
 
     if (isDatasetTarget(target)) {
       // Labeling: extracted fields ARE the labels, so they are always written
@@ -642,9 +1015,21 @@ export async function createAsyncRun(
 }
 
 /**
+ * When an agent-session schedule last fired with nothing new to analyze. Such a
+ * slot creates no run, so without this it would stay due and fire again on every
+ * tick of the day; it counts as fired instead (per process: after a restart the
+ * slot is checked once more, which is harmless).
+ */
+const emptyScheduleSlots = new Map<string, number>();
+
+/**
  * Run every definition in a tenant whose cron schedule is due. "Due" is decided
  * against the most recent run's timestamp so each slot fires at most once.
  * Used by the background analysis scheduler; deps are injectable for tests.
+ *
+ * A definition with an agent-session source analyzes the sessions that are new
+ * or changed since their last result. When there are none no run is created
+ * (not an error) and the slot still counts as fired.
  */
 export async function runScheduledAnalyses(
   tenantDbName: string,
@@ -659,17 +1044,35 @@ export async function runScheduledAnalyses(
   const errors: string[] = [];
   for (const def of definitions) {
     if (!def.schedule?.enabled) continue;
+    const agentSource = def.source?.kind === 'agent_sessions' ? def.source : undefined;
+    const slotKey = `${tenantDbName}:${def.projectId ?? ''}:${def.key}`;
     const recent = await db.listAnalysisRuns({ definitionKey: def.key, limit: 1 });
-    const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
-    if (!isDue(def.schedule, last ? new Date(last) : null, now)) continue;
+    const lastRun = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
+    const lastFired = Math.max(lastRun ? new Date(lastRun).getTime() : -Infinity, emptyScheduleSlots.get(slotKey) ?? -Infinity);
+    if (!isDue(def.schedule, Number.isFinite(lastFired) ? new Date(lastFired) : null, now)) continue;
     try {
       await runDefinition(
-        { tenantDbName, tenantId, projectId: def.projectId, createdBy: 'system', definitionKey: def.key },
+        {
+          tenantDbName,
+          tenantId,
+          projectId: def.projectId,
+          createdBy: 'system',
+          definitionKey: def.key,
+          ...(agentSource
+            ? { target: buildAgentSessionTarget(agentSource, now), selection: { strategy: 'changed' as const } }
+            : {}),
+        },
         deps,
       );
+      emptyScheduleSlots.delete(slotKey);
       fired.push(def.key);
     } catch (err) {
-      errors.push(`${def.key}: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      if (agentSource && /no conversations to analyze/i.test(message)) {
+        emptyScheduleSlots.set(slotKey, now.getTime());
+        continue;
+      }
+      errors.push(`${def.key}: ${message}`);
     }
   }
   return { fired, errors };
