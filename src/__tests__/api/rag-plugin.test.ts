@@ -98,8 +98,16 @@ vi.mock('@/lib/services/rag/ragReindexService', () => ({
   }),
 }));
 
+/**
+ * An imported document is indexed later by a queued job. Publishing it is
+ * stubbed for the same reason: the test needs no queue, and can see the job.
+ */
+const ingestJobs = vi.hoisted(() => ({ publishRagIngestJob: vi.fn(async () => undefined) }));
+vi.mock('@/lib/services/rag/ragIngestJob', () => ingestJobs);
+
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
+import { RAG_IMPORT_MAX_DOCUMENTS } from '@/lib/services/rag/ragTransfer';
 import { ragApiPlugin } from '@/server/api/plugins/rag';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -792,5 +800,194 @@ describe('document routes are project-scoped and never answer with the source te
     });
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('export and import routes move a module as JSONL', () => {
+  const SOURCE_KEY = 'transfer-source';
+  const TARGET_KEY = 'transfer-target';
+  /** Multi-line and quoted: what one JSONL line has to carry intact. */
+  const REFUND_TEXT = 'Q: how long does a refund take?\nA: "14" days from the request.';
+
+  function exportLines(body: string): Array<Record<string, unknown>> {
+    return body.trimEnd().split('\n').map((line) => parseJsonBody<Record<string, unknown>>(line));
+  }
+
+  async function exportModule(key: string) {
+    return app.inject({
+      method: 'GET',
+      url: `/api/rag/modules/${key}/export`,
+      headers: REQUEST_HEADERS,
+    });
+  }
+
+  async function importInto(key: string, payload: Record<string, unknown>) {
+    return app.inject({
+      method: 'POST',
+      url: `/api/rag/modules/${key}/import`,
+      headers: JSON_HEADERS,
+      payload: JSON.stringify(payload),
+    });
+  }
+
+  beforeAll(async () => {
+    for (const key of [SOURCE_KEY, TARGET_KEY]) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/rag/modules',
+        headers: JSON_HEADERS,
+        payload: createModulePayload({ key, name: key }),
+      });
+      expect(res.statusCode).toBe(201);
+    }
+
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+
+    // Stored the way ingest stores a source this short: inline, no bucket object.
+    await db.createRagDocument({
+      tenantId: TENANT_ID,
+      projectId: FAKE_PROJECT_ID,
+      ragModuleKey: SOURCE_KEY,
+      fileName: 'refunds.md',
+      contentType: 'text/markdown',
+      metadata: { lang: 'en' },
+      status: 'indexed',
+      sourceText: REFUND_TEXT,
+      createdBy: USER_ID,
+    });
+
+    // Same module key, another project.
+    await db.createRagDocument({
+      tenantId: TENANT_ID,
+      projectId: OTHER_PROJECT_ID,
+      ragModuleKey: SOURCE_KEY,
+      fileName: 'their-notes.md',
+      status: 'indexed',
+      sourceText: FOREIGN_PROJECT_QUERY,
+      createdBy: 'someone-else',
+    });
+
+    // A module that is switched off.
+    await db.createRagModule({
+      tenantId: TENANT_ID,
+      projectId: FAKE_PROJECT_ID,
+      key: 'disabled-module',
+      name: 'Disabled Module',
+      embeddingModelKey: 'embed-model',
+      vectorProviderKey: 'vec-provider',
+      vectorIndexKey: 'vec-index',
+      chunkConfig: { strategy: 'recursive_character', chunkSize: 800, chunkOverlap: 100 },
+      status: 'disabled',
+      createdBy: USER_ID,
+    });
+
+    // A module that only another project has.
+    await db.createRagModule({
+      tenantId: TENANT_ID,
+      projectId: OTHER_PROJECT_ID,
+      key: 'their-module',
+      name: 'Their Module',
+      embeddingModelKey: 'embed-model',
+      vectorProviderKey: 'vec-provider',
+      vectorIndexKey: 'vec-index',
+      chunkConfig: { strategy: 'recursive_character', chunkSize: 800, chunkOverlap: 100 },
+      status: 'active',
+      createdBy: 'someone-else',
+    });
+  });
+
+  it('GET /export answers a header line, then each document with its full text', async () => {
+    const res = await exportModule(SOURCE_KEY);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('application/x-ndjson');
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="${SOURCE_KEY}.rag.jsonl"`);
+
+    const [header, ...documents] = exportLines(res.body);
+    expect(header).toMatchObject({
+      format: 'cognipeer.rag-module',
+      version: 1,
+      module: { key: SOURCE_KEY },
+      documentCount: 1,
+      skippedDocuments: 0,
+    });
+    expect(documents).toHaveLength(1);
+    expect(documents[0]).toMatchObject({
+      type: 'document',
+      fileName: 'refunds.md',
+      contentType: 'text/markdown',
+      metadata: { lang: 'en' },
+      content: REFUND_TEXT,
+    });
+    // The same-key module of another project stays out.
+    expect(res.body).not.toContain(FOREIGN_PROJECT_QUERY);
+  });
+
+  it('GET /export 404s an unknown module and one that only another project has', async () => {
+    expect((await exportModule('no-such-module')).statusCode).toBe(404);
+    expect((await exportModule('their-module')).statusCode).toBe(404);
+  });
+
+  it('POST /import re-ingests an export into another module, queued for indexing', async () => {
+    const exported = await exportModule(SOURCE_KEY);
+
+    const res = await importInto(TARGET_KEY, { data: exported.body });
+
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody(res.body)).toEqual({ total: 1, imported: 1, failed: 0, errors: [] });
+
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+    const documents = await db.listRagDocuments(TARGET_KEY, { projectId: FAKE_PROJECT_ID });
+    expect(documents).toHaveLength(1);
+    expect(documents[0]).toMatchObject({
+      fileName: 'refunds.md',
+      status: 'pending',
+      metadata: { lang: 'en' },
+      sourceText: REFUND_TEXT,
+      createdBy: USER_ID,
+    });
+    expect(ingestJobs.publishRagIngestJob).toHaveBeenCalledWith(expect.objectContaining({
+      tenantDbName: TENANT_DB_NAME,
+      ragModuleKey: TARGET_KEY,
+      documentId: String(documents[0]._id),
+    }));
+
+    // And it comes back out the same.
+    const [, ...roundTripped] = exportLines((await exportModule(TARGET_KEY)).body);
+    expect(roundTripped).toEqual(exportLines(exported.body).slice(1));
+  });
+
+  it('POST /import rejects a body without a JSONL string', async () => {
+    for (const payload of [{}, { data: ' \n ' }, { data: 42 }]) {
+      const res = await importInto(TARGET_KEY, payload);
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toContain('"data"');
+    }
+  });
+
+  it('POST /import answers 400 for a module it cannot import into and for a file it will not read', async () => {
+    const line = JSON.stringify({ fileName: 'note.md', content: 'note' });
+
+    for (const key of ['no-such-module', 'their-module']) {
+      const res = await importInto(key, { data: line });
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toContain('not found');
+    }
+
+    const disabledRes = await importInto('disabled-module', { data: line });
+    expect(disabledRes.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(disabledRes.body).error).toContain('not active');
+
+    const nextVersion = JSON.stringify({ format: 'cognipeer.rag-module', version: 2 });
+    const versionRes = await importInto(TARGET_KEY, { data: `${nextVersion}\n${line}` });
+    expect(versionRes.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(versionRes.body).error).toContain('Unsupported export version');
+
+    const tooMany = Array.from({ length: RAG_IMPORT_MAX_DOCUMENTS + 1 }, () => line).join('\n');
+    const capRes = await importInto(TARGET_KEY, { data: tooMany });
+    expect(capRes.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(capRes.body).error).toContain('at most');
   });
 });

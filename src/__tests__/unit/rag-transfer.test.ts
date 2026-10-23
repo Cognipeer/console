@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const ragService = vi.hoisted(() => ({
   getRagModule: vi.fn(),
   listRagDocuments: vi.fn(),
+  getRagDocument: vi.fn(),
   ingestDocument: vi.fn(),
 }));
 const ragSource = vi.hoisted(() => ({ loadSourceText: vi.fn() }));
@@ -25,16 +26,30 @@ describe('exportRagModule', () => {
   });
 
   it('writes a header line then one JSON line per document with multi-line content intact', async () => {
-    ragService.listRagDocuments.mockResolvedValue([
+    const listed = [
       { fileName: 'a.md', contentType: 'text/markdown', metadata: { lang: 'tr' }, _id: '1' },
       { fileName: 'b.txt', _id: '2' },
-    ]);
+    ];
+    ragService.listRagDocuments.mockResolvedValue(listed);
+    // Listed rows come without their inline text, so the export reads each full row.
+    ragService.getRagDocument.mockImplementation(async (_tenant: string, id: string) => ({
+      ...listed.find((row) => row._id === id),
+      sourceText: `full text of ${id}`,
+    }));
     ragSource.loadSourceText
       .mockResolvedValueOnce('line one\nline "two"')
       .mockResolvedValueOnce(undefined);
 
     const result = await exportRagModule('tenant', 'tid', 'proj', 'faq');
 
+    expect(ragService.getRagDocument.mock.calls).toEqual([['tenant', '1'], ['tenant', '2']]);
+    expect(ragSource.loadSourceText).toHaveBeenNthCalledWith(
+      1,
+      'tenant',
+      'tid',
+      'proj',
+      expect.objectContaining({ _id: '1', sourceText: 'full text of 1' }),
+    );
     expect(result).toBeDefined();
     expect(result!.documentCount).toBe(1);
     expect(result!.skippedDocuments).toBe(1);
