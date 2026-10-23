@@ -1,6 +1,6 @@
 import { createLogger } from '@/lib/core/logger';
 import type { IRagChunkConfig, IRagDocument } from '@/lib/database';
-import { listRagDocuments, getRagModule, ingestDocument } from './ragService';
+import { listRagDocuments, getRagDocument, getRagModule, ingestDocument } from './ragService';
 import { loadSourceText } from './ragSource';
 import { validateChunkConfig } from './chunking';
 
@@ -82,9 +82,11 @@ export async function exportRagModule(
   const lines: string[] = [];
   let skippedDocuments = 0;
 
-  for (const document of documents as IRagDocument[]) {
-    // listRagDocuments trims inline source text, so the full text is loaded per
-    // document here. Only the body is kept in memory, one document at a time.
+  for (const listed of documents as IRagDocument[]) {
+    // listRagDocuments drops the inline source text, and a short document keeps
+    // its text nowhere else, so each document's full row is read here, one at a
+    // time.
+    const document = (await getRagDocument(tenantDbName, String(listed._id))) ?? listed;
     const content = await loadSourceText(tenantDbName, tenantId, projectId, document);
     if (!content) {
       skippedDocuments += 1;
