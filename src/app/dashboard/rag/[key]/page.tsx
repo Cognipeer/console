@@ -55,6 +55,8 @@ import {
   IconChartHistogram,
   IconActivity,
   IconFileUpload,
+  IconDownload,
+  IconUpload,
   IconAlertTriangle,
 } from '@tabler/icons-react';
 import EditRagModuleModal from '@/components/rag/EditRagModuleModal';
@@ -74,6 +76,9 @@ import type { IRagChunkConfig, RagChunkStrategy } from '@/lib/database';
 
 /** How often a document still being ingested is re-read. */
 const DOC_POLL_INTERVAL_MS = 2500;
+/** Documents per import request; keeps each body well under the server's body limit. */
+const IMPORT_BATCH_SIZE = 1000;
+const IMPORT_FORMAT_NAME = 'cognipeer.rag-module';
 
 /** Which busy indicator a reload drives — 'silent' drives none, for polling. */
 type LoadIndicator = 'initial' | 'refresh' | 'silent';
@@ -640,6 +645,77 @@ export default function RagModuleDetailPage() {
   };
 
   const [reingestingDocId, setReingestingDocId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = async () => {
+    if (!moduleKey) return;
+    setExporting(true);
+    try {
+      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/export`, { cache: 'no-store' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${moduleKey}.rag.jsonl`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Export failed', message: String(error) });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImportFile = async (file: File) => {
+    if (!moduleKey) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
+      // The export header is informational here; each batch is posted as plain JSONL.
+      if (lines.length > 0 && lines[0].includes(`"format":"${IMPORT_FORMAT_NAME}"`)) lines.shift();
+
+      const url = `/api/rag/modules/${encodeURIComponent(moduleKey)}/import`;
+      let imported = 0;
+      let failed = 0;
+      let batchError: string | undefined;
+
+      for (let start = 0; start < lines.length; start += IMPORT_BATCH_SIZE) {
+        const batch = lines.slice(start, start + IMPORT_BATCH_SIZE).join('\n');
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: batch }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          batchError = body.error || `Import failed (${res.status}) at document ${start + 1}`;
+          break;
+        }
+        imported += body.imported;
+        failed += body.failed;
+      }
+
+      if (batchError) throw new Error(`${batchError}. ${imported} document(s) were queued before it.`);
+      notifications.show({
+        color: failed > 0 ? 'orange' : 'green',
+        title: 'Import finished',
+        message: `${imported} of ${lines.length} document(s) queued${failed > 0 ? `, ${failed} failed` : ''}.`,
+      });
+      void loadDocuments(true);
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Import failed', message: String(error) });
+    } finally {
+      setImporting(false);
+      if (importInputRef.current) importInputRef.current.value = '';
+    }
+  };
 
   /**
    * The whole-module rebuild is a server-side run now. It used to be a
@@ -1312,6 +1388,38 @@ export default function RagModuleDetailPage() {
                   <Text size="sm" c="dimmed">{documents.length} document(s) in this module</Text>
                 </div>
                 <Group gap="xs">
+                  <Tooltip label="Download every document's source text as JSONL" withArrow>
+                    <Button
+                      variant="light"
+                      size="xs"
+                      leftSection={exporting ? <Loader size={12} /> : <IconDownload size={14} />}
+                      onClick={() => void handleExport()}
+                      disabled={exporting || docsLoading || documents.length === 0}
+                    >
+                      Export
+                    </Button>
+                  </Tooltip>
+                  <Tooltip label="Import a JSONL export; documents are re-chunked and re-embedded with this module" withArrow>
+                    <Button
+                      variant="light"
+                      size="xs"
+                      leftSection={importing ? <Loader size={12} /> : <IconUpload size={14} />}
+                      onClick={() => importInputRef.current?.click()}
+                      disabled={importing}
+                    >
+                      Import
+                    </Button>
+                  </Tooltip>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".jsonl,.ndjson,application/x-ndjson"
+                    style={{ display: 'none' }}
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0];
+                      if (file) void handleImportFile(file);
+                    }}
+                  />
                   <Tooltip
                     label="Rebuild every document's chunks in the background — the run survives closing this tab"
                     withArrow
