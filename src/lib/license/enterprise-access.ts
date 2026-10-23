@@ -149,12 +149,10 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     prefixes: ['/api/portals/', '/api/portal/'],
   },
   {
-    // Agent Channels: connect agents to Slack and Microsoft Teams. Gates the admin API
-    // (/api/channels) and the self-service identity links + login-link page API
-    // (/api/channel-identities). The public Teams webhook (/api/public/channels) is a
-    // public API prefix and checks the license in-handler.
+    // Agent Channels: connect agents to Slack and Microsoft Teams. Gates the admin API (/api/channels). The public
+    // Teams webhook (/api/public/channels) is a public API prefix and checks the license in-handler.
     module: 'channels',
-    prefixes: ['/api/channels/', '/api/channel-identities/'],
+    prefixes: ['/api/channels/'],
   },
   {
     // Entity Health: the health scoreboard of agents, models, knowledge bases, MCP servers and tools,

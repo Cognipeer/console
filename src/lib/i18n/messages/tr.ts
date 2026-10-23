@@ -10,7 +10,6 @@ import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
 import { agentChannelsTr } from './agentChannels.tr';
 import { agentChannelsDeployTr } from './agentChannelsDeploy.tr';
-import { agentChannelsLinkTr } from './agentChannelsLink.tr';
 import { agentChannelsListTr } from './agentChannelsList.tr';
 import { agentChannelsSetupTr } from './agentChannelsSetup.tr';
 import { agentTemplatesTr } from './agentTemplates.tr';
@@ -1285,7 +1284,6 @@ export const tr: typeof en = {
     ...agentChannelsListTr,
     ...agentChannelsSetupTr,
     ...agentChannelsDeployTr,
-    ...agentChannelsLinkTr,
   },
   iamPrincipals: {
     segments: {
@@ -1684,8 +1682,6 @@ export const tr: typeof en = {
     iamDescription: 'Politikalar, kişiler, erişim kontrolü, denetim izi ve limitler',
     webhooks: 'Webhook’lar',
     webhooksDescription: 'Kendi uç noktalarınıza imzalı olaylar gönderin',
-    agentChannels: 'Kanallar',
-    agentChannelsDescription: 'Ajanları Slack ve Microsoft Teams’e bağlayın',
     agentSessions: 'Oturumlar',
     agentSessionsActive: 'Aktif',
     agentSessionsAll: 'Tümü',

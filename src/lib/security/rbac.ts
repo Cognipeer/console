@@ -346,8 +346,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/ai-app-gateway', service: 'ai-app-gateway' },
   { prefix: '/api/cluster', service: 'cluster' },
   { prefix: '/api/portals', service: 'portals' },
-  // Admin API only. '/api/channel-identities' (self-service links) and '/api/public/channels'
-  // (Bot Framework webhook, JWT-verified in the handler) are deliberately not mapped.
+  // Admin API only. '/api/public/channels' (Bot Framework webhook, JWT-verified in the handler) is deliberately not mapped.
   { prefix: '/api/channels', service: 'channels' },
   { prefix: '/api/iam', service: 'iam' },
   { prefix: '/api/webhooks', service: 'webhooks' },

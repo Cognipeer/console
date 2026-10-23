@@ -33,7 +33,6 @@ import {
   IconTrashX,
   IconUsers,
   IconVectorBezier,
-  IconPlugConnected,
   IconWebhook,
   IconWorld,
   IconWorldSearch,
@@ -87,7 +86,6 @@ const ICON_REGISTRY = {
   IconTrashX,
   IconUsers,
   IconVectorBezier,
-  IconPlugConnected,
   IconWebhook,
   IconWorld,
   IconWorldSearch,
@@ -318,18 +316,6 @@ export const DASHBOARD_SUBPAGES: ReadonlyArray<DashboardSubpage> = [
     navDescriptionKey: 'webhooksDescription',
     tags: ['webhooks', 'events', 'notifications', 'agents'],
     searchKeywords: ['webhook', 'event', 'callback', 'notification', 'olay', 'bildirim'],
-  },
-  {
-    // Enterprise: connect published agents to Slack and Microsoft Teams.
-    id: 'channels',
-    parent: 'agents',
-    service: 'channels',
-    href: '/dashboard/agents/channels',
-    icon: IconPlugConnected,
-    navLabelKey: 'agentChannels',
-    navDescriptionKey: 'agentChannelsDescription',
-    tags: ['channels', 'slack', 'teams', 'messaging', 'agents'],
-    searchKeywords: ['channel', 'channels', 'slack', 'teams', 'microsoft teams', 'chat', 'bot', 'kanal', 'kanallar'],
   },
 ];
 

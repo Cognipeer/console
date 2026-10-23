@@ -1,7 +1,6 @@
 import { accountPageEn } from './accountPage.en';
 import { agentChannelsEn } from './agentChannels.en';
 import { agentChannelsDeployEn } from './agentChannelsDeploy.en';
-import { agentChannelsLinkEn } from './agentChannelsLink.en';
 import { agentChannelsListEn } from './agentChannelsList.en';
 import { agentChannelsSetupEn } from './agentChannelsSetup.en';
 import { agentTemplatesEn } from './agentTemplates.en';
@@ -356,8 +355,6 @@ export const en = {
     tokensDescription: 'Create and manage API access tokens',
     webhooks: 'Webhooks',
     webhooksDescription: 'Send signed events to your own endpoints',
-    agentChannels: 'Channels',
-    agentChannelsDescription: 'Connect agents to Slack and Microsoft Teams',
     agentSessions: 'Sessions',
     agentSessionsActive: 'Active',
     agentSessionsAll: 'All',
@@ -1411,7 +1408,6 @@ export const en = {
     ...agentChannelsListEn,
     ...agentChannelsSetupEn,
     ...agentChannelsDeployEn,
-    ...agentChannelsLinkEn,
   },
   iamPrincipals: {
     segments: {

@@ -4,7 +4,6 @@ import type { agentChannelsEn } from './agentChannels.en';
 export const agentChannelsTr: typeof agentChannelsEn = {
   common: {
     title: 'Kanallar',
-    eyebrow: 'Ajanlar',
     platforms: {
       slack: 'Slack',
       teams: 'Microsoft Teams',
@@ -25,10 +24,6 @@ export const agentChannelsTr: typeof agentChannelsEn = {
       not_found: 'Ajan silinmiş',
       inactive: 'Ajan pasif',
       unpublished: 'Yayınlanmamış',
-    },
-    linkedVia: {
-      email: 'E-posta ile eşleşti',
-      login: 'Giriş bağlantısıyla bağlandı',
     },
     health: {
       unknown: 'Bir sorun var. Ayrıntıları görmek için bağlantıyı doğrulayın.',
@@ -76,14 +71,13 @@ export const agentChannelsTr: typeof agentChannelsEn = {
       invalid_socket_url: 'Slack beklenmeyen bir Socket Mode adresi döndürdü.',
     },
     warnings: {
-      emailScope: 'users:read.email izni yok: e-posta ile eşleştirme kapalı kalır, kişiler giriş yaparak bağlanır.',
+      emailScope: 'users:read.email izni yok: e-posta ile eşleştirme kapalı kalır, bu yüzden kişiler Console kullanıcılarıyla eşleştirilemez.',
       scopeMissing: '{scope} izni yok: {feature} çalışmaz.',
       sameAppUnconfirmed: "İki token'ın aynı Slack uygulamasına ait olduğu doğrulanamadı. İkisini de aynı uygulamadan kopyaladığınızdan emin olun.",
       features: {
         mentions: 'kanallarda @ ile anılınca yanıt verme',
         post: 'yanıt gönderme',
         dm: 'doğrudan mesajlara yanıt verme',
-        dmLinks: 'giriş bağlantılarını özel mesajla gönderme',
         people: 'kişileri tanıma (misafir ve çalışma alanı kontrolleri)',
         publicChannels: 'ajanın yanıt vereceği yer seçilirken herkese açık kanalları listeleme',
         privateChannels: 'ajanın yanıt vereceği yer seçilirken özel kanalları listeleme',
@@ -106,12 +100,9 @@ export const agentChannelsTr: typeof agentChannelsEn = {
       conversationsScope: "Bot token'ında channels:read ve groups:read izinleri yok, bu yüzden Slack kanalları listelemiyor. Uygulamayı manifestten yeniden yükleyin.",
       agent_not_found: 'Bu ajan artık yok.',
       agent_not_published: 'Önce ajanı yayınlayın: kanallarda her zaman yayınlanmış sürüm çalışır.',
-      deployment_exists: 'Bu ajan bu kanalda zaten var.',
-      deployment_limit: 'Bu kanala daha fazla ajan eklenemez.',
       user_not_found: 'Listedeki bazı kişiler artık yok.',
       group_not_found: 'Listedeki bazı gruplar artık yok.',
-      immutable_field: 'Kanaldaki ajan değiştirilemez. Bu ajanı kaldırıp diğerini ekleyin.',
-      deployment_not_found: 'Bu ajan artık bu kanalda değil. Sayfayı yenileyin.',
+      immutable_field: 'Kanaldaki ajan değiştirilemez. Diğer ajan için yeni bir kanal oluşturun.',
       service_disabled: 'Kanallar bu kurulumda kapalı.',
       invalid_identity: 'Her e-posta alan adı example.com gibi olmalı.',
       invalid_credentials: 'Girdiğiniz kimlik bilgilerini kontrol edin.',

@@ -58,7 +58,6 @@ import {
   IconTrendingUp,
   IconVector,
   IconVolume,
-  IconPlugConnected,
   IconWebhook,
   IconWorld,
   type Icon,
@@ -647,7 +646,6 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
         !p.startsWith('/dashboard/agents/tools') &&
         !p.startsWith('/dashboard/agents/skills') &&
         !p.startsWith('/dashboard/agents/webhooks') &&
-        !p.startsWith('/dashboard/agents/channels') &&
         // The project-wide lists; an agent's own `/dashboard/agents/<id>/sessions/<sid>` stays here.
         p !== '/dashboard/agents/sessions' &&
         !p.startsWith('/dashboard/agents/sessions/'),
@@ -676,16 +674,6 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       icon: IconWebhook,
       matcher: (p) => p.startsWith('/dashboard/agents/webhooks'),
       requiresService: 'webhooks',
-    },
-    {
-      // Connect agents to Slack / Microsoft Teams (Enterprise).
-      id: 'channels',
-      label: 'Channels',
-      labelKey: 'agentChannels',
-      href: '/dashboard/agents/channels',
-      icon: IconPlugConnected,
-      matcher: (p) => p.startsWith('/dashboard/agents/channels'),
-      requiresService: 'channels',
     },
     {
       // Every agent's sessions in one place: the ones in progress, and all of them.

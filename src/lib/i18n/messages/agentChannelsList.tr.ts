@@ -1,39 +1,9 @@
 import type { agentChannelsListEn } from './agentChannelsList.en';
 
-/** Ajan kanalları: kanal listesi (Ajanlar › Kanallar) ve kanal detay sayfası. Bkz. agentChannelsList.en.ts. */
+/** Ajan kanalları: kanal penceresi ve ajanın Yayınla sekmesindeki Kanallar bölümü (Kanallar sayfası yok). Bkz. agentChannelsList.en.ts. */
 export const agentChannelsListTr: typeof agentChannelsListEn = {
   list: {
     noun: 'kanal',
-    title: 'Kanallar',
-    subtitle: "Ajanlarınızı Slack ve Microsoft Teams'e bağlayın. Her kanal sizin oluşturduğunuz bir Slack uygulaması ya da Teams botudur; içine birden çok ajan ekleyebilirsiniz.",
-    add: 'Kanal ekle',
-    guide: 'Kurulum rehberi',
-    search: 'Kanal adına göre ara',
-    filters: {
-      platform: 'Platforma göre filtrele',
-      platformAll: 'Tüm platformlar',
-      state: 'Duruma göre filtrele',
-      stateAll: 'Tüm durumlar',
-    },
-    columns: {
-      name: 'Ad',
-      platform: 'Platform',
-      state: 'Durum',
-      agents: 'Ajanlar',
-      lastMessage: 'Son mesaj',
-    },
-    agents: {
-      none: 'Ajan yok',
-      one: '1 ajan',
-      other: '{count} ajan',
-    },
-    actions: {
-      open: 'Aç',
-      guide: 'Kurulum rehberi',
-      disable: 'Devre dışı bırak',
-      enable: 'Etkinleştir',
-      delete: 'Sil',
-    },
     disable: {
       title: '{name} devre dışı bırakılsın mı?',
       message: 'Bağlantı kapanır ve kanalı yeniden etkinleştirene kadar bot yanıt vermez.',
@@ -45,25 +15,15 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
       confirm: 'Etkinleştir',
     },
     delete: {
-      warning: "Bağlı sohbet hesapları ve kanal kaydı silinir. Oturum geçmişi Console'da kalır.",
+      warning: "Kanal kaydı silinir. Oturum geçmişi Console'da kalır.",
     },
     notify: {
       enabled: 'Kanal etkinleştirildi',
       disabled: 'Kanal devre dışı bırakıldı',
       deleted: 'Kanal silindi',
     },
-    empty: {
-      title: "Ajanlarınızı Slack ya da Teams'e taşıyın",
-      description: 'Kendi Slack uygulamanızı ya da Azure botunuzu yaklaşık 10 dakikada bağlayın. Tüm adımlar ekranda anlatılıyor.',
-    },
-    noMatch: {
-      title: 'Eşleşen kanal yok',
-      description: 'Aramayı ya da filtreleri değiştirin.',
-    },
-    footer: '{total} kanaldan {shown} tanesi gösteriliyor',
   },
   detail: {
-    back: 'Kanallara dön',
     loading: 'Kanal yükleniyor…',
     meta: {
       connectionsOne: '1 bağlantı açık',
@@ -106,52 +66,10 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
       failed: 'Bazı kontroller başarısız',
       dismiss: 'Kapat',
     },
-    agents: {
-      title: 'Ajanlar',
-      add: 'Ajan ekle',
-      columns: {
-        agent: 'Ajan',
-        where: 'Nerede',
-        who: 'Kimler',
-        enabled: 'Açık',
-        actions: 'İşlem',
-      },
-      version: 'v{version}',
-      skipped: 'Bu ajan hazır olana kadar atlanır: kanal bu ajanla yanıt vermez.',
-      where: {
-        dm: 'DM',
-        dmOnly: 'Yalnızca DM',
-        allChannels: 'Tüm kanallar',
-        nowhere: 'Hiçbir yerde',
-      },
-      who: {
-        everyone: 'Herkes',
-        nobody: 'Kimse',
-        group: '{name} (grup)',
-        unknownGroup: 'Bir grup',
-        unknownPerson: 'Bir kişi',
-      },
-      more: '+{count}',
-      moreAria: '{count} tane daha: {names}',
-      toggleAria: '{name} ile yanıt ver',
-      toggleFailed: 'Ajan açılıp kapatılamadı',
-      empty: {
-        title: 'Bu kanalda henüz ajan yok',
-        description: 'Burada yanıt verecek yayınlanmış ajanları ekleyin.',
-      },
-      remove: {
-        title: '{name} bu kanaldan kaldırılsın mı?',
-        message: "Ajan burada yanıt vermeyi bırakır. Ajanın kendisi ve oturumları Console'da kalır.",
-        done: 'Ajan kanaldan kaldırıldı',
-      },
-    },
-    overlap: {
-      dm: 'doğrudan mesajlar',
-      allChannels: 'tüm kanallar',
-      more: '{count} yer daha',
-      line: '{places} için {count} ajan açık ({agents}): kişiye hangisinin yanıt vereceği sorulur.',
-      moreGroups: '{count} yerde daha birden çok ajan açık.',
-      note: 'Kişiye yalnızca kullanma yetkisi olduğu ajanlar sorulur.',
+    access: {
+      title: 'Nerede ve kimler',
+      where: 'Nerede yanıtlar',
+      who: 'Kimler kullanabilir',
     },
     people: {
       title: 'Kişi eşleştirme',
@@ -167,8 +85,7 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
         invalid: '“{value}” bir alan adı değil. example.com gibi yazın.',
       },
       notes: {
-        link: 'Eşleşemeyen kişiye özel, tek kullanımlık bir giriş bağlantısı gönderilir (10 dakika geçerli).',
-        noAccount: 'Console hesabı olmayan kişiye yöneticisine başvurması söylenir.',
+        noAccount: 'Bir Console kullanıcısıyla eşleşemeyen kişiye yöneticisine başvurması söylenir.',
       },
       saved: 'Kişi eşleştirme güncellendi',
     },
@@ -215,7 +132,7 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
       sectionLanguageHint: 'Botun kendi mesajlarında kullandığı dil.',
       language: 'Dil',
       languageAria: 'Bot dili',
-      languageHint: 'Bot giriş bağlantılarını, ajan seçim kartlarını ve ret mesajlarını bu dilde yazar. Yanıtlar ajanın kendi dilinde gelir.',
+      languageHint: 'Bot kendi mesajlarını (ör. ret mesajları) bu dilde yazar. Yanıtlar ajanın kendi dilinde gelir.',
       summary: {
         channel: 'Kanal',
         platform: 'Platform',
@@ -230,5 +147,36 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
       ready: '{done} / {total} hazır',
       saved: 'Kanal güncellendi',
     },
+  },
+  // Liste ile kanal sayfasının ortak hücreleri (ajan, nerede, kimler).
+  cells: {
+    agent: {
+      skipped: 'Bu ajan hazır değil: hazır olana kadar kanal yanıt vermez.',
+    },
+    where: {
+      dm: 'DM',
+      dmOnly: 'Yalnızca DM',
+      allChannels: 'Tüm kanallar',
+      nowhere: 'Hiçbir yerde',
+    },
+    who: {
+      everyone: 'Herkes',
+      nobody: 'Kimse',
+      group: '{name} (grup)',
+      unknownGroup: 'Bir grup',
+      unknownPerson: 'Bir kişi',
+    },
+    more: '+{count}',
+    moreAria: '{count} tane daha: {names}',
+  },
+  // Agent'ın Ship sekmesindeki Kanallar bölümü.
+  ship: {
+    title: 'Kanallar',
+    description: 'Bu agent\'ın Slack ve Microsoft Teams\'te yanıt verdiği kanallar.',
+    add: 'Kanal ekle',
+    empty: 'Bu agent henüz Slack veya Microsoft Teams\'e bağlı değil.',
+    loadFailed: 'Kanallar yüklenemedi.',
+    retry: 'Tekrar dene',
+    openAria: '{name} kanalını aç',
   },
 };

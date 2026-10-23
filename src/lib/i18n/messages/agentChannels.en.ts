@@ -1,13 +1,12 @@
 /**
  * Agent channels (Enterprise): agents answering in Slack and Microsoft Teams. The words every screen of the
  * feature shares (platforms, states, health and check codes, server refusals). Each screen keeps its own
- * strings in its own file (agentChannelsList / Setup / Deploy / Link); all of them are spread into the
+ * strings in its own file (agentChannelsList / Setup / Deploy; the Link file is empty since the account-link flow was removed); all of them are spread into the
  * `agentChannels` namespace in `en.ts`.
  */
 export const agentChannelsEn = {
   common: {
     title: 'Channels',
-    eyebrow: 'Agents',
     platforms: {
       slack: 'Slack',
       teams: 'Microsoft Teams',
@@ -28,10 +27,6 @@ export const agentChannelsEn = {
       not_found: 'Agent deleted',
       inactive: 'Agent inactive',
       unpublished: 'Not published',
-    },
-    linkedVia: {
-      email: 'Matched by email',
-      login: 'Linked with a login link',
     },
     // Why a connection is in error (`health.code`). Unknown codes fall back to `health.message` / `unknown`.
     health: {
@@ -86,14 +81,13 @@ export const agentChannelsEn = {
     // Slack's warnings after a credentials check. The server sends English sentences (for API callers); the
     // screens match the known ones (_lib/ui/warnings.ts) and show the server's sentence for anything else.
     warnings: {
-      emailScope: 'The users:read.email scope is missing: email matching stays off and people connect by signing in.',
+      emailScope: 'The users:read.email scope is missing: email matching stays off, so people cannot be matched to Console users.',
       scopeMissing: 'The {scope} scope is missing: {feature} will not work.',
       sameAppUnconfirmed: 'Could not confirm that both tokens belong to the same Slack app. Make sure you copied them from the same app.',
       features: {
         mentions: 'answering @mentions in channels',
         post: 'posting answers',
         dm: 'answering direct messages',
-        dmLinks: 'sending private login links by direct message',
         people: 'looking people up (guest and workspace checks)',
         publicChannels: 'listing public channels when choosing where an agent answers',
         privateChannels: 'listing private channels when choosing where an agent answers',
@@ -118,12 +112,9 @@ export const agentChannelsEn = {
       conversationsScope: 'The bot token lacks the channels:read and groups:read permissions, so Slack does not list the channels. Install the app again from the manifest.',
       agent_not_found: 'This agent no longer exists.',
       agent_not_published: 'Publish the agent first: channels always run the published version.',
-      deployment_exists: 'This agent is already on this channel.',
-      deployment_limit: 'No more agents can be added to this channel.',
       user_not_found: 'Some people on the list no longer exist.',
       group_not_found: 'Some groups on the list no longer exist.',
-      immutable_field: 'The agent on a channel cannot be changed. Remove it and add the other agent.',
-      deployment_not_found: 'This agent is no longer on this channel. Reload the page.',
+      immutable_field: 'The agent of a channel cannot be changed. Create a new channel for the other agent.',
       service_disabled: 'Channels are turned off on this installation.',
       invalid_identity: 'Every email domain must look like example.com.',
       invalid_credentials: 'Check the credentials you entered.',
