@@ -36,10 +36,10 @@
     },
     {
       "id": "anthropic",
-      "driver": "openai-compatible",
+      "driver": "anthropic",
       "name": "Anthropic",
-      "tagline": "Claude 4 family via OpenAI-compatible endpoint",
-      "description": "Claude Opus, Sonnet and Haiku connected through the OpenAI-compatible adapter.",
+      "tagline": "Claude on the native Messages API, including Azure AI Foundry",
+      "description": "Claude Opus, Sonnet and Haiku over the native Messages API with extended thinking and prompt caching. Point the Base URL at a Foundry or proxy root to use Claude outside api.anthropic.com.",
       "domains": ["model"],
       "color": "#cc7d4f",
       "tags": ["popular", "tools", "long-context"],
