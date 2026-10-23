@@ -31,6 +31,7 @@ import type {
     IAgentPendingActionResolution,
     IAgentUserQuestion,
 } from '@/lib/database';
+import { delegationCallIdOf } from '@/lib/shared/agentTurnFlow';
 import { AgentPendingActionError } from './agentErrors';
 import { CLIENT_TOOL_SERVER_GRACE_SECONDS, clientToolMeta } from './agentClientTools';
 import {
@@ -245,13 +246,17 @@ interface PauseEntry {
     timeoutSeconds?: number;
 }
 
-/** The sub-agent the SDK tagged a surfaced child pause with. */
+/**
+ * The sub-agent the SDK tagged a surfaced child pause with. The delegation it names is the
+ * CALL (what a page matches it to): the SDK's own key for one child of a parallel call,
+ * `<call>#<index>`, is cut back to the call.
+ */
 function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string; delegationToolCallId?: string } {
     const tag = entry.metadata?.__subagent as { name?: unknown; parentToolCallId?: unknown } | undefined;
     if (typeof tag?.name !== 'string' || !tag.name) return {};
     return {
         subagent: tag.name,
-        ...(typeof tag.parentToolCallId === 'string' && tag.parentToolCallId ? { delegationToolCallId: tag.parentToolCallId } : {}),
+        ...(typeof tag.parentToolCallId === 'string' && tag.parentToolCallId ? { delegationToolCallId: delegationCallIdOf(tag.parentToolCallId) } : {}),
     };
 }
 

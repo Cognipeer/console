@@ -62,6 +62,7 @@ import type { IAgentConfig, IAgentConversation } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
 import { executeAgentChatLocal, executePlaygroundChatLocal, type AgentToolCallEvent } from '@/lib/services/agents/agentService';
+import type { AgentSubagentEvent } from '@/lib/shared/agentTurnFlow';
 import { resolveAgentPendingAction } from '@/lib/services/agents/agentActionResolution';
 import { destroyCache } from '@/lib/core/cache';
 
@@ -749,8 +750,12 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       childCallsLookup();
       const id = await freshConv();
       const first: AgentToolCallEvent[] = [];
+      const firstRuns: AgentSubagentEvent[] = [];
 
-      await playground(id, 'who is acme', { onToolEvent: (e: AgentToolCallEvent) => first.push(e) });
+      await playground(id, 'who is acme', {
+        onToolEvent: (e: AgentToolCallEvent) => first.push(e),
+        onSubagent: (e: AgentSubagentEvent) => firstRuns.push(e),
+      });
 
       const delegation = first.filter((e) => e.name === 'delegate_to');
       expect(delegation.map((e) => e.id)).toEqual(['d1']);
@@ -762,11 +767,16 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
       expect(action).toMatchObject({ subagent: 'helper', delegationToolCallId: 'd1' });
 
+      // The first leg told how the child started and that it paused; the run is the one the delegation made.
+      expect(firstRuns.map((e) => e.phase)).toEqual(['start', 'paused']);
+      expect(firstRuns[0]).toMatchObject({ name: 'helper', parentToolCallId: 'd1', input: 'find them' });
+
       const second: AgentToolCallEvent[] = [];
+      const secondRuns: AgentSubagentEvent[] = [];
       await resolveAgentPendingAction({
         tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId: String(action._id),
         body: { decision: 'allow' }, actor: { userId: OWNER, channel: 'api' }, authorize: async () => ({ allowed: true }),
-        mode: 'sync', stream: { onToolEvent: (e) => second.push(e) },
+        mode: 'sync', stream: { onToolEvent: (e) => second.push(e), onSubagent: (e) => secondRuns.push(e) },
       });
 
       const starts = second.filter((e) => e.name === 'delegate_to' && e.phase === 'start');
@@ -774,14 +784,24 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(starts.find((e) => e.id === 'd2')).not.toHaveProperty('resumed');
       expect(second.filter((e) => e.name === 'lookup').every((e) => e.subagent?.name === 'helper')).toBe(true);
       expect(second.some((e) => e.name === 'lookup')).toBe(true);
+      // The child's calls say which delegation they belong to, so the view can group them under it.
+      expect(second.some((e) => e.name === 'lookup' && e.subagent?.parentToolCallId === 'd1')).toBe(true);
+      // The leg that continues the child reports its end under the id it started with.
+      expect(secondRuns.some((e) => e.id === firstRuns[0].id && e.phase === 'result' && e.resumed === true)).toBe(true);
+      const continued = (await stored(id)).messages.at(-1)!;
+      expect(continued.subagentRuns?.some((run) => run.id === firstRuns[0].id && run.resumed === true && run.steps.some((s) => s.name === 'lookup'))).toBe(true);
 
       // The stored log: one tool_use for the delegation across both legs, and the child's rows carry the stamp.
-      const stored = await db.listAgentSessionEvents!(id, { types: ['agent.tool_use', 'agent.tool_result'] });
-      const uses = stored.filter((e) => e.type === 'agent.tool_use');
+      const rows = await db.listAgentSessionEvents!(id, { types: ['agent.tool_use', 'agent.tool_result'] });
+      const uses = rows.filter((e) => e.type === 'agent.tool_use');
       expect(uses.filter((e) => e.data.toolCallId === 'd1')).toHaveLength(1);
-      const lookupRows = stored.filter((e) => e.data.name === 'lookup');
+      const lookupRows = rows.filter((e) => e.data.name === 'lookup');
       expect(lookupRows.length).toBeGreaterThan(0);
       expect(lookupRows.every((e) => e.data.subagent === 'helper')).toBe(true);
+      expect(lookupRows.every((e) => typeof e.data.subagentId === 'string' && typeof e.data.parentToolCallId === 'string')).toBe(true);
+      const lifecycle = await db.listAgentSessionEvents!(id, { types: ['agent.subagent'] });
+      expect(lifecycle.some((e) => e.data.phase === 'start' && e.data.id === firstRuns[0].id)).toBe(true);
+      expect(lifecycle.some((e) => e.data.phase === 'result' && e.data.id === firstRuns[0].id)).toBe(true);
     });
 
     it('refuses the call on a run nobody can answer, and the sub-agent carries on without the tool', async () => {

@@ -96,12 +96,38 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
 // ── Session events ───────────────────────────────────────────────────────
 
 /**
+ * Log rows only the dashboard and the portal read: the plan and the sub-agents
+ * of a turn are not part of the client API's event vocabulary, and a summarization
+ * pass a sub-agent made of its own context is none of the session's.
+ */
+export function isClientSessionEvent(type: string, data: Record<string, unknown> | undefined): boolean {
+    if (type === 'agent.plan' || type === 'agent.subagent') return false;
+    if (type === 'agent.compaction' && data?.subagent !== undefined && data.subagent !== null) return false;
+    return true;
+}
+
+/**
+ * Fields the dashboard's session view adds to a row and a client never saw: which
+ * sub-agent and delegation a tool call belongs to, and where a summarization pass
+ * stands in the turn. Stripped so the client's rows keep the shape they were
+ * documented with.
+ */
+const DASHBOARD_ONLY_FIELDS: Record<string, readonly string[]> = {
+    'agent.tool_use': ['subagentId', 'parentToolCallId', 'parallel'],
+    'agent.tool_result': ['subagentId', 'parentToolCallId', 'parallel'],
+    'agent.compaction': ['id', 'index', 'afterToolCallId', 'trigger', 'compactedTools'],
+};
+
+/**
  * The `data` of a logged event for a client: keys snake_cased, tool arguments
  * left alone, and — as on a pending action — no `tool_name` for a question and
- * no `delegation_tool_call_id` (an internal link the portal uses).
+ * no `delegation_tool_call_id` (an internal link the portal uses). Pass the
+ * event's `type` to also drop what only the dashboard reads (see above).
  */
-export function toClientEventData(data: Record<string, unknown>): Record<string, unknown> {
-    const wire = toSnakeCaseDeep<Record<string, unknown>>(data);
+export function toClientEventData(data: Record<string, unknown>, type?: string): Record<string, unknown> {
+    const hidden = type ? DASHBOARD_ONLY_FIELDS[type] : undefined;
+    const source = hidden ? Object.fromEntries(Object.entries(data).filter(([key]) => !hidden.includes(key))) : data;
+    const wire = toSnakeCaseDeep<Record<string, unknown>>(source);
     if (data.kind === 'user_question') delete wire.tool_name;
     delete wire.delegation_tool_call_id;
     return wire;
@@ -118,7 +144,7 @@ export function toClientEventFrame(frame: {
     return {
         ...(frame.seq !== undefined ? { seq: frame.seq } : {}),
         type: frame.type,
-        data: toClientEventData(frame.data),
+        data: toClientEventData(frame.data, frame.type),
         ...(frame.runId ? { run_id: toPublicRunId(frame.runId) } : {}),
         created_at: frame.createdAt,
     };

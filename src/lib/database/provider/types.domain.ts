@@ -3249,6 +3249,11 @@ export interface IAgentVersion {
 
 /** One tool call as a debug session shows it — see `IAgentConversationMessage`. */
 export interface IAgentConversationStep {
+  /**
+   * The tool call's id, as the model made it and the live events name it: what a plan version, a
+   * sub-agent run and a summarization pass of the turn anchor on. The SDK's execution id for a call
+   * recorded without one.
+   */
   id?: string;
   name: string;
   args?: unknown;
@@ -3383,7 +3388,12 @@ export interface IAgentConversationMessage {
   compactions?: IAgentTurnCompaction[];
   /** The tool results those summarizations replaced with a placeholder. */
   compactedTools?: Array<{ toolName: string; toolCallId: string }>;
-  /** Every plan version the agent wrote during this turn, oldest first (at most 30). */
+  /**
+   * Every plan version the agent wrote during this turn, oldest first (at most 30). An empty list says
+   * the turn called its plan tool and wrote nothing (a read): a reader leaves that call out, as the
+   * live view does. Absent when the turn made no plan call, and on turns stored before plans were
+   * recorded, which keep every call they made.
+   */
   plans?: IAgentTurnPlanSnapshot[];
   /** The sub-agents this turn ran, in start order, each with its own steps. */
   subagentRuns?: IAgentTurnSubagentRun[];
@@ -3691,7 +3701,9 @@ export interface AgentMessageFeedbackTotals {
 
 /**
  * One entry of the append-only session event log (`agent_session_events`).
- * `seq` is dense and increasing per conversation; `(conversationId, seq)` is unique.
+ * `seq` is increasing per conversation and numbers the stored events one after the other;
+ * `(conversationId, seq)` is unique. A reader shown only some of the rows (the client API
+ * leaves out the dashboard-only ones) sees numbers skip: it is a position, not a count.
  */
 export interface IAgentSessionEvent {
   _id?: ObjectId | string;

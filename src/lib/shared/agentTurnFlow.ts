@@ -29,6 +29,17 @@ export function isDelegationTool(toolName: string | undefined): boolean {
     return Boolean(toolName && DELEGATION_TOOLS.has(toolName));
 }
 
+/**
+ * The delegation call a sub-agent run belongs to. The SDK gives each child of
+ * spawn_subagents_parallel its own key, `<toolCallId>#<index>`; the call itself
+ * is `<toolCallId>`, so that is what the run is grouped and anchored by.
+ */
+export function delegationCallIdOf(parentToolCallId: string): string;
+export function delegationCallIdOf(parentToolCallId: string | undefined): string | undefined;
+export function delegationCallIdOf(parentToolCallId: string | undefined): string | undefined {
+    return parentToolCallId?.replace(/#\d+$/, '');
+}
+
 /** SSE `plan` and session log `agent.plan`: one plan version, as the agent wrote it. */
 export type AgentPlanEvent = IAgentTurnPlanSnapshot;
 
@@ -233,7 +244,8 @@ export function orderTurnFlow(message: TurnFlowInput, options: TurnFlowOptions =
     }
     const runsByCall = new Map<string, IAgentTurnSubagentRun[]>();
     for (const run of runs) {
-        const key = run.parentToolCallId ?? '';
+        // A run stored under the SDK's `<call>#<index>` key (a child of a parallel call) belongs to the call.
+        const key = delegationCallIdOf(run.parentToolCallId) ?? '';
         runsByCall.set(key, [...(runsByCall.get(key) ?? []), run]);
     }
 

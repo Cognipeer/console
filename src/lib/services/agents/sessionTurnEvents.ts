@@ -11,11 +11,18 @@
 import { randomUUID } from 'node:crypto';
 import type { SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
-import type { DatabaseProvider, IAgentTurnCompaction, IAgentTurnUsageSummary } from '@/lib/database';
+import type { DatabaseProvider, IAgentTurnUsageSummary } from '@/lib/database';
+import type {
+  AgentCompactionEvent,
+  AgentPlanEvent,
+  AgentSubagentEvent,
+  AgentToolCallSubagentStamp,
+} from '@/lib/shared/agentTurnFlow';
 import { classifyAgentRunError } from './agentErrors';
 import { delegatedSubagentName } from './subagentEvents';
 import { sessionUsageEventData, type SessionBudgetSettlement } from './sessionBudget';
 import {
+  SESSION_EVENT_MAX_DATA_BYTES,
   createSessionEventWriter,
   type SessionEventBus,
   type SessionEventWriter,
@@ -93,9 +100,18 @@ export interface SessionTurnEvents {
   readonly writer: SessionEventWriter;
   /** Names this turn: the conversation's `runtimeTurnId` and the `turnId` on the usage rows of its model calls. */
   readonly turnId: string;
-  /** Maps the SDK's tool-call events onto `agent.tool_use` / `agent.tool_result`. */
-  onSdkEvent(event: AgentSdkEvent): void;
-  onCompaction(compaction: IAgentTurnCompaction): void;
+  /**
+   * Maps the SDK's tool-call events onto `agent.tool_use` / `agent.tool_result`.
+   * `stamp` is the sub-agent a forwarded child call came from, with the delegation
+   * it belongs to (from the turn's flow tracker): the row names all three.
+   */
+  onSdkEvent(event: AgentSdkEvent, stamp?: AgentToolCallSubagentStamp): void;
+  /** A finished summarization pass: the agent's own (positioned), or a sub-agent's (`subagent` set). */
+  onCompaction(compaction: AgentCompactionEvent): void;
+  /** A plan version, once: the same version is not written twice. */
+  onPlan(plan: AgentPlanEvent): void;
+  /** One lifecycle step of a sub-agent (start, result, error, paused). */
+  onSubagent(event: AgentSubagentEvent): void;
   /** A text delta of the answer — live only. */
   onText(text: string): void;
   /** A delta of the model's reasoning text — live only. */
@@ -131,6 +147,21 @@ export function conversationRuntimePatch(
     stopReason,
     pendingActionIds: stopReason === 'requires_action' ? pendingActionIds : [],
   };
+}
+
+/**
+ * A plan version as its log row carries it. A row past the log's size cap keeps
+ * its keys but turns every long value into a text preview, which would leave a
+ * follower with `steps` as a string; so a big plan sheds what the log can do
+ * without (owner, criteria, evidence, then the length of each title) first.
+ */
+export function planForLog(plan: AgentPlanEvent): AgentPlanEvent {
+  const size = (value: unknown) => JSON.stringify(value).length;
+  const budget = SESSION_EVENT_MAX_DATA_BYTES * 0.75;
+  if (size(plan) <= budget) return plan;
+  const lean = { ...plan, steps: plan.steps.map(({ id, title, status }) => ({ id, title, status })) };
+  if (size(lean) <= budget) return lean;
+  return { ...lean, steps: lean.steps.map((step) => ({ ...step, title: step.title.slice(0, 80) })) };
 }
 
 export function startSessionTurnEvents(options: SessionTurnEventsOptions): SessionTurnEvents {
@@ -182,6 +213,10 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
   // A resumed leg reads the ids the earlier legs already wrote before it writes its own.
   const usedIds = new Set<string>();
   const resultIds = new Set<string>();
+  // A plan version is told apart by its call as well: the SDK numbers versions from 1 again
+  // when the session's state was reset, so a number alone would match an earlier turn's.
+  const planKeys = new Set<string>();
+  const planKeyOf = (version: unknown, toolCallId: unknown) => `${version}:${typeof toolCallId === 'string' ? toolCallId : ''}`;
   let seeded: Promise<void> = Promise.resolve();
   let seedPending = false;
   const deferred: Array<() => void> = [];
@@ -189,12 +224,24 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     seedPending = true;
     seeded = (async () => {
       try {
-        const prior = await db.listAgentSessionEvents!(conversationId, { types: ['agent.tool_use', 'agent.tool_result'] });
-        for (const e of prior) {
+        const prior = await db.listAgentSessionEvents!(conversationId, { types: ['user.message', 'agent.tool_use', 'agent.tool_result', 'agent.plan'] });
+        // The turn this leg continues began at the newest user message (a resumed leg writes none of
+        // its own): only the plan versions from there on are its earlier legs'.
+        let turnStart = 0;
+        prior.forEach((e, i) => {
+          if (e.type === 'user.message') turnStart = i;
+        });
+        prior.forEach((e, i) => {
+          if (e.type === 'agent.plan') {
+            const written = e.data as { version?: unknown; toolCallId?: unknown } | undefined;
+            if (i >= turnStart && typeof written?.version === 'number') planKeys.add(planKeyOf(written.version, written.toolCallId));
+            return;
+          }
           const id = (e.data as { toolCallId?: unknown } | undefined)?.toolCallId;
-          if (typeof id !== 'string') continue;
-          (e.type === 'agent.tool_use' ? usedIds : resultIds).add(id);
-        }
+          if (typeof id !== 'string') return;
+          if (e.type === 'agent.tool_use') usedIds.add(id);
+          else if (e.type === 'agent.tool_result') resultIds.add(id);
+        });
       } catch (error) {
         logger.warn('Could not read the earlier tool events of the session', { conversationId, error: String(error) });
       }
@@ -297,7 +344,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
       writer.emit(type, data);
     }),
 
-    onSdkEvent(event) {
+    onSdkEvent(event, stamp) {
       if (event.type !== 'tool_call' || !event.name) return;
       guarded('tool event', () => {
         if (isSuperseded()) return;
@@ -305,6 +352,12 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
         // A forwarded child event names its child; a delegation call names the one it handed the task to.
         const subagent = (event as { subagentName?: string }).subagentName
           ?? delegatedSubagentName(event.name, event.args, (event as { result?: unknown }).result);
+        // Which sub-agent made the call, and under which delegation, so a follower can group it.
+        const origin = stamp ? {
+          ...(stamp.id ? { subagentId: stamp.id } : {}),
+          ...(stamp.parentToolCallId ? { parentToolCallId: stamp.parentToolCallId } : {}),
+          ...(stamp.parallel ? { parallel: true } : {}),
+        } : {};
         const write = () => {
           const id = typeof event.id === 'string' ? event.id : undefined;
           if (event.phase === 'start') {
@@ -317,6 +370,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
               name: event.name,
               ...(event.args !== undefined ? { args: event.args } : {}),
               ...(subagent ? { subagent } : {}),
+              ...origin,
             });
           } else if (event.phase === 'success' || event.phase === 'error') {
             if (id) {
@@ -330,6 +384,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
               ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
               ...(event.error?.message ? { error: event.error.message } : {}),
               ...(subagent ? { subagent } : {}),
+              ...origin,
             });
           }
         };
@@ -343,6 +398,30 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
         if (isSuperseded()) return;
         ensureStarted();
         writer.emit('agent.compaction', { ...compaction });
+      });
+    },
+
+    onPlan(plan) {
+      guarded('plan', () => {
+        if (isSuperseded()) return;
+        ensureStarted();
+        // A resumed leg first reads which versions the earlier legs wrote (like the tool ids above).
+        const write = () => {
+          const key = planKeyOf(plan.version, plan.toolCallId);
+          if (planKeys.has(key)) return;
+          planKeys.add(key);
+          writer.emit('agent.plan', { ...planForLog(plan) });
+        };
+        if (seedPending || deferred.length) deferred.push(write);
+        else write();
+      });
+    },
+
+    onSubagent(event) {
+      guarded('subagent', () => {
+        if (isSuperseded()) return;
+        ensureStarted();
+        writer.emit('agent.subagent', { ...event });
       });
     },
 

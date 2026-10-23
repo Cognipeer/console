@@ -653,6 +653,8 @@ export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTu
     const extra = event as AgentSdkSummarizationEvent & {
         model?: string;
         droppedDirectives?: Array<{ directive: string; reason: string; sourceQuote?: string }>;
+        /** agent-sdk ≥ 0.20: `fallback` when the summarizer call failed and a local summary was used. */
+        status?: string;
     };
     const directiveSources = structured?.user_directive_sources;
     return {
@@ -684,7 +686,7 @@ export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTu
         ...(notes.length > 0 ? { integrityNotes: notes } : {}),
         // The SDK reports a failed summarizer call as a summarization event
         // whose token count did not move — the fallback summary was local.
-        ...(notes.some((note) => /fallback/i.test(note)) ? { failed: true } : {}),
+        ...(extra.status === 'fallback' || notes.some((note) => /fallback/i.test(note)) ? { failed: true } : {}),
     };
 }
 

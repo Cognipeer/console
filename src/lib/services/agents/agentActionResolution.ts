@@ -70,7 +70,7 @@ import {
     type PublicPendingAction,
 } from './agentPendingActions';
 import { createSessionEventWriter, type SessionStopReason } from './sessionEvents';
-import type { IAgentTurnCompaction } from '@/lib/database';
+import type { AgentCompactionEvent, AgentPlanEvent, AgentSubagentEvent } from '@/lib/shared/agentTurnFlow';
 
 const logger = createLogger('agents:action-resolution');
 
@@ -158,7 +158,9 @@ export interface ResolveAgentActionInput {
         onToolEvent?: (event: AgentToolCallEvent) => void;
         onTextChunk?: (text: string) => void;
         onReasoningChunk?: (text: string) => void;
-        onCompaction?: (compaction: IAgentTurnCompaction) => void;
+        onCompaction?: (compaction: AgentCompactionEvent) => void;
+        onPlan?: (plan: AgentPlanEvent) => void;
+        onSubagent?: (event: AgentSubagentEvent) => void;
         signal?: AbortSignal;
     };
     /** Deadline / cancel reference for a continuation that runs under a ceiling. */
@@ -742,6 +744,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
                     ...(input.stream?.onReasoningChunk ? { onReasoningChunk: input.stream.onReasoningChunk } : {}),
                     ...(input.stream?.onCompaction ? { onCompaction: input.stream.onCompaction } : {}),
+                    ...(input.stream?.onPlan ? { onPlan: input.stream.onPlan } : {}),
+                    ...(input.stream?.onSubagent ? { onSubagent: input.stream.onSubagent } : {}),
                     ...(watch ? { signal: watch.signal } : input.stream?.signal ? { signal: input.stream.signal } : {}),
                     onInvokeStart: () => { invoking = true; },
                 });

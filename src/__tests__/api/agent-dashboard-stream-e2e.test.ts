@@ -309,6 +309,43 @@ describe('channel: dashboard session stream', () => {
         expect(result?.data.compactions).toHaveLength(1);
     });
 
+    it('streams the agent\'s plan, its sub-agents and a child\'s own pass as events of their own, before the result', async () => {
+        const plan = { toolCallId: 'p1', version: 1, operation: 'write', steps: [{ id: 1, title: 'Gather', status: 'in-progress' }], at: '2026-10-23T10:00:00.000Z' };
+        const start = { phase: 'start', id: 'sa_1', name: 'helper', parentToolCallId: 'd1', input: 'go', at: '2026-10-23T10:00:01.000Z' };
+        const childPass = { at: '2026-10-23T10:00:02.000Z', messagesCompressed: 3, subagent: { id: 'sa_1', name: 'helper' } };
+        const pending = { at: '2026-10-23T10:00:03.000Z', phase: 'start', id: 'call_summary_1' };
+        mockFn(executePlaygroundChatLocal).mockImplementation(
+            async (request: {
+                onPlan?: (p: Record<string, unknown>) => void;
+                onSubagent?: (e: Record<string, unknown>) => void;
+                onCompaction?: (c: Record<string, unknown>) => void;
+            }) => {
+                request.onPlan?.(plan);
+                request.onSubagent?.(start);
+                request.onCompaction?.(childPass);
+                request.onCompaction?.(pending);
+                return { ...PLAYGROUND_RESULT, plans: [plan] };
+            },
+        );
+
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'plan it', conversationId: 'conv-1' },
+        });
+        const events = readEvents(res.body);
+
+        expect(events.map((e) => e.event).filter((name) => name !== 'status' && name !== 'action')).toEqual(['plan', 'subagent', 'summary', 'summary', 'result']);
+        expect(events.find((e) => e.event === 'plan')?.data).toEqual(plan);
+        expect(events.find((e) => e.event === 'subagent')?.data).toEqual(start);
+        const summaries = events.filter((e) => e.event === 'summary');
+        expect(summaries[0].data.subagent).toEqual({ id: 'sa_1', name: 'helper' });
+        expect(summaries[1].data).toMatchObject({ phase: 'start', id: 'call_summary_1' });
+        expect(events.find((e) => e.event === 'result')?.data.plans).toHaveLength(1);
+    });
+
     it('classifies a provider key failure on the error event', async () => {
         mockFn(executePlaygroundChatLocal).mockRejectedValue(
             Object.assign(new Error('401 Incorrect API key provided'), { status: 401, agentModelKey: 'gpt-5-terra' }),
