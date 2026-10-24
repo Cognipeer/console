@@ -38,7 +38,9 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { SmartState as AgentSdkSmartState, ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
+import type { AgentToolApprovalException } from '@/lib/database/provider/types.domain';
 import { toolInputSchemaToZod } from './agentRuntimeConfig';
+import { HitlBlockedCallError, approvalReasonOf, decideToolCall, type HitlCallDecision, type HitlCallLog } from './agentHitlExceptions';
 
 /** What the model is told when the host page did not answer. */
 export const CLIENT_TOOL_UNANSWERED_MESSAGE = 'The host page did not answer.';
@@ -211,6 +213,31 @@ export function clientToolNeedsApproval(spec: Pick<EmbeddedClientTool, 'name' | 
     return (own === 'always' || own === 'never' ? own : policy.defaultPolicy) === 'always';
 }
 
+/** The agent's approval exceptions (by argument) for its client tools, and where to record what they decide. */
+export interface ClientToolExceptions {
+    byTool: Readonly<Record<string, readonly AgentToolApprovalException[] | undefined>>;
+    log?: HitlCallLog;
+}
+
+/**
+ * The verdict for one call of a client tool: its exceptions, then the tool's
+ * setting. An admin who made the tool always ask (`needsApproval: true`) is not
+ * overruled by an exception that lets calls through; one that asks or blocks
+ * still applies.
+ */
+function clientCallDecision(
+    spec: Pick<EmbeddedClientTool, 'name' | 'needsApproval'>,
+    policy: ClientToolApprovalPolicy,
+    asksFirst: boolean,
+    exceptions: readonly AgentToolApprovalException[],
+    args: unknown,
+): HitlCallDecision {
+    const usable = spec.needsApproval === true ? exceptions.filter((exception) => exception.action !== 'allow') : exceptions;
+    const own = policy.toolPolicies[spec.name];
+    const source = typeof spec.needsApproval === 'boolean' || own === 'always' || own === 'never' ? 'tool_policy' : 'default_policy';
+    return decideToolCall({ policy: asksFirst ? 'always' : 'never', source }, usable, args);
+}
+
 // ── The answer a page gives ─────────────────────────────────────────────
 
 export type ClientToolAnswer =
@@ -318,6 +345,12 @@ export function buildClientTools(input: {
     allowedTools: ReadonlySet<string>;
     /** The agent's approval settings: they apply to a tool whose admin did not decide. */
     approvalPolicy: ClientToolApprovalPolicy;
+    /**
+     * Its exceptions by argument, while tool approval is on. They apply on every
+     * run, but on one where `approvalPolicy` asks nobody, an exception that asks
+     * does not either; one that blocks still does.
+     */
+    exceptions?: ClientToolExceptions;
 }): BuiltClientTools {
     const tools: AgentSdkToolInterface[] = [];
     const definitions: BuiltClientTools['definitions'] = [];
@@ -348,19 +381,47 @@ export function buildClientTools(input: {
             return { __awaitingUserQuestion: true, id: entry.id, toolCallId };
         };
         const description = `${spec.description}\n\n${CLIENT_TOOL_DESCRIPTION_NOTE}`;
+        const asksFirst = clientToolNeedsApproval(spec, input.approvalPolicy);
+        const exceptions = input.exceptions?.byTool[spec.name] ?? [];
+        const log = input.exceptions?.log;
+        const decide = (args: unknown) => clientCallDecision(spec, input.approvalPolicy, asksFirst, exceptions, args);
+        const guarded = input.guard.protect({ name: clientToolPolicyName(spec.name), requestedName: spec.name }, pause);
+        // A call an exception blocks is refused first, on the arguments the model wrote (a guardrail may
+        // mask the very value the rule looks for), and the page never sees it.
+        const run = exceptions.some((exception) => exception.action === 'deny')
+            ? async (args: Record<string, unknown>) => {
+                const decision = decide(args);
+                if (decision.action === 'deny' && decision.exception) {
+                    log?.note(spec.name, args, decision);
+                    throw new HitlBlockedCallError(spec.name, decision.exception);
+                }
+                return guarded(args);
+            }
+            : guarded;
         const tool = input.createToolFn({
             name: spec.name,
             description,
             schema: toolInputSchemaToZod(spec.inputSchema),
-            func: input.guard.protect(
-                { name: clientToolPolicyName(spec.name), requestedName: spec.name },
-                pause,
-            ),
+            func: run,
         }) as AgentSdkToolInterface & Record<string, unknown>;
         tool._stateRef = stateRef;
         tool.__source = 'client-tool';
-        const asksFirst = clientToolNeedsApproval(spec, input.approvalPolicy);
-        tool.needsApproval = () => asksFirst && !input.allowedTools.has(spec.name);
+        tool.needsApproval = exceptions.length === 0
+            ? () => asksFirst && !input.allowedTools.has(spec.name)
+            : (args: unknown) => {
+                const decision = decide(args);
+                if (decision.source !== 'exception') return asksFirst && !input.allowedTools.has(spec.name);
+                if (decision.action === 'allow') log?.note(spec.name, args, decision);
+                // "Don't ask again for this tool" does not skip an exception: it was written for these arguments.
+                return decision.action === 'ask' && input.approvalPolicy.toolApprovalEnabled;
+            };
+        // Why a call waits: stored on the approval, shown in the trace, and kept for the pending action.
+        tool.approvalPrompt = (args: unknown) => {
+            const decision = decide(args);
+            if (decision.action !== 'ask') return undefined;
+            log?.note(spec.name, args, decision);
+            return approvalReasonOf(spec.name, decision).text;
+        };
         tools.push(tool);
         definitions.push({
             name: spec.name,

@@ -58,6 +58,8 @@ export interface ClientPendingAction {
     status: string;
     expires_at?: string;
     requested_at?: string;
+    /** `tool_approval`: why the call waits (`source`, the matched `exception`, a sentence in `text`). */
+    reason?: { source: string; exception?: { field?: string; pattern: string }; text?: string };
 }
 
 /** What `toClientPendingAction` reads: the dashboard's `PublicPendingAction`, or the copy on a message. */
@@ -73,6 +75,7 @@ export interface PendingActionLike {
     status: string;
     expiresAt?: string;
     requestedAt?: string;
+    reason?: ClientPendingAction['reason'];
 }
 
 export function toClientPendingAction(action: PendingActionLike): ClientPendingAction {
@@ -90,6 +93,7 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
         status: action.status,
         ...(action.expiresAt ? { expires_at: action.expiresAt } : {}),
         ...(action.requestedAt ? { requested_at: action.requestedAt } : {}),
+        ...(action.reason ? { reason: action.reason } : {}),
     };
 }
 

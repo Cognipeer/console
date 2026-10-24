@@ -18,6 +18,11 @@ import type { ChatMessage } from './sessionTypes';
 
 export type PendingActionView = IAgentMessagePendingAction;
 
+/** The agent's Configure → Approvals & questions section, where its approval exceptions are edited. */
+export function approvalSettingsHref(agentId: string): string {
+    return `/dashboard/agents/${encodeURIComponent(agentId)}?tab=approvals`;
+}
+
 /** Body of `POST …/actions/:actionId/resolve` for a tool approval. */
 export interface ApprovalResolveBody {
     decision: 'allow' | 'deny';

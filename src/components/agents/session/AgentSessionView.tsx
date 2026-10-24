@@ -110,6 +110,7 @@ import {
     answerBlockedById,
     answerBlockedReason,
     applyLocalResolution,
+    approvalSettingsHref,
     cancelOpenActions,
     composerGateFor,
     isStaleActionRefusal,
@@ -1309,6 +1310,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                     blockedById={blockedById}
                                                                     budgetBannerShown={budgetBannerShown}
                                                                     budgetStops={budgetStops}
+                                                                    ruleHref={approvalSettingsHref(agentId)}
                                                                 />
                                                             ) : (
                                                                 <>
@@ -1648,6 +1650,7 @@ function AssistantTurn({
     blockedById,
     budgetBannerShown,
     budgetStops,
+    ruleHref,
 }: {
     message: ChatMessage;
     /** The message's place in the session: it keeps the "go to" ids of its summarization dividers apart from other turns'. */
@@ -1662,6 +1665,8 @@ function AssistantTurn({
     budgetBannerShown: boolean;
     /** The session budget stops the session instead of pausing it. */
     budgetStops: boolean;
+    /** Where the agent's approval settings are edited. */
+    ruleHref?: string;
 }) {
     // What the turn did, in the order it happened: narration, tool calls, plan versions, sub-agent groups, summaries.
     const flow = useMemo(() => buildTurnFlow(message, { previousPlan, messageIndex }), [message, previousPlan, messageIndex]);
@@ -1702,6 +1707,7 @@ function AssistantTurn({
                     blocked={blocked}
                     blockedById={blockedById}
                     onShowInGroup={showInGroup}
+                    ruleHref={ruleHref}
                 />
             ) : null}
             {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}

@@ -52,6 +52,7 @@ describe('resolveHitlConfig', () => {
       toolApprovalEnabled: true,
       defaultPolicy: 'never',
       toolPolicies: { sandbox_exec: 'always' },
+      toolExceptions: {},
       askUserEnabled: true,
       allowFreeText: false,
       timeoutMinutes: 0,

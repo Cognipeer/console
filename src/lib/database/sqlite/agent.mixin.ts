@@ -745,10 +745,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.agentPendingActions}
         (id, tenantId, projectId, agentKey, conversationId, runId, kind, sdkId, toolCallId, toolName, args, questions,
          allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy,
-         clientTool, subagent, delegationToolCallId)
+         clientTool, subagent, delegationToolCallId, reason)
         VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @runId, @kind, @sdkId, @toolCallId, @toolName, @args,
          @questions, @allowFreeText, @status, @requestedAt, @expiresAt, @resolvedAt, @resolvedBy, @resolution, @agentVersion,
-         @usePublished, @createdBy, @clientTool, @subagent, @delegationToolCallId)
+         @usePublished, @createdBy, @clientTool, @subagent, @delegationToolCallId, @reason)
       `);
       const created: IAgentPendingAction[] = actions.map((action) => ({
         ...action,
@@ -782,6 +782,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             clientTool: action.clientTool ? this.toJson(action.clientTool) : null,
             subagent: action.subagent ?? null,
             delegationToolCallId: action.delegationToolCallId ?? null,
+            reason: action.reason ? this.toJson(action.reason) : null,
           });
         }
       })();
@@ -1064,6 +1065,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.clientTool ? { clientTool: this.parseJson<NonNullable<IAgentPendingAction['clientTool']>>(row.clientTool, { timeoutSeconds: 60 }) } : {}),
         ...(row.subagent ? { subagent: String(row.subagent) } : {}),
         ...(row.delegationToolCallId ? { delegationToolCallId: String(row.delegationToolCallId) } : {}),
+        ...(row.reason ? { reason: this.parseJson<NonNullable<IAgentPendingAction['reason']>>(row.reason, { source: 'other' }) } : {}),
       };
     }
 

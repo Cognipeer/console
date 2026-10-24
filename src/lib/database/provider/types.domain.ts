@@ -3049,6 +3049,41 @@ export interface IAgentClientToolConfig {
 export type AgentToolApprovalPolicy = 'always' | 'never';
 
 /**
+ * What an approval exception does to the calls it matches: `ask` waits for a
+ * person, `allow` runs without asking, `deny` refuses the call (the model is
+ * told a rule blocked it).
+ */
+export type AgentToolApprovalExceptionAction = 'ask' | 'allow' | 'deny';
+
+/**
+ * One exception to a tool's approval setting, judged on the call's arguments:
+ * when `field` (a dot path into the arguments; absent = any text value in them)
+ * matches `pattern` (`*` = anything, not case-sensitive), `action` applies
+ * instead of the tool's setting. When several match, the strictest wins
+ * (`deny` › `ask` › `allow`).
+ */
+export interface AgentToolApprovalException {
+  field?: string;
+  pattern: string;
+  action: AgentToolApprovalExceptionAction;
+}
+
+/** Why a tool call waited for a person (`IAgentPendingAction.reason`). */
+export interface IAgentApprovalReason {
+  /**
+   * `tool_policy`: the tool's own setting asks; `default_policy`: the agent's
+   * setting for tools without one asks; `exception`: an approval exception
+   * matched the call's arguments; `other`: something else asked (a skill
+   * script, a guardrail) — `text` says what.
+   */
+  source: 'tool_policy' | 'default_policy' | 'exception' | 'other';
+  /** `exception`: the rule that matched; no `field` = any argument. */
+  exception?: { field?: string; pattern: string };
+  /** The same reason in one sentence, as the approval prompt (and the trace) carry it. */
+  text?: string;
+}
+
+/**
  * What an approval-gated tool call or an ask-user question does on a run that
  * has no interactive user (a schedule, an evaluation or red-team case, an
  * OpenAI-shaped client):
@@ -3073,6 +3108,8 @@ export interface IAgentHumanInTheLoopConfig {
     defaultPolicy?: AgentToolApprovalPolicy;
     /** Per-tool override; the key is the tool name as the model sees it. */
     tools?: Record<string, AgentToolApprovalPolicy>;
+    /** Per-tool exceptions judged on a call's arguments; the key is the tool name as the model sees it. */
+    exceptions?: Record<string, AgentToolApprovalException[]>;
   };
   /** Minutes a request waits before `onTimeout` applies. Default 1440; 0 = never expires. */
   timeoutMinutes?: number;
@@ -3451,6 +3488,11 @@ export interface IAgentConversationStep {
    * dropping it (it is not part of the final answer).
    */
   narration?: string;
+  /**
+   * An approval exception decided this call: it ran without asking (`allow`)
+   * or was refused (`deny`). Absent when the tool's own setting applied.
+   */
+  approvalRule?: { action: 'allow' | 'deny'; field?: string; pattern: string };
 }
 
 /** A file attached to a user message — the file itself is a conversation file (`IFileRecord`). */
@@ -3761,6 +3803,8 @@ export interface IAgentMessagePendingAction {
   timeoutSeconds?: number;
   status: AgentPendingActionStatus;
   resolution?: IAgentPendingActionResolution;
+  /** `tool_approval`: why the call waited for a person. */
+  reason?: IAgentApprovalReason;
 }
 
 /**
@@ -3795,6 +3839,8 @@ export interface IAgentPendingAction {
   resolution?: IAgentPendingActionResolution;
   /** `client_tool`: how long the host page may take before the call is answered with an error. */
   clientTool?: { timeoutSeconds: number };
+  /** `tool_approval`: why the call waited for a person — absent on rows written before it was recorded. */
+  reason?: IAgentApprovalReason;
   /** The config the paused turn ran with, so the continuation rebuilds the same agent. */
   agentVersion?: number | null;
   usePublished?: boolean;
