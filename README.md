@@ -7,7 +7,9 @@
 [![Stars](https://img.shields.io/github/stars/Cognipeer/console?style=social)](https://github.com/Cognipeer/console)
 [![Docs](https://img.shields.io/badge/docs-docs.cognipeer.com-0A7CFF)](https://docs.cognipeer.com/console/)
 
-[Docs](https://docs.cognipeer.com/console/) · [Quick start](#quick-start) · [Discussions](https://github.com/Cognipeer/console/discussions) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+[Docs](https://docs.cognipeer.com/console/) · [Quick start](#quick-start) · [Discussions](https://github.com/Cognipeer/console/discussions) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Contact](mailto:developer@cognipeer.com)
+
+**Adoption:** in active use at 15 companies that Cognipeer supports as enterprise customers. Open-source users are not included in this count.
 
 <p align="center"><img src=".github/assets/console-tour.gif" alt="Tour of the Cognipeer Console dashboard: Model Hub, knowledge bases, guardrails, agents, tracing, cost (Enterprise) and the service launcher" width="900"></p>
 
@@ -222,6 +224,8 @@ Security reporting guidance is in [SECURITY.md](SECURITY.md). Do not disclose vu
 | [cognipeer-observability](https://github.com/Cognipeer/cognipeer-observability) | Drop-in agent tracing for LangChain, LangGraph, OpenAI Agents and OpenTelemetry |
 
 If this project is useful to you, a ⭐ on GitHub helps other developers find it.
+
+Questions or enterprise support: [developer@cognipeer.com](mailto:developer@cognipeer.com).
 
 ## License 
 
