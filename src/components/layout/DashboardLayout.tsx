@@ -53,11 +53,18 @@ export const SETTINGS_NAV_ORDER: string[] = [
   'resources',
   'tokens',
   'audit',
+  'data-retention',
   'iam',
   'license',
   'sso',
   'ldap',
 ];
+
+/** Position in the Settings section; an entry missing from the order goes last, not first. */
+function settingsNavRank(id: string): number {
+  const index = SETTINGS_NAV_ORDER.indexOf(id);
+  return index === -1 ? SETTINGS_NAV_ORDER.length : index;
+}
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -187,9 +194,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
     () =>
       allowedServices
         .filter((svc) => svc.isSettings)
-        .sort(
-          (a, b) => SETTINGS_NAV_ORDER.indexOf(a.id) - SETTINGS_NAV_ORDER.indexOf(b.id),
-        ),
+        .sort((a, b) => settingsNavRank(a.id) - settingsNavRank(b.id)),
     [allowedServices],
   );
 
