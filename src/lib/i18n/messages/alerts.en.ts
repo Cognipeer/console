@@ -634,7 +634,7 @@ export const alertsEn = {
     templateBadge: 'Template',
   },
   libraryUx: {
-    pageLink: 'Channels',
+    pageLink: 'Notification channels',
     title: 'Notification channels',
     subtitle: 'Destinations shared across your workspace. Rules reference them, so a webhook or key is managed in one place.',
     backToRules: 'Alert rules',

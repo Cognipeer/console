@@ -341,7 +341,7 @@ export default function AutomationsPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Operate · Automations"
+        eyebrow="Configure · Background jobs"
         title={t('header.title')}
         subtitle={t('header.subtitle')}
         actions={

@@ -270,7 +270,7 @@ export function getDashboardServices(
 /**
  * Synthetic definition for the Settings section of the left nav. Not part of
  * the service registry — used as the sub-nav header when a settings page
- * (projects, providers, members, tokens, audit, license) is active.
+ * (an entry with `settings: true`, grouped by SETTINGS_NAV_GROUPS) is active.
  */
 export const SETTINGS_NAV_SECTION: DashboardServiceDefinition = {
   id: 'settings' as DashboardServiceDefinition['id'],

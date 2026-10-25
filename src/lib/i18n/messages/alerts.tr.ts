@@ -635,7 +635,7 @@ export const alertsTr: typeof alertsEn = {
     templateBadge: 'Şablon',
   },
   libraryUx: {
-    pageLink: 'Kanallar',
+    pageLink: 'Bildirim kanalları',
     title: 'Bildirim kanalları',
     subtitle: 'Çalışma alanı genelinde paylaşılan hedefler. Kurallar bunlara başvurur; böylece bir webhook veya anahtar tek yerden yönetilir.',
     backToRules: 'Uyarı kuralları',

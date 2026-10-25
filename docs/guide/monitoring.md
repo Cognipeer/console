@@ -238,7 +238,7 @@ Redirects are not followed, and a delivery that fails is not retried: for guaran
 
 **Destinations.** Webhook, Slack and Teams URLs must use `https`, must not contain credentials, and must resolve to a public address. This is checked when you save and again on every delivery. Redirects are not followed, and each delivery times out after `ALERT_CHANNEL_TIMEOUT_MS` (10 seconds by default).
 
-**Send test** sends a clearly labelled test notification on one channel, either as typed or from a saved rule, and shows the result. Shared channels are tested on the **Channels** page, by workspace owners and admins. It is limited to 5 tests per minute per user and 20 per minute per project (`429` with a `Retry-After` header), and an unsaved email channel can be tested against at most 5 recipients. A PagerDuty test opens and immediately resolves its own throw-away incident.
+**Send test** sends a clearly labelled test notification on one channel, either as typed or from a saved rule, and shows the result. Shared channels are tested on the **Notification channels** page, by workspace owners and admins. It is limited to 5 tests per minute per user and 20 per minute per project (`429` with a `Retry-After` header), and an unsaved email channel can be tested against at most 5 recipients. A PagerDuty test opens and immediately resolves its own throw-away incident.
 
 ### Incidents
 

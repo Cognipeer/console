@@ -749,26 +749,11 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
     },
     {
       id: 'channels',
-      label: 'Channels',
+      label: 'Notification channels',
+      labelKey: 'alertChannels',
       href: '/dashboard/alerts/channels',
       icon: IconWebhook,
       matcher: (p) => p.startsWith('/dashboard/alerts/channels'),
-    },
-  ],
-  cluster: [
-    {
-      id: 'nodes',
-      label: 'Nodes',
-      href: '/dashboard/cluster/nodes',
-      icon: IconServer,
-      matcher: (p) => p.startsWith('/dashboard/cluster/nodes'),
-    },
-    {
-      id: 'instances',
-      label: 'Instances',
-      href: '/dashboard/cluster/instances',
-      icon: IconDatabase,
-      matcher: (p) => p.startsWith('/dashboard/cluster/instances'),
     },
   ],
   'gpu-fleet': [

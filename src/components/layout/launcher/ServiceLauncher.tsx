@@ -98,7 +98,8 @@ export default function ServiceLauncher({
 
   const categories: { key: CategoryKey; label: string }[] = [
     { key: 'all', label: 'All' },
-    ...DASHBOARD_CATEGORY_ORDER.map((cat) => ({
+    // A category with nothing to offer gets no tab (Admin: its pages all sit in Settings).
+    ...DASHBOARD_CATEGORY_ORDER.filter((cat) => counts[cat] > 0).map((cat) => ({
       key: cat as CategoryKey,
       label: DASHBOARD_CATEGORY_LABELS[cat],
     })),

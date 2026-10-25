@@ -4,7 +4,13 @@
  * center for an end user.
  */
 import { describe, expect, it } from 'vitest';
-import { SETTINGS_NAV_ORDER } from '@/components/layout/DashboardLayout';
+import {
+  SETTINGS_NAV_GROUPS,
+  SETTINGS_NAV_ORDER,
+  settingsSectionKeys,
+} from '@/components/layout/DashboardLayout';
+import { en } from '@/lib/i18n/messages/en';
+import { tr } from '@/lib/i18n/messages/tr';
 import {
   ALL_DASHBOARD_SERVICES,
   findDashboardService,
@@ -43,6 +49,43 @@ describe('the services registry', () => {
     const settings = ALL_DASHBOARD_SERVICES.filter((s) => s.isSettings).map((s) => s.id);
     for (const id of settings) expect(SETTINGS_NAV_ORDER, id).toContain(id);
     expect(SETTINGS_NAV_ORDER[0]).toBe('projects');
+  });
+
+  it('keeps configuration and platform pages in Settings, not in the launcher', () => {
+    for (const id of ['config', 'automations', 'cluster']) {
+      expect(findDashboardService(id)?.isSettings, id).toBe(true);
+    }
+    // nothing of the Admin category is left in the launcher, so it shows no Admin tab
+    const launcherAdmin = ALL_DASHBOARD_SERVICES.filter((s) => s.category === 'admin' && !s.isSettings);
+    expect(ids(launcherAdmin)).toEqual([]);
+    // Alerts is daily operations work and stays a service
+    expect(findDashboardService('alerts')?.isSettings).toBeFalsy();
+  });
+
+  it('names every Settings group heading in both languages', () => {
+    for (const { sectionKey } of SETTINGS_NAV_GROUPS) {
+      expect((en.navigation as Record<string, string>)[sectionKey], sectionKey).toBeTruthy();
+      expect((tr.navigation as Record<string, string>)[sectionKey], sectionKey).toBeTruthy();
+    }
+  });
+});
+
+describe('the Settings group headings', () => {
+  it('heads the first entry the viewer has of each group', () => {
+    expect(settingsSectionKeys(SETTINGS_NAV_ORDER).filter(Boolean)).toEqual(
+      SETTINGS_NAV_GROUPS.map((group) => group.sectionKey),
+    );
+    // an end user without the admin pages: one heading over what is left
+    expect(settingsSectionKeys(['projects', 'config', 'tokens'])).toEqual(['settingsWorkspace', undefined, undefined]);
+    expect(settingsSectionKeys(['tokens', 'audit', 'license'])).toEqual([
+      'settingsWorkspace',
+      'settingsGovernance',
+      'settingsPlatform',
+    ]);
+  });
+
+  it('gives an entry no group names no heading', () => {
+    expect(settingsSectionKeys(['projects', 'unlisted'])).toEqual(['settingsWorkspace', undefined]);
   });
 });
 
