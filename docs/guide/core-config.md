@@ -6,7 +6,7 @@ The config module (`src/lib/core/config.ts`) provides centralized, typed configu
 
 - **Type safety** — Every config value has a known type with sensible defaults.
 - **Swappable source** — The `ConfigSource` abstraction lets you replace ENV with a database, settings page, or any other backend in the future.
-- **Validation** — Critical values are checked at startup. Missing `JWT_SECRET` is always rejected; `MONGODB_URI` is required only when `DB_PROVIDER=mongodb`.
+- **Validation** — Critical values are checked at startup. `JWT_SECRET` and `PROVIDER_ENCRYPTION_SECRET` are always required; `MONGODB_URI` is required only when `DB_PROVIDER=mongodb`. Production refuses to start when validation reports an error.
 - **Single cache** — Config is built once and reused for the process lifetime.
 
 ## Usage
@@ -52,7 +52,8 @@ if (errors.length > 0) {
 | Field | Condition |
 |-------|-----------|
 | `MONGODB_URI` | Must be non-empty when `DB_PROVIDER=mongodb` |
-| `JWT_SECRET` | Must be non-empty |
+| `JWT_SECRET` | Required, at least 32 characters |
+| `PROVIDER_ENCRYPTION_SECRET` | Required, at least 32 characters, and different from `JWT_SECRET` |
 | `REDIS_URL` | Required when `CACHE_PROVIDER=redis` |
 | `REDIS_URL` | Required when `RATE_LIMIT_PROVIDER=redis` |
 | `CACHE_PROVIDER` | Must match `RATE_LIMIT_PROVIDER` when rate limiting uses `memory` or `redis` |

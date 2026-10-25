@@ -118,7 +118,7 @@ the PII gate before it is stored"* — and the server enforces it: a create call
 block is rejected with **HTTP 400**, and so is one with no categories selected or a strategy other than
 `mask` / `pseudonym`.
 
-**PII categories** lists the 18 built-in categories, each with its severity badge. Seven are pre-selected
+**PII categories** lists the 25 built-in categories, each with its severity badge. Seven are pre-selected
 (email, phone, credit card, IBAN, and the Turkish TCKN / phone / IBAN categories). At least one must stay
 selected. Category definitions live in [PII Service](/guide/pii).
 

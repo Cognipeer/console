@@ -45,7 +45,7 @@ mistake here, so decide before you build.
 | Runs when | Automatically, on every request to a model or agent it is bound to | Only when your code calls it |
 | Can it stop a request? | Yes — a blocking finding raises HTTP 400 `guardrail_block` | No. It returns `has_blocking: true` and leaves the decision to you |
 | What it detects | PII, banned words, harmful content, prompt injection | PII only |
-| PII category set | 15 categories, ids like `nationalId`, `tckn`, `address` | 18 categories, ids like `ssn_us`, `tc_kimlik`, `address_en` |
+| PII category set | 15 categories, ids like `nationalId`, `tckn`, `address` | 25 categories, ids like `ssn_us`, `tc_kimlik`, `address_en` |
 | Evasion handling | Normalises zero-width and fullwidth characters and rewrites `user (at) mail (dot) com`; the secret detector also knows Stripe, AWS, GitHub, Slack, `cpeer_`, JWT and PEM shapes | Plain regex over the text as supplied |
 | Transformations | Block, redact, warn, flag | Detect, redact, mask, tokenize (reversible), block |
 | Redaction marker | `[REDACTED_EMAIL]` for PII findings (`[REDACTED:category]` for word-filter and regex findings) | `[REDACTED_EMAIL]` |
@@ -262,11 +262,21 @@ every category stays available.
 | `tc_kimlik` | Turkish National ID (TC Kimlik No) | tr | yes |
 | `tr_phone` | Turkish phone number | tr | yes |
 | `tr_iban` | Turkish IBAN | tr | yes |
+| `tr_vkn` | Turkish Tax ID (VKN) | tr | no |
+| `tr_plaka` | Turkish license plate | tr | no |
+| `tr_passport` | Turkish passport number | tr | no |
+| `address_tr` | Turkish street address | tr | no |
 | `de_phone` | German phone number | de | no |
+| `person` | Person name | global | no |
+| `organization` | Organization name | global | no |
+| `location` | Location | global | no |
 
 Credit cards are Luhn-validated, TC Kimlik numbers are checksum-validated, and phone numbers are
 rejected outside 7–15 digits — so those three categories produce far fewer false positives than their
 regexes alone would suggest.
+
+`person`, `organization` and `location` have no regular expression: the pattern pass never reports
+them, only the dictionary and NER passes can.
 
 **Custom patterns** merges your own regexes on top. **Add pattern** creates a row with **Category ID**,
 **Label**, **Regex pattern**, **Flags**, **Severity**, **Languages** and an **Enabled** switch. Invalid

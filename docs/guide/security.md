@@ -18,7 +18,7 @@ The root [SECURITY.md](https://github.com/Cognipeer/console/blob/main/SECURITY.m
 Before you run Cognipeer Console outside local development, do the following:
 
 - set a strong `JWT_SECRET`,
-- set `PROVIDER_ENCRYPTION_SECRET` explicitly instead of relying on the JWT fallback,
+- set `PROVIDER_ENCRYPTION_SECRET` to its own random value of at least 32 characters, different from `JWT_SECRET` (production refuses to start without it),
 - keep `.env.local` and runtime secrets out of version control,
 - review CORS settings before exposing `/api/client/*` endpoints to browsers,
 - use HTTPS and trusted ingress or reverse proxies, and list them in `TRUSTED_PROXIES` so IP allowlists and IP rules see the real client address,

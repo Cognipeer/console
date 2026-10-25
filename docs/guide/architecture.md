@@ -13,7 +13,7 @@
 | Email | Nodemailer + Handlebars templates |
 | Build | Turbopack |
 | Testing | Vitest |
-| Deployment | Docker + Kubernetes (Helm) |
+| Deployment | Docker (Kubernetes with your own manifests) |
 
 ## Request Flow
 

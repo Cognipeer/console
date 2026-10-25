@@ -1,6 +1,6 @@
 # Deployment
 
-The Cognipeer Console supports multiple deployment strategies: standalone Docker, Kubernetes with Helm, and traditional Node.js process management.
+The Cognipeer Console supports multiple deployment strategies: standalone Docker, Kubernetes with manifests of your own, and traditional Node.js process management.
 
 ## Docker
 
@@ -29,7 +29,8 @@ SQLite mode (default):
 docker run -d \
   --name cognipeer-console \
   -p 3000:3000 \
-  -e JWT_SECRET="your-secret-here" \
+  -e JWT_SECRET="<random value, at least 32 characters>" \
+  -e PROVIDER_ENCRYPTION_SECRET="<a different random value, at least 32 characters>" \
   -v console-data:/app/data \
   cognipeer-console:latest
 ```
@@ -42,9 +43,12 @@ docker run -d \
   -p 3000:3000 \
   -e DB_PROVIDER="mongodb" \
   -e MONGODB_URI="mongodb://host.docker.internal:27017" \
-  -e JWT_SECRET="your-secret-here" \
+  -e JWT_SECRET="<random value, at least 32 characters>" \
+  -e PROVIDER_ENCRYPTION_SECRET="<a different random value, at least 32 characters>" \
   cognipeer-console:latest
 ```
+
+The image runs with `NODE_ENV=production`, so it refuses to start unless both secrets are valid. Generate each value once, for example with `openssl rand -hex 32`, and keep them: credentials stored under the old `PROVIDER_ENCRYPTION_SECRET` cannot be read with a new one, and a different `JWT_SECRET` signs everyone out.
 
 ### Docker Compose
 
@@ -59,7 +63,8 @@ services:
       DB_PROVIDER: sqlite
       MAIN_DB_NAME: cgate_main
       SQLITE_DATA_DIR: /app/data/sqlite
-      JWT_SECRET: change-me-in-production
+      JWT_SECRET: "<random value, at least 32 characters>"
+      PROVIDER_ENCRYPTION_SECRET: "<a different random value, at least 32 characters>"
       LOG_LEVEL: info
       LOG_FORMAT: json
       CACHE_PROVIDER: memory
@@ -78,43 +83,19 @@ If you want MongoDB instead, set `DB_PROVIDER=mongodb`, add `MONGODB_URI`, and p
 
 ## Kubernetes
 
-### Helm Chart
+This repository does not include a Helm chart, a helmfile or Kubernetes manifests. To run Console on Kubernetes, deploy the image built from the repository's `Dockerfile` (see [Docker](#docker)) with manifests of your own. For help with a Kubernetes deployment, contact [developer@cognipeer.com](mailto:developer@cognipeer.com).
 
-The project includes a Helm chart at `deploy/k8s/cgate/`:
+What the image gives your manifests:
 
-```bash
-# Install
-helm install cognipeer-console deploy/k8s/cgate \
-  --set image.repository=your-registry/cognipeer-console \
-  --set image.tag=latest
-
-# Upgrade
-helm upgrade cognipeer-console deploy/k8s/cgate \
-  --set image.tag=v1.2.0
-```
-
-### Helmfile
-
-For multi-environment deployments:
-
-```bash
-# Deploy to dev
-helmfile -e dev apply
-
-# Deploy to production
-helmfile -e production apply
-```
-
-Environment-specific values are in `deploy/k8s/values/`:
-
-```
-deploy/k8s/values/
-├── common.yaml.gotmpl  # Shared across environments
-├── dev.yaml             # Development overrides
-└── production.yaml      # Production overrides
-```
+- The container listens on port `3000` and runs as the non-root user `node`.
+- `GET /api/health/live` and `GET /api/health/ready` are public endpoints for liveness and readiness probes (see [Health Probes](#health-probes) below).
+- Node is the container's main process, so `SIGTERM` reaches it and starts a [graceful shutdown](#graceful-shutdown).
+- SQLite databases and local files are written under `/app/data`. Mount a persistent volume there, or use MongoDB (`DB_PROVIDER=mongodb`).
+- Settings are environment variables; see the [Configuration Reference](../guide/configuration.md). `JWT_SECRET` and `PROVIDER_ENCRYPTION_SECRET` are required.
 
 ### Health Probes
+
+Example settings for the probes in your own manifests. The endpoints are described in the [Health API](/api/health).
 
 ```yaml
 livenessProbe:
@@ -134,19 +115,6 @@ readinessProbe:
   periodSeconds: 10
   timeoutSeconds: 10
   failureThreshold: 3
-```
-
-### Security Context
-
-The Helm chart configures:
-
-```yaml
-securityContext:
-  capabilities:
-    drop: [ALL]
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
 ```
 
 ## Standalone Node.js
@@ -174,7 +142,8 @@ pm2 start npm --name cognipeer-console -- start
 
 | Variable | Description |
 |----------|-------------|
-| `JWT_SECRET` | JWT signing secret |
+| `JWT_SECRET` | JWT signing secret (min 32 chars) |
+| `PROVIDER_ENCRYPTION_SECRET` | Key that encrypts provider credentials at rest (min 32 chars, must differ from `JWT_SECRET`) |
 
 ### Conditionally Required Variables
 
