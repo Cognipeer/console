@@ -25,6 +25,13 @@ import { emptyTriggerForm } from '@/components/agents/studio/triggerForm';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import type { IAgentCallbackConfig } from '@/lib/database/provider/types.domain';
 
+// The lists render through DataGrid, whose row navigation needs the app router.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn(), back: vi.fn(), refresh: vi.fn() }),
+  usePathname: () => '/dashboard/agents/a1',
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 // The full timezone list makes a jsdom render take seconds; two zones are enough for what is checked here.
 vi.mock('@/components/agents/studio/triggerForm', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/agents/studio/triggerForm')>()),

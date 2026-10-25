@@ -31,6 +31,13 @@ import {
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
 import { interpretSessionEvent } from '@/components/agents/session/sessionFollow';
 
+// The lists render through DataGrid, whose row navigation needs the app router.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn(), back: vi.fn(), refresh: vi.fn() }),
+  usePathname: () => '/dashboard/agents/a1',
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 (globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

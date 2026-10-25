@@ -18,6 +18,7 @@ import {
   TextInput,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import {
   IconAlertTriangle,
   IconFileText,
@@ -66,6 +67,22 @@ interface OcrResult {
 }
 
 type Source = 'file' | 'url';
+
+type OcrKeyValue = { key: string; value: string; confidence?: number; idx: number };
+
+const keyValueColumns: DataGridColumn<OcrKeyValue>[] = [
+  { key: 'key', label: 'Key', render: (kv) => <Text size="sm" fw={500}>{kv.key}</Text> },
+  { key: 'value', label: 'Value', render: (kv) => <Text size="sm">{kv.value}</Text> },
+  {
+    key: 'confidence',
+    label: 'Confidence',
+    render: (kv) => (
+      <Text size="xs" c="dimmed">
+        {kv.confidence !== undefined ? `${(kv.confidence * 100).toFixed(1)}%` : '—'}
+      </Text>
+    ),
+  },
+];
 
 function renderTable(table: OcrTable) {
   const grid: string[][] = Array.from({ length: table.rows }, () =>
@@ -420,36 +437,11 @@ export default function OcrPlayground({ modelKey, configuredMode }: OcrPlaygroun
 
               {result.keyValuePairs && (
                 <Tabs.Panel value="kv" pt="sm">
-                  <Table withTableBorder withColumnBorders striped>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>Key</Table.Th>
-                        <Table.Th>Value</Table.Th>
-                        <Table.Th>Confidence</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {result.keyValuePairs.map((kv, idx) => (
-                        <Table.Tr key={idx}>
-                          <Table.Td>
-                            <Text size="sm" fw={500}>
-                              {kv.key}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm">{kv.value}</Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed">
-                              {kv.confidence !== undefined
-                                ? `${(kv.confidence * 100).toFixed(1)}%`
-                                : '—'}
-                            </Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
+                  <DataGrid<OcrKeyValue>
+                    records={result.keyValuePairs.map((kv, idx) => ({ ...kv, idx }))}
+                    rowKey={(kv) => String(kv.idx)}
+                    columns={keyValueColumns}
+                  />
                 </Tabs.Panel>
               )}
             </Tabs>

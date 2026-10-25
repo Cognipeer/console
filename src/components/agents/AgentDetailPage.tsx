@@ -54,6 +54,7 @@ import GuardrailBindingList, {
   type GuardrailBindingRow,
 } from '@/components/guardrails/GuardrailBindingList';
 import LoadingState from '@/components/common/LoadingState';
+import DataGrid from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
 import { KnowledgeBindingsEditor } from './KnowledgeBindingsEditor';
@@ -1640,83 +1641,90 @@ export default function AgentDetailPage() {
                     minHeight={220}
                   />
                 ) : (
-                  <div className="ds-tbl-wrap">
-                  <Table striped highlightOnHover>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th w={40}>
-                          <VisuallyHidden>Select version</VisuallyHidden>
-                        </Table.Th>
-                        <Table.Th>{t('versions.version')}</Table.Th>
-                        <Table.Th>{t('versions.changelog')}</Table.Th>
-                        <Table.Th>{t('versions.publishedAt')}</Table.Th>
-                        <Table.Th />
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {versions.map((v) => {
-                        const isSelected = compareVersionA === String(v.version) || compareVersionB === String(v.version);
-                        return (
-                          <Table.Tr key={v.version}>
-                            <Table.Td>
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => {
-                                  const vStr = String(v.version);
-                                  if (isSelected) {
-                                    if (compareVersionA === vStr) setCompareVersionA(null);
-                                    if (compareVersionB === vStr) setCompareVersionB(null);
-                                  } else {
-                                    if (!compareVersionA) setCompareVersionA(vStr);
-                                    else if (!compareVersionB) setCompareVersionB(vStr);
-                                    else {
-                                      setCompareVersionA(compareVersionB);
-                                      setCompareVersionB(vStr);
-                                    }
+                  <DataGrid<AgentVersion>
+                    records={versions}
+                    rowKey={(v) => String(v.version)}
+                    columns={[
+                      {
+                        key: 'select',
+                        label: <VisuallyHidden>Select version</VisuallyHidden>,
+                        width: 40,
+                        render: (v) => {
+                          const isSelected = compareVersionA === String(v.version) || compareVersionB === String(v.version);
+                          return (
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {
+                                const vStr = String(v.version);
+                                if (isSelected) {
+                                  if (compareVersionA === vStr) setCompareVersionA(null);
+                                  if (compareVersionB === vStr) setCompareVersionB(null);
+                                } else {
+                                  if (!compareVersionA) setCompareVersionA(vStr);
+                                  else if (!compareVersionB) setCompareVersionB(vStr);
+                                  else {
+                                    setCompareVersionA(compareVersionB);
+                                    setCompareVersionB(vStr);
                                   }
-                                }}
-                              />
-                            </Table.Td>
-                            <Table.Td>
-                              <Group gap="xs">
-                                <Badge size="sm" variant="filled" color="blue">v{v.version}</Badge>
-                                {agent.publishedVersion === v.version && (
-                                  <Badge size="xs" variant="light" color="teal">{t('versions.current')}</Badge>
-                                )}
-                              </Group>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="sm" lineClamp={1}>
-                                {v.changelog || <Text span c="dimmed" fs="italic" size="sm">{t('versions.noChangelog')}</Text>}
-                              </Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="sm">
-                                {v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}
-                              </Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Tooltip label={t('versions.snapshot')}>
-                                <ActionIcon
-                                  size="sm"
-                                  variant="subtle"
-                                  onClick={() => {
-                                    setCompareVersionA(String(v.version));
-                                    setCompareVersionB(null);
-                                    setCompareModalOpen(true);
-                                  }}
-                                >
-                                  <IconCode size={14} />
-                                </ActionIcon>
-                              </Tooltip>
-                            </Table.Td>
-                          </Table.Tr>
-                        );
-                      })}
-                    </Table.Tbody>
-                  </Table>
-                  </div>
+                                }
+                              }}
+                            />
+                          );
+                        },
+                      },
+                      {
+                        key: 'version',
+                        label: t('versions.version'),
+                        render: (v) => (
+                          <Group gap="xs">
+                            <Badge size="sm" variant="filled" color="blue">v{v.version}</Badge>
+                            {agent.publishedVersion === v.version && (
+                              <Badge size="xs" variant="light" color="teal">{t('versions.current')}</Badge>
+                            )}
+                          </Group>
+                        ),
+                      },
+                      {
+                        key: 'changelog',
+                        label: t('versions.changelog'),
+                        render: (v) => (
+                          <Text size="sm" lineClamp={1}>
+                            {v.changelog || <Text span c="dimmed" fs="italic" size="sm">{t('versions.noChangelog')}</Text>}
+                          </Text>
+                        ),
+                      },
+                      {
+                        key: 'publishedAt',
+                        label: t('versions.publishedAt'),
+                        render: (v) => (
+                          <Text size="sm">
+                            {v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}
+                          </Text>
+                        ),
+                      },
+                      {
+                        key: 'actions',
+                        label: '',
+                        align: 'right',
+                        render: (v) => (
+                          <Tooltip label={t('versions.snapshot')}>
+                            <ActionIcon
+                              size="sm"
+                              variant="subtle"
+                              onClick={() => {
+                                setCompareVersionA(String(v.version));
+                                setCompareVersionB(null);
+                                setCompareModalOpen(true);
+                              }}
+                            >
+                              <IconCode size={14} />
+                            </ActionIcon>
+                          </Tooltip>
+                        ),
+                      },
+                    ]}
+                  />
                 )}
               </Stack>
             </ConfigSection>

@@ -1,13 +1,5 @@
-.table {
-  font-size: var(--mantine-font-size-sm);
-}
-
-.row {
-  cursor: pointer;
-}
-
-.row td {
-  vertical-align: middle;
+.wide :global(.ds-tbl) {
+  min-width: 1080px;
 }
 
 .agentLink {
@@ -32,8 +24,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Sortable headers read like the grid's other headers; a button would reset their case and font. */
 .sortHeader {
   width: 100%;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.sortActive {
+  color: var(--ds-text);
+  font-weight: 600;
 }
 
 .sortHeader:hover {

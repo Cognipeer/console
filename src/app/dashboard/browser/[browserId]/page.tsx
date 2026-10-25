@@ -20,7 +20,6 @@ import {
   SimpleGrid,
   Stack,
   Switch,
-  Table,
   Tabs,
   Text,
   TextInput,
@@ -53,6 +52,7 @@ import {
 } from '@tabler/icons-react';
 import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 import DetailShell from '@/components/common/ui/DetailShell';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import BrowserOverview from '@/components/browser/BrowserOverview';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
@@ -448,6 +448,66 @@ export default function BrowserDetailPage() {
     </>
   );
 
+  const sessionColumns: DataGridColumn<BrowserSessionView>[] = [
+    { key: 'name', label: 'Name', render: (s) => s.name || '—' },
+    { key: 'sessionKey', label: 'Key', render: (s) => <Code>{s.sessionKey}</Code> },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (s) => <Badge color={statusColor(s.status)} variant="light">{s.status}</Badge>,
+    },
+    {
+      key: 'url',
+      label: 'URL',
+      render: (s) => <Text size="xs" c="dimmed" lineClamp={1} maw={260}>{s.currentUrl ?? '—'}</Text>,
+    },
+    {
+      key: 'lastActivity',
+      label: 'Last activity',
+      render: (s) => <Text size="xs" c="dimmed">{formatDate(s.lastActivityAt)}</Text>,
+    },
+    {
+      key: 'actions',
+      label: '',
+      align: 'right',
+      render: (s) => (
+        <Group gap={4} justify="flex-end">
+          <Tooltip label="Open live preview">
+            <ActionIcon variant="light" onClick={() => { setDrawerSession(s); drawerHandlers.open(); }}>
+              <IconCamera size={14} />
+            </ActionIcon>
+          </Tooltip>
+          {(s.eventCount ?? 0) > 1 && (
+            <Tooltip label="Record this session as a replayable flow">
+              <ActionIcon variant="light" color="grape" onClick={() => setRecordTarget(s)}>
+                <IconRoute size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          {(s.status === 'running' || s.status === 'idle') && (
+            <Tooltip label="Save this signed-in session as the browser profile">
+              <ActionIcon variant="light" color="teal" onClick={() => handleSaveProfile(s)}>
+                <IconCookie size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          {s.status !== 'closed' && s.status !== 'expired' && (
+            <Tooltip label="Close session">
+              <ActionIcon variant="light" color="orange" onClick={() => handleCloseSession(s)}>
+                <IconX size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          <Tooltip label="Delete session">
+            <ActionIcon variant="light" color="red" onClick={() => handleDeleteSession(s)}>
+              <IconTrash size={14} />
+            </ActionIcon>
+          </Tooltip>
+        </Group>
+      ),
+    },
+  ];
+
   return (
     <DetailShell
       backHref="/dashboard/browser"
@@ -556,75 +616,12 @@ export default function BrowserDetailPage() {
                 </Button>
               </Group>
             </Paper>
-
-            <Paper withBorder p="md" radius="lg">
-              {filteredSessions.length === 0 ? (
-                <Text c="dimmed" ta="center" py="xl">No sessions yet.</Text>
-              ) : (
-                <Table highlightOnHover>
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th>Name</Table.Th>
-                      <Table.Th>Key</Table.Th>
-                      <Table.Th>Status</Table.Th>
-                      <Table.Th>URL</Table.Th>
-                      <Table.Th>Last activity</Table.Th>
-                      <Table.Th />
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {filteredSessions.map((s) => (
-                      <Table.Tr key={s.id}>
-                        <Table.Td>{s.name || '—'}</Table.Td>
-                        <Table.Td><Code>{s.sessionKey}</Code></Table.Td>
-                        <Table.Td><Badge color={statusColor(s.status)} variant="light">{s.status}</Badge></Table.Td>
-                        <Table.Td>
-                          <Text size="xs" c="dimmed" lineClamp={1} maw={260}>{s.currentUrl ?? '—'}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="xs" c="dimmed">{formatDate(s.lastActivityAt)}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Group gap={4} justify="flex-end">
-                            <Tooltip label="Open live preview">
-                              <ActionIcon variant="light" onClick={() => { setDrawerSession(s); drawerHandlers.open(); }}>
-                                <IconCamera size={14} />
-                              </ActionIcon>
-                            </Tooltip>
-                            {(s.eventCount ?? 0) > 1 && (
-                              <Tooltip label="Record this session as a replayable flow">
-                                <ActionIcon variant="light" color="grape" onClick={() => setRecordTarget(s)}>
-                                  <IconRoute size={14} />
-                                </ActionIcon>
-                              </Tooltip>
-                            )}
-                            {(s.status === 'running' || s.status === 'idle') && (
-                              <Tooltip label="Save this signed-in session as the browser profile">
-                                <ActionIcon variant="light" color="teal" onClick={() => handleSaveProfile(s)}>
-                                  <IconCookie size={14} />
-                                </ActionIcon>
-                              </Tooltip>
-                            )}
-                            {s.status !== 'closed' && s.status !== 'expired' && (
-                              <Tooltip label="Close session">
-                                <ActionIcon variant="light" color="orange" onClick={() => handleCloseSession(s)}>
-                                  <IconX size={14} />
-                                </ActionIcon>
-                              </Tooltip>
-                            )}
-                            <Tooltip label="Delete session">
-                              <ActionIcon variant="light" color="red" onClick={() => handleDeleteSession(s)}>
-                                <IconTrash size={14} />
-                              </ActionIcon>
-                            </Tooltip>
-                          </Group>
-                        </Table.Td>
-                      </Table.Tr>
-                    ))}
-                  </Table.Tbody>
-                </Table>
-              )}
-            </Paper>
+            <DataGrid<BrowserSessionView>
+              records={filteredSessions}
+              rowKey={(s) => s.id}
+              columns={sessionColumns}
+              empty={{ title: 'No sessions yet.' }}
+            />
           </Stack>
         </Tabs.Panel>
 

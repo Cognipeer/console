@@ -6,6 +6,7 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
   Button,
+  Box,
   Center,
   Code,
   CopyButton,
@@ -20,14 +21,12 @@ import {
   Slider,
   Stack,
   Switch,
-  Table,
   Tabs,
   Text,
   Textarea,
   TextInput,
   ThemeIcon,
   Tooltip,
-  Box,
   Accordion,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
@@ -746,6 +745,92 @@ export default function RagModuleDetailPage() {
     }
   };
 
+  const zeroQueryColumns: DataGridColumn<RagQueryLogView>[] = [
+    {
+      key: 'query',
+      label: 'Query',
+      render: (log) => <Text size="sm" lineClamp={2} maw={400}>{log.query}</Text>,
+    },
+    {
+      key: 'why',
+      label: 'Why',
+      align: 'center',
+      render: (log) => {
+        // A query the store answered and the threshold emptied is a
+        // tuning problem; one the store never answered is a content gap.
+        // Logs written before the count existed can say neither: absent
+        // is not zero, and calling it a content gap sends the user
+        // looking for documents that may well be there.
+        const preFilter = log.preFilterMatchCount;
+        const recorded = typeof preFilter === 'number';
+        const filtered = recorded && preFilter > 0;
+        return (
+          <Badge
+            variant="light"
+            color={!recorded ? 'gray' : filtered ? 'yellow' : 'red'}
+            size="sm"
+          >
+            {!recorded
+              ? 'reason not recorded'
+              : filtered
+                ? `${preFilter} below min score`
+                : 'nothing retrieved'}
+          </Badge>
+        );
+      },
+    },
+    {
+      key: 'bestScore',
+      label: 'Best score',
+      align: 'center',
+      render: (log) => (
+        <Text size="xs" c="dimmed" ff="monospace">
+          {typeof log.topScore === 'number' ? log.topScore.toFixed(3) : '—'}
+        </Text>
+      ),
+    },
+    {
+      key: 'time',
+      label: 'Time',
+      render: (log) => <Text size="xs" c="dimmed">{formatDate(log.createdAt)}</Text>,
+    },
+  ];
+
+  const historyColumns: DataGridColumn<RagQueryLogView>[] = [
+    {
+      key: 'query',
+      label: 'Query',
+      render: (log) => <Text size="sm" lineClamp={2} maw={400}>{log.query}</Text>,
+    },
+    {
+      key: 'topK',
+      label: 'Top K',
+      align: 'center',
+      render: (log) => <Badge variant="light" color="gray" size="sm">{log.topK}</Badge>,
+    },
+    {
+      key: 'matches',
+      label: 'Matches',
+      align: 'center',
+      render: (log) => <Badge variant="filled" color="violet" size="sm">{log.matchCount}</Badge>,
+    },
+    {
+      key: 'latency',
+      label: 'Latency',
+      align: 'center',
+      render: (log) => (
+        <Badge variant="light" color={latencyColor(log.latencyMs)} size="sm">
+          {typeof log.latencyMs === 'number' ? `${log.latencyMs}ms` : '—'}
+        </Badge>
+      ),
+    },
+    {
+      key: 'time',
+      label: 'Time',
+      render: (log) => <Text size="xs" c="dimmed">{formatDate(log.createdAt)}</Text>,
+    },
+  ];
+
   const docColumns: DataGridColumn<RagDocumentView>[] = [
     {
       key: 'fileName',
@@ -1153,71 +1238,16 @@ export default function RagModuleDetailPage() {
                 </Button>
               </Group>
 
-              {insightsLoading ? (
-                <Center py="xl"><Loader size="sm" color="violet" /></Center>
-              ) : insightsError ? (
+              {insightsError ? (
                 <InlineLoadError message={insightsError} onRetry={() => void loadInsights()} />
-              ) : zeroQueries.length === 0 ? (
-                <Center py="xl">
-                  <Text size="sm" c="dimmed">No zero-result queries logged. Every query found something.</Text>
-                </Center>
               ) : (
-                <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
-                  <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
-                    <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
-                      <Table.Tr>
-                        <Table.Th>Query</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Why</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Best score</Table.Th>
-                        <Table.Th>Time</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {zeroQueries.map((log) => {
-                        // A query the store answered and the threshold emptied is a
-                        // tuning problem; one the store never answered is a content gap.
-                        // Logs written before the count existed can say neither: absent
-                        // is not zero, and calling it a content gap sends the user
-                        // looking for documents that may well be there.
-                        const preFilter = log.preFilterMatchCount;
-                        const recorded = typeof preFilter === 'number';
-                        const filtered = recorded && preFilter > 0;
-                        return (
-                          <Table.Tr key={log._id}>
-                            <Table.Td style={{ maxWidth: 400 }}>
-                              <Text size="sm" lineClamp={2}>{log.query}</Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Center>
-                                <Badge
-                                  variant="light"
-                                  color={!recorded ? 'gray' : filtered ? 'yellow' : 'red'}
-                                  size="sm"
-                                >
-                                  {!recorded
-                                    ? 'reason not recorded'
-                                    : filtered
-                                      ? `${preFilter} below min score`
-                                      : 'nothing retrieved'}
-                                </Badge>
-                              </Center>
-                            </Table.Td>
-                            <Table.Td>
-                              <Center>
-                                <Text size="xs" c="dimmed" ff="monospace">
-                                  {typeof log.topScore === 'number' ? log.topScore.toFixed(3) : '—'}
-                                </Text>
-                              </Center>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="xs" c="dimmed">{formatDate(log.createdAt)}</Text>
-                            </Table.Td>
-                          </Table.Tr>
-                        );
-                      })}
-                    </Table.Tbody>
-                  </Table>
-                </Box>
+                <DataGrid<RagQueryLogView>
+                  records={zeroQueries}
+                  rowKey={(log) => log._id}
+                  columns={zeroQueryColumns}
+                  loading={insightsLoading}
+                  empty={{ title: 'No zero-result queries logged. Every query found something.' }}
+                />
               )}
             </Paper>
 
@@ -1790,62 +1820,19 @@ export default function RagModuleDetailPage() {
                 </Button>
               </Group>
 
-              {usageLoading ? (
-                <Center py="xl"><Loader size="sm" /></Center>
-              ) : usageError ? (
+              {usageError ? (
                 <InlineLoadError message={usageError} onRetry={() => void loadUsage()} />
-              ) : queryLogs.length === 0 ? (
-                <Center py="xl">
-                  <Stack gap="sm" align="center">
-                    <ThemeIcon size={64} radius="xl" variant="light" color="gray">
-                      <IconActivity size={32} />
-                    </ThemeIcon>
-                    <Text c="dimmed" size="sm">No queries logged yet. Use the Playground or SDK to run queries.</Text>
-                  </Stack>
-                </Center>
               ) : (
-                <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
-                  <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
-                    <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
-                      <Table.Tr>
-                        <Table.Th>Query</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Top K</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Matches</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Latency</Table.Th>
-                        <Table.Th>Time</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {queryLogs.map((log) => (
-                        <Table.Tr key={log._id}>
-                          <Table.Td style={{ maxWidth: 400 }}>
-                            <Text size="sm" lineClamp={2}>{log.query}</Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Center>
-                              <Badge variant="light" color="gray" size="sm">{log.topK}</Badge>
-                            </Center>
-                          </Table.Td>
-                          <Table.Td>
-                            <Center>
-                              <Badge variant="filled" color="violet" size="sm">{log.matchCount}</Badge>
-                            </Center>
-                          </Table.Td>
-                          <Table.Td>
-                            <Center>
-                              <Badge variant="light" color={latencyColor(log.latencyMs)} size="sm">
-                                {typeof log.latencyMs === 'number' ? `${log.latencyMs}ms` : '—'}
-                              </Badge>
-                            </Center>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed">{formatDate(log.createdAt)}</Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
-                </Box>
+                <DataGrid<RagQueryLogView>
+                  records={queryLogs}
+                  rowKey={(log) => log._id}
+                  columns={historyColumns}
+                  loading={usageLoading}
+                  empty={{
+                    icon: <IconActivity size={32} />,
+                    title: 'No queries logged yet. Use the Playground or SDK to run queries.',
+                  }}
+                />
               )}
             </Paper>
           </Stack>

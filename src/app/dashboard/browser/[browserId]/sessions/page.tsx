@@ -19,7 +19,6 @@ import {
   Select,
   Stack,
   Switch,
-  Table,
   Text,
   TextInput,
   Tooltip,
@@ -40,6 +39,7 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import ArtifactBucketSelect from '@/components/browser/ArtifactBucketSelect';
 import type { BrowserSessionEventView, BrowserSessionView } from '@/lib/services/browser';
@@ -184,6 +184,53 @@ export default function BrowserSessionsPage() {
     });
   };
 
+  const sessionColumns: DataGridColumn<BrowserSessionView>[] = [
+    { key: 'name', label: 'Name', render: (s) => s.name || s.agentKey || '—' },
+    { key: 'sessionKey', label: 'Key', render: (s) => <Code>{s.sessionKey}</Code> },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (s) => <Badge color={statusColor(s.status)} variant="light">{s.status}</Badge>,
+    },
+    {
+      key: 'url',
+      label: 'Current URL',
+      render: (s) => <Text size="sm" truncate maw={260}>{s.currentUrl ?? '—'}</Text>,
+    },
+    { key: 'events', label: 'Events', render: (s) => s.eventCount ?? 0 },
+    {
+      key: 'lastActivity',
+      label: 'Last Activity',
+      render: (s) => (
+        <Text size="xs" c="dimmed">{s.lastActivityAt ? new Date(s.lastActivityAt).toLocaleString() : '—'}</Text>
+      ),
+    },
+    {
+      key: 'actions',
+      label: '',
+      align: 'right',
+      render: (s) => (
+        <Group gap={4} justify="flex-end">
+          <Tooltip label="Open viewer">
+            <ActionIcon variant="light" onClick={() => { setDrawerSession(s); drawerHandlers.open(); }}>
+              <IconCamera size={16} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label="Close session">
+            <ActionIcon variant="light" color="orange" onClick={() => handleClose(s)} disabled={s.status === 'closed' || s.status === 'expired'}>
+              <IconX size={16} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label="Delete record">
+            <ActionIcon variant="light" color="red" onClick={() => handleDelete(s)}>
+              <IconTrash size={16} />
+            </ActionIcon>
+          </Tooltip>
+        </Group>
+      ),
+    },
+  ];
+
   return (
     <PageContainer>
       <Group gap="xs">
@@ -214,62 +261,13 @@ export default function BrowserSessionsPage() {
         URLs are persisted in sanitized form and typed input is redacted before it reaches the event log. Use this view to inspect operational flow without leaking secrets.
       </Alert>
 
-      <Paper withBorder p="md">
-        {loading ? (
-          <Group justify="center" py="xl"><Loader /></Group>
-        ) : sessions.length === 0 ? (
-          <Text c="dimmed" ta="center" py="xl">No sessions yet. Create one to get started.</Text>
-        ) : (
-          <div className="ds-tbl-wrap">
-          <Table highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Name</Table.Th>
-                <Table.Th>Key</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Current URL</Table.Th>
-                <Table.Th>Events</Table.Th>
-                <Table.Th>Last Activity</Table.Th>
-                <Table.Th />
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {sessions.map((s) => (
-                <Table.Tr key={s.id}>
-                  <Table.Td>{s.name || s.agentKey || '—'}</Table.Td>
-                  <Table.Td><Code>{s.sessionKey}</Code></Table.Td>
-                  <Table.Td><Badge color={statusColor(s.status)} variant="light">{s.status}</Badge></Table.Td>
-                  <Table.Td><Text size="sm" truncate maw={260}>{s.currentUrl ?? '—'}</Text></Table.Td>
-                  <Table.Td>{s.eventCount ?? 0}</Table.Td>
-                  <Table.Td>
-                    <Text size="xs" c="dimmed">{s.lastActivityAt ? new Date(s.lastActivityAt).toLocaleString() : '—'}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Group gap={4} justify="flex-end">
-                      <Tooltip label="Open viewer">
-                        <ActionIcon variant="light" onClick={() => { setDrawerSession(s); drawerHandlers.open(); }}>
-                          <IconCamera size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                      <Tooltip label="Close session">
-                        <ActionIcon variant="light" color="orange" onClick={() => handleClose(s)} disabled={s.status === 'closed' || s.status === 'expired'}>
-                          <IconX size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                      <Tooltip label="Delete record">
-                        <ActionIcon variant="light" color="red" onClick={() => handleDelete(s)}>
-                          <IconTrash size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                    </Group>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-          </div>
-        )}
-      </Paper>
+      <DataGrid<BrowserSessionView>
+        records={sessions}
+        rowKey={(s) => s.id}
+        columns={sessionColumns}
+        loading={loading}
+        empty={{ title: 'No sessions yet. Create one to get started.' }}
+      />
 
       {/* Create modal */}
       <FormShell

@@ -23,12 +23,10 @@ import {
   SimpleGrid,
   Stack,
   Switch,
-  Table,
   Tabs,
   Text,
   Textarea,
   TextInput,
-  ThemeIcon,
   Tooltip,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
@@ -52,6 +50,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
@@ -103,6 +102,135 @@ const STATUS_COLORS: Record<string, string> = {
   success: 'teal',
   error: 'red',
 };
+
+interface McpAuditEntry {
+  _id?: string;
+  action: string;
+  performedBy: string;
+  ipAddress?: string;
+  userAgent?: string;
+  changes?: Record<string, { from?: unknown; to?: unknown }>;
+  createdAt?: string;
+}
+
+const logColumns: DataGridColumn<McpRequestLogView>[] = [
+  {
+    key: 'detail',
+    label: 'Detail',
+    width: 64,
+    render: (log) => {
+      const hasPayload = !!log.requestPayload || !!log.responsePayload;
+      return (
+        <Text size="xs" c={hasPayload ? 'blue' : 'dimmed'}>
+          {hasPayload ? 'View' : '—'}
+        </Text>
+      );
+    },
+  },
+  { key: 'tool', label: 'Tool', render: (log) => <Code>{log.toolName}</Code> },
+  {
+    key: 'status',
+    label: 'Status',
+    render: (log) => (
+      <Group gap={4} wrap="nowrap">
+        <Badge size="sm" variant="light" color={STATUS_COLORS[log.status] ?? 'gray'}>
+          {log.status}
+        </Badge>
+        {(() => {
+          const auth = (log.requestPayload as Record<string, unknown> | undefined)
+            ?._runtimeAuth as { headerKeys?: string[]; source?: string } | undefined;
+          if (!auth?.headerKeys?.length) return null;
+          return (
+            <Tooltip label={`Runtime headers: ${auth.headerKeys.join(', ')}${auth.source ? ` (${auth.source})` : ''}`}>
+              <Badge size="xs" variant="outline" color="orange">
+                runtime auth
+              </Badge>
+            </Tooltip>
+          );
+        })()}
+      </Group>
+    ),
+  },
+  {
+    key: 'latency',
+    label: 'Latency',
+    render: (log) => (
+      <Text size="sm">{log.latencyMs !== undefined ? `${log.latencyMs}ms` : '—'}</Text>
+    ),
+  },
+  {
+    key: 'error',
+    label: 'Error',
+    render: (log) => (
+      <Text size="xs" c="dimmed" lineClamp={1}>
+        {log.errorMessage || '—'}
+      </Text>
+    ),
+  },
+  {
+    key: 'time',
+    label: 'Time',
+    render: (log) => (
+      <Text size="xs" c="dimmed">
+        {log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}
+      </Text>
+    ),
+  },
+];
+
+const auditColumns: DataGridColumn<McpAuditEntry>[] = [
+  {
+    key: 'time',
+    label: 'Time',
+    render: (entry) => (
+      <Text size="xs" ff="monospace" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+        {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}
+      </Text>
+    ),
+  },
+  {
+    key: 'action',
+    label: 'Action',
+    render: (entry) => (
+      <Badge size="sm" variant="light" color={
+        entry.action === 'delete' ? 'red'
+          : entry.action === 'secrets_change' ? 'orange'
+            : entry.action === 'create' ? 'teal'
+              : 'blue'
+      }>
+        {entry.action.replace(/_/g, ' ')}
+      </Badge>
+    ),
+  },
+  {
+    key: 'by',
+    label: 'By',
+    render: (entry) => <Text size="xs" ff="monospace">{entry.performedBy}</Text>,
+  },
+  {
+    key: 'ip',
+    label: 'IP',
+    render: (entry) => <Text size="xs" ff="monospace" c="dimmed">{entry.ipAddress ?? '—'}</Text>,
+  },
+  {
+    key: 'changes',
+    label: 'Changes',
+    render: (entry) =>
+      entry.changes && Object.keys(entry.changes).length ? (
+        <Tooltip
+          multiline
+          maw={420}
+          label={<pre style={{ margin: 0, fontSize: 11 }}>{JSON.stringify(entry.changes, null, 2)}</pre>}
+        >
+          <Text size="xs" c="dimmed" style={{ cursor: 'help' }}>
+            {Object.keys(entry.changes).join(', ')}
+          </Text>
+        </Tooltip>
+      ) : (
+        <Text size="xs" c="dimmed">—</Text>
+      ),
+  },
+];
 
 /** Wire shape of `IMcpGuardrailConfig.mode` — 'off', not GuardrailMode's 'disabled'. */
 type GuardrailBindingMode = 'off' | 'monitor' | 'enforce';
@@ -202,15 +330,7 @@ export default function McpDetailPage() {
 
   // ── Tools refresh + audit state ──
   const [refreshingTools, setRefreshingTools] = useState(false);
-  const [auditLogs, setAuditLogs] = useState<Array<{
-    _id?: string;
-    action: string;
-    performedBy: string;
-    ipAddress?: string;
-    userAgent?: string;
-    changes?: Record<string, { from?: unknown; to?: unknown }>;
-    createdAt?: string;
-  }>>([]);
+  const [auditLogs, setAuditLogs] = useState<McpAuditEntry[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
 
   const form = useForm({
@@ -1849,99 +1969,20 @@ async with sse_client(
               </Group>
             </Paper>
 
-            <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
-            {logsLoading ? (
-              <Center p="xl">
-                <Loader size="sm" />
-              </Center>
-            ) : logs.length === 0 ? (
-              <Center p="xl">
-                <Stack align="center" gap="xs">
-                  <ThemeIcon size={40} radius="xl" variant="light" color="gray">
-                    <IconList size={20} />
-                  </ThemeIcon>
-                  <Text c="dimmed" size="sm">No request logs yet</Text>
-                  <Text c="dimmed" size="xs">
-                    Logs will appear here once tools are executed via the API endpoint
-                  </Text>
-                </Stack>
-              </Center>
-            ) : (
-              <Table horizontalSpacing="md" verticalSpacing="sm">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th w={64}>Detail</Table.Th>
-                    <Table.Th>Tool</Table.Th>
-                    <Table.Th>Status</Table.Th>
-                    <Table.Th>Latency</Table.Th>
-                    <Table.Th>Error</Table.Th>
-                    <Table.Th>Time</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {logs.map((log) => {
-                    const hasPayload = !!log.requestPayload || !!log.responsePayload;
-                    return (
-                      <Table.Tr
-                        key={log.id}
-                        onClick={() => hasPayload && setSelectedLog(log)}
-                        style={{ cursor: hasPayload ? 'pointer' : 'default' }}
-                      >
-                        <Table.Td>
-                          <Text size="xs" c={hasPayload ? 'blue' : 'dimmed'}>
-                            {hasPayload ? 'View' : '—'}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Code>{log.toolName}</Code>
-                        </Table.Td>
-                        <Table.Td>
-                          <Group gap={4} wrap="nowrap">
-                            <Badge
-                              size="sm"
-                              variant="light"
-                              color={STATUS_COLORS[log.status] ?? 'gray'}
-                            >
-                              {log.status}
-                            </Badge>
-                            {(() => {
-                              const auth = (log.requestPayload as Record<string, unknown> | undefined)
-                                ?._runtimeAuth as { headerKeys?: string[]; source?: string } | undefined;
-                              if (!auth?.headerKeys?.length) return null;
-                              return (
-                                <Tooltip label={`Runtime headers: ${auth.headerKeys.join(', ')}${auth.source ? ` (${auth.source})` : ''}`}>
-                                  <Badge size="xs" variant="outline" color="orange">
-                                    runtime auth
-                                  </Badge>
-                                </Tooltip>
-                              );
-                            })()}
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm">
-                            {log.latencyMs !== undefined ? `${log.latencyMs}ms` : '—'}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="xs" c="dimmed" lineClamp={1}>
-                            {log.errorMessage || '—'}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="xs" c="dimmed">
-                            {log.createdAt
-                              ? new Date(log.createdAt).toLocaleString()
-                              : '—'}
-                          </Text>
-                        </Table.Td>
-                      </Table.Tr>
-                    );
-                  })}
-                </Table.Tbody>
-              </Table>
-            )}
-            </Paper>
+            <DataGrid<McpRequestLogView>
+              records={logs}
+              rowKey={(log) => log.id}
+              columns={logColumns}
+              loading={logsLoading}
+              onRowClick={(log) => {
+                if (log.requestPayload || log.responsePayload) setSelectedLog(log);
+              }}
+              empty={{
+                icon: <IconList size={20} />,
+                title: 'No request logs yet',
+                description: 'Logs will appear here once tools are executed via the API endpoint',
+              }}
+            />
 
             <Group justify="space-between" align="center">
               <Text size="sm" c="dimmed">
@@ -1962,69 +2003,13 @@ async with sse_client(
 
         {/* ── Audit Tab ── */}
         <Tabs.Panel value="audit">
-          <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
-            {auditLoading ? (
-              <Center p="xl"><Loader size="sm" /></Center>
-            ) : auditLogs.length === 0 ? (
-              <Center p="xl">
-                <Text c="dimmed">No audit entries yet</Text>
-              </Center>
-            ) : (
-              <Table horizontalSpacing="md" verticalSpacing="sm">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Time</Table.Th>
-                    <Table.Th>Action</Table.Th>
-                    <Table.Th>By</Table.Th>
-                    <Table.Th>IP</Table.Th>
-                    <Table.Th>Changes</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {auditLogs.map((entry, idx) => (
-                    <Table.Tr key={entry._id ?? idx}>
-                      <Table.Td>
-                        <Text size="xs" ff="monospace" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
-                          {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge size="sm" variant="light" color={
-                          entry.action === 'delete' ? 'red'
-                            : entry.action === 'secrets_change' ? 'orange'
-                              : entry.action === 'create' ? 'teal'
-                                : 'blue'
-                        }>
-                          {entry.action.replace(/_/g, ' ')}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" ff="monospace">{entry.performedBy}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" ff="monospace" c="dimmed">{entry.ipAddress ?? '—'}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        {entry.changes && Object.keys(entry.changes).length ? (
-                          <Tooltip
-                            multiline
-                            maw={420}
-                            label={<pre style={{ margin: 0, fontSize: 11 }}>{JSON.stringify(entry.changes, null, 2)}</pre>}
-                          >
-                            <Text size="xs" c="dimmed" style={{ cursor: 'help' }}>
-                              {Object.keys(entry.changes).join(', ')}
-                            </Text>
-                          </Tooltip>
-                        ) : (
-                          <Text size="xs" c="dimmed">—</Text>
-                        )}
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            )}
-          </Paper>
+          <DataGrid<McpAuditEntry>
+            records={auditLogs}
+            rowKey={(entry) => entry._id ?? `${entry.createdAt}-${entry.action}-${entry.performedBy}`}
+            columns={auditColumns}
+            loading={auditLoading}
+            empty={{ title: 'No audit entries yet' }}
+          />
         </Tabs.Panel>
 
       <Modal

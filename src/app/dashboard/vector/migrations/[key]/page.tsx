@@ -28,6 +28,7 @@ import {
   IconPlayerStop,
   IconTrash,
 } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type {
   IVectorMigration,
@@ -258,6 +259,48 @@ export default function VectorMigrationDetailPage() {
   const runLogsPageCount = runLogs ? Math.ceil(runLogs.total / LOGS_LIMIT) : 0;
   const runLogsCurrentPage = runLogs ? Math.floor(runLogs.offset / LOGS_LIMIT) : 0;
 
+  const runColumns: DataGridColumn<(typeof runs)[number]>[] = [
+    {
+      key: 'run',
+      label: 'Run',
+      render: (run) => <Badge size="sm" variant="filled" color="dark" radius="sm">#{run.attempt}</Badge>,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (run) => {
+        const isCurrentRun = run.attempt === migration.attempt;
+        return (
+          <Badge
+            size="xs"
+            variant="light"
+            radius="xl"
+            color={isCurrentRun ? statusColor(migration.status) : 'gray'}
+          >
+            {isCurrentRun ? migration.status : (run.failedBatches > 0 ? 'had failures' : 'replaced')}
+          </Badge>
+        );
+      },
+    },
+    { key: 'batches', label: 'Batches', render: (run) => <Text size="xs">{run.batchCount}</Text> },
+    { key: 'migrated', label: 'Migrated', render: (run) => <Text size="xs">{run.migratedCount}</Text> },
+    {
+      key: 'failed',
+      label: 'Failed',
+      render: (run) => <Text size="xs" c={run.failedCount > 0 ? 'red' : undefined}>{run.failedCount}</Text>,
+    },
+    {
+      key: 'started',
+      label: 'Started',
+      render: (run) => <Text size="xs" c="dimmed">{formatDate(run.startedAt)}</Text>,
+    },
+    {
+      key: 'ended',
+      label: 'Ended',
+      render: (run) => <Text size="xs" c="dimmed">{formatDate(run.endedAt)}</Text>,
+    },
+  ];
+
   return (
     <PageContainer>
       <PageHeader
@@ -395,66 +438,13 @@ export default function VectorMigrationDetailPage() {
           </Text>
         </Stack>
 
-        {runs.length === 0 ? (
-          <Center py="xl">
-            <Text size="sm" c="dimmed">No runs yet. Logs appear once the migration starts.</Text>
-          </Center>
-        ) : (
-          <Table highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Run</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Batches</Table.Th>
-                <Table.Th>Migrated</Table.Th>
-                <Table.Th>Failed</Table.Th>
-                <Table.Th>Started</Table.Th>
-                <Table.Th>Ended</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {runs.map((run) => {
-                const isCurrentRun = run.attempt === migration.attempt;
-                return (
-                  <Table.Tr
-                    key={run.attempt}
-                    onClick={() => handleOpenRun(run.attempt)}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <Table.Td>
-                      <Badge size="sm" variant="filled" color="dark" radius="sm">#{run.attempt}</Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge
-                        size="xs"
-                        variant="light"
-                        radius="xl"
-                        color={isCurrentRun ? statusColor(migration.status) : 'gray'}
-                      >
-                        {isCurrentRun ? migration.status : (run.failedBatches > 0 ? 'had failures' : 'replaced')}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs">{run.batchCount}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs">{run.migratedCount}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs" c={run.failedCount > 0 ? 'red' : undefined}>{run.failedCount}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs" c="dimmed">{formatDate(run.startedAt)}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs" c="dimmed">{formatDate(run.endedAt)}</Text>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
-        )}
+        <DataGrid<(typeof runs)[number]>
+          records={runs}
+          rowKey={(run) => String(run.attempt)}
+          columns={runColumns}
+          onRowClick={(run) => handleOpenRun(run.attempt)}
+          empty={{ title: 'No runs yet. Logs appear once the migration starts.' }}
+        />
       </Paper>
 
       {/* Run detail modal */}

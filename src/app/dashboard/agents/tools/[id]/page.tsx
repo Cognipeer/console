@@ -22,7 +22,6 @@ import {
   SimpleGrid,
   Stack,
   Switch,
-  Table,
   Tabs,
   Text,
   Textarea,
@@ -47,6 +46,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import FormShell, { FormField, FormSection } from '@/components/common/ui/FormShell';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import type { ToolView, ToolRequestLogView } from '@/lib/services/tools';
@@ -60,6 +60,117 @@ const STATUS_COLORS: Record<string, string> = {
   success: 'teal',
   error: 'red',
 };
+
+const actionColumns: DataGridColumn<IToolAction>[] = [
+  { key: 'key', label: 'Action Key', render: (action) => <Code>{action.key}</Code> },
+  {
+    key: 'name',
+    label: 'Name',
+    render: (action) => <Text size="sm" fw={500}>{action.name}</Text>,
+  },
+  {
+    key: 'description',
+    label: 'Description',
+    render: (action) => <Text size="xs" c="dimmed" lineClamp={2}>{action.description}</Text>,
+  },
+  {
+    key: 'type',
+    label: 'Type',
+    render: (action) => (
+      <Badge size="xs" variant="light" color={action.executionType === 'openapi_http' ? 'indigo' : 'violet'}>
+        {action.executionType === 'openapi_http' ? 'HTTP' : 'MCP'}
+      </Badge>
+    ),
+  },
+  {
+    key: 'target',
+    label: 'Method / Path',
+    render: (action) =>
+      action.httpMethod && action.httpPath ? (
+        <Text size="xs" ff="monospace">
+          {action.httpMethod} {action.httpPath}
+        </Text>
+      ) : action.mcpToolName ? (
+        <Text size="xs" ff="monospace">{action.mcpToolName}</Text>
+      ) : (
+        <Text size="xs" c="dimmed">—</Text>
+      ),
+  },
+];
+
+const logColumns: DataGridColumn<ToolRequestLogView>[] = [
+  {
+    key: 'detail',
+    label: 'Detail',
+    width: 64,
+    render: (log) => {
+      const hasPayload = !!log.requestPayload || !!log.responsePayload;
+      return (
+        <Text size="xs" c={hasPayload ? 'blue' : 'dimmed'}>
+          {hasPayload ? 'View' : '—'}
+        </Text>
+      );
+    },
+  },
+  { key: 'action', label: 'Action', render: (log) => <Code>{log.actionName || log.actionKey}</Code> },
+  {
+    key: 'status',
+    label: 'Status',
+    render: (log) => (
+      <Badge size="sm" variant="light" color={STATUS_COLORS[log.status] ?? 'gray'}>
+        {log.status}
+      </Badge>
+    ),
+  },
+  {
+    key: 'latency',
+    label: 'Latency',
+    render: (log) => (
+      <Text size="sm">{log.latencyMs !== undefined ? `${log.latencyMs}ms` : '—'}</Text>
+    ),
+  },
+  {
+    key: 'caller',
+    label: 'Caller',
+    render: (log) => (
+      <Group gap={4} wrap="nowrap">
+        <Badge size="xs" variant="light" color="gray">
+          {log.callerType || 'unknown'}
+        </Badge>
+        {(() => {
+          const auth = (log.requestPayload as Record<string, unknown> | undefined)
+            ?._runtimeAuth as { headerKeys?: string[]; source?: string } | undefined;
+          if (!auth?.headerKeys?.length) return null;
+          return (
+            <Tooltip label={`Runtime headers: ${auth.headerKeys.join(', ')}${auth.source ? ` (${auth.source})` : ''}`}>
+              <Badge size="xs" variant="outline" color="orange">
+                runtime auth
+              </Badge>
+            </Tooltip>
+          );
+        })()}
+      </Group>
+    ),
+  },
+  {
+    key: 'error',
+    label: 'Error',
+    render: (log) => (
+      <Text size="xs" c="dimmed" lineClamp={1}>
+        {log.errorMessage || '—'}
+      </Text>
+    ),
+  },
+  {
+    key: 'time',
+    label: 'Time',
+    render: (log) => (
+      <Text size="xs" c="dimmed">
+        {log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}
+      </Text>
+    ),
+  },
+];
 
 const TYPE_LABELS: Record<string, string> = {
   openapi: 'OpenAPI',
@@ -753,54 +864,12 @@ export default function ToolDetailPage() {
               </Stack>
             </Paper>
           ) : (
-            <Paper withBorder radius="md">
-              <Table striped highlightOnHover>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Action Key</Table.Th>
-                    <Table.Th>Name</Table.Th>
-                    <Table.Th>Description</Table.Th>
-                    <Table.Th>Type</Table.Th>
-                    <Table.Th>Method / Path</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {tool.actions.map((action) => (
-                    <Table.Tr
-                      key={action.key}
-                      onClick={() => setSelectedAction(action)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <Table.Td>
-                        <Code>{action.key}</Code>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm" fw={500}>{action.name}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed" lineClamp={2}>{action.description}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge size="xs" variant="light" color={action.executionType === 'openapi_http' ? 'indigo' : 'violet'}>
-                          {action.executionType === 'openapi_http' ? 'HTTP' : 'MCP'}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        {action.httpMethod && action.httpPath ? (
-                          <Text size="xs" ff="monospace">
-                            {action.httpMethod} {action.httpPath}
-                          </Text>
-                        ) : action.mcpToolName ? (
-                          <Text size="xs" ff="monospace">{action.mcpToolName}</Text>
-                        ) : (
-                          <Text size="xs" c="dimmed">—</Text>
-                        )}
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Paper>
+            <DataGrid<IToolAction>
+              records={tool.actions}
+              rowKey={(action) => action.key}
+              columns={actionColumns}
+              onRowClick={(action) => setSelectedAction(action)}
+            />
           )}
         </Tabs.Panel>
 
@@ -858,105 +927,20 @@ export default function ToolDetailPage() {
               </Group>
             </Paper>
 
-            <Paper withBorder radius="md" p={0} style={{ overflow: 'hidden' }}>
-              {logsLoading ? (
-                <Center p="xl">
-                  <Loader size="sm" />
-                </Center>
-              ) : logs.length === 0 ? (
-                <Center p="xl">
-                  <Stack align="center" gap="xs">
-                    <ThemeIcon size={40} radius="xl" variant="light" color="gray">
-                      <IconList size={20} />
-                    </ThemeIcon>
-                    <Text c="dimmed" size="sm">No request logs yet</Text>
-                    <Text c="dimmed" size="xs">
-                      Logs will appear here once tool actions are executed
-                    </Text>
-                  </Stack>
-                </Center>
-              ) : (
-                <Table horizontalSpacing="md" verticalSpacing="sm">
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th w={64}>Detail</Table.Th>
-                      <Table.Th>Action</Table.Th>
-                      <Table.Th>Status</Table.Th>
-                      <Table.Th>Latency</Table.Th>
-                      <Table.Th>Caller</Table.Th>
-                      <Table.Th>Error</Table.Th>
-                      <Table.Th>Time</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {logs.map((log) => {
-                      const hasPayload = !!log.requestPayload || !!log.responsePayload;
-                      return (
-                        <Table.Tr
-                          key={log.id}
-                          onClick={() => hasPayload && setSelectedLog(log)}
-                          style={{ cursor: hasPayload ? 'pointer' : 'default' }}
-                        >
-                          <Table.Td>
-                            <Text size="xs" c={hasPayload ? 'blue' : 'dimmed'}>
-                              {hasPayload ? 'View' : '—'}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Code>{log.actionName || log.actionKey}</Code>
-                          </Table.Td>
-                          <Table.Td>
-                            <Badge
-                              size="sm"
-                              variant="light"
-                              color={STATUS_COLORS[log.status] ?? 'gray'}
-                            >
-                              {log.status}
-                            </Badge>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="sm">
-                              {log.latencyMs !== undefined ? `${log.latencyMs}ms` : '—'}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Group gap={4} wrap="nowrap">
-                              <Badge size="xs" variant="light" color="gray">
-                                {log.callerType || 'unknown'}
-                              </Badge>
-                              {(() => {
-                                const auth = (log.requestPayload as Record<string, unknown> | undefined)
-                                  ?._runtimeAuth as { headerKeys?: string[]; source?: string } | undefined;
-                                if (!auth?.headerKeys?.length) return null;
-                                return (
-                                  <Tooltip label={`Runtime headers: ${auth.headerKeys.join(', ')}${auth.source ? ` (${auth.source})` : ''}`}>
-                                    <Badge size="xs" variant="outline" color="orange">
-                                      runtime auth
-                                    </Badge>
-                                  </Tooltip>
-                                );
-                              })()}
-                            </Group>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed" lineClamp={1}>
-                              {log.errorMessage || '—'}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed">
-                              {log.createdAt
-                                ? new Date(log.createdAt).toLocaleString()
-                                : '—'}
-                            </Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      );
-                    })}
-                  </Table.Tbody>
-                </Table>
-              )}
-            </Paper>
+            <DataGrid<ToolRequestLogView>
+              records={logs}
+              rowKey={(log) => log.id}
+              columns={logColumns}
+              loading={logsLoading}
+              onRowClick={(log) => {
+                if (log.requestPayload || log.responsePayload) setSelectedLog(log);
+              }}
+              empty={{
+                icon: <IconList size={20} />,
+                title: 'No request logs yet',
+                description: 'Logs will appear here once tool actions are executed',
+              }}
+            />
 
             <Group justify="space-between" align="center">
               <Text size="sm" c="dimmed">

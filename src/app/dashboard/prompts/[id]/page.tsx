@@ -18,13 +18,13 @@ import {
   ScrollArea,
   SimpleGrid,
   Stack,
-  Table,
   Tabs,
   Text,
   Textarea,
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { notifications } from '@mantine/notifications';
 import {
@@ -282,6 +282,37 @@ export default function PromptDetailPage() {
     );
   }
 
+  const versionColumns: DataGridColumn<PromptVersionView>[] = [
+    {
+      key: 'version',
+      label: t('versions.version'),
+      render: (v) => (
+        <Badge variant={v.isLatest ? 'filled' : 'outline'} size="sm" color={v.isLatest ? 'green' : 'gray'}>
+          v{v.version} {v.isLatest && '(latest)'}
+        </Badge>
+      ),
+    },
+    { key: 'createdAt', label: t('versions.createdAt'), render: (v) => formatDate(v.createdAt) },
+    {
+      key: 'comment',
+      label: t('versions.comment'),
+      render: (v) => (
+        <Text size="sm" c="dimmed" lineClamp={1} maw={200}>
+          {v.comment || '—'}
+        </Text>
+      ),
+    },
+    {
+      key: 'template',
+      label: t('versions.template'),
+      render: (v) => (
+        <Text size="xs" c="dimmed" lineClamp={2} maw={300} style={{ fontFamily: 'monospace' }}>
+          {v.template.substring(0, 100)}{v.template.length > 100 && '...'}
+        </Text>
+      ),
+    },
+  ];
+
   return (
     <PageContainer>
       {/* Header */}
@@ -505,46 +536,12 @@ export default function PromptDetailPage() {
                   {t('actions.versionHistory')}
                 </Button>
               </Group>
-              {versions.length > 0 ? (
-                <ScrollArea type="auto">
-                  <Table striped highlightOnHover>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>{t('versions.version')}</Table.Th>
-                        <Table.Th>{t('versions.createdAt')}</Table.Th>
-                        <Table.Th>{t('versions.comment')}</Table.Th>
-                        <Table.Th>{t('versions.template')}</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {versions.map((v) => (
-                        <Table.Tr key={v.id}>
-                          <Table.Td>
-                            <Badge variant={v.isLatest ? 'filled' : 'outline'} size="sm" color={v.isLatest ? 'green' : 'gray'}>
-                              v{v.version} {v.isLatest && '(latest)'}
-                            </Badge>
-                          </Table.Td>
-                          <Table.Td>{formatDate(v.createdAt)}</Table.Td>
-                          <Table.Td>
-                            <Text size="sm" c="dimmed" lineClamp={1} maw={200}>
-                              {v.comment || '—'}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed" lineClamp={2} maw={300} style={{ fontFamily: 'monospace' }}>
-                              {v.template.substring(0, 100)}{v.template.length > 100 && '...'}
-                            </Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
-                </ScrollArea>
-              ) : (
-                <Center py="xl">
-                  <Text size="sm" c="dimmed">{t('versions.empty')}</Text>
-                </Center>
-              )}
+              <DataGrid<PromptVersionView>
+                records={versions}
+                rowKey={(v) => v.id}
+                columns={versionColumns}
+                empty={{ title: t('versions.empty') }}
+              />
             </Stack>
           </Paper>
 

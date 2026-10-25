@@ -6,14 +6,12 @@ import {
   ActionIcon,
   Badge,
   Button,
-  Center,
   Group,
   Loader,
   Paper,
   Progress,
   SimpleGrid,
   Stack,
-  Table,
   Text,
   ThemeIcon,
   Tooltip,
@@ -30,6 +28,7 @@ import {
   IconRefresh,
   IconTrash,
 } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type { IVectorMigration, VectorMigrationStatus } from '@/lib/database/provider/types.base';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
@@ -208,6 +207,112 @@ export default function VectorMigrationsPage() {
     failed: migrations.filter((m) => m.status === 'failed').length,
   }), [migrations]);
 
+  const migrationColumns: DataGridColumn<IVectorMigration>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      render: (m) => (
+        <Stack gap={2}>
+          <Text size="sm" fw={500}>{m.name}</Text>
+          {m.description && <Text size="xs" c="dimmed" lineClamp={1}>{m.description}</Text>}
+        </Stack>
+      ),
+    },
+    {
+      key: 'route',
+      label: 'Source → Destination',
+      render: (m) => (
+        <Group gap={4} wrap="nowrap">
+          <Text size="xs" c="dimmed" style={{ maxWidth: 120 }} lineClamp={1}>{m.sourceIndexName || m.sourceIndexKey}</Text>
+          <IconArrowRight size={12} />
+          <Text size="xs" c="dimmed" style={{ maxWidth: 120 }} lineClamp={1}>{m.destinationIndexName || m.destinationIndexKey}</Text>
+        </Group>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (m) => (
+        <Badge size="sm" variant="light" radius="xl" color={statusColor(m.status)}>
+          {m.status}
+        </Badge>
+      ),
+    },
+    {
+      key: 'progress',
+      label: 'Progress',
+      render: (m) =>
+        m.totalVectors > 0 ? (
+          <Stack gap={4} style={{ minWidth: 140 }}>
+            <Progress value={migrationProgressValue(m)} size="xs" color={statusColor(m.status)} radius="xl" />
+            <Text size="xs" c="dimmed">{migrationProgressLabel(m)}</Text>
+          </Stack>
+        ) : (
+          <Text size="xs" c="dimmed">—</Text>
+        ),
+    },
+    {
+      key: 'created',
+      label: 'Created',
+      render: (m) => <Text size="xs" c="dimmed">{formatDate(m.createdAt)}</Text>,
+    },
+    {
+      key: 'actions',
+      label: 'Actions',
+      align: 'right',
+      render: (m) => (
+        <Group gap={4} justify="flex-end" wrap="nowrap">
+          {m.status === 'pending' || m.status === 'failed' || m.status === 'cancelled' ? (
+            <Tooltip label="Start migration">
+              <ActionIcon
+                size="sm"
+                variant="light"
+                color="teal"
+                onClick={(e) => { e.stopPropagation(); void handleStart(m); }}
+              >
+                <IconPlayerPlay size={14} />
+              </ActionIcon>
+            </Tooltip>
+          ) : null}
+          {isActive(m.status) ? (
+            <Tooltip label="Cancel migration">
+              <ActionIcon
+                size="sm"
+                variant="light"
+                color="yellow"
+                onClick={(e) => { e.stopPropagation(); void handleCancel(m); }}
+              >
+                <IconPlayerStop size={14} />
+              </ActionIcon>
+            </Tooltip>
+          ) : null}
+          <Tooltip label="View details">
+            <ActionIcon
+              size="sm"
+              variant="light"
+              color="gray"
+              onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/vector/migrations/${m.key}`); }}
+            >
+              <IconArrowRight size={14} />
+            </ActionIcon>
+          </Tooltip>
+          {!isActive(m.status) ? (
+            <Tooltip label="Delete migration">
+              <ActionIcon
+                size="sm"
+                variant="light"
+                color="red"
+                onClick={(e) => { e.stopPropagation(); void handleDelete(m); }}
+              >
+                <IconTrash size={14} />
+              </ActionIcon>
+            </Tooltip>
+          ) : null}
+        </Group>
+      ),
+    },
+  ];
+
   return (
     <PageContainer>
       <PageHeader
@@ -290,124 +395,17 @@ export default function VectorMigrationsPage() {
           <Text fw={600} size="lg">All Migrations</Text>
         </Group>
 
-        {loading ? (
-          <Center py="xl"><Loader size="sm" color="teal" /></Center>
-        ) : migrations.length === 0 ? (
-          <Center py="xl">
-            <Stack align="center" gap="sm">
-              <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                <IconDatabaseExport size={24} />
-              </ThemeIcon>
-              <Text c="dimmed" size="sm">No migrations yet. Create one to get started.</Text>
-            </Stack>
-          </Center>
-        ) : (
-          <div className="ds-tbl-wrap">
-          <Table highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Name</Table.Th>
-                <Table.Th>Source → Destination</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Progress</Table.Th>
-                <Table.Th>Created</Table.Th>
-                <Table.Th style={{ textAlign: 'right' }}>Actions</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {migrations.map((m) => (
-                <Table.Tr
-                  key={m.key}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => router.push(`/dashboard/vector/migrations/${m.key}`)}
-                >
-                  <Table.Td>
-                    <Stack gap={2}>
-                      <Text size="sm" fw={500}>{m.name}</Text>
-                      {m.description && <Text size="xs" c="dimmed" lineClamp={1}>{m.description}</Text>}
-                    </Stack>
-                  </Table.Td>
-                  <Table.Td>
-                    <Group gap={4} wrap="nowrap">
-                      <Text size="xs" c="dimmed" style={{ maxWidth: 120 }} lineClamp={1}>{m.sourceIndexName || m.sourceIndexKey}</Text>
-                      <IconArrowRight size={12} />
-                      <Text size="xs" c="dimmed" style={{ maxWidth: 120 }} lineClamp={1}>{m.destinationIndexName || m.destinationIndexKey}</Text>
-                    </Group>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge size="sm" variant="light" radius="xl" color={statusColor(m.status)}>
-                      {m.status}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    {m.totalVectors > 0 ? (
-                      <Stack gap={4} style={{ minWidth: 140 }}>
-                        <Progress value={migrationProgressValue(m)} size="xs" color={statusColor(m.status)} radius="xl" />
-                        <Text size="xs" c="dimmed">{migrationProgressLabel(m)}</Text>
-                      </Stack>
-                    ) : (
-                      <Text size="xs" c="dimmed">—</Text>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="xs" c="dimmed">{formatDate(m.createdAt)}</Text>
-                  </Table.Td>
-                  <Table.Td onClick={(e) => e.stopPropagation()}>
-                    <Group gap={4} justify="flex-end" wrap="nowrap">
-                      {m.status === 'pending' || m.status === 'failed' || m.status === 'cancelled' ? (
-                        <Tooltip label="Start migration">
-                          <ActionIcon
-                            size="sm"
-                            variant="light"
-                            color="teal"
-                            onClick={() => void handleStart(m)}
-                          >
-                            <IconPlayerPlay size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                      ) : null}
-                      {isActive(m.status) ? (
-                        <Tooltip label="Cancel migration">
-                          <ActionIcon
-                            size="sm"
-                            variant="light"
-                            color="yellow"
-                            onClick={() => void handleCancel(m)}
-                          >
-                            <IconPlayerStop size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                      ) : null}
-                      <Tooltip label="View details">
-                        <ActionIcon
-                          size="sm"
-                          variant="light"
-                          color="gray"
-                          onClick={() => router.push(`/dashboard/vector/migrations/${m.key}`)}
-                        >
-                          <IconArrowRight size={14} />
-                        </ActionIcon>
-                      </Tooltip>
-                      {!isActive(m.status) ? (
-                        <Tooltip label="Delete migration">
-                          <ActionIcon
-                            size="sm"
-                            variant="light"
-                            color="red"
-                            onClick={() => void handleDelete(m)}
-                          >
-                            <IconTrash size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                      ) : null}
-                    </Group>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-          </div>
-        )}
+        <DataGrid<IVectorMigration>
+          records={migrations}
+          rowKey={(m) => m.key}
+          columns={migrationColumns}
+          loading={loading}
+          rowHref={(m) => `/dashboard/vector/migrations/${m.key}`}
+          empty={{
+            icon: <IconDatabaseExport size={24} />,
+            title: 'No migrations yet. Create one to get started.',
+          }}
+        />
       </Paper>
 
       <CreateVectorMigrationModal
