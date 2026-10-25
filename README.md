@@ -1,8 +1,15 @@
 # Cognipeer Console
 
-Open-source, self-hosted AI gateway for multi-tenant organizations — OpenAI-compatible LLM routing, RAG, agent orchestration, GPU fleet management, AI red-teaming, and cost optimization behind one production-ready console.
+**Self-hosted, open-source AI gateway and control plane: OpenAI-compatible LLM routing, RAG, an MCP hub, guardrails and agent tracing for multi-tenant teams.**
 
 [![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/Cognipeer/console?filter=*-community&sort=semver&label=version)](https://github.com/Cognipeer/console/tags)
+[![Stars](https://img.shields.io/github/stars/Cognipeer/console?style=social)](https://github.com/Cognipeer/console)
+[![Docs](https://img.shields.io/badge/docs-docs.cognipeer.com-0A7CFF)](https://docs.cognipeer.com/console/)
+
+[Docs](https://docs.cognipeer.com/console/) · [Quick start](#quick-start) · [Discussions](https://github.com/Cognipeer/console/discussions) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+
+<p align="center"><img src=".github/assets/console-tour.gif" alt="Tour of the Cognipeer Console dashboard: models, agents, knowledge and tracing views" width="900"></p>
 
 Community edition is available under AGPL-3.0. Commercial licensing, hosted deployments, and support agreements are available separately through Cognipeer.
 
@@ -190,6 +197,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, code style, a
 ## Security
 
 Security reporting guidance is in [SECURITY.md](SECURITY.md). Do not disclose vulnerabilities in public issues.
+
+## Cognipeer open-source projects
+
+| Project | What it does |
+| --- | --- |
+| [console-sdk](https://github.com/Cognipeer/console-sdk) | TypeScript SDK for the Cognipeer Console API |
+| [agent-sdk](https://github.com/Cognipeer/agent-sdk) | Lightweight, message-first agent runtime |
+| [agent-server](https://github.com/Cognipeer/agent-server) | Ready-made REST API layer for AI agents |
+| [chat-ui](https://github.com/Cognipeer/chat-ui) | React chat UI components for AI agents |
+| [to-markdown](https://github.com/Cognipeer/to-markdown) | Convert PDF, Office, HTML and more to Markdown for LLM pipelines |
+| [graph-builder](https://github.com/Cognipeer/graph-builder) | Turn text sources into a queryable graph |
+| [cognipeer-observability](https://github.com/Cognipeer/cognipeer-observability) | Drop-in agent tracing for LangChain, LangGraph, OpenAI Agents and OpenTelemetry |
+
+If this project is useful to you, a ⭐ on GitHub helps other developers find it.
 
 ## License 
 
