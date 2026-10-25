@@ -457,8 +457,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const existing = await getCampaign(session.tenantDbName, id);
       if (!existing) return reply.code(404).send({ error: 'Campaign not found' });
       const isAgent = existing.targetKind === 'agent';
-      // The stored kind decides, not the body: a PATCH cannot move a campaign between kinds, and an enabled
-      // schedule scans the agent later with nobody's permission checked.
+      // The stored kind decides, not the body: a PATCH cannot move a campaign between kinds, and a saved
+      // campaign can run the agent later on its schedule.
       if (isAgent) await requireAgentTestAccess(request);
       if (body.probeKeys !== undefined) {
         const customKeys = await loadCustomProbeKeys(session.tenantDbName, existing.projectId);

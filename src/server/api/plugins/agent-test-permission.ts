@@ -8,8 +8,7 @@
  * the draft): all of them can call the agent's tools.
  *
  * Saving a target or campaign that points at an agent asks it too, because a
- * saved one runs later (a scheduled scan) and nobody's permission is checked
- * then; the one that saved it is the one who may spend the agent.
+ * saved campaign can run the agent later, unattended, on its schedule.
  *
  * Only agent targets ask. Viewing tests and results, deleting them, and testing
  * a model, a Knowledge Engine module or an external endpoint stay under

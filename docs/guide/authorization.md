@@ -32,6 +32,23 @@ Every API route states how it is authorized:
 
 A route that declares nothing is refused with `403` and `code: "route_not_declared"`. A healthy build has none; `GET /api/iam/engine/stats` lists any it finds.
 
+### Calls that need a second service
+
+Most requests are held to one service action, the one of the service that owns the feature. The calls below drive another service as well and are held to both: the caller needs the level on each, and a denial on either one refuses the call.
+
+| Call | First service action | Second service action | Surface |
+| --- | --- | --- | --- |
+| Run an evaluation suite whose target is an agent | `evaluations.write` | `agents.write` | dashboard and client API |
+| Create or change an evaluation target that points at an agent | `evaluations.write` | `agents.write` | dashboard |
+| Run a red-team scan of an agent campaign | `redteam.write` | `agents.write` | dashboard and client API |
+| Create or change a red-team campaign that targets an agent | `redteam.write` | `agents.write` | dashboard |
+
+`agents.write` is the level of chatting with an agent in Studio and of invoking it through the client API. A test drives the agent the same way, with its tools, its knowledge and its guardrails, so it asks for the same level whichever version it runs: the published one, a pinned version or the draft. A saved target or campaign asks for it too. A scheduled scan runs the agent later, unattended, which is why saving the campaign asks for the same level.
+
+The answer is decided like any other request, so custom policies, project limits and, for an API token, the owner's level capped by the token's scope all apply. A scoped token needs `agents` in its scope at `write` or above; without it the token cannot run an agent test, whatever its owner holds. A refusal is a `403` that names `service: "agents"` and `required: "write"` and carries a decision id (see [Decision ids](#decision-ids)); it comes before any run is created. In the Console the run and save controls are switched off for someone without the level, with the hint *Running an agent test needs Write access to Agents*.
+
+Not affected: viewing targets, campaigns, runs and results; deleting them; editing suites, datasets and custom probes; and tests of a model, a Knowledge Engine module or an external endpoint. Those need Evaluations or Red Team only. See [Who can run an agent test](/guide/evaluation-and-analysis#who-can-run-an-agent-test).
+
 ## The settings you maintain
 
 | Setting | Where you change it | What it does |
