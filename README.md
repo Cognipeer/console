@@ -1,8 +1,17 @@
 # Cognipeer Console
 
-Open-source, self-hosted AI gateway for multi-tenant organizations — OpenAI-compatible LLM routing, RAG, agent orchestration, GPU fleet management, AI red-teaming, and cost optimization behind one production-ready console.
+**Self-hosted, open-source AI gateway and control plane: OpenAI-compatible LLM routing, RAG, an MCP hub, guardrails and agent tracing for multi-tenant teams.**
 
 [![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/Cognipeer/console?filter=*-community&sort=semver&label=version)](https://github.com/Cognipeer/console/tags)
+[![Stars](https://img.shields.io/github/stars/Cognipeer/console?style=social)](https://github.com/Cognipeer/console)
+[![Docs](https://img.shields.io/badge/docs-docs.cognipeer.com-0A7CFF)](https://docs.cognipeer.com/console/)
+
+[Docs](https://docs.cognipeer.com/console/) · [Quick start](#quick-start) · [Discussions](https://github.com/Cognipeer/console/discussions) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Contact](mailto:developer@cognipeer.com)
+
+**Adoption:** in active use at 15 companies that Cognipeer supports as enterprise customers. Open-source users are not included in this count.
+
+<p align="center"><img src=".github/assets/console-tour.gif" alt="Tour of the Cognipeer Console dashboard: Model Hub, knowledge bases, guardrails, agents, tracing, cost (Enterprise) and the service launcher" width="900"></p>
 
 Community edition is available under AGPL-3.0. Commercial licensing, hosted deployments, and support agreements are available separately through Cognipeer.
 
@@ -11,14 +20,14 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 **Gateway**
 - **LLM Gateway** — OpenAI-compatible chat completions, embeddings, batch, and moderations across OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, vLLM, Ollama, and more
 - **Model Hub & Dynamic Routing** — Fallback chains and per-model quota/rate limiting
-- **Realtime** — WebSocket voice agents with barge-in and tool-call events
+- **Realtime** *(Enterprise)* — WebSocket voice agents with barge-in and tool-call events
 
 **Agents & Automation**
 - **MCP Hub** — Curate, host, and discover Model Context Protocol servers (OpenAPI, remote, stdio) with per-tool controls
-- **Sandbox** — Isolated runtime environments for code, agents and previews with snapshot/fork/resume and port-forwarded previews
+- **Sandbox** *(Enterprise)* — Isolated runtime environments for code, agents and previews with snapshot/fork/resume and port-forwarded previews
 - **Browser Automation** — Managed browser profiles, live sessions, and per-browser MCP endpoints
 - **A2A Protocol** — Publish Console-managed agents as Agent-to-Agent servers with agent cards
-- **Prompt Management** — Versioned templates with environment-based deployment (dev/staging/prod) and a built-in prompt optimizer
+- **Prompt Management** — Versioned templates with environment-based deployment (dev/staging/prod); the Prompt Optimizer is Enterprise
 
 **Knowledge & Retrieval**
 - **RAG / Knowledge Engine** — Document ingestion, chunking, embedding, and retrieval
@@ -39,11 +48,15 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 - **Audit Logging** — Tenant-scoped audit trails
 
 **Infrastructure & Cost**
-- **GPU Fleet** — Pooled GPU inference with MIG slicing, Hugging Face catalog deploys, and capacity planning
-- **Cost Intelligence** — Spend tracking, budgets, and automated optimization prescriptions
-- **Multi-Tenant Architecture** — Complete data isolation per tenant, projects, groups, and LDAP/SSO-ready auth
+- **GPU Fleet** *(Enterprise)* — Pooled GPU inference with MIG slicing, Hugging Face catalog deploys, and capacity planning
+- **Cost & Optimization** *(Enterprise)* — Budgets and automated optimization prescriptions on top of spend and usage tracking
+- **Multi-Tenant Architecture** — Complete data isolation per tenant, projects and groups; SSO (OIDC) and LDAP sign-in are Enterprise
 - **File Management** — Multi-provider file storage with automatic Markdown conversion
 - **Quota & Rate Limiting** — Multi-dimensional quota enforcement with plan-level defaults
+
+## Editions
+
+This repository is the **Community Edition**, licensed under AGPL-3.0. The commercial **Enterprise Edition** adds Sandbox, Realtime, GPU Fleet, Cluster (multi-node), Cost & Optimization, Prompt Optimizer, AI App Gateway, Portals, Channels, Service Reports, Entity Health, Data Retention, Single Sign-On (OIDC) and LDAP Directory. In a community build these pages show an upgrade notice. See [COMMERCIAL.md](COMMERCIAL.md) for commercial terms.
 
 ## Quick Start
 
@@ -55,12 +68,14 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 ### Installation
 
 ```bash
-git clone https://github.com/Cognipeer/cognipeer-console.git
-cd cognipeer-console
+git clone https://github.com/Cognipeer/console.git
+cd console
 npm install
 cp .env.example .env.local
 npm run dev
 ```
+
+Set `JWT_SECRET` and `PROVIDER_ENCRYPTION_SECRET` in `.env.local` to two different random values of at least 32 characters (for example `openssl rand -hex 32`). Development starts without them and logs a warning; production refuses to start.
 
 The gateway starts with **SQLite by default** — no external database required.
 
@@ -68,16 +83,21 @@ Visit [http://localhost:3000](http://localhost:3000) to access the dashboard.
 
 ### Docker
 
+Docker Compose reads its variables from `.env`. Create it with two independent secrets, then start:
+
 ```bash
+printf 'JWT_SECRET=%s\nPROVIDER_ENCRYPTION_SECRET=%s\n' "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
 
-Or build and run manually:
+Or build and run manually with the same `.env`:
 
 ```bash
 docker build -t cognipeer-console .
-docker run -p 3000:3000 -v ./data:/app/data -e JWT_SECRET=your-secret-here cognipeer-console
+docker run -p 3000:3000 -v ./data:/app/data --env-file .env cognipeer-console
 ```
+
+Keep both values: changing `PROVIDER_ENCRYPTION_SECRET` later makes stored provider credentials unreadable, and changing `JWT_SECRET` signs everyone out.
 
 ## Architecture
 
@@ -190,6 +210,22 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, code style, a
 ## Security
 
 Security reporting guidance is in [SECURITY.md](SECURITY.md). Do not disclose vulnerabilities in public issues.
+
+## Cognipeer open-source projects
+
+| Project | What it does |
+| --- | --- |
+| [console-sdk](https://github.com/Cognipeer/console-sdk) | TypeScript SDK for the Cognipeer Console API |
+| [agent-sdk](https://github.com/Cognipeer/agent-sdk) | Lightweight, message-first agent runtime |
+| [agent-server](https://github.com/Cognipeer/agent-server) | Ready-made REST API layer for AI agents |
+| [chat-ui](https://github.com/Cognipeer/chat-ui) | React chat UI components for AI agents |
+| [to-markdown](https://github.com/Cognipeer/to-markdown) | Convert PDF, Office, HTML and more to Markdown for LLM pipelines |
+| [graph-builder](https://github.com/Cognipeer/graph-builder) | Turn text sources into a queryable graph |
+| [cognipeer-observability](https://github.com/Cognipeer/cognipeer-observability) | Drop-in agent tracing for LangChain, LangGraph, OpenAI Agents and OpenTelemetry |
+
+If this project is useful to you, a ⭐ on GitHub helps other developers find it.
+
+Questions or enterprise support: [developer@cognipeer.com](mailto:developer@cognipeer.com).
 
 ## License 
 

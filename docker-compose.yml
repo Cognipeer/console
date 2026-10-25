@@ -8,7 +8,9 @@ services:
       - DB_PROVIDER=sqlite
       - MAIN_DB_NAME=console_main
       - SQLITE_DATA_DIR=/app/data/sqlite
-      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env.local or environment}
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env or environment}
+      # Encrypts provider credentials at rest; 32+ chars and different from JWT_SECRET
+      - PROVIDER_ENCRYPTION_SECRET=${PROVIDER_ENCRYPTION_SECRET:?Set PROVIDER_ENCRYPTION_SECRET in .env or environment}
       - CACHE_PROVIDER=memory
       - RATE_LIMIT_PROVIDER=memory
       # Self-hosted installs are on-prem: with SUPPORT_BASE_URL alone the Help
