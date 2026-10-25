@@ -572,6 +572,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Pickers and lists in the IAM center search Turkish names the way people type them: `istanbul` finds `İstanbul`,
   and the Turkish letters I, İ, ı and i match each other. The page language follows the locale.
 - Portal pages stay readable on dark portal themes.
+- The Settings gear opens Projects again. Data retention was missing from the Settings order, so it was listed
+  first and the gear opened it (an upgrade page on Community) for tenant admins.
 
 ### Entity health and alerting
 

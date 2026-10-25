@@ -38,6 +38,12 @@ describe('the services registry', () => {
     expect(SETTINGS_NAV_ORDER).toContain('iam');
     expect(SETTINGS_NAV_ORDER).toContain('tokens');
   });
+
+  it('orders every Settings entry, so none jumps ahead of Projects and takes over the gear link', () => {
+    const settings = ALL_DASHBOARD_SERVICES.filter((s) => s.isSettings).map((s) => s.id);
+    for (const id of settings) expect(SETTINGS_NAV_ORDER, id).toContain(id);
+    expect(SETTINGS_NAV_ORDER[0]).toBe('projects');
+  });
 });
 
 describe('who is offered the IAM center', () => {
