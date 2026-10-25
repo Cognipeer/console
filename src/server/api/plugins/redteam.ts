@@ -18,6 +18,14 @@ import { EU_RISK_TIERS, type CampaignComplianceMeta, type EuRiskTier } from '@/l
 import { EU_RISK_CATEGORIES } from '@/lib/services/redteam/euTaxonomy';
 import { buildJudgeInvoker, type RedTeamModelContext } from '@/lib/services/redteam/adapters';
 import type { IRedTeamCampaign } from '@/lib/database';
+import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
+import {
+  parseAgentRevision,
+  parseAgentRunOverride,
+  storedAgentRevision,
+  toStoredAgentVersion,
+  type AgentRevision,
+} from '@/lib/shared/agentRevision';
 import {
   compareRuns,
   createCampaign,
@@ -37,15 +45,19 @@ import {
   CustomProbeError,
   type CustomProbeInput,
   type RunOptions,
+  type UpdateCampaignInput,
 } from '@/lib/services/redteam/service';
 import type { RedTeamOutcome, RedTeamTargetKind } from '@/lib/database';
 import {
   readJsonBody,
+  readOptionalJsonObjectBody,
   requireProjectContextForRequest,
   requireSessionContext,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
+import { readClearableText, readRequiredText } from './partial-update';
 
 const logger = createLogger('api:redteam');
 
@@ -74,6 +86,11 @@ function sanitizeProbeKeys(raw: unknown, customKeys: string[] = []): string[] | 
   return keys;
 }
 
+/** A PATCH's `probeKeys` must be a list of keys; which ones exist is checked once the campaign (and so its project) is known. */
+function isProbeKeyList(raw: unknown): raw is string[] {
+  return Array.isArray(raw) && raw.every((k) => typeof k === 'string');
+}
+
 /** Load the tenant's custom probe selection keys (for validating campaigns). */
 async function loadCustomProbeKeys(tenantDbName: string, projectId?: string): Promise<string[]> {
   const probes = await listCustomProbes(tenantDbName, { projectId });
@@ -91,6 +108,18 @@ function sanitizeSchedule(raw: unknown): ScheduleResult {
   const cronError = validateCron(s.cron);
   if (cronError) return { error: cronError };
   return { schedule: { cron: s.cron, enabled: s.enabled !== false } };
+}
+
+/**
+ * A scheduled scan runs unattended to guard what is in service, so it may not
+ * default to an unpublished draft. `null` when the combination is fine.
+ */
+function scheduledDraftError(
+  schedule: IRedTeamCampaign['schedule'] | undefined,
+  revision: AgentRevision,
+): string | null {
+  if (!schedule?.enabled || revision !== 'draft') return null;
+  return 'A scheduled scan guards what is published: pick Published or a version for agentVersion, or turn the schedule off.';
 }
 
 type RunOptionsResult = { options: RunOptions } | { error: string };
@@ -119,6 +148,9 @@ function sanitizeRunOptions(body: Record<string, unknown>, customKeys: string[] 
   if (typeof body.judgeModelKey === 'string' && body.judgeModelKey) {
     options.judgeModelKey = body.judgeModelKey;
   }
+  const revision = parseAgentRunOverride(body.agentVersion);
+  if (!revision.ok) return { error: revision.error };
+  if (revision.revision !== undefined) options.agentVersion = revision.revision;
   return { options };
 }
 
@@ -215,13 +247,14 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
   return {
     input: {
       name: body.name.trim(),
-      description: typeof body.description === 'string' ? body.description : undefined,
-      family: typeof body.family === 'string' && body.family.trim() ? body.family.trim() : undefined,
+      // Optional fields only when the body carries them, so a PATCH leaves the stored ones alone.
+      ...(typeof body.description === 'string' ? { description: body.description } : {}),
+      ...(typeof body.family === 'string' && body.family.trim() ? { family: body.family.trim() } : {}),
       category: body.category,
       severity: body.severity as RedTeamSeverity,
       attempts,
       detectors,
-      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+      ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
     },
   };
 }
@@ -345,11 +378,19 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       if ('error' in sched) return reply.code(400).send({ error: sched.error });
       const comp = sanitizeCompliance(body.compliance);
       if ('error' in comp) return reply.code(400).send({ error: comp.error });
+      const revision = parseAgentRevision(body.agentVersion);
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
+      const isAgent = body.targetKind === 'agent';
+      const draftError = isAgent ? scheduledDraftError(sched.schedule, revision.revision ?? 'published') : null;
+      if (draftError) return reply.code(400).send({ error: draftError });
+      // A saved agent campaign is scanned later (by its schedule too), so whoever saves one may spend the agent.
+      if (isAgent) await requireAgentTestAccess(request);
       const campaign = await createCampaign(session.tenantDbName, session.tenantId, session.userId, {
         name: body.name.trim(),
         description: typeof body.description === 'string' ? body.description : undefined,
         targetKind: body.targetKind as RedTeamTargetKind,
         agentKey: typeof body.agentKey === 'string' ? body.agentKey : undefined,
+        ...(isAgent && revision.revision !== undefined ? { agentVersion: toStoredAgentVersion(revision.revision) } : {}),
         modelKey: typeof body.modelKey === 'string' ? body.modelKey : undefined,
         probeKeys,
         judgeModelKey: typeof body.judgeModelKey === 'string' ? body.judgeModelKey : undefined,
@@ -361,6 +402,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(201).send({ campaign });
     } catch (error) {
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
       logger.error('Create red-team campaign error', { error });
       return internalError(reply, error);
     }
@@ -383,40 +426,70 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const session = requireSessionContext(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
-      let probeKeys: string[] | null | undefined;
-      if (body.probeKeys !== undefined) {
-        const existing = await getCampaign(session.tenantDbName, id);
-        const customKeys = await loadCustomProbeKeys(session.tenantDbName, existing?.projectId);
-        probeKeys = sanitizeProbeKeys(body.probeKeys, customKeys);
-        if (!probeKeys) {
-          return reply.code(400).send({ error: 'probeKeys must reference built-in or existing custom probes' });
-        }
+      // Only the keys the body carries reach the update: an absent key leaves the stored value alone, `null`
+      // clears the description, the judge model or the schedule, and a key that cannot be cleared must hold
+      // a value (see partial-update.ts).
+      const data: UpdateCampaignInput = {};
+      const invalid =
+        readRequiredText(body, 'name', data)
+        ?? readRequiredText(body, 'agentKey', data)
+        ?? readRequiredText(body, 'modelKey', data)
+        ?? readClearableText(body, 'description', data)
+        ?? readClearableText(body, 'judgeModelKey', data, { blankClears: true });
+      if (invalid) return reply.code(400).send({ error: invalid });
+      if (body.probeKeys !== undefined && !isProbeKeyList(body.probeKeys)) {
+        return reply.code(400).send({ error: 'probeKeys must be an array of probe keys' });
       }
-      let schedule: IRedTeamCampaign['schedule'] | undefined;
-      if (body.schedule !== undefined) {
+      if (body.schedule === null) {
+        data.schedule = null;
+      } else if (body.schedule !== undefined) {
         const sched = sanitizeSchedule(body.schedule);
         if ('error' in sched) return reply.code(400).send({ error: sched.error });
-        schedule = sched.schedule;
+        data.schedule = sched.schedule;
       }
-      let compliance: CampaignComplianceMeta | undefined;
       if (body.compliance !== undefined) {
         const comp = sanitizeCompliance(body.compliance);
         if ('error' in comp) return reply.code(400).send({ error: comp.error });
-        compliance = comp.compliance;
+        if (comp.compliance !== undefined) data.compliance = comp.compliance;
       }
-      const campaign = await updateCampaign(session.tenantDbName, id, session.userId, {
-        name: body.name as string | undefined,
-        description: body.description as string | undefined,
-        agentKey: body.agentKey as string | undefined,
-        modelKey: body.modelKey as string | undefined,
-        probeKeys: probeKeys ?? undefined,
-        judgeModelKey: body.judgeModelKey as string | undefined,
-        schedule,
-        compliance,
-      });
+      const revision = parseAgentRevision(body.agentVersion);
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
+      const existing = await getCampaign(session.tenantDbName, id);
+      if (!existing) return reply.code(404).send({ error: 'Campaign not found' });
+      const isAgent = existing.targetKind === 'agent';
+      // The stored kind decides, not the body: a PATCH cannot move a campaign between kinds, and an enabled
+      // schedule scans the agent later with nobody's permission checked.
+      if (isAgent) await requireAgentTestAccess(request);
+      if (body.probeKeys !== undefined) {
+        const customKeys = await loadCustomProbeKeys(session.tenantDbName, existing.projectId);
+        const probeKeys = sanitizeProbeKeys(body.probeKeys, customKeys);
+        if (!probeKeys) {
+          return reply.code(400).send({ error: 'probeKeys must reference built-in or existing custom probes' });
+        }
+        data.probeKeys = probeKeys;
+      }
+      // A version number belongs to one agent: moving the campaign to another agent without naming a version
+      // puts it back on the published one, as the form does.
+      const agentMoved = isAgent && data.agentKey !== undefined && data.agentKey !== existing.agentKey;
+      const nextRevision = revision.revision ?? (agentMoved ? 'published' : undefined);
+      // Validate the state the PATCH leaves behind, not just the fields it
+      // sends: enabling a schedule on a draft-default campaign is as wrong as
+      // setting the draft on a scheduled one.
+      if (isAgent && (nextRevision !== undefined || data.schedule !== undefined)) {
+        const draftError = scheduledDraftError(
+          data.schedule !== undefined ? data.schedule ?? undefined : existing.schedule,
+          nextRevision ?? storedAgentRevision(existing.agentVersion),
+        );
+        if (draftError) return reply.code(400).send({ error: draftError });
+      }
+      // Only an agent campaign has a revision to store.
+      if (isAgent && nextRevision !== undefined) data.agentVersion = toStoredAgentVersion(nextRevision);
+      const campaign = await updateCampaign(session.tenantDbName, id, session.userId, data);
       if (!campaign) return reply.code(404).send({ error: 'Campaign not found' });
       return reply.code(200).send({ campaign });
     } catch (error) {
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
       logger.error('Update red-team campaign error', { error });
       return internalError(reply, error);
     }
@@ -437,12 +510,19 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Scan (async, queue-backed) ─────────────────────────────────────
   // Mirrors evaluation: create a pending run, publish a job, return immediately.
   // The queue consumer runs it in the background; the dashboard polls the run.
-  // The optional body carries per-run overrides (turns, concurrency, probes, judge).
+  // The optional body carries per-run overrides (turns, concurrency, probes, judge,
+  // agentVersion: "published" | "draft" | a version number).
   app.post('/redteam/campaigns/:key/scan', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      // The body is optional, as on the evaluation run; one that is sent must parse.
+      let body: Record<string, unknown>;
+      try {
+        body = readOptionalJsonObjectBody(request);
+      } catch {
+        return reply.code(400).send({ error: 'Request body must be a JSON object' });
+      }
       const customKeys = await loadCustomProbeKeys(session.tenantDbName, projectId);
       const optionsResult = sanitizeRunOptions(body, customKeys);
       if ('error' in optionsResult) return reply.code(400).send({ error: optionsResult.error });
@@ -453,10 +533,18 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         createdBy: session.userId,
         campaignKey: key,
         options: optionsResult.options,
+        // Asked by the service once it knows the campaign targets an agent, before a run row exists.
+        authorizeAgentRun: () => requireAgentTestAccess(request),
       });
       return reply.code(202).send({ run, status: 'pending' });
     } catch (error) {
+      // Before the message checks below: a refusal must never be read as a 404 or a 409.
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
       logger.error('Run red-team scan error', { error });
+      if (error instanceof AgentRevisionError) {
+        return reply.code(400).send({ error: error.message });
+      }
       if (error instanceof Error && error.message.toLowerCase().includes('not found')) {
         return reply.code(404).send({ error: error.message });
       }
@@ -582,7 +670,15 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
       const result = sanitizeCustomProbe(body);
       if ('error' in result) return reply.code(400).send({ error: result.error });
-      const probe = await updateCustomProbe(session.tenantDbName, id, session.userId, result.input);
+      // The sanitizer fills in the create-time detectors when the body has none; a PATCH keeps the stored ones.
+      const { detectors, ...input } = result.input;
+      const probe = await updateCustomProbe(session.tenantDbName, id, session.userId, {
+        ...input,
+        ...(body.detectors !== undefined ? { detectors } : {}),
+        // `null` puts the create-time default back (see updateCustomProbe).
+        ...(body.description === null ? { description: null } : {}),
+        ...(body.family === null ? { family: null } : {}),
+      });
       if (!probe) return reply.code(404).send({ error: 'Custom probe not found' });
       return reply.code(200).send({ probe });
     } catch (error) {

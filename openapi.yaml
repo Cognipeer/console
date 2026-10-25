@@ -6237,7 +6237,7 @@ paths:
       tags:
         - Evaluation
       summary: Run an evaluation suite
-      description: Run the named suite synchronously over its dataset and return the completed, scored run. Unlike the asynchronous dashboard surface, this token-authenticated client surface blocks until the run finishes and returns HTTP 201 with the completed run (aggregate + per-item scores). The suite, its target and its dataset must already exist. A target/judge error on an item is recorded on that item and counted in aggregate.failed; it does not abort the run.
+      description: Run the named suite synchronously over its dataset and return the completed, scored run. Unlike the asynchronous dashboard surface, this token-authenticated client surface blocks until the run finishes and returns HTTP 201 with the completed run (aggregate + per-item scores). The suite, its target and its dataset must already exist. For an agent target, the optional `agent_version` body field overrides the target's default for this run (`published`, `draft`, or a version number); it is rejected with 400 when invalid (as is a body that is not a JSON object) or when the target is not an agent target, and 404 when the agent or version does not exist. If a run of the same suite on the same agent revision is already in progress, the request is rejected with 409; runs of different revisions may run side by side. Running an agent target (any version, the draft included) also needs write access to the Agents service, the same level as invoking the agent. The token's owner must hold it, capped by the token's scope. Without it the call is refused with 403 (`service` is `agents`, `required` is `write`) before any run is created. A target/judge error on an item is recorded on that item and counted in aggregate.failed; it does not abort the run.
       operationId: runEvaluationSuite
       parameters:
         - name: key
@@ -6246,6 +6246,18 @@ paths:
           description: Key of the suite to run.
           schema:
             type: string
+      requestBody:
+        required: false
+        description: Optional. Pick which agent configuration this run tests; omit the body to use the target's default.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTestRunRequest"
+            examples:
+              draft:
+                summary: Test the saved draft
+                value:
+                  agent_version: draft
       responses:
         "201":
           description: The completed evaluation run.
@@ -6264,8 +6276,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
   /files/buckets:
     get:
       tags:
@@ -10339,7 +10355,7 @@ paths:
       tags:
         - Red Team
       summary: Launch a scan
-      description: Enqueues an asynchronous scan for the campaign identified by `key` and returns immediately with a `pending` run. No request body is required. Poll the run-detail endpoint to watch it finish. If a scan for the same campaign is already in progress, the request is rejected with 409.
+      description: "Enqueues an asynchronous scan for the campaign identified by `key` and returns immediately with a `pending` run. The request body is optional: `agent_version` (`published`, `draft` or a version number) overrides the campaign's default agent revision for this scan only; it is rejected with 400 when invalid or when the campaign is not an agent campaign, and 404 when the agent or version does not exist. Poll the run-detail endpoint to watch it finish. If a scan of the same campaign on the same agent revision is already in progress, the request is rejected with 409; scans of different revisions may run side by side. A body that is not a JSON object is rejected with 400. Scanning an agent campaign (any version, the draft included) also needs write access to the Agents service, the same level as invoking the agent. The token's owner must hold it, capped by the token's scope. Without it the call is refused with 403 (`service` is `agents`, `required` is `write`) before any run is created."
       operationId: runRedTeamCampaignScan
       parameters:
         - name: key
@@ -10348,6 +10364,18 @@ paths:
           description: Campaign key to scan.
           schema:
             type: string
+      requestBody:
+        required: false
+        description: Optional. Pick which agent configuration this run tests; omit the body to use the target's default.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTestRunRequest"
+            examples:
+              draft:
+                summary: Test the saved draft
+                value:
+                  agent_version: draft
       responses:
         "202":
           description: Scan enqueued; a pending run is returned.
@@ -10359,12 +10387,16 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
   /redteam/probes:
     get:
       tags:
@@ -21124,6 +21156,42 @@ components:
           type: string
           description: Error message if this scorer failed to run.
           nullable: true
+    AgentTestRunRequest:
+      type: object
+      description: Optional body of an agent test run (evaluation run or red-team scan).
+      properties:
+        agent_version:
+          description: Agent revision to test, overriding the target/campaign default for this run. A digit string is accepted as a version number. Omitted (or `null`), the target's or campaign's default is used.
+          oneOf:
+            - type: string
+              enum:
+                - published
+                - draft
+            - type: integer
+              minimum: 1
+    AgentRunRevision:
+      type: object
+      description: The agent revision a test run exercised. Absent for non-agent targets and for runs created before revisions existed.
+      properties:
+        requested:
+          description: What the run asked for.
+          oneOf:
+            - type: string
+              enum:
+                - published
+                - draft
+            - type: integer
+              minimum: 1
+        version:
+          type: integer
+          nullable: true
+          description: Published version that answered; `null` when the draft answered. Absent until the run starts.
+        draft_fingerprint:
+          type: string
+          description: Fingerprint of the draft configuration under test (draft runs).
+        draft_changed:
+          type: boolean
+          description: True when the draft was saved while the run was executing.
     EvalRun:
       type: object
       description: A full evaluation run, including its per-item scores.
@@ -21203,6 +21271,8 @@ components:
         target_key:
           type: string
           description: Key of the target under test.
+        agent_revision:
+          $ref: "#/components/schemas/AgentRunRevision"
         dataset_key:
           type: string
           description: Key of the dataset used.
@@ -24912,6 +24982,15 @@ components:
           type: string
           nullable: true
           description: LLM judge for the campaign (also drives adaptive attacker turns).
+        agent_version:
+          description: Default agent revision of an agent campaign — `published` while it follows the published version, `draft`, or a pinned version number. Present on agent campaigns, omitted on model campaigns. A scheduled campaign is never `draft`.
+          oneOf:
+            - type: string
+              enum:
+                - published
+                - draft
+            - type: integer
+              minimum: 1
         created_at:
           type: string
           description: Campaign creation timestamp.
@@ -25089,6 +25168,8 @@ components:
           type: string
           nullable: true
           description: Target reference (agent or model key).
+        agent_revision:
+          $ref: "#/components/schemas/AgentRunRevision"
         status:
           type: string
           description: Run status.

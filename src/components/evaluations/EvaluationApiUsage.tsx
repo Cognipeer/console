@@ -66,7 +66,14 @@ export default function EvaluationApiUsage({ suiteKey }: Props) {
 # → { "suites": [ { "key": "${key}", "target_key": "...", "dataset_key": "...", "scorers": [...] } ] }`;
 
   const runCurl = `curl -X POST ${BASE}/api/client/v1/evaluation/suites/${key}/run \\
-  -H "Authorization: Bearer YOUR_API_TOKEN"`;
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+# Agent targets: test the saved draft or a specific version for this run only
+# (omit the body to use the target's default; accepts "published" | "draft" | <version>)
+curl -X POST ${BASE}/api/client/v1/evaluation/suites/${key}/run \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"agent_version": "draft"}'`;
 
   const runResponse = `{
   "run": {
@@ -134,7 +141,7 @@ if (passRate < 0.9) {
 
       <Snippet
         title="2 · Run a suite"
-        description="Trigger a synchronous run over the suite's dataset. Returns the scored result once it completes."
+        description="Trigger a synchronous run over the suite's dataset. Returns the scored result once it completes. For agent targets, the optional agent_version body field picks the draft or a version; the run reports the revision it used in agent_revision."
         code={runCurl}
       />
 

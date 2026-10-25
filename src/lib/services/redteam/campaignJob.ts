@@ -16,6 +16,7 @@ import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { createAsyncRun, executeRun, type RunOptions, type WithId } from './service';
 import { isDue } from './schedulePlanner';
+import { storedAgentRevision } from '@/lib/shared/agentRevision';
 import type { IRedTeamRun } from '@/lib/database';
 
 const logger = createLogger('redteam:job');
@@ -41,6 +42,8 @@ export interface EnqueueCampaignRunInput {
   campaignKey: string;
   /** Per-run overrides (turns, concurrency, probe/judge selection). */
   options?: RunOptions;
+  /** Refuses the scan of an agent campaign before a run exists (see `CreateRunParams`); never queued. */
+  authorizeAgentRun?: () => Promise<void>;
 }
 
 /**
@@ -97,7 +100,9 @@ export async function runCampaignJob(payload: RedTeamJobPayload): Promise<void> 
  * Enqueue a scan for every campaign in a tenant whose cron schedule is due.
  * "Due" is decided against the most recent run's timestamp so each slot fires
  * at most once. Used by the background red-team scheduler. A campaign with a
- * scan already in progress is skipped (createAsyncRun throws → caught here).
+ * scan already in progress is skipped (createAsyncRun throws → caught here), and
+ * so is one whose default revision is the draft (a schedule guards what is
+ * published).
  */
 export async function runScheduledScans(
   tenantDbName: string,
@@ -111,6 +116,12 @@ export async function runScheduledScans(
   const errors: string[] = [];
   for (const campaign of campaigns) {
     if (!campaign.schedule?.enabled) continue;
+    // Saving refuses this combination; guard again so a campaign that got there
+    // some other way never runs unattended against an unpublished draft.
+    if (campaign.targetKind === 'agent' && storedAgentRevision(campaign.agentVersion) === 'draft') {
+      errors.push(`${campaign.key}: scheduled scans cannot run against the draft; pick Published or a version`);
+      continue;
+    }
     const recent = await db.listRedTeamRuns({ campaignKey: campaign.key, limit: 1 });
     const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
     if (!isDue(campaign.schedule, last ? new Date(last) : null, now)) continue;

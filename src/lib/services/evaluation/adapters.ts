@@ -36,6 +36,7 @@ import {
 import { calculateCost } from '@/lib/services/models/usageLogger';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationTarget, IModelPricing } from '@/lib/database';
+import { selectorForStoredDefault, type AgentRunSelector } from '@/lib/services/agents/agentRevision';
 import type {
   DatasetItem,
   EmbedInvoker,
@@ -398,7 +399,19 @@ function withSystemPrompt(input: DatasetItem['input'], systemPrompt: string): Da
   return [{ role: 'system' as const, content: systemPrompt }, ...input.filter((m) => m.role !== 'system')];
 }
 
-export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationModelContext): TargetInvoker {
+export interface TargetInvokerOptions {
+  /**
+   * Agent targets: the config this run pinned as it started. Without it the
+   * invoker follows the target's own default, as each call finds it.
+   */
+  agentRun?: AgentRunSelector;
+}
+
+export function buildTargetInvoker(
+  target: IEvaluationTarget,
+  ctx: EvaluationModelContext,
+  options: TargetInvokerOptions = {},
+): TargetInvoker {
   const resolvePricing = target.kind === 'model' && target.modelKey
     ? buildPricingResolver(ctx, target.modelKey)
     : () => Promise.resolve(null);
@@ -467,12 +480,12 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
     }
     if (target.kind === 'agent') {
       if (!target.agentKey) throw new Error(`Evaluation target "${target.key}" has no agentKey configured`);
-      // An agent runs with its OWN published prompt, resolved inside
-      // executeAgentChat — there is no per-call override seam. Failing loudly
+      // An agent runs with its OWN prompt, resolved inside executeAgentChat —
+      // there is no per-call override seam. Failing loudly
       // beats silently evaluating a different prompt than the user selected.
       if (resolveSystemPrompt) {
         throw new Error(
-          `Evaluation target "${target.key}" sets a system-prompt override, which agent targets do not support — an agent always runs its own published prompt. Use a model target to test a prompt, or change the agent's prompt.`,
+          `Evaluation target "${target.key}" sets a system-prompt override, which agent targets do not support — an agent runs its own prompt (of the version or draft the run tests). Use a model target to test a prompt, or change the agent's prompt.`,
         );
       }
       // Lazy import: the agent runtime pulls in a heavy module graph (rag /
@@ -504,13 +517,10 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
         // No one is present during a suite run: a gated tool follows the agent's
         // `humanInTheLoop.unattended` setting (deny by default).
         unattended: true,
-        // A pinned version wins; otherwise follow whatever is published. Both
-        // paths read an immutable snapshot — the draft config is never what a
-        // suite tests, because a half-finished edit in the playground would
-        // otherwise change a scheduled run's result without anyone publishing.
-        ...(typeof target.agentVersion === 'number'
-          ? { version: target.agentVersion }
-          : { usePublished: true }),
+        // A run pins its config up front (`options.agentRun`) so every item
+        // tests the same one. Without that, follow the target's own default:
+        // a pinned version, the draft, or whatever is published.
+        ...(options.agentRun ?? selectorForStoredDefault(target.agentVersion)),
       });
       return {
         text: extractAgentText(response),

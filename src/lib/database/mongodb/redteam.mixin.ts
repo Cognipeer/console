@@ -14,6 +14,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { definedFields } from './definedFields';
 
 export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class RedTeamOps extends Base {
@@ -34,8 +35,7 @@ export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       data: Partial<Omit<IRedTeamCampaign, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IRedTeamCampaign | null> {
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
+      const updateData = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IRedTeamCampaign>(COLLECTIONS.redTeamCampaigns)
         .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
@@ -144,8 +144,7 @@ export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       data: Partial<Omit<IRedTeamCustomProbe, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IRedTeamCustomProbe | null> {
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
+      const updateData = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IRedTeamCustomProbe>(COLLECTIONS.redTeamCustomProbes)
         .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });

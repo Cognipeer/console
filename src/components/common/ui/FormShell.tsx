@@ -10,7 +10,7 @@ import {
   isValidElement,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { Button, ActionIcon } from '@mantine/core';
+import { Button, ActionIcon, Tooltip } from '@mantine/core';
 import { IconCheck, IconChevronDown, IconChevronRight, IconX } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
@@ -26,6 +26,8 @@ export interface FormShellAction {
   color?: 'teal' | 'red' | 'orange' | 'blue' | 'gray';
   variant?: 'filled' | 'default' | 'subtle' | 'outline';
   disabled?: boolean;
+  /** Said on hover while the action is disabled: why it is. */
+  disabledReason?: ReactNode;
   loading?: boolean;
   onClick: () => void;
 }
@@ -65,6 +67,34 @@ function EscapeHint({ disableEscape = false }: { disableEscape?: boolean }) {
     <div className="form-header-hint">
       {t('escapeHintBefore')} <span className="form-kbd">ESC</span> {t('escapeHintAfter')}
     </div>
+  );
+}
+
+/** The footer's primary button; one that is disabled and carries a reason says it on hover. */
+function PrimaryButton({ action }: { action: FormShellAction }) {
+  // A native `disabled` swallows the hover the tooltip listens to, so a button that says why it is off is only
+  // marked disabled and its click ignored.
+  const reason = action.disabled ? action.disabledReason : undefined;
+  const button = (
+    <Button
+      variant={action.variant ?? 'filled'}
+      size="sm"
+      color={action.color ?? 'teal'}
+      leftSection={action.icon}
+      loading={action.loading}
+      disabled={action.disabled && !reason}
+      data-disabled={reason ? true : undefined}
+      aria-disabled={reason ? true : undefined}
+      onClick={reason ? undefined : action.onClick}
+    >
+      {action.label}
+    </Button>
+  );
+  if (action.disabledReason === undefined) return button;
+  return (
+    <Tooltip label={action.disabledReason} disabled={!reason} withArrow multiline w={240}>
+      {button}
+    </Tooltip>
   );
 }
 
@@ -194,17 +224,7 @@ export default function FormShell({
           {secondaryAction?.label ?? t('cancel')}
         </Button>
         {primaryAction ? (
-          <Button
-            variant={primaryAction.variant ?? 'filled'}
-            size="sm"
-            color={primaryAction.color ?? 'teal'}
-            leftSection={primaryAction.icon}
-            loading={primaryAction.loading}
-            disabled={primaryAction.disabled}
-            onClick={primaryAction.onClick}
-          >
-            {primaryAction.label}
-          </Button>
+          <PrimaryButton action={primaryAction} />
         ) : null}
       </div>
     </div>,

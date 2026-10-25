@@ -12,6 +12,7 @@
 import crypto from 'node:crypto';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { extractAgentText, extractAssistantText } from '@/lib/services/evaluation/adapters';
+import type { AgentRunSelector } from '@/lib/services/agents/agentRevision';
 import type { AttackerInvoker, JudgeInvoker, RedTeamMessage, RedTeamOutput, TargetInvoker } from './types';
 
 export interface RedTeamModelContext {
@@ -28,6 +29,8 @@ export interface RedTeamTargetSpec {
   key: string;
   modelKey?: string;
   agentKey?: string;
+  /** Which agent configuration every call hits; absent follows the published version. */
+  agentRun?: AgentRunSelector;
 }
 
 async function invokeModel(
@@ -93,7 +96,7 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
         conversationId,
         userMessage: lastUser(messages),
         userId: ctx.userId ?? 'redteam',
-        usePublished: true,
+        ...(target.agentRun ?? { usePublished: true }),
         // No one is present during a red-team run: a gated tool follows the agent's
         // `humanInTheLoop.unattended` setting (deny by default).
         unattended: true,

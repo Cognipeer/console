@@ -1090,6 +1090,14 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.evaluationTargets, 'promptVersion', 'promptVersion INTEGER');
     this.ensureTableColumn(db, TABLES.evaluationTargets, 'responseFormat', 'responseFormat TEXT');
     this.ensureTableColumn(db, TABLES.evaluationTargets, 'maxTokens', 'maxTokens INTEGER');
+    // Agent test revisions: the configuration a target or campaign tests by
+    // default (a version number or 'draft'), and what each run asked for and
+    // ran. Without the target column a pinned version was dropped on insert,
+    // so every "pinned" suite quietly tested the published version.
+    this.ensureTableColumn(db, TABLES.evaluationTargets, 'agentVersion', 'agentVersion TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationRuns, 'agentRevision', 'agentRevision TEXT');
+    this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'agentVersion', 'agentVersion TEXT');
+    this.ensureTableColumn(db, TABLES.redTeamRuns, 'agentRevision', 'agentRevision TEXT');
     // AI labeling: structured labels + their provenance on dataset items, and
     // the run target that says an analysis run labelled a dataset rather than
     // the conversation corpus.

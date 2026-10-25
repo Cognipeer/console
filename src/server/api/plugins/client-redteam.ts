@@ -6,7 +6,8 @@
  *
  *   GET  /client/v1/redteam/probes                  – built-in probe catalog
  *   GET  /client/v1/redteam/campaigns               – list configured campaigns
- *   POST /client/v1/redteam/campaigns/:key/scan     – trigger a scan (async)
+ *   POST /client/v1/redteam/campaigns/:key/scan     – trigger a scan (async); scanning an
+ *        agent campaign also needs write access to Agents (403 otherwise), whichever version is asked for
  *   GET  /client/v1/redteam/runs                    – list runs (?campaign_key,?limit)
  *   GET  /client/v1/redteam/runs/:id                – one run + per-attempt verdicts
  *
@@ -19,11 +20,15 @@ import { listProbeCatalog } from '@/lib/services/redteam/probes';
 import { enqueueCampaignRun } from '@/lib/services/redteam/campaignJob';
 import { getRun, listCampaigns, listRuns, type WithId } from '@/lib/services/redteam/service';
 import type { IRedTeamCampaign, IRedTeamRun } from '@/lib/database';
+import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
+import { agentRevisionApiView, parseAgentRunOverride, storedAgentRevision } from '@/lib/shared/agentRevision';
 import {
   getApiTokenContextForRequest,
+  readOptionalJsonObjectBody,
   sendApiTokenError,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
 
 const logger = createLogger('api:client-redteam');
 
@@ -35,6 +40,9 @@ function clampLimit(raw: unknown): number | undefined {
 }
 
 function fail(reply: import('fastify').FastifyReply, error: unknown, scope: string) {
+  // A refusal (403, or the 503 when the engine cannot decide) is answered as the gate answers it, never as a 404 or a 500.
+  const refused = sendAgentTestRefusal(reply, error);
+  if (refused) return refused;
   logger.error(`Client red-team ${scope} error`, { error });
   const message = error instanceof Error ? error.message : 'Internal error';
   return (
@@ -50,6 +58,8 @@ function toCampaignView(c: WithId<IRedTeamCampaign>) {
     description: c.description,
     target_kind: c.targetKind,
     agent_key: c.agentKey,
+    // What a scan attacks unless it asks for another: "published", "draft" or a version.
+    ...(c.targetKind === 'agent' ? { agent_version: storedAgentRevision(c.agentVersion) } : {}),
     model_key: c.modelKey,
     probe_keys: c.probeKeys,
     judge_model_key: c.judgeModelKey,
@@ -63,6 +73,7 @@ function toRunSummary(r: WithId<IRedTeamRun>) {
     campaign_key: r.campaignKey,
     target_kind: r.targetKind,
     target_ref: r.targetRef,
+    agent_revision: agentRevisionApiView(r.agentRevision),
     status: r.status,
     aggregate: r.aggregate,
     started_at: r.startedAt,
@@ -118,15 +129,35 @@ export const clientRedTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
       if (!key) return reply.code(400).send({ error: 'campaign key is required' });
+      // The body is optional: existing callers POST with none. One that is
+      // sent must parse, or the run would quietly test the default revision.
+      let body: Record<string, unknown>;
+      try {
+        body = readOptionalJsonObjectBody(request);
+      } catch {
+        return reply.code(400).send({ error: 'Request body must be a JSON object' });
+      }
+      const revision = parseAgentRunOverride(body.agent_version, 'agent_version');
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
       const run = await enqueueCampaignRun({
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         createdBy: ctx.tokenRecord.userId ?? 'api-token',
         campaignKey: key,
+        ...(revision.revision !== undefined ? { options: { agentVersion: revision.revision } } : {}),
+        // Asked by the service once it knows the campaign targets an agent, before a run row exists. For a
+        // token it is the owner's permission, capped by the token's scope.
+        authorizeAgentRun: () => requireAgentTestAccess(request),
       });
       return reply.code(202).send({ run: toRunSummary(run), status: 'pending' });
     } catch (error) {
+      // Before the message checks below: a refusal must never be read as a 409.
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
+      if (error instanceof AgentRevisionError) {
+        return reply.code(400).send({ error: error.message });
+      }
       if (error instanceof Error && error.message.toLowerCase().includes('already in progress')) {
         return reply.code(409).send({ error: error.message });
       }

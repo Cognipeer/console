@@ -11,7 +11,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { DatasetGenerationSource } from '@/lib/services/evaluation/datasetGeneration';
 import { enqueueDatasetGeneration } from '@/lib/services/evaluation/datasetGenerationJob';
 import { convertFileToText } from '@/lib/services/rag/ragService';
-import type { CloneDatasetFilter } from '@/lib/services/evaluation/service';
+import type { CloneDatasetFilter, UpdateSuiteInput, UpdateTargetInput } from '@/lib/services/evaluation/service';
 import {
   appendDatasetItems,
   cloneDataset,
@@ -40,17 +40,22 @@ import {
   updateTarget,
 } from '@/lib/services/evaluation/service';
 import { enqueueSuiteRun } from '@/lib/services/evaluation/evaluationRunJob';
+import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
+import { parseAgentRevision, parseAgentRunOverride, toStoredAgentVersion } from '@/lib/shared/agentRevision';
 import { summarizeLabels } from '@/lib/services/evaluation/labelSummary';
 import { SUPPORTED_SCORERS } from '@/lib/services/evaluation/scorers';
 import { enqueueDefinitionRun } from '@/lib/services/analysis/analysisRunJob';
 import type { RunSelection } from '@/lib/services/analysis/service';
 import {
   readJsonBody,
+  readOptionalJsonObjectBody,
   requireProjectContextForRequest,
   requireSessionContext,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
+import { readClearableText, readRequiredText } from './partial-update';
 
 const logger = createLogger('api:evaluations');
 
@@ -75,21 +80,6 @@ function sanitizeTopK(raw: unknown): number | undefined {
 function sanitizeMinScore(raw: unknown): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
   return raw >= 0 && raw <= 1 ? raw : undefined;
-}
-
-/**
- * `null` is meaningful here and `undefined` is not: a PATCH that clears the pin
- * sends `null`, and the update must write "follow the published version" rather
- * than leave the old pin in place. A non-number is dropped to `undefined` (the
- * field is left out / untouched); a number below 1 becomes `null` ("follow
- * published", a state the runner can execute) rather than a pin that cannot
- * resolve.
- */
-function sanitizeAgentVersion(raw: unknown): number | null | undefined {
-  if (raw === null) return null;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
-  const version = Math.trunc(raw);
-  return version >= 1 ? version : null;
 }
 
 function internalError(reply: import('fastify').FastifyReply, error: unknown) {
@@ -264,12 +254,16 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.kind === 'rag' && typeof body.ragModuleKey !== 'string') {
         return reply.code(400).send({ error: 'ragModuleKey is required for Knowledge Engine targets' });
       }
+      const revision = parseAgentRevision(body.agentVersion);
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
+      // A saved agent target is run later, so whoever saves one may spend the agent.
+      if (body.kind === 'agent') await requireAgentTestAccess(request);
       const target = await createTarget(session.tenantDbName, session.tenantId, session.userId, {
         name: body.name.trim(),
         description: typeof body.description === 'string' ? body.description : undefined,
         kind: body.kind as EvaluationTargetKind,
         agentKey: body.agentKey as string | undefined,
-        agentVersion: sanitizeAgentVersion(body.agentVersion),
+        agentVersion: revision.revision === undefined ? undefined : toStoredAgentVersion(revision.revision),
         modelKey: body.modelKey as string | undefined,
         external: body.external as never,
         ragModuleKey: typeof body.ragModuleKey === 'string' ? body.ragModuleKey : undefined,
@@ -285,6 +279,8 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(201).send({ target });
     } catch (error) {
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
       logger.error('Create evaluation target error', { error });
       return internalError(reply, error);
     }
@@ -307,25 +303,54 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const session = requireSessionContext(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
-      const target = await updateTarget(session.tenantDbName, id, session.userId, {
-        name: body.name as string | undefined,
-        description: body.description as string | undefined,
-        agentKey: body.agentKey as string | undefined,
-        agentVersion: sanitizeAgentVersion(body.agentVersion),
-        modelKey: body.modelKey as string | undefined,
-        ragModuleKey: body.ragModuleKey as string | undefined,
-        retrievalTopK: sanitizeTopK(body.retrievalTopK),
-        retrievalMinScore: sanitizeMinScore(body.retrievalMinScore),
-        systemPrompt: body.systemPrompt as string | undefined,
-        promptKey: body.promptKey as string | undefined,
-        promptVersion: body.promptVersion as number | undefined,
-        responseFormat: body.responseFormat as Record<string, unknown> | undefined,
-        maxTokens: body.maxTokens as number | undefined,
-        defaultParams: body.defaultParams as Record<string, unknown> | undefined,
-      });
+      const revision = parseAgentRevision(body.agentVersion);
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
+      // Only the keys the body carries reach the update: an absent key leaves the stored value alone, `null`
+      // clears an optional one, and a key that cannot be cleared must hold text (see partial-update.ts).
+      const data: UpdateTargetInput = {
+        // Optional knobs go through as sent; `null` clears.
+        ...(body.systemPrompt !== undefined ? { systemPrompt: body.systemPrompt as string | null } : {}),
+        ...(body.promptKey !== undefined ? { promptKey: body.promptKey as string | null } : {}),
+        ...(body.promptVersion !== undefined ? { promptVersion: body.promptVersion as number | null } : {}),
+        ...(body.responseFormat !== undefined ? { responseFormat: body.responseFormat as Record<string, unknown> | null } : {}),
+        ...(body.maxTokens !== undefined ? { maxTokens: body.maxTokens as number | null } : {}),
+        ...(body.defaultParams !== undefined ? { defaultParams: body.defaultParams as Record<string, unknown> | null } : {}),
+        // `null` drops the pin: both providers treat an absent key as "leave the pin alone".
+        ...(revision.revision !== undefined ? { agentVersion: toStoredAgentVersion(revision.revision) } : {}),
+      };
+      const invalid =
+        readRequiredText(body, 'name', data)
+        ?? readRequiredText(body, 'agentKey', data)
+        ?? readRequiredText(body, 'modelKey', data)
+        ?? readRequiredText(body, 'ragModuleKey', data)
+        ?? readClearableText(body, 'description', data);
+      if (invalid) return reply.code(400).send({ error: invalid });
+      // `null` puts the module's own default back; an out-of-range number is dropped, as on create.
+      const topK = body.retrievalTopK === null ? null : sanitizeTopK(body.retrievalTopK);
+      if (topK !== undefined) data.retrievalTopK = topK;
+      const minScore = body.retrievalMinScore === null ? null : sanitizeMinScore(body.retrievalMinScore);
+      if (minScore !== undefined) data.retrievalMinScore = minScore;
+      const existing = await getTarget(session.tenantDbName, id);
+      if (!existing) return reply.code(404).send({ error: 'Target not found' });
+      // The stored kind decides, not the body: a PATCH cannot move a target between kinds, and a saved agent
+      // target is run later by whoever (or whatever) holds it.
+      if (existing.kind === 'agent') await requireAgentTestAccess(request);
+      // A version number belongs to one agent: moving the target to another agent without naming a version puts
+      // it back on the published one, as the form does.
+      if (
+        existing.kind === 'agent'
+        && revision.revision === undefined
+        && data.agentKey !== undefined
+        && data.agentKey !== existing.agentKey
+      ) {
+        data.agentVersion = null;
+      }
+      const target = await updateTarget(session.tenantDbName, id, session.userId, data);
       if (!target) return reply.code(404).send({ error: 'Target not found' });
       return reply.code(200).send({ target });
     } catch (error) {
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
       logger.error('Update evaluation target error', { error });
       return internalError(reply, error);
     }
@@ -853,20 +878,27 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const session = requireSessionContext(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
-      const scorers = body.scorers !== undefined ? sanitizeScorers(body.scorers) : undefined;
-      if (body.scorers !== undefined && !scorers) {
-        return reply.code(400).send({ error: 'scorers must be an array of { type: "assertion" | "llm-judge" }' });
+      // Only the keys the body carries reach the update: an absent key leaves the stored value alone, `null`
+      // clears the description or a model key, and a key that cannot be cleared must hold text.
+      const data: UpdateSuiteInput = {};
+      const invalid =
+        readRequiredText(body, 'name', data)
+        ?? readRequiredText(body, 'targetKey', data)
+        ?? readRequiredText(body, 'datasetKey', data)
+        ?? readClearableText(body, 'description', data)
+        ?? readClearableText(body, 'judgeModelKey', data, { blankClears: true })
+        ?? readClearableText(body, 'embeddingModelKey', data, { blankClears: true });
+      if (invalid) return reply.code(400).send({ error: invalid });
+      if (body.scorers !== undefined) {
+        const scorers = sanitizeScorers(body.scorers);
+        if (!scorers) {
+          return reply.code(400).send({ error: 'scorers must be an array of { type: "assertion" | "llm-judge" }' });
+        }
+        data.scorers = scorers;
       }
-      const suite = await updateSuite(session.tenantDbName, id, session.userId, {
-        name: body.name as string | undefined,
-        description: body.description as string | undefined,
-        targetKey: body.targetKey as string | undefined,
-        datasetKey: body.datasetKey as string | undefined,
-        scorers: scorers ?? undefined,
-        judgeModelKey: body.judgeModelKey as string | undefined,
-        embeddingModelKey: body.embeddingModelKey as string | undefined,
-        ...(body.runConfig !== undefined ? { runConfig: sanitizeRunConfig(body.runConfig) } : {}),
-      });
+      const runConfig = body.runConfig !== undefined ? sanitizeRunConfig(body.runConfig) : undefined;
+      if (runConfig) data.runConfig = runConfig;
+      const suite = await updateSuite(session.tenantDbName, id, session.userId, data);
       if (!suite) return reply.code(404).send({ error: 'Suite not found' });
       return reply.code(200).send({ suite });
     } catch (error) {
@@ -893,6 +925,16 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
+      // The body is optional: existing callers POST with none. One that is
+      // sent must parse, or the run would quietly test the default revision.
+      let body: Record<string, unknown>;
+      try {
+        body = readOptionalJsonObjectBody(request);
+      } catch {
+        return reply.code(400).send({ error: 'Request body must be a JSON object' });
+      }
+      const revision = parseAgentRunOverride(body.agentVersion);
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
       // Enqueue + return immediately (status 'pending'); the queue consumer runs
       // it in the background so the dashboard never blocks on a long run. The UI
       // polls the run detail endpoint to watch progress.
@@ -902,10 +944,17 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         createdBy: session.userId,
         suiteKey: key,
+        agentVersion: revision.revision,
+        // Asked by the service once it knows the suite's target is an agent, before a run row exists.
+        authorizeAgentRun: () => requireAgentTestAccess(request),
       });
       return reply.code(202).send({ run });
     } catch (error) {
+      // Before the message checks below: a refusal must never be read as a 404 or a 409.
+      const refused = sendAgentTestRefusal(reply, error);
+      if (refused) return refused;
       logger.error('Run evaluation suite error', { error });
+      if (error instanceof AgentRevisionError) return reply.code(400).send({ error: error.message });
       if (error instanceof Error && error.message.toLowerCase().includes('not found')) {
         return reply.code(404).send({ error: error.message });
       }

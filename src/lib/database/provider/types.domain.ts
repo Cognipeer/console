@@ -780,6 +780,39 @@ export type EvaluationScorerType =
  */
 export type EvaluationTurnMode = 'single' | 'perTurn';
 
+/**
+ * Which configuration of an agent a test run exercises: whatever is published
+ * when the run starts (`published`), the saved draft (`draft`), or one
+ * published version (a number). Evaluation targets and red-team campaigns keep
+ * a default; a single run can ask for another.
+ */
+export type AgentRevision = 'published' | 'draft' | number;
+
+/**
+ * What an agent test run asked for, and what actually answered. `requested` is
+ * written when the run is created; the rest when it starts, because that is
+ * when `published` is pinned to a number — once, so a publish in the middle of
+ * a run cannot split it across two versions.
+ */
+export interface IAgentRunRevision {
+  requested: AgentRevision;
+  /**
+   * The agent the run tested. Kept with the run because a target can later be pointed at another agent, which
+   * would otherwise rename the agent of every past run. Runs recorded before it was kept have none.
+   */
+  agentKey?: string;
+  /** The published version that answered; `null` when the draft did (asked for, or nothing was published yet). */
+  version?: number | null;
+  /** Draft runs: a short hash of the draft config the run started on, so two draft runs can be told apart. */
+  draftFingerprint?: string;
+  /**
+   * Draft runs: the draft was saved while the run was going. Every item reads
+   * the draft as it is at that moment, so the later items may have run a
+   * different config than the earlier ones.
+   */
+  draftChanged?: boolean;
+}
+
 export interface IEvaluationExternalTarget {
   protocol: 'openai-chat' | 'webhook';
   url: string;
@@ -800,19 +833,21 @@ export interface IEvaluationTarget {
   kind: EvaluationTargetKind;
   agentKey?: string;
   /**
-   * `agent` targets: pin the run to one published version instead of following
-   * whatever is published now.
+   * `agent` targets: which configuration a run tests unless the run asks for
+   * another (see `AgentRevision`). A number pins one published version,
+   * `'draft'` tests the saved draft, and absent / `null` follows whatever is
+   * published when the run starts.
    *
-   * Absent means "the published version", which is the right default for a
-   * suite that guards production. Pinning is what makes a comparison run
-   * meaningful: two targets on the same agent at v3 and v4 answer "did the new
-   * version regress?", and that question is unanswerable while both silently
-   * follow the same moving pointer.
+   * Following the published version is the right default for a suite that
+   * guards production. Pinning is what makes a comparison run meaningful: two
+   * targets on the same agent at v3 and v4 answer "did the new version
+   * regress?", and that question is unanswerable while both silently follow
+   * the same moving pointer. The draft answers "is my change ready to publish?".
    *
    * `null` is how a PATCH clears an existing pin: both provider mixins treat
    * `undefined` as "leave this field alone", so an absent key cannot unpin.
    */
-  agentVersion?: number | null;
+  agentVersion?: number | 'draft' | null;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
   /** `rag` targets: which module to retrieve from, and how much. */
@@ -1074,6 +1109,8 @@ export interface IEvaluationRun {
   progress: { total: number; completed: number; failed: number };
   aggregate?: IEvaluationRunAggregate;
   items: IEvaluationRunItem[];
+  /** `agent` targets: the configuration the run asked for and the one that answered. */
+  agentRevision?: IAgentRunRevision;
   error?: string;
   startedAt?: Date;
   finishedAt?: Date;
@@ -1111,6 +1148,14 @@ export interface IRedTeamCampaign {
   description?: string;
   targetKind: RedTeamTargetKind;
   agentKey?: string;
+  /**
+   * Agent campaigns: which configuration a scan attacks unless the scan asks
+   * for another — a published version (number), the saved draft (`'draft'`),
+   * or absent / `null` for whatever is published when the scan starts. A
+   * scheduled campaign never defaults to the draft: an unattended scan guards
+   * what is in service.
+   */
+  agentVersion?: number | 'draft' | null;
   modelKey?: string;
   /** Selected built-in probe keys; empty selects the whole catalog. */
   probeKeys: string[];
@@ -1196,6 +1241,8 @@ export interface IRedTeamRun {
   targetKind: RedTeamTargetKind;
   /** agentKey or modelKey of the target under test (for display). */
   targetRef: string;
+  /** Agent campaigns: the configuration the scan asked for and the one that answered. */
+  agentRevision?: IAgentRunRevision;
   status: RedTeamRunStatus;
   mode: RedTeamRunMode;
   progress: { total: number; completed: number; failed: number };

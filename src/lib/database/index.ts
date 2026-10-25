@@ -298,6 +298,8 @@ export type {
   IEvaluationRun,
   IEvaluationRunItem,
   IEvaluationRunAggregate,
+  AgentRevision,
+  IAgentRunRevision,
   EvaluationTargetKind,
   EvaluationRunStatus,
   EvaluationRunMode,

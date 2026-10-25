@@ -29,6 +29,9 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { configVersionTag, runVersionTag } from '@/components/agents/agentVersionTag';
+import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
 import CreateTargetModal from '@/components/evaluations/CreateTargetModal';
 import CreateDatasetModal from '@/components/evaluations/CreateDatasetModal';
 import CreateSuiteModal from '@/components/evaluations/CreateSuiteModal';
@@ -73,6 +76,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [runningKey, setRunningKey] = useState<string | null>(null);
+  const { canRunAgentTests } = useAgentTestAccess();
 
   const [targetModal, setTargetModal] = useState(false);
   const [datasetModal, setDatasetModal] = useState(false);
@@ -169,7 +173,10 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
     await loadAll();
   };
 
-  const targetName = (key: string) => targets.find((t) => t.key === key)?.name ?? key;
+  const targetByKey = (key: string) => targets.find((t) => t.key === key);
+  const targetName = (key: string) => targetByKey(key)?.name ?? key;
+  /** Running an agent suite needs Write on Agents; the server refuses it otherwise. */
+  const agentRunBlocked = (suite: EvalSuiteView) => !canRunAgentTests && targetByKey(suite.targetKey)?.kind === 'agent';
   const datasetName = (key: string) => datasets.find((d) => d.key === key)?.name ?? key;
 
   const targetsCtl = useTableControls(targets, {
@@ -198,7 +205,11 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
     ) },
     { key: 'kind', label: 'Kind', render: (t) => <span className="ds-badge ds-badge-info">{t.kind}</span> },
     { key: 'ref', label: 'Reference', render: (t) => (
-      <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>{t.modelKey ?? t.agentKey ?? t.ragModuleKey ?? '—'}</span>
+      <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+        {t.kind === 'agent'
+          ? <AgentWithVersion name={t.agentKey ?? '—'} tag={configVersionTag(t.agentVersion)} />
+          : t.modelKey ?? t.ragModuleKey ?? '—'}
+      </span>
     ) },
     { key: 'created', label: 'Created', render: (t) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(t.createdAt)}</span> },
   ];
@@ -238,7 +249,14 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
         <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{s.key}</span>
       </div>
     ) },
-    { key: 'target', label: 'Target', render: (s) => <span className="ds-muted" style={{ fontSize: 12 }}>{targetName(s.targetKey)}</span> },
+    { key: 'target', label: 'Target', render: (s) => {
+      const target = targetByKey(s.targetKey);
+      return (
+        <span className="ds-muted" style={{ fontSize: 12 }}>
+          <AgentWithVersion name={targetName(s.targetKey)} tag={target?.kind === 'agent' ? configVersionTag(target.agentVersion) : null} />
+        </span>
+      );
+    } },
     { key: 'dataset', label: 'Dataset', render: (s) => <span className="ds-muted" style={{ fontSize: 12 }}>{datasetName(s.datasetKey)}</span> },
     { key: 'scorers', label: 'Scorers', render: (s) => (
       <Group gap={4}>{s.scorers.map((sc) => <span key={sc.type} className="ds-badge ds-badge-teal">{sc.type}</span>)}</Group>
@@ -264,6 +282,19 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
           ),
         } satisfies DataGridColumn<EvalRunView>]
       : []),
+    { key: 'agent', label: 'Agent', render: (r) => {
+      const target = targetByKey(r.targetKey);
+      // The agent the run recorded; runs from before it was kept name the target's current agent.
+      const agentKey = r.agentRevision?.agentKey ?? (target?.kind === 'agent' ? target.agentKey : undefined);
+      const tag = runVersionTag(r.agentRevision);
+      // A model or retrieval run has neither; a run from before the revision was recorded has the name alone.
+      if (!agentKey && !tag) return <span className="ds-faint">—</span>;
+      return (
+        <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+          <AgentWithVersion name={agentKey} tag={tag} />
+        </span>
+      );
+    } },
     { key: 'created', label: 'Started', render: (r) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(r.startedAt ?? r.createdAt)}</span> },
   ];
 
@@ -395,7 +426,8 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
               id: 'run',
               label: runningKey === s.key ? 'Running…' : 'Run',
               icon: <IconPlayerPlay size={14} />,
-              disabled: runningKey !== null,
+              disabled: runningKey !== null || agentRunBlocked(s),
+              disabledReason: agentRunBlocked(s) ? AGENT_TEST_ACCESS_HINT : undefined,
               onClick: () => void runSuiteNow(s),
             },
             { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => setEditSuite(s) },

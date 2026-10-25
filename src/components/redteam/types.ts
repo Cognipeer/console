@@ -1,5 +1,7 @@
 /** Lightweight view types mirroring the /api/redteam/* JSON responses. */
 
+import type { IAgentRunRevision } from '@/lib/shared/agentRevision';
+
 export type RedTeamTargetKind = 'agent' | 'model';
 export type RedTeamOutcome = 'safe' | 'vulnerable' | 'needs_review';
 export type RedTeamSeverity = 'low' | 'medium' | 'high' | 'critical';
@@ -60,6 +62,8 @@ export interface RedTeamCampaignView {
   description?: string;
   targetKind: RedTeamTargetKind;
   agentKey?: string;
+  /** Agent campaigns: default revision a scan attacks — a pinned version, `'draft'`, or absent/null for the published one. A single scan can override it. */
+  agentVersion?: number | 'draft' | null;
   modelKey?: string;
   probeKeys: string[];
   judgeModelKey?: string;
@@ -133,6 +137,8 @@ export interface RedTeamRunView {
   aggregate?: RedTeamAggregateView;
   attempts: RedTeamAttemptView[];
   error?: string;
+  /** Agent campaigns: the configuration this scan attacked. */
+  agentRevision?: IAgentRunRevision;
   startedAt?: string;
   finishedAt?: string;
   createdAt?: string;

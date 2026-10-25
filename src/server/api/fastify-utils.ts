@@ -137,6 +137,25 @@ export function readJsonObjectBody<T extends object = Record<string, unknown>>(r
 }
 
 /**
+ * A body the caller may leave out: none at all (or a literal `null`) reads as
+ * `{}`, anything else must be a JSON object. Unlike safeReadJsonBody, malformed
+ * JSON throws, so a route can answer 400 instead of quietly running on its
+ * defaults something the caller asked to change.
+ */
+export function readOptionalJsonObjectBody<T extends object = Record<string, unknown>>(request: FastifyRequest): T {
+  const { body } = request;
+  if (body === undefined || body === null) return {} as T;
+  if (typeof body === 'string' && body.trim() === '') return {} as T;
+  if (Buffer.isBuffer(body) && body.toString('utf8').trim() === '') return {} as T;
+  const parsed: unknown = readJsonBody<unknown>(request);
+  if (parsed === null) return {} as T;
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new SyntaxError('Request body must be a JSON object');
+  }
+  return parsed as T;
+}
+
+/**
  * Same as readJsonBody but never throws — returns `{}` on missing or malformed
  * payload. Use when the handler validates field-by-field and prefers to reply
  * with a domain-specific 400 rather than letting JSON parse errors leak out.

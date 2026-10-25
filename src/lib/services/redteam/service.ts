@@ -12,6 +12,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
 import type {
+  AgentRevision,
   IRedTeamCampaign,
   IRedTeamRun,
   IRedTeamAttemptResult,
@@ -37,10 +38,19 @@ import {
   type RedTeamTargetSpec,
 } from './adapters';
 import type { AttemptResult, DetectionSignal } from './types';
+import { sameAgentRevision, agentRevisionLabel, storedAgentRevision } from '@/lib/shared/agentRevision';
+import {
+  AgentRevisionError,
+  assertAgentRevisionRunnable,
+  startAgentRevision,
+  type StartedAgentRevision,
+} from '@/lib/services/agents/agentRevision';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
 const SEVERITIES: RedTeamSeverity[] = ['low', 'medium', 'high', 'critical'];
+/** The family a custom probe gets when none is given. */
+const DEFAULT_CUSTOM_PROBE_FAMILY = 'custom';
 
 export type WithId<T> = Omit<T, '_id'> & { id: string };
 
@@ -150,6 +160,8 @@ export interface CreateCampaignInput {
   description?: string;
   targetKind: RedTeamTargetKind;
   agentKey?: string;
+  /** Agent campaigns: the revision a scan attacks by default (absent / `null` = whatever is published). */
+  agentVersion?: number | 'draft' | null;
   modelKey?: string;
   probeKeys?: string[];
   judgeModelKey?: string;
@@ -187,6 +199,8 @@ export async function createCampaign(
     description: input.description,
     targetKind: input.targetKind,
     agentKey: input.agentKey,
+    // Only an agent campaign has a revision; absent already means "published".
+    ...(input.targetKind === 'agent' && input.agentVersion != null ? { agentVersion: input.agentVersion } : {}),
     modelKey: input.modelKey,
     probeKeys: input.probeKeys ?? [],
     judgeModelKey: input.judgeModelKey,
@@ -215,12 +229,25 @@ export async function getCampaign(tenantDbName: string, id: string): Promise<Wit
   return record ? toView(record) : null;
 }
 
+/**
+ * A campaign PATCH: a key that is absent leaves the stored value alone (never
+ * pass `undefined` for it), and `null` clears the description, the judge model
+ * or the schedule.
+ */
+export type UpdateCampaignInput = Partial<
+  Pick<IRedTeamCampaign, 'name' | 'targetKind' | 'agentKey' | 'modelKey' | 'probeKeys' | 'agentVersion' | 'runConfig' | 'policy' | 'projectId'>
+> & {
+  description?: string | null;
+  judgeModelKey?: string | null;
+  schedule?: IRedTeamCampaign['schedule'] | null;
+  compliance?: CampaignComplianceMeta;
+};
+
 export async function updateCampaign(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IRedTeamCampaign, 'name' | 'description' | 'targetKind' | 'agentKey' | 'modelKey' | 'probeKeys' | 'judgeModelKey' | 'runConfig' | 'policy' | 'schedule' | 'projectId'>>
-    & { compliance?: CampaignComplianceMeta },
+  data: UpdateCampaignInput,
 ): Promise<WithId<IRedTeamCampaign> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -232,7 +259,11 @@ export async function updateCampaign(
     if (!existing) return null;
     metadata = withCompliance(existing.metadata, compliance);
   }
-  const updated = await db.updateRedTeamCampaign(id, { ...rest, ...(metadata ? { metadata } : {}), updatedBy });
+  // The provider type has no `null` for an optional field, but both mixins store one as a cleared value.
+  const updated = await db.updateRedTeamCampaign(
+    id,
+    { ...rest, ...(metadata ? { metadata } : {}), updatedBy } as Parameters<typeof db.updateRedTeamCampaign>[1],
+  );
   return updated ? toView(updated) : null;
 }
 
@@ -478,8 +509,22 @@ export async function executeRun(
     // The judge model doubles as the attacker model that drives adaptive turns.
     const attackerModelKey = judgeModelKey;
 
+    // Pin the agent configuration once, here, so every attempt of the scan hits
+    // the same one even if someone publishes or saves halfway through.
+    let started: StartedAgentRevision | undefined;
+    if (campaign.targetKind === 'agent' && campaign.agentKey) {
+      const run = await db.findRedTeamRunById(runId);
+      const requested = run?.agentRevision?.requested ?? options?.agentVersion ?? storedAgentRevision(campaign.agentVersion);
+      started = await startAgentRevision(tenantDbName, campaign.agentKey, projectId, requested);
+    }
+
     const total = probes.reduce((n, p) => n + p.generate().length, 0);
-    await db.updateRedTeamRun(runId, { status: 'running', startedAt: new Date(), progress: { total, completed: 0, failed: 0 } });
+    await db.updateRedTeamRun(runId, {
+      status: 'running',
+      startedAt: new Date(),
+      progress: { total, completed: 0, failed: 0 },
+      ...(started ? { agentRevision: started.revision } : {}),
+    });
 
     // Persist incremental progress so the polling run-detail page shows attempts
     // appear step by step (throttled to avoid hammering the DB on large scans).
@@ -487,7 +532,7 @@ export async function executeRun(
     let lastFlush = 0;
     const result = await runRedTeam({
       probes,
-      invokeTarget: makeTarget(targetSpec(campaign), ctx),
+      invokeTarget: makeTarget({ ...targetSpec(campaign), ...(started ? { agentRun: started.selector } : {}) }, ctx),
       invokeJudge: judgeModelKey ? makeJudge(judgeModelKey, ctx) : undefined,
       invokeAttacker: attackerModelKey ? makeAttacker(attackerModelKey, ctx) : undefined,
       config: {
@@ -510,6 +555,8 @@ export async function executeRun(
     });
 
     const attempts = result.attempts.map(mapAttempt);
+    // A draft is read afresh per attempt: say so when it was saved mid-scan.
+    const draftChanged = started?.revision.version === null && (await started.draftChanged());
     const updated = await db.updateRedTeamRun(runId, {
       status: 'completed',
       progress: {
@@ -520,6 +567,7 @@ export async function executeRun(
       aggregate: result.aggregate,
       attempts,
       finishedAt: new Date(),
+      ...(started && draftChanged ? { agentRevision: { ...started.revision, draftChanged: true } } : {}),
     });
     return toView(updated ?? (await db.findRedTeamRunById(runId))!);
   } catch (err) {
@@ -542,6 +590,11 @@ export interface RunOptions {
   probeKeys?: string[];
   /** Judge model for this run (overrides the campaign's judge). */
   judgeModelKey?: string;
+  /**
+   * Agent campaigns: attack this revision for this scan only, over the
+   * campaign's default. A model campaign has none, so passing one is refused.
+   */
+  agentVersion?: AgentRevision;
 }
 
 export interface CreateRunParams {
@@ -552,6 +605,13 @@ export interface CreateRunParams {
   campaignKey: string;
   /** Per-run overrides; merged over campaign defaults. */
   options?: RunOptions;
+  /**
+   * Asked once the campaign is known to target an agent, before anything about
+   * the agent is looked at and before a run row is written; it throws to
+   * refuse. Only the request that starts a scan can answer for its caller, so
+   * this is never queued (the scheduler has no caller to ask).
+   */
+  authorizeAgentRun?: () => Promise<void>;
 }
 
 /** Resolve the effective probe keys for a run (run override → campaign default). */
@@ -572,12 +632,33 @@ async function createPendingRun(
   const campaign = await db.findRedTeamCampaignByKey(campaignKey, projectId);
   if (!campaign) throw new Error(`Red-team campaign "${campaignKey}" not found`);
 
+  const override = params.options?.agentVersion;
+  if (override !== undefined && campaign.targetKind !== 'agent') {
+    throw new AgentRevisionError(`Campaign "${campaign.key}" targets a model; agentVersion only applies to agent campaigns`);
+  }
+  // Before the revision check below, which says whether a version exists.
+  if (campaign.targetKind === 'agent') await params.authorizeAgentRun?.();
+  // An agent run records what it asked for; a missing agent or version fails
+  // here rather than after a run row exists that could only fail.
+  let requested: AgentRevision | undefined;
+  if (campaign.targetKind === 'agent' && campaign.agentKey) {
+    requested = override ?? storedAgentRevision(campaign.agentVersion);
+    await assertAgentRevisionRunnable(tenantDbName, campaign.agentKey, projectId, requested);
+  }
+
   // Reject if a recent run is still in progress (stale >1h rows are ignored so
-  // a campaign can never get permanently locked by a crashed worker).
-  const inFlight = await db.listRedTeamRuns({ projectId, campaignKey: campaign.key, status: 'running', limit: 1 });
-  const recentStart = inFlight[0]?.startedAt ? new Date(inFlight[0].startedAt).getTime() : 0;
-  if (inFlight.length > 0 && Date.now() - recentStart < 60 * 60 * 1000) {
-    throw new Error(`A run for campaign "${campaign.key}" is already in progress`);
+  // a campaign can never get permanently locked by a crashed worker). Scans of
+  // different revisions test different things, so they may overlap.
+  const inFlight = await db.listRedTeamRuns({ projectId, campaignKey: campaign.key, status: 'running', limit: 20 });
+  const conflict = inFlight.some((r) => {
+    const recentStart = r.startedAt ? new Date(r.startedAt).getTime() : 0;
+    if (Date.now() - recentStart >= 60 * 60 * 1000) return false;
+    return !requested || !r.agentRevision || sameAgentRevision(r.agentRevision.requested, requested);
+  });
+  if (conflict) {
+    throw new Error(
+      `A run for campaign "${campaign.key}" is already in progress${requested !== undefined ? ` on ${agentRevisionLabel(requested)}` : ''}`,
+    );
   }
 
   const customProbes = await db.listRedTeamCustomProbes({ projectId });
@@ -589,6 +670,7 @@ async function createPendingRun(
     targetKind: campaign.targetKind,
     targetRef: targetRef(campaign),
     status: 'pending',
+    ...(requested !== undefined ? { agentRevision: { requested, agentKey: campaign.agentKey } } : {}),
     mode,
     progress: { total: probeCount, completed: 0, failed: 0 },
     attempts: [],
@@ -656,7 +738,7 @@ export async function createCustomProbe(
     key,
     name: input.name,
     description: input.description ?? '',
-    family: input.family || 'custom',
+    family: input.family || DEFAULT_CUSTOM_PROBE_FAMILY,
     category: input.category,
     severity: input.severity,
     attempts: input.attempts,
@@ -683,11 +765,24 @@ export async function getCustomProbe(tenantDbName: string, id: string): Promise<
   return record ? toView(record) : null;
 }
 
+/**
+ * A custom-probe PATCH: a key that is absent leaves the stored value alone
+ * (never pass `undefined` for it). `null` for the description or the family
+ * puts back what a create would have stored (an empty description, the
+ * `custom` family): neither is ever stored as a null.
+ */
+export type UpdateCustomProbeInput = Partial<
+  Pick<IRedTeamCustomProbe, 'name' | 'category' | 'severity' | 'attempts' | 'detectors' | 'enabled' | 'projectId'>
+> & {
+  description?: string | null;
+  family?: string | null;
+};
+
 export async function updateCustomProbe(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IRedTeamCustomProbe, 'name' | 'description' | 'family' | 'category' | 'severity' | 'attempts' | 'detectors' | 'enabled' | 'projectId'>>,
+  data: UpdateCustomProbeInput,
 ): Promise<WithId<IRedTeamCustomProbe> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -700,7 +795,13 @@ export async function updateCustomProbe(
       detectors: data.detectors ?? existing.detectors,
     });
   }
-  const updated = await db.updateRedTeamCustomProbe(id, { ...data, updatedBy });
+  const { description, family, ...rest } = data;
+  const updated = await db.updateRedTeamCustomProbe(id, {
+    ...rest,
+    ...(description !== undefined ? { description: description ?? '' } : {}),
+    ...(family !== undefined ? { family: family || DEFAULT_CUSTOM_PROBE_FAMILY } : {}),
+    updatedBy,
+  });
   return updated ? toView(updated) : null;
 }
 

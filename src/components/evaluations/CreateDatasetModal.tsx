@@ -201,8 +201,9 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
           method: isEdit ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
+            // On an edit an emptied description is sent as '' (an absent key leaves the stored one alone).
             isEdit
-              ? { name: name.trim(), description: description || undefined }
+              ? { name: name.trim(), description }
               : { name: name.trim(), description: description || undefined, items },
           ),
         },

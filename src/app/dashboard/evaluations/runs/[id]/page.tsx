@@ -2,12 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Paper, Progress, Text } from '@mantine/core';
-import { IconArrowLeft } from '@tabler/icons-react';
+import { Alert, Button, Group, Loader, Paper, Progress, Text } from '@mantine/core';
+import { IconAlertTriangle, IconArrowLeft } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { runVersionTag } from '@/components/agents/agentVersionTag';
 import EvaluationRunCompare from '@/components/evaluations/EvaluationRunCompare';
 import type { EvalRunItemView, EvalRunView } from '@/components/evaluations/types';
 
@@ -182,8 +184,15 @@ export default function EvaluationRunDetailPage() {
         title={run.suiteKey}
         subtitle={
           <span>
-            Target <span className="ds-mono">{run.targetKey}</span> · Dataset <span className="ds-mono">{run.datasetKey}</span>{' '}
-            · <span className={`ds-badge ${RUN_STATUS_BADGE[run.status] ?? ''}`}>{run.status}</span>
+            Target <span className="ds-mono">{run.targetKey}</span>
+            {run.agentRevision ? (
+              <>
+                {' '}· Agent{' '}
+                <span className="ds-mono"><AgentWithVersion name={run.agentRevision.agentKey} tag={runVersionTag(run.agentRevision)} /></span>
+              </>
+            ) : null}
+            {' '}· Dataset <span className="ds-mono">{run.datasetKey}</span>
+            {' '}· <span className={`ds-badge ${RUN_STATUS_BADGE[run.status] ?? ''}`}>{run.status}</span>
           </span>
         }
         actions={backButton}
@@ -193,6 +202,13 @@ export default function EvaluationRunDetailPage() {
         <div className="ds-card ds-card-pad-sm" style={{ marginBottom: 16, color: 'var(--mantine-color-red-6)' }}>
           {run.error}
         </div>
+      ) : null}
+
+      {run.agentRevision?.draftChanged ? (
+        <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={16} />} mb="md" title="The draft changed during this run">
+          The agent&apos;s draft was saved while this run was in progress, so later items may have run a different
+          configuration than earlier ones. Re-run to get a result for one configuration.
+        </Alert>
       ) : null}
 
       {inProgress ? (

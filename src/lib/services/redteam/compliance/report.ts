@@ -27,6 +27,8 @@ import type {
 
 /** Evidence samples surfaced per EU risk family (CoP asks for ~5). */
 const SAMPLES_PER_CATEGORY = 5;
+/** Pages of `limit` runs read past draft scans at most, so a project of mostly drafts cannot turn one report into a full scan. */
+const MAX_RUN_PAGES = 10;
 
 /** Effective outcome honouring any human-in-the-loop override. */
 function effectiveOutcome(a: IRedTeamAttemptResult): RedTeamOutcome {
@@ -57,6 +59,7 @@ function toSample(run: IRedTeamRun, a: IRedTeamAttemptResult): ComplianceEvidenc
     outcome: effectiveOutcome(a),
     input: lastTurn?.user ?? a.transcript[0]?.user ?? '',
     output: lastTurn?.assistant ?? '',
+    ...(run.agentRevision?.version !== undefined ? { agentVersion: run.agentRevision.version } : {}),
   };
 }
 
@@ -99,17 +102,38 @@ export async function buildComplianceReport(
 ): Promise<EuComplianceReport> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const runs = await db.listRedTeamRuns({
-    projectId: options.projectId,
-    status: 'completed',
-    limit: options.limit ?? 100,
-  });
+  // A scan of an unpublished draft shows how a candidate holds up, not how the
+  // system in service does, so it is not evidence about the latter. Drafts are
+  // skipped while reading, so they do not use up the report's `limit`.
+  const limit = options.limit ?? 100;
+  const runs: IRedTeamRun[] = [];
+  let draftRunsExcluded = 0;
+  for (let page = 0; page < MAX_RUN_PAGES && runs.length < limit; page += 1) {
+    const batch = await db.listRedTeamRuns({
+      projectId: options.projectId,
+      status: 'completed',
+      limit,
+      skip: page * limit,
+    });
+    for (const run of batch) {
+      if (runs.length >= limit) break;
+      if (run.agentRevision?.requested === 'draft') draftRunsExcluded += 1;
+      else runs.push(run);
+    }
+    if (batch.length < limit) break;
+  }
 
   const disclaimers: string[] = [
     'Automated adversarial-testing evidence only; it does not by itself constitute a conformity assessment.',
     'Coverage is limited to the probes selected in the referenced campaigns; absence of a finding is not proof of safety.',
     'LLM-judge verdicts are probabilistic; human-in-the-loop reviews, where present, override machine verdicts.',
   ];
+
+  if (draftRunsExcluded > 0) {
+    disclaimers.push(
+      `${draftRunsExcluded} scan${draftRunsExcluded === 1 ? '' : 's'} of an unpublished agent draft ${draftRunsExcluded === 1 ? 'was' : 'were'} excluded: a draft is not the system in service.`,
+    );
+  }
 
   // ── System header: gather campaign metadata + targets ──────────────
   const campaignKeys = [...new Set(runs.map((r) => r.campaignKey))];
