@@ -11,6 +11,9 @@ All application configuration is managed through the central `getConfig()` funct
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `JWT_SECRET` | Secret for JWT signing (min 32 chars) | — |
+| `PROVIDER_ENCRYPTION_SECRET` | Key that encrypts provider credentials at rest (min 32 chars, must differ from `JWT_SECRET`) | — |
+
+Both secrets are checked at startup; see [Validation](#validation).
 
 ### Database
 
@@ -59,7 +62,9 @@ On an installation you run yourself, set `DEPLOYMENT_MODE=onprem` to use storage
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `JWT_EXPIRES_IN` | JWT token expiry | `7d` |
-| `PROVIDER_ENCRYPTION_SECRET` | Encryption key for provider credentials | Falls back to `JWT_SECRET` |
+| `PROVIDER_ENCRYPTION_SECRET` | Key that encrypts provider credentials at rest. Required: min 32 chars, must differ from `JWT_SECRET`. | — |
+
+Production refuses to start unless `PROVIDER_ENCRYPTION_SECRET` is valid, and in production credentials are never encrypted with `JWT_SECRET`. Outside production, an unset `PROVIDER_ENCRYPTION_SECRET` is reported as a configuration error and new credentials are encrypted with `JWT_SECRET` instead. Decryption also tries `JWT_SECRET`, so credentials that an earlier version saved under it stay readable and are encrypted under `PROVIDER_ENCRYPTION_SECRET` the next time they are saved.
 
 ### Network & Authorization
 
@@ -463,11 +468,12 @@ At startup, critical configuration is validated:
 ```typescript
 const cfg = getConfig();
 const errors = validateConfig(cfg);
-// Checks: MONGODB_URI required, JWT_SECRET required,
+// Checks: MONGODB_URI required, JWT_SECRET required (min 32 chars),
+// PROVIDER_ENCRYPTION_SECRET required (min 32 chars, different from JWT_SECRET),
 // REDIS_URL required when CACHE_PROVIDER=redis, etc.
 ```
 
-Validation errors are logged but do not crash the server — this allows K8s secrets to be injected after initial startup.
+Every error is logged. In production the server then refuses to start. In any other environment it keeps running and logs a warning that some features may not work.
 
 ## Example `.env.local`
 
@@ -476,6 +482,7 @@ Validation errors are logged but do not crash the server — this allows K8s sec
 ```bash
 # Required
 JWT_SECRET=your-secret-key-must-be-at-least-32-chars
+PROVIDER_ENCRYPTION_SECRET=another-secret-key-of-at-least-32-chars
 
 # Database (SQLite is the default — no MongoDB needed)
 # DB_PROVIDER=sqlite
@@ -498,6 +505,7 @@ CORS_ALLOWED_ORIGINS=http://localhost:3001,http://localhost:5173
 ```bash
 # Required
 JWT_SECRET=your-secret-key-must-be-at-least-32-chars
+PROVIDER_ENCRYPTION_SECRET=another-secret-key-of-at-least-32-chars
 
 # Database
 DB_PROVIDER=mongodb

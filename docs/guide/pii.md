@@ -10,7 +10,7 @@ The policy list shows total / enabled / disabled counts and the languages covere
 
 ## Concepts
 
-- **Category** — a built-in PII class (`email`, `phone`, `creditCard`, `iban`, `nationalId`, `passport`, `address`, `ipAddress`, `url`, `socialHandle`, `apiKey`, `cryptoWallet`, `birthDate`, `swift`). Each category ships with multi-language detectors.
+- **Category** — a built-in PII class, such as `email`, `phone`, `creditCard`, `iban`, `ipAddress`, `ssn_us` or `tc_kimlik`. There are 25 built-in categories; the [category table](/how-to/guardrail-and-pii#configure-categories-and-patterns) lists them with their languages and defaults. Each category ships with multi-language detectors.
 - **Policy** — a named, project-scoped configuration that picks which categories are enabled, which languages to scan, a default action (`detect | redact | mask | block | tokenize`), and any custom regex patterns.
 - **Action**
   - `detect` — return findings only (no transformation)

@@ -14,7 +14,10 @@ Create a minimal `.env.local`:
 
 ```bash
 JWT_SECRET=your-secret-key-must-be-at-least-32-characters-long
+PROVIDER_ENCRYPTION_SECRET=a-different-secret-key-of-at-least-32-characters
 ```
+
+Use two different values of at least 32 characters each, for example from `openssl rand -hex 32`.
 
 Start the server:
 
@@ -32,9 +35,12 @@ That's it! The gateway starts with **SQLite** as the database (default), storing
 docker build -t cognipeer-console .
 docker run -p 3000:3000 \
   -e JWT_SECRET=your-secret-key-must-be-at-least-32-characters-long \
+  -e PROVIDER_ENCRYPTION_SECRET=a-different-secret-key-of-at-least-32-characters \
   -v console-data:/app/data \
   cognipeer-console
 ```
+
+The image runs with `NODE_ENV=production`, so it refuses to start unless both secrets are valid.
 
 The `-v console-data:/app/data` volume persists your SQLite databases and local files across container restarts.
 
@@ -67,6 +73,7 @@ At minimum you need:
 | Variable | Description |
 |----------|-------------|
 | `JWT_SECRET` | Secret for JWT signing (min 32 chars) |
+| `PROVIDER_ENCRYPTION_SECRET` | Key that encrypts provider credentials at rest (min 32 chars, must differ from `JWT_SECRET`) |
 
 Optional (only when using MongoDB):
 

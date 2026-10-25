@@ -376,5 +376,5 @@ is in [Authorization](/guide/authorization#the-settings-you-maintain).
 |----------|---------|-------------|
 | `JWT_SECRET` | — | **Required**. Secret for JWT signing |
 | `JWT_EXPIRES_IN` | `7d` | JWT expiration duration |
-| `PROVIDER_ENCRYPTION_SECRET` | `JWT_SECRET` | Encryption key for stored credentials |
+| `PROVIDER_ENCRYPTION_SECRET` | — | **Required**. Key that encrypts stored provider credentials at rest. Min 32 chars, must differ from `JWT_SECRET` |
 | `TRUSTED_PROXIES` | — (unset: forwarded headers are not used for authorization) | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Set it whenever the console runs behind one: the client address that token IP allowlists, the IP condition of policies, rate limits and audit logs use depends on it. See [Authorization](/guide/authorization#client-address-and-trusted-proxies). |
