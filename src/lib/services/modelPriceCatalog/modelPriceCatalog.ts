@@ -133,6 +133,8 @@ interface RawCatalogEntry {
   input_cost_per_token?: number;
   output_cost_per_token?: number;
   cache_read_input_token_cost?: number;
+  /** 5-minute cache-write price; the *_above_1hr variant is deliberately ignored. */
+  cache_creation_input_token_cost?: number;
   max_input_tokens?: number;
   max_output_tokens?: number;
   litellm_provider?: string;
@@ -158,6 +160,7 @@ export function parseCatalogJson(raw: Record<string, unknown>): ModelPriceCatalo
     const inputTokenPer1M = perTokenToPerMillion(spec.input_cost_per_token);
     const outputTokenPer1M = perTokenToPerMillion(spec.output_cost_per_token);
     const cachedTokenPer1M = perTokenToPerMillion(spec.cache_read_input_token_cost);
+    const cacheWriteTokenPer1M = perTokenToPerMillion(spec.cache_creation_input_token_cost);
     if (inputTokenPer1M <= 0 && outputTokenPer1M <= 0 && cachedTokenPer1M <= 0) continue;
 
     const pricing: IModelPricing = {
@@ -165,6 +168,7 @@ export function parseCatalogJson(raw: Record<string, unknown>): ModelPriceCatalo
       inputTokenPer1M,
       outputTokenPer1M,
       ...(cachedTokenPer1M > 0 ? { cachedTokenPer1M } : {}),
+      ...(cacheWriteTokenPer1M > 0 ? { cacheWriteTokenPer1M } : {}),
     };
     entries.push({
       key,

@@ -136,15 +136,35 @@ function normalizeKeyCandidate(input: string): string {
   return slugify(fallback, SLUG_OPTIONS);
 }
 
+const PRICING_NUMBER_KEYS = [
+  'inputTokenPer1M',
+  'outputTokenPer1M',
+  'cachedTokenPer1M',
+  'cacheWriteTokenPer1M',
+  'inputSecondPer1K',
+  'outputSecondPer1K',
+  'inputCharacterPer1M',
+  'pagePer1K',
+  'imagePer1K',
+] as const;
+
+/**
+ * Keeps every pricing field whose value is a finite number >= 0 and drops the rest
+ * (undefined/null/NaN/negative), so a blank cache price stays absent instead of being
+ * stored as 0 and Mongo never receives an undefined/null key.
+ */
 function ensureCurrency(
   pricing: CreateModelInput['pricing'],
 ): CreateModelInput['pricing'] {
-  return {
-    currency: pricing.currency || 'USD',
-    inputTokenPer1M: pricing.inputTokenPer1M,
-    outputTokenPer1M: pricing.outputTokenPer1M,
-    cachedTokenPer1M: pricing.cachedTokenPer1M ?? 0,
-  };
+  const source = pricing as unknown as Record<string, unknown>;
+  const result: Record<string, unknown> = { currency: pricing.currency || 'USD' };
+  for (const key of PRICING_NUMBER_KEYS) {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      result[key] = value;
+    }
+  }
+  return result as unknown as CreateModelInput['pricing'];
 }
 
 export async function listModels(
@@ -569,7 +589,7 @@ export async function createDynamicModel(
     providerDriver: DYNAMIC_PROVIDER_KEY,
     category: 'llm',
     modelId: 'dynamic-router',
-    pricing: { currency: 'USD', inputTokenPer1M: 0, outputTokenPer1M: 0, cachedTokenPer1M: 0 },
+    pricing: { currency: 'USD', inputTokenPer1M: 0, outputTokenPer1M: 0 },
     settings: { dynamic: payload.dynamic },
     isMultimodal: false,
     supportsToolCalls: true,

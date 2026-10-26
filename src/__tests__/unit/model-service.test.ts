@@ -333,6 +333,44 @@ describe('createModel - key clash', () => {
     const created = await createModel(TENANT_DB, TENANT_ID, PROJECT_ID, 'user-1', input({}));
     expect(created.key).toBe('my-model-2');
   });
+
+  it('keeps blank cache prices absent and every other pricing field; drops invalid values', async () => {
+    const { createModel } = await import('@/lib/services/models/modelService');
+    await createModel(TENANT_DB, TENANT_ID, PROJECT_ID, 'user-1', input({
+      pricing: {
+        inputTokenPer1M: 5,
+        outputTokenPer1M: 15,
+        cacheWriteTokenPer1M: 6.25,
+        inputSecondPer1K: 0.4,
+        inputCharacterPer1M: 15,
+        pagePer1K: 1.5,
+        imagePer1K: 40,
+        cachedTokenPer1M: undefined,
+        outputSecondPer1K: -1,
+      },
+    }));
+    const saved = db.createModel.mock.calls[0][0] as unknown as { pricing: Record<string, unknown> };
+    expect(saved.pricing).toEqual({
+      currency: 'USD',
+      inputTokenPer1M: 5,
+      outputTokenPer1M: 15,
+      cacheWriteTokenPer1M: 6.25,
+      inputSecondPer1K: 0.4,
+      inputCharacterPer1M: 15,
+      pagePer1K: 1.5,
+      imagePer1K: 40,
+    });
+    expect('cachedTokenPer1M' in saved.pricing).toBe(false);
+  });
+
+  it('keeps an explicit cache-read price', async () => {
+    const { createModel } = await import('@/lib/services/models/modelService');
+    await createModel(TENANT_DB, TENANT_ID, PROJECT_ID, 'user-1', input({
+      pricing: { currency: 'EUR', inputTokenPer1M: 3, outputTokenPer1M: 15, cachedTokenPer1M: 0.3 },
+    }));
+    const saved = db.createModel.mock.calls[0][0] as unknown as { pricing: Record<string, unknown> };
+    expect(saved.pricing).toEqual({ currency: 'EUR', inputTokenPer1M: 3, outputTokenPer1M: 15, cachedTokenPer1M: 0.3 });
+  });
 });
 
 // ── validateDynamicConfigReferences ───────────────────────────────────────────
