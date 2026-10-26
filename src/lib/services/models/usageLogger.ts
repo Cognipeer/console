@@ -22,6 +22,9 @@ import {
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
 import { recordRoutedUsage } from './dynamicRoutingState';
+import { resolveTokenRates } from './pricingRates';
+
+export { hasCacheReadPrice, hasCacheWritePrice, resolveTokenRates, type TokenRates } from './pricingRates';
 
 const TOKENS_PER_MILLION = 1_000_000;
 const SECONDS_PER_THOUSAND = 1_000;
@@ -29,10 +32,20 @@ const CHARACTERS_PER_MILLION = 1_000_000;
 const PAGES_PER_THOUSAND = 1_000;
 const IMAGES_PER_THOUSAND = 1_000;
 
+/**
+ * One model call's usage. `inputTokens` is the WHOLE prompt (uncached, cache-read
+ * and cache-write tokens) and `outputTokens` the whole completion (visible and
+ * reasoning); the cache and reasoning counts are SUBSETS of them, never added on
+ * top. `toGatewayUsage` turns every provider's shape into this one.
+ */
 export interface TokenUsage {
   inputTokens?: number;
   outputTokens?: number;
+  /** Subset of `inputTokens` read from the provider's prompt cache. */
   cachedInputTokens?: number;
+  /** Subset of `inputTokens` written to the provider's prompt cache (Anthropic
+   *  `cache_creation_input_tokens`, Bedrock `cacheWriteInputTokens`). */
+  cachedWriteTokens?: number;
   totalTokens?: number;
   toolCalls?: number;
   // Non-token units used by STT / TTS / OCR / image models. Optional and only
@@ -59,8 +72,14 @@ export interface UsageCostResult {
   currency: string;
   inputCost: number;
   outputCost: number;
+  /** The cache-read slice of the prompt. */
   cachedCost: number;
+  /** The cache-write slice of the prompt. */
+  cacheWriteCost: number;
   totalCost: number;
+  /** Cache tokens this cost priced at the input rate because the model has no
+   *  price entered for them. Absent when nothing was assumed. */
+  assumedRates?: Array<'cacheRead' | 'cacheWrite'>;
 }
 
 export function calculateCost(
@@ -68,23 +87,29 @@ export function calculateCost(
   usage: TokenUsage,
 ): UsageCostResult {
   const currency = pricing.currency || 'USD';
+  const rates = resolveTokenRates(pricing);
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
   const cachedTokens = usage.cachedInputTokens ?? 0;
+  const cacheWriteTokens = usage.cachedWriteTokens ?? 0;
 
-  // Cached tokens are a *subset* of the prompt count, not an addition to it —
-  // that is true of OpenAI's `prompt_tokens_details.cached_tokens` and of
-  // LangChain's standardized `input_token_details.cache_read`. Billing the full
-  // prompt at the input rate and then adding the cached portion again charges
-  // the cache-hit tokens twice, at more than the uncached price.
-  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
+  // Cache reads and writes are *subsets* of the prompt count, not additions to
+  // it — that is true of OpenAI's `prompt_tokens_details.cached_tokens`, of
+  // LangChain's standardized `input_token_details.cache_read` and of the
+  // Anthropic / Bedrock counts once `toGatewayUsage` has folded them in. Billing
+  // the full prompt at the input rate and then adding a cached portion again
+  // charges those tokens twice. Each slice is priced in full at its own rate.
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens - cacheWriteTokens);
 
-  const inputCost =
-    ((pricing.inputTokenPer1M ?? 0) * uncachedInputTokens) / TOKENS_PER_MILLION;
-  const outputCost =
-    ((pricing.outputTokenPer1M ?? 0) * outputTokens) / TOKENS_PER_MILLION;
-  const cachedCost =
-    ((pricing.cachedTokenPer1M ?? 0) * cachedTokens) / TOKENS_PER_MILLION;
+  const inputCost = (rates.input * uncachedInputTokens) / TOKENS_PER_MILLION;
+  const outputCost = (rates.output * outputTokens) / TOKENS_PER_MILLION;
+  const cachedCost = (rates.cacheRead * cachedTokens) / TOKENS_PER_MILLION;
+  const cacheWriteCost = (rates.cacheWrite * cacheWriteTokens) / TOKENS_PER_MILLION;
+
+  // A free model (input rate 0) assumes nothing: every slice is free either way.
+  const assumedRates: Array<'cacheRead' | 'cacheWrite'> = [];
+  if (rates.input > 0 && cachedTokens > 0 && rates.cacheReadAssumed) assumedRates.push('cacheRead');
+  if (rates.input > 0 && cacheWriteTokens > 0 && rates.cacheWriteAssumed) assumedRates.push('cacheWrite');
 
   // Non-token components. Each contributes to either inputCost or outputCost
   // depending on direction so the existing aggregate fields stay meaningful.
@@ -106,14 +131,16 @@ export function calculateCost(
     inputCost + audioInputCost + characterInputCost + pageInputCost + imageInputCost;
   const totalOutputCost = outputCost + audioOutputCost;
 
-  const totalCost = totalInputCost + totalOutputCost + cachedCost;
+  const totalCost = totalInputCost + totalOutputCost + cachedCost + cacheWriteCost;
 
   return {
     currency,
     inputCost: totalInputCost,
     outputCost: totalOutputCost,
     cachedCost,
+    cacheWriteCost,
     totalCost,
+    ...(assumedRates.length > 0 ? { assumedRates } : {}),
   };
 }
 
@@ -160,11 +187,9 @@ export async function logModelUsage(
     ...model.pricing,
     ...calculateCost(model.pricing, usage),
   };
+  // The cache counts are subsets of inputTokens: a total never adds them again.
   const totalTokens =
-    usage.totalTokens ??
-    (usage.inputTokens ?? 0) +
-      (usage.outputTokens ?? 0) +
-      (usage.cachedInputTokens ?? 0);
+    usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
 
   let routing = payload.routing;
   // A semantic-cache hit costs nothing on any model, so it is not a routing
@@ -205,6 +230,7 @@ export async function logModelUsage(
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
     cachedInputTokens: usage.cachedInputTokens ?? 0,
+    cachedWriteTokens: usage.cachedWriteTokens ?? 0,
     reasoningTokens: usage.reasoningTokens ?? 0,
     totalTokens,
     costUsd: pricingSnapshot.totalCost,
@@ -263,6 +289,7 @@ export async function logModelUsage(
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
     cachedInputTokens: usage.cachedInputTokens ?? 0,
+    cachedWriteTokens: usage.cachedWriteTokens ?? 0,
     reasoningTokens: usage.reasoningTokens,
     totalTokens,
     toolCalls: usage.toolCalls ?? 0,

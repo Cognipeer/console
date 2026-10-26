@@ -1,5 +1,6 @@
 import { redactDataUrls } from '@/lib/services/logRedaction';
 import { isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
+import type { TokenUsage, UsageCostResult } from './usageLogger';
 
 export type OpenAIErrorBody = {
   message: string;
@@ -13,10 +14,22 @@ export type NormalizedOpenAIError = {
   error: OpenAIErrorBody;
 };
 
+/** What a limit-hit call was billed, carried on its OutputTokenLimitError. */
+export type OutputTokenLimitBilling = {
+  /** The call's gateway usage (`toGatewayUsage` rule): the provider bills a cut-off call too. */
+  usage?: TokenUsage;
+  cost?: UsageCostResult;
+  /** The core already wrote the call's usage row and settled its cost (`onUsageSettled`). */
+  usageBooked?: boolean;
+};
+
 export class OutputTokenLimitError extends Error {
   readonly limit?: number;
+  readonly usage?: TokenUsage;
+  readonly cost?: UsageCostResult;
+  readonly usageBooked?: boolean;
 
-  constructor(limit?: number) {
+  constructor(limit?: number, billing?: OutputTokenLimitBilling) {
     const limitDescription = limit ? ` (${limit} tokens)` : '';
     super(
       `The model reached its output token limit${limitDescription} before producing a final answer or tool call. `
@@ -24,6 +37,9 @@ export class OutputTokenLimitError extends Error {
     );
     this.name = 'OutputTokenLimitError';
     this.limit = limit;
+    if (billing?.usage) this.usage = billing.usage;
+    if (billing?.cost) this.cost = billing.cost;
+    if (billing?.usageBooked) this.usageBooked = true;
   }
 }
 
