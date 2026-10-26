@@ -3621,12 +3621,12 @@ export const en = {
       },
       maxOutputTokens: {
         label: 'Maximum output tokens',
-        description: 'Maximum generated tokens; must not exceed the context window.',
+        description: 'The most tokens this model can generate in one response. Used to cap defaults and retries and advertised to clients; must not exceed the context window. It is not a per-request default: see Default max tokens.',
         placeholder: 'e.g. 16384',
       },
       runtimeMaxTokens: {
         label: 'Default max tokens',
-        description: 'Runtime output limit used when the request does not provide one.',
+        description: 'Output limit applied to every request that does not set its own max_tokens. Blank = the provider or model default. Keep it at or below Maximum output tokens.',
       },
     },
     review: {
@@ -4298,7 +4298,7 @@ export const en = {
   },
   agents: {
     outputLimit: {
-      message: "The model reached its output token limit before it could answer. Raise the model's maximum output tokens or lower its reasoning effort, then try again.",
+      message: "The model reached its output token limit before it could answer. Raise the request's max_tokens (or the model's Default max tokens, or the agent's Max output tokens per call) or lower the reasoning effort, then try again.",
     },
     title: 'Agents',
     subtitle: 'Create and manage AI agents powered by your models',
@@ -4459,6 +4459,9 @@ export const en = {
       reasoningEffortHint: 'Chosen here, it wins over the Model Hub default and over an API request.',
       reasoningPickerAria: 'Reasoning for {model}',
       showReasoning: 'Show reasoning',
+      maxTokensPerCall: 'Max output tokens per call',
+      maxTokensPerCallDescription: "Output limit for each model call of this agent, thinking tokens included. Blank = the model's own default (Default max tokens in the Model Hub). Not the same as Max total output tokens, which caps the whole run.",
+      maxTokensPerCallPlaceholder: 'Model default',
       showReasoningDescription: 'On by default. When off, reasoning text is left out of API responses, session messages and Studio chat. The thinking tokens are still counted and billed.',
       guardrails: 'Guardrails',
       inputGuardrail: 'Input Guardrail',
@@ -6262,7 +6265,7 @@ export const en = {
       missingModelIdMessage: 'The catalog is matched against the model ID field.',
       noMatchTitle: 'No catalog match',
       noMatchMessage: 'No unambiguous price found for "{name}" in the catalog.',
-      filledTitle: 'Pricing filled from catalog',
+      filledTitle: 'Filled from catalog',
       filledMessage: 'Matched {key} ({confidence})',
       errorTitle: 'Catalog lookup failed',
     },

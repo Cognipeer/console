@@ -7,6 +7,7 @@ import { IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import {
   getDefaultModelOutputModalities,
+  limitsFromCatalogFill,
   type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
 import {
@@ -837,12 +838,18 @@ export default function CreateModelModal({
         outputProps={form.getInputProps('pricing.outputTokenPer1M')}
         cachedProps={form.getInputProps('pricing.cachedTokenPer1M')}
         cacheWriteProps={form.getInputProps('pricing.cacheWriteTokenPer1M')}
-        onApplyCatalog={(pricing) => {
+        onApplyCatalog={(pricing, meta) => {
           setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
           setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
           // 0 = the catalog has no such price; keep the field blank.
           setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M || '');
           setFieldValue('pricing.cacheWriteTokenPer1M', pricing.cacheWriteTokenPer1M || '');
+          // Token limits of the entry fill the (chat model) limit fields only while they are empty.
+          if (isLlm) {
+            const limits = limitsFromCatalogFill(formValues.capabilities, meta);
+            if (limits.contextWindow !== undefined) setFieldValue('capabilities.contextWindow', limits.contextWindow);
+            if (limits.maxOutputTokens !== undefined) setFieldValue('capabilities.maxOutputTokens', limits.maxOutputTokens);
+          }
         }}
       >
         {formValues.category === 'stt' && (
@@ -929,7 +936,11 @@ export default function CreateModelModal({
               }
             : undefined
         }
-        maxTokens={{ props: form.getInputProps('settings.maxTokens') }}
+        maxTokens={{
+          label: tWizard('fields.runtimeMaxTokens.label'),
+          hint: tWizard('fields.runtimeMaxTokens.description'),
+          props: form.getInputProps('settings.maxTokens'),
+        }}
         temperatureProps={form.getInputProps('settings.temperature')}
       />
 

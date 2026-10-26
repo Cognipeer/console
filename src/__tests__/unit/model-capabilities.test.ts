@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { IModel } from '@/lib/database';
 import {
   applyModelCapabilityOverrides,
+  limitsFromCatalogFill,
   parseModelCapabilityOverrides,
   resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
@@ -75,12 +76,27 @@ describe('model capabilities', () => {
 
     expect(capabilities).toEqual(expect.objectContaining({
       contextWindow: 32768,
-      maxOutputTokens: 4096,
+      // `settings.max_tokens` is the default per-request limit, not the model maximum: never advertised as one.
+      maxOutputTokens: undefined,
       inputModalities: ['text', 'image'],
       outputModalities: ['embeddings'],
       supportsReasoning: false,
       supportsToolCalls: true,
     }));
+  });
+
+  it('does not advertise the default per-request limit (settings.maxTokens / max_tokens) as the model maximum', () => {
+    expect(resolveModelCapabilities(makeModel({ settings: { maxTokens: 2048 } })).maxOutputTokens).toBeUndefined();
+    expect(resolveModelCapabilities(makeModel({ settings: { max_tokens: 2048 } })).maxOutputTokens).toBeUndefined();
+  });
+
+  it('still reads a declared maximum from metadata and from settings.maxOutputTokens', () => {
+    expect(resolveModelCapabilities(makeModel({ settings: { maxTokens: 2048 }, metadata: { max_output_tokens: 64000 } })).maxOutputTokens).toBe(64000);
+    expect(resolveModelCapabilities(makeModel({ settings: { maxTokens: 2048, maxOutputTokens: 32000 } })).maxOutputTokens).toBe(32000);
+    expect(resolveModelCapabilities(makeModel({
+      settings: { maxTokens: 2048 },
+      metadata: { capabilities: { maxOutputTokens: 128000 } },
+    })).maxOutputTokens).toBe(128000);
   });
 
   it('uses category-specific modalities for speech and OCR models', () => {
@@ -113,6 +129,45 @@ describe('model capabilities', () => {
     expect(() => parseModelCapabilityOverrides({
       inputModalities: ['text', 'telepathy'],
     })).toThrow('unsupported modality');
+  });
+
+  describe('limitsFromCatalogFill (Fill from catalog)', () => {
+    it('fills both limits while the fields are empty', () => {
+      expect(limitsFromCatalogFill(
+        { contextWindow: '', maxOutputTokens: '' },
+        { maxInputTokens: 200000, maxOutputTokens: 64000 },
+      )).toEqual({ contextWindow: 200000, maxOutputTokens: 64000 });
+    });
+
+    it('never overwrites a value somebody typed', () => {
+      expect(limitsFromCatalogFill(
+        { contextWindow: 100000, maxOutputTokens: 8000 },
+        { maxInputTokens: 200000, maxOutputTokens: 64000 },
+      )).toEqual({});
+      expect(limitsFromCatalogFill(
+        { contextWindow: 100000, maxOutputTokens: '' },
+        { maxInputTokens: 200000, maxOutputTokens: 64000 },
+      )).toEqual({ maxOutputTokens: 64000 });
+    });
+
+    it('skips a maximum output that would exceed the context window the form holds (the save would refuse it)', () => {
+      expect(limitsFromCatalogFill(
+        { contextWindow: 32000, maxOutputTokens: '' },
+        { maxInputTokens: 200000, maxOutputTokens: 64000 },
+      )).toEqual({});
+      expect(limitsFromCatalogFill(
+        { contextWindow: '', maxOutputTokens: '' },
+        { maxInputTokens: 32000, maxOutputTokens: 64000 },
+      )).toEqual({ contextWindow: 32000 });
+    });
+
+    it('fills only what the catalog entry has, and ignores junk', () => {
+      expect(limitsFromCatalogFill({ contextWindow: '', maxOutputTokens: '' }, { maxOutputTokens: 16384 }))
+        .toEqual({ maxOutputTokens: 16384 });
+      expect(limitsFromCatalogFill({ contextWindow: '', maxOutputTokens: '' }, { maxInputTokens: 0, maxOutputTokens: -1 }))
+        .toEqual({});
+      expect(limitsFromCatalogFill({ contextWindow: '', maxOutputTokens: '' }, {})).toEqual({});
+    });
   });
 
   it('normalizes duplicate modalities and removes overrides explicitly', () => {

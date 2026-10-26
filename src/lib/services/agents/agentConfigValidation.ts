@@ -127,6 +127,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         });
     }
     checkNumber(issues, 'topP', config.topP, { min: 0, max: 1 });
+    checkNumber(issues, 'maxTokens', config.maxTokens, { min: 1, integer: true });
 
     const runtime = config.runtime ?? {};
     checkEnum(issues, 'runtime.profile', runtime.profile, PROFILES);

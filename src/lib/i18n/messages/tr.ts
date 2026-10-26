@@ -403,12 +403,12 @@ export const tr: typeof en = {
       maxOutputTokens: {
         label: 'Maksimum çıktı token sayısı',
         description:
-          'Üretilebilecek maksimum token sayısı; bağlam penceresini aşmamalıdır.',
+          'Modelin tek bir yanıtta üretebileceği en fazla token sayısı. Varsayılanları ve yeniden denemeleri sınırlamak için kullanılır ve istemcilere bildirilir; bağlam penceresini aşmamalıdır. İstek başına varsayılan değildir: bunun için Varsayılan maksimum token alanına bakın.',
         placeholder: 'ör. 16384',
       },
       runtimeMaxTokens: {
         label: 'Varsayılan maksimum token',
-        description: 'İstekte belirtilmediğinde kullanılan çalışma zamanı çıktı sınırı.',
+        description: 'Kendi max_tokens değerini belirtmeyen her isteğe uygulanan çıktı sınırı. Boşsa sağlayıcının veya modelin varsayılanı geçerlidir. Maksimum çıktı token sayısının altında veya eşit tutun.',
       },
     },
     review: {
@@ -2791,7 +2791,7 @@ export const tr: typeof en = {
   agents: {
     ...en.agents,
     outputLimit: {
-      message: 'Model, yanıt veremeden çıktı token sınırına ulaştı. Modelin en yüksek çıktı token değerini artırın veya akıl yürütme eforunu düşürün, sonra tekrar deneyin.',
+      message: 'Model, yanıt veremeden çıktı token sınırına ulaştı. İsteğin max_tokens değerini (veya modelin Varsayılan maksimum token ayarını ya da agent’ın çağrı başına maksimum çıktı token ayarını) artırın veya akıl yürütme eforunu düşürün, sonra tekrar deneyin.',
     },
     title: 'Agent’lar',
     subtitle: 'Modellerinizle çalışan AI agent’ları oluşturun ve yönetin',
@@ -2961,6 +2961,9 @@ export const tr: typeof en = {
       reasoningEffortHint: 'Burada seçilirse Model Hub varsayılanının ve API isteğinin önüne geçer.',
       reasoningPickerAria: '{model} için akıl yürütme',
       showReasoning: 'Akıl yürütmeyi göster',
+      maxTokensPerCall: 'Çağrı başına maksimum çıktı token',
+      maxTokensPerCallDescription: 'Bu agent’ın her model çağrısı için çıktı sınırı; düşünme token’ları dahildir. Boşsa modelin kendi varsayılanı (Model Hub’daki Varsayılan maksimum token) kullanılır. Tüm çalışmayı sınırlayan Max total output tokens ile aynı şey değildir.',
+      maxTokensPerCallPlaceholder: 'Model varsayılanı',
       showReasoningDescription: 'Varsayılan olarak açık. Kapalıyken akıl yürütme metni API yanıtlarında, oturum mesajlarında ve Studio sohbetinde yer almaz. Düşünme token\'ları yine sayılır ve faturalanır.',
       guardrails: 'Guardrail’ler',
       inputGuardrail: 'Girdi Guardrail’i',
@@ -4522,7 +4525,7 @@ export const tr: typeof en = {
       missingModelIdMessage: 'Katalog, model ID alanına göre eşleştirilir.',
       noMatchTitle: 'Katalogda eşleşme yok',
       noMatchMessage: '"{name}" için katalogda kesin bir fiyat bulunamadı.',
-      filledTitle: 'Fiyatlar katalogdan dolduruldu',
+      filledTitle: 'Katalogdan dolduruldu',
       filledMessage: '{key} ile eşleşti ({confidence})',
       errorTitle: 'Katalog sorgusu başarısız',
     },

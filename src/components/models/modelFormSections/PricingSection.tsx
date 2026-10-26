@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { NumberInput, TextInput } from '@mantine/core';
 import { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
-import CatalogPriceFill from '@/components/models/CatalogPriceFill';
+import CatalogPriceFill, { type CatalogFillMeta } from '@/components/models/CatalogPriceFill';
 import type { FieldProps } from './types';
 
 interface PricingSectionProps {
@@ -14,12 +14,16 @@ interface PricingSectionProps {
   outputProps: FieldProps;
   cachedProps: FieldProps;
   cacheWriteProps: FieldProps;
-  onApplyCatalog: (pricing: {
-    inputTokenPer1M: number;
-    outputTokenPer1M: number;
-    cachedTokenPer1M: number;
-    cacheWriteTokenPer1M: number;
-  }) => void;
+  onApplyCatalog: (
+    pricing: {
+      inputTokenPer1M: number;
+      outputTokenPer1M: number;
+      cachedTokenPer1M: number;
+      cacheWriteTokenPer1M: number;
+    },
+    /** Catalog match details, incl. its token limits (fill an empty context window / max output). */
+    meta: CatalogFillMeta,
+  ) => void;
   /** Category-specific price fields (per second / character / page / image). */
   children?: ReactNode;
 }

@@ -42,6 +42,7 @@ import {
 } from '@/components/models/requestParams';
 import {
   getDefaultModelOutputModalities,
+  limitsFromCatalogFill,
   type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
 import {
@@ -781,12 +782,18 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             value: form.values.pricing.cacheWriteTokenPer1M,
             onChange: setOptionalPrice('pricing.cacheWriteTokenPer1M'),
           }}
-          onApplyCatalog={(pricing) => {
+          onApplyCatalog={(pricing, meta) => {
             form.setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
             form.setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
             // 0 = the catalog has no such price; keep the field blank.
             form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M || '');
             form.setFieldValue('pricing.cacheWriteTokenPer1M', pricing.cacheWriteTokenPer1M || '');
+            // Token limits of the entry fill the (chat model) limit fields only while they are empty.
+            if (isLlm) {
+              const limits = limitsFromCatalogFill(form.values, meta);
+              if (limits.contextWindow !== undefined) form.setFieldValue('contextWindow', limits.contextWindow);
+              if (limits.maxOutputTokens !== undefined) form.setFieldValue('maxOutputTokens', limits.maxOutputTokens);
+            }
           }}
         />
 
