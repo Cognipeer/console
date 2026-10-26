@@ -29,7 +29,7 @@ import {
   parseDecisionRequest,
 } from '@/lib/providers/contracts/decisionHelpers';
 import { DecisionBackendError } from '@/lib/providers/contracts/structuredDecisionRuntime';
-import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { isUsageBookedError, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { ProviderDisabledError } from '@/lib/services/providers/providerService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
@@ -227,7 +227,10 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const model = modelKey ? await getModelByKey(tenantDbName!, modelKey, projectId!) : null;
+        // A limit hit the core billed already has its row.
+        const model = modelKey && !isUsageBookedError(error)
+          ? await getModelByKey(tenantDbName!, modelKey, projectId!)
+          : null;
         if (model) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           await logModelUsage(tenantDbName!, model, {

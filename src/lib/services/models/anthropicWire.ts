@@ -410,18 +410,17 @@ export function anthropicMessageId(seed?: string): string {
 
 function anthropicUsage(usage: Record<string, unknown> | undefined) {
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-  const cached = num(
-    (usage?.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens
-      ?? usage?.cached_tokens,
-  );
+  const details = usage?.prompt_tokens_details as Record<string, unknown> | undefined;
+  const cached = num(details?.cached_tokens ?? usage?.cached_tokens);
+  const written = num(details?.cache_write_tokens);
   return {
-    // Messages reports input EXCLUSIVE of cache reads; chat-completions reports
-    // it inclusive. Subtracting here is what keeps a translated response from
-    // over-reporting every cached turn.
-    input_tokens: Math.max(0, num(usage?.prompt_tokens) - cached),
+    // Messages reports input EXCLUSIVE of cache reads and writes; chat-completions
+    // reports it inclusive. Subtracting here is what keeps a translated response
+    // from over-reporting every cached turn.
+    input_tokens: Math.max(0, num(usage?.prompt_tokens) - cached - written),
     output_tokens: num(usage?.completion_tokens),
     cache_read_input_tokens: cached,
-    cache_creation_input_tokens: 0,
+    cache_creation_input_tokens: written,
   };
 }
 
@@ -544,6 +543,7 @@ export function openAiStreamToAnthropic(
   let outputTokens = 0;
   let inputTokens = 0;
   let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let closed = false;
 
   return new ReadableStream<Uint8Array>({
@@ -577,7 +577,7 @@ export function openAiStreamToAnthropic(
               input_tokens: inputTokens,
               output_tokens: 0,
               cache_read_input_tokens: cacheReadTokens,
-              cache_creation_input_tokens: 0,
+              cache_creation_input_tokens: cacheWriteTokens,
             },
           },
         });
@@ -607,6 +607,7 @@ export function openAiStreamToAnthropic(
           const mapped = anthropicUsage(usage);
           inputTokens = mapped.input_tokens || inputTokens;
           cacheReadTokens = mapped.cache_read_input_tokens || cacheReadTokens;
+          cacheWriteTokens = mapped.cache_creation_input_tokens || cacheWriteTokens;
           outputTokens = mapped.output_tokens || outputTokens;
         }
 
@@ -750,7 +751,7 @@ export function openAiStreamToAnthropic(
             input_tokens: inputTokens,
             output_tokens: outputTokens,
             cache_read_input_tokens: cacheReadTokens,
-            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens: cacheWriteTokens,
           },
         });
         emit('message_stop', { type: 'message_stop' });

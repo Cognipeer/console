@@ -43,6 +43,11 @@ export class OutputTokenLimitError extends Error {
   }
 }
 
+/** The core already wrote this call's usage row (an output-limit hit it billed): callers must not log another. */
+export function isUsageBookedError(error: unknown): boolean {
+  return error instanceof OutputTokenLimitError && error.usageBooked === true;
+}
+
 type ErrorRecord = Record<string, unknown>;
 
 export const MODEL_PARAMETER_UNSUPPORTED_CODE = 'model_parameter_unsupported';

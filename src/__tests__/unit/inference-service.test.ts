@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import {
   handleChatCompletion,
   handleEmbeddingRequest,
+  handleOcrRequest,
   OutputTokenLimitError,
 } from '@/lib/services/models/inferenceService';
 import { handleDecisionRequest } from '@/lib/services/models/decisionService';
@@ -780,6 +781,7 @@ describe('handleChatCompletion', () => {
       expect(call?.[2].providerResponse).toMatchObject({
         cancelled: 'client_disconnected',
         output_tokens_estimated: true,
+        usage_estimated: true,
       });
     });
 
@@ -1183,6 +1185,55 @@ describe('handleChatCompletion', () => {
     expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]).toMatchObject({ status: 'error' });
   });
 
+  it('books the output generated before a provider stream failed, and settles the budget once', async () => {
+    stubModel(makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
+    stubUpstream((call) => {
+      const live = controlledStream(call.signal);
+      live.send(chunk.text('Partial answer text'));
+      setTimeout(() => live.fail(Object.assign(new Error('upstream reset'), { status: 502 })), 10);
+      return live.response;
+    });
+    const onUsageSettled = vi.fn();
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [{ role: 'user', content: 'a prompt of some length' }] },
+      stream: true,
+      onUsageSettled,
+    });
+    await readSse(result.stream!);
+    await flush();
+
+    const row = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2];
+    expect(row).toMatchObject({ status: 'error', providerResponse: expect.objectContaining({ usage_estimated: true }) });
+    expect(row.usage.outputTokens).toBe(Math.ceil('Partial answer text'.length / 4));
+    expect(row.usage.inputTokens).toBeGreaterThan(0);
+    expect(onUsageSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it('books nothing for a provider stream that failed before its first chunk', async () => {
+    stubModel(makeLlmModel());
+    stubUpstream((call) => {
+      const live = controlledStream(call.signal);
+      live.send(chunk.text(''));
+      setTimeout(() => live.fail(Object.assign(new Error('upstream reset'), { status: 502 })), 10);
+      return live.response;
+    });
+    const onUsageSettled = vi.fn();
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [{ role: 'user', content: 'hi' }] },
+      stream: true,
+      onUsageSettled,
+    });
+    await readSse(result.stream!);
+    await flush();
+
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]).toMatchObject({ status: 'error', usage: {} });
+    expect(onUsageSettled).not.toHaveBeenCalled();
+  });
+
   it('throws an output token limit error for an empty non-streaming length result', async () => {
     stubModel(makeLlmModel({ settings: { maxTokens: 512 } }));
     stubUpstream(() => json(completion({ content: '', finish: 'length' })));
@@ -1195,6 +1246,87 @@ describe('handleChatCompletion', () => {
       limit: 512,
       message: expect.stringContaining('Reasoning models'),
     } satisfies Partial<OutputTokenLimitError>);
+  });
+
+  it('settles a non-streaming output-limit hit: ONE error row with the provider tokens, one budget debit, usage on the error', async () => {
+    stubModel(makeLlmModel({ settings: { maxTokens: 512 }, pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
+    stubUpstream(() => json(completion({
+      content: '',
+      finish: 'length',
+      usage: { prompt_tokens: 100, completion_tokens: 512, total_tokens: 612 },
+    })));
+    const onUsageSettled = vi.fn();
+
+    const error = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [] },
+      onUsageSettled,
+    }).catch((e: unknown) => e) as OutputTokenLimitError;
+    await flush();
+
+    expect(error.name).toBe('OutputTokenLimitError');
+    expect(error.usageBooked).toBe(true);
+    expect(error.usage).toMatchObject({ inputTokens: 100, outputTokens: 512 });
+    expect(error.cost?.totalCost).toBeCloseTo(0.000001 * 100 * 10 + 0.000001 * 512 * 30, 9);
+    expect(onUsageSettled).toHaveBeenCalledTimes(1);
+    expect(onUsageSettled).toHaveBeenCalledWith(error.cost, error.usage);
+
+    const rows = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: 'error',
+      finishReason: 'length',
+      usage: { inputTokens: 100, outputTokens: 512 },
+      providerResponse: { finish_reason: 'length', output_token_limit: true },
+    });
+  });
+
+  it('writes exactly one row for a limit hit even when the caller asks for failures to be logged', async () => {
+    stubModel(makeLlmModel({ settings: { maxTokens: 512 } }));
+    stubUpstream(() => json(completion({
+      content: '',
+      finish: 'length',
+      usage: { prompt_tokens: 100, completion_tokens: 512, total_tokens: 612 },
+    })));
+
+    const { executeModelCall } = await import('@/lib/services/models/inferenceService');
+
+    await expect(executeModelCall({
+      tenantDbName: BASE_PARAMS.tenantDbName,
+      tenantId: BASE_PARAMS.tenantId,
+      projectId: BASE_PARAMS.projectId,
+      modelKey: BASE_PARAMS.modelKey,
+      request: { messages: [{ role: 'user', content: 'hi' }] },
+      context: { logFailures: true },
+    })).rejects.toMatchObject({ name: 'OutputTokenLimitError', usageBooked: true });
+    await flush();
+
+    const rows = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'error', usage: { inputTokens: 100 } });
+  });
+
+  it('settles a stream whose upstream sent no usage on an estimate, flagged, without a wire usage frame', async () => {
+    stubModel(makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
+    stubUpstream(() => sse([chunk.text('Hello there'), chunk.finish('stop')]));
+    const onUsageSettled = vi.fn();
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [{ role: 'user', content: 'twelve chars' }], stream_options: { include_usage: true } },
+      stream: true,
+      onUsageSettled,
+    });
+    const { frames } = await readSse(result.stream!);
+    await flush();
+
+    expect(frames.some((frame) => frame !== '[DONE]' && frame.usage)).toBe(false);
+    const row = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2];
+    expect(row).toMatchObject({ status: 'success', providerResponse: expect.objectContaining({ usage_estimated: true }) });
+    expect(row.usage.inputTokens).toBe(Math.ceil('twelve chars'.length / 4));
+    expect(row.usage.outputTokens).toBe(Math.ceil('Hello there'.length / 4));
+    expect(onUsageSettled).toHaveBeenCalledTimes(1);
+    expect(onUsageSettled.mock.calls[0][0].totalCost).toBeGreaterThan(0);
   });
 
   it('applies body overrides to the request the provider receives', async () => {
@@ -1367,6 +1499,33 @@ describe('handleChatCompletion', () => {
     expect(streamBody).not.toContain('"finish_reason":"length"');
     expect(upstream.calls).toHaveLength(1);
     expect(upstream.calls[0].body.stream).toBe(false);
+  });
+
+  it('settles the eager (non-streamed) tool call that hit its output limit: one error row with the provider tokens', async () => {
+    stubModel(makeLlmModel({ settings: { maxTokens: 512, disableStreamingWithTools: true } }));
+    stubUpstream(() => json(completion({
+      content: '',
+      finish: 'length',
+      usage: { prompt_tokens: 100, completion_tokens: 512, total_tokens: 612 },
+    })));
+    const onUsageSettled = vi.fn();
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: {
+        messages: [],
+        tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }],
+      },
+      stream: true,
+      onUsageSettled,
+    });
+    await readSse(result.stream!);
+    await flush();
+
+    const rows = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'error', finishReason: 'length', usage: { inputTokens: 100, outputTokens: 512 } });
+    expect(onUsageSettled).toHaveBeenCalledTimes(1);
   });
 
 
@@ -1819,6 +1978,46 @@ describe('handleChatCompletion · Dynamic LLM', () => {
 
     expect(result.routing?.decision).toBe('fallback');
     expect(result.routing?.chosenModelKey).toBe('small');
+  });
+
+  it('carries what a primary that hit its output limit burned onto the fallback outcome (burnedUsage), not onto its usage', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      fallbackModelKey: 'small',
+      rules: [
+        {
+          label: 'always',
+          targetModelKey: 'big',
+          matchType: 'all',
+          conditions: [{ signal: 'messageCount', operator: 'gte', value: 1 }],
+        },
+      ],
+    });
+    wireModels(router);
+    const runtimes = new Map<string, ModelProviderRuntime>();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_db: string, _tid: string, providerKey: string) => {
+        if (!runtimes.has(providerKey)) runtimes.set(providerKey, await openAiRuntime({}, providerKey));
+        return { runtime: runtimes.get(providerKey) };
+      },
+    );
+    stubUpstream((call) => call.headers.authorization === 'Bearer p-big'
+      ? json(completion({ content: '', finish: 'length', usage: { prompt_tokens: 40, completion_tokens: 64, total_tokens: 104 } }))
+      : json(completion({ content: 'ok', usage: { prompt_tokens: 40, completion_tokens: 5, total_tokens: 45 } })));
+
+    const { executeModelCall } = await import('@/lib/services/models/inferenceService');
+    const outcome = await executeModelCall({
+      tenantDbName: BASE_PARAMS.tenantDbName,
+      tenantId: BASE_PARAMS.tenantId,
+      projectId: BASE_PARAMS.projectId,
+      modelKey: 'router',
+      request: { messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    expect(outcome.routing?.decision).toBe('fallback');
+    expect(outcome.usage).toMatchObject({ inputTokens: 40, outputTokens: 5 });
+    expect(outcome.burnedUsage).toMatchObject({ inputTokens: 40, outputTokens: 64 });
   });
 
   const priced = (key: string, input: number, output: number, extra: object = {}) =>
@@ -2467,5 +2666,55 @@ describe('handleEmbeddingRequest', () => {
     });
 
     expect(result.requestId).toBe('custom-req-id');
+  });
+});
+
+describe('handleOcrRequest', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (logModelUsage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+  });
+
+  it('books the cached read/write slices and the reasoning of a VLM OCR result', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...makeLlmModel({ key: 'ocr-model', category: 'ocr' }),
+    });
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createOcrRuntime: vi.fn().mockResolvedValue({
+          extract: vi.fn().mockResolvedValue({
+            text: 'page text',
+            usage: {
+              inputTokens: 1000,
+              outputTokens: 50,
+              cachedInputTokens: 600,
+              cachedWriteTokens: 200,
+              reasoningTokens: 10,
+            },
+          }),
+        }),
+      },
+    });
+
+    const result = await handleOcrRequest({
+      tenantDbName: 'tenant_acme',
+      modelKey: 'ocr-model',
+      projectId: 'proj-1',
+      input: { document: { kind: 'url', url: 'https://example.com/a.pdf' } },
+    });
+    await flush();
+
+    expect(result.usage).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 50,
+      totalTokens: 1050,
+      cachedInputTokens: 600,
+      cachedWriteTokens: 200,
+      reasoningTokens: 10,
+    });
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]).toMatchObject({
+      route: 'ocr',
+      usage: { cachedInputTokens: 600, cachedWriteTokens: 200, reasoningTokens: 10 },
+    });
   });
 });

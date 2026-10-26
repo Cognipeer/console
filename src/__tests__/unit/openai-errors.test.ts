@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isUsageBookedError,
   normalizeInferenceError,
   OutputTokenLimitError,
 } from '@/lib/services/models/openaiErrors';
@@ -15,6 +16,26 @@ describe('normalizeInferenceError', () => {
         code: 'output_token_limit_exceeded',
       },
     });
+  });
+
+  it('keeps the settled usage on an output token limit error without putting it on the wire body', () => {
+    const usage = { inputTokens: 100, outputTokens: 512, totalTokens: 612 };
+    const cost = { currency: 'USD', inputCost: 0.001, outputCost: 0.01, cachedCost: 0, cacheWriteCost: 0, totalCost: 0.011 };
+    const error = new OutputTokenLimitError(512, { usage, cost, usageBooked: true });
+
+    expect(error.limit).toBe(512);
+    expect(error.usage).toEqual(usage);
+    expect(error.cost).toEqual(cost);
+    expect(error.usageBooked).toBe(true);
+    expect(normalizeInferenceError(error)).toEqual(normalizeInferenceError(new OutputTokenLimitError(512)));
+    expect(new OutputTokenLimitError(512).usageBooked).toBeUndefined();
+  });
+
+  it('tells a limit hit the core already billed from any other error', () => {
+    expect(isUsageBookedError(new OutputTokenLimitError(512, { usageBooked: true }))).toBe(true);
+    expect(isUsageBookedError(new OutputTokenLimitError(512))).toBe(false);
+    expect(isUsageBookedError(Object.assign(new Error('x'), { usageBooked: true }))).toBe(false);
+    expect(isUsageBookedError(undefined)).toBe(false);
   });
 
   it('reads nested provider context-length details', () => {

@@ -675,6 +675,21 @@ describe('openAiResponseToNative', () => {
     expect(native.wireFinishReason).toBe('tool_calls');
     expect(native.guardrails).toEqual({ output: { guardrail_key: 'g', findings: [] } });
   });
+
+  it('keeps the cache-write slice of a stored response instead of zeroing it', () => {
+    const native = openAiResponseToNative({
+      id: 'chatcmpl-2',
+      model: 'gpt-4o',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'text' } }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        total_tokens: 105,
+        prompt_tokens_details: { cached_tokens: 40, cache_write_tokens: 30 },
+      },
+    });
+    expect(native.response.usage).toMatchObject({ cachedInputTokens: 40, cachedWriteTokens: 30 });
+  });
 });
 
 describe('newCompletionId', () => {

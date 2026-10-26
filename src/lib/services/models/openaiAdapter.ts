@@ -609,7 +609,7 @@ export function openAiResponseToNative(wire: Record<string, unknown>): {
         outputTokens: usage.outputTokens ?? 0,
         totalTokens: usage.totalTokens ?? 0,
         cachedInputTokens: usage.cachedInputTokens ?? 0,
-        cachedWriteTokens: 0,
+        cachedWriteTokens: usage.cachedWriteTokens ?? 0,
         cachedOutputTokens: 0,
         reasoningTokens: usage.reasoningTokens ?? 0,
       },
