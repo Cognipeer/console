@@ -40,6 +40,7 @@ import {
   parseDashboardDateFilterFromSearchParams,
 } from '@/lib/utils/dashboardDateFilter';
 import { createLogger } from '@/lib/core/logger';
+import { calcCacheHitRate } from '@/lib/utils/tracingUtils';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
   readJsonBody,
@@ -371,6 +372,8 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       let errorCalls = 0;
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
+      let totalCachedInputTokens = 0;
+      let totalCachedWriteTokens = 0;
       let totalTokens = 0;
       let totalToolCalls = 0;
       let cacheHits = 0;
@@ -389,6 +392,8 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         errorCalls += agg.errorCalls;
         totalInputTokens += agg.totalInputTokens;
         totalOutputTokens += agg.totalOutputTokens;
+        totalCachedInputTokens += agg.totalCachedInputTokens ?? 0;
+        totalCachedWriteTokens += agg.totalCachedWriteTokens ?? 0;
         totalTokens += agg.totalTokens;
         totalToolCalls += agg.totalToolCalls;
         cacheHits += agg.cacheHits;
@@ -412,7 +417,10 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       const avgLatencyMs = latencyCount > 0
         ? Math.round(latencySum / latencyCount)
         : null;
+      // `cacheHitRate` is the SEMANTIC (response) cache; the prompt cache is
+      // cached / input (same formula as calcCacheHitRate).
       const cacheHitRate = totalCalls > 0 ? cacheHits / totalCalls : 0;
+      const promptCacheHitRate = calcCacheHitRate(totalInputTokens, totalCachedInputTokens);
       const errorRate = totalCalls > 0 ? errorCalls / totalCalls : 0;
       const daily = Array.from(dailyMap.entries())
         .sort(([a], [b]) => a.localeCompare(b))
@@ -436,11 +444,14 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
           embeddingCount: scopedModels.filter((model) => model.category === 'embedding').length,
           errorCalls,
           errorRate,
+          promptCacheHitRate,
           llmCount: scopedModels.filter((model) => model.category === 'llm').length,
           providerCount: scopedProviderCount,
           successCalls,
           totalCalls,
           totalCost,
+          totalCachedInputTokens,
+          totalCachedWriteTokens,
           totalInputTokens,
           totalModels: scopedModels.length,
           totalOutputTokens,

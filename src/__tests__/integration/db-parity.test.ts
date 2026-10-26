@@ -1139,10 +1139,10 @@ describeForEachProvider('Usage daily rollup (incrementUsageDaily/listUsageDaily)
   it('upserts additively on the same dimension tuple (incl. units merge)', async () => {
     const db = getDb();
     await db.incrementUsageDaily([
-      { ...dims(), requests: 1, inputTokens: 100, outputTokens: 50, totalTokens: 150, costUsd: 0.5, latencyMsSum: 200, latencyCount: 1, units: { toolCalls: 2 } },
+      { ...dims(), requests: 1, inputTokens: 100, outputTokens: 50, cachedWriteTokens: 25, totalTokens: 150, costUsd: 0.5, latencyMsSum: 200, latencyCount: 1, units: { toolCalls: 2 } },
     ]);
     await db.incrementUsageDaily([
-      { ...dims(), requests: 1, errors: 1, inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.1, latencyMsSum: 100, latencyCount: 1, units: { toolCalls: 1, pages: 3 } },
+      { ...dims(), requests: 1, errors: 1, inputTokens: 10, outputTokens: 5, cachedWriteTokens: 5, totalTokens: 15, costUsd: 0.1, latencyMsSum: 100, latencyCount: 1, units: { toolCalls: 1, pages: 3 } },
     ]);
 
     const rows = await db.listUsageDaily({ userId: 'user-1' });
@@ -1152,6 +1152,7 @@ describeForEachProvider('Usage daily rollup (incrementUsageDaily/listUsageDaily)
     expect(row.errors).toBe(1);
     expect(row.inputTokens).toBe(110);
     expect(row.outputTokens).toBe(55);
+    expect(row.cachedWriteTokens).toBe(30);
     expect(row.totalTokens).toBe(165);
     expect(row.costUsd).toBeCloseTo(0.6, 10);
     expect(row.latencyMsSum).toBe(300);
@@ -1329,7 +1330,7 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
       tenantId, projectId: 'proj-ledger', modelKey: 'gpt-4o', route: 'agent.chat', status: 'success' as const,
       providerRequest: {}, providerResponse: {}, agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-L', runId: 'run-L',
     };
-    await db.createModelUsageLog({ ...base, requestId: 'L1', turnId: 'turn-1', traceSessionId: 'sess-L', inputTokens: 100, outputTokens: 20, cachedInputTokens: 10, reasoningTokens: 5, totalTokens: 130, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.25 } });
+    await db.createModelUsageLog({ ...base, requestId: 'L1', turnId: 'turn-1', traceSessionId: 'sess-L', inputTokens: 100, outputTokens: 20, cachedInputTokens: 10, cachedWriteTokens: 7, reasoningTokens: 5, totalTokens: 130, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.25 } });
     await db.createModelUsageLog({ ...base, requestId: 'L2', turnId: 'turn-1', status: 'error', inputTokens: 50, outputTokens: 0, totalTokens: 50, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.05 } });
     await db.createModelUsageLog({ ...base, requestId: 'L3', turnId: 'turn-2', inputTokens: 1, outputTokens: 1, totalTokens: 2 });
 
@@ -1337,7 +1338,7 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
     expect(stored).toMatchObject({ agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-L', turnId: 'turn-1', runId: 'run-L', traceSessionId: 'sess-L' });
 
     const turn = await db.summarizeModelUsageForTurn('conv-L', 'turn-1', 'proj-ledger');
-    expect(turn).toMatchObject({ calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 10, reasoningTokens: 5, totalTokens: 180 });
+    expect(turn).toMatchObject({ calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 10, cachedWriteTokens: 7, reasoningTokens: 5, totalTokens: 180 });
     expect(turn.costUsd).toBeCloseTo(0.3, 6);
     expect(turn.lastAt).toBeInstanceOf(Date);
     expect((await db.summarizeModelUsageForTurn('conv-L', 'turn-none')).calls).toBe(0);
@@ -1396,6 +1397,8 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
 
     expect(agg.totalCalls).toBe(2);
     expect(agg.totalTokens).toBe(4500);
+    expect(agg.totalCachedWriteTokens).toBe(0);
+    expect(agg.costSummary?.cacheWriteCost).toBe(0);
     expect(agg.costSummary).toBeDefined();
     expect(agg.costSummary?.currency).toBe('USD');
     expect(agg.costSummary?.totalCost).toBeCloseTo(0.006, 10);
@@ -1405,6 +1408,44 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
     // The per-period buckets carry cost too — the usage chart reads them.
     const charted = (agg.timeseries ?? []).reduce((sum, point) => sum + (point.totalCost ?? 0), 0);
     expect(charted).toBeCloseTo(0.006, 10);
+  });
+
+  it('aggregateModelUsage sums cache-write tokens and cacheWriteCost identically on both providers', async () => {
+    const db = getDb();
+    const base = {
+      tenantId,
+      projectId: 'proj-write',
+      modelKey: 'claude-write',
+      route: 'chat.completions',
+      status: 'success' as const,
+      providerRequest: {},
+      providerResponse: {},
+    };
+    await db.createModelUsageLog({
+      ...base,
+      requestId: 'w-1',
+      inputTokens: 1000,
+      outputTokens: 100,
+      cachedInputTokens: 400,
+      cachedWriteTokens: 200,
+      totalTokens: 1100,
+      pricingSnapshot: { currency: 'USD', inputTokenPer1M: 3, outputTokenPer1M: 15, cacheWriteCost: 0.00075, totalCost: 0.01 },
+    });
+    // A legacy-shaped row: no write tokens, no cacheWriteCost.
+    await db.createModelUsageLog({
+      ...base,
+      requestId: 'w-2',
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+      pricingSnapshot: { currency: 'USD', inputTokenPer1M: 3, outputTokenPer1M: 15, totalCost: 0.001 },
+    });
+
+    const agg = await db.aggregateModelUsage('claude-write', { groupBy: 'day' }, 'proj-write');
+    expect(agg.totalCachedInputTokens).toBe(400);
+    expect(agg.totalCachedWriteTokens).toBe(200);
+    expect(agg.costSummary?.cacheWriteCost).toBeCloseTo(0.00075, 10);
+    expect((agg.timeseries ?? []).reduce((sum, p) => sum + (p.cachedWriteTokens ?? 0), 0)).toBe(200);
   });
 
   it('aggregateModelUsage omits costSummary when nothing is priced', async () => {

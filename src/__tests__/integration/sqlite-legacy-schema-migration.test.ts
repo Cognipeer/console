@@ -210,6 +210,35 @@ describe('Legacy tenant DB schema migration', () => {
     expect(names.has('actorType')).toBe(true);
   });
 
+  it('adds model_usage_logs.cachedWriteTokens via migration and round-trips it', async () => {
+    const policy = new Database(path.join(tmpDir, `${LEGACY_DB_NAME}.db`), {
+      readonly: true,
+    });
+    const cols = policy
+      .prepare(`PRAGMA table_info(model_usage_logs)`)
+      .all() as Array<{ name: string }>;
+    policy.close();
+    expect(cols.some((c) => c.name === 'cachedWriteTokens')).toBe(true);
+
+    await provider.createModelUsageLog({
+      tenantId: 'tenant-legacy',
+      projectId: LEGACY_PROJECT_ID,
+      modelKey: 'legacy-bound-model',
+      requestId: 'legacy-write-1',
+      route: 'chat.completions',
+      status: 'success',
+      providerRequest: {},
+      providerResponse: {},
+      inputTokens: 100,
+      outputTokens: 10,
+      cachedInputTokens: 20,
+      cachedWriteTokens: 30,
+      totalTokens: 110,
+    });
+    const logs = await provider.listModelUsageLogs('legacy-bound-model', {}, LEGACY_PROJECT_ID);
+    expect(logs.find((l) => l.requestId === 'legacy-write-1')?.cachedWriteTokens).toBe(30);
+  });
+
   it('creates idx_model_usage_user after the column migration', () => {
     const policy = new Database(path.join(tmpDir, `${LEGACY_DB_NAME}.db`), {
       readonly: true,

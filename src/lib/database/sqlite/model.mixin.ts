@@ -152,11 +152,11 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.modelUsageLogs}
         (id, tenantId, projectId, modelKey, modelId, requestId, route, status,
          providerRequest, providerResponse, errorMessage, latencyMs,
-         inputTokens, outputTokens, cachedInputTokens, totalTokens, finishReason, reasoningTokens, toolCalls, cacheHit, pricingSnapshot, routing,
+         inputTokens, outputTokens, cachedInputTokens, cachedWriteTokens, totalTokens, finishReason, reasoningTokens, toolCalls, cacheHit, pricingSnapshot, routing,
          userId, apiTokenId, actorType, agentKey, channel, conversationId, turnId, runId, traceSessionId, createdAt)
         VALUES (@id, @tenantId, @projectId, @modelKey, @modelId, @requestId, @route, @status,
          @providerRequest, @providerResponse, @errorMessage, @latencyMs,
-         @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @finishReason, @reasoningTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
+         @inputTokens, @outputTokens, @cachedInputTokens, @cachedWriteTokens, @totalTokens, @finishReason, @reasoningTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
          @userId, @apiTokenId, @actorType, @agentKey, @channel, @conversationId, @turnId, @runId, @traceSessionId, @createdAt)
       `).run({
         id,
@@ -183,6 +183,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         inputTokens: log.inputTokens,
         outputTokens: log.outputTokens,
         cachedInputTokens: log.cachedInputTokens ?? 0,
+        cachedWriteTokens: log.cachedWriteTokens ?? 0,
         totalTokens: log.totalTokens,
         finishReason: log.finishReason ?? null,
         reasoningTokens: log.reasoningTokens ?? null,
@@ -257,6 +258,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           SUM(inputTokens) as inputTokens,
           SUM(outputTokens) as outputTokens,
           SUM(COALESCE(cachedInputTokens, 0)) as cachedInputTokens,
+          SUM(COALESCE(cachedWriteTokens, 0)) as cachedWriteTokens,
           SUM(COALESCE(reasoningTokens, 0)) as reasoningTokens,
           SUM(totalTokens) as totalTokens,
           SUM(COALESCE(json_extract(pricingSnapshot, '$.totalCost'), 0)) as costUsd,
@@ -270,6 +272,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         inputTokens: num(row.inputTokens),
         outputTokens: num(row.outputTokens),
         cachedInputTokens: num(row.cachedInputTokens),
+        cachedWriteTokens: num(row.cachedWriteTokens),
         reasoningTokens: num(row.reasoningTokens),
         totalTokens: num(row.totalTokens),
         costUsd: num(row.costUsd),
@@ -306,6 +309,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           SUM(inputTokens) as totalInputTokens,
           SUM(outputTokens) as totalOutputTokens,
           SUM(COALESCE(cachedInputTokens, 0)) as totalCachedInputTokens,
+          SUM(COALESCE(cachedWriteTokens, 0)) as totalCachedWriteTokens,
           SUM(totalTokens) as totalTokens,
           SUM(COALESCE(toolCalls, 0)) as totalToolCalls,
           SUM(CASE WHEN cacheHit = 1 THEN 1 ELSE 0 END) as cacheHits,
@@ -314,7 +318,8 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           SUM(COALESCE(json_extract(pricingSnapshot, '$.totalCost'), 0)) as totalCost,
           SUM(COALESCE(json_extract(pricingSnapshot, '$.inputCost'), 0)) as inputCost,
           SUM(COALESCE(json_extract(pricingSnapshot, '$.outputCost'), 0)) as outputCost,
-          SUM(COALESCE(json_extract(pricingSnapshot, '$.cachedCost'), 0)) as cachedCost
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.cachedCost'), 0)) as cachedCost,
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.cacheWriteCost'), 0)) as cacheWriteCost
         FROM ${TABLES.modelUsageLogs} ${where}
       `).get(params) as SqliteRow;
 
@@ -338,6 +343,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         totalInputTokens: (agg.totalInputTokens as number) ?? 0,
         totalOutputTokens: (agg.totalOutputTokens as number) ?? 0,
         totalCachedInputTokens: (agg.totalCachedInputTokens as number) ?? 0,
+        totalCachedWriteTokens: (agg.totalCachedWriteTokens as number) ?? 0,
         totalTokens: (agg.totalTokens as number) ?? 0,
         totalToolCalls: (agg.totalToolCalls as number) ?? 0,
         cacheHits: (agg.cacheHits as number) ?? 0,
@@ -353,6 +359,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
                 inputCost: (agg.inputCost as number) ?? 0,
                 outputCost: (agg.outputCost as number) ?? 0,
                 cachedCost: (agg.cachedCost as number) ?? 0,
+                cacheWriteCost: (agg.cacheWriteCost as number) ?? 0,
               },
             }
           : {}),
@@ -373,6 +380,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             SUM(inputTokens) as inputTokens,
             SUM(outputTokens) as outputTokens,
             SUM(COALESCE(cachedInputTokens, 0)) as cachedInputTokens,
+            SUM(COALESCE(cachedWriteTokens, 0)) as cachedWriteTokens,
             SUM(totalTokens) as totalTokens,
             SUM(CASE WHEN cacheHit = 1 THEN 1 ELSE 0 END) as cacheHits,
             SUM(COALESCE(json_extract(pricingSnapshot, '$.totalCost'), 0)) as totalCost
@@ -387,6 +395,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           inputTokens: (r.inputTokens as number) ?? 0,
           outputTokens: (r.outputTokens as number) ?? 0,
           cachedInputTokens: (r.cachedInputTokens as number) ?? 0,
+          cachedWriteTokens: (r.cachedWriteTokens as number) ?? 0,
           totalTokens: (r.totalTokens as number) ?? 0,
           totalCost: (r.totalCost as number) ?? 0,
           cacheHits: (r.cacheHits as number) ?? 0,
@@ -461,6 +470,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         inputTokens: (r.inputTokens as number) ?? 0,
         outputTokens: (r.outputTokens as number) ?? 0,
         cachedInputTokens: (r.cachedInputTokens as number) ?? 0,
+        cachedWriteTokens: r.cachedWriteTokens == null ? undefined : Number(r.cachedWriteTokens),
         totalTokens: (r.totalTokens as number) ?? 0,
         finishReason: (r.finishReason as string | null) ?? undefined,
         reasoningTokens: r.reasoningTokens == null ? undefined : Number(r.reasoningTokens),

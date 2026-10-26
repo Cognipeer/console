@@ -11,11 +11,42 @@ import type {
   IModelUsageAggregate,
   IAgentTurnUsageSummary,
   IModelUsageCostSnapshot,
+  IModelPricing,
   ModelCategory,
   ModelProviderType,
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+
+const PRICING_NUMBER_KEYS = [
+  'inputTokenPer1M',
+  'outputTokenPer1M',
+  'cachedTokenPer1M',
+  'cacheWriteTokenPer1M',
+  'inputSecondPer1K',
+  'outputSecondPer1K',
+  'inputCharacterPer1M',
+  'pagePer1K',
+  'imagePer1K',
+] as const;
+
+/**
+ * Pricing as stored: every `IModelPricing` price that is a finite number >= 0
+ * is kept as entered; blank/undefined/null/NaN/negative keys are dropped.
+ * Mongo has no `ignoreUndefined`, so an explicit `undefined` would be stored
+ * as `null`, and a `?? 0` would turn "not entered" into a real 0 price.
+ */
+function sanitizePricing(pricing: IModelPricing): IModelPricing {
+  const source = pricing as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { currency: pricing.currency || 'USD' };
+  for (const key of PRICING_NUMBER_KEYS) {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      out[key] = value;
+    }
+  }
+  return out as unknown as IModelPricing;
+}
 
 export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class ModelOps extends Base {
@@ -51,12 +82,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       await this.ensureModelIndexes();
       const db = this.getTenantDb();
       const now = new Date();
-      const pricing = {
-        currency: model.pricing.currency || 'USD',
-        inputTokenPer1M: model.pricing.inputTokenPer1M,
-        outputTokenPer1M: model.pricing.outputTokenPer1M,
-        cachedTokenPer1M: model.pricing.cachedTokenPer1M ?? 0,
-      };
+      const pricing = sanitizePricing(model.pricing);
 
       const modelDoc = {
         ...model,
@@ -84,12 +110,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
       const pricing = data.pricing;
       if (pricing) {
-        updateData.pricing = {
-          currency: pricing.currency || 'USD',
-          inputTokenPer1M: pricing.inputTokenPer1M,
-          outputTokenPer1M: pricing.outputTokenPer1M,
-          cachedTokenPer1M: pricing.cachedTokenPer1M ?? 0,
-        };
+        updateData.pricing = sanitizePricing(pricing);
       }
 
       if (data.providerDriver !== undefined && data.provider === undefined) {
@@ -327,6 +348,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
               inputTokens: { $sum: { $ifNull: ['$inputTokens', 0] } },
               outputTokens: { $sum: { $ifNull: ['$outputTokens', 0] } },
               cachedInputTokens: { $sum: { $ifNull: ['$cachedInputTokens', 0] } },
+              cachedWriteTokens: { $sum: { $ifNull: ['$cachedWriteTokens', 0] } },
               reasoningTokens: { $sum: { $ifNull: ['$reasoningTokens', 0] } },
               totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
               costUsd: { $sum: { $ifNull: ['$pricingSnapshot.totalCost', 0] } },
@@ -342,6 +364,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         inputTokens: num(row?.inputTokens),
         outputTokens: num(row?.outputTokens),
         cachedInputTokens: num(row?.cachedInputTokens),
+        cachedWriteTokens: num(row?.cachedWriteTokens),
         reasoningTokens: num(row?.reasoningTokens),
         totalTokens: num(row?.totalTokens),
         costUsd: num(row?.costUsd),
@@ -398,6 +421,9 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
               totalCachedInputTokens: {
                 $sum: { $ifNull: ['$cachedInputTokens', 0] },
               },
+              totalCachedWriteTokens: {
+                $sum: { $ifNull: ['$cachedWriteTokens', 0] },
+              },
               totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
               totalToolCalls: { $sum: { $ifNull: ['$toolCalls', 0] } },
               cacheHits: {
@@ -424,6 +450,9 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
               cachedCost: {
                 $sum: { $ifNull: ['$pricingSnapshot.cachedCost', 0] },
               },
+              cacheWriteCost: {
+                $sum: { $ifNull: ['$pricingSnapshot.cacheWriteCost', 0] },
+              },
             },
           },
         ])
@@ -436,6 +465,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         totalInputTokens: 0,
         totalOutputTokens: 0,
         totalCachedInputTokens: 0,
+        totalCachedWriteTokens: 0,
         totalTokens: 0,
         totalToolCalls: 0,
         cacheHits: 0,
@@ -446,6 +476,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         inputCost: 0,
         outputCost: 0,
         cachedCost: 0,
+        cacheWriteCost: 0,
       };
 
       const unit = options?.groupBy ?? 'day';
@@ -465,6 +496,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
               inputTokens: { $sum: { $ifNull: ['$inputTokens', 0] } },
               outputTokens: { $sum: { $ifNull: ['$outputTokens', 0] } },
               cachedInputTokens: { $sum: { $ifNull: ['$cachedInputTokens', 0] } },
+              cachedWriteTokens: { $sum: { $ifNull: ['$cachedWriteTokens', 0] } },
               totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
               totalCost: { $sum: { $ifNull: ['$pricingSnapshot.totalCost', 0] } },
               cacheHits: {
@@ -487,6 +519,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
           inputTokens: Number(record.inputTokens ?? 0),
           outputTokens: Number(record.outputTokens ?? 0),
           cachedInputTokens: Number(record.cachedInputTokens ?? 0),
+          cachedWriteTokens: Number(record.cachedWriteTokens ?? 0),
           totalTokens: Number(record.totalTokens ?? 0),
           totalCost: Number(record.totalCost ?? 0),
           cacheHits: Number(record.cacheHits ?? 0),
@@ -500,6 +533,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
             inputCost: totalsDoc.inputCost ?? 0,
             outputCost: totalsDoc.outputCost ?? 0,
             cachedCost: totalsDoc.cachedCost ?? 0,
+            cacheWriteCost: totalsDoc.cacheWriteCost ?? 0,
           }
         : undefined;
 
@@ -511,6 +545,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         totalInputTokens: totalsDoc.totalInputTokens ?? 0,
         totalOutputTokens: totalsDoc.totalOutputTokens ?? 0,
         totalCachedInputTokens: totalsDoc.totalCachedInputTokens ?? 0,
+        totalCachedWriteTokens: totalsDoc.totalCachedWriteTokens ?? 0,
         totalTokens: totalsDoc.totalTokens ?? 0,
         totalToolCalls: totalsDoc.totalToolCalls ?? 0,
         cacheHits: totalsDoc.cacheHits ?? 0,
