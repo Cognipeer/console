@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import JSZip from 'jszip';
 
 const ragService = vi.hoisted(() => ({
   getRagModule: vi.fn(),
@@ -14,10 +15,21 @@ vi.mock('@/lib/services/rag/ragSource', () => ragSource);
 import {
   exportRagModule,
   importRagModuleJsonl,
+  RAG_EXPORT_PART_SIZE,
   RAG_IMPORT_MAX_DOCUMENTS,
 } from '@/lib/services/rag/ragTransfer';
 
 const activeModule = { key: 'faq', name: 'FAQ', description: 'Support answers', status: 'active' };
+
+/** Each part of an export ZIP, by name, as its non-empty lines. */
+async function readParts(body: Buffer): Promise<Record<string, string[]>> {
+  const zip = await JSZip.loadAsync(body);
+  const parts: Record<string, string[]> = {};
+  for (const name of Object.keys(zip.files).sort()) {
+    parts[name] = (await zip.file(name)!.async('string')).trimEnd().split('\n');
+  }
+  return parts;
+}
 
 describe('exportRagModule', () => {
   beforeEach(() => {
@@ -25,7 +37,7 @@ describe('exportRagModule', () => {
     ragService.getRagModule.mockResolvedValue(activeModule);
   });
 
-  it('writes a header line then one JSON line per document with multi-line content intact', async () => {
+  it('zips a part with a header line then one JSON line per document with multi-line content intact', async () => {
     const listed = [
       { fileName: 'a.md', contentType: 'text/markdown', metadata: { lang: 'tr' }, _id: '1' },
       { fileName: 'b.txt', _id: '2' },
@@ -53,12 +65,21 @@ describe('exportRagModule', () => {
     expect(result).toBeDefined();
     expect(result!.documentCount).toBe(1);
     expect(result!.skippedDocuments).toBe(1);
-    expect(result!.fileName).toBe('faq.rag.jsonl');
+    expect(result!.partCount).toBe(1);
+    expect(result!.fileName).toBe('faq.rag.zip');
 
-    const lines = result!.body.trimEnd().split('\n');
+    const parts = await readParts(result!.body);
+    expect(Object.keys(parts)).toEqual(['faq.part-001.rag.jsonl']);
+    const lines = parts['faq.part-001.rag.jsonl'];
     expect(lines).toHaveLength(2);
     const header = JSON.parse(lines[0]);
-    expect(header).toMatchObject({ format: 'cognipeer.rag-module', version: 1, documentCount: 1, skippedDocuments: 1 });
+    expect(header).toMatchObject({
+      format: 'cognipeer.rag-module',
+      version: 1,
+      documentCount: 1,
+      skippedDocuments: 1,
+      part: { index: 1, count: 1, documentCount: 1 },
+    });
     expect(header.module).toMatchObject({ key: 'faq', name: 'FAQ' });
 
     const doc = JSON.parse(lines[1]);
@@ -69,6 +90,63 @@ describe('exportRagModule', () => {
       metadata: { lang: 'tr' },
       content: 'line one\nline "two"',
     });
+  });
+
+  it('splits the documents into parts of RAG_EXPORT_PART_SIZE, in order', async () => {
+    const count = RAG_EXPORT_PART_SIZE * 2 + 1;
+    const listed = Array.from({ length: count }, (_, i) => ({ fileName: `doc-${i}.md`, _id: String(i) }));
+    ragService.listRagDocuments.mockResolvedValue(listed);
+    ragService.getRagDocument.mockImplementation(async (_tenant: string, id: string) => listed[Number(id)]);
+    ragSource.loadSourceText.mockImplementation(async (_t: string, _i: string, _p: string, doc: { _id: string }) => (
+      `text ${doc._id}`
+    ));
+
+    const result = await exportRagModule('tenant', 'tid', 'proj', 'faq');
+
+    expect(result!.partCount).toBe(3);
+    const parts = await readParts(result!.body);
+    expect(Object.keys(parts)).toEqual([
+      'faq.part-001.rag.jsonl',
+      'faq.part-002.rag.jsonl',
+      'faq.part-003.rag.jsonl',
+    ]);
+    const sizes = Object.values(parts).map((lines) => lines.length - 1);
+    expect(sizes).toEqual([RAG_EXPORT_PART_SIZE, RAG_EXPORT_PART_SIZE, 1]);
+    const headers = Object.values(parts).map((lines) => JSON.parse(lines[0]));
+    expect(headers.map((h) => h.part)).toEqual([
+      { index: 1, count: 3, documentCount: RAG_EXPORT_PART_SIZE },
+      { index: 2, count: 3, documentCount: RAG_EXPORT_PART_SIZE },
+      { index: 3, count: 3, documentCount: 1 },
+    ]);
+    expect(headers.every((h) => h.documentCount === count)).toBe(true);
+    const fileNames = Object.values(parts).flatMap((lines) => lines.slice(1).map((line) => JSON.parse(line).fileName));
+    expect(fileNames).toEqual(listed.map((doc) => doc.fileName));
+  });
+
+  it('leaves out optional fields stored as null, so the export imports back', async () => {
+    // Mongo stores an unset optional field as null.
+    const listed = [{ fileName: 'a.md', _id: '1', contentType: null, metadata: null, chunkConfig: null }];
+    ragService.listRagDocuments.mockResolvedValue(listed);
+    ragService.getRagDocument.mockResolvedValue(listed[0]);
+    ragSource.loadSourceText.mockResolvedValue('body');
+    ragService.getRagModule.mockResolvedValue({ ...activeModule, description: null });
+
+    const result = await exportRagModule('tenant', 'tid', 'proj', 'faq');
+
+    const [headerLine, docLine] = (await readParts(result!.body))['faq.part-001.rag.jsonl'];
+    expect(JSON.parse(headerLine).module).toEqual({ key: 'faq', name: 'FAQ' });
+    expect(JSON.parse(docLine)).toEqual({ type: 'document', fileName: 'a.md', content: 'body' });
+  });
+
+  it('writes one header-only part for a module with no documents', async () => {
+    ragService.listRagDocuments.mockResolvedValue([]);
+
+    const result = await exportRagModule('tenant', 'tid', 'proj', 'faq');
+
+    expect(result!.partCount).toBe(1);
+    const parts = await readParts(result!.body);
+    expect(parts['faq.part-001.rag.jsonl']).toHaveLength(1);
+    expect(JSON.parse(parts['faq.part-001.rag.jsonl'][0]).part).toEqual({ index: 1, count: 1, documentCount: 0 });
   });
 
   it('returns undefined when the module does not exist', async () => {
@@ -122,6 +200,15 @@ describe('importRagModuleJsonl', () => {
     expect(result.imported).toBe(1);
     expect(result.failed).toBe(2);
     expect(result.errors.map((e) => e.line)).toEqual([2, 3]);
+  });
+
+  it('treats a null chunkConfig as absent', async () => {
+    const data = JSON.stringify({ type: 'document', fileName: 'a.md', content: 'x', chunkConfig: null, metadata: null });
+
+    const result = await importRagModuleJsonl('tenant', 'tid', undefined, 'faq', 'u', data);
+
+    expect(result).toEqual({ total: 1, imported: 1, failed: 0, errors: [] });
+    expect(ragService.ingestDocument.mock.calls[0][3]).toMatchObject({ chunkConfig: undefined, metadata: undefined });
   });
 
   it('rejects an unsupported export version before ingesting anything', async () => {
