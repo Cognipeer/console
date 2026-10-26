@@ -177,6 +177,8 @@ export function withReasoningVisibility<T extends { includeThoughts?: boolean }>
 export const ANTHROPIC_MIN_THINKING_BUDGET = 1024;
 /** Room kept for the visible answer above the thinking budget. */
 export const THINKING_ANSWER_HEADROOM = 4096;
+/** Gemini: output limit above the thinking budget (same rule as the agent-sdk Gemini reasoning mapping). */
+export const GEMINI_ANSWER_HEADROOM = 2048;
 
 const EFFORT_BUDGET = EFFORT_BUDGETS;
 /** Vertex Gemini thinks up to this many tokens; xhigh / max map to the largest budget. */
@@ -213,6 +215,10 @@ export function supportsAdaptiveThinking(modelId: string | undefined): boolean {
  * Anthropic (and Bedrock-Claude) extended thinking. `undefined` = send nothing.
  * An explicit `thinking` in the operator's extra body is the caller's job to
  * respect (see `hasExplicitThinking`).
+ *
+ * `maxTokens` is the budget-style floor only; the adaptive effort headroom (ADAPTIVE_MIN_OUTPUT_TOKENS) and
+ * the model-maximum cap are applied by `computeOutputTokenLimit` (outputLimits.ts), the one place the sent
+ * limit is decided.
  */
 export function translateAnthropicThinking(
   reasoning: NormalizedReasoning | undefined,

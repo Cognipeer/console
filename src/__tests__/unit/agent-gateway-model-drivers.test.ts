@@ -372,7 +372,7 @@ describe('anthropic', () => {
     usage: { input_tokens: 10, output_tokens: 5, ...usage },
   });
 
-  it('sends Messages-API wire: key header, a max_tokens floor, tools as input_schema', async () => {
+  it('sends Messages-API wire: key header, the capped default max_tokens, tools as input_schema', async () => {
     const { calls, fetch } = recorder(() => json(messageResponse(
       [{ type: 'text', text: 'Hi' }, { type: 'tool_use', id: 'tu1', name: 'lookup', input: { q: 'x' } }],
       { cache_read_input_tokens: 7 },
@@ -384,7 +384,7 @@ describe('anthropic', () => {
     expect(calls[0].headers['x-api-key']).toBe('sk-ant');
     expect(calls[0].headers['anthropic-version']).toBeTruthy();
     expect(calls[0].body).toMatchObject({
-      model: 'claude-sonnet-4-5', max_tokens: 8192, temperature: 0.2, system: 'be brief',
+      model: 'claude-sonnet-4-5', max_tokens: 21333, temperature: 0.2, system: 'be brief',
       tools: [{ name: 'lookup', description: 'Find a thing', input_schema: { type: 'object' } }],
     });
     expect(reply.content).toBe('Hi');

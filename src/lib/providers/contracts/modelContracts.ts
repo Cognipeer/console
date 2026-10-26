@@ -2,14 +2,7 @@ import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime, NativeProviderSpec } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { resolveRuleForDriver } from '@/lib/services/models/modelRules';
-import {
-  type NormalizedReasoning,
-  THINKING_ANSWER_HEADROOM,
-  hasExplicitThinking,
-  normalizeReasoning,
-  translateAnthropicThinking,
-  translateVertexThinking,
-} from '@/lib/services/models/reasoning';
+import { type NormalizedReasoning, normalizeReasoning } from '@/lib/services/models/reasoning';
 import { ANTHROPIC_DEFAULT_MAX_TOKENS, buildNativeChatClient, buildNativeEmbedder } from './nativeClients';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
 import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
@@ -218,9 +211,9 @@ function resolveUnsupportedParams(
  */
 const DEFAULT_PROVIDER_RETRIES = 2;
 
-/** Anthropic's Messages API requires max_tokens; this is the floor applied when
- *  an operator has cleared the field. Generous enough not to truncate a coding
- *  answer, bounded enough not to be a blank cheque. */
+/** Anthropic's Messages API requires max_tokens; this is what an anthropic call
+ *  sends when nothing is configured and the model's maximum is unknown (the model
+ *  maximum otherwise, see outputLimits.ts). */
 export { ANTHROPIC_DEFAULT_MAX_TOKENS };
 
 /**
@@ -680,9 +673,8 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
  *    needs that key to exist before it can route anything.
  *
  * `maxTokens` is REQUIRED by the Messages API, unlike the OpenAI schema where
- * it is optional. LangChain defaults it, but an operator who explicitly cleared
- * it would otherwise get a hard 400 rather than an unbounded response — so a
- * floor is applied here instead of letting the request fail at the provider.
+ * it is optional. With nothing configured the native client sends the model's
+ * maximum output (8192 for a model it does not know), see outputLimits.ts.
  */
 export const AnthropicModelProviderContract: ProviderContract<ModelProviderRuntime, AnthropicCredentials, AnthropicSettings> = {
   id: 'anthropic',

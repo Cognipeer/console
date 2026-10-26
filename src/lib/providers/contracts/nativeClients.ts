@@ -32,7 +32,8 @@ import type {
 import { createLogger } from '@/lib/core/logger';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
-import { hasExplicitThinking, translateAnthropicThinking } from '@/lib/services/models/reasoning';
+import { hasExplicitThinking } from '@/lib/services/models/reasoning';
+import { ANTHROPIC_FALLBACK_OUTPUT_TOKENS, computeOutputTokenLimit } from '@/lib/services/models/outputLimits';
 import { withFileReferenceRestore, withInlineReasoningNormalization } from './wireNormalization';
 import type {
   ModelRuntimeConfig,
@@ -46,11 +47,11 @@ import type {
 import type { ModelSettingsOverrides } from './modelContracts';
 
 /**
- * The Messages API refuses a request without `max_tokens`; this is the floor
- * applied when an operator has cleared the field. Generous enough not to
- * truncate a coding answer, bounded enough not to be a blank cheque.
+ * The Messages API refuses a request without `max_tokens`. When nothing is configured the call is sent the
+ * model's maximum (see `computeOutputTokenLimit`); this is what it falls back to for a model whose
+ * maximum is not known. Kept under its old name for the callers that import it.
  */
-export const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
+export const ANTHROPIC_DEFAULT_MAX_TOKENS = ANTHROPIC_FALLBACK_OUTPUT_TOKENS;
 
 /** Drivers whose wire format is OpenAI Chat Completions. */
 export const OPENAI_SCHEMA_DRIVERS: ReadonlySet<string> = new Set(['openai', 'openai-compatible', 'azure', 'together']);
@@ -177,21 +178,73 @@ export function hasUnreplayableToolTurn(messages: ChatCompletionRequest['message
   );
 }
 
-/** Sampling and token settings of the model record, as the request defaults. */
+function firstPositive(...values: unknown[]): number | undefined {
+  return values.find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+}
+
+/**
+ * The `max_tokens` a call to this model is sent with: the request's own value, else the model record's
+ * (`maxCompletionTokens` > `maxTokens`), else the driver default, then the thinking headroom and the model
+ * maximum cap. The ONE place the native client decides it - `buildNativeOptions` and every `prepare` call
+ * go through here, and the gateway's `resolveOutputTokenLimit` goes through the same `computeOutputTokenLimit`,
+ * so the limit it reports on a cut-off answer is the one that was sent.
+ *
+ * `reasoning` is what thinking is derived from for THIS call: pass undefined when the call runs without it
+ * (a tool loop whose signed thinking blocks were lost, see `hasUnreplayableToolTurn`). `modelMax` is the
+ * model's maximum when the caller knows a declared one; the built-in table by model id applies otherwise.
+ */
+export function resolveNativeMaxTokens(input: {
+  driver: string;
+  modelId: string;
+  overrides: ModelSettingsOverrides;
+  reasoning?: unknown;
+  /** The request's own limit; beats the model record's and is a hard cap (no adaptive headroom on top). */
+  requestMaxTokens?: number;
+  stream?: boolean;
+  modelMax?: number;
+}): number | undefined {
+  const { driver, overrides } = input;
+  return computeOutputTokenLimit({
+    driver,
+    modelId: input.modelId,
+    modelMax: input.modelMax,
+    override: firstPositive(input.requestMaxTokens),
+    configured: firstPositive(overrides.maxCompletionTokens, overrides.maxTokens),
+    stream: input.stream,
+    reasoning: input.reasoning,
+    explicitThinking: (driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody),
+  });
+}
+
+/**
+ * Sampling and token settings of the model record, as the request defaults.
+ * `stream` says which kind of call the token default is for (a non-streaming default is capped); the
+ * client itself re-resolves the limit per call, so a request's own value and its stream mode apply.
+ */
 export function buildNativeOptions(input: {
   driver: string;
   modelId: string;
   overrides: ModelSettingsOverrides;
   settings: AnyRecord;
   reasoning?: NativeReasoning;
+  stream?: boolean;
+  modelMax?: number;
 }): NativeModelOptions {
   const { driver, overrides } = input;
   const openAiSchema = OPENAI_SCHEMA_DRIVERS.has(driver);
 
-  let maxTokens = overrides.maxCompletionTokens ?? overrides.maxTokens;
-  // The Messages API refuses a request without `max_tokens`; an operator who
-  // cleared the field gets a floor instead of a 400.
-  if (driver === 'anthropic') maxTokens ??= ANTHROPIC_DEFAULT_MAX_TOKENS;
+  // The Messages API refuses a request without `max_tokens`; the default is the model maximum (or a floor),
+  // and thinking tokens come out of the same limit - see `computeOutputTokenLimit`.
+  const maxTokens = resolveNativeMaxTokens({
+    driver,
+    modelId: input.modelId,
+    overrides,
+    reasoning: input.reasoning,
+    // The gateway marks a limit the caller set (gatewayRequest.ts `buildChatModelSettings`).
+    requestMaxTokens: firstPositive(input.settings.requestMaxTokens),
+    stream: input.stream,
+    modelMax: input.modelMax,
+  });
 
   let extra: AnyRecord | undefined = overrides.extraBody ? { ...overrides.extraBody } : undefined;
   // Converse carries model-specific parameters in its own envelope.
@@ -217,14 +270,6 @@ export function buildNativeOptions(input: {
   if (reasoning && !((driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody))) {
     // The provider turns it into the wire form itself (`reasoning_effort`, `reasoning: {effort, summary}`, thinking).
     options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
-    if (!openAiSchema) {
-      // Thinking tokens come out of `max_tokens`: leave the answer the room the console's
-      // rule promises (the SDK's own floor is thinner), and keep a roomy cap as it is.
-      if (driver === 'anthropic' || driver === 'bedrock') {
-        const thinking = translateAnthropicThinking(reasoning, maxTokens, input.modelId);
-        if (thinking?.thinking.type === 'enabled' && thinking.maxTokens !== undefined) options.maxTokens = thinking.maxTokens;
-      }
-    }
   }
   if (extra) options.extra = extra;
   options.transformRequest = buildTransformRequest({ driver, modelId: input.modelId, settings: input.settings });
@@ -276,11 +321,16 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
     return createProvider(buildProviderConfig(spec, overrides, input.transport, config.options?.maxRetries));
   })();
 
+  // The model's maximum output as the gateway resolved it (the record's declared value or the built-in table);
+  // without it the table by model id applies.
+  const modelMax = firstPositive(settings.maxOutputTokens, settings.max_output_tokens);
+
   const defaults = buildNativeOptions({
     driver,
     modelId,
     overrides,
     settings,
+    modelMax,
     // The settings carry the full normalized reasoning (includeThoughts too); the typed
     // overrides only know effort/summary.
     reasoning: normalizeNativeReasoning(settings.reasoning) ?? normalizeNativeReasoning(overrides.reasoning),
@@ -294,7 +344,6 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
       model: request.model ?? modelId,
       temperature: request.temperature ?? scalarDefaults.temperature,
       topP: request.topP ?? scalarDefaults.topP,
-      maxTokens: request.maxTokens ?? scalarDefaults.maxTokens,
       presencePenalty: request.presencePenalty ?? scalarDefaults.presencePenalty,
       frequencyPenalty: request.frequencyPenalty ?? scalarDefaults.frequencyPenalty,
       stop: request.stop ?? scalarDefaults.stop,
@@ -308,6 +357,19 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
     // way in: that call runs without it (the first turn of the loop kept it).
     const mustDropThinking = (driver === 'anthropic' || driver === 'bedrock') && hasUnreplayableToolTurn(merged.messages);
     if (reasoning && !mustDropThinking) merged.reasoning = reasoning;
+    // Decided per call: the request's own value beats the model record's, a non-streaming default is capped,
+    // and the thinking headroom only applies when the call actually thinks.
+    const maxTokens = resolveNativeMaxTokens({
+      driver,
+      modelId,
+      overrides,
+      reasoning: mustDropThinking ? undefined : reasoning,
+      requestMaxTokens: request.maxTokens ?? firstPositive(settings.requestMaxTokens),
+      stream,
+      modelMax,
+    });
+    if (maxTokens !== undefined) merged.maxTokens = maxTokens;
+    else delete merged.maxTokens;
     if (defaultExtra || request.extra) merged.extra = { ...(defaultExtra ?? {}), ...(request.extra ?? {}) };
     if (stream && overrides.streamUsage === false && merged.streamUsage === undefined) merged.streamUsage = false;
     const out = await transformRequest!(merged);
