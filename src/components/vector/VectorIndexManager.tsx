@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   ActionIcon,
   Badge,
@@ -11,7 +10,6 @@ import {
   NumberInput,
   Select,
   Stack,
-  Table,
   Text,
   TextInput,
   Tooltip,
@@ -21,6 +19,7 @@ import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
 import { IconTrash, IconRefresh } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import SectionCard from '@/components/common/SectionCard';
@@ -84,7 +83,6 @@ export default function VectorIndexManager({ provider }: VectorIndexManagerProps
   const [indexes, setIndexes] = useState<VectorIndexRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const router = useRouter();
 
   const form = useForm<CreateIndexFormValues>({
     initialValues: {
@@ -234,12 +232,65 @@ export default function VectorIndexManager({ provider }: VectorIndexManagerProps
     });
   };
 
-  const navigateToIndex = (index: VectorIndexRecord) => {
-    if (!providerKey) {
-      return;
-    }
-    router.push(`/dashboard/vector/${providerKey}/${index.key}`);
-  };
+  const indexColumns: DataGridColumn<VectorIndexRecord>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      render: (index) => (
+        <Group gap="xs">
+          <Text fw={500}>{index.name}</Text>
+          <Badge color="blue" variant="light">
+            {index.createdBy ?? 'system'}
+          </Badge>
+        </Group>
+      ),
+    },
+    {
+      key: 'key',
+      label: 'Index ID',
+      render: (index) => {
+        const providerHandle = resolveProviderHandle(index.metadata);
+        return (
+          <Stack gap={4}>
+            <Text size="sm" c="dimmed" ff="monospace">
+              {index.key}
+            </Text>
+            <Text size="xs" c="dimmed">
+              External ID: {index.externalId}
+            </Text>
+            {providerHandle ? (
+              <Text size="xs" c="dimmed">
+                Handle: {providerHandle}
+              </Text>
+            ) : null}
+          </Stack>
+        );
+      },
+    },
+    { key: 'dimension', label: 'Dimension', align: 'right', render: (index) => index.dimension },
+    { key: 'metric', label: 'Metric', render: (index) => index.metric },
+    { key: 'created', label: 'Created', render: (index) => formatDate(index.createdAt) },
+    {
+      key: 'actions',
+      label: '',
+      align: 'right',
+      render: (index) => (
+        <Tooltip label="Delete index">
+          <ActionIcon
+            variant="subtle"
+            color="red"
+            aria-label={`Delete ${index.name}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              void handleDeleteIndex(index);
+            }}
+          >
+            <IconTrash size={16} />
+          </ActionIcon>
+        </Tooltip>
+      ),
+    },
+  ];
 
   const createModal = (
     <Modal
@@ -337,81 +388,12 @@ export default function VectorIndexManager({ provider }: VectorIndexManagerProps
             minHeight={220}
           />
         ) : (
-          <Table striped highlightOnHover withColumnBorders>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Name</Table.Th>
-                <Table.Th>Index ID</Table.Th>
-                <Table.Th>Dimension</Table.Th>
-                <Table.Th>Metric</Table.Th>
-                <Table.Th>Created</Table.Th>
-                <Table.Th></Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {indexes.map((index) => {
-                const providerHandle = resolveProviderHandle(index.metadata);
-                return (
-                  <Table.Tr
-                    key={index.key}
-                    onClick={() => navigateToIndex(index)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        navigateToIndex(index);
-                      }
-                    }}
-                    tabIndex={0}
-                    role="button"
-                    aria-label={`Open index ${index.name}`}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <Table.Td>
-                      <Group gap="xs">
-                        <Text fw={500}>{index.name}</Text>
-                        <Badge color="blue" variant="light">
-                          {index.createdBy ?? 'system'}
-                        </Badge>
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Stack gap={4}>
-                        <Text size="sm" c="dimmed" ff="monospace">
-                          {index.key}
-                        </Text>
-                        <Text size="xs" c="dimmed">
-                          External ID: {index.externalId}
-                        </Text>
-                        {providerHandle ? (
-                          <Text size="xs" c="dimmed">
-                            Handle: {providerHandle}
-                          </Text>
-                        ) : null}
-                      </Stack>
-                    </Table.Td>
-                    <Table.Td>{index.dimension}</Table.Td>
-                    <Table.Td>{index.metric}</Table.Td>
-                    <Table.Td>{formatDate(index.createdAt)}</Table.Td>
-                    <Table.Td>
-                      <Tooltip label="Delete index">
-                        <ActionIcon
-                          variant="subtle"
-                          color="red"
-                          aria-label={`Delete ${index.name}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleDeleteIndex(index);
-                          }}
-                        >
-                          <IconTrash size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
+          <DataGrid<VectorIndexRecord>
+            records={indexes}
+            rowKey={(index) => index.key}
+            columns={indexColumns}
+            rowHref={(index) => (providerKey ? `/dashboard/vector/${providerKey}/${index.key}` : null)}
+          />
         )}
       </Stack>
       {createModal}

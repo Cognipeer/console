@@ -22,11 +22,11 @@ import {
   Group,
   Paper,
   Stack,
-  Table,
   Text,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconExternalLink, IconPlus, IconX } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { ToggleList, ToggleRow } from '@/components/common/ui/FormShell';
 import { useConfirm } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
@@ -155,6 +155,61 @@ export default function McpMembersPanel({ serverId, members, onServerUpdated }: 
 
   const availableOptions = options.filter((o) => !memberIds.has(o.id));
 
+  const memberColumns: DataGridColumn<McpMemberSummary>[] = [
+    {
+      key: 'server',
+      label: 'Server',
+      render: (m) => (
+        <Group gap={6}>
+          <Anchor component={Link} href={`/dashboard/mcp/${m.serverId}`} size="sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            {m.name} <IconExternalLink size={12} />
+          </Anchor>
+          <Text size="xs" c="dimmed" ff="monospace">{m.serverKey}</Text>
+        </Group>
+      ),
+    },
+    {
+      key: 'source',
+      label: 'Source',
+      render: (m) => (
+        <Badge size="sm" variant="light" color="grape">
+          {SOURCE_LABELS[m.sourceType] ?? m.sourceType}
+        </Badge>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (m) => (
+        <Badge size="sm" variant="light" color={m.status === 'active' ? 'teal' : 'gray'}>
+          {m.status === 'active' ? 'Active' : 'Disabled'}
+        </Badge>
+      ),
+    },
+    {
+      key: 'tools',
+      label: 'Tools',
+      render: (m) => <Text size="sm">{m.toolCount}</Text>,
+    },
+    {
+      key: 'remove',
+      label: '',
+      align: 'right',
+      render: (m) => (
+        <Button
+          variant="subtle"
+          color="red"
+          size="xs"
+          leftSection={<IconX size={13} />}
+          loading={removing === m.serverId}
+          onClick={() => void handleRemove(m.serverId)}
+        >
+          Remove
+        </Button>
+      ),
+    },
+  ];
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
@@ -177,58 +232,11 @@ export default function McpMembersPanel({ serverId, members, onServerUpdated }: 
           This composite has no members — it publishes no tools and will not serve calls until you add one.
         </Alert>
       ) : (
-        <Paper withBorder radius="md">
-          <Table>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Server</Table.Th>
-                <Table.Th>Source</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Tools</Table.Th>
-                <Table.Th />
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {members.map((m) => (
-                <Table.Tr key={m.serverId}>
-                  <Table.Td>
-                    <Group gap={6}>
-                      <Anchor component={Link} href={`/dashboard/mcp/${m.serverId}`} size="sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                        {m.name} <IconExternalLink size={12} />
-                      </Anchor>
-                      <Text size="xs" c="dimmed" ff="monospace">{m.serverKey}</Text>
-                    </Group>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge size="sm" variant="light" color="grape">
-                      {SOURCE_LABELS[m.sourceType] ?? m.sourceType}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge size="sm" variant="light" color={m.status === 'active' ? 'teal' : 'gray'}>
-                      {m.status === 'active' ? 'Active' : 'Disabled'}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{m.toolCount}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Button
-                      variant="subtle"
-                      color="red"
-                      size="xs"
-                      leftSection={<IconX size={13} />}
-                      loading={removing === m.serverId}
-                      onClick={() => void handleRemove(m.serverId)}
-                    >
-                      Remove
-                    </Button>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        </Paper>
+        <DataGrid<McpMemberSummary>
+          records={members}
+          rowKey={(m) => m.serverId}
+          columns={memberColumns}
+        />
       )}
 
       {pickerOpen ? (

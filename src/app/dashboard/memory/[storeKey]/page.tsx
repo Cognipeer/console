@@ -17,13 +17,13 @@ import {
   Select,
   SimpleGrid,
   Stack,
-  Table,
   Tabs,
   Text,
   TextInput,
   Tooltip,
 } from '@mantine/core';
 import DetailShell from '@/components/common/ui/DetailShell';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import AddMemoryItemModal from '@/components/memory/AddMemoryItemModal';
 import { notifications } from '@mantine/notifications';
@@ -525,6 +525,78 @@ export default function MemoryStoreDetailPage() {
     </>
   );
 
+  const memoryColumns: DataGridColumn<MemoryItem>[] = [
+    {
+      key: 'content',
+      label: t('content'),
+      render: (item) => (
+        <Text size="sm" lineClamp={2} maw={420}>
+          {item.content}
+        </Text>
+      ),
+    },
+    {
+      key: 'scope',
+      label: t('scope'),
+      render: (item) => (
+        <Badge size="xs" variant="light">
+          {getScopeLabel(t, item.scope)}
+        </Badge>
+      ),
+    },
+    {
+      key: 'scopeId',
+      label: t('scopeId'),
+      render: (item) => <Text size="sm">{item.scopeId || '—'}</Text>,
+    },
+    {
+      key: 'tags',
+      label: t('tags'),
+      render: (item) => (
+        <Group gap={4}>
+          {(item.tags || []).slice(0, 3).map((tag) => (
+            <Badge key={tag} size="xs" variant="light" color="gray">
+              {tag}
+            </Badge>
+          ))}
+        </Group>
+      ),
+    },
+    {
+      key: 'importance',
+      label: t('importance'),
+      render: (item) => <Text size="sm">{(item.importance ?? 0.5).toFixed(2)}</Text>,
+    },
+    {
+      key: 'source',
+      label: t('memorySource'),
+      render: (item) => <Text size="sm">{getSourceLabel(t, item.source)}</Text>,
+    },
+    {
+      key: 'createdAt',
+      label: t('createdAt'),
+      render: (item) => <Text size="sm">{formatDate(item.createdAt)}</Text>,
+    },
+    {
+      key: 'actions',
+      label: t('actions'),
+      render: (item) => (
+        <Tooltip label={t('delete')}>
+          <ActionIcon
+            color="red"
+            variant="subtle"
+            loading={deletingMemoryId === item._id}
+            onClick={() => {
+              void handleDeleteMemory(item._id);
+            }}
+          >
+            <IconTrash size={16} />
+          </ActionIcon>
+        </Tooltip>
+      ),
+    },
+  ];
+
   return (
     <>
       <DetailShell
@@ -734,91 +806,18 @@ export default function MemoryStoreDetailPage() {
               </Text>
             </Group>
 
-            {loadingMemories ? (
-              <Center py="xl">
-                <Loader size="md" />
-              </Center>
-            ) : memories.length === 0 ? (
-              <Stack align="center" py="xl" gap="sm">
-                <Text fw={600}>{t('noMemories')}</Text>
-                <Text size="sm" c="dimmed" maw={420} ta="center">
-                  {t('noMemoriesDescription')}
-                </Text>
-              </Stack>
-            ) : (
-              <>
-                <Table highlightOnHover>
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th>{t('content')}</Table.Th>
-                      <Table.Th>{t('scope')}</Table.Th>
-                      <Table.Th>{t('scopeId')}</Table.Th>
-                      <Table.Th>{t('tags')}</Table.Th>
-                      <Table.Th>{t('importance')}</Table.Th>
-                      <Table.Th>{t('memorySource')}</Table.Th>
-                      <Table.Th>{t('createdAt')}</Table.Th>
-                      <Table.Th>{t('actions')}</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {memories.map((item) => (
-                      <Table.Tr key={item._id}>
-                        <Table.Td maw={420}>
-                          <Text size="sm" lineClamp={2}>
-                            {item.content}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Badge size="xs" variant="light">
-                            {getScopeLabel(t, item.scope)}
-                          </Badge>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm">{item.scopeId || '—'}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Group gap={4}>
-                            {(item.tags || []).slice(0, 3).map((tag) => (
-                              <Badge key={tag} size="xs" variant="light" color="gray">
-                                {tag}
-                              </Badge>
-                            ))}
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm">{(item.importance ?? 0.5).toFixed(2)}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm">{getSourceLabel(t, item.source)}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm">{formatDate(item.createdAt)}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Tooltip label={t('delete')}>
-                            <ActionIcon
-                              color="red"
-                              variant="subtle"
-                              loading={deletingMemoryId === item._id}
-                              onClick={() => {
-                                void handleDeleteMemory(item._id);
-                              }}
-                            >
-                              <IconTrash size={16} />
-                            </ActionIcon>
-                          </Tooltip>
-                        </Table.Td>
-                      </Table.Tr>
-                    ))}
-                  </Table.Tbody>
-                </Table>
+            <DataGrid<MemoryItem>
+              records={memories}
+              rowKey={(item) => item._id}
+              columns={memoryColumns}
+              loading={loadingMemories}
+              empty={{ title: t('noMemories'), description: t('noMemoriesDescription') }}
+            />
 
-                {totalPages > 1 && (
-                  <Group justify="center" py="md">
-                    <Pagination value={page} onChange={setPage} total={totalPages} size="sm" />
-                  </Group>
-                )}
-              </>
+            {totalPages > 1 && (
+              <Group justify="center" py="md">
+                <Pagination value={page} onChange={setPage} total={totalPages} size="sm" />
+              </Group>
             )}
           </Paper>
         </Tabs.Panel>

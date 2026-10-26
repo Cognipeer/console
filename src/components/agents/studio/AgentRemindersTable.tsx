@@ -8,10 +8,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActionIcon, Button, Group, Menu, Select, Skeleton, Stack, Table, Text, Tooltip, UnstyledButton } from '@mantine/core';
+import { ActionIcon, Button, Group, Menu, Select, Skeleton, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconDots, IconRefresh } from '@tabler/icons-react';
-import EmptyState from '@/components/common/EmptyState';
+import DataGrid from '@/components/common/ui/DataGrid';
 import { useConfirm } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
 import { cancelReminder, fireReminderNow } from './reminderActions';
@@ -174,52 +174,64 @@ export default function AgentRemindersTable({ agentId, onOpenSession, onActiveCo
                 </Group>
             </Group>
 
-            {rows.length === 0 ? (
-                <EmptyState title={t('emptyTitle')} description={t('emptyDescription')} minHeight={160} />
-            ) : (
-                <Table highlightOnHover verticalSpacing={6}>
-                    <Table.Thead>
-                        <Table.Tr>
-                            <Table.Th w={170}>{t('nextFire')}</Table.Th>
-                            <Table.Th>{t('message')}</Table.Th>
-                            <Table.Th w={220}>{t('sessionOwner')}</Table.Th>
-                            <Table.Th w={120}>{t('status')}</Table.Th>
-                            <Table.Th w={80} />
-                        </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                        {rows.map((reminder) => (
-                            <Table.Tr key={reminder.id}>
-                                <Table.Td>
-                                    <Text size="xs">{new Date(reminder.fire_at * 1000).toLocaleString()}</Text>
-                                    {isUpcomingReminder(reminder) ? <Text size="xs" c="dimmed">{formatUntil(reminder.fire_at, t)}</Text> : null}
-                                </Table.Td>
-                                <Table.Td>
-                                    <UnstyledButton onClick={() => setSelectedId(reminder.id)} maw={420}>
-                                        <Text size="sm" lineClamp={1}>{reminder.message}</Text>
-                                    </UnstyledButton>
-                                </Table.Td>
-                                <Table.Td>
-                                    <UnstyledButton onClick={() => onOpenSession(reminder.session_id)} maw={210}>
-                                        <Text size="xs" lineClamp={1}>{reminder.session_title || reminder.session_id}</Text>
-                                    </UnstyledButton>
-                                    {reminder.owner ? <Text size="xs" c="dimmed" lineClamp={1}>{reminderOwnerText(reminder)}</Text> : null}
-                                </Table.Td>
-                                <Table.Td>
-                                    <Text size="xs" c="dimmed">{t(`status_${reminder.status}`)}</Text>
-                                </Table.Td>
-                                <Table.Td>
-                                    {isUpcomingReminder(reminder) ? (
-                                        <Button size="compact-xs" variant="subtle" color="gray" loading={busyId === reminder.id} onClick={() => void cancelOne(reminder)}>
-                                            {t('cancel')}
-                                        </Button>
-                                    ) : null}
-                                </Table.Td>
-                            </Table.Tr>
-                        ))}
-                    </Table.Tbody>
-                </Table>
-            )}
+            <DataGrid<AgentReminderView>
+                records={rows}
+                rowKey={(reminder) => reminder.id}
+                empty={{ title: t('emptyTitle'), description: t('emptyDescription') }}
+                columns={[
+                    {
+                        key: 'fire_at',
+                        label: t('nextFire'),
+                        width: 170,
+                        render: (reminder) => (
+                            <>
+                                <Text size="xs">{new Date(reminder.fire_at * 1000).toLocaleString()}</Text>
+                                {isUpcomingReminder(reminder) ? <Text size="xs" c="dimmed">{formatUntil(reminder.fire_at, t)}</Text> : null}
+                            </>
+                        ),
+                    },
+                    {
+                        key: 'message',
+                        label: t('message'),
+                        render: (reminder) => (
+                            <UnstyledButton onClick={() => setSelectedId(reminder.id)} maw={420}>
+                                <Text size="sm" lineClamp={1}>{reminder.message}</Text>
+                            </UnstyledButton>
+                        ),
+                    },
+                    {
+                        key: 'session',
+                        label: t('sessionOwner'),
+                        width: 220,
+                        render: (reminder) => (
+                            <>
+                                <UnstyledButton onClick={() => onOpenSession(reminder.session_id)} maw={210}>
+                                    <Text size="xs" lineClamp={1}>{reminder.session_title || reminder.session_id}</Text>
+                                </UnstyledButton>
+                                {reminder.owner ? <Text size="xs" c="dimmed" lineClamp={1}>{reminderOwnerText(reminder)}</Text> : null}
+                            </>
+                        ),
+                    },
+                    {
+                        key: 'status',
+                        label: t('status'),
+                        width: 120,
+                        render: (reminder) => <Text size="xs" c="dimmed">{t(`status_${reminder.status}`)}</Text>,
+                    },
+                    {
+                        key: 'actions',
+                        label: '',
+                        align: 'right',
+                        width: 80,
+                        render: (reminder) =>
+                            isUpcomingReminder(reminder) ? (
+                                <Button size="compact-xs" variant="subtle" color="gray" loading={busyId === reminder.id} onClick={() => void cancelOne(reminder)}>
+                                    {t('cancel')}
+                                </Button>
+                            ) : null,
+                    },
+                ]}
+            />
 
             <Text size="xs" c="dimmed">{t('retentionNote')}</Text>
 

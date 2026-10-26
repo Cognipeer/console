@@ -16,7 +16,6 @@ import {
   ScrollArea,
   SimpleGrid,
   Stack,
-  Table,
   Tabs,
   Text,
   TextInput,
@@ -25,6 +24,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { AreaChart } from '@mantine/charts';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useForm } from '@mantine/form';
@@ -583,6 +583,35 @@ export default function VectorIndexDetailPage() {
     `// [{ id: 'vec-001', score: 0.9832, metadata: { source: 'doc-1' } }, ...]`,
   ].join('\n');
 
+  type TopKRow = NonNullable<typeof stats>['topKDistribution'][number];
+  type QueryMatchRow = NonNullable<typeof queryResult>['matches'][number];
+  const topKColumns: DataGridColumn<TopKRow>[] = [
+    { key: 'topK', label: 'Top K', render: (row) => <Text size="sm" fw={500}>{row.topK}</Text> },
+    { key: 'count', label: 'Query Count', render: (row) => row.count.toLocaleString() },
+    {
+      key: 'share',
+      label: 'Share',
+      render: (row) => {
+        const total = stats?.totals.totalQueries ?? 0;
+        const pct = total > 0 ? ((row.count / total) * 100).toFixed(1) : '0.0';
+        return `${pct}%`;
+      },
+    },
+  ];
+  const matchColumns: DataGridColumn<QueryMatchRow>[] = [
+    { key: 'id', label: 'ID', render: (match) => match.id },
+    { key: 'score', label: 'Score', render: (match) => match.score.toFixed(4) },
+    {
+      key: 'metadata',
+      label: 'Metadata',
+      render: (match) => (
+        <Text size="xs" c="dimmed" style={{ whiteSpace: 'pre-wrap' }}>
+          {stringifyMetadata(match.metadata)}
+        </Text>
+      ),
+    },
+  ];
+
   return (
     <PageContainer>
       <PageHeader
@@ -892,29 +921,11 @@ export default function VectorIndexDetailPage() {
                 {stats && stats.topKDistribution.length > 0 && (
                   <Paper withBorder radius="lg" p="lg">
                     <Text fw={600} mb="md">Top-K Distribution</Text>
-                    <Table highlightOnHover>
-                      <Table.Thead>
-                        <Table.Tr>
-                          <Table.Th>Top K</Table.Th>
-                          <Table.Th>Query Count</Table.Th>
-                          <Table.Th>Share</Table.Th>
-                        </Table.Tr>
-                      </Table.Thead>
-                      <Table.Tbody>
-                        {stats.topKDistribution.map((row) => {
-                          const pct = stats.totals.totalQueries > 0
-                            ? ((row.count / stats.totals.totalQueries) * 100).toFixed(1)
-                            : '0.0';
-                          return (
-                            <Table.Tr key={row.topK}>
-                              <Table.Td><Text size="sm" fw={500}>{row.topK}</Text></Table.Td>
-                              <Table.Td>{row.count.toLocaleString()}</Table.Td>
-                              <Table.Td>{pct}%</Table.Td>
-                            </Table.Tr>
-                          );
-                        })}
-                      </Table.Tbody>
-                    </Table>
+                    <DataGrid<TopKRow>
+                      records={stats.topKDistribution}
+                      rowKey={(row) => String(row.topK)}
+                      columns={topKColumns}
+                    />
                   </Paper>
                 )}
               </Stack>
@@ -1113,28 +1124,11 @@ export default function VectorIndexDetailPage() {
                 {queryResult && (
                   <Stack gap="sm">
                     <Text size="sm" c="dimmed">{queryResult.matches.length} matches</Text>
-                    <Table highlightOnHover verticalSpacing="sm">
-                      <Table.Thead>
-                        <Table.Tr>
-                          <Table.Th>ID</Table.Th>
-                          <Table.Th>Score</Table.Th>
-                          <Table.Th>Metadata</Table.Th>
-                        </Table.Tr>
-                      </Table.Thead>
-                      <Table.Tbody>
-                        {queryResult.matches.map((match) => (
-                          <Table.Tr key={match.id}>
-                            <Table.Td>{match.id}</Table.Td>
-                            <Table.Td>{match.score.toFixed(4)}</Table.Td>
-                            <Table.Td>
-                              <Text size="xs" c="dimmed" style={{ whiteSpace: 'pre-wrap' }}>
-                                {stringifyMetadata(match.metadata)}
-                              </Text>
-                            </Table.Td>
-                          </Table.Tr>
-                        ))}
-                      </Table.Tbody>
-                    </Table>
+                    <DataGrid<QueryMatchRow>
+                      records={queryResult.matches}
+                      rowKey={(match) => match.id}
+                      columns={matchColumns}
+                    />
                   </Stack>
                 )}
               </Stack>

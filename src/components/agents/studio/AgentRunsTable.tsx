@@ -18,7 +18,6 @@ import {
     SegmentedControl,
     Skeleton,
     Stack,
-    Table,
     Text,
     Tooltip,
     UnstyledButton,
@@ -26,6 +25,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import { IconPlayerStop, IconRefresh, IconX } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
+import DataGrid from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
@@ -194,97 +194,106 @@ export default function AgentRunsTable({ agentId, onOpenConversation, conversati
                 </Group>
             </Group>
 
-            {rows.length === 0 ? (
-                <Text size="sm" c="dimmed" ta="center" py="lg">No runs match this filter.</Text>
-            ) : (
-                <Table highlightOnHover verticalSpacing={6}>
-                    <Table.Thead>
-                        <Table.Tr>
-                            <Table.Th w={110}>Status</Table.Th>
-                            <Table.Th>Run</Table.Th>
-                            <Table.Th w={110}>Started</Table.Th>
-                            <Table.Th w={90} ta="right">Duration</Table.Th>
-                            <Table.Th w={130}>Callback</Table.Th>
-                            <Table.Th>Error</Table.Th>
-                            <Table.Th w={40} />
-                        </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                        {rows.map((run) => {
+            <DataGrid<AgentRunRow>
+                records={rows}
+                rowKey={(run) => run.id}
+                empty={{ title: 'No runs match this filter.' }}
+                columns={[
+                    {
+                        key: 'status',
+                        label: 'Status',
+                        width: 110,
+                        render: (run) => (
+                            <Group gap={4} wrap="nowrap">
+                                <StatusBadge status={run.status} />
+                                {run.cancel_requested_at && ACTIVE_RUN_STATUSES.has(run.status)
+                                    ? <Badge size="xs" color="orange" variant="light">canceling</Badge>
+                                    : null}
+                            </Group>
+                        ),
+                    },
+                    {
+                        key: 'run',
+                        label: 'Run',
+                        render: (run) => onOpenConversation ? (
+                            <UnstyledButton onClick={() => onOpenConversation(run.conversation_id)}>
+                                <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>
+                                <Text size="xs" c="teal" td="underline">Open conversation</Text>
+                            </UnstyledButton>
+                        ) : <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>,
+                    },
+                    {
+                        key: 'started',
+                        label: 'Started',
+                        width: 110,
+                        render: (run) => (
+                            <Text size="xs" c="dimmed">
+                                {run.status === 'scheduled' && run.scheduled_for
+                                    ? `Starts ${new Date(run.scheduled_for * 1000).toLocaleString()}`
+                                    : run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
+                            </Text>
+                        ),
+                    },
+                    {
+                        key: 'duration',
+                        label: 'Duration',
+                        align: 'right',
+                        width: 90,
+                        render: (run) => {
                             const duration = durationOf(run);
-                            return (
-                                <Table.Tr key={run.id}>
-                                    <Table.Td>
-                                        <Group gap={4} wrap="nowrap">
-                                            <StatusBadge status={run.status} />
-                                            {run.cancel_requested_at && ACTIVE_RUN_STATUSES.has(run.status)
-                                                ? <Badge size="xs" color="orange" variant="light">canceling</Badge>
-                                                : null}
-                                        </Group>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        {onOpenConversation ? (
-                                            <UnstyledButton onClick={() => onOpenConversation(run.conversation_id)}>
-                                                <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>
-                                                <Text size="xs" c="teal" td="underline">Open conversation</Text>
-                                            </UnstyledButton>
-                                        ) : <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>}
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Text size="xs" c="dimmed">
-                                            {run.status === 'scheduled' && run.scheduled_for
-                                                ? `Starts ${new Date(run.scheduled_for * 1000).toLocaleString()}`
-                                                : run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
-                                        </Text>
-                                    </Table.Td>
-                                    <Table.Td ta="right">
-                                        <Text size="xs">{duration !== null ? formatDuration(duration) : '—'}</Text>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        {run.callback ? (
-                                            <Tooltip label={`${run.callback.url}${run.callback.signed ? ' · signed' : ''} · ${run.callback.attempts} attempt(s)`} withArrow multiline maw={360}>
-                                                <Badge
-                                                    size="xs"
-                                                    variant="light"
-                                                    color={run.callback.status === 'delivered' ? 'teal' : run.callback.status === 'failed' ? 'red' : 'gray'}
-                                                >
-                                                    {run.callback.status ?? 'pending'}
-                                                </Badge>
-                                            </Tooltip>
-                                        ) : <Text size="xs" c="dimmed">polling</Text>}
-                                    </Table.Td>
-                                    <Table.Td>
-                                        {run.error ? (
-                                            <Tooltip label={run.error.message ?? ''} disabled={!run.error.message} withArrow multiline maw={420}>
-                                                <Text size="xs" c={run.status === 'failed' ? 'red' : 'dimmed'} lineClamp={1}>
-                                                    {ERROR_LABELS[run.error.type] ?? run.error.type}
-                                                    {run.error.message && run.status === 'failed' ? ` — ${run.error.message}` : ''}
-                                                </Text>
-                                            </Tooltip>
-                                        ) : <Text size="xs" c="dimmed">—</Text>}
-                                    </Table.Td>
-                                    <Table.Td>
-                                        {ACTIVE_RUN_STATUSES.has(run.status) && !run.cancel_requested_at ? (
-                                            <Tooltip label="Cancel run" withArrow>
-                                                <ActionIcon
-                                                    size="sm"
-                                                    variant="subtle"
-                                                    color="red"
-                                                    loading={canceling === run.id}
-                                                    onClick={() => void cancel(run)}
-                                                    aria-label="Cancel run"
-                                                >
-                                                    <IconPlayerStop size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                        ) : null}
-                                    </Table.Td>
-                                </Table.Tr>
-                            );
-                        })}
-                    </Table.Tbody>
-                </Table>
-            )}
+                            return <Text size="xs">{duration !== null ? formatDuration(duration) : '—'}</Text>;
+                        },
+                    },
+                    {
+                        key: 'callback',
+                        label: 'Callback',
+                        width: 130,
+                        render: (run) => run.callback ? (
+                            <Tooltip label={`${run.callback.url}${run.callback.signed ? ' · signed' : ''} · ${run.callback.attempts} attempt(s)`} withArrow multiline maw={360}>
+                                <Badge
+                                    size="xs"
+                                    variant="light"
+                                    color={run.callback.status === 'delivered' ? 'teal' : run.callback.status === 'failed' ? 'red' : 'gray'}
+                                >
+                                    {run.callback.status ?? 'pending'}
+                                </Badge>
+                            </Tooltip>
+                        ) : <Text size="xs" c="dimmed">polling</Text>,
+                    },
+                    {
+                        key: 'error',
+                        label: 'Error',
+                        render: (run) => run.error ? (
+                            <Tooltip label={run.error.message ?? ''} disabled={!run.error.message} withArrow multiline maw={420}>
+                                <Text size="xs" c={run.status === 'failed' ? 'red' : 'dimmed'} lineClamp={1}>
+                                    {ERROR_LABELS[run.error.type] ?? run.error.type}
+                                    {run.error.message && run.status === 'failed' ? ` — ${run.error.message}` : ''}
+                                </Text>
+                            </Tooltip>
+                        ) : <Text size="xs" c="dimmed">—</Text>,
+                    },
+                    {
+                        key: 'actions',
+                        label: '',
+                        align: 'right',
+                        width: 40,
+                        render: (run) => ACTIVE_RUN_STATUSES.has(run.status) && !run.cancel_requested_at ? (
+                            <Tooltip label="Cancel run" withArrow>
+                                <ActionIcon
+                                    size="sm"
+                                    variant="subtle"
+                                    color="red"
+                                    loading={canceling === run.id}
+                                    onClick={() => void cancel(run)}
+                                    aria-label="Cancel run"
+                                >
+                                    <IconPlayerStop size={14} />
+                                </ActionIcon>
+                            </Tooltip>
+                        ) : null,
+                    },
+                ]}
+            />
         </Stack>
     );
 }

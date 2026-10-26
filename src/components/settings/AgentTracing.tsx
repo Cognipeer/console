@@ -16,10 +16,10 @@ import {
   TextInput,
   Select,
   Anchor,
-  Table,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
 import { IconInfoCircle, IconRefresh, IconCalendar } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import SessionTable from '@/components/tracing/SessionTable';
 import {
   formatNumber,
@@ -29,6 +29,42 @@ import {
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import type { DashboardOverview } from '@/lib/services/agentTracing';
+
+type RecentAgent = DashboardOverview['recentAgents'][number];
+
+const recentAgentColumns: DataGridColumn<RecentAgent>[] = [
+  {
+    key: 'agent',
+    label: 'Agent',
+    render: (agent) => (
+      <Text size="sm" fw={500} lineClamp={1}>
+        {agent.label || agent.name}
+      </Text>
+    ),
+  },
+  {
+    key: 'sessions',
+    label: 'Sessions',
+    align: 'right',
+    render: (agent) => <Text size="xs" c="dimmed">{formatNumber(agent.sessionsCount)}</Text>,
+  },
+  {
+    key: 'tokens',
+    label: 'Tokens',
+    align: 'right',
+    render: (agent) => (
+      <Badge size="xs" variant="light" color="blue">
+        {formatNumber(agent.totalTokens)}
+      </Badge>
+    ),
+  },
+  {
+    key: 'avg',
+    label: 'Avg / session',
+    align: 'right',
+    render: (agent) => <Text size="xs" c="dimmed">{formatNumber(agent.averageTokensPerSession)}</Text>,
+  },
+];
 
 export default function AgentTracing() {
   const { openDocs } = useDocsDrawer();
@@ -276,40 +312,11 @@ export default function AgentTracing() {
                     Total tracked: {formatNumber(dashboardData.recentAgentsTotal)}
                   </Text>
                 </Group>
-                <Table.ScrollContainer minWidth={480}>
-                  <Table verticalSpacing="xs" highlightOnHover>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>Agent</Table.Th>
-                        <Table.Th ta="right">Sessions</Table.Th>
-                        <Table.Th ta="right">Tokens</Table.Th>
-                        <Table.Th ta="right">Avg / session</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {dashboardData.recentAgents.slice(0, 6).map((agent) => (
-                        <Table.Tr key={agent.name}>
-                          <Table.Td>
-                            <Text size="sm" fw={500} lineClamp={1}>
-                              {agent.label || agent.name}
-                            </Text>
-                          </Table.Td>
-                          <Table.Td ta="right">
-                            <Text size="xs" c="dimmed">{formatNumber(agent.sessionsCount)}</Text>
-                          </Table.Td>
-                          <Table.Td ta="right">
-                            <Badge size="xs" variant="light" color="blue">
-                              {formatNumber(agent.totalTokens)}
-                            </Badge>
-                          </Table.Td>
-                          <Table.Td ta="right">
-                            <Text size="xs" c="dimmed">{formatNumber(agent.averageTokensPerSession)}</Text>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
-                </Table.ScrollContainer>
+                <DataGrid<RecentAgent>
+                  records={dashboardData.recentAgents.slice(0, 6)}
+                  rowKey={(agent) => agent.name}
+                  columns={recentAgentColumns}
+                />
               </Stack>
             </Card>
           )}

@@ -12,7 +12,6 @@ import {
   Paper,
   SimpleGrid,
   Stack,
-  Table,
   Text,
   Textarea,
   Tooltip,
@@ -20,6 +19,7 @@ import {
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCertificate, IconCheck, IconCopy, IconRefresh, IconTrash } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm';
 
@@ -182,6 +182,41 @@ export default function LicenseManagement() {
   };
   const statusColor = license?.status === 'active' ? 'teal' : license?.status === 'free' ? 'blue' : 'red';
 
+  const serviceColumns: DataGridColumn<ServiceState>[] = [
+    {
+      key: 'service',
+      label: t('services.service'),
+      render: (item) => <Text size="sm">{item.label}</Text>,
+    },
+    {
+      key: 'id',
+      label: t('services.id'),
+      render: (item) => (
+        <Text size="sm" ff="monospace" c="dimmed">
+          {item.service}
+        </Text>
+      ),
+    },
+    {
+      key: 'state',
+      label: t('services.state'),
+      render: (item) => (
+        <Badge color={item.enabled ? 'teal' : 'gray'} variant="light">
+          {item.enabled ? t('services.on') : t('services.off')}
+        </Badge>
+      ),
+    },
+    {
+      key: 'reason',
+      label: t('services.reason'),
+      render: (item) => (
+        <Text size="sm" c="dimmed">
+          {item.enabled ? '—' : offReason(item)}
+        </Text>
+      ),
+    },
+  ];
+
   return (
     <Box p="md">
       <Stack gap="md">
@@ -323,42 +358,11 @@ export default function LicenseManagement() {
               <Text size="sm" c="dimmed">
                 {t('services.subtitle')}
               </Text>
-              <Table.ScrollContainer minWidth={520}>
-                <Table verticalSpacing="xs">
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th>{t('services.service')}</Table.Th>
-                      <Table.Th>{t('services.id')}</Table.Th>
-                      <Table.Th>{t('services.state')}</Table.Th>
-                      <Table.Th>{t('services.reason')}</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {services.map((item) => (
-                      <Table.Tr key={item.service}>
-                        <Table.Td>
-                          <Text size="sm">{item.label}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" ff="monospace" c="dimmed">
-                            {item.service}
-                          </Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Badge color={item.enabled ? 'teal' : 'gray'} variant="light">
-                            {item.enabled ? t('services.on') : t('services.off')}
-                          </Badge>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" c="dimmed">
-                            {item.enabled ? '—' : offReason(item)}
-                          </Text>
-                        </Table.Td>
-                      </Table.Tr>
-                    ))}
-                  </Table.Tbody>
-                </Table>
-              </Table.ScrollContainer>
+              <DataGrid<ServiceState>
+                records={services}
+                rowKey={(item) => item.service}
+                columns={serviceColumns}
+              />
             </Stack>
           </Paper>
         ) : null}

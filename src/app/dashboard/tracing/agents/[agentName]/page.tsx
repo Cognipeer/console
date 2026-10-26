@@ -11,9 +11,7 @@ import {
   Center,
   Collapse,
   Group,
-  ScrollArea,
   Stack,
-  Table,
   Text,
 } from '@mantine/core';
 import {
@@ -31,6 +29,7 @@ import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
 import AgentHealthPanel from '@/components/tracing/health/AgentHealthPanel';
 import { formatDayLabel } from '@/components/tracing/health/healthFormat';
 import { formatRelative } from '@/components/iam/timeFormat';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { DetailSkeleton } from '@/components/common/ui/Skeletons';
 import DetailShell, {
   DetailCard,
@@ -267,6 +266,19 @@ export default function AgentTracingAgentPage() {
     (sum, item) => sum + (item.count || 0),
     0,
   );
+
+  type DailyRow = (typeof dailyRows)[number];
+  const dailyColumns: DataGridColumn<DailyRow>[] = [
+    { key: 'date', label: t('detail.colDate'), render: (row) => formatDayLabel(row.date, locale) },
+    { key: 'sessions', label: t('detail.colSessions'), render: (row) => formatNumber(row.sessionsCount) },
+    { key: 'events', label: t('detail.colEvents'), render: (row) => formatNumber(row.totalEvents) },
+    { key: 'tokens', label: t('detail.colTokens'), render: (row) => formatNumber(row.totalTokens) },
+    {
+      key: 'avgDuration',
+      label: t('detail.colAvgDuration'),
+      render: (row) => formatDuration(row.averageDurationMs),
+    },
+  ];
 
   return (
     <DetailShell
@@ -561,40 +573,12 @@ export default function AgentTracingAgentPage() {
         }
       >
         <Collapse in={rawDailyOpen} id="agent-raw-daily">
-          <ScrollArea>
-            <Table striped highlightOnHover withColumnBorders>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>{t('detail.colDate')}</Table.Th>
-                  <Table.Th>{t('detail.colSessions')}</Table.Th>
-                  <Table.Th>{t('detail.colEvents')}</Table.Th>
-                  <Table.Th>{t('detail.colTokens')}</Table.Th>
-                  <Table.Th>{t('detail.colAvgDuration')}</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {dailyRows.length === 0 ? (
-                  <Table.Tr>
-                    <Table.Td colSpan={5}>
-                      <Center c="dimmed" py="sm">
-                        {t('detail.noActivity')}
-                      </Center>
-                    </Table.Td>
-                  </Table.Tr>
-                ) : (
-                  dailyRows.map((row) => (
-                    <Table.Tr key={row.date}>
-                      <Table.Td>{formatDayLabel(row.date, locale)}</Table.Td>
-                      <Table.Td>{formatNumber(row.sessionsCount)}</Table.Td>
-                      <Table.Td>{formatNumber(row.totalEvents)}</Table.Td>
-                      <Table.Td>{formatNumber(row.totalTokens)}</Table.Td>
-                      <Table.Td>{formatDuration(row.averageDurationMs)}</Table.Td>
-                    </Table.Tr>
-                  ))
-                )}
-              </Table.Tbody>
-            </Table>
-          </ScrollArea>
+          <DataGrid<DailyRow>
+            records={dailyRows}
+            rowKey={(row) => row.date}
+            columns={dailyColumns}
+            empty={{ title: t('detail.noActivity') }}
+          />
         </Collapse>
       </DetailCard>
 

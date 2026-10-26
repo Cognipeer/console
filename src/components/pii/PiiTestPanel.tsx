@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   Badge,
   Button,
@@ -8,12 +8,12 @@ import {
   Group,
   Paper,
   Stack,
-  Table,
   Text,
   Textarea,
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { PiiAction, PiiEngine } from '@/lib/services/pii/types';
 import type { PiiCustomPatternForm } from './PiiPolicyEditor';
@@ -52,6 +52,9 @@ interface Props {
   minConfidence: number;
   contextBoost: boolean;
 }
+
+type VaultRow = { token: string; value: string; category: string };
+type FindingRow = { f: Finding; below: boolean; key: string };
 
 /** Row identity for matching a threshold-free scan against the filtered one. */
 const findingKey = (f: Finding) => `${f.category}:${f.start}:${f.end}`;
@@ -113,6 +116,74 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
       setRunning(false);
     }
   };
+
+  const dim = (below: boolean, node: ReactNode) => (below ? <div style={{ opacity: 0.5 }}>{node}</div> : node);
+
+  const vaultCols: DataGridColumn<VaultRow>[] = [
+    { key: 'token', label: 'Token', render: (r) => <Code>{r.token}</Code> },
+    { key: 'value', label: t('value'), render: (r) => r.value },
+    { key: 'category', label: t('category'), render: (r) => r.category },
+  ];
+
+  const findingColumns: DataGridColumn<FindingRow>[] = [
+    {
+      key: 'category',
+      label: t('category'),
+      render: ({ f, below }) =>
+        dim(
+          below,
+          <div>
+            <Text size="xs" fw={500}>{f.label}</Text>
+            <Text size="xs" c="dimmed">{f.category}</Text>
+            {below && (
+              <Badge size="xs" variant="outline" color="gray" mt={2}>{t('belowThreshold')}</Badge>
+            )}
+          </div>,
+        ),
+    },
+    {
+      key: 'severity',
+      label: t('severity'),
+      render: ({ f, below }) =>
+        dim(
+          below,
+          <Badge size="xs" color={below ? 'gray' : f.severity === 'high' ? 'red' : f.severity === 'medium' ? 'orange' : 'gray'}>
+            {tSev(f.severity)}
+          </Badge>,
+        ),
+    },
+    {
+      key: 'value',
+      label: t('value'),
+      render: ({ f, below }) =>
+        dim(
+          below,
+          <div style={{ fontFamily: 'var(--font-mono, monospace)', maxWidth: 320, wordBreak: 'break-all' }}>{f.value}</div>,
+        ),
+    },
+    {
+      key: 'confidence',
+      label: t('confidence'),
+      render: ({ f, below }) =>
+        dim(
+          below,
+          <Text size="xs" fw={below ? 400 : 600} c={below || (f.confidence ?? 1) < ranThreshold ? 'dimmed' : undefined}>
+            {typeof f.confidence === 'number' ? f.confidence.toFixed(2) : '—'}
+          </Text>,
+        ),
+    },
+    {
+      key: 'evidence',
+      label: t('evidence'),
+      render: ({ f, below }) =>
+        dim(below, <Text size="xs" c="dimmed">{f.evidence?.length ? f.evidence.join(' · ') : '—'}</Text>),
+    },
+    {
+      key: 'offset',
+      label: t('offset'),
+      render: ({ f, below }) => dim(below, <Text size="xs" c="dimmed">{f.start}–{f.end}</Text>),
+    },
+  ];
 
   return (
     <Stack gap="md">
@@ -190,24 +261,11 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
           {result.vault && Object.keys(result.vault).length > 0 && (
             <Paper p="md" withBorder radius="sm">
               <Text size="sm" fw={600} mb="xs">{t('vault')}</Text>
-              <Table striped highlightOnHover withColumnBorders verticalSpacing="xs" fz="xs">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Token</Table.Th>
-                    <Table.Th>{t('value')}</Table.Th>
-                    <Table.Th>{t('category')}</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {Object.entries(result.vault).map(([token, entry]) => (
-                    <Table.Tr key={token}>
-                      <Table.Td><Code>{token}</Code></Table.Td>
-                      <Table.Td>{entry.value}</Table.Td>
-                      <Table.Td>{entry.category}</Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+              <DataGrid<VaultRow>
+                records={Object.entries(result.vault).map(([token, entry]) => ({ token, ...entry }))}
+                rowKey={(r) => r.token}
+                columns={vaultCols}
+              />
             </Paper>
           )}
 
@@ -216,55 +274,14 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
             {result.findings.length === 0 && ignored.length === 0 ? (
               <Text size="sm" c="dimmed">{t('noFindings')}</Text>
             ) : (
-              <Table striped highlightOnHover withColumnBorders verticalSpacing="xs" fz="xs">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>{t('category')}</Table.Th>
-                    <Table.Th>{t('severity')}</Table.Th>
-                    <Table.Th>{t('value')}</Table.Th>
-                    <Table.Th>{t('confidence')}</Table.Th>
-                    <Table.Th>{t('evidence')}</Table.Th>
-                    <Table.Th>{t('offset')}</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {[
-                    ...result.findings.map((f) => ({ f, below: false })),
-                    ...ignored.map((f) => ({ f, below: true })),
-                  ].map(({ f, below }, i) => (
-                    <Table.Tr key={`${f.category}-${f.start}-${i}`} style={below ? { opacity: 0.5 } : undefined}>
-                      <Table.Td>
-                        <div>
-                          <Text size="xs" fw={500}>{f.label}</Text>
-                          <Text size="xs" c="dimmed">{f.category}</Text>
-                          {below && (
-                            <Badge size="xs" variant="outline" color="gray" mt={2}>{t('belowThreshold')}</Badge>
-                          )}
-                        </div>
-                      </Table.Td>
-                      <Table.Td>
-                        <Badge size="xs" color={below ? 'gray' : f.severity === 'high' ? 'red' : f.severity === 'medium' ? 'orange' : 'gray'}>
-                          {tSev(f.severity)}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td style={{ fontFamily: 'var(--font-mono, monospace)', maxWidth: 320, wordBreak: 'break-all' }}>
-                        {f.value}
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" fw={below ? 400 : 600} c={below || (f.confidence ?? 1) < ranThreshold ? 'dimmed' : undefined}>
-                          {typeof f.confidence === 'number' ? f.confidence.toFixed(2) : '—'}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">{f.evidence?.length ? f.evidence.join(' · ') : '—'}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">{f.start}–{f.end}</Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+              <DataGrid<FindingRow>
+                records={[
+                  ...result.findings.map((f) => ({ f, below: false })),
+                  ...ignored.map((f) => ({ f, below: true })),
+                ].map((row, i) => ({ ...row, key: `${row.f.category}-${row.f.start}-${i}` }))}
+                rowKey={(row) => row.key}
+                columns={findingColumns}
+              />
             )}
           </Paper>
         </>

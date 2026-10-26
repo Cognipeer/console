@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import DataGrid from '@/components/common/ui/DataGrid';
 import {
     ActionIcon,
     Alert,
@@ -25,7 +26,6 @@ import {
     SimpleGrid,
     Stack,
     Switch,
-    Table,
     TagsInput,
     Text,
     Textarea,
@@ -543,37 +543,33 @@ export function WebhookDeliveriesPanel({ agentId, triggerId, onShowRuns }: { age
             ) : null}
             {!loadFailed && rows && rows.length === 0 ? <Text size="sm" c="dimmed">{t('deliveriesEmpty')}</Text> : null}
             {rows && rows.length > 0 ? (
-                <Table verticalSpacing={4} highlightOnHover>
-                    <Table.Thead>
-                        <Table.Tr>
-                            <Table.Th w={170}>{t('colReceived')}</Table.Th>
-                            <Table.Th>{t('colEvent')}</Table.Th>
-                            <Table.Th w={130}>{t('colOutcome')}</Table.Th>
-                            <Table.Th w={60}>{t('colHttp')}</Table.Th>
-                            <Table.Th>{t('colRun')}</Table.Th>
-                            <Table.Th>{t('colReason')}</Table.Th>
-                        </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                        {rows.map((row) => (
-                            <Table.Tr key={row.id}>
-                                <Table.Td><Text size="xs">{new Date(row.received_at * 1000).toLocaleString(locale)}</Text></Table.Td>
-                                <Table.Td>
+                <DataGrid<DeliveryRow>
+                    records={rows}
+                    rowKey={(row) => row.id}
+                    columns={[
+                        { key: 'received', label: t('colReceived'), width: 170, render: (row) => <Text size="xs">{new Date(row.received_at * 1000).toLocaleString(locale)}</Text> },
+                        {
+                            key: 'event',
+                            label: t('colEvent'),
+                            render: (row) => (
+                                <>
                                     <Text size="xs">{row.event ?? t('none')}</Text>
                                     {row.delivery_id ? <Text size="xs" c="dimmed" ff="monospace" lineClamp={1}>{row.delivery_id}</Text> : null}
-                                </Table.Td>
-                                <Table.Td><OutcomeLabel outcome={row.outcome} label={t(`outcome_${row.outcome}`)} /></Table.Td>
-                                <Table.Td><Text size="xs">{row.http_status}</Text></Table.Td>
-                                <Table.Td>
-                                    {row.run_id ? (
-                                        <UnstyledButton onClick={onShowRuns}><Text size="xs" ff="monospace" c="teal">{row.run_id}</Text></UnstyledButton>
-                                    ) : <Text size="xs" c="dimmed">{t('none')}</Text>}
-                                </Table.Td>
-                                <Table.Td><Text size="xs" c="dimmed">{row.reason ?? ''}</Text></Table.Td>
-                            </Table.Tr>
-                        ))}
-                    </Table.Tbody>
-                </Table>
+                                </>
+                            ),
+                        },
+                        { key: 'outcome', label: t('colOutcome'), width: 130, render: (row) => <OutcomeLabel outcome={row.outcome} label={t(`outcome_${row.outcome}`)} /> },
+                        { key: 'http', label: t('colHttp'), width: 60, render: (row) => <Text size="xs">{row.http_status}</Text> },
+                        {
+                            key: 'run',
+                            label: t('colRun'),
+                            render: (row) => row.run_id ? (
+                                <UnstyledButton onClick={onShowRuns}><Text size="xs" ff="monospace" c="teal">{row.run_id}</Text></UnstyledButton>
+                            ) : <Text size="xs" c="dimmed">{t('none')}</Text>,
+                        },
+                        { key: 'reason', label: t('colReason'), render: (row) => <Text size="xs" c="dimmed">{row.reason ?? ''}</Text> },
+                    ]}
+                />
             ) : null}
             {hasMore && rows ? (
                 <Button size="xs" variant="subtle" loading={loading} onClick={() => void load(rows[rows.length - 1]?.id)}>{t('loadMore')}</Button>

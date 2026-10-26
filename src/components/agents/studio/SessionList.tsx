@@ -14,7 +14,7 @@
  * (`summariseConversation`), so no transcript is shipped just to draw a row.
  */
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
     ActionIcon,
@@ -26,12 +26,12 @@ import {
     Select,
     Skeleton,
     Stack,
-    Table,
     Text,
     TextInput,
     Tooltip,
     UnstyledButton,
 } from '@mantine/core';
+import DataGrid from '@/components/common/ui/DataGrid';
 import { DatePickerInput } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
 import {
@@ -127,7 +127,7 @@ function SortHeader({
     return (
         <UnstyledButton onClick={() => onSort(column)} className={classes.sortHeader}>
             <Group gap={2} wrap="nowrap" justify={align === 'right' ? 'flex-end' : 'flex-start'}>
-                <Text size="xs" fw={600} c={active ? undefined : 'dimmed'}>{children}</Text>
+                <span className={active ? classes.sortActive : undefined}>{children}</span>
                 {active ? (
                     sort.direction === 'asc'
                         ? <IconArrowUp size={11} />
@@ -280,13 +280,7 @@ const COLUMN_WIDTHS = {
 } as const;
 /** The least the name of a cross-agent row is given. */
 const WIDE_NAME_MIN_WIDTH = 170;
-/** The cross-agent table's fixed columns plus that name; narrower screens scroll the table, not the page. */
-const WIDE_TABLE_MIN_WIDTH = 1080;
-
-function TableScroller({ on, children }: { on: boolean; children: ReactNode }) {
-    return on ? <Table.ScrollContainer minWidth={WIDE_TABLE_MIN_WIDTH} type="native">{children}</Table.ScrollContainer> : <>{children}</>;
-}
-
+// The cross-agent table keeps a 1080 px floor (SessionList.module.css `.wide`): narrower screens scroll the table, not the page.
 export default function SessionList({
     agentId,
     sessions,
@@ -398,12 +392,6 @@ export default function SessionList({
         || status !== 'all' || source !== 'all' || agentFilter !== 'all';
     const clearFilters = () => {
         setQuery(''); setTimeWindow('all'); setRange([null, null]); setActivity('all'); setStatus('all'); setSource('all'); setAgentFilter('all');
-    };
-
-    // The whole row opens the inspector; the controls inside it (copy, stop, links, the filters' portals) keep their own click.
-    const openFromRow = (event: React.MouseEvent<HTMLElement>, sessionId: string) => {
-        if ((event.target as HTMLElement).closest('a,button,input,textarea,select,label,[role="button"],[role="option"],[data-no-row-click]')) return;
-        onOpen(sessionId);
     };
 
     const toggleSort = (column: SortColumn) => {
@@ -581,221 +569,240 @@ export default function SessionList({
                 </Group>
             </Group>
 
-            {filtered.length === 0 ? (
-                <Text size="sm" c="dimmed" ta="center" py="xl">
-                    No session matches these filters.
-                </Text>
-            ) : (
-            <TableScroller on={Boolean(showAgent)}>
-            <Table highlightOnHover verticalSpacing={6} className={classes.table}>
-                <Table.Thead>
-                    <Table.Tr>
-                        <Table.Th>
-                            <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
-                        </Table.Th>
-                        {showAgent ? <Table.Th w={columns.agent}>{tall('agentColumn')}</Table.Th> : null}
-                        <Table.Th w={columns.source}>Source</Table.Th>
-                        <Table.Th w={columns.owner}>{ts('ownerColumn')}</Table.Th>
-                        <Table.Th w={columns.id}>Session ID</Table.Th>
-                        <Table.Th w={columns.turns} ta="right">
-                            <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>
-                        </Table.Th>
-                        <Table.Th w={columns.tokens} ta="right">
-                            <SortHeader column="totalTokens" sort={sort} onSort={toggleSort} align="right">Tokens</SortHeader>
-                        </Table.Th>
-                        <Table.Th w={columns.cost} ta="right">
-                            <SortHeader column="costUsd" sort={sort} onSort={toggleSort} align="right">Cost</SortHeader>
-                        </Table.Th>
-                        <Table.Th w={columns.active} ta="right">
+            <div className={showAgent ? classes.wide : undefined}>
+            <DataGrid<SessionListItem>
+                records={filtered}
+                rowKey={(session) => session._id}
+                onRowClick={(session) => onOpen(session._id)}
+                empty={{ title: 'No session matches these filters.' }}
+                columns={[
+                    {
+                        key: 'title',
+                        label: <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>,
+                        render: (session) => (
+                            <Group gap={6} wrap="nowrap" miw={showAgent ? WIDE_NAME_MIN_WIDTH : undefined}>
+                                <UnstyledButton onClick={(event) => { event.stopPropagation(); onOpen(session._id); }} className={classes.nameButton}>
+                                    <Text size="sm" fw={500} lineClamp={1}>
+                                        {session.title || 'New session'}
+                                    </Text>
+                                </UnstyledButton>
+                                {session.runtimeStatus === 'requires_action' ? (
+                                    session.canResolve === false ? (
+                                        // Waiting, but not for this viewer: the server says they could not answer it.
+                                        <Tooltip label={ts('waitingElsewhereTooltip')} withArrow>
+                                            <Badge size="xs" variant="light" color="gray" leftSection={<IconHandStop size={10} />}>
+                                                {ts('waitingElsewhereBadge')}
+                                            </Badge>
+                                        </Tooltip>
+                                    ) : (
+                                        <Tooltip label={t('waitingTooltip')} withArrow>
+                                            <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
+                                                {t('waitingBadge')}
+                                            </Badge>
+                                        </Tooltip>
+                                    )
+                                ) : null}
+                                {session.runtimeStatus === 'budget_paused' ? (
+                                    <Tooltip label={tb('pausedTooltip')} withArrow>
+                                        <Badge size="xs" variant="light" color="orange" leftSection={<IconCoin size={10} />}>
+                                            {tb('pausedBadge')}
+                                        </Badge>
+                                    </Tooltip>
+                                ) : null}
+                                {session.activeRun && session.activeRun.status !== 'requires_action' ? (
+                                    <Group gap={2} wrap="nowrap">
+                                        <Tooltip
+                                            label={session.activeRun.status === 'scheduled' && session.activeRun.scheduledFor
+                                                ? tr('runScheduledFor', { time: new Date(session.activeRun.scheduledFor * 1000).toLocaleString() })
+                                                : session.activeRun.id}
+                                            withArrow
+                                        >
+                                            <span>
+                                                <StatusBadge status={session.activeRun.cancelRequested ? 'canceling' : session.activeRun.status} label={session.activeRun.cancelRequested ? tr('runCanceling') : undefined} />
+                                            </span>
+                                        </Tooltip>
+                                        {(session.agentId ?? agentId) && !session.activeRun.cancelRequested ? (
+                                            <Tooltip label={tr('stopRun')} withArrow>
+                                                <ActionIcon
+                                                    size="xs"
+                                                    variant="subtle"
+                                                    color="gray"
+                                                    loading={stopping === session.activeRun.id}
+                                                    onClick={(event) => { event.stopPropagation(); void stopRun((session.agentId ?? agentId)!, session.activeRun!.id); }}
+                                                    aria-label={tr('stopRun')}
+                                                >
+                                                    <IconPlayerStop size={12} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        ) : null}
+                                    </Group>
+                                ) : null}
+                                {session.reminders && session.reminders.active > 0 ? (
+                                    <Tooltip label={reminderRowHint(session.reminders, tr)} withArrow>
+                                        <IconClock size={13} color="var(--mantine-color-dimmed)" aria-label={tr('rowHintLabel')} />
+                                    </Tooltip>
+                                ) : null}
+                                {session.status === 'error' ? (
+                                    <Tooltip
+                                        label={session.failedCalls
+                                            ? `${session.failedCalls} failed tool call${session.failedCalls === 1 ? '' : 's'}`
+                                            : 'An output failed validation'}
+                                        withArrow
+                                    >
+                                        <IconAlertTriangle size={14} color="var(--ds-err)" aria-label="Has errors" />
+                                    </Tooltip>
+                                ) : session.status === 'stopped' && session.runtimeStatus !== 'requires_action' ? (
+                                    <Tooltip label="A turn stopped early (limit, cancel or pause)" withArrow>
+                                        <IconHandStop size={14} color="var(--ds-warn)" aria-label="Stopped early" />
+                                    </Tooltip>
+                                ) : null}
+                            </Group>
+                        ),
+                    },
+                    ...(showAgent ? [{
+                        key: 'agent',
+                        label: tall('agentColumn'),
+                        width: columns.agent,
+                        render: (session: SessionListItem) =>
+                            session.agentId ? (
+                                <Tooltip label={tall('openAgent')} withArrow>
+                                    <Text
+                                        component={Link}
+                                        href={`/dashboard/agents/${session.agentId}?tab=sessions`}
+                                        size="xs"
+                                        lineClamp={1}
+                                        className={classes.agentLink}
+                                    >
+                                        {session.agentName ?? session.agentKey ?? session.agentId}
+                                    </Text>
+                                </Tooltip>
+                            ) : null,
+                    }] : []),
+                    {
+                        key: 'source',
+                        label: 'Source',
+                        width: columns.source,
+                        render: (session) => <div className="ds-badge-cluster"><SessionSourceBadge source={session.source} /></div>,
+                    },
+                    {
+                        key: 'owner',
+                        label: ts('ownerColumn'),
+                        width: columns.owner,
+                        render: (session) => (
+                            <Text size="xs" c={session.ownSession ? undefined : 'dimmed'} lineClamp={1} data-testid="session-owner">
+                                {sessionOwnerText(session, ts)}
+                            </Text>
+                        ),
+                    },
+                    {
+                        key: 'id',
+                        label: 'Session ID',
+                        width: columns.id,
+                        render: (session) => (
+                            <Group gap={4} wrap="nowrap">
+                                <Tooltip label={session._id} withArrow>
+                                    <Text size="xs" ff="monospace" c="dimmed">{session._id.slice(0, 8)}…</Text>
+                                </Tooltip>
+                                <CopyButton value={session._id}>
+                                    {({ copied, copy }) => (
+                                        <Tooltip label={copied ? 'Copied' : 'Copy id'} withArrow>
+                                            <ActionIcon size={16} variant="subtle" color="gray" onClick={(event) => { event.stopPropagation(); copy(); }}>
+                                                {copied ? <IconCheck size={11} /> : <IconCopy size={11} />}
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    )}
+                                </CopyButton>
+                            </Group>
+                        ),
+                    },
+                    {
+                        key: 'turns',
+                        label: <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>,
+                        align: 'right',
+                        width: columns.turns,
+                        render: (session) => <Text size="xs" className={classes.num}>{session.turns ?? 0}</Text>,
+                    },
+                    {
+                        key: 'tokens',
+                        label: <SortHeader column="totalTokens" sort={sort} onSort={toggleSort} align="right">Tokens</SortHeader>,
+                        align: 'right',
+                        width: columns.tokens,
+                        render: (session) => (
+                            <Text size="xs" className={classes.num}>
+                                {session.totalTokens ? formatNumber(session.totalTokens) : '—'}
+                            </Text>
+                        ),
+                    },
+                    {
+                        key: 'cost',
+                        label: <SortHeader column="costUsd" sort={sort} onSort={toggleSort} align="right">Cost</SortHeader>,
+                        align: 'right',
+                        width: columns.cost,
+                        render: (session) => (
+                            <Text size="xs" className={classes.num}>
+                                {session.costUsd ? formatCost(session.costUsd) : '—'}
+                                {session.costUsd && session.costComplete === false ? (
+                                    <Tooltip label="Some turns are unpriced — their model has no pricing configured" withArrow>
+                                        <Text component="span" c="dimmed"> +</Text>
+                                    </Tooltip>
+                                ) : null}
+                            </Text>
+                        ),
+                    },
+                    {
+                        key: 'active',
+                        label: (
                             <Tooltip label="Time the agent spent working, summed over turns" withArrow>
                                 <span>
                                     <SortHeader column="activeMs" sort={sort} onSort={toggleSort} align="right">Active</SortHeader>
                                 </span>
                             </Tooltip>
-                        </Table.Th>
-                        <Table.Th w={columns.updated}>
-                            <SortHeader column="updatedAt" sort={sort} onSort={toggleSort}>Last activity</SortHeader>
-                        </Table.Th>
-                        <Table.Th w={40} />
-                    </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                    {filtered.map((session) => (
-                                <Table.Tr key={session._id} className={classes.row} onClick={(event) => openFromRow(event, session._id)}>
-                                    <Table.Td>
-                                        <Group gap={6} wrap="nowrap" miw={showAgent ? WIDE_NAME_MIN_WIDTH : undefined}>
-                                            <UnstyledButton onClick={() => onOpen(session._id)} className={classes.nameButton}>
-                                                <Text size="sm" fw={500} lineClamp={1}>
-                                                    {session.title || 'New session'}
-                                                </Text>
-                                            </UnstyledButton>
-                                            {session.runtimeStatus === 'requires_action' ? (
-                                                session.canResolve === false ? (
-                                                    // Waiting, but not for this viewer: the server says they could not answer it.
-                                                    <Tooltip label={ts('waitingElsewhereTooltip')} withArrow>
-                                                        <Badge size="xs" variant="light" color="gray" leftSection={<IconHandStop size={10} />}>
-                                                            {ts('waitingElsewhereBadge')}
-                                                        </Badge>
-                                                    </Tooltip>
-                                                ) : (
-                                                    <Tooltip label={t('waitingTooltip')} withArrow>
-                                                        <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
-                                                            {t('waitingBadge')}
-                                                        </Badge>
-                                                    </Tooltip>
-                                                )
-                                            ) : null}
-                                            {session.runtimeStatus === 'budget_paused' ? (
-                                                <Tooltip label={tb('pausedTooltip')} withArrow>
-                                                    <Badge size="xs" variant="light" color="orange" leftSection={<IconCoin size={10} />}>
-                                                        {tb('pausedBadge')}
-                                                    </Badge>
-                                                </Tooltip>
-                                            ) : null}
-                                            {session.activeRun && session.activeRun.status !== 'requires_action' ? (
-                                                <Group gap={2} wrap="nowrap">
-                                                    <Tooltip
-                                                        label={session.activeRun.status === 'scheduled' && session.activeRun.scheduledFor
-                                                            ? tr('runScheduledFor', { time: new Date(session.activeRun.scheduledFor * 1000).toLocaleString() })
-                                                            : session.activeRun.id}
-                                                        withArrow
-                                                    >
-                                                        <span>
-                                                            <StatusBadge status={session.activeRun.cancelRequested ? 'canceling' : session.activeRun.status} label={session.activeRun.cancelRequested ? tr('runCanceling') : undefined} />
-                                                        </span>
-                                                    </Tooltip>
-                                                    {(session.agentId ?? agentId) && !session.activeRun.cancelRequested ? (
-                                                        <Tooltip label={tr('stopRun')} withArrow>
-                                                            <ActionIcon
-                                                                size="xs"
-                                                                variant="subtle"
-                                                                color="gray"
-                                                                loading={stopping === session.activeRun.id}
-                                                                onClick={() => void stopRun((session.agentId ?? agentId)!, session.activeRun!.id)}
-                                                                aria-label={tr('stopRun')}
-                                                            >
-                                                                <IconPlayerStop size={12} />
-                                                            </ActionIcon>
-                                                        </Tooltip>
-                                                    ) : null}
-                                                </Group>
-                                            ) : null}
-                                            {session.reminders && session.reminders.active > 0 ? (
-                                                <Tooltip label={reminderRowHint(session.reminders, tr)} withArrow>
-                                                    <IconClock size={13} color="var(--mantine-color-dimmed)" aria-label={tr('rowHintLabel')} />
-                                                </Tooltip>
-                                            ) : null}
-                                            {session.status === 'error' ? (
-                                                <Tooltip
-                                                    label={session.failedCalls
-                                                        ? `${session.failedCalls} failed tool call${session.failedCalls === 1 ? '' : 's'}`
-                                                        : 'An output failed validation'}
-                                                    withArrow
-                                                >
-                                                    <IconAlertTriangle size={14} color="var(--ds-err)" aria-label="Has errors" />
-                                                </Tooltip>
-                                            ) : session.status === 'stopped' && session.runtimeStatus !== 'requires_action' ? (
-                                                <Tooltip label="A turn stopped early (limit, cancel or pause)" withArrow>
-                                                    <IconHandStop size={14} color="var(--ds-warn)" aria-label="Stopped early" />
-                                                </Tooltip>
-                                            ) : null}
-                                        </Group>
-                                    </Table.Td>
-                                    {showAgent ? (
-                                        <Table.Td>
-                                            {session.agentId ? (
-                                                <Tooltip label={tall('openAgent')} withArrow>
-                                                    <Text
-                                                        component={Link}
-                                                        href={`/dashboard/agents/${session.agentId}?tab=sessions`}
-                                                        size="xs"
-                                                        lineClamp={1}
-                                                        className={classes.agentLink}
-                                                    >
-                                                        {session.agentName ?? session.agentKey ?? session.agentId}
-                                                    </Text>
-                                                </Tooltip>
-                                            ) : null}
-                                        </Table.Td>
-                                    ) : null}
-                                    <Table.Td>
-                                        <SessionSourceBadge source={session.source} />
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Text size="xs" c={session.ownSession ? undefined : 'dimmed'} lineClamp={1} data-testid="session-owner">
-                                            {sessionOwnerText(session, ts)}
-                                        </Text>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Group gap={4} wrap="nowrap">
-                                            <Tooltip label={session._id} withArrow>
-                                                <Text size="xs" ff="monospace" c="dimmed">{session._id.slice(0, 8)}…</Text>
-                                            </Tooltip>
-                                            <CopyButton value={session._id}>
-                                                {({ copied, copy }) => (
-                                                    <Tooltip label={copied ? 'Copied' : 'Copy id'} withArrow>
-                                                        <ActionIcon size={16} variant="subtle" color="gray" onClick={copy}>
-                                                            {copied ? <IconCheck size={11} /> : <IconCopy size={11} />}
-                                                        </ActionIcon>
-                                                    </Tooltip>
-                                                )}
-                                            </CopyButton>
-                                        </Group>
-                                    </Table.Td>
-                                    <Table.Td ta="right">
-                                        <Text size="xs" className={classes.num}>{session.turns ?? 0}</Text>
-                                    </Table.Td>
-                                    <Table.Td ta="right">
-                                        <Text size="xs" className={classes.num}>
-                                            {session.totalTokens ? formatNumber(session.totalTokens) : '—'}
-                                        </Text>
-                                    </Table.Td>
-                                    <Table.Td ta="right">
-                                        <Text size="xs" className={classes.num}>
-                                            {session.costUsd ? formatCost(session.costUsd) : '—'}
-                                            {session.costUsd && session.costComplete === false ? (
-                                                <Tooltip label="Some turns are unpriced — their model has no pricing configured" withArrow>
-                                                    <Text component="span" c="dimmed"> +</Text>
-                                                </Tooltip>
-                                            ) : null}
-                                        </Text>
-                                    </Table.Td>
-                                    <Table.Td ta="right">
-                                        <Text size="xs" className={classes.num}>
-                                            {session.activeMs ? formatDuration(session.activeMs) : '—'}
-                                        </Text>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Tooltip
-                                            label={new Date(session.updatedAt ?? session.createdAt ?? '').toLocaleString()}
-                                            withArrow
-                                        >
-                                            <Text size="xs" c="dimmed">
-                                                {formatRelativeTime(session.updatedAt ?? session.createdAt)}
-                                            </Text>
-                                        </Tooltip>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        {onContinue && isContinuableSession(session.source) ? (
-                                            <Tooltip label="Continue session" withArrow>
-                                                <ActionIcon size="sm" variant="subtle" onClick={() => onContinue(session._id)}>
-                                                    <IconPlayerPlay size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                        ) : (
-                                            <Tooltip label="View session" withArrow>
-                                                <ActionIcon size="sm" variant="subtle" color="gray" onClick={() => onOpen(session._id)}>
-                                                    <IconExternalLink size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                        )}
-                                    </Table.Td>
-                                </Table.Tr>
-                    ))}
-                </Table.Tbody>
-            </Table>
-            </TableScroller>
-            )}
+                        ),
+                        align: 'right',
+                        width: columns.active,
+                        render: (session) => (
+                            <Text size="xs" className={classes.num}>
+                                {session.activeMs ? formatDuration(session.activeMs) : '—'}
+                            </Text>
+                        ),
+                    },
+                    {
+                        key: 'updated',
+                        label: <SortHeader column="updatedAt" sort={sort} onSort={toggleSort}>Last activity</SortHeader>,
+                        width: columns.updated,
+                        render: (session) => (
+                            <Tooltip
+                                label={new Date(session.updatedAt ?? session.createdAt ?? '').toLocaleString()}
+                                withArrow
+                            >
+                                <Text size="xs" c="dimmed">
+                                    {formatRelativeTime(session.updatedAt ?? session.createdAt)}
+                                </Text>
+                            </Tooltip>
+                        ),
+                    },
+                    {
+                        key: 'actions',
+                        label: '',
+                        align: 'right',
+                        width: 40,
+                        render: (session) => onContinue && isContinuableSession(session.source) ? (
+                            <Tooltip label="Continue session" withArrow>
+                                <ActionIcon size="sm" variant="subtle" onClick={(event) => { event.stopPropagation(); onContinue(session._id); }}>
+                                    <IconPlayerPlay size={14} />
+                                </ActionIcon>
+                            </Tooltip>
+                        ) : (
+                            <Tooltip label="View session" withArrow>
+                                <ActionIcon size="sm" variant="subtle" color="gray" onClick={(event) => { event.stopPropagation(); onOpen(session._id); }}>
+                                    <IconExternalLink size={14} />
+                                </ActionIcon>
+                            </Tooltip>
+                        ),
+                    },
+                ]}
+            />
+            </div>
         </Stack>
     );
 }

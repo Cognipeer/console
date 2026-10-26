@@ -7,10 +7,8 @@ import {
   Group,
   Progress,
   RingProgress,
-  ScrollArea,
   SimpleGrid,
   Stack,
-  Table,
   Text,
   ThemeIcon,
   Tooltip,
@@ -25,6 +23,7 @@ import {
   IconEye,
 } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
+import DataGrid from '@/components/common/ui/DataGrid';
 import LoadingState from '@/components/common/LoadingState';
 import SectionCard from '@/components/common/SectionCard';
 import type { IGuardrailEvaluationLog, IGuardrailEvalAggregate } from '@/lib/database';
@@ -329,23 +328,57 @@ export default function GuardrailEvaluationHistory({
         <>
       {/* ── Recent evaluation logs ── */}
       <SectionCard title="Recent Evaluations" p="md">
-        <ScrollArea>
-          <Table striped highlightOnHover fz="xs">
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Input</Table.Th>
-                <Table.Th>Findings</Table.Th>
-                <Table.Th>Severity</Table.Th>
-                <Table.Th>Source</Table.Th>
-                <Table.Th>Latency</Table.Th>
-                <Table.Th>Date</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {logs.map((log, i) => {
-                const id = (log._id ?? i).toString();
+        <DataGrid<IGuardrailEvaluationLog>
+          records={logs}
+          rowKey={(log) => String(log._id ?? logs.indexOf(log))}
+          empty={{ title: 'No evaluation logs found' }}
+          columns={[
+            {
+              key: 'status',
+              label: 'Status',
+              render: (log) => (
+                <Badge
+                  size="sm"
+                  variant="light"
+                  color={!log.passed ? 'red' : log.findings?.length ? 'yellow' : 'teal'}
+                >
+                  {!log.passed ? 'Failed' : log.decision === 'redact' ? 'Redacted' : log.findings?.length ? 'Flagged' : 'Passed'}
+                </Badge>
+              ),
+            },
+            {
+              key: 'input',
+              label: 'Input',
+              width: 260,
+              render: (log) => (
+                <Tooltip label={log.inputText || '—'} multiline w={300}>
+                  <Text size="xs" truncate>{truncate(log.inputText, 60)}</Text>
+                </Tooltip>
+              ),
+            },
+            {
+              key: 'findings',
+              label: 'Findings',
+              render: (log) => {
                 const topFinding = log.findings?.[0];
+                return topFinding ? (
+                  <Tooltip label={topFinding.message}>
+                    <Text size="xs" truncate style={{ maxWidth: 160 }}>
+                      {typeof topFinding.confidence === 'number'
+                        ? `${topFinding.category} · ${topFinding.confidence.toFixed(2)}`
+                        : topFinding.type}
+                      {log.findings.length > 1 && ` +${log.findings.length - 1}`}
+                    </Text>
+                  </Tooltip>
+                ) : (
+                  <Text size="xs" c="dimmed">—</Text>
+                );
+              },
+            },
+            {
+              key: 'severity',
+              label: 'Severity',
+              render: (log) => {
                 const maxSev = log.findings?.reduce(
                   (best: string, f: { severity: string }) => {
                     const order = { high: 3, medium: 2, low: 1 } as Record<string, number>;
@@ -353,63 +386,31 @@ export default function GuardrailEvaluationHistory({
                   },
                   'low',
                 );
-                return (
-                  <Table.Tr key={id}>
-                    <Table.Td>
-                      <Badge
-                        size="sm"
-                        variant="light"
-                        color={!log.passed ? 'red' : log.findings?.length ? 'yellow' : 'teal'}
-                      >
-                        {!log.passed ? 'Failed' : log.decision === 'redact' ? 'Redacted' : log.findings?.length ? 'Flagged' : 'Passed'}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td style={{ maxWidth: 260 }}>
-                      <Tooltip label={log.inputText || '—'} multiline w={300}>
-                        <Text size="xs" truncate>{truncate(log.inputText, 60)}</Text>
-                      </Tooltip>
-                    </Table.Td>
-                    <Table.Td>
-                      {topFinding ? (
-                        <Tooltip label={topFinding.message}>
-                          <Text size="xs" truncate style={{ maxWidth: 160 }}>
-                            {typeof topFinding.confidence === 'number'
-                              ? `${topFinding.category} · ${topFinding.confidence.toFixed(2)}`
-                              : topFinding.type}
-                            {log.findings.length > 1 && ` +${log.findings.length - 1}`}
-                          </Text>
-                        </Tooltip>
-                      ) : (
-                        <Text size="xs" c="dimmed">—</Text>
-                      )}
-                    </Table.Td>
-                    <Table.Td>
-                      {maxSev && log.findings?.length ? <SeverityBadge severity={maxSev} /> : <Text size="xs" c="dimmed">—</Text>}
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs" c="dimmed">{log.source ?? '—'}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs" c="dimmed">{log.latencyMs != null ? `${log.latencyMs}ms` : '—'}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="xs" c="dimmed">
-                        {log.createdAt ? new Date(log.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
-                      </Text>
-                    </Table.Td>
-                  </Table.Tr>
-                );
-              })}
-              {logs.length === 0 && (
-                <Table.Tr>
-                  <Table.Td colSpan={7}>
-                    <Text ta="center" c="dimmed" size="sm" py="md">No evaluation logs found</Text>
-                  </Table.Td>
-                </Table.Tr>
-              )}
-            </Table.Tbody>
-          </Table>
-        </ScrollArea>
+                return maxSev && log.findings?.length ? <SeverityBadge severity={maxSev} /> : <Text size="xs" c="dimmed">—</Text>;
+              },
+            },
+            {
+              key: 'source',
+              label: 'Source',
+              render: (log) => <Text size="xs" c="dimmed">{log.source ?? '—'}</Text>,
+            },
+            {
+              key: 'latency',
+              label: 'Latency',
+              align: 'right',
+              render: (log) => <Text size="xs" c="dimmed">{log.latencyMs != null ? `${log.latencyMs}ms` : '—'}</Text>,
+            },
+            {
+              key: 'date',
+              label: 'Date',
+              render: (log) => (
+                <Text size="xs" c="dimmed">
+                  {log.createdAt ? new Date(log.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                </Text>
+              ),
+            },
+          ]}
+        />
       </SectionCard>
         </>
       )}

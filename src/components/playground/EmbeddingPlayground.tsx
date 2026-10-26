@@ -9,7 +9,6 @@ import {
   Group,
   Paper,
   Stack,
-  Table,
   Text,
   Textarea,
 } from '@mantine/core';
@@ -20,6 +19,7 @@ import {
   IconRefresh,
   IconVectorBezier2,
 } from '@tabler/icons-react';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
 interface EmbeddingPlaygroundProps {
   modelKey: string;
@@ -38,6 +38,45 @@ interface SimilarityPair {
   b: number;
   score: number;
 }
+
+const vectorColumns: DataGridColumn<VectorSummary>[] = [
+  { key: 'index', label: '#', width: 40, render: (vector) => vector.index },
+  {
+    key: 'input',
+    label: 'Input',
+    render: (vector) => <Text size="xs" lineClamp={2}>{vector.input}</Text>,
+  },
+  { key: 'dims', label: 'Dims', width: 90, align: 'right', render: (vector) => vector.dimensions },
+  { key: 'norm', label: '‖v‖', width: 90, align: 'right', render: (vector) => vector.magnitude.toFixed(3) },
+  {
+    key: 'preview',
+    label: 'First 8 values',
+    render: (vector) => (
+      <Code fz={10}>
+        [{vector.preview.map((value) => value.toFixed(4)).join(', ')}…]
+      </Code>
+    ),
+  },
+];
+
+const similarityColumns: DataGridColumn<SimilarityPair>[] = [
+  {
+    key: 'pair',
+    label: 'Pair',
+    render: (pair) => <Text size="xs">#{pair.a} ↔ #{pair.b}</Text>,
+  },
+  {
+    key: 'score',
+    label: 'Score',
+    width: 120,
+    align: 'right',
+    render: (pair) => (
+      <Badge variant="light" color={pair.score > 0.8 ? 'green' : pair.score > 0.5 ? 'yellow' : 'gray'}>
+        {pair.score.toFixed(4)}
+      </Badge>
+    ),
+  },
+];
 
 const DEFAULT_INPUT = [
   'The cat sat on the mat.',
@@ -140,34 +179,11 @@ export default function EmbeddingPlayground({ modelKey }: EmbeddingPlaygroundPro
         <Paper withBorder radius="md" p="md">
           <Stack gap="sm">
             <Text fw={600} size="sm">Vectors</Text>
-            <Table striped withTableBorder>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th w={40}>#</Table.Th>
-                  <Table.Th>Input</Table.Th>
-                  <Table.Th w={90}>Dims</Table.Th>
-                  <Table.Th w={90}>‖v‖</Table.Th>
-                  <Table.Th>First 8 values</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {vectors.map((vector) => (
-                  <Table.Tr key={vector.index}>
-                    <Table.Td>{vector.index}</Table.Td>
-                    <Table.Td>
-                      <Text size="xs" lineClamp={2}>{vector.input}</Text>
-                    </Table.Td>
-                    <Table.Td>{vector.dimensions}</Table.Td>
-                    <Table.Td>{vector.magnitude.toFixed(3)}</Table.Td>
-                    <Table.Td>
-                      <Code fz={10}>
-                        [{vector.preview.map((value) => value.toFixed(4)).join(', ')}…]
-                      </Code>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+            <DataGrid<VectorSummary>
+              records={vectors}
+              rowKey={(vector) => String(vector.index)}
+              columns={vectorColumns}
+            />
           </Stack>
         </Paper>
       ) : null}
@@ -176,28 +192,11 @@ export default function EmbeddingPlayground({ modelKey }: EmbeddingPlaygroundPro
         <Paper withBorder radius="md" p="md">
           <Stack gap="sm">
             <Text fw={600} size="sm">Cosine similarity</Text>
-            <Table striped withTableBorder>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Pair</Table.Th>
-                  <Table.Th w={120}>Score</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {similarities.map((pair) => (
-                  <Table.Tr key={`${pair.a}-${pair.b}`}>
-                    <Table.Td>
-                      <Text size="xs">#{pair.a} ↔ #{pair.b}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge variant="light" color={pair.score > 0.8 ? 'green' : pair.score > 0.5 ? 'yellow' : 'gray'}>
-                        {pair.score.toFixed(4)}
-                      </Badge>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+            <DataGrid<SimilarityPair>
+              records={similarities}
+              rowKey={(pair) => `${pair.a}-${pair.b}`}
+              columns={similarityColumns}
+            />
           </Stack>
         </Paper>
       ) : null}
