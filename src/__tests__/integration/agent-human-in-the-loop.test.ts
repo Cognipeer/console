@@ -355,6 +355,102 @@ describe('a tool that needs approval pauses the turn', () => {
   });
 });
 
+describe('approval exceptions (by argument)', () => {
+  it('asks for the call an exception matches, and records why on every copy of the request', async () => {
+    await createAgent({
+      humanInTheLoop: {
+        toolApproval: { enabled: true, defaultPolicy: 'never', exceptions: { sandbox_exec: [{ field: 'command', pattern: 'rm -rf*', action: 'ask' }] } },
+      },
+    });
+    scriptModel(oneToolScript('rm -rf /tmp/x'));
+    const id = String((await newConversation())._id);
+    const response = await chat(id, 'clean up');
+
+    expect(response.status).toBe('requires_action');
+    expect(executed).toEqual([]);
+    const reason = { source: 'exception', exception: { field: 'command', pattern: 'rm -rf*' } };
+    expect(response.required_action?.actions[0].reason).toMatchObject(reason);
+
+    const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
+    expect(action.reason).toMatchObject(reason);
+    expect(action.reason?.text).toContain('`command` matches "rm -rf*"');
+    expect((await storedConversation(id)).messages[1].pendingActions?.[0].reason).toMatchObject(reason);
+    const required = (await events(id)).find((e) => e.type === 'action.required');
+    expect(required?.data).toMatchObject({ reason });
+  });
+
+  it('lets other calls of the tool run as the tool setting says', async () => {
+    await createAgent({
+      humanInTheLoop: {
+        toolApproval: { enabled: true, defaultPolicy: 'never', exceptions: { sandbox_exec: [{ field: 'command', pattern: 'rm -rf*', action: 'ask' }] } },
+      },
+    });
+    scriptModel(oneToolScript('ls -la'));
+    expect((await chat(String((await newConversation())._id), 'list')).status).toBe('completed');
+    expect(executed).toEqual([{ tool: 'sandbox_exec', args: { command: 'ls -la' } }]);
+  });
+
+  it('runs a call an allow exception matches without asking, and the step names the rule', async () => {
+    await createAgent({
+      humanInTheLoop: {
+        toolApproval: { enabled: true, defaultPolicy: 'always', exceptions: { sandbox_exec: [{ field: 'command', pattern: 'ls*', action: 'allow' }] } },
+      },
+    });
+    scriptModel(oneToolScript('ls -la'));
+    const id = String((await newConversation())._id);
+    expect((await chat(id, 'list')).status).toBe('completed');
+    expect(executed).toHaveLength(1);
+    const assistant = (await storedConversation(id)).messages[1];
+    expect(assistant.steps?.[0]).toMatchObject({ name: 'sandbox_exec', approvalRule: { action: 'allow', field: 'command', pattern: 'ls*' } });
+  });
+
+  it('blocks a call a deny exception matches: the tool never runs, nobody is asked, the model is told why', async () => {
+    await createAgent({
+      humanInTheLoop: {
+        toolApproval: { enabled: true, defaultPolicy: 'always', exceptions: { sandbox_exec: [{ pattern: '*rm -rf*', action: 'deny' }] } },
+      },
+    });
+    const model = scriptModel(oneToolScript('cd / && rm -rf x'));
+    const id = String((await newConversation())._id);
+    const response = await chat(id, 'clean up');
+
+    expect(response.status).toBe('completed');
+    expect(executed).toEqual([]);
+    expect(await db.listAgentPendingActions(id, { status: 'pending' })).toEqual([]);
+    const toolMessage = model.seen[1].find((m) => m.role === 'tool');
+    expect(String(toolMessage?.content)).toContain('Blocked by this agent\'s approval rules');
+    const step = (await storedConversation(id)).messages[1].steps?.[0];
+    expect(step).toMatchObject({ status: 'error', approvalRule: { action: 'deny', pattern: '*rm -rf*' } });
+    expect(step?.error).toMatch(/^Blocked by this agent's approval rules/);
+  });
+
+  it('still blocks on a run nobody can answer, and refuses the call that would have asked', async () => {
+    await createAgent({
+      humanInTheLoop: {
+        toolApproval: {
+          enabled: true,
+          defaultPolicy: 'always',
+          exceptions: { sandbox_exec: [{ field: 'command', pattern: 'ls*', action: 'allow' }, { pattern: '*rm -rf*', action: 'deny' }] },
+        },
+      },
+    });
+    scriptModel(oneToolScript('ls'));
+    const allowed = await chat(String((await newConversation())._id), 'list', { unattended: true });
+    expect(allowed.status).toBe('completed');
+    expect(executed).toHaveLength(1);
+
+    const model = scriptModel(oneToolScript('rm -rf x'));
+    await chat(String((await newConversation())._id), 'clean', { unattended: true });
+    expect(executed).toHaveLength(1);
+    expect(String(model.seen[1].find((m) => m.role === 'tool')?.content)).toContain('Blocked by this agent\'s approval rules');
+
+    const asked = scriptModel(oneToolScript('pwd'));
+    await chat(String((await newConversation())._id), 'where', { unattended: true });
+    expect(executed).toHaveLength(1);
+    expect(String(asked.seen[1].find((m) => m.role === 'tool')?.content)).toContain('no approver is available');
+  });
+});
+
 describe('unattended callers', () => {
   const DENIED = 'This tool needs human approval and no approver is available in this run.';
 

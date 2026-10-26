@@ -16637,6 +16637,29 @@ components:
         requested_at:
           type: string
           format: date-time
+        reason:
+          type: object
+          description: "`tool_approval`: why the call waits for a person."
+          properties:
+            source:
+              type: string
+              enum:
+                - tool_policy
+                - default_policy
+                - exception
+                - other
+              description: "`tool_policy`: the tool's own setting asks; `default_policy`: the agent's setting for tools without one asks; `exception`: an approval exception matched the call's arguments; `other`: something else asked (a skill script, a guardrail)."
+            exception:
+              type: object
+              description: "`exception`: the rule that matched. No `field` = any argument."
+              properties:
+                field:
+                  type: string
+                pattern:
+                  type: string
+            text:
+              type: string
+              description: The same reason in one sentence.
       required:
         - id
         - kind

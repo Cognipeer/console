@@ -33,7 +33,7 @@ import { isSessionOngoing } from '@/lib/services/agents/sessionActivityState';
 import PendingActionList from '../session/PendingActionCards';
 import SessionActivity from '../session/SessionActivity';
 import SessionStatusBadge from '../session/SessionStatusBadge';
-import { answerBlockedById, answerBlockedReason, isStaleActionRefusal, openActionsOf, type ResolveBody, type ServerPendingAction } from '../session/pendingActions';
+import { answerBlockedById, answerBlockedReason, approvalSettingsHref, isStaleActionRefusal, openActionsOf, type ResolveBody, type ServerPendingAction } from '../session/pendingActions';
 import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi';
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
@@ -383,6 +383,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                             onResolve={(actionId, body) => void resolveAction(actionId, body)}
                             blocked={blocked}
                             blockedById={blockedById}
+                            ruleHref={approvalSettingsHref(agentId)}
                         />
                     </Alert>
                 ) : null}

@@ -1208,6 +1208,8 @@ export class SQLiteProviderBase {
     // The sub-agent a surfaced child pause belongs to.
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'subagent', 'subagent TEXT');
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'delegationToolCallId', 'delegationToolCallId TEXT');
+    // Why a tool approval waits (JSON, IAgentApprovalReason).
+    this.ensureTableColumn(db, TABLES.agentPendingActions, 'reason', 'reason TEXT');
     // Analysis decision layer: the decision model, where runs read from (JSON) and the review settings (JSON).
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'decisionModelKey', 'decisionModelKey TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'source', 'source TEXT');

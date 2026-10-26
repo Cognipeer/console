@@ -10,10 +10,21 @@
 
 import type {
     AgentHitlUnattendedPolicy,
+    AgentToolApprovalException,
     AgentToolApprovalPolicy,
     IAgentConfig,
     IAgentHumanInTheLoopConfig,
 } from '@/lib/database';
+import {
+    HitlBlockedCallError,
+    approvalReasonOf,
+    decideToolCall,
+    normalizeToolExceptions,
+    validateToolExceptions,
+    type HitlCallDecision,
+    type HitlCallLog,
+    type ToolPolicySource,
+} from './agentHitlExceptions';
 
 /**
  * Tools that only READ (and the agent's own file-writing tools, which never touch anything outside
@@ -84,6 +95,8 @@ export interface ResolvedHitlConfig {
     toolApprovalEnabled: boolean;
     defaultPolicy: AgentToolApprovalPolicy;
     toolPolicies: Record<string, AgentToolApprovalPolicy>;
+    /** Per-tool exceptions judged on a call's arguments (`agentHitlExceptions.ts`); malformed ones left out. */
+    toolExceptions: Record<string, AgentToolApprovalException[]>;
     askUserEnabled: boolean;
     allowFreeText: boolean;
     /** 0 = never expires. */
@@ -120,6 +133,7 @@ export function resolveHitlConfig(
         toolApprovalEnabled: approval?.enabled === true,
         defaultPolicy: approval?.defaultPolicy === 'never' ? 'never' : HITL_DEFAULTS.defaultPolicy,
         toolPolicies: carryOverReadPolicies(approval?.tools && typeof approval.tools === 'object' ? { ...approval.tools } : {}),
+        toolExceptions: normalizeToolExceptions(approval?.exceptions),
         askUserEnabled: hitl?.askUser?.enabled === true,
         allowFreeText: hitl?.askUser?.allowFreeText !== false,
         timeoutMinutes: typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 0
@@ -149,38 +163,199 @@ export function toolApprovalPolicy(resolved: ResolvedHitlConfig, toolName: strin
     return resolved.defaultPolicy;
 }
 
+/** What decides a tool's own setting (see {@link toolApprovalPolicy}): what a call that asks was asked by. */
+export function toolApprovalPolicySource(resolved: ResolvedHitlConfig, toolName: string): ToolPolicySource {
+    const explicit = resolved.toolPolicies[toolName];
+    if (explicit === 'always' || explicit === 'never') return 'tool_policy';
+    if (isReadOnlyTool(toolName)) return 'read_only';
+    return 'default_policy';
+}
+
+/** The verdict for one call of a tool: the strictest of its matching exceptions, else its own setting. */
+export function toolCallDecision(resolved: ResolvedHitlConfig, toolName: string, args: unknown): HitlCallDecision {
+    return decideToolCall(
+        { policy: toolApprovalPolicy(resolved, toolName), source: toolApprovalPolicySource(resolved, toolName) },
+        resolved.toolExceptions[toolName],
+        args,
+    );
+}
+
 /** The session allow-list ("don't ask again for this tool in this session"). */
 export function sessionAllowedTools(metadata: Record<string, unknown> | undefined): Set<string> {
     const raw = metadata?.hitlAllowedTools;
     return new Set(Array.isArray(raw) ? raw.filter((name): name is string => typeof name === 'string') : []);
 }
 
-type ToolRecord = { name?: string; needsApproval?: unknown };
+type ToolRecord = { name?: string; needsApproval?: unknown; approvalPrompt?: unknown };
+
+/** Whether the tool has exceptions, i.e. is decided per call rather than one way for every call. */
+function hasExceptions(resolved: ResolvedHitlConfig, name: string): boolean {
+    return (resolved.toolExceptions[name]?.length ?? 0) > 0;
+}
+
+function hasDenyException(resolved: ResolvedHitlConfig, name: string): boolean {
+    return resolved.toolExceptions[name]?.some((exception) => exception.action === 'deny') ?? false;
+}
+
+/**
+ * Does this call wait for a person? The session allow-list ("don't ask again
+ * for this tool") skips the tool's own setting, never an exception: that was
+ * written for exactly these arguments.
+ */
+function callAsks(decision: HitlCallDecision, allowedTools: ReadonlySet<string>, name: string): boolean {
+    if (decision.action !== 'ask') return false;
+    return decision.source === 'exception' || !allowedTools.has(name);
+}
+
+/** What a gate set on the tool before this one (another side's) says about the call. */
+function priorAsks(tool: ToolRecord, args: unknown): boolean {
+    const prior = tool.needsApproval;
+    if (typeof prior === 'function') {
+        try {
+            return Boolean((prior as (input: unknown) => unknown)(args));
+        } catch {
+            // The SDK reads a predicate that throws as "ask"; so does this.
+            return true;
+        }
+    }
+    return prior === true;
+}
+
+/** The approval prompt already on the tool (its own, or another side's), for these arguments. */
+function promptOf(tool: ToolRecord, args: unknown): string | undefined {
+    const own = tool.approvalPrompt;
+    if (typeof own === 'function') {
+        try {
+            const text = (own as (input: unknown) => unknown)(args);
+            return typeof text === 'string' && text ? text : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+    return typeof own === 'string' && own ? own : undefined;
+}
 
 /**
  * Returns the tools with `needsApproval` set per the agent's policy; the input
- * array is not mutated. A tool that never needs approval (policy `never`, or
- * toolApproval off) is returned untouched, so an agent without the feature
- * hands the SDK exactly the tools it did before.
+ * array is not mutated. A tool that never needs approval (policy `never` and no
+ * exceptions, or toolApproval off) is returned untouched, so an agent without
+ * the feature hands the SDK exactly the tools it did before.
  *
- * For `always` the SDK gets a predicate rather than `true`, so a tool the user
- * chose to "allow for this session" stops asking without rebuilding the tool.
+ * The SDK gets a predicate rather than `true`: a tool the user chose to "allow
+ * for this session" stops asking without rebuilding the tool, and a tool with
+ * exceptions is decided on each call's arguments. Its `approvalPrompt` says why
+ * a call waits; the SDK stores it on the approval and in the trace, and `log`
+ * keeps the structured reason for the pending action. A call an exception
+ * refuses never asks: the tool's execution throws {@link HitlBlockedCallError}.
+ *
+ * A gate already on the tool (another side's, see {@link gateChildTools}) is
+ * kept: the call asks when either side asks.
  */
 export function applyToolApprovals<T extends ToolRecord>(
     tools: T[],
     resolved: ResolvedHitlConfig,
     allowedTools: ReadonlySet<string>,
+    log?: HitlCallLog,
 ): T[] {
     if (!resolved.toolApprovalEnabled) return tools;
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
-        if (!name || toolApprovalPolicy(resolved, name) !== 'always') return tool;
-        return { ...tool, needsApproval: () => !allowedTools.has(name) };
+        if (!name) return tool;
+        const perCall = hasExceptions(resolved, name);
+        if (!perCall && toolApprovalPolicy(resolved, name) !== 'always') return tool;
+        const asks = (args: unknown) => {
+            const decision = toolCallDecision(resolved, name, args);
+            // A call an exception lets through is recorded, so its step can show the rule.
+            if (decision.source === 'exception' && decision.action === 'allow') log?.note(name, args, decision);
+            return callAsks(decision, allowedTools, name);
+        };
+        const gated: T = {
+            ...tool,
+            needsApproval: tool.needsApproval === undefined ? asks : (args: unknown) => priorAsks(tool, args) || asks(args),
+            approvalPrompt: (args: unknown) => {
+                if (priorAsks(tool, args)) return promptOf(tool, args);
+                const decision = toolCallDecision(resolved, name, args);
+                if (decision.action !== 'ask') return promptOf(tool, args);
+                log?.note(name, args, decision);
+                return promptOf(tool, args) ?? approvalReasonOf(name, decision).text;
+            },
+        };
+        if (!hasDenyException(resolved, name)) return gated;
+        return refuseCalls(gated, (args) => blockedCall(resolved, name, args, log));
     });
+}
+
+/** The refusal of a call an exception blocks, or null. */
+function blockedCall(resolved: ResolvedHitlConfig, name: string, args: unknown, log?: HitlCallLog): Error | null {
+    const decision = toolCallDecision(resolved, name, args);
+    if (decision.action !== 'deny' || !decision.exception) return null;
+    log?.note(name, args, decision);
+    return new HitlBlockedCallError(name, decision.exception);
 }
 
 /** What a denied call tells the model: the tool did not run, and why. */
 export const UNATTENDED_DENIED_MESSAGE = 'This tool needs human approval and no approver is available in this run.';
+
+/** Thrown in place of a call that would wait for approval on a run nobody can answer (decided per call). */
+export class HitlUnattendedCallError extends Error {
+    constructor() {
+        super(UNATTENDED_DENIED_MESSAGE);
+        this.name = 'HitlUnattendedCallError';
+    }
+}
+
+function isHitlRefusal(error: unknown): boolean {
+    return error instanceof HitlBlockedCallError || error instanceof HitlUnattendedCallError;
+}
+
+const TOOL_CALLABLE_KEYS = ['func', 'invoke', 'call', '_call', 'run'] as const;
+
+/**
+ * The tool with each way of running it checking the call first: a call
+ * `refusal` names an error for throws it instead of running. A refusal is a
+ * decision, so it is never retried, and no cached result is served in its place.
+ */
+function refuseCalls<T extends ToolRecord>(tool: T, refusal: (args: unknown) => Error | null): T {
+    const checked: Record<string, unknown> = { ...tool };
+    for (const key of TOOL_CALLABLE_KEYS) {
+        const original = checked[key];
+        if (typeof original !== 'function') continue;
+        checked[key] = async function (this: unknown, input: unknown, ...rest: unknown[]) {
+            const refused = refusal(input);
+            if (refused) throw refused;
+            return (original as (...params: unknown[]) => unknown).apply(this, [input, ...rest]);
+        };
+    }
+    const retry = checked.retry;
+    if (retry && typeof retry === 'object') {
+        const own = (retry as { shouldRetry?: unknown }).shouldRetry;
+        checked.retry = {
+            ...retry,
+            shouldRetry: (error: unknown, attempt: number) => !isHitlRefusal(error)
+                && (typeof own === 'function' ? Boolean((own as (e: unknown, n: number) => unknown)(error, attempt)) : true),
+        };
+    }
+    delete checked.cache;
+    return checked as T;
+}
+
+/**
+ * The tools of a run that runs gated calls without anyone approving them
+ * (`unattended: allow`): nothing asks, but a call an exception blocks is still
+ * refused — "run without approval" never meant "run what a rule forbids".
+ */
+export function applyToolBlocks<T extends ToolRecord>(
+    tools: T[],
+    resolved: ResolvedHitlConfig,
+    log?: HitlCallLog,
+): T[] {
+    if (!resolved.toolApprovalEnabled) return tools;
+    return tools.map((tool) => {
+        const name = typeof tool.name === 'string' ? tool.name : '';
+        if (!name || !hasDenyException(resolved, name)) return tool;
+        return refuseCalls(tool, (args) => blockedCall(resolved, name, args, log));
+    });
+}
 
 /**
  * How the agent's human-in-the-loop settings apply to ONE run:
@@ -213,8 +388,6 @@ function unattendedMode(policy: AgentHitlUnattendedPolicy, canPause: boolean): H
     return 'deny';
 }
 
-const TOOL_CALLABLE_KEYS = ['func', 'invoke', 'call', '_call', 'run'] as const;
-
 /**
  * The tools of a run nobody can answer, for the `deny` mode: a tool that would
  * have waited for approval is returned with its execution replaced by one that
@@ -229,6 +402,7 @@ export function denyUnattendedTools<T extends ToolRecord>(
     tools: T[],
     resolved: ResolvedHitlConfig,
     allowedTools: ReadonlySet<string>,
+    log?: HitlCallLog,
 ): T[] {
     if (!resolved.toolApprovalEnabled) return tools;
     const refuse = async (): Promise<never> => {
@@ -236,7 +410,23 @@ export function denyUnattendedTools<T extends ToolRecord>(
     };
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
-        if (!name || toolApprovalPolicy(resolved, name) !== 'always' || allowedTools.has(name)) return tool;
+        if (!name) return tool;
+        if (hasExceptions(resolved, name)) {
+            // Decided per call: one that would ask is refused (nobody can answer it), one an exception
+            // blocks is blocked, the rest run.
+            const refusal = (args: unknown): Error | null => {
+                const decision = toolCallDecision(resolved, name, args);
+                if (decision.action === 'deny') return blockedCall(resolved, name, args, log);
+                if (callAsks(decision, allowedTools, name)) return new HitlUnattendedCallError();
+                if (decision.source === 'exception') log?.note(name, args, decision);
+                return null;
+            };
+            const refused = refuseCalls(tool, refusal);
+            // A call this side refuses must not wait for another side's approval first.
+            if (tool.needsApproval !== undefined) refused.needsApproval = (args: unknown) => refusal(args) === null && priorAsks(tool, args);
+            return refused;
+        }
+        if (toolApprovalPolicy(resolved, name) !== 'always' || allowedTools.has(name)) return tool;
         const denied: Record<string, unknown> = { ...tool };
         for (const key of TOOL_CALLABLE_KEYS) {
             if (typeof denied[key] === 'function') denied[key] = refuse;
@@ -268,13 +458,18 @@ export function gateChildTools<T extends ToolRecord>(
     tools: T[],
     sides: ChildApprovalSide[],
     allowedTools: ReadonlySet<string>,
+    log?: HitlCallLog,
 ): T[] {
     let gated = tools;
     for (const side of sides) {
-        if (side.mode === 'ask') gated = applyToolApprovals(gated, side.hitl, allowedTools);
+        if (side.mode === 'ask') gated = applyToolApprovals(gated, side.hitl, allowedTools, log);
     }
     for (const side of sides) {
-        if (side.mode === 'deny') gated = denyUnattendedTools(gated, side.hitl, allowedTools);
+        if (side.mode === 'deny') gated = denyUnattendedTools(gated, side.hitl, allowedTools, log);
+    }
+    // A side that lets everything run still blocks what its exceptions block.
+    for (const side of sides) {
+        if (side.mode === 'allow') gated = applyToolBlocks(gated, side.hitl, log);
     }
     return gated;
 }
@@ -320,6 +515,14 @@ export function validateHitlConfig(config: IAgentConfig): {
         enumCheck('humanInTheLoop.toolApproval.defaultPolicy', approval.defaultPolicy, ['always', 'never']);
         for (const [tool, policy] of Object.entries(approval.tools ?? {})) {
             enumCheck(`humanInTheLoop.toolApproval.tools.${tool}`, policy, ['always', 'never']);
+        }
+        errors.push(...validateToolExceptions(approval.exceptions));
+        const hasAny = Object.values(approval.exceptions ?? {}).some((list) => Array.isArray(list) && list.length > 0);
+        if (hasAny && !approval.enabled) {
+            warnings.push({
+                field: 'humanInTheLoop.toolApproval.exceptions',
+                message: 'Approval exceptions apply only while "Ask before tools run" is on',
+            });
         }
     }
     if (hitl.unattended === 'allow' && (approval?.enabled || hitl.askUser?.enabled)) {

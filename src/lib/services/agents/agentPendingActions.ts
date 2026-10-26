@@ -25,6 +25,7 @@ import type { ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 import type {
     AgentResponseFormat,
     DatabaseProvider,
+    IAgentApprovalReason,
     IAgentConversation,
     IAgentMessagePendingAction,
     IAgentPendingAction,
@@ -43,6 +44,7 @@ import {
     type AgentTurnOutcome,
 } from './agentTurnState';
 import type { ResolvedHitlConfig } from './agentHumanInTheLoop';
+import type { HitlCallLog } from './agentHitlExceptions';
 import type { SessionEventWriter } from './sessionEvents';
 import { closePausedTrace, type PausedTraceClosure, type PausedTraceDb } from './pausedTraceClosure';
 
@@ -67,6 +69,8 @@ export interface PublicPendingAction {
     status: IAgentPendingAction['status'];
     expiresAt?: string;
     requestedAt: string;
+    /** `tool_approval`: why the call waits. */
+    reason?: IAgentApprovalReason;
 }
 
 export function toPublicPendingAction(action: IAgentPendingAction): PublicPendingAction {
@@ -83,6 +87,7 @@ export function toPublicPendingAction(action: IAgentPendingAction): PublicPendin
         status: action.status,
         ...(action.expiresAt ? { expiresAt: new Date(action.expiresAt).toISOString() } : {}),
         requestedAt: new Date(action.requestedAt).toISOString(),
+        ...(action.reason ? { reason: action.reason } : {}),
     };
 }
 
@@ -100,6 +105,7 @@ export function toMessagePendingAction(action: IAgentPendingAction): IAgentMessa
         ...(action.clientTool ? { timeoutSeconds: action.clientTool.timeoutSeconds } : {}),
         status: action.status,
         ...(action.resolution ? { resolution: action.resolution } : {}),
+        ...(action.reason ? { reason: action.reason } : {}),
     };
 }
 
@@ -116,6 +122,7 @@ export function actionRequiredEventData(action: IAgentPendingAction): Record<str
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
         ...(action.clientTool ? { timeoutSeconds: action.clientTool.timeoutSeconds } : {}),
         ...(action.expiresAt ? { expiresAt: new Date(action.expiresAt).toISOString() } : {}),
+        ...(action.reason ? { reason: action.reason } : {}),
     };
 }
 
@@ -244,6 +251,8 @@ interface PauseEntry {
     allowFreeText?: boolean;
     /** `client_tool`: how long the host page may take. */
     timeoutSeconds?: number;
+    /** `tool_approval`: the approval prompt the SDK stored with it (the tool's own wording, or why the agent's settings ask). */
+    prompt?: string;
 }
 
 /**
@@ -272,6 +281,7 @@ export function collectPauseEntries(state: AgentSdkSmartState | undefined): Paus
             toolName: approval.toolName,
             ...subagentField(approval),
             args: approval.args,
+            ...(typeof approval.metadata?.prompt === 'string' && approval.metadata.prompt ? { prompt: approval.metadata.prompt } : {}),
         });
     }
     for (const question of state?.pendingUserQuestions ?? []) {
@@ -313,6 +323,8 @@ export interface OpenPauseInput {
     conversationId: string;
     runId?: string;
     hitl: ResolvedHitlConfig;
+    /** What the run's approval gates decided: why each tool call waits. */
+    approvalLog?: Pick<HitlCallLog, 'reasonFor'>;
     /** The version the paused turn ran (null = the draft), so the continuation rebuilds the same agent. */
     agentVersion: number | null;
     usePublished: boolean;
@@ -395,11 +407,22 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
             ? new Date(now.getTime() + (entry.timeoutSeconds + CLIENT_TOOL_SERVER_GRACE_SECONDS) * 1000)
             : expiresAt,
         ...(entry.kind === 'client_tool' && entry.timeoutSeconds !== undefined ? { clientTool: { timeoutSeconds: entry.timeoutSeconds } } : {}),
+        ...(entry.kind === 'tool_approval' ? approvalReasonField(entry, input.approvalLog) : {}),
         agentVersion: input.agentVersion,
         usePublished: input.usePublished,
         createdBy: input.createdBy,
     })));
     return { snapshot, actions };
+}
+
+/**
+ * Why a tool call waits: what the agent's approval settings decided for it, or,
+ * when something else asked (a skill script, a guardrail), the prompt it gave.
+ */
+function approvalReasonField(entry: PauseEntry, log: Pick<HitlCallLog, 'reasonFor'> | undefined): { reason?: IAgentApprovalReason } {
+    const decided = log?.reasonFor(entry.toolName, entry.args);
+    if (decided) return { reason: decided };
+    return entry.prompt ? { reason: { source: 'other', text: entry.prompt.slice(0, 500) } } : {};
 }
 
 // ── Answers ─────────────────────────────────────────────────────────────

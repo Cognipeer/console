@@ -11,11 +11,14 @@
  * An agent with no `humanInTheLoop` at all never pauses; the first switch turned
  * on creates the object. What the per-tool table shows as "asks / does not ask"
  * is computed by the same function the runtime uses (`toolApprovalPolicy`).
+ * A tool's exceptions (by argument) are edited in `AgentToolExceptionsModal`.
  */
 
+import { useState } from 'react';
 import {
     Alert,
     Badge,
+    Button,
     Group,
     NumberInput,
     SegmentedControl,
@@ -26,12 +29,13 @@ import {
     Text,
     Tooltip,
 } from '@mantine/core';
-import { IconInfoCircle } from '@tabler/icons-react';
+import { IconFilter, IconInfoCircle, IconPlus } from '@tabler/icons-react';
 import type { IAgentClientToolConfig, IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
 import { HITL_DEFAULTS, resolveHitlConfig } from '@/lib/services/agents/agentHumanInTheLoop';
 import { useTranslations } from '@/lib/i18n';
 import { ConfigBlock, describedSelectOption } from './ConfigSection';
-import { hitlToolRows, patchHitl, setToolChoice, type ToolPolicyChoice } from './hitlSettings';
+import AgentToolExceptionsModal from './AgentToolExceptionsModal';
+import { hitlToolRows, patchHitl, setToolChoice, setToolExceptions, type HitlToolRow, type ToolPolicyChoice } from './hitlSettings';
 import type { AgentToolConfig } from '../session/sessionTools';
 
 export interface AgentHumanInTheLoopPanelProps {
@@ -49,6 +53,9 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
     const rows = hitlToolRows(toolConfig, value, clientTools);
     const set = (patch: Partial<IAgentHumanInTheLoopConfig>) => onChange(patchHitl(value, patch));
     const canPause = resolved.toolApprovalEnabled || resolved.askUserEnabled;
+    // The row as it was when its exceptions editor opened (null = closed).
+    const [editing, setEditing] = useState<HitlToolRow | null>(null);
+    const exceptionCount = (count: number) => (count === 1 ? t('exceptionsOne') : t('exceptionsMany', { count }));
 
     const timeoutOptions = [
         { value: 'deny', label: t('onTimeoutDeny'), description: t('onTimeoutDenyDescription') },
@@ -133,6 +140,7 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                                 <Table.Th>{t('toolColumn')}</Table.Th>
                                                 <Table.Th w={150}>{t('sourceColumn')}</Table.Th>
                                                 <Table.Th w={380}>{t('policyColumn')}</Table.Th>
+                                                <Table.Th w={150}>{t('exceptionsColumn')}</Table.Th>
                                             </Table.Tr>
                                         </Table.Thead>
                                         <Table.Tbody>
@@ -181,12 +189,37 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                                             </Badge>
                                                         </Group>
                                                     </Table.Td>
+                                                    <Table.Td>
+                                                        <Button
+                                                            size="compact-xs"
+                                                            variant={row.exceptions.length > 0 ? 'light' : 'subtle'}
+                                                            color={row.exceptions.length > 0 ? 'blue' : 'gray'}
+                                                            leftSection={row.exceptions.length > 0 ? <IconFilter size={12} /> : <IconPlus size={12} />}
+                                                            onClick={() => setEditing(row)}
+                                                            aria-label={t('editExceptions', { tool: row.name })}
+                                                        >
+                                                            {row.exceptions.length > 0 ? exceptionCount(row.exceptions.length) : t('addException')}
+                                                        </Button>
+                                                    </Table.Td>
                                                 </Table.Tr>
                                             ))}
                                         </Table.Tbody>
                                     </Table>
                                 )}
                             </Stack>
+
+                            <AgentToolExceptionsModal
+                                opened={editing !== null}
+                                onClose={() => setEditing(null)}
+                                row={editing}
+                                hitl={value}
+                                clientSchema={editing?.origin === 'client'
+                                    ? clientTools?.find((tool) => tool.name.trim() === editing.name)?.inputSchema
+                                    : undefined}
+                                onApply={(exceptions) => {
+                                    if (editing) onChange(setToolExceptions(value, editing.name, exceptions));
+                                }}
+                            />
 
                             {(toolConfig.subagents?.length ?? 0) > 0 ? (
                                 <Alert variant="light" color="blue" icon={<IconInfoCircle size={16} />} p="sm">

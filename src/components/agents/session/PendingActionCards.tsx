@@ -15,6 +15,7 @@
 import { useState } from 'react';
 import {
     Alert,
+    Anchor,
     Badge,
     Box,
     Button,
@@ -60,6 +61,8 @@ interface CardProps {
     busy: boolean;
     /** This very action is the one being sent. */
     resolving: boolean;
+    /** Where the agent's approval settings are edited ("View rule" on an approval an exception asked for). */
+    ruleHref?: string;
     /**
      * The server says the viewer may not answer this request: every control is disabled, each with `title` = the
      * reason (already worded). Absent = the viewer may answer, or the server could not tell (it decides again).
@@ -90,11 +93,38 @@ function ShowInGroupLink({ action, onShowInGroup }: { action: PendingActionView;
     );
 }
 
+/** Why an approval waits, in one line; nothing for a request stored before the reason was recorded. */
+function ApprovalReasonLine({ action, ruleHref }: { action: PendingActionView; ruleHref?: string }) {
+    const t = useTranslations('agents.hitl');
+    const reason = action.reason;
+    if (!reason) return null;
+    let text: string;
+    if (reason.source === 'exception' && reason.exception) {
+        const rule = t('ruleText', {
+            field: reason.exception.field ?? t('anyArgumentRule'),
+            pattern: reason.exception.pattern,
+        });
+        text = t('reasonException', { rule });
+    } else if (reason.source === 'tool_policy') text = t('reasonToolPolicy');
+    else if (reason.source === 'default_policy') text = t('reasonDefaultPolicy');
+    else if (reason.text) text = t('reasonOther', { text: reason.text });
+    else return null;
+    return (
+        <Group gap={6} wrap="wrap" data-testid="approval-reason">
+            <Text size="xs" c="dimmed">{text}</Text>
+            {reason.source === 'exception' && ruleHref ? (
+                <Anchor href={ruleHref} size="xs">{t('viewRule')}</Anchor>
+            ) : null}
+        </Group>
+    );
+}
+
 export function ToolApprovalCard({
     action,
     busy,
     resolving,
     lockedReason,
+    ruleHref,
     onShowInGroup,
     onResolve,
 }: CardProps & { onResolve: (body: ApprovalResolveBody) => void }) {
@@ -107,6 +137,9 @@ export function ToolApprovalCard({
     const [argsText, setArgsText] = useState(() => formatArgs(action.args));
     const [comment, setComment] = useState('');
     const [remember, setRemember] = useState(false);
+
+    // An exception asked for exactly these arguments: "don't ask again for this tool" would not skip it.
+    const askedByException = action.reason?.source === 'exception';
 
     const parsed = editing ? parseEditedArgs(argsText) : null;
     const argsError = parsed && !parsed.ok
@@ -123,7 +156,7 @@ export function ToolApprovalCard({
             comment,
             edited,
             original: action.args,
-            remember,
+            remember: remember && !askedByException,
         }));
     };
 
@@ -138,6 +171,7 @@ export function ToolApprovalCard({
                     {action.subagent ? <Badge size="xs" variant="outline" color="violet">{t('askedBySubagent', { name: action.subagent })}</Badge> : null}
                     {changed ? <Badge size="xs" variant="outline" color="orange">{t('argsEdited')}</Badge> : null}
                 </Group>
+                <ApprovalReasonLine action={action} ruleHref={ruleHref} />
 
                 <Box>
                     <Group justify="space-between" mb={2}>
@@ -185,14 +219,18 @@ export function ToolApprovalCard({
                     disabled={off}
                     title={why}
                 />
-                <Checkbox
-                    size="xs"
-                    label={t('remember')}
-                    checked={remember}
-                    onChange={(event) => setRemember(event.currentTarget.checked)}
-                    disabled={off}
-                    title={why}
-                />
+                {askedByException ? (
+                    <Text size="xs" c="dimmed">{t('rememberNotForException')}</Text>
+                ) : (
+                    <Checkbox
+                        size="xs"
+                        label={t('remember')}
+                        checked={remember}
+                        onChange={(event) => setRemember(event.currentTarget.checked)}
+                        disabled={off}
+                        title={why}
+                    />
+                )}
 
                 <Group justify="flex-end" gap="xs">
                     <ShowInGroupLink action={action} onShowInGroup={onShowInGroup} />
@@ -531,10 +569,12 @@ export interface PendingActionListProps {
     blockedById?: Readonly<Record<string, AnswerBlockedReason>>;
     /** A request raised inside a sub-agent's delegation links back to its group: the transcript opens the group and scrolls to it. */
     onShowInGroup?: (delegationToolCallId: string, subagent?: string) => void;
+    /** Where the agent's approval settings are edited: an approval an exception asked for links there. */
+    ruleHref?: string;
 }
 
 /** The approvals and questions a paused turn is waiting on, open ones as cards and the rest as one-liners. */
-export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked, blockedById, onShowInGroup }: PendingActionListProps) {
+export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked, blockedById, onShowInGroup, ruleHref }: PendingActionListProps) {
     const t = useTranslations('agents.hitl');
     if (actions.length === 0) return null;
     const open = actions.some((action) => action.status === 'pending');
@@ -580,6 +620,7 @@ export default function PendingActionList({ actions, busy, resolvingId, onResolv
                         busy={busy}
                         resolving={resolvingId === action.id}
                         lockedReason={lockedReasonOf(action)}
+                        ruleHref={ruleHref}
                         onShowInGroup={onShowInGroup}
                         onResolve={(body) => onResolve(action.id, body)}
                     />

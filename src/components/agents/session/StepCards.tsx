@@ -67,6 +67,16 @@ export function StepCard({ step, index }: { step: PlaygroundStep; index: number 
                 {step.subagent ? (
                     <Badge size="xs" variant="outline" color="violet">via {step.subagent}</Badge>
                 ) : null}
+                {step.approvalRule ? (
+                    <Tooltip
+                        label={`An approval exception on this tool: ${step.approvalRule.field ?? 'any argument'} matches "${step.approvalRule.pattern}"`}
+                        withArrow
+                    >
+                        {step.approvalRule.action === 'deny'
+                            ? <Badge size="xs" variant="filled" color="red">blocked by rule</Badge>
+                            : <Badge size="xs" variant="outline" color="gray">no approval · exception</Badge>}
+                    </Tooltip>
+                ) : null}
                 {step.fromCache ? (
                     <Tooltip label="Served from the response cache — the tool was not actually called" withArrow>
                         <Badge size="xs" variant="outline" color="gray">cached</Badge>

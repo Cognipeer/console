@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { HitlBlockedCallError, createHitlCallLog } from '@/lib/services/agents/agentHitlExceptions';
 import { createTool } from '@cognipeer/agent-sdk';
 import type { SmartState } from '@cognipeer/agent-sdk';
 import {
@@ -233,6 +234,67 @@ describe('the tool the model sees', () => {
         expect(ask(built(plain, new Set(['get_selection']), asking).tools)).toBe(false);
         // The admin exempts the tool from the agent's policy.
         expect(ask(built([{ ...plain[0], needsApproval: false }], new Set(), asking).tools)).toBe(false);
+    });
+
+    describe('with approval exceptions', () => {
+        type Built = { needsApproval: (args: unknown) => boolean; approvalPrompt: (args: unknown) => unknown; func: (args: unknown) => Promise<unknown>; _stateRef: Record<string, unknown> };
+        const asking: ClientToolApprovalPolicy = { toolApprovalEnabled: true, defaultPolicy: 'always', toolPolicies: {} };
+        const byTool = {
+            send_email: [
+                { field: 'to', pattern: '*@acme.com', action: 'allow' as const },
+                { field: 'to', pattern: '*@rival.com', action: 'deny' as const },
+            ],
+        };
+        const make = (opts: { declared?: EmbeddedClientTool[]; allowed?: Set<string>; policy?: ClientToolApprovalPolicy; log?: ReturnType<typeof createHitlCallLog> } = {}) => {
+            const { tools } = buildClientTools({
+                declared: opts.declared ?? [{ name: 'send_email', description: 'Send' }],
+                createToolFn: createTool,
+                guard,
+                allowedTools: opts.allowed ?? new Set(),
+                approvalPolicy: opts.policy ?? asking,
+                exceptions: { byTool, log: opts.log },
+            });
+            const tool = tools[0] as unknown as Built;
+            Object.assign(tool._stateRef, { ctx: {}, pendingUserQuestions: [] });
+            return tool;
+        };
+
+        it('decides per call, and says why a call waits', () => {
+            const log = createHitlCallLog();
+            const tool = make({ log });
+            expect(tool.needsApproval({ to: 'a@acme.com' })).toBe(false);
+            expect(log.ruleFor('send_email', { to: 'a@acme.com' })).toEqual({ action: 'allow', field: 'to', pattern: '*@acme.com' });
+            expect(tool.needsApproval({ to: 'a@other.com' })).toBe(true);
+            expect(tool.approvalPrompt({ to: 'a@other.com' })).toBe('This agent asks before tools without their own setting run.');
+            expect(log.reasonFor('send_email', { to: 'a@other.com' })).toMatchObject({ source: 'default_policy' });
+        });
+
+        it('blocks a call before the page sees it, on any run', async () => {
+            const log = createHitlCallLog();
+            const tool = make({ log, policy: { ...asking, toolApprovalEnabled: false } });
+            expect(tool.needsApproval({ to: 'x@rival.com' })).toBe(false);
+            await expect(tool.func({ to: 'x@rival.com' })).rejects.toBeInstanceOf(HitlBlockedCallError);
+            expect(tool._stateRef.pendingUserQuestions).toEqual([]);
+            expect(log.ruleFor('send_email', { to: 'x@rival.com' })).toMatchObject({ action: 'deny' });
+            await tool.func({ to: 'x@acme.com' });
+            expect(tool._stateRef.pendingUserQuestions).toHaveLength(1);
+        });
+
+        it('lets an exception that asks ask after "remember", and never lets one that allows overrule the admin', () => {
+            const remembered = buildClientTools({
+                declared: [{ name: 'send_email', description: 'Send' }],
+                createToolFn: createTool,
+                guard,
+                allowedTools: new Set(['send_email']),
+                approvalPolicy: { ...asking, defaultPolicy: 'never' },
+                exceptions: { byTool: { send_email: [{ pattern: '*@rival.com', action: 'ask' }] } },
+            }).tools[0] as unknown as Built;
+            expect(remembered.needsApproval({ to: 'x@rival.com' })).toBe(true);
+            expect(remembered.needsApproval({ to: 'x@acme.com' })).toBe(false);
+
+            const adminAsks = make({ declared: [{ name: 'send_email', description: 'Send', needsApproval: true }] });
+            expect(adminAsks.needsApproval({ to: 'a@acme.com' })).toBe(true);
+        });
     });
 });
 

@@ -226,6 +226,7 @@ import {
 import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
+    applyToolBlocks,
     denyUnattendedTools,
     gateChildTools,
     resolveHitlConfig,
@@ -235,6 +236,7 @@ import {
     type HitlRunMode,
     type ResolvedHitlConfig,
 } from './agentHumanInTheLoop';
+import { createHitlCallLog, type HitlCallLog } from './agentHitlExceptions';
 import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
 import {
     agentReasoningForModel,
@@ -1904,6 +1906,8 @@ type BuildSubagentsInput = {
         mode: HitlRunMode;
         run: { unattended?: boolean; canPause?: boolean };
         allowedTools: ReadonlySet<string>;
+        /** Where the gates record what they decided (why a call waits, what an exception let through or refused). */
+        log?: HitlCallLog;
     };
 };
 
@@ -2012,10 +2016,10 @@ export async function buildAgentSubagents(
         }
 
         if (input.approvals && childTools.length > 0) {
-            const { hitl, mode, run, allowedTools } = input.approvals;
+            const { hitl, mode, run, allowedTools, log } = input.approvals;
             const sides: ChildApprovalSide[] = [{ hitl, mode }];
             if (targetHitl) sides.push({ hitl: targetHitl, mode: resolveHitlRunMode(targetHitl, run) });
-            childTools.splice(0, childTools.length, ...gateChildTools(childTools, sides, allowedTools));
+            childTools.splice(0, childTools.length, ...gateChildTools(childTools, sides, allowedTools, log));
         }
 
         let childModel: unknown;
@@ -4274,6 +4278,8 @@ async function buildLocalAgentRun(input: {
     const config = await applyServiceAvailability(tenantId, migrateAgentReasoning(input.config), { agentKey });
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
+    // What the approval gates decide during the run, read back when the turn is stored.
+    const hitlLog = createHitlCallLog();
 
     // What this run's priced model requests add up to (sub-agent models too),
     // read by the caller to keep the session budget true even when the turn is
@@ -4642,6 +4648,7 @@ async function buildLocalAgentRun(input: {
                     allowedTools,
                     // Nobody can be asked on an unattended run: what got this far was allowed to go ahead.
                     approvalPolicy: input.unattended ? { ...hitl, toolApprovalEnabled: false } : hitl,
+                    exceptions: hitl.toolApprovalEnabled ? { byTool: hitl.toolExceptions, log: hitlLog } : undefined,
                 });
                 clientTools = built.tools;
                 toolDefinitions.push(...built.definitions);
@@ -4687,7 +4694,7 @@ async function buildLocalAgentRun(input: {
             ...(input.userId ? { userId: input.userId } : {}),
         },
         onWarning: (message) => warnings.add(message),
-        approvals: { hitl, mode: hitlMode, run: { unattended: input.unattended, canPause: input.canPause }, allowedTools },
+        approvals: { hitl, mode: hitlMode, run: { unattended: input.unattended, canPause: input.canPause }, allowedTools, log: hitlLog },
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
@@ -4735,10 +4742,10 @@ async function buildLocalAgentRun(input: {
     });
     const ownTools = reminderTools ? reminderTools.watchTools(approvable) : approvable;
     const policyGated = hitlMode === 'ask'
-        ? applyToolApprovals(ownTools, hitl, allowedTools)
+        ? applyToolApprovals(ownTools, hitl, allowedTools, hitlLog)
         : hitlMode === 'deny'
-            ? denyUnattendedTools(ownTools, hitl, allowedTools)
-            : ownTools;
+            ? denyUnattendedTools(ownTools, hitl, allowedTools, hitlLog)
+            : applyToolBlocks(ownTools, hitl, hitlLog);
     const gatedTools = reminderTools ? reminderTools.gate(policyGated) : policyGated;
     if (reminderTools) clientTools = reminderTools.watchTools(clientTools);
 
@@ -4777,6 +4784,8 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        /** What the approval gates decided: why a pause waits, which calls an exception let through or refused. */
+        hitlLog,
         /** Who the run's Console identity tokens are for; a pause stores it for its continuation. */
         identity,
         // Files of both kinds ride on the answer: what the agent left in the sandbox's /outputs/ and what it wrote with the file tools.
@@ -5538,7 +5547,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5703,7 +5712,7 @@ async function runAgentChatTurn(
         const flowRecord = turnFlowRecord(flow, () => compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined));
         // The same per-call detail a dashboard session stores, so a conversation
         // started over the API shows its tool calls when it is opened there.
-        const steps = extractPlaygroundSteps(result, priorExecutionIds);
+        const steps = extractPlaygroundSteps(result, priorExecutionIds, hitlLog);
 
         // §12.12: the deadline (sync ceiling, §5) or an async cancel flag
         // (background mode, §7 step 6) may have already decided this turn's
@@ -5728,6 +5737,7 @@ async function runAgentChatTurn(
                 conversationId,
                 ...(request.runId ? { runId: request.runId } : {}),
                 hitl,
+                approvalLog: hitlLog,
                 agentVersion: resolvedVersion,
                 usePublished: Boolean(request.usePublished || request.version !== undefined),
                 turn: pausedTurnOptions(request, identity),
@@ -5912,6 +5922,8 @@ export function extractPlaygroundSteps(
      * that made them, not to this one.
      */
     priorExecutionIds?: ReadonlySet<string>,
+    /** What the approval gates decided: a call an exception let through or refused names the rule. */
+    hitlLog?: Pick<HitlCallLog, 'ruleFor'>,
 ): AgentPlaygroundStep[] {
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
     if (!Array.isArray(history)) return [];
@@ -5984,6 +5996,11 @@ export function extractPlaygroundSteps(
         // SDK's random `executionId`: the plan versions, sub-agent runs and summarization passes of the turn
         // anchor on the call id, and a step that carried another id would match none of them.
         const callId = typeof entry.tool_call_id === 'string' && entry.tool_call_id ? entry.tool_call_id : undefined;
+        const approvalRule = hitlLog?.ruleFor(typeof entry.toolName === 'string' ? entry.toolName : undefined, entry.args);
+        // A blocked call reports the rule, not a generic failure.
+        const blockedText = approvalRule?.action === 'deny' && typeof output === 'string'
+            ? output.replace(/^Error executing tool:\s*/, '')
+            : undefined;
 
         return {
             id: callId ?? (typeof entry.executionId === 'string' ? entry.executionId : undefined),
@@ -5991,8 +6008,9 @@ export function extractPlaygroundSteps(
             args: entry.args,
             output,
             ...(rawDiffers ? { rawOutput } : {}),
-            ...(errorText ? { error: errorText } : {}),
+            ...(errorText ? { error: blockedText ?? errorText } : {}),
             ...(subagentOf ? { subagent: subagentOf } : {}),
+            ...(approvalRule ? { approvalRule } : {}),
             // Reported as an error even when the SDK called it a success,
             // so the transcript, the Events tab and the per-tool failure
             // count all agree with the error text above.
@@ -6297,7 +6315,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6444,7 +6462,7 @@ async function runPlaygroundChatTurn(
                 : {}),
             ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
             latencyMs: Date.now() - invokeStartedAt,
-            steps: extractPlaygroundSteps(result, priorExecutionIds),
+            steps: extractPlaygroundSteps(result, priorExecutionIds, hitlLog),
             ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
             version: ranVersion,
             ...answeredWithMetadata(model.key, Boolean(modelChoice), routedModel()),
@@ -6485,6 +6503,7 @@ async function runPlaygroundChatTurn(
                     agentKey,
                     conversationId: String(sessionConversation._id),
                     hitl,
+                    approvalLog: hitlLog,
                     agentVersion: ranVersion,
                     usePublished: ranVersion !== null,
                     ...(pausedFor ? { turn: { identity: pausedFor } } : {}),
@@ -6959,7 +6978,7 @@ async function runAgentResumeTurn(
         })
         : undefined;
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -7151,7 +7170,7 @@ async function runAgentResumeTurn(
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const flowRecord = turnFlowRecord(flow, () => compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined));
-        const steps = extractPlaygroundSteps(result, priorExecutionIds);
+        const steps = extractPlaygroundSteps(result, priorExecutionIds, hitlLog);
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
         // The usage the turn reports (response, run result, `agent.message` event) is every leg of it —
@@ -7180,6 +7199,7 @@ async function runAgentResumeTurn(
                 conversationId,
                 ...(request.runId ? { runId: request.runId } : {}),
                 hitl,
+                approvalLog: hitlLog,
                 agentVersion: version,
                 usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
                 ...(Object.keys(repauseTurn).length > 0 ? { turn: repauseTurn } : {}),

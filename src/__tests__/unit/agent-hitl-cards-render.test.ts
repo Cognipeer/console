@@ -59,6 +59,28 @@ describe('PendingActionList', () => {
     expect(html.match(/aria-label="required"/g)).toHaveLength(1);
   });
 
+  it('says why an approval waits and links to the rule', () => {
+    const byException: PendingActionView = {
+      ...approval,
+      reason: { source: 'exception', exception: { field: 'command', pattern: '*rm -rf*' } },
+    };
+    const html = renderToStaticMarkup(h(MantineProvider, null, h(PendingActionList, {
+      actions: [byException], busy: false, onResolve: noop, ruleHref: '/dashboard/agents/a1?tab=approvals',
+    })));
+    expect(html).toContain('Asked because command matches “*rm -rf*”.');
+    expect(html).toContain('View rule');
+    expect(html).toContain('/dashboard/agents/a1?tab=approvals');
+    // An exception asks every time it matches: "don't ask again" is not offered.
+    expect(html).not.toContain('Don’t ask again for this tool in this session');
+    expect(html).toContain('so it is asked again whenever a call matches it');
+
+    const byTool = render(list([{ ...approval, reason: { source: 'tool_policy' } }]));
+    expect(byTool).toContain('Asked because this tool is set to always ask.');
+    expect(byTool).toContain('Don’t ask again for this tool in this session');
+    expect(render(list([{ ...approval, reason: { source: 'exception', exception: { pattern: 'x' } } }]))).toContain('an argument matches “x”');
+    expect(render(list([{ ...approval, reason: { source: 'other', text: 'A skill asked' } }]))).toContain('Asked: A skill asked');
+  });
+
   it('collapses settled actions to one line each', () => {
     const html = render(list([
       { ...approval, status: 'resolved', resolution: { decision: 'deny', comment: 'too risky' } },
@@ -105,6 +127,17 @@ describe('AgentHumanInTheLoopPanel', () => {
     expect(panel(on)).toContain('value="Deny the tool call"');
     expect(panel({ ...on, unattended: 'pause' })).toContain('value="Pause and wait for approval in Studio"');
     expect(panel({ ...on, unattended: 'allow' })).toContain('value="Run without approval"');
+  });
+
+  it('shows each tool\'s exceptions, or a way to add one', () => {
+    const html = panel({
+      toolApproval: { enabled: true, exceptions: { create_issue: [{ field: 'project', pattern: 'SEC*', action: 'deny' }] } },
+    });
+    expect(html).toContain('Exceptions');
+    expect(html).toContain('1 exception');
+    expect(html).toContain('aria-label="Exceptions of create_issue"');
+    expect(html).toContain('aria-label="Exceptions of sandbox_exec"');
+    expect(html).toContain('>Add<');
   });
 
   it('does not show the unattended policy when there is nothing that can pause', () => {
