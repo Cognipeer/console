@@ -579,6 +579,13 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Pickers and lists in the IAM center search Turkish names the way people type them: `istanbul` finds `İstanbul`,
   and the Turkish letters I, İ, ı and i match each other. The page language follows the locale.
 - Portal pages stay readable on dark portal themes.
+- The Settings gear opens Projects again. Data retention was missing from the Settings order, so it was listed
+  first and the gear opened it (an upgrade page on Community) for tenant admins.
+- The menu keeps services and settings apart. Config Management, Automations (now **Background jobs**) and Cluster
+  moved from the services launcher into **Settings**, which is grouped into Workspace, Identity & access, Governance
+  and Platform; the launcher no longer shows an empty Admin tab. Alerts stays a service; its shared channel library is
+  labelled **Notification channels**, and the IAM center's Audit tab (denials and policy changes) is now
+  **Authorization log**.
 
 ### Entity health and alerting
 

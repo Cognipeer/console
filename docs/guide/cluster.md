@@ -75,7 +75,7 @@ Each assignment is `(entityType, entityId) → (nodeName, mode)` where `mode` is
 
 ## Dashboard
 
-`/dashboard/cluster` is split into a topology overview and an instance-assignment editor. The overview lists every node with its status, role, last heartbeat, version, and the assignment count it owns. The editor cross-joins assignments with the full instance list (collected across every tenant) so operators can see at a glance which entities are pinned and which fall back to the default node.
+`/dashboard/cluster` (**Settings › Cluster**) is split into a topology overview and an instance-assignment editor. The overview lists every node with its status, role, last heartbeat, version, and the assignment count it owns. The editor cross-joins assignments with the full instance list (collected across every tenant) so operators can see at a glance which entities are pinned and which fall back to the default node.
 
 Cross-tenant iteration is unavoidable here — assignments are global to the cluster but instance records live per-tenant. Volume is small (the page tops out at hundreds of rows), so the implementation is a straightforward scan.
 

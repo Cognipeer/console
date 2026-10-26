@@ -316,7 +316,7 @@ Each operation appends an event to the session with a monotonic `sequence`, a ty
 
 Usage attribution emits one event per session under the service `browser`: a success event at close carrying the session duration as latency, or — if the session never opened — a single error event instead. Neither carries token counts or a cost, so browser sessions appear in usage surfaces as counted activity rather than money.
 
-Two maintenance jobs are visible on **Automations** (`/dashboard/automations`) under the **Browser** domain, both with **Run now**:
+Two maintenance jobs are visible on **Settings › Background jobs** (`/dashboard/automations`) under the **Browser** domain, both with **Run now**:
 
 - **Browser Session Reaper** — closes idle or over-lifetime sessions inside the local runtime. Supports **Pause** and **Resume**.
 - **Browser Session Reconciliation** — after a restart, marks sessions the database still believes are active as `expired` with `Browser runtime restarted before the session completed`. It cannot be paused.

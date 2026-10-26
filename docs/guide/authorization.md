@@ -430,7 +430,7 @@ No writes from tokens that call from a given network:
 
 The **Access check** tab answers "can this person or token do this, and which rule decides?". Choose a person or token, an action (a service level) and, if you want, a project, channel, IP address and time. The result says allowed or denied and names the deciding rule: a built-in one (a role, a project limit, a token scope) or one of your policies. It does not change anything, so people who may only view the IAM center can use it.
 
-The **Principals** tab lists every person and token with their effective levels, and the **Audit** tab lists denials and policy changes (CSV export included).
+The **Principals** tab lists every person and token with their effective levels, and the **Authorization log** tab lists denials and policy changes (CSV export included).
 
 ### Decision ids
 

@@ -10,7 +10,7 @@ export default function AuditPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Operate · Audit"
+        eyebrow="Configure · Audit"
         title={t('audit')}
         subtitle={t('auditDescription')}
       />

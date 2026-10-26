@@ -119,7 +119,7 @@ describe('IAM center page', () => {
   it('shows the seven tabs and the overview by default', async () => {
     await renderPage({});
     const labels = qa('[role="tab"]').map((t) => t.textContent?.trim());
-    expect(labels).toEqual(['Overview', 'Policies', 'Principals', 'Access check', 'Audit', 'Limits', 'Settings']);
+    expect(labels).toEqual(['Overview', 'Policies', 'Principals', 'Access check', 'Authorization log', 'Limits', 'Settings']);
     expect(text()).toContain('IAM center');
     expect(text()).toContain('tab:overview manage=true');
     // the page header keeps its eyebrow; the engine settings page and its mode switch are gone

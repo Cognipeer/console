@@ -46,18 +46,41 @@ import {
 import { EnterpriseUpsell } from '@/components/enterprise/EnterpriseUpsell';
 import type { PermissionService, UserServicePermissions } from '@/lib/security/rbac';
 
-/** Display order of the Settings section items in the left nav. */
-export const SETTINGS_NAV_ORDER: string[] = [
-  'projects',
-  'providers',
-  'resources',
-  'tokens',
-  'audit',
-  'iam',
-  'license',
-  'sso',
-  'ldap',
+/**
+ * The groups of the Settings section in the left nav, in display order. Each
+ * heading is a `navigation` message key. Settings holds what configures the
+ * workspace, who may enter it, what it keeps and how the platform runs; a page
+ * people build or operate with is a service in the launcher.
+ */
+export const SETTINGS_NAV_GROUPS: ReadonlyArray<{ sectionKey: string; ids: readonly string[] }> = [
+  { sectionKey: 'settingsWorkspace', ids: ['projects', 'providers', 'config', 'tokens', 'resources'] },
+  { sectionKey: 'settingsAccess', ids: ['iam', 'sso', 'ldap'] },
+  { sectionKey: 'settingsGovernance', ids: ['audit', 'data-retention'] },
+  { sectionKey: 'settingsPlatform', ids: ['automations', 'cluster', 'license'] },
 ];
+
+/** Display order of the Settings section items in the left nav. */
+export const SETTINGS_NAV_ORDER: string[] = SETTINGS_NAV_GROUPS.flatMap((group) => [...group.ids]);
+
+/** Position in the Settings section; an entry missing from the order goes last, not first. */
+function settingsNavRank(id: string): number {
+  const index = SETTINGS_NAV_ORDER.indexOf(id);
+  return index === -1 ? SETTINGS_NAV_ORDER.length : index;
+}
+
+/**
+ * The heading each entry of an ordered Settings list starts: the first entry the
+ * viewer has of a group carries that group's heading, the rest none.
+ */
+export function settingsSectionKeys(ids: readonly string[]): Array<string | undefined> {
+  let previous: string | undefined;
+  return ids.map((id) => {
+    const group = SETTINGS_NAV_GROUPS.find((candidate) => candidate.ids.includes(id))?.sectionKey;
+    const starts = group !== undefined && group !== previous ? group : undefined;
+    previous = group;
+    return starts;
+  });
+}
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -187,23 +210,21 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
     () =>
       allowedServices
         .filter((svc) => svc.isSettings)
-        .sort(
-          (a, b) => SETTINGS_NAV_ORDER.indexOf(a.id) - SETTINGS_NAV_ORDER.indexOf(b.id),
-        ),
+        .sort((a, b) => settingsNavRank(a.id) - settingsNavRank(b.id)),
     [allowedServices],
   );
 
-  const settingsNavItems = useMemo<SubNavItem[]>(
-    () =>
-      settingsServices.map((svc) => ({
-        id: svc.id,
-        label: tNavigation(svc.navLabelKey),
-        href: svc.href,
-        icon: svc.icon,
-        matcher: (p: string) => p === svc.href || p.startsWith(`${svc.href}/`),
-      })),
-    [settingsServices, tNavigation],
-  );
+  const settingsNavItems = useMemo<SubNavItem[]>(() => {
+    const sectionKeys = settingsSectionKeys(settingsServices.map((svc) => svc.id));
+    return settingsServices.map((svc, index) => ({
+      id: svc.id,
+      label: tNavigation(svc.navLabelKey),
+      sectionKey: sectionKeys[index],
+      href: svc.href,
+      icon: svc.icon,
+      matcher: (p: string) => p === svc.href || p.startsWith(`${svc.href}/`),
+    }));
+  }, [settingsServices, tNavigation]);
 
   const settingsHref = settingsServices[0]?.href ?? '/dashboard/tokens';
 

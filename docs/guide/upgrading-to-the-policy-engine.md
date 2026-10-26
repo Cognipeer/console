@@ -163,7 +163,7 @@ Work through the report before the upgrade, in this order:
 - **Do not change permissions while the update runs.** A permission map saved by the old code loses the keys that code does not know (`portals`, `resources`, `iam`, `webhooks`).
 - **A server that cannot run the engine does not start.** At boot it loads Cedar, compiles its schema and the built-in policies, and evaluates a few canned decisions; on failure the process exits with the reason. Check the logs of the first upgraded instance before the rest follow.
 - **Readiness.** `GET /api/health/ready` includes an `authorization-engine` check: `ok`, `degraded` or `down` (the endpoint answers `503` for `down`). If your orchestrator probes only the TCP port, point the readiness probe at this endpoint.
-- **Watch.** In the first hours, look at the **Denials** feed (**IAM center → Audit**) and at `GET /api/iam/engine/stats`: `enforce.unavailable` and `enforce.undeclaredDenies` should stay at 0, and `undeclaredRoutes.count` should be 0.
+- **Watch.** In the first hours, look at the **Denials** feed (**IAM center → Authorization log**) and at `GET /api/iam/engine/stats`: `enforce.unavailable` and `enforce.undeclaredDenies` should stay at 0, and `undeclaredRoutes.count` should be 0.
 
 ### Capacity
 

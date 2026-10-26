@@ -126,7 +126,7 @@ describe('Webhooks are no longer a Settings page', () => {
 
   it('is gone from the Settings order and the platform-services file', () => {
     const layout = readFileSync(join(__dirname, '../../components/layout/DashboardLayout.tsx'), 'utf8');
-    const order = /const SETTINGS_NAV_ORDER: string\[\] = \[([^\]]*)\]/.exec(layout)?.[1] ?? '';
+    const order = /const SETTINGS_NAV_GROUPS[^=]*= \[([\s\S]*?)\n\];/.exec(layout)?.[1] ?? '';
     expect(order).toContain("'tokens'");
     expect(order).not.toContain('webhooks');
 

@@ -266,7 +266,8 @@
         "configuration",
         "secret",
         "settings"
-      ]
+      ],
+      "settings": true
     },
     {
       "id": "tracing",
@@ -628,9 +629,13 @@
         "scheduler",
         "maintenance",
         "jobs",
-        "workflow"
+        "workflow",
+        "background jobs",
+        "arka plan i\u015fleri",
+        "otomasyon"
       ],
-      "tenantAdminOnly": true
+      "tenantAdminOnly": true,
+      "settings": true
     },
     {
       "id": "cluster",
@@ -655,7 +660,8 @@
       ],
       "tenantAdminOnly": true,
       "requiresEnterprise": true,
-      "enterpriseModule": "cluster"
+      "enterpriseModule": "cluster",
+      "settings": true
     },
     {
       "id": "gpu-fleet",
@@ -800,7 +806,7 @@
       "id": "projects",
       "href": "/dashboard/projects",
       "icon": "IconLayoutDashboard",
-      "category": "operate",
+      "category": "admin",
       "navLabelKey": "projects",
       "navDescriptionKey": "projectsDescription",
       "tags": [
