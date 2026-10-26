@@ -63,6 +63,7 @@ const SEGMENT_KEYS: Record<string, string> = {
   sso: 'sso',
   ldap: 'ldap',
   files: 'files',
+  connectors: 'connectors',
   resources: 'resources',
   cluster: 'cluster',
   nodes: 'nodes',
@@ -115,6 +116,8 @@ const PATH_LABEL_OVERRIDES: Record<string, string> = {
   'ocr-jobs': 'OCR Jobs',
   redteam: 'Red Team',
   websearch: 'Web Search',
+  'connectors/oauth-apps': 'OAuth Apps',
+  'connectors/catalog': 'Catalog',
 };
 
 function pathOverrideLabel(

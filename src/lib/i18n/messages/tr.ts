@@ -28,6 +28,7 @@ import { consoleIdentityTr } from './consoleIdentity.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 import { projectTabsTr } from './projectTabs.tr';
 import { portalsNowTr } from './portalsNow.tr';
+import { managedToolsTr } from './managedTools.tr';
 import { tracingHealthTr } from './tracingHealth.tr';
 import { projectsAccessTr } from './projectsAccess.tr';
 
@@ -1111,6 +1112,7 @@ export const tr: typeof en = {
       ldap: 'LDAP Dizini',
       portals: 'Portallar',
       channels: 'Kanallar',
+      connectors: 'Bağlayıcılar',
       resources: 'Kaynak Kaydı',
       iam: 'Yetki Motoru',
       webhooks: 'Webhook’lar',
@@ -1276,6 +1278,7 @@ export const tr: typeof en = {
   healthDigest: healthDigestTr,
   consoleIdentity: consoleIdentityTr,
   analyticsDashboards: analyticsDashboardsTr,
+  managedTools: managedToolsTr,
   projectTabs: projectTabsTr,
   accountPage: accountPageTr,
   // Slack ve Microsoft Teams'teki ajanlar (Enterprise): ekran başına bir dosya (agentChannels*.tr.ts).
@@ -1720,6 +1723,14 @@ export const tr: typeof en = {
     costDescription: 'Model ve agent bazında harcama, fiyatlandırma, model geçiş önerileri ve parite testleri',
     portals: 'Portallar',
     portalsDescription: 'Seçili ajanları ekibinize sade bir sohbet sayfası olarak sunun',
+    connectors: 'Bağlayıcılar',
+    connectorsDescription: 'GitHub gibi dış sistemleri bir kez bağlayın, ajanlarda araç olarak kullanın',
+    connectorsCatalog: 'Katalog',
+    connectorsCatalogDescription: 'Ekleyebileceğiniz bağlayıcı türleri ve her birinin sunduğu',
+    connectorsInstalled: 'Kurulu',
+    connectorsOauthApps: 'OAuth uygulamaları',
+    connectorsOauthAppsDescription: 'Bağlayıcıların oturum açarken kullandığı OAuth uygulamaları',
+    connectorsSettings: 'Ayarlar',
   },
   navigationFeedback: {
     loadingPage: 'Sayfa yükleniyor…',
@@ -2631,6 +2642,7 @@ export const tr: typeof en = {
     cost: 'Maliyet ve Optimizasyon',
     resources: 'Kaynaklar',
     portals: 'Portallar',
+    connectors: 'Bağlayıcılar',
     sso: 'Tek Oturum Açma (SSO)',
     ldap: 'LDAP Dizini',
     iamPeople: 'Kişiler',

@@ -22,14 +22,20 @@ import { getDatabase } from '@/lib/database';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
-import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
+import type { IMcpAuthConfig, ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
 import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
+import { remoteListTools, remoteRpc } from '@/lib/services/mcp/remoteMcpClient';
+import { getToolCredentialResolver } from '@/enterprise/tool-credentials';
+import { getToolActionExecutor } from '@/enterprise/tool-actions';
 import { mergeAuthConfigUpdate, openAuthConfig, sealAuthConfig } from './secretVault';
 import type {
   CreateToolInput,
   UpdateToolInput,
   ToolView,
   ExecuteToolActionResult,
+  ExecuteToolActionOptions,
+  ManagedToolInput,
+  ManagedToolUpdate,
 } from './types';
 
 const logger = createLogger('tool-service');
@@ -189,47 +195,15 @@ export async function discoverMcpTools(
   endpoint: string,
   transport: 'sse' | 'streamable-http',
   auth?: IToolAuthConfig,
+  extraHeaders?: Record<string, string>,
 ): Promise<IToolAction[]> {
-  // Build headers
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-  };
-  if (auth?.type === 'token' && auth.token) {
-    headers['Authorization'] = `Bearer ${auth.token}`;
-  } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
-    headers[auth.headerName] = auth.headerValue;
-  } else if (auth?.type === 'basic' && auth.username && auth.password) {
-    const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
-    headers['Authorization'] = `Basic ${encoded}`;
-  }
-
-  // For streamable-http, use JSON-RPC to list tools
-  const listToolsBody = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/list',
-    params: {},
-  });
-
   try {
-    const response = await safeFetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: listToolsBody,
-    }, { sensitiveHeaders: credentialHeaderNames(auth) });
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`MCP server responded with ${response.status}: ${errText}`);
-    }
-
-    const data = await response.json();
-    const mcpTools: Array<{
-      name: string;
-      description?: string;
-      inputSchema?: Record<string, unknown>;
-    }> = data?.result?.tools || data?.tools || [];
+    const mcpTools = await remoteListTools({
+      url: endpoint,
+      transport,
+      auth: toMcpAuth(auth),
+      ...(extraHeaders ? { extraHeaders } : {}),
+    });
 
     return mcpTools.map((t) => ({
       key: slugify(t.name, SLUG_OPTIONS),
@@ -245,6 +219,19 @@ export async function discoverMcpTools(
   }
 }
 
+/** A tool credential in the MCP client's shape. `none` and `connector` add no header. */
+function toMcpAuth(auth: IToolAuthConfig | undefined): IMcpAuthConfig | undefined {
+  if (auth?.type !== 'token' && auth?.type !== 'header' && auth?.type !== 'basic') return undefined;
+  return {
+    type: auth.type,
+    token: auth.token,
+    headerName: auth.headerName,
+    headerValue: auth.headerValue,
+    username: auth.username,
+    password: auth.password,
+  };
+}
+
 // ── CRUD ──────────────────────────────────────────────────────────────────
 
 export async function createTool(
@@ -254,6 +241,13 @@ export async function createTool(
   projectId: string | undefined,
   input: CreateToolInput,
 ): Promise<ITool> {
+  if ((input.upstreamAuth as IToolAuthConfig | undefined)?.type === 'connector') {
+    throw new Error(MANAGED_AUTH_ERROR);
+  }
+  // A `connector` tool is created by the Connectors module (createManagedTool), never from outside.
+  if (input.type !== 'openapi' && input.type !== 'mcp') {
+    throw new Error('Tool type must be "openapi" or "mcp"');
+  }
   const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
 
   let actions: IToolAction[] = [];
@@ -328,6 +322,11 @@ export async function updateTool(
     return existingTool;
   };
 
+  if ((input.upstreamAuth as IToolAuthConfig | undefined)?.type === 'connector') {
+    throw new Error(MANAGED_AUTH_ERROR);
+  }
+  if (isManagedTool(await loadExisting())) throw new Error(MANAGED_TOOL_ERROR);
+
   if (input.name !== undefined) updateData.name = input.name.trim();
   if (input.description !== undefined) updateData.description = input.description.trim();
   if (input.status !== undefined) updateData.status = input.status;
@@ -370,6 +369,79 @@ export async function updateTool(
   }
 
   return db.updateTool(toolId, updateData as Partial<ITool>);
+}
+
+// ── Managed tools ─────────────────────────────────────────────────────────
+
+const MANAGED_AUTH_ERROR = 'A connector credential can only be set by the Connectors module';
+const MANAGED_TOOL_ERROR = 'This tool is managed by a connector. Change it from the connector.';
+
+/** A tool another module owns. Its credential comes from that module for each call; the Tools API cannot change it. */
+export function isManagedTool(tool: Pick<ITool, 'upstreamAuth'> | null | undefined): boolean {
+  return tool?.upstreamAuth?.type === 'connector';
+}
+
+/**
+ * Creates a tool the Connectors module owns. Its actions come from the caller,
+ * which discovered them with the connector's credential.
+ */
+export async function createManagedTool(
+  tenantDbName: string,
+  tenantId: string,
+  userId: string,
+  projectId: string | undefined,
+  input: ManagedToolInput,
+): Promise<ITool> {
+  const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const tool = await db.createTool({
+    tenantId,
+    projectId: projectId ?? undefined,
+    key,
+    name: input.name.trim(),
+    description: input.description?.trim(),
+    type: input.type,
+    status: input.status ?? 'active',
+    actions: input.actions,
+    openApiSpec: input.openApiSpec,
+    upstreamBaseUrl: input.upstreamBaseUrl,
+    upstreamAuth: { type: 'connector', connectorId: input.connectorId },
+    mcpEndpoint: input.mcpEndpoint,
+    mcpTransport: input.mcpTransport,
+    metadata: input.metadata,
+    createdBy: userId,
+  });
+  logger.info('Managed tool created', { key, type: input.type, tenantId, actionCount: input.actions.length });
+  return tool;
+}
+
+/** Updates a tool the given connector owns; refuses any other tool. */
+export async function updateManagedTool(
+  tenantDbName: string,
+  toolId: string,
+  connectorId: string,
+  userId: string,
+  patch: ManagedToolUpdate,
+): Promise<ITool | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const existing = await db.findToolById(toolId);
+  if (!existing) return null;
+  if (existing.upstreamAuth?.type !== 'connector' || existing.upstreamAuth.connectorId !== connectorId) {
+    throw new Error('The tool is not managed by this connector');
+  }
+  const update: Partial<ITool> = { updatedBy: userId };
+  if (patch.name !== undefined) update.name = patch.name.trim();
+  if (patch.description !== undefined) update.description = patch.description.trim();
+  if (patch.status !== undefined) update.status = patch.status;
+  if (patch.actions !== undefined) update.actions = patch.actions;
+  if (patch.mcpEndpoint !== undefined) update.mcpEndpoint = patch.mcpEndpoint;
+  if (patch.mcpTransport !== undefined) update.mcpTransport = patch.mcpTransport;
+  if (patch.upstreamBaseUrl !== undefined) update.upstreamBaseUrl = patch.upstreamBaseUrl;
+  if (patch.openApiSpec !== undefined) update.openApiSpec = patch.openApiSpec;
+  if (patch.metadata !== undefined) update.metadata = patch.metadata;
+  return db.updateTool(toolId, update);
 }
 
 export async function deleteTool(
@@ -437,16 +509,21 @@ export async function syncToolActions(
   const tool = await db.findToolById(toolId);
   if (!tool) throw new Error('Tool not found');
 
+  // A connector tool's actions are the connector's own: only its owner changes them.
+  if (tool.type === 'connector') return tool;
+
   let actions: IToolAction[] = [];
 
   if (tool.type === 'openapi' && tool.openApiSpec) {
     const parsed = parseOpenApiToActions(tool.openApiSpec);
     actions = parsed.actions;
   } else if (tool.type === 'mcp' && tool.mcpEndpoint) {
+    const upstream = await resolveUpstreamAuth(tool);
     actions = await discoverMcpTools(
       tool.mcpEndpoint,
       tool.mcpTransport || 'streamable-http',
-      openAuthConfig(tool.upstreamAuth),
+      upstream.auth,
+      upstream.headers,
     );
   }
 
@@ -461,13 +538,37 @@ export async function syncToolActions(
  * when a redirect leads to another origin (`safeFetch` `sensitiveHeaders`).
  */
 function credentialHeaderNames(
-  auth: IToolAuthConfig | undefined,
+  upstream: UpstreamAuth,
   runtimeHeaders?: Record<string, string>,
 ): string[] {
+  const { auth } = upstream;
   return [
-    ...(auth?.type === 'header' && auth.headerName ? [auth.headerName] : []),
+    ...(auth.type === 'header' && auth.headerName ? [auth.headerName] : []),
+    ...Object.keys(upstream.headers),
     ...Object.keys(runtimeHeaders ?? {}),
   ];
+}
+
+interface UpstreamAuth {
+  auth: IToolAuthConfig;
+  /** Headers the tool's owner adds to every upstream request. */
+  headers: Record<string, string>;
+}
+
+/**
+ * The credential for one upstream call. A connector-managed tool gets it from
+ * the Connectors module (and fails closed without it); any other tool opens
+ * its own sealed config.
+ */
+async function resolveUpstreamAuth(tool: ITool): Promise<UpstreamAuth> {
+  if (!isManagedTool(tool)) return { auth: openAuthConfig(tool.upstreamAuth), headers: {} };
+  const resolver = getToolCredentialResolver();
+  if (!resolver) {
+    throw new Error('This tool is managed by a connector, and the Connectors module is not available');
+  }
+  const { auth, headers } = await resolver(tool);
+  if (auth.type === 'connector') throw new Error('The connector did not supply a credential');
+  return { auth, headers: headers ?? {} };
 }
 
 /**
@@ -478,6 +579,7 @@ export async function executeToolAction(
   actionKey: string,
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
+  options?: ExecuteToolActionOptions,
 ): Promise<ExecuteToolActionResult> {
   await assertServiceEnabled({ tenantId: tool.tenantId }, 'tools');
   const action = tool.actions.find((a) => a.key === actionKey);
@@ -487,10 +589,24 @@ export async function executeToolAction(
 
   const start = Date.now();
 
+  // A connector's own action: the Connectors module runs it with the
+  // connector's credential, so no credential is resolved (or held) here.
+  if (action.executionType === 'connector_action') {
+    const executor = getToolActionExecutor();
+    if (!executor) {
+      throw new Error('This tool is managed by a connector, and the Connectors module is not available');
+    }
+    const { result, isError } = await executor({ tool, action, args });
+    return { result, latencyMs: Date.now() - start, ...(isError ? { isError } : {}) };
+  }
+
+  const upstream = await resolveUpstreamAuth(tool);
+  if (isManagedTool(tool)) options?.onSecrets?.(authConfigSecretValues(upstream.auth));
+
   if (action.executionType === 'openapi_http') {
-    return executeOpenApiAction(tool, action, args, start, runtimeHeaders);
+    return executeOpenApiAction(tool, action, args, start, upstream, runtimeHeaders);
   } else if (action.executionType === 'mcp_call') {
-    return executeMcpAction(tool, action, args, start, runtimeHeaders);
+    return executeMcpAction(tool, action, args, start, upstream, runtimeHeaders);
   }
 
   throw new Error(`Unsupported execution type: ${action.executionType}`);
@@ -501,6 +617,7 @@ async function executeOpenApiAction(
   action: IToolAction,
   args: Record<string, unknown>,
   start: number,
+  upstream: UpstreamAuth,
   runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
   if (!tool.upstreamBaseUrl) {
@@ -527,18 +644,18 @@ async function executeOpenApiAction(
     Accept: 'application/json',
   };
 
-  const auth = openAuthConfig(tool.upstreamAuth);
-  if (auth?.type === 'token' && auth.token) {
+  const { auth } = upstream;
+  if (auth.type === 'token' && auth.token) {
     headers['Authorization'] = `Bearer ${auth.token}`;
-  } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
+  } else if (auth.type === 'header' && auth.headerName && auth.headerValue) {
     headers[auth.headerName] = auth.headerValue;
-  } else if (auth?.type === 'basic' && auth.username && auth.password) {
+  } else if (auth.type === 'basic' && auth.username && auth.password) {
     const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
     headers['Authorization'] = `Basic ${encoded}`;
   }
 
-  // Caller-supplied runtime headers (already policy-filtered) win over static auth.
-  Object.assign(headers, runtimeHeaders);
+  // Caller-supplied runtime headers (already policy-filtered) win over the owner's headers and static auth.
+  Object.assign(headers, upstream.headers, runtimeHeaders);
 
   const fetchOptions: RequestInit = {
     method: action.httpMethod || 'GET',
@@ -552,7 +669,7 @@ async function executeOpenApiAction(
   const turnSignal = currentTurnSignal();
   if (turnSignal) fetchOptions.signal = turnSignal;
   const response = await safeFetch(request.url, fetchOptions, {
-    sensitiveHeaders: credentialHeaderNames(auth, runtimeHeaders),
+    sensitiveHeaders: credentialHeaderNames(upstream, runtimeHeaders),
   });
   const latencyMs = Date.now() - start;
 
@@ -577,79 +694,47 @@ async function executeMcpAction(
   action: IToolAction,
   args: Record<string, unknown>,
   start: number,
+  upstream: UpstreamAuth,
   runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
   if (!tool.mcpEndpoint) {
     throw new Error('Tool has no MCP endpoint configured');
   }
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
-
-  const auth = openAuthConfig(tool.upstreamAuth);
-  if (auth?.type === 'token' && auth.token) {
-    headers['Authorization'] = `Bearer ${auth.token}`;
-  } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
-    headers[auth.headerName] = auth.headerValue;
-  } else if (auth?.type === 'basic' && auth.username && auth.password) {
-    const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
-    headers['Authorization'] = `Basic ${encoded}`;
-  }
-
-  // Caller-supplied runtime headers (already policy-filtered) win over static auth.
-  Object.assign(headers, runtimeHeaders);
-
-  const callBody = JSON.stringify({
-    jsonrpc: '2.0',
-    id: Date.now(),
-    method: 'tools/call',
-    params: {
-      name: action.mcpToolName || action.name,
-      arguments: args,
-    },
-  });
-
   const turnSignal = currentTurnSignal();
-  const response = await safeFetch(tool.mcpEndpoint, {
-    method: 'POST',
-    headers,
-    body: callBody,
+  // Streamable HTTP: a JSON or SSE answer, and a session when the server requires one.
+  const callResult = await remoteRpc({
+    url: tool.mcpEndpoint,
+    transport: tool.mcpTransport || 'streamable-http',
+    auth: toMcpAuth(upstream.auth),
+    // Caller-supplied runtime headers (already policy-filtered) win over the owner's headers and static auth.
+    extraHeaders: { ...upstream.headers, ...(runtimeHeaders ?? {}) },
     ...(turnSignal ? { signal: turnSignal } : {}),
-  }, { sensitiveHeaders: credentialHeaderNames(auth, runtimeHeaders) });
+  }, 'tools/call', {
+    name: action.mcpToolName || action.name,
+    arguments: args,
+  }) as { content?: unknown; isError?: boolean } | undefined;
 
   const latencyMs = Date.now() - start;
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => 'Unknown error');
-    throw new Error(`MCP server error (${response.status}): ${errorText}`);
-  }
-
-  const data = await response.json();
-
-  if (data.error) {
-    throw new Error(`MCP tool error: ${data.error.message || JSON.stringify(data.error)}`);
-  }
-
-  // MCP tools/call returns result in data.result.content
-  const content = data?.result?.content;
+  // MCP tools/call returns the result in result.content
+  const content = callResult?.content;
   let result: unknown;
   if (contentHasMedia(content)) {
     // Keep images/audio/resources as a ToolOutput; text-only results keep the legacy unwrap.
-    result = mcpResultToToolOutput(data.result);
+    result = mcpResultToToolOutput(callResult);
   } else if (Array.isArray(content)) {
     const textParts = content.filter((c: { type: string }) => c.type === 'text');
     result = textParts.length === 1
       ? textParts[0].text
       : textParts.map((c: { text: string }) => c.text).join('\n');
   } else {
-    result = data.result;
+    result = callResult;
   }
 
   // A tool that failed on the server's side answers 200 with `isError: true`. The text still goes to the
   // caller (the model reads it), but the call is a failure for logs and metrics.
-  const isError = data?.result?.isError === true;
+  const isError = callResult?.isError === true;
   return { result, latencyMs, ...(isError ? { isError: true } : {}) };
 }
 
@@ -670,6 +755,9 @@ export function serializeTool(tool: ITool): ToolView {
     mcpEndpoint: tool.mcpEndpoint,
     mcpTransport: tool.mcpTransport,
     metadata: tool.metadata,
+    ...(tool.upstreamAuth?.type === 'connector' && tool.upstreamAuth.connectorId
+      ? { managedBy: { kind: 'connector' as const, id: tool.upstreamAuth.connectorId } }
+      : {}),
     createdBy: tool.createdBy,
     updatedBy: tool.updatedBy,
     createdAt: tool.createdAt,
@@ -694,6 +782,13 @@ export function toolRequestSecretValues(
     ...Object.values(runtimeHeaders ?? {}),
     ...authConfigSecretValues(openAuthConfig(tool.upstreamAuth)),
   ];
+}
+
+/** Adds values a call resolved (see ExecuteToolActionOptions.onSecrets) to a request log's scrub list, once each. */
+export function addSecretValues(target: string[], values: string[]): void {
+  for (const value of values) {
+    if (value && !target.includes(value)) target.push(value);
+  }
 }
 
 export async function logToolRequest(

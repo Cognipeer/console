@@ -228,6 +228,13 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     pickLabel: (b) => wrappedName(b, 'bucket'),
   }),
   createStandardResolver({
+    path: ['connectors'],
+    buildUrl: (id) => `/api/connectors/${encodeURIComponent(id)}`,
+    pickLabel: (b) => wrappedName(b, 'connector'),
+    // A page of the Connectors menu, not a connector id.
+    excludeValues: ['oauth-apps', 'catalog'],
+  }),
+  createStandardResolver({
     path: ['vector', 'migrations'],
     buildUrl: (key) => `/api/vector/migrations/${encodeURIComponent(key)}`,
     pickLabel: (b) => wrappedName(b, 'migration'),
