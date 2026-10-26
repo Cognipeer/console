@@ -3096,9 +3096,13 @@ export interface IAgentHumanInTheLoopConfig {
  *    there is nothing to keep it against, so it lasts one message.
  *  - `ephemeral`: a fresh sandbox per message (run), created on the first
  *    sandbox tool call and deleted when the run ends. Nothing carries over.
+ *  - `instance`: an existing persistent sandbox of the project, chosen in
+ *    `instanceId`. Every conversation and run shares it; the agent never
+ *    creates, stops or deletes it, and its template, resources and network
+ *    are its own.
  *  - `persist`: the former name of `session`, still accepted as such.
  */
-export type AgentSandboxMode = 'session' | 'ephemeral' | 'persist';
+export type AgentSandboxMode = 'session' | 'ephemeral' | 'instance' | 'persist';
 
 /**
  * Gives an agent a sandbox (the enterprise Agent Runtime Sandbox module) and
@@ -3135,6 +3139,12 @@ export interface IAgentSandboxConfig {
   templateKey?: string;
   /** Default `session`. */
   mode?: AgentSandboxMode;
+  /**
+   * The persistent sandbox (an instance of this project) the agent works in when `mode` is `instance`. Choosing
+   * or changing it needs write access to Sandbox. Not carried by an exported manifest: an id names one project's
+   * machine.
+   */
+  instanceId?: string;
   /** Per-command timeout. Default 60, max 600. */
   commandTimeoutSec?: number;
   /** @deprecated No longer used — a session sandbox closes by the sandbox module's idle timeout. Still accepted so saved configs load. */

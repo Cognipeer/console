@@ -200,3 +200,24 @@ describe('import: tenant scope, permission order and shape rules', () => {
   });
 });
 
+
+describe('a persistent sandbox (instance mode)', () => {
+  it('is left out of an export: the id names one project\'s machine', () => {
+    const manifest = buildAgentManifest(
+      { key: 'a', name: 'A', status: 'draft' },
+      { modelKey: 'gpt', sandbox: { enabled: true, mode: 'instance', instanceId: 'sbx-1' } } as never,
+    );
+    expect(manifest.spec.sandbox).toEqual({ enabled: true, mode: 'instance' });
+  });
+
+  it('is never taken from a manifest, is kept when importing over the agent, and is reported when missing', async () => {
+    db.findAgentByKey.mockResolvedValue({ _id: 'a1', key: 'support', config: { modelKey: 'gpt', sandbox: { enabled: true, mode: 'instance', instanceId: 'sbx-kept' } } });
+    await apply(manifestWith({ mode: 'instance', instanceId: 'sbx-from-elsewhere' }));
+    expect((updated.mock.calls[0][0] as { config: { sandbox: Record<string, unknown> } }).config.sandbox.instanceId).toBe('sbx-kept');
+
+    db.findAgentByKey.mockResolvedValue(null);
+    const result = await apply(manifestWith({ mode: 'instance', instanceId: 'sbx-from-elsewhere' }));
+    expect((created.mock.calls[0][0] as { config: { sandbox: Record<string, unknown> } }).config.sandbox).not.toHaveProperty('instanceId');
+    expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'sandbox_instance_unset' }));
+  });
+});

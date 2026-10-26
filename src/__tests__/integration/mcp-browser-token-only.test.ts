@@ -23,8 +23,8 @@ import { createBrowser } from '@/lib/services/browser/browserProfileService';
 import {
   createMcpServer,
   getMcpServer,
-  isBrowserServer,
-  reachesBrowser,
+  isTokenOnlyServer,
+  reachesTokenOnlyServer,
   updateMcpServer,
 } from '@/lib/services/mcp';
 import { McpServerConfigError } from '@/lib/services/mcp/errors';
@@ -101,7 +101,7 @@ afterAll(async () => {
 describe('a browser server', () => {
   it('is created with an API token', () => {
     expect(browserServer.exposure?.accessMode).toBe('token');
-    expect(isBrowserServer(browserServer)).toBe(true);
+    expect(isTokenOnlyServer(browserServer)).toBe(true);
   });
 
   it('cannot be created public', async () => {
@@ -118,7 +118,7 @@ describe('a browser server', () => {
     await tokenOnly(updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, {
       internalConfig: { provider: 'browser', instanceKey: browserKey, config: {} },
     }));
-    expect(isBrowserServer((await getMcpServer(TENANT_DB_NAME, String(server._id)))!)).toBe(false);
+    expect(isTokenOnlyServer((await getMcpServer(TENANT_DB_NAME, String(server._id)))!)).toBe(false);
   });
 
   it('can still be edited while it keeps the token', async () => {
@@ -138,14 +138,14 @@ describe('a composite with a browser member', () => {
 
   it('is created with an API token and cannot be made public', async () => {
     const composite = await createComposite('Token with browser', [browserServer]);
-    expect(await reachesBrowser(await getDatabase(), composite)).toBe(true);
+    expect(await reachesTokenOnlyServer(await getDatabase(), composite)).toBe(true);
     await tokenOnly(updateMcpServer(TENANT_DB_NAME, String(composite._id), USER_ID, { exposure: PUBLIC }));
   });
 
   it('cannot be formed by adding the browser to a public composite', async () => {
     const member = await createAgentObsServer('Observability member');
     const composite = await createComposite('Public without browser', [member], PUBLIC);
-    expect(await reachesBrowser(await getDatabase(), composite)).toBe(false);
+    expect(await reachesTokenOnlyServer(await getDatabase(), composite)).toBe(false);
     await tokenOnly(updateMcpServer(TENANT_DB_NAME, String(composite._id), USER_ID, {
       compositeConfig: { members: [{ serverId: String(member._id) }, { serverId: String(browserServer._id) }] },
     }));
@@ -157,7 +157,7 @@ describe('a composite with a browser member', () => {
     await expect(updateMcpServer(TENANT_DB_NAME, String(member._id), USER_ID, {
       internalConfig: { provider: 'browser', instanceKey: browserKey, config: {} },
     })).rejects.toThrow(/public composite server "Public observability composite"/);
-    expect(isBrowserServer((await getMcpServer(TENANT_DB_NAME, String(member._id)))!)).toBe(false);
+    expect(isTokenOnlyServer((await getMcpServer(TENANT_DB_NAME, String(member._id)))!)).toBe(false);
   });
 
   it('lets a member of a token composite become a browser server', async () => {
@@ -166,7 +166,7 @@ describe('a composite with a browser member', () => {
     const updated = await updateMcpServer(TENANT_DB_NAME, String(member._id), USER_ID, {
       internalConfig: { provider: 'browser', instanceKey: browserKey, config: {} },
     });
-    expect(isBrowserServer(updated!)).toBe(true);
+    expect(isTokenOnlyServer(updated!)).toBe(true);
   });
 });
 

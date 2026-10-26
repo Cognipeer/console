@@ -22,6 +22,11 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
 });
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/server/api/plugins/sandbox-permission', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/server/api/plugins/sandbox-permission')>()),
+    requestHasSandboxRead: vi.fn(async () => false),
+    requestHasSandboxWrite: vi.fn(async () => false),
+}));
 
 vi.mock('@/lib/services/agents', () => ({
     createAgentRecord: vi.fn(),
@@ -119,6 +124,7 @@ import { createSkill, deleteSkill, getSkillById, listSkills, updateSkill } from 
 import { checkAgentModel } from '@/lib/services/agents/agentService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
+import { requestHasSandboxRead, requestHasSandboxWrite } from '@/server/api/plugins/sandbox-permission';
 import {
     getAgentRunStatus,
     listAgentRuns,
@@ -420,8 +426,35 @@ describe('sandbox capabilities', () => {
         const app = await agentsApp();
         const res = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
         expect(res.statusCode).toBe(200);
-        expect(parseJsonBody(res.body)).toEqual({ available: true, templates: [{ key: 'multi-base', name: 'Multi base' }] });
+        // A module that cannot list sandboxes offers none to pick.
+        expect(parseJsonBody(res.body)).toEqual({ available: true, templates: [{ key: 'multi-base', name: 'Multi base' }], instances: [], canAttach: false });
         expect(mockFn(resolveSandboxAvailability)).toHaveBeenCalledWith('tenant-1');
+    });
+
+    it('GET /agents/sandbox/capabilities lists the project\'s persistent sandboxes to a Sandbox user, and says who may pick one', async () => {
+        const listInstances = vi.fn().mockResolvedValue([
+            { id: 'sbx-1', name: 'Shared', state: 'running', persist: true, templateKey: 'multi-base', createdBy: 'user-9' },
+        ]);
+        mockFn(resolveSandboxAvailability).mockResolvedValue({
+            available: true,
+            runner: { listTemplates: vi.fn().mockResolvedValue([]), listInstances, describeInstance: vi.fn() },
+        });
+        mockFn(requestHasSandboxRead).mockResolvedValueOnce(true);
+        mockFn(requestHasSandboxWrite).mockResolvedValueOnce(true);
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
+        expect(parseJsonBody(res.body)).toEqual({
+            available: true,
+            templates: [],
+            // Only what the picker shows: not who made it.
+            instances: [{ id: 'sbx-1', name: 'Shared', state: 'running', templateKey: 'multi-base' }],
+            canAttach: true,
+        });
+        expect(listInstances).toHaveBeenCalledWith(expect.any(String), 'tenant-1', SESSION_CTX.projectId, { persist: true });
+
+        // Without Sandbox read nothing is listed; without write nothing can be picked.
+        const denied = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
+        expect(parseJsonBody(denied.body)).toMatchObject({ instances: [], canAttach: false });
     });
 
     it('GET /agents/sandbox/capabilities reports an unlicensed tenant as unavailable, with the reason', async () => {
@@ -429,7 +462,7 @@ describe('sandbox capabilities', () => {
         const app = await agentsApp();
         const res = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
         expect(res.statusCode).toBe(200);
-        expect(parseJsonBody(res.body)).toEqual({ available: false, reason: 'license', templates: [] });
+        expect(parseJsonBody(res.body)).toEqual({ available: false, reason: 'license', templates: [], instances: [], canAttach: false });
     });
 });
 

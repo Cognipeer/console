@@ -30,8 +30,9 @@ export {
   parseOpenApiSpec,
   resolveExposure,
   resolveSourceType,
-  isBrowserServer,
-  reachesBrowser,
+  isTokenOnlyServer,
+  reachesTokenOnlyServer,
+  tokenOnlyProviderOf,
   DEFAULT_MCP_EXPOSURE,
 } from './mcpService';
 

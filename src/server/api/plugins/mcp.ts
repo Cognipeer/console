@@ -44,6 +44,8 @@ import type {
 } from '@/lib/services/mcp';
 import { sanitizeCompositePrefix } from '@/lib/services/mcp';
 import { INTERNAL_MCP_PROVIDERS } from '@/lib/services/mcp/internal/registry';
+import { sandboxInstanceProvider, sandboxProvider } from '@/lib/services/mcp/internal/sandboxProvider';
+import { requestHasSandboxWrite } from './sandbox-permission';
 import {
   buildRuntimeContextFromRequest,
   describeRuntimeAuth,
@@ -186,6 +188,29 @@ function parseRemoteConfig(raw: unknown): IMcpRemoteConfig | undefined {
     url: value.url.trim(),
     transport: value.transport === 'sse' ? 'sse' : 'streamable-http',
   };
+}
+
+/**
+ * Serving a sandbox over MCP hands its callers the right to run code in it, so a server on a sandbox provider is
+ * created, or pointed at another template or sandbox, only by someone who may work in the project's sandboxes
+ * (Sandbox write). Re-saving other settings asks nothing.
+ */
+const SANDBOX_MCP_PROVIDER_IDS = new Set([sandboxProvider.id, sandboxInstanceProvider.id]);
+
+const SANDBOX_MCP_WRITE_REQUIRED_BODY = {
+  error: 'Serving a sandbox over MCP needs write access to Sandbox in this project.',
+  type: 'sandbox_write_required',
+  code: 'sandbox_write_required',
+  field: 'internalConfig',
+} as const;
+
+async function sandboxMcpRefusal(
+  request: FastifyRequest,
+  projectId: string,
+  internalConfig: InternalMcpConfigInput | undefined,
+): Promise<typeof SANDBOX_MCP_WRITE_REQUIRED_BODY | null> {
+  if (!internalConfig || !SANDBOX_MCP_PROVIDER_IDS.has(internalConfig.provider)) return null;
+  return (await requestHasSandboxWrite(request, projectId)) ? null : SANDBOX_MCP_WRITE_REQUIRED_BODY;
 }
 
 function parseInternalConfig(raw: unknown): InternalMcpConfigInput | undefined {
@@ -362,12 +387,16 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         },
         // What a server set up for Console identity verifies its tokens against.
         consoleIdentity: consoleIdentityIssuerInfo(session.tenantId),
-        internalProviders: INTERNAL_MCP_PROVIDERS.map((p) => ({
+        // `available: false` (an enterprise module or license missing) hides the provider on the create screen;
+        // `tokenOnly`: a server on it, and a composite that includes one, takes an API token only.
+        internalProviders: await Promise.all(INTERNAL_MCP_PROVIDERS.map(async (p) => ({
           id: p.id,
           label: p.label,
           description: p.description,
           configFields: p.configFields,
-        })),
+          tokenOnly: p.tokenOnly === true,
+          available: p.isAvailable ? await p.isAvailable({ tenantId: session.tenantId }).catch(() => false) : true,
+        }))),
       });
     } catch (error) {
       return sendProjectContextError(reply, error)
@@ -450,6 +479,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         if (!INTERNAL_MCP_PROVIDERS.some((p) => p.id === internalConfig.provider)) {
           return reply.code(400).send({ error: `Unknown internal provider "${internalConfig.provider}"` });
         }
+        const sandboxRefusal = await sandboxMcpRefusal(request, projectId, internalConfig);
+        if (sandboxRefusal) return reply.code(403).send(sandboxRefusal);
       }
 
       const compositeConfig = parseCompositeConfig(body.compositeConfig);
@@ -668,6 +699,10 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
+      const nextInternalConfig = body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined;
+      const sandboxRefusal = await sandboxMcpRefusal(request, projectId, nextInternalConfig);
+      if (sandboxRefusal) return reply.code(403).send(sandboxRefusal);
+
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {
         key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
@@ -679,7 +714,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
         stdioConfig: nextStdioConfig,
-        internalConfig: body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined,
+        internalConfig: nextInternalConfig,
         compositeConfig: body.compositeConfig !== undefined ? parseCompositeConfig(body.compositeConfig) : undefined,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         endpointSlug: typeof body.endpointSlug === 'string' && body.endpointSlug.trim()

@@ -295,6 +295,11 @@ export interface AgentSandboxRef {
   agentKey: string;
   /** Present for a per-conversation (`persist`) sandbox. */
   conversationId?: string;
+  /**
+   * Who acts on the sandbox: the `createdBy` of a machine made for this ref and the actor recorded for every
+   * call. Absent = `agent`. The internal MCP sandbox providers pass `mcp:<serverKey>`.
+   */
+  actor?: string;
 }
 
 export interface AgentSandboxSpec {
@@ -307,10 +312,31 @@ export interface AgentSandboxSpec {
   env?: Record<string, string>;
   /** Reuse this instance when it still exists (starting it if stopped). */
   instanceId?: string;
+  /**
+   * Use `instanceId` and nothing else: an existing persistent sandbox of `ref.projectId` that an operator chose.
+   * Nothing is created when it is gone, belongs to another project or is not persistent (an error instead), and
+   * its own settings are left as they are, except that preview is switched on when `preview.enabled` asks for it.
+   * `templateKey`, `resources`, `blockNetwork`, `env` and `idleStopSeconds` are ignored.
+   */
+  attach?: boolean;
+  /** Name of a machine made for this ref. Absent = derived from the agent key. */
+  name?: string;
   /** Preview flags applied to the instance (also re-applied on reuse). */
   preview?: { enabled: boolean; public: boolean };
   /** See `ISandboxInstance.idleStopSeconds`. */
   idleStopSeconds?: number | null;
+}
+
+/** One sandbox of a project, as an agent's settings and the MCP sandbox providers list it. */
+export interface AgentSandboxInstanceInfo {
+  id: string;
+  name: string;
+  /** The instance's `actualState` (`running`, `stopped`, …). */
+  state: string;
+  persist: boolean;
+  templateKey?: string;
+  /** Who made it (`agent`, `mcp:<serverKey>`, a user id, …). */
+  createdBy?: string;
 }
 
 export interface AgentSandboxPreviewLink {
@@ -346,6 +372,18 @@ export interface AgentSandboxTemplateInfo {
 
 export interface AgentSandboxRunner {
   listTemplates(tenantDbName: string, tenantId: string): Promise<AgentSandboxTemplateInfo[]>;
+  /**
+   * The project's sandboxes (no warm-pool or deleted ones), narrowed by `filter`. Optional: a runner without it
+   * cannot offer an existing sandbox to pick, and the platform says so.
+   */
+  listInstances?(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    filter?: { persist?: boolean; createdBy?: string },
+  ): Promise<AgentSandboxInstanceInfo[]>;
+  /** One sandbox of `ref.projectId`; null when it does not exist there or is deleted. Optional, like `listInstances`. */
+  describeInstance?(ref: AgentSandboxRef, instanceId: string): Promise<AgentSandboxInstanceInfo | null>;
   /** Returns a running, exec-ready instance; `created` when a new one was made. */
   ensureInstance(ref: AgentSandboxRef, spec: AgentSandboxSpec): Promise<{ instanceId: string; created: boolean }>;
   /**

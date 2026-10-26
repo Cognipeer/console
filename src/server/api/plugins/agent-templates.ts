@@ -33,6 +33,7 @@ import { prepareNewAgentConfig, redactAgent } from './agent-config-write';
 import { prepareTriggerWrite } from './agent-triggers';
 import { requestCanNameBucket } from './files-permission';
 import { requestHasConfigRead } from './config-permission';
+import { requestHasSandboxWrite } from './sandbox-permission';
 import { guardrailByKeyInScope } from './guardrails';
 
 const logger = createLogger('api:agent-templates');
@@ -62,6 +63,7 @@ function writeDepsFor(request: FastifyRequest, context: ProjectContext): AgentTe
       user: context.user,
       canNameBucket: (bucketKey) => requestCanNameBucket(request, scope, bucketKey),
       canReferenceConfig: () => requestHasConfigRead(request, scope.projectId),
+      canUseSandbox: () => requestHasSandboxWrite(request, scope.projectId),
     }),
     prepareTriggerWrite: ({ body, agent }) => prepareTriggerWrite({ body, agent, scope }),
   };

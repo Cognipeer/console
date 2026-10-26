@@ -30,7 +30,10 @@ import { validateSeedFiles } from './agentSandboxSeedFiles';
 import { unsuppliableRequiredVariables, validateVariableDeclaration } from './agentVariables';
 import { resolveSubagentTarget } from './subagentRoster';
 import { subagentConfigIssues } from './subagentConfigRules';
-import { SANDBOX_MODES } from './agentSandboxMode';
+import { SANDBOX_MODES, resolveSandboxMode } from './agentSandboxMode';
+
+/** What a sandbox instance id looks like (a UUID or a database id). */
+const SANDBOX_INSTANCE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
 import { checkEmbeddedClientTools } from './agentClientTools';
@@ -366,7 +369,16 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     const sandbox = config.sandbox;
     if (sandbox?.enabled) {
         if (sandbox.mode !== undefined && !SANDBOX_MODES.includes(sandbox.mode)) {
-            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: session, ephemeral' });
+            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: session, ephemeral, instance' });
+        }
+        if (resolveSandboxMode(sandbox.mode) === 'instance') {
+            if (typeof sandbox.instanceId !== 'string' || !sandbox.instanceId.trim()) {
+                issues.errors.push({ field: 'sandbox.instanceId', message: 'Pick the persistent sandbox this agent works in' });
+            } else if (!SANDBOX_INSTANCE_ID.test(sandbox.instanceId)) {
+                issues.errors.push({ field: 'sandbox.instanceId', message: 'is not a sandbox id' });
+            }
+        } else if (sandbox.instanceId !== undefined && typeof sandbox.instanceId !== 'string') {
+            issues.errors.push({ field: 'sandbox.instanceId', message: 'must be a string' });
         }
         for (const issue of validateSeedFiles(sandbox.seedFiles)) issues.errors.push(issue);
         checkNumber(issues, 'sandbox.commandTimeoutSec', sandbox.commandTimeoutSec, { min: 1, max: 600, integer: true });
@@ -388,7 +400,8 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         if (sandbox.preview?.enabled) {
             checkNumber(issues, 'sandbox.preview.linkTtlHours', sandbox.preview.linkTtlHours, { min: 1, max: 168 });
             checkNumber(issues, 'sandbox.preview.keepAliveMinutes', sandbox.preview.keepAliveMinutes, { min: 5, max: 24 * 60, integer: true });
-            if (sandbox.blockNetwork) {
+            // A persistent sandbox's network is its own; the agent's switch does not apply to it.
+            if (sandbox.blockNetwork && resolveSandboxMode(sandbox.mode) !== 'instance') {
                 issues.warnings.push({
                     field: 'sandbox.preview',
                     message: 'Preview links do not work while the sandbox network is blocked',
@@ -592,6 +605,26 @@ export async function validateAgentConfig(input: {
                     ? 'Sandbox access requires an Enterprise license'
                     : 'This edition has no sandbox module',
             });
+        } else if (resolveSandboxMode(config.sandbox.mode) === 'instance') {
+            // The machine is an existing one: its template is its own, and it must be a persistent
+            // sandbox of THIS project (the shape check has already asked for an id).
+            const instanceId = config.sandbox.instanceId?.trim();
+            const describe = availability.runner.describeInstance;
+            if (instanceId && !describe) {
+                issues.errors.push({ field: 'sandbox.instanceId', message: 'This sandbox module cannot attach an agent to an existing sandbox' });
+            } else if (instanceId && describe) {
+                const found = await describe.call(availability.runner, {
+                    tenantDbName: input.tenantDbName,
+                    tenantId: input.tenantId,
+                    projectId,
+                    agentKey: input.agentKey ?? '',
+                }, instanceId).catch(() => undefined);
+                if (found === null) {
+                    issues.errors.push({ field: 'sandbox.instanceId', message: `Sandbox "${instanceId}" does not exist in this project` });
+                } else if (found && !found.persist) {
+                    issues.errors.push({ field: 'sandbox.instanceId', message: `Sandbox "${found.name}" is not persistent — an agent can only be given a persistent sandbox` });
+                }
+            }
         } else if (!config.sandbox.templateKey?.trim()) {
             // No implicit default: built-in templates are only created by the
             // explicit "Seed defaults" action, so an unset key could resolve

@@ -723,6 +723,97 @@ describe('per-message sandbox on a conversation', () => {
     });
 });
 
+describe('persistent sandbox (instance mode)', () => {
+    const attachable = () => {
+        fake.runner.describeInstance = async (_ref, id) => ({ id, name: 'shared', state: 'stopped', persist: true });
+    };
+
+    it('attaches to the chosen machine, never creates, stops or deletes it, and records nothing on the conversation', async () => {
+        attachable();
+        conversations.set('conv-7', { _id: 'conv-7', agentKey: 'builder', projectId: 'p1', metadata: { keep: true } });
+        const { byName, cleanup } = await build(
+            { enabled: true, mode: 'instance', instanceId: 'sbx-shared', templateKey: 'multi-base', blockNetwork: true, resources: { cpuCores: 4 } },
+            { conversation: { _id: 'conv-7' } },
+        );
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        await cleanup();
+
+        expect(fake.ops()).toEqual(['ensureInstance', 'exec']);
+        const spec = fake.calls[0].args[1] as Record<string, unknown>;
+        expect(spec).toMatchObject({ attach: true, instanceId: 'sbx-shared', persist: true });
+        // The machine's own settings apply: nothing of the agent's machine shape is sent.
+        expect(spec).not.toHaveProperty('templateKey');
+        expect(spec).not.toHaveProperty('blockNetwork');
+        expect(spec).not.toHaveProperty('resources');
+        expect(spec).not.toHaveProperty('env');
+        expect(spec).not.toHaveProperty('idleStopSeconds');
+        // Shared by every conversation: not tied to this one, and not recorded on it (a deleted
+        // conversation must not delete the operator's machine).
+        expect((fake.calls[0].args[0] as { conversationId?: string }).conversationId).toBeUndefined();
+        expect(conversations.get('conv-7')!.metadata).toEqual({ keep: true });
+        expect(fake.calls[1].args[1]).toBe('sbx-shared');
+    });
+
+    it('passes the agent\'s plain variables with each command instead of setting them on the machine', async () => {
+        attachable();
+        const sandbox = sealAgentSandboxConfig({ enabled: true, mode: 'instance', instanceId: 'sbx-shared', env: { APP_ENV: 'prod' }, secrets: { API_TOKEN: 'tok-secret-123456' } }, undefined)!;
+        const { byName } = await build(sandbox);
+        await byName('sandbox_exec').invoke({ command: 'env' });
+        expect((fake.calls[1].args[2] as { env: Record<string, string> }).env).toEqual({ APP_ENV: 'prod', API_TOKEN: 'tok-secret-123456' });
+    });
+
+    it('keeps a machine it issued a preview link for running, like any other, and still never stops it', async () => {
+        attachable();
+        const { byName, cleanup } = await build({ enabled: true, mode: 'instance', instanceId: 'sbx-shared', preview: { enabled: true } });
+        await byName('sandbox_preview_link').invoke({ port: 8000 });
+        await cleanup();
+        expect(fake.ops()).toEqual(['ensureInstance', 'previewLink']);
+        expect(fake.calls[0].args[1]).toMatchObject({ attach: true, preview: { enabled: true, public: false } });
+    });
+
+    it('delivers only the /outputs files written during the run, not what the shared machine already held', async () => {
+        attachable();
+        savedOutputs.length = 0;
+        conversations.set('conv-8', { _id: 'conv-8', agentKey: 'builder', projectId: 'p1', metadata: {} });
+        const files: Record<string, { mtime: number; data: Buffer }> = {
+            '/outputs/old.txt': { mtime: 10, data: Buffer.from('from another conversation') },
+        };
+        fake.runner.exec = async (...args) => {
+            fake.calls.push({ op: 'exec', args });
+            const command = (args[2] as { command: string }).command;
+            if (command.startsWith('find ')) {
+                return { exitCode: 0, stdout: Object.entries(files).map(([path, f]) => `${f.mtime}|${f.data.length}|${path}`).join('\n'), stderr: '' };
+            }
+            files['/outputs/new.txt'] = { mtime: 20, data: Buffer.from('this run') };
+            return { exitCode: 0, stdout: 'ok', stderr: '' };
+        };
+        fake.runner.readFileBytes = async (_ref, _id, path) => files[path]!.data;
+
+        const { byName, collectOutputs } = await build({ enabled: true, mode: 'instance', instanceId: 'sbx-shared' }, {
+            conversation: { _id: 'conv-8', metadata: {} },
+            outputs: { agentConfig: undefined, actorId: 'user-1' },
+        });
+        await byName('sandbox_exec').invoke({ command: 'make report' });
+        const { attachments } = await collectOutputs();
+
+        expect(attachments.map((a) => a.name)).toEqual(['new.txt']);
+    });
+
+    it('runs without its tools, and says why, when no sandbox is chosen', async () => {
+        attachable();
+        const { tools, warnings } = await build({ enabled: true, mode: 'instance' });
+        expect(tools).toEqual([]);
+        expect(warnings.join(' ')).toMatch(/persistent sandbox, but none is chosen/);
+    });
+
+    it('runs without its tools on a sandbox module that cannot attach (an older one would reuse or replace the id)', async () => {
+        const { tools, warnings } = await build({ enabled: true, mode: 'instance', instanceId: 'sbx-shared' });
+        expect(tools).toEqual([]);
+        expect(warnings.join(' ')).toMatch(/cannot attach an agent to an existing sandbox/);
+        expect(fake.calls).toEqual([]);
+    });
+});
+
 describe('preview', () => {
     it('no preview tool unless preview is enabled', async () => {
         expect((await build({ enabled: true })).tools.map((t: { name: string }) => t.name)).not.toContain('sandbox_preview_link');

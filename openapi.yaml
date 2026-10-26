@@ -28412,13 +28412,24 @@ components:
           type: boolean
         templateKey:
           type: string
-          description: The sandbox template; required when enabled.
+          description: The sandbox template; required when enabled, except in `instance` mode.
         mode:
           type: string
           enum:
             - session
             - ephemeral
+            - instance
           default: session
+          description: >-
+            `session`: one sandbox per conversation, kept between turns. `ephemeral`: a fresh sandbox per message.
+            `instance`: an existing persistent sandbox of the project (`instanceId`), shared by every conversation;
+            the agent starts it when it is stopped and never creates, stops or deletes it.
+        instanceId:
+          type: string
+          description: >-
+            The persistent sandbox an `instance`-mode agent works in (an instance of the agent's project). Setting
+            or changing it needs write access to Sandbox (`403` `sandbox_write_required`); an id that is not a
+            persistent sandbox of the project is `400`.
         commandTimeoutSec:
           type: integer
           minimum: 1

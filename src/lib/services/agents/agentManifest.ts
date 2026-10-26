@@ -84,6 +84,9 @@ function sanitizeConfig(config: IAgentConfig): IAgentConfig {
         // Same reasoning for sandbox secrets: the keys travel (so an importer
         // sees which secrets to fill in), the sealed values never do.
         spec.sandbox = maskAgentSandboxConfig(spec.sandbox);
+        // A persistent sandbox is one project's machine: its id means nothing
+        // elsewhere, and an import over this agent keeps the one it has.
+        if (spec.sandbox) delete spec.sandbox.instanceId;
     }
     if (spec.callback) {
         // The callback URL travels; its sealed secret never does (masked, so an
@@ -431,6 +434,30 @@ export class ConfigReferenceForbiddenError extends Error {
  * two groups, a secret under `envRefs`) is dropped and reported; an import never fails over a reference.
  * `storedSecretNames`: the typed secrets the target agent keeps (a manifest carries none, so they stay).
  */
+/**
+ * A manifest never carries a persistent sandbox (see `sanitizeConfig`): an import over an agent keeps the one it
+ * has, so re-importing an export does not take its sandbox away. An agent left set to a persistent sandbox it does
+ * not have is reported, not refused; it runs without its sandbox tools until one is picked.
+ */
+function keepStoredSandboxInstance(
+    config: IAgentConfig,
+    previous: IAgentConfig | undefined,
+    warnings: Array<{ code: string; message: string }>,
+): IAgentConfig {
+    if (!config.sandbox) return config;
+    const stored = previous?.sandbox?.instanceId;
+    const sandbox = { ...config.sandbox };
+    if (stored) sandbox.instanceId = stored;
+    else delete sandbox.instanceId;
+    if (sandbox.enabled && sandbox.mode === 'instance' && !sandbox.instanceId) {
+        warnings.push({
+            code: 'sandbox_instance_unset',
+            message: 'sandbox.mode is "instance", but a persistent sandbox is chosen in each project: pick one in the agent\'s Sandbox settings.',
+        });
+    }
+    return { ...config, sandbox };
+}
+
 async function rebindSandboxConfigRefs(
     db: DatabaseProvider,
     projectId: string,
@@ -593,7 +620,7 @@ async function importManifest(
         await assertMayReferenceConfigRaw(spec, existing.config, options.canReferenceConfig);
         const storedSecretNames = Object.keys(maskAgentSandboxConfig(existing.config?.sandbox)?.secrets ?? {});
         const rebound = await rebindSandboxConfigRefs(db, projectId, spec, storedSecretNames);
-        const incoming = rebound.config;
+        const incoming = keepStoredSandboxInstance(rebound.config, existing.config, rebound.warnings);
         await assertMayNameBucket(incoming, existing.config, options.canNameBucket);
         await assertMayReferenceConfig(incoming, existing.config, options.canReferenceConfig);
         const updated = await db.updateAgent(String(existing._id), {
@@ -613,7 +640,7 @@ async function importManifest(
     const spec = sanitizeConfig(manifest.spec);
     await assertMayReferenceConfigRaw(spec, undefined, options.canReferenceConfig);
     const rebound = await rebindSandboxConfigRefs(db, projectId, spec);
-    const incoming = rebound.config;
+    const incoming = keepStoredSandboxInstance(rebound.config, undefined, rebound.warnings);
     await assertMayNameBucket(incoming, undefined, options.canNameBucket);
     await assertMayReferenceConfig(incoming, undefined, options.canReferenceConfig);
     const created = await db.createAgent({
