@@ -39,6 +39,7 @@ import {
   type Icon,
 } from '@tabler/icons-react';
 import platformServicesJson from '@/config/platform-services.json';
+import type { DocPath } from '@/lib/docs/docsLinks';
 import {
   getEffectiveServicePermission,
   type PermissionService,
@@ -108,6 +109,8 @@ export type DashboardServiceDefinition = {
   href: string;
   navLabelKey: string;
   navDescriptionKey: string;
+  /** The service's page on the docs site (`docs-links` path): what Documentation opens while it is in view. */
+  docsPath: DocPath;
   icon: Icon;
   /** Underlying icon name from `platform-services.json`. */
   iconName: PlatformIconName | string;
@@ -142,6 +145,7 @@ interface RawPlatformServicesConfig {
     category: DashboardServiceCategory;
     navLabelKey: string;
     navDescriptionKey: string;
+    docsPath: string;
     tags?: string[];
     searchKeywords?: string[];
     showInServicesHome?: boolean;
@@ -173,6 +177,7 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = RAW.services
     href: entry.href,
     navLabelKey: entry.navLabelKey,
     navDescriptionKey: entry.navDescriptionKey,
+    docsPath: entry.docsPath as DocPath,
     icon: resolveIcon(entry.icon),
     iconName: entry.icon,
     category: entry.category,
@@ -277,6 +282,7 @@ export const SETTINGS_NAV_SECTION: DashboardServiceDefinition = {
   href: '/dashboard/projects',
   navLabelKey: 'settings',
   navDescriptionKey: 'settingsDescription',
+  docsPath: '/console/guide/govern/multi-tenancy',
   icon: IconSettings,
   iconName: 'IconSettings',
   category: 'admin',

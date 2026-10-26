@@ -4,6 +4,7 @@ import { Fragment, useMemo, type MouseEvent, type ReactNode } from 'react';
 import { Anchor, Code, Divider, Group, Stack, Text } from '@mantine/core';
 import LoadingState from '@/components/common/LoadingState';
 import SectionCard from '@/components/common/SectionCard';
+import DocAnchor from '@/components/docs/DocAnchor';
 import { useTranslations } from '@/lib/i18n';
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import CopyableCode from './CopyableCode';
@@ -147,9 +148,9 @@ export default function AgentUsagePanel({
         </Text>
         <Text size="sm">{withInlineCode(t('token'))}</Text>
         {snippets.hasVariables ? <Text size="sm">{withInlineCode(t('variablesNote'))}</Text> : null}
-        <Anchor href={snippets.referenceUrl} target="_blank" rel="noopener noreferrer" size="sm">
+        <DocAnchor doc={snippets.referenceDoc} size="sm">
           {t('referenceLink')}
-        </Anchor>
+        </DocAnchor>
 
         <Divider />
 
@@ -215,9 +216,9 @@ export default function AgentUsagePanel({
           <Caption text={t('docs.description')} />
           <Stack gap={4}>
             {snippets.docs.map((link) => (
-              <Anchor key={link.id} href={link.url} target="_blank" rel="noopener noreferrer" size="sm">
+              <DocAnchor key={link.id} doc={link.doc} size="sm">
                 {t(`docs.${link.id}`)}
-              </Anchor>
+              </DocAnchor>
             ))}
           </Stack>
         </Section>

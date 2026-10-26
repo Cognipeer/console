@@ -11,6 +11,8 @@
  *   cfg.database.uri  // typed, validated, with defaults
  */
 
+import { normalizeDocsBaseUrl } from '@/lib/docs/docsLinks';
+
 /* ------------------------------------------------------------------ */
 /*  Config Source Abstraction                                          */
 /* ------------------------------------------------------------------ */
@@ -50,6 +52,16 @@ export interface AppConfig {
     /** saas = Cognipeer-hosted, onprem = customer-hosted. */
     mode: 'saas' | 'onprem';
     isOnPrem: boolean;
+  };
+
+  docs: {
+    /**
+     * Root of the docs site the docs panel and every docs link open (DOCS_BASE_URL): the public
+     * site by default; a copy the browsers of a self-hosted install can reach, when they cannot
+     * reach that one. Read by the server and handed to the page, so it changes with a restart,
+     * not a rebuild.
+     */
+    baseUrl: string;
   };
 
   license: {
@@ -872,6 +884,10 @@ function buildConfig(source: ConfigSource): AppConfig {
     deployment: {
       mode: deploymentMode,
       isOnPrem: deploymentMode === 'onprem',
+    },
+
+    docs: {
+      baseUrl: normalizeDocsBaseUrl(source.get('DOCS_BASE_URL')),
     },
 
     services: {

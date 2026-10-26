@@ -16,6 +16,7 @@
     "test:ui": "vitest --ui",
     "test:endpoints": "tsx scripts/check-endpoint-coverage.ts",
     "test:openapi": "tsx scripts/check-openapi-routes.ts",
+    "docs:links": "node scripts/check-docs-links.mjs",
     "test:smoke": "node --import tsx scripts/smoke/run.ts",
     "test:flake": "tsx scripts/flake-hunter.ts",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",

@@ -338,7 +338,7 @@ export default function AgentTracingAgentPage() {
         <>
           <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
           <Button
-            onClick={() => openDocs('api-tracing')}
+            onClick={() => openDocs('observe-tracing')}
             variant="light"
             size="xs"
             leftSection={<IconBook size={14} />}
@@ -621,7 +621,7 @@ export default function AgentTracingAgentPage() {
           {' '}{t('detail.footerWith')}{' '}
           <Anchor component={Link} href="/dashboard/tokens">{t('detail.footerTokensLink')}</Anchor>
           {'. '}{t('detail.footerSee')}{' '}
-          <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
+          <Anchor component="button" onClick={() => openDocs('observe-trace-an-agent')}>
             {t('detail.footerExamplesLink')}
           </Anchor>
           {' '}{t('detail.footerAfter')}

@@ -493,7 +493,7 @@ export default function TracingAgentsPage() {
               variant="default"
               size="sm"
               leftSection={<IconBook size={14} stroke={1.7} />}
-              onClick={() => openDocs('api-tracing')}
+              onClick={() => openDocs('observe-tracing')}
             >
               {t('common.docs')}
             </Button>

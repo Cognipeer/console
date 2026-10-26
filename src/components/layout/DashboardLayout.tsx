@@ -1,19 +1,10 @@
 'use client';
 
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import {
-  ActionIcon,
-  AppShell,
-  Button,
-  Group,
-  Stack,
-  Text,
-} from '@mantine/core';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { AppShell } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { IconExternalLink, IconX } from '@tabler/icons-react';
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DashboardBreadcrumbs from './DashboardBreadcrumbs';
 import CommandPalette, { openCommandPalette } from './CommandPalette';
 import SlimRail from './launcher/SlimRail';
@@ -33,10 +24,11 @@ import { DashboardUserProvider, type DashboardUser } from './DashboardUserContex
 import { openSupport } from '@/lib/support/openSupport';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import classes from './launcher/LauncherShell.module.css';
-import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
+import { DocsDrawerProvider, type OpenDocs } from '@/components/docs/DocsDrawerContext';
+import DocsAside from '@/components/docs/DocsAside';
 import NavigationProgress from '@/components/common/navigation/NavigationProgress';
 import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
-import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
+import { isDocId, normalizeDocsBaseUrl, resolveDoc, type DocTarget } from '@/lib/docs/docsLinks';
 import {
   canUseDashboardService,
   enterpriseModuleForPath,
@@ -88,6 +80,8 @@ interface DashboardLayoutProps {
   isOnPrem?: boolean;
   /** Whether the tenant holds an active ENTERPRISE license; undefined when it could not be read. */
   enterpriseLicensed?: boolean;
+  /** Root of the docs site the docs panel and the docs links open (DOCS_BASE_URL). */
+  docsBaseUrl?: string;
   user?: {
     name: string;
     email: string;
@@ -99,12 +93,16 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, enterpriseLicensed, user }: DashboardLayoutProps) {
+export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, enterpriseLicensed, docsBaseUrl: configuredDocsBaseUrl, user }: DashboardLayoutProps) {
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
   const pathname = usePathname() ?? '';
+  const searchParams = useSearchParams();
   const [docsOpened, docsControls] = useDisclosure(false);
-  const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
+  // What the panel was last asked to show; `id` counts the requests, so asking again for the page
+  // on screen takes the reader back to it.
+  const [docsRequest, setDocsRequest] = useState<{ target?: DocTarget; title?: string; id: number }>({ id: 0 });
+  const docsBaseUrl = useMemo(() => normalizeDocsBaseUrl(configuredDocsBaseUrl), [configuredDocsBaseUrl]);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const t = useTranslations('layout');
@@ -112,11 +110,14 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const tNotifications = useTranslations('notifications');
   const tNavigation = useTranslations('navigation');
 
-  const activeDoc = useMemo(() => resolveSdkDoc(docsDocId), [docsDocId]);
+  const activeDoc = useMemo(
+    () => resolveDoc(docsRequest.target, docsRequest.title),
+    [docsRequest.target, docsRequest.title],
+  );
 
-  const openDocs = useCallback(
-    (docId?: SdkDocId) => {
-      setDocsDocId(docId ?? DEFAULT_SDK_DOC);
+  const openDocs = useCallback<OpenDocs>(
+    (target, options) => {
+      setDocsRequest((previous) => ({ target, title: options?.title, id: previous.id + 1 }));
       docsControls.open();
     },
     [docsControls],
@@ -294,59 +295,66 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
   );
 
+  // The Documentation entries (top bar, rail, service menu, mobile menu) open the page of the
+  // service in view; outside any service, the start of the guide.
+  const openServiceDocs = useCallback(() => {
+    if (activeService) {
+      openDocs(activeService.docsPath, { title: tNavigation(activeService.navLabelKey) });
+    } else {
+      openDocs();
+    }
+  }, [activeService, openDocs, tNavigation]);
+
+  // An open panel follows the reader into another service: the page it shows belongs to the last one.
+  const docsServiceRef = useRef(activeService?.id);
+  useEffect(() => {
+    const previous = docsServiceRef.current;
+    docsServiceRef.current = activeService?.id;
+    if (!docsOpened || !activeService || previous === activeService.id) return;
+    openServiceDocs();
+  }, [activeService, docsOpened, openServiceDocs]);
+
+  // `?docs=<docs-links id>` on any dashboard address opens that page in the panel (older links to
+  // /dashboard/docs arrive this way); the parameter is dropped from the address once read.
+  const docsParam = searchParams?.get('docs') ?? null;
+  useEffect(() => {
+    if (!docsParam) return;
+    openDocs(isDocId(docsParam) ? docsParam : undefined);
+    const rest = new URLSearchParams(searchParams?.toString() ?? '');
+    rest.delete('docs');
+    const query = rest.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    // Only a new parameter value opens the panel again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docsParam]);
+
+  // The frame loads the first time the panel opens, not with every dashboard page.
+  const [docsMounted, setDocsMounted] = useState(false);
+  useEffect(() => {
+    if (docsOpened) setDocsMounted(true);
+  }, [docsOpened]);
+
   const handleNavigate = useCallback(
     (href: string) => {
       if (href === '/dashboard/docs') {
-        openDocs(DEFAULT_SDK_DOC);
+        openServiceDocs();
         return;
       }
       navigate(href);
     },
-    [openDocs, navigate],
+    [openServiceDocs, navigate],
   );
 
-  const docsAside = (
-    <AppShell.Aside p="md" withBorder>
-      <Stack gap="md" h="100%" style={{ minHeight: 0 }}>
-        <Group justify="space-between" align="center" wrap="nowrap">
-          <div style={{ minWidth: 0 }}>
-            <Text fw={600}>Documentation</Text>
-            <Text size="sm" c="dimmed" mt={4} lineClamp={1}>
-              {activeDoc.title}
-            </Text>
-          </div>
-          <Group gap="xs" wrap="nowrap">
-            <Button
-              component={Link}
-              href={activeDoc.url}
-              target="_blank"
-              rel="noreferrer"
-              variant="light"
-              leftSection={<IconExternalLink size={16} />}
-            >
-              Open
-            </Button>
-            <ActionIcon
-              variant="light"
-              aria-label="Close documentation"
-              onClick={docsControls.close}
-            >
-              <IconX size={16} />
-            </ActionIcon>
-          </Group>
-        </Group>
+  const docsAside = docsMounted ? (
+    <DocsAside
+      baseUrl={docsBaseUrl}
+      doc={activeDoc}
+      requestId={docsRequest.id}
+      onClose={docsControls.close}
+    />
+  ) : null;
 
-        <div style={{ flex: 1, minHeight: 0 }}>
-          <iframe
-            title={activeDoc.title}
-            src={activeDoc.url}
-            style={{ width: '100%', height: '100%', border: 0, borderRadius: 12 }}
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-          />
-        </div>
-      </Stack>
-    </AppShell.Aside>
-  );
+  const docsContextValue = useMemo(() => ({ openDocs, docsBaseUrl }), [openDocs, docsBaseUrl]);
 
   const launcherContextValue = useMemo(
     () => ({
@@ -377,7 +385,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   );
 
   return (
-    <DocsDrawerProvider value={{ openDocs }}>
+    <DocsDrawerProvider value={docsContextValue}>
       <DashboardUserProvider value={dashboardUser}>
       <LauncherProvider value={launcherContextValue}>
       <NavigationProgress />
@@ -410,7 +418,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               supportEnabled={supportEnabled}
               onSearchClick={openCommandPalette}
               onLauncherClick={() => setLauncherOpen(true)}
-              onDocsClick={() => openDocs(DEFAULT_SDK_DOC)}
+              onDocsClick={openServiceDocs}
               onSupportClick={handleSupportClick}
               onLogout={handleLogout}
               onNavigate={handleNavigate}
@@ -423,6 +431,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               recents={recentServices}
               activeServiceId={isSettingsActive ? null : (activeService?.id ?? null)}
               onLauncherClick={() => setLauncherOpen(true)}
+              onHelpClick={openServiceDocs}
               settingsHref={settingsHref}
               settingsActive={isSettingsActive}
             />
@@ -433,7 +442,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                 pathname={pathname}
                 isPinned={pinned.has(activeService.id)}
                 onTogglePin={() => togglePin(activeService.id)}
-                onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
+                onOpenDocs={openServiceDocs}
                 items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
                 hidePin={isSettingsActive}
               />
@@ -468,7 +477,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               recents={recentServices}
               activeService={activeService}
               onOpenLauncher={() => setLauncherOpen(true)}
-              onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
+              onOpenDocs={openServiceDocs}
               subnavOverride={
                 isSettingsActive
                   ? { title: tNavigation('settings'), items: settingsNavItems }

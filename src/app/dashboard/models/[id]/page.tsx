@@ -38,7 +38,6 @@ import {
   IconCopy,
   IconCpu,
   IconDots,
-  IconExternalLink,
   IconLayoutDashboard,
   IconPinned,
   IconPlayerPlay,
@@ -984,7 +983,7 @@ export default function ModelDetailPage() {
               </Menu.Item>
               <Menu.Item
                 leftSection={<IconBook size={14} />}
-                onClick={() => openDocs('api-client')}
+                onClick={() => openDocs('models-model-hub')}
               >
                 Docs
               </Menu.Item>
@@ -1999,6 +1998,7 @@ function ConfigureTab({
   onEdit: () => void;
 }) {
   const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
+  const { openDocs } = useDocsDrawer();
 
   const guardrailsByKey = useMemo(() => {
     const map = new Map<string, GuardrailLite>();
@@ -2323,12 +2323,11 @@ function ConfigureTab({
             endpoints.
           </div>
           <Button
-            component={Link}
-            href="/dashboard/docs"
+            onClick={() => openDocs('models-inference')}
             variant="subtle"
             size="xs"
             mt="sm"
-            rightSection={<IconExternalLink size={11} stroke={1.7} />}
+            leftSection={<IconBook size={12} stroke={1.7} />}
             style={{ paddingLeft: 0 }}
           >
             Read docs
