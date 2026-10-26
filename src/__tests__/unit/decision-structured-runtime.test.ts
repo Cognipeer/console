@@ -103,7 +103,7 @@ describe('createStructuredDecisionRuntime', () => {
   });
 
   it('returns canonical usage: driver fold plus cache/reasoning subsets', async () => {
-    const { runtime, invoke } = fakeRuntime({
+    const { invoke } = fakeRuntime({
       content: JSON.stringify({ answers: { sentiment: { pos: 0.9, neg: 0.1 }, urgent: 0.05 } }),
     });
     invoke.mockResolvedValue({
