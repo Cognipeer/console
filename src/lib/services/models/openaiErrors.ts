@@ -23,23 +23,54 @@ export type OutputTokenLimitBilling = {
   usageBooked?: boolean;
 };
 
+/** The wire dialect the caller spoke: it decides which request parameter the limit message names. */
+export type OutputLimitDialect = 'chat' | 'messages' | 'responses';
+
+/** The request parameter that sets the output limit in each dialect (chat completions also takes `max_tokens`). */
+export const OUTPUT_LIMIT_PARAMETER: Record<OutputLimitDialect, string> = {
+  chat: 'max_completion_tokens',
+  messages: 'max_tokens',
+  responses: 'max_output_tokens',
+};
+
+/** Anthropic / Bedrock stop reason: the CONTEXT window filled up, not the output limit; a larger limit cannot help. */
+export const CONTEXT_WINDOW_EXCEEDED_REASON = 'model_context_window_exceeded';
+
+export type OutputTokenLimitOptions = OutputTokenLimitBilling & {
+  /** The provider's own stop reason (`max_tokens`, `incomplete`, `model_context_window_exceeded` ...), when it sent one. */
+  rawFinishReason?: string;
+  /** The caller's wire dialect, so the message names the parameter the caller actually sends. Default: chat completions. */
+  dialect?: OutputLimitDialect;
+};
+
 export class OutputTokenLimitError extends Error {
+  /** The limit the call SENT (the gateway's one resolved value); absent only when no limit was sent at all. */
   readonly limit?: number;
   readonly usage?: TokenUsage;
   readonly cost?: UsageCostResult;
   readonly usageBooked?: boolean;
+  readonly rawFinishReason?: string;
+  readonly dialect?: OutputLimitDialect;
 
-  constructor(limit?: number, billing?: OutputTokenLimitBilling) {
+  constructor(limit?: number, options?: OutputTokenLimitOptions) {
     const limitDescription = limit ? ` (${limit} tokens)` : '';
+    const parameter = OUTPUT_LIMIT_PARAMETER[options?.dialect ?? 'chat'];
     super(
-      `The model reached its output token limit${limitDescription} before producing a final answer or tool call. `
-      + 'Reasoning models may consume this budget internally. Increase max_completion_tokens or configure a higher model default.',
+      options?.rawFinishReason === CONTEXT_WINDOW_EXCEEDED_REASON
+        ? `The model's context window was full${limit ? ` (output limit ${limit} tokens)` : ''} before it produced a final answer or tool call. `
+          + 'Shorten the conversation or the input: a higher output limit cannot help.'
+        : `The model reached its output token limit${limitDescription} before producing a final answer or tool call. `
+          + 'Reasoning models may consume this budget internally. '
+          // Never the advertised maximum ("Maximum output tokens"): that one only caps defaults and retries.
+          + `Increase ${parameter} on the request or raise the model's "Default max tokens" setting.`,
     );
     this.name = 'OutputTokenLimitError';
     this.limit = limit;
-    if (billing?.usage) this.usage = billing.usage;
-    if (billing?.cost) this.cost = billing.cost;
-    if (billing?.usageBooked) this.usageBooked = true;
+    if (options?.usage) this.usage = options.usage;
+    if (options?.cost) this.cost = options.cost;
+    if (options?.usageBooked) this.usageBooked = true;
+    if (options?.rawFinishReason) this.rawFinishReason = options.rawFinishReason;
+    if (options?.dialect) this.dialect = options.dialect;
   }
 }
 

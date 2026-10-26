@@ -35,7 +35,7 @@ import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { createInlineReasoningSplitter, splitInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
-import { OPENAI_SCHEMA_DRIVERS, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
+import { OPENAI_SCHEMA_DRIVERS, hasUnreplayableToolTurn, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import type { NativeChatClient, NativeChatRequest } from '@/lib/providers/domains/model';
 import { createStreamGate } from '@/lib/services/guardrail';
 import type { HookScope } from '@/lib/services/guardrail';
@@ -46,7 +46,7 @@ import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
 import { replicaOrder, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
 import { MAX_ROUTING_DEPTH, getDynamicRoutingConfig } from './dynamicRouting';
-import { normalizeInferenceError, OutputTokenLimitError } from './openaiErrors';
+import { normalizeInferenceError, OutputTokenLimitError, type OutputLimitDialect } from './openaiErrors';
 import { buildCacheVariantKey, isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
 import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
 import {
@@ -109,6 +109,42 @@ function ensureLlmModel(model: IModel) {
 function wantsJsonOutput(responseFormat: unknown): boolean {
   const type = (responseFormat as { type?: unknown } | undefined)?.type;
   return type === 'json_object' || type === 'json_schema';
+}
+
+/**
+ * The wire dialect a call arrived in, from its usage route: the limit message names the parameter the
+ * caller actually sends (`max_tokens` on /messages, `max_output_tokens` on /responses). Anything else,
+ * agents and the chat-completions edge included, reads as chat completions (the default wording).
+ */
+function limitDialect(route: string): OutputLimitDialect | undefined {
+  if (route === 'messages' || route.startsWith('messages.')) return 'messages';
+  if (route === 'responses' || route.startsWith('responses.')) return 'responses';
+  return undefined;
+}
+
+/**
+ * A call whose tool calls the console's own agent loop runs. There, a tool call the output limit cut off
+ * is a limit hit (the agent retries with a raised limit): its arguments are incomplete and must not run.
+ * Every other caller gets the reply as the provider sent it (`finish_reason: "length"` with the partial
+ * tool call), the way the provider's own API answers.
+ */
+function runsToolCalls(route: string): boolean {
+  return route.startsWith('agent.');
+}
+
+/** The error of a call that hit its output limit, carrying the limit it sent and the provider's own stop reason. */
+function buildLimitError(
+  state: CallState,
+  limit: number | undefined,
+  rawFinishReason: string | undefined,
+  billing?: ConstructorParameters<typeof OutputTokenLimitError>[1],
+): OutputTokenLimitError {
+  const dialect = limitDialect(state.route);
+  return new OutputTokenLimitError(limit, {
+    ...billing,
+    ...(rawFinishReason ? { rawFinishReason } : {}),
+    ...(dialect ? { dialect } : {}),
+  });
 }
 
 // ── Replica pool ──────────────────────────────────────────────────────────
@@ -458,8 +494,12 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // The resolved invocation settings are a fresh object (sampling, limits, reasoning):
   // the model's Upstream API choice has to be carried over for the provider spec.
   if (supportsUpstreamApiChoice(activeModel.providerDriver)) modelSettings.upstreamApi = resolveUpstreamApi(activeModel.settings);
-  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
-
+  // A streamed call of a model that cannot stream tool calls is served by one non-streamed request.
+  const disableProviderStreaming = Boolean(
+    state.input.stream
+    && modelSettings.disableStreamingWithTools === true
+    && (state.request.tools?.length ?? 0) > 0,
+  );
   const client = await runtime.createNativeChatClient({
     modelId: activeModel.modelId,
     category: activeModel.category,
@@ -468,19 +508,31 @@ async function prepareCall(state: CallState, activeModel: IModel) {
     // provider must not retry underneath it.
     options: { maxRetries: 0 },
   });
+  const request = buildNativeCall(client, state.request, state.wire);
+
+  // A tool loop whose signed thinking blocks were lost runs without thinking (the native client's
+  // `prepare` drops it), so its limit carries no thinking headroom either.
+  const driver = activeModel.providerDriver;
+  const runsWithoutThinking = (driver === 'anthropic' || driver === 'bedrock') && hasUnreplayableToolTurn(request.messages);
+  // The limit the native client SENDS (caller / retry override > Default max tokens > the driver default,
+  // the thinking headroom on top, capped by the model maximum): the one number the error, the stream
+  // event and the agent's raised retry all work from. `reasoning` is what the client derives thinking
+  // from; `stream` is the transport actually used (a non-streamed request has a lower default cap).
+  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings, {
+    driver,
+    model: activeModel,
+    stream: Boolean(state.input.stream) && !disableProviderStreaming,
+    reasoning: runsWithoutThinking ? undefined : modelSettings.reasoning,
+  });
 
   return {
     client,
-    request: buildNativeCall(client, state.request, state.wire),
+    request,
     modelSettings,
     overrides,
     outputTokenLimit,
     // A model behind an upstream that cannot stream tool calls (opt-in per model).
-    disableProviderStreaming: Boolean(
-      state.input.stream
-      && modelSettings.disableStreamingWithTools === true
-      && (state.request.tools?.length ?? 0) > 0,
-    ),
+    disableProviderStreaming,
     includeStreamUsage: asRecord(overrides.stream_options).include_usage === true,
   };
 }
@@ -817,15 +869,20 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
 
   const usage = toGatewayUsage(client.driver, native.usage);
 
+  // A `length` finish is a limit hit when there is no ANSWER: no visible text (judged on the content
+  // AFTER the inline reasoning was split out: a model that spent its budget inside `<reasoning>` has
+  // said nothing) and no tool call - or, for the console's agent loop, a tool call the limit cut off
+  // (its arguments are not to be trusted).
+  const lengthFinish = native.finishReason === 'length';
+  const cutOffToolCall = native.toolCalls.length > 0 && runsToolCalls(state.route);
   if (
-    native.finishReason === 'length'
-    && !guardrailContentToText(rawText).trim()
-    && native.toolCalls.length === 0
+    lengthFinish
+    && (cutOffToolCall || (native.toolCalls.length === 0 && !guardrailContentToText(finalResponse.content ?? '').trim()))
   ) {
     // The provider billed the prompt and the capped output (reasoning included)
     // even though no answer came back, so the call is settled - budget and row,
     // whatever `logFailures` says - before the error leaves.
-    const limitError = new OutputTokenLimitError(outputTokenLimit);
+    const limitError = buildLimitError(state, outputTokenLimit, native.rawFinishReason);
     const cost = settleUsage(state, 'log-chat-usage', usage, {
       requestId,
       route: state.route,
@@ -838,13 +895,17 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
         ...describeRequestContract(wire),
         ...replicaTrace(model, servingReplica, completed.failed),
       }),
-      providerResponse: sanitizeForLogging({ finish_reason: 'length', output_token_limit: true }),
+      providerResponse: sanitizeForLogging({
+        finish_reason: 'length',
+        output_token_limit: true,
+        ...(native.rawFinishReason ? { raw_finish_reason: native.rawFinishReason } : {}),
+      }),
       errorMessage: limitError.message,
       latencyMs,
       cacheHit: false,
       finishReason: 'length',
     });
-    throw new OutputTokenLimitError(outputTokenLimit, { usage, cost, usageBooked: true });
+    throw buildLimitError(state, outputTokenLimit, native.rawFinishReason, { usage, cost, usageBooked: true });
   }
 
   if (native.toolCalls.length > 0) usage.toolCalls = native.toolCalls.length;
@@ -946,6 +1007,8 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     usage,
     latencyMs,
     cacheHit: false,
+    // Visible text the limit cut off: handed back as it is, flagged for a caller that cares (an agent).
+    ...(lengthFinish ? { truncated: true } : {}),
     wireModel: model.modelId,
     includeReasoning: state.includeReasoning,
   };
@@ -1108,6 +1171,9 @@ async function* streamEvents(args: {
   let pendingFinish: string | undefined;
   let hasFinalOutput = false;
   let outputLimitError: OutputTokenLimitError | null = null;
+  /** The terminal chunk said `length`: the output limit (or the context window) ended the answer. */
+  let lengthFinish = false;
+  let rawLengthFinish: string | undefined;
   /** True once gated characters actually reached the caller. */
   let releasedGatedText = false;
 
@@ -1401,12 +1467,24 @@ async function* streamEvents(args: {
       if (inline) inlineReasoning += inline;
       const reasoningDelta = `${delta.reasoning?.summary ?? ''}${inline ?? ''}`;
 
-      if (typeof chunk.rawFinishReason === 'string') {
+      // A chunk that says `length` is terminal even without a raw reason (a Responses-API
+      // `incomplete` arrives that way); any other normalized value only counts with its raw
+      // reason, because OpenAI chat chunks carry `stop` on every chunk.
+      if (typeof chunk.rawFinishReason === 'string' || chunk.finishReason === 'length') {
         // The terminal frame is said LAST (after the splitter tail and the
         // argument repairs), so it is held here.
         pendingFinish = wireFinishReason(driver, chunk.rawFinishReason, chunk.finishReason);
-        if (chunk.finishReason === 'length' && !hasFinalOutput && !contentText?.trim() && !(delta.toolCalls?.length)) {
-          outputLimitError = new OutputTokenLimitError(outputTokenLimit);
+        lengthFinish = chunk.finishReason === 'length';
+        rawLengthFinish = lengthFinish && typeof chunk.rawFinishReason === 'string' ? chunk.rawFinishReason : undefined;
+        // No answer (nothing visible), or a tool call the limit cut off in the agent loop, is a limit
+        // hit; visible text, or a client's partial tool call, is a truncated answer the caller keeps.
+        if (
+          lengthFinish
+          && (assembler.toolCallCount > 0
+            ? runsToolCalls(state.route)
+            : !hasFinalOutput && !contentText?.trim())
+        ) {
+          outputLimitError = buildLimitError(state, outputTokenLimit, rawLengthFinish);
         }
       }
       if (contentText?.trim() || (delta.toolCalls && delta.toolCalls.length > 0)) hasFinalOutput = true;
@@ -1458,8 +1536,9 @@ async function* streamEvents(args: {
 
     // Arguments that do not parse on their own - empty, or the lone `{` Bedrock's
     // Qwen tool parser emits for a no-argument tool - are completed with the
-    // missing fragment, so a strict client (and the agent loop) can parse them.
-    if (!outputLimitError) {
+    // missing fragment, so a strict client (and the agent loop) can parse them. Never on a
+    // `length` finish: those arguments are cut off, not blank, and completing them would hide it.
+    if (!outputLimitError && !lengthFinish) {
       for (const blank of assembler.blankToolCalls()) {
         assembler.complete(blank.index, blank.completion);
         const out = await emit({ type: 'delta', toolCalls: [{ index: blank.index, arguments: blank.completion }] });
@@ -1501,7 +1580,12 @@ async function* streamEvents(args: {
     }
 
     if (outputLimitError) {
-      yield { type: 'output_limit', error: normalizeInferenceError(outputLimitError).error };
+      yield {
+        type: 'output_limit',
+        error: normalizeInferenceError(outputLimitError).error,
+        ...(outputLimitError.limit !== undefined ? { limit: outputLimitError.limit } : {}),
+        ...(outputLimitError.rawFinishReason ? { rawFinishReason: outputLimitError.rawFinishReason } : {}),
+      };
     }
 
     // Some upstreams never send a terminal finish_reason. Clients that wait for
@@ -1527,6 +1611,10 @@ async function* streamEvents(args: {
     const response: ChatCompletionResponse = {
       ...assembled,
       content: emittedContent.length > 0 ? emittedContent : null,
+      // The assembler only learns a finish reason from a chunk that carries a raw one.
+      ...(lengthFinish ? { finishReason: 'length' as const } : {}),
+      // Tool calls cut off by the limit are never handed on: the `output_limit` event above is the answer.
+      ...(outputLimitError ? { toolCalls: [] } : {}),
       ...(reasoning ? { reasoning } : {}),
     };
     donePending = true;
@@ -1538,6 +1626,8 @@ async function* streamEvents(args: {
       ...(usageEstimated ? { usageEstimated: true } : {}),
       wireFinishReason: finishForSettle,
       outputLimitReached: Boolean(outputLimitError),
+      // Visible text the limit cut off: delivered as it is, flagged.
+      ...(lengthFinish && !outputLimitError ? { truncated: true } : {}),
     };
     settleSuccess(finishForSettle);
     exitedEarly = false;

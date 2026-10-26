@@ -178,8 +178,13 @@ export interface ModelStreamDone {
   /** The provider's usage exactly as the native client reported it (the shape agent-sdk consumers read); absent when the stream carried none. */
   nativeUsage?: ChatCompletionResponse['usage'];
   wireFinishReason: string;
-  /** The model hit its output limit without producing an answer. */
+  /** The model hit its output limit without producing an answer (or cut a tool call off: a `length` finish with tool calls). */
   outputLimitReached: boolean;
+  /**
+   * The answer is visible text the model's output limit cut off (finish `length`, text, no tool calls). It
+   * is returned unchanged; an agent turns it into a partial turn. Never set together with `outputLimitReached`.
+   */
+  truncated?: boolean;
   /**
    * `usage` is the core's estimate (chars/4 over the request and the streamed answer), because the
    * upstream never sent usage. It is booked and settled, but never put on the OpenAI wire usage frame.
@@ -195,8 +200,17 @@ export type ModelStreamEvent =
   | { type: 'usage'; usage: TokenUsage; wire: Record<string, unknown> }
   /** The stream ended without a finish reason of its own: a terminal step the caller must say. */
   | { type: 'finish'; finishReason: string }
-  /** The model reached its output limit before producing anything: an error frame, then the end. */
-  | { type: 'output_limit'; error: { message: string; type: string; code?: string | null; param?: string | null } }
+  /**
+   * The model reached its output limit before producing anything, or cut its tool calls off: an error frame,
+   * then the end. `limit` is the limit the call SENT (absent when none was); `rawFinishReason` the provider's
+   * own stop reason when it sent one (`model_context_window_exceeded` means the context was full).
+   */
+  | {
+    type: 'output_limit';
+    error: { message: string; type: string; code?: string | null; param?: string | null };
+    limit?: number;
+    rawFinishReason?: string;
+  }
   /**
    * An output guardrail blocked the answer mid-stream. The consumer writes its
    * terminal frames and CLOSES, and only then resumes the generator: the core
@@ -237,6 +251,8 @@ export interface ModelCallOutcome {
   wire?: Record<string, unknown>;
   /** Non-streamed answer. */
   result?: ModelCallResult;
+  /** Non-streamed answer whose visible text the output limit cut off (finish `length`, text, no tool calls); returned unchanged. */
+  truncated?: boolean;
   /** Streamed answer. */
   stream?: AsyncGenerator<ModelStreamEvent, void, void>;
   /** Verdict headers of a streamed answer, filled in as the stream unfolds. */
