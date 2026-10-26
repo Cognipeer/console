@@ -69,6 +69,7 @@ describe('recordTraceModelUsage', () => {
       inputTokens: 4000,
       outputTokens: 2000,
       cachedInputTokens: 0,
+      cachedWriteTokens: 0,
       reasoningTokens: 100,
       totalTokens: 6000,
       costUsd: (4000 * 2 + 2000 * 10) / 1_000_000,
@@ -149,6 +150,55 @@ describe('recordTraceModelUsage', () => {
     hoisted.recordUsageEvent.mockClear();
     await recordTraceModelUsage({ ...base, events: [first, second], previousEvents: [first, second] });
     expect(hoisted.recordUsageEvent).not.toHaveBeenCalled();
+  });
+
+  it('treats cached read/write as subsets of input: total = input + output, write priced at its own rate', async () => {
+    const db = makeDb({
+      models: [{
+        key: 'claude-main',
+        modelId: 'claude-x',
+        pricing: { inputTokenPer1M: 2, outputTokenPer1M: 10, cachedTokenPer1M: 0.5, cacheWriteTokenPer1M: 2.5 },
+      }],
+    });
+    hoisted.getDatabase.mockResolvedValue(db);
+
+    await recordTraceModelUsage({
+      ...base,
+      events: [{
+        model: 'claude-main',
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        cachedInputTokens: 200_000,
+        cachedWriteTokens: 100_000,
+      }],
+    });
+
+    const row = hoisted.recordUsageEvent.mock.calls[0][0] as Record<string, number>;
+    expect(row).toMatchObject({
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+      cachedInputTokens: 200_000,
+      cachedWriteTokens: 100_000,
+      totalTokens: 2_000_000,
+    });
+    // 700k uncached @2 + 200k read @0.5 + 100k write @2.5 + 1M output @10
+    expect(row.costUsd).toBeCloseTo(11.75, 6);
+  });
+
+  it('subtracts previous cache-write tokens on a re-post and still records a write-only delta', async () => {
+    const db = makeDb({ models: [{ key: 'k', modelId: 'k', pricing: { inputTokenPer1M: 1, outputTokenPer1M: 1 } }] });
+    hoisted.getDatabase.mockResolvedValue(db);
+    const first = { model: 'k', inputTokens: 100, outputTokens: 50, cachedWriteTokens: 10 };
+
+    await recordTraceModelUsage({ ...base, events: [first], previousEvents: [first] });
+    expect(hoisted.recordUsageEvent).not.toHaveBeenCalled();
+
+    await recordTraceModelUsage({
+      ...base,
+      events: [{ ...first, cachedWriteTokens: 30 }],
+      previousEvents: [first],
+    });
+    expect(hoisted.recordUsageEvent.mock.calls[0][0]).toMatchObject({ cachedWriteTokens: 20, inputTokens: 0, outputTokens: 0 });
   });
 
   it('never throws and does not touch the database when nothing is billable', async () => {

@@ -330,6 +330,49 @@ describe('convention edge cases', () => {
   });
 });
 
+describe('cache-write tokens and basis precedence', () => {
+  it('reads the cache-write subset from each convention without merging it into cachedInputTokens', () => {
+    expect(mapChild([int('cognipeer.tokens.cache_write', 11)]).event.cachedWriteTokens).toBe(11);
+    expect(mapChild([int('llm.token_count.prompt_details.cache_write', 22)]).event.cachedWriteTokens).toBe(22);
+    expect(mapChild([int('gen_ai.usage.cache_creation.input_tokens', 33)]).event.cachedWriteTokens).toBe(33);
+    const { event } = mapChild([int('gen_ai.usage.cache_read.input_tokens', 5), int('gen_ai.usage.cache_creation_input_tokens', 7)]);
+    expect(event.cachedInputTokens).toBe(5);
+    expect(event.cachedWriteTokens).toBe(7);
+  });
+
+  it('leaves cachedWriteTokens absent when nothing reported it', () => {
+    expect(mapChild([str('openinference.span.kind', 'CHAIN')]).event.cachedWriteTokens).toBeUndefined();
+  });
+
+  it('prefers the inclusive gen_ai input/output over native cognipeer.tokens when a span carries both', () => {
+    const { event } = mapChild([
+      int('cognipeer.tokens.input', 100),
+      int('cognipeer.tokens.output', 40),
+      int('cognipeer.tokens.total', 140),
+      int('gen_ai.usage.input_tokens', 600),
+      int('gen_ai.usage.output_tokens', 90),
+      int('cognipeer.tokens.cached_input', 400),
+      int('cognipeer.tokens.cache_write', 100),
+    ]);
+    expect(event.inputTokens).toBe(600);
+    expect(event.outputTokens).toBe(90);
+    expect(event.totalTokens).toBe(690);
+    expect(event.cachedInputTokens).toBe(400);
+    expect(event.cachedWriteTokens).toBe(100);
+  });
+
+  it('keeps cognipeer.tokens when no gen_ai counts are present', () => {
+    const { event } = mapChild([
+      int('cognipeer.tokens.input', 100),
+      int('cognipeer.tokens.output', 40),
+      int('cognipeer.tokens.total', 140),
+    ]);
+    expect(event.inputTokens).toBe(100);
+    expect(event.outputTokens).toBe(40);
+    expect(event.totalTokens).toBe(140);
+  });
+});
+
 describe('reasoningTokens across conventions', () => {
   it('reads cognipeer.tokens.reasoning', () => {
     const { event } = mapChild([int('cognipeer.tokens.reasoning', 512)]);

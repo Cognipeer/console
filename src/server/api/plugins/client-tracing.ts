@@ -5,6 +5,11 @@ import type {
 } from '@/lib/database/provider/types.base';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getConfig } from '@/lib/core/config';
+import {
+  normalizeTraceEventUsage,
+  type NormalizedTraceEventUsage,
+  type TraceUsageBasis,
+} from '@/lib/services/tracing/traceUsage';
 import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
@@ -56,6 +61,13 @@ type TracingUsage = {
   cache_read_input_tokens?: number | null;
   cachedInputTokens?: number | null;
   cached_input_tokens?: number | null;
+  /** Cache-WRITE subset of the input count (Anthropic's `cache_creation_input_tokens`). */
+  cacheWriteTokens?: number | null;
+  cache_write_tokens?: number | null;
+  cacheCreationInputTokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  /** Where the sender's native counts differ from the inclusive canonical basis. */
+  usageBasis?: TraceUsageBasis | null;
   inputTokens?: number | null;
   input_tokens?: number | null;
   outputTokens?: number | null;
@@ -90,6 +102,11 @@ type TracingEventPayload = {
   bytesIn?: number | null;
   bytesOut?: number | null;
   cachedInputTokens?: number | null;
+  /** Cache-WRITE subset of `inputTokens` (SDK wire name). */
+  cacheWriteTokens?: number | null;
+  /** SDK-declared basis of the native counts: `inputExcludesCache` /
+   *  `outputExcludesReasoning`. Absent = already inclusive. */
+  usageBasis?: TraceUsageBasis | null;
   data?: Record<string, unknown> & {
     sections?: unknown[];
     toolDetails?: Record<string, unknown>;
@@ -108,6 +125,8 @@ type TracingEventPayload = {
     /** OTel exporter's plural form — a JSON array or comma-joined string. */
     finishReasons?: string[] | string | null;
     reasoningTokens?: number | null;
+    cacheWriteTokens?: number | null;
+    usageBasis?: TraceUsageBasis | null;
     modelName?: string | null;
     usage?: TracingUsage;
   };
@@ -566,6 +585,9 @@ function buildEventMetadata(event: TracingEventPayload, sections: Array<Record<s
   delete metadata.stop_reason;
   delete metadata.finishReasons;
   delete metadata.reasoningTokens;
+  // Same for the cache-write count and the basis flags (see resolveTraceEventUsage).
+  delete metadata.cacheWriteTokens;
+  delete metadata.usageBasis;
 
   const toolDetails = getEventToolDetails(event, sections);
   if (toolDetails) {
@@ -576,6 +598,37 @@ function buildEventMetadata(event: TracingEventPayload, sections: Array<Record<s
 
 function getEventUsage(event: TracingEventPayload): TracingUsage {
   return event.usage || event.metadata?.usage || {};
+}
+
+/**
+ * Canonical usage of one ingested event: gathers the (top-level, `usage`,
+ * `metadata`) spellings and folds the SDK's `usageBasis` through the shared
+ * pure helper so stored events, session totals, pricing and metrics all see
+ * inclusive input/output. Events without a basis flag pass through untouched.
+ */
+function resolveTraceEventUsage(event: TracingEventPayload): NormalizedTraceEventUsage {
+  const usage = getEventUsage(event);
+  const diagnostics = extractTraceDiagnostics(event);
+  return normalizeTraceEventUsage({
+    inputTokens: event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens,
+    outputTokens: event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens,
+    cachedInputTokens:
+      event?.cachedInputTokens
+      ?? usage?.cachedInputTokens
+      ?? usage?.cached_input_tokens
+      ?? usage?.cacheReadInputTokens
+      ?? usage?.cache_read_input_tokens,
+    cacheWriteTokens:
+      event?.cacheWriteTokens
+      ?? usage?.cacheWriteTokens
+      ?? usage?.cache_write_tokens
+      ?? usage?.cacheCreationInputTokens
+      ?? usage?.cache_creation_input_tokens
+      ?? event?.metadata?.cacheWriteTokens,
+    reasoningTokens: diagnostics.reasoningTokens,
+    totalTokens: event?.totalTokens,
+    usageBasis: event?.usageBasis ?? usage?.usageBasis ?? event?.metadata?.usageBasis,
+  });
 }
 
 /** Caller-supplied `metadata` key format — shared with the read-side
@@ -1143,23 +1196,23 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         if (!continuation) await backgroundDb.deleteAgentTracingEvents(sessionId, ctx.projectId);
 
         const createdEvents: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>> = [];
+        // Session totals come from the sender's native-basis summary; the events
+        // below are stored inclusive, so the totals must follow them.
+        let usageAdjusted = false;
+        let inputAdjustment = 0;
+        let outputAdjustment = 0;
         for (const event of partEvents) {
           const sections = getEventSections(event);
           const metadata = buildEventMetadata(event, sections);
           const toolDetails = getEventToolDetails(event, sections);
-          const usage = getEventUsage(event);
           const diagnostics = extractTraceDiagnostics(event);
-          const inputTokens =
-            event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? undefined;
-          const outputTokens =
-            event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens ?? undefined;
-          const cachedInputTokens =
-            event?.cachedInputTokens
-            ?? usage?.cachedInputTokens
-            ?? usage?.cached_input_tokens
-            ?? usage?.cacheReadInputTokens
-            ?? usage?.cache_read_input_tokens
-            ?? undefined;
+          const normalized = resolveTraceEventUsage(event);
+          const { inputTokens, outputTokens, cachedInputTokens, cachedWriteTokens } = normalized;
+          if (normalized.adjusted) {
+            usageAdjusted = true;
+            inputAdjustment += normalized.inputDelta;
+            outputAdjustment += normalized.outputDelta;
+          }
 
           const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
             actor: event.actor || {},
@@ -1168,6 +1221,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             bytesIn: event.bytesIn ?? undefined,
             bytesOut: event.bytesOut ?? undefined,
             cachedInputTokens,
+            cachedWriteTokens: cachedWriteTokens ?? 0,
             durationMs: event.durationMs ?? undefined,
             error: toErrorRecord(event.error),
             finishReason: diagnostics.finishReason,
@@ -1194,13 +1248,37 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             toolName: event.toolName
               || (event.actor?.scope === 'tool' ? event.actor?.name ?? undefined : undefined)
               || normalizeToolName(toolDetails?.name),
-            totalTokens: event.totalTokens ?? undefined,
+            totalTokens: normalized.totalTokens,
             traceId: typeof event.traceId === 'string' ? event.traceId : undefined,
             type: event.type ?? undefined,
           };
 
           await backgroundDb.createAgentTracingEvent(eventDoc);
           createdEvents.push(eventDoc);
+        }
+
+        // The sender's summary totals are native-basis; the stored events are
+        // inclusive. Keep the larger of the summary plus this part's fold and what
+        // the stored events add up to: a continuation's summary is cumulative over
+        // parts whose folds are not in this payload (and a part with no flagged
+        // event must not pull inclusive totals back to native), and a sender that
+        // sent no summary totals would otherwise keep the fold alone.
+        if (usageAdjusted || continuation) {
+          const stats = aggregateEvents(continuation
+            ? await backgroundDb.listAgentTracingEvents(sessionId, ctx.projectId, { projection: { sections: 0, metadata: 0 } })
+            : createdEvents as IAgentTracingEvent[]);
+          const totalInputTokens = Math.max((sessionDoc.totalInputTokens ?? 0) + inputAdjustment, stats.totalInputTokens);
+          const totalOutputTokens = Math.max((sessionDoc.totalOutputTokens ?? 0) + outputAdjustment, stats.totalOutputTokens);
+          if (totalInputTokens !== sessionDoc.totalInputTokens || totalOutputTokens !== sessionDoc.totalOutputTokens) {
+            sessionDoc.totalInputTokens = totalInputTokens;
+            sessionDoc.totalOutputTokens = totalOutputTokens;
+            sessionDoc.summary = { ...(sessionDoc.summary ?? {}), totalInputTokens, totalOutputTokens };
+            await backgroundDb.updateAgentTracingSession(sessionId, {
+              summary: sessionDoc.summary,
+              totalInputTokens,
+              totalOutputTokens,
+            }, ctx.projectId);
+          }
         }
 
         const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
@@ -1442,19 +1520,11 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       const sections = getEventSections(event);
       const metadata = buildEventMetadata(event, sections);
       const toolDetails = getEventToolDetails(event, sections);
-      const usage = getEventUsage(event);
       const diagnostics = extractTraceDiagnostics(event);
-      const inputTokens =
-        event?.inputTokens ?? usage?.inputTokens ?? usage?.input_tokens ?? undefined;
-      const outputTokens =
-        event?.outputTokens ?? usage?.outputTokens ?? usage?.output_tokens ?? undefined;
-      const cachedInputTokens =
-        event?.cachedInputTokens
-        ?? usage?.cachedInputTokens
-        ?? usage?.cached_input_tokens
-        ?? usage?.cacheReadInputTokens
-        ?? usage?.cache_read_input_tokens
-        ?? undefined;
+      // Normalized (inclusive) usage feeds the event doc AND the session
+      // accumulator, so accumulated totals stay in the canonical basis.
+      const normalized = resolveTraceEventUsage(event);
+      const { inputTokens, outputTokens, cachedInputTokens, cachedWriteTokens } = normalized;
       const newTotalEvents = (session.totalEvents || 0) + 1;
       const models = [event?.model, event?.modelName, event?.metadata?.modelName]
         .filter((name): name is string => typeof name === 'string' && name.length > 0);
@@ -1469,6 +1539,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           bytesIn: event.bytesIn ?? undefined,
           bytesOut: event.bytesOut ?? undefined,
           cachedInputTokens,
+          cachedWriteTokens: cachedWriteTokens ?? 0,
           durationMs: event.durationMs ?? undefined,
           error: toErrorRecord(event.error),
           finishReason: diagnostics.finishReason,
@@ -1495,7 +1566,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           toolName: event.toolName
             || (event.actor?.scope === 'tool' ? event.actor?.name ?? undefined : undefined)
             || normalizeToolName(toolDetails?.name),
-          totalTokens: event.totalTokens ?? undefined,
+          totalTokens: normalized.totalTokens,
           traceId: typeof event.traceId === 'string' ? event.traceId : undefined,
           type: event.type ?? undefined,
         };
@@ -1604,6 +1675,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       const durationMs = payload.durationMs ?? (endedAt.getTime() - sessionStartedAt);
       // Built from a session snapshot: once for the reply, and again from a fresh read inside the background write,
       // so events persisted since the request (the SDK does not wait for `/events` before `/end`) are not overwritten.
+      // Token totals: the SDK's summary is native-basis, while the totals accumulated by `/events` are
+      // inclusive (normalized at ingest) and therefore >= the native ones, so `maxTotal` keeps the inclusive value.
       const mergeEnd = (source: IAgentTracingSession) => {
         const existingSummary = getSummaryRecord(source.summary);
         const payloadSummary = getSummaryRecord(payload.summary);
