@@ -1,5 +1,7 @@
 /** Lightweight view types mirroring the /api/evaluation/* JSON responses. */
 
+import type { IAgentRunRevision } from '@/lib/shared/agentRevision';
+
 /** A tool call recorded on an assistant turn. */
 export interface EvalToolCallView {
   id?: string;
@@ -96,8 +98,8 @@ export interface EvalTargetView {
   description?: string;
   kind: 'agent' | 'model' | 'external' | 'rag';
   agentKey?: string;
-  /** Pinned published version; absent/null means "follow the published one". */
-  agentVersion?: number | null;
+  /** Default revision a run tests: a pinned published version, `'draft'`, or absent/null for "follow the published one". A single run can override it. */
+  agentVersion?: number | 'draft' | null;
   modelKey?: string;
   /** `rag` targets: the Knowledge Engine module queried, and how much of it. */
   ragModuleKey?: string;
@@ -225,6 +227,8 @@ export interface EvalRunView {
   aggregate?: EvalRunAggregateView;
   items: EvalRunItemView[];
   error?: string;
+  /** Agent targets only: the configuration this run tested. */
+  agentRevision?: IAgentRunRevision;
   startedAt?: string;
   finishedAt?: string;
   createdAt?: string;

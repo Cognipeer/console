@@ -2,13 +2,15 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Modal, Progress, Select, Stack, Text, Textarea } from '@mantine/core';
+import { Alert, Button, Group, Loader, Modal, Progress, Select, Stack, Text, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft } from '@tabler/icons-react';
+import { IconAlertTriangle, IconArrowLeft } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { runVersionTag } from '@/components/agents/agentVersionTag';
 import RedTeamRunCompare from '@/components/redteam/RedTeamRunCompare';
 import type { RedTeamAttemptView, RedTeamOutcome, RedTeamRunView } from '@/components/redteam/types';
 
@@ -159,7 +161,7 @@ export default function RedTeamRunDetailPage() {
         title={run.campaignKey}
         subtitle={
           <span>
-            Target <span className="ds-mono">{run.targetRef}</span> ({run.targetKind}){' '}
+            Target <span className="ds-mono"><AgentWithVersion name={run.targetRef} tag={runVersionTag(run.agentRevision)} /></span> ({run.targetKind}){' '}
             · <span className={`ds-badge ${RUN_STATUS_BADGE[run.status] ?? ''}`}>{run.status}</span>
             {active ? <span className="ds-faint" style={{ marginLeft: 8 }}>· {run.progress.completed}/{run.progress.total} attempts</span> : null}
           </span>
@@ -169,6 +171,13 @@ export default function RedTeamRunDetailPage() {
 
       {run.error ? (
         <div className="ds-card ds-card-pad-sm" style={{ marginBottom: 16, color: 'var(--mantine-color-red-6)' }}>{run.error}</div>
+      ) : null}
+
+      {run.agentRevision?.draftChanged ? (
+        <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={16} />} mb="md" title="The draft changed during this scan">
+          The agent&apos;s draft was saved while this scan was in progress, so later attempts may have attacked a
+          different configuration than earlier ones. Re-run the scan to get a result for one configuration.
+        </Alert>
       ) : null}
 
       {active ? (

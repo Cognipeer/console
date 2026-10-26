@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Alert, NumberInput, SegmentedControl, Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconCheck, IconInfoCircle, IconRobot } from '@tabler/icons-react';
+import { IconCheck, IconInfoCircle, IconLock, IconRobot } from '@tabler/icons-react';
 import FormShell, {
   Checklist,
   FormField,
@@ -13,6 +13,10 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { configVersionTag } from '@/components/agents/agentVersionTag';
+import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
+import { storedVersionFromPicker } from '@/lib/shared/agentRevision';
 import type { EvalTargetView, ModelOption } from './types';
 
 interface CreateTargetModalProps {
@@ -30,7 +34,7 @@ interface FormValues {
   kind: 'agent' | 'model' | 'external' | 'rag';
   modelKey: string;
   agentKey: string;
-  /** '' means "follow the published version". Held as a string for Mantine's Select. */
+  /** '' follows the published version, 'draft' the saved draft, digits a pinned version. Held as a string for Mantine's Select. */
   agentVersion: string;
   /** Retrieval targets: which Knowledge Engine module to query, and how much. */
   ragModuleKey: string;
@@ -52,6 +56,9 @@ const KIND_OPTIONS = [
   { value: 'rag', label: 'Knowledge Engine — retrieval from a module' },
   { value: 'external', label: 'External — an HTTP endpoint' },
 ];
+
+/** The Version select's non-numeric choice; "published" is the cleared state. */
+const DRAFT_OPTION = { value: 'draft', label: 'Draft — the saved, unpublished config' };
 
 const KIND_LABEL: Record<string, string> = { model: 'Model', agent: 'Agent', rag: 'Knowledge Engine module', external: 'External' };
 
@@ -101,6 +108,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
   const [prompts, setPrompts] = useState<{ value: string; label: string }[]>([]);
   const [ragModules, setRagModules] = useState<{ value: string; label: string }[]>([]);
   const isEdit = Boolean(editing);
+  const { canRunAgentTests } = useAgentTestAccess();
   const form = useForm<FormValues>({
     initialValues: {
       name: '', description: '', kind: 'model', modelKey: '', agentKey: '', agentVersion: '',
@@ -135,7 +143,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         kind: editing.kind,
         modelKey: editing.modelKey ?? '',
         agentKey: editing.agentKey ?? '',
-        agentVersion: typeof editing.agentVersion === 'number' ? String(editing.agentVersion) : '',
+        agentVersion: editing.agentVersion === 'draft' ? 'draft' : typeof editing.agentVersion === 'number' ? String(editing.agentVersion) : '',
         ragModuleKey: editing.ragModuleKey ?? '',
         retrievalTopK: editing.retrievalTopK ?? '',
         retrievalMinScore: editing.retrievalMinScore ?? '',
@@ -210,25 +218,26 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     const v = form.getValues();
     setLoading(true);
     try {
+      // An absent key leaves the stored value alone on an edit, so a field the form
+      // left empty is sent as `null` (`''` for the description) to clear it. A create
+      // reads `null` as absent, so the same payload serves both.
       const payload = {
         name: v.name.trim(),
-        description: v.description || undefined,
+        description: v.description || (isEdit ? '' : undefined),
         modelKey: v.kind === 'model' ? v.modelKey : undefined,
         agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
-        // `null`, not `undefined`: an absent key means "leave alone" on both DB
-        // providers, so clearing the pin on an edit needs an explicit value.
-        agentVersion: v.kind === 'agent' ? (v.agentVersion ? Number(v.agentVersion) : null) : undefined,
+        agentVersion: v.kind === 'agent' ? storedVersionFromPicker(v.agentVersion) : undefined,
         ragModuleKey: v.kind === 'rag' ? v.ragModuleKey : undefined,
         // Left empty, the module's own defaultTopK / defaultMinScore apply —
         // which is what a suite should test unless it is testing the knobs.
-        retrievalTopK: v.kind === 'rag' && typeof v.retrievalTopK === 'number' ? v.retrievalTopK : undefined,
-        retrievalMinScore: v.kind === 'rag' && typeof v.retrievalMinScore === 'number' ? v.retrievalMinScore : undefined,
+        retrievalTopK: v.kind === 'rag' ? (typeof v.retrievalTopK === 'number' ? v.retrievalTopK : null) : undefined,
+        retrievalMinScore: v.kind === 'rag' ? (typeof v.retrievalMinScore === 'number' ? v.retrievalMinScore : null) : undefined,
         // Override is model-only; sending it for an agent target would be
-        // rejected at run time (an agent always runs its published prompt).
-        promptKey: v.kind === 'model' && v.promptMode === 'promptKey' ? v.promptKey : undefined,
-        systemPrompt: v.kind === 'model' && v.promptMode === 'inline' ? v.systemPrompt : undefined,
-        responseFormat: v.kind === 'model' ? buildResponseFormat(v) : undefined,
-        maxTokens: v.kind === 'model' && typeof v.maxTokens === 'number' ? v.maxTokens : undefined,
+        // rejected at run time (an agent runs its own prompt).
+        promptKey: v.kind === 'model' ? (v.promptMode === 'promptKey' ? v.promptKey : null) : undefined,
+        systemPrompt: v.kind === 'model' ? (v.promptMode === 'inline' ? v.systemPrompt : null) : undefined,
+        responseFormat: v.kind === 'model' ? (buildResponseFormat(v) ?? null) : undefined,
+        maxTokens: v.kind === 'model' ? (typeof v.maxTokens === 'number' ? v.maxTokens : null) : undefined,
       };
       const res = await fetch(
         isEdit ? `/api/evaluation/targets/${editing!.id}` : '/api/evaluation/targets',
@@ -263,7 +272,9 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       : v.promptMode === 'inline' ? v.systemPrompt.trim().length > 0
         : true;
   const validSchema = v.responseMode !== 'json_schema' || isJson(v.jsonSchema);
-  const canSubmit = validName && validRef && (kind !== 'model' || (validPrompt && validSchema));
+  // Creating or changing an agent target needs Write on Agents, like running it (the server refuses it otherwise).
+  const agentBlocked = kind === 'agent' && !canRunAgentTests;
+  const canSubmit = validName && validRef && (kind !== 'model' || (validPrompt && validSchema)) && !agentBlocked;
 
   const checklist = [
     { id: 'name', label: 'Name provided', done: validName },
@@ -274,7 +285,12 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     <SummaryGroup title="Target">
       <SummaryKV label="Name" value={v.name || '—'} />
       <SummaryKV label="Kind" value={KIND_LABEL[kind]} />
-      <SummaryKV label={referenceLabel(kind)} value={referenceValue(v)} />
+      <SummaryKV
+        label={referenceLabel(kind)}
+        value={kind === 'agent' && v.agentKey.trim()
+          ? <AgentWithVersion name={referenceValue(v)} tag={configVersionTag(storedVersionFromPicker(v.agentVersion))} />
+          : referenceValue(v)}
+      />
       {kind === 'rag' && (
         <SummaryKV
           label="Retrieval"
@@ -304,12 +320,13 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       title={isEdit ? 'Edit evaluation target' : 'New evaluation target'}
       subtitle="Define the agent, model, or endpoint under test."
       summary={summary}
-      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      footerStatus={agentBlocked ? AGENT_TEST_ACCESS_HINT : `${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
       primaryAction={{
         label: isEdit ? 'Save changes' : 'Create target',
         icon: <IconCheck size={13} />,
         loading,
         disabled: !canSubmit,
+        disabledReason: agentBlocked ? AGENT_TEST_ACCESS_HINT : undefined,
         onClick: () => void handleSubmit(),
       }}
     >
@@ -353,7 +370,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
             </FormField>
             <FormField
               label="Version"
-              hint="Pin the suite to one published version. Left on “published”, the target follows whatever is live — right for a guard suite, wrong for an A/B."
+              hint="Left on “published”, the target follows whatever is live — right for a guard suite. Pin a version for an A/B, or pick the draft to check a change before publishing it. A single run can pick another."
             >
               <Select
                 placeholder={
@@ -363,12 +380,20 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
                       ? 'Loading versions…'
                       : 'Published (follows the live version)'
                 }
-                data={agentVersionOptions}
+                data={[DRAFT_OPTION, ...agentVersionOptions]}
                 disabled={!v.agentKey || agentVersionsLoading}
                 clearable
                 {...form.getInputProps('agentVersion')}
+                // `null`, not '': Mantine keeps showing the last label for a value it
+                // has no option for, so a pin cleared by switching agents would linger.
+                value={v.agentVersion || null}
               />
             </FormField>
+            {agentBlocked && (
+              <Alert color="yellow" variant="light" icon={<IconLock size={16} />}>
+                {AGENT_TEST_ACCESS_HINT}
+              </Alert>
+            )}
           </>
         )}
         {kind === 'rag' && (
@@ -503,8 +528,8 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
 
       {kind === 'agent' && (
         <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />} mt="md">
-          An agent target always runs its own published prompt, so there is no system-prompt override here. To evaluate a
-          prompt change, use a model target — or change the agent&apos;s prompt and re-publish it.
+          An agent target runs the agent&apos;s own prompt, so there is no system-prompt override here. To evaluate a
+          prompt change, use a model target — or change the agent&apos;s prompt and test the draft before publishing it.
         </Alert>
       )}
     </FormShell>

@@ -32,6 +32,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { definedFields } from './definedFields';
 import { hasAnyLabel, matchesLabel, mongoLabelCandidates } from '../provider/labelMatch';
 
 /** True when the error is a Mongo duplicate-key violation (code 11000). */
@@ -134,14 +135,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationTarget, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IEvaluationTarget | null> {
       const db = this.getTenantDb();
-      // Skip undefined keys instead of $set-ing them: the driver serializes an
-      // explicit `undefined` to null, so a partial update carrying an absent
-      // optional field would WIPE it. The SQLite mixin treats undefined as
-      // "leave alone" — the two providers must not disagree about that.
-      const updateData: Record<string, unknown> = { updatedAt: new Date() };
-      for (const [k, v] of Object.entries(data)) {
-        if (k !== '_id' && v !== undefined) updateData[k] = v;
-      }
+      const updateData = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IEvaluationTarget>(COLLECTIONS.evaluationTargets)
         .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
@@ -221,8 +215,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
     ): Promise<IEvaluationDataset | null> {
       const db = this.getTenantDb();
       const { items, ...rest } = data;
-      const updateData: Record<string, unknown> = { ...rest, updatedAt: new Date() };
-      delete updateData._id;
+      const updateData: Record<string, unknown> = { ...definedFields(rest), updatedAt: new Date() };
       if (items !== undefined) updateData.itemCount = items.length;
       const result = await db
         .collection<IEvaluationDataset>(COLLECTIONS.evaluationDatasets)
@@ -708,8 +701,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationSuite, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IEvaluationSuite | null> {
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
+      const updateData = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IEvaluationSuite>(COLLECTIONS.evaluationSuites)
         .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });

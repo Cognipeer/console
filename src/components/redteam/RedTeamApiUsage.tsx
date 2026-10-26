@@ -52,7 +52,7 @@ export default function RedTeamApiUsage({ campaignKey }: { campaignKey?: string 
   const endpoints: { method: string; path: string; note: string }[] = [
     { method: 'GET', path: `${base}/probes`, note: 'List the built-in probe catalog.' },
     { method: 'GET', path: `${base}/campaigns`, note: 'List configured campaigns for the token’s project.' },
-    { method: 'POST', path: `${base}/campaigns/${key}/scan`, note: 'Trigger a scan (async). Returns a pending run.' },
+    { method: 'POST', path: `${base}/campaigns/${key}/scan`, note: 'Trigger a scan (async). Returns a pending run. Optional body {"agent_version": "published" | "draft" | <n>} picks the agent revision for this scan.' },
     { method: 'GET', path: `${base}/runs?campaign_key=${key}`, note: 'List scan runs (newest first).' },
     { method: 'GET', path: `${base}/runs/{id}`, note: 'Fetch one run with per-attempt verdicts + aggregate.' },
   ];
@@ -60,6 +60,9 @@ export default function RedTeamApiUsage({ campaignKey }: { campaignKey?: string 
   const curl = `# 1. Kick off a scan
 curl -X POST "$CONSOLE_URL${base}/campaigns/${key}/scan" \\
   -H "Authorization: Bearer $API_TOKEN"
+
+#    Agent campaigns: scan the saved draft (or a version number) instead of the default
+#    curl -X POST ... -H "Content-Type: application/json" -d '{"agent_version": "draft"}'
 
 # 2. Poll the run until status is "completed"
 curl "$CONSOLE_URL${base}/runs/$RUN_ID" \\

@@ -18,6 +18,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { agentRevisionFromColumn, agentVersionFromColumn, agentVersionToColumn } from './agentRevisionColumns';
 
 function toIso(value: Date | string | undefined | null): string | null {
   if (!value) return null;
@@ -37,9 +38,9 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.redTeamCampaigns}
-        (id, tenantId, projectId, key, name, description, targetKind, agentKey, modelKey,
+        (id, tenantId, projectId, key, name, description, targetKind, agentKey, agentVersion, modelKey,
          probeKeys, judgeModelKey, runConfig, policy, schedule, metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @targetKind, @agentKey, @modelKey,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @targetKind, @agentKey, @agentVersion, @modelKey,
          @probeKeys, @judgeModelKey, @runConfig, @policy, @schedule, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -50,6 +51,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         description: campaign.description ?? null,
         targetKind: campaign.targetKind,
         agentKey: campaign.agentKey ?? null,
+        agentVersion: agentVersionToColumn(campaign.agentVersion),
         modelKey: campaign.modelKey ?? null,
         probeKeys: this.toJson(campaign.probeKeys ?? []),
         judgeModelKey: campaign.judgeModelKey ?? null,
@@ -76,6 +78,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.targetKind !== undefined) { sets.push('targetKind = @targetKind'); params.targetKind = data.targetKind; }
       if (data.agentKey !== undefined) { sets.push('agentKey = @agentKey'); params.agentKey = data.agentKey; }
+      if (data.agentVersion !== undefined) { sets.push('agentVersion = @agentVersion'); params.agentVersion = agentVersionToColumn(data.agentVersion); }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
       if (data.probeKeys !== undefined) { sets.push('probeKeys = @probeKeys'); params.probeKeys = this.toJson(data.probeKeys); }
       if (data.judgeModelKey !== undefined) { sets.push('judgeModelKey = @judgeModelKey'); params.judgeModelKey = data.judgeModelKey; }
@@ -131,9 +134,9 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.redTeamRuns}
-        (id, tenantId, projectId, campaignKey, targetKind, targetRef, status, mode, progress,
+        (id, tenantId, projectId, campaignKey, targetKind, targetRef, agentRevision, status, mode, progress,
          aggregate, attempts, error, startedAt, finishedAt, createdBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @campaignKey, @targetKind, @targetRef, @status, @mode, @progress,
+        VALUES (@id, @tenantId, @projectId, @campaignKey, @targetKind, @targetRef, @agentRevision, @status, @mode, @progress,
          @aggregate, @attempts, @error, @startedAt, @finishedAt, @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -142,6 +145,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         campaignKey: run.campaignKey,
         targetKind: run.targetKind,
         targetRef: run.targetRef ?? null,
+        agentRevision: run.agentRevision ? this.toJson(run.agentRevision) : null,
         status: run.status,
         mode: run.mode,
         progress: this.toJson(run.progress ?? { total: 0, completed: 0, failed: 0 }),
@@ -167,6 +171,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.mode !== undefined) { sets.push('mode = @mode'); params.mode = data.mode; }
       if (data.targetRef !== undefined) { sets.push('targetRef = @targetRef'); params.targetRef = data.targetRef; }
+      if (data.agentRevision !== undefined) { sets.push('agentRevision = @agentRevision'); params.agentRevision = data.agentRevision ? this.toJson(data.agentRevision) : null; }
       if (data.progress !== undefined) { sets.push('progress = @progress'); params.progress = this.toJson(data.progress); }
       if (data.aggregate !== undefined) { sets.push('aggregate = @aggregate'); params.aggregate = this.toJson(data.aggregate); }
       if (data.attempts !== undefined) { sets.push('attempts = @attempts'); params.attempts = this.toJson(data.attempts); }
@@ -320,6 +325,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         description: (r.description as string | null) ?? undefined,
         targetKind: r.targetKind as IRedTeamCampaign['targetKind'],
         agentKey: (r.agentKey as string | null) ?? undefined,
+        agentVersion: agentVersionFromColumn(r.agentVersion),
         modelKey: (r.modelKey as string | null) ?? undefined,
         probeKeys: this.parseJson<string[]>(r.probeKeys, []),
         judgeModelKey: (r.judgeModelKey as string | null) ?? undefined,
@@ -343,6 +349,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         campaignKey: r.campaignKey as string,
         targetKind: r.targetKind as IRedTeamRun['targetKind'],
         targetRef: (r.targetRef as string | null) ?? '',
+        agentRevision: agentRevisionFromColumn(r.agentRevision),
         status: r.status as RedTeamRunStatus,
         mode: r.mode as IRedTeamRun['mode'],
         progress: this.parseJson(r.progress, { total: 0, completed: 0, failed: 0 }),

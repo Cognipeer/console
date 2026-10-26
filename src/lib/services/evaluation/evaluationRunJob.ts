@@ -22,7 +22,8 @@ const logger = createLogger('evaluation:job');
 export const EVALUATION_RUN_QUEUE = 'evaluation-run';
 export const EVALUATION_RUN_JOB = 'evaluation.run';
 
-export interface EvaluationRunJobPayload extends QueuePayload, RunSuiteParams {
+/** What a queued run carries: the run's parameters without the hook that answered for the request that made it. */
+export interface EvaluationRunJobPayload extends QueuePayload, Omit<RunSuiteParams, 'authorizeAgentRun'> {
   runId: string;
 }
 
@@ -33,7 +34,15 @@ export interface EvaluationRunJobPayload extends QueuePayload, RunSuiteParams {
 export async function enqueueSuiteRun(params: RunSuiteParams): Promise<WithId<IEvaluationRun>> {
   const run = await createAsyncRun(params);
 
-  const payload: EvaluationRunJobPayload = { ...params, runId: run.id };
+  const payload: EvaluationRunJobPayload = {
+    tenantDbName: params.tenantDbName,
+    tenantId: params.tenantId,
+    projectId: params.projectId,
+    createdBy: params.createdBy,
+    suiteKey: params.suiteKey,
+    agentVersion: params.agentVersion,
+    runId: run.id,
+  };
   const queue = await getQueue();
   await queue.publish(EVALUATION_RUN_QUEUE, EVALUATION_RUN_JOB, payload, { attempts: 1, backoffMs: 5000 });
   logger.info('Evaluation run enqueued', { runId: run.id, suiteKey: params.suiteKey });
@@ -50,6 +59,7 @@ export async function runSuiteJob(payload: EvaluationRunJobPayload): Promise<voi
     createdBy: payload.createdBy,
     suiteKey: payload.suiteKey,
     runId: payload.runId,
+    agentVersion: payload.agentVersion,
   });
   logger.info('Evaluation run completed', { runId: payload.runId, suiteKey: payload.suiteKey });
 }

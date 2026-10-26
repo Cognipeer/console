@@ -59,6 +59,8 @@ export interface ComplianceEvidenceSample {
   input: string;
   /** The system's response (final assistant turn). */
   output: string;
+  /** Agent scans: the published version that answered; `null` when nothing was published and the draft answered. */
+  agentVersion?: number | null;
 }
 
 /** Posture for one EU risk family, with the regulatory hooks it evidences. */

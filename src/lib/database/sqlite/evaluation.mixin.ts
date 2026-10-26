@@ -31,6 +31,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { agentRevisionFromColumn, agentVersionFromColumn, agentVersionToColumn } from './agentRevisionColumns';
 import {
   hasAnyLabel,
   labelJsonPath,
@@ -149,10 +150,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.evaluationTargets}
-        (id, tenantId, projectId, key, name, description, kind, agentKey, modelKey,
+        (id, tenantId, projectId, key, name, description, kind, agentKey, agentVersion, modelKey,
          ragModuleKey, retrievalTopK, retrievalMinScore,
          external, systemPrompt, promptKey, promptVersion, responseFormat, maxTokens, defaultParams, metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @kind, @agentKey, @modelKey,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @kind, @agentKey, @agentVersion, @modelKey,
          @ragModuleKey, @retrievalTopK, @retrievalMinScore,
          @external, @systemPrompt, @promptKey, @promptVersion, @responseFormat, @maxTokens, @defaultParams, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
@@ -164,6 +165,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         description: target.description ?? null,
         kind: target.kind,
         agentKey: target.agentKey ?? null,
+        agentVersion: agentVersionToColumn(target.agentVersion),
         modelKey: target.modelKey ?? null,
         ragModuleKey: target.ragModuleKey ?? null,
         retrievalTopK: target.retrievalTopK ?? null,
@@ -195,6 +197,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.kind !== undefined) { sets.push('kind = @kind'); params.kind = data.kind; }
       if (data.agentKey !== undefined) { sets.push('agentKey = @agentKey'); params.agentKey = data.agentKey; }
+      if (data.agentVersion !== undefined) { sets.push('agentVersion = @agentVersion'); params.agentVersion = agentVersionToColumn(data.agentVersion); }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
       if (data.ragModuleKey !== undefined) { sets.push('ragModuleKey = @ragModuleKey'); params.ragModuleKey = data.ragModuleKey ?? null; }
       if (data.retrievalTopK !== undefined) { sets.push('retrievalTopK = @retrievalTopK'); params.retrievalTopK = data.retrievalTopK ?? null; }
@@ -748,9 +751,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       db.prepare(`
         INSERT INTO ${TABLES.evaluationRuns}
         (id, tenantId, projectId, suiteKey, targetKey, datasetKey, status, mode, progress,
-         aggregate, items, error, startedAt, finishedAt, createdBy, createdAt, updatedAt)
+         aggregate, items, agentRevision, error, startedAt, finishedAt, createdBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @suiteKey, @targetKey, @datasetKey, @status, @mode, @progress,
-         @aggregate, @items, @error, @startedAt, @finishedAt, @createdBy, @createdAt, @updatedAt)
+         @aggregate, @items, @agentRevision, @error, @startedAt, @finishedAt, @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: run.tenantId,
@@ -763,6 +766,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         progress: this.toJson(run.progress ?? { total: 0, completed: 0, failed: 0 }),
         aggregate: run.aggregate !== undefined ? this.toJson(run.aggregate) : null,
         items: this.toJson(run.items ?? []),
+        agentRevision: run.agentRevision ? this.toJson(run.agentRevision) : null,
         error: run.error ?? null,
         startedAt: toIso(run.startedAt),
         finishedAt: toIso(run.finishedAt),
@@ -785,6 +789,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (data.progress !== undefined) { sets.push('progress = @progress'); params.progress = this.toJson(data.progress); }
       if (data.aggregate !== undefined) { sets.push('aggregate = @aggregate'); params.aggregate = this.toJson(data.aggregate); }
       if (data.items !== undefined) { sets.push('items = @items'); params.items = this.toJson(data.items); }
+      if (data.agentRevision !== undefined) { sets.push('agentRevision = @agentRevision'); params.agentRevision = data.agentRevision ? this.toJson(data.agentRevision) : null; }
       if (data.error !== undefined) { sets.push('error = @error'); params.error = data.error; }
       if (data.startedAt !== undefined) { sets.push('startedAt = @startedAt'); params.startedAt = toIso(data.startedAt); }
       if (data.finishedAt !== undefined) { sets.push('finishedAt = @finishedAt'); params.finishedAt = toIso(data.finishedAt); }
@@ -827,6 +832,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         description: (r.description as string | null) ?? undefined,
         kind: r.kind as EvaluationTargetKind,
         agentKey: (r.agentKey as string | null) ?? undefined,
+        agentVersion: agentVersionFromColumn(r.agentVersion),
         modelKey: (r.modelKey as string | null) ?? undefined,
         ragModuleKey: (r.ragModuleKey as string | null) ?? undefined,
         retrievalTopK: (r.retrievalTopK as number | null) ?? undefined,
@@ -927,6 +933,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         progress: this.parseJson(r.progress, { total: 0, completed: 0, failed: 0 }),
         aggregate: aggregate ?? undefined,
         items: this.parseJson<IEvaluationRunItem[]>(r.items, []),
+        agentRevision: agentRevisionFromColumn(r.agentRevision),
         error: (r.error as string | null) ?? undefined,
         startedAt: this.toDate(r.startedAt),
         finishedAt: this.toDate(r.finishedAt),

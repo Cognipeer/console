@@ -140,9 +140,12 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
     }
     setSaving(true);
     try {
+      // An absent key leaves the stored value alone on an edit, so an emptied description is
+      // sent as `''` to clear it. The optional fields inside the attempts and the judges need
+      // no such care: those arrays are sent whole and replace the stored ones.
       const payload = {
         name: name.trim(),
-        description: description.trim() || undefined,
+        description: description.trim() || (editing ? '' : undefined),
         category,
         severity,
         attempts: attempts.map((a, i) => ({

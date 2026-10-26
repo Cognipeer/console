@@ -25,6 +25,9 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { configVersionTag, runVersionTag } from '@/components/agents/agentVersionTag';
+import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
 import CreateCampaignModal from '@/components/redteam/CreateCampaignModal';
 import CreateCustomProbeModal from '@/components/redteam/CreateCustomProbeModal';
 import RunScanModal from '@/components/redteam/RunScanModal';
@@ -77,6 +80,7 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [scanCampaign, setScanCampaign] = useState<RedTeamCampaignView | null>(null);
+  const { canRunAgentTests } = useAgentTestAccess();
 
   const [campaignModal, setCampaignModal] = useState(false);
   const [probeModal, setProbeModal] = useState(false);
@@ -187,7 +191,11 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
     ) },
     { key: 'kind', label: 'Target', render: (c) => <span className="ds-badge ds-badge-info">{c.targetKind}</span> },
     { key: 'ref', label: 'Agent / Model', render: (c) => (
-      <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>{c.agentKey ?? c.modelKey ?? '—'}</span>
+      <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+        {c.targetKind === 'agent' && c.agentKey
+          ? <AgentWithVersion name={c.agentKey} tag={configVersionTag(c.agentVersion)} />
+          : c.modelKey ?? '—'}
+      </span>
     ) },
     { key: 'probes', label: 'Probes', render: (c) => <span>{c.probeKeys.length === 0 ? 'all' : c.probeKeys.length}</span> },
     { key: 'schedule', label: 'Schedule', render: (c) => (
@@ -208,6 +216,15 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
       </span>
     ) },
     { key: 'review', label: 'Needs review', render: (r) => <span>{r.aggregate ? r.aggregate.needsReview : '—'}</span> },
+    { key: 'agent', label: 'Agent', render: (r) => (
+      r.targetKind === 'agent'
+        ? (
+          <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+            <AgentWithVersion name={r.targetRef} tag={runVersionTag(r.agentRevision)} />
+          </span>
+        )
+        : <span className="ds-faint">—</span>
+    ) },
     { key: 'resilience', label: 'Resilience', render: (r) => <span>{r.aggregate ? pct(r.aggregate.resilienceScore) : '—'}</span> },
     { key: 'created', label: 'Started', render: (r) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(r.startedAt ?? r.createdAt)}</span> },
   ];
@@ -291,6 +308,9 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
               id: 'scan',
               label: 'Run scan',
               icon: <IconPlayerPlay size={14} />,
+              // Scanning an agent needs Write on Agents; the server refuses it otherwise.
+              disabled: c.targetKind === 'agent' && !canRunAgentTests,
+              disabledReason: AGENT_TEST_ACCESS_HINT,
               onClick: () => setScanCampaign(c),
             },
             { id: 'open', label: 'Open', icon: <IconPencil size={14} />, onClick: () => router.push(`/dashboard/redteam/campaigns/${c.id}`) },

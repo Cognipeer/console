@@ -10,6 +10,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, Group, Select, Stack, Table, Text } from '@mantine/core';
 import { IconArrowRight } from '@tabler/icons-react';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { runVersionTag } from '@/components/agents/agentVersionTag';
+import { describeRunRevision } from '@/lib/shared/agentRevision';
 import type { EvalComparisonStatus, EvalComparisonView, EvalRunView } from './types';
 
 const STATUS_COLOR: Record<EvalComparisonStatus, string> = {
@@ -68,8 +71,20 @@ export default function EvaluationRunCompare({ run }: Props) {
   }, [run.suiteKey, run.id]);
 
   const options = useMemo(
-    () => candidates.map((r) => ({ value: r.id, label: `${fmtDate(r.finishedAt ?? r.createdAt)} · ${Math.round((r.aggregate?.passRate ?? 0) * 100)}% pass` })),
+    () => candidates.map((r) => ({
+      value: r.id,
+      label: `${fmtDate(r.finishedAt ?? r.createdAt)} · ${Math.round((r.aggregate?.passRate ?? 0) * 100)}% pass${r.agentRevision ? ` · ${describeRunRevision(r.agentRevision)}` : ''}`,
+    })),
     [candidates],
+  );
+
+  // Two runs of the same suite can have tested different agent configurations;
+  // say which, because that is usually what the diff is about.
+  const baselineRevision = candidates.find((r) => r.id === (comparison?.baselineRunId ?? baselineId))?.agentRevision;
+  // The target may have been pointed at another agent between the two runs; the versions alone would then read
+  // as one agent's change.
+  const agentMoved = Boolean(
+    baselineRevision?.agentKey && run.agentRevision?.agentKey && baselineRevision.agentKey !== run.agentRevision.agentKey,
   );
 
   const runCompare = async () => {
@@ -144,6 +159,13 @@ export default function EvaluationRunCompare({ run }: Props) {
           <Button size="xs" onClick={runCompare} loading={loading} disabled={!baselineId}>Compare</Button>
         </Group>
       </Group>
+
+      {baselineRevision && run.agentRevision ? (
+        <Text size="xs" c="dimmed" mb="sm">
+          Agent version: baseline <AgentWithVersion name={agentMoved ? baselineRevision.agentKey : undefined} tag={runVersionTag(baselineRevision)} /> → this run{' '}
+          <AgentWithVersion name={agentMoved ? run.agentRevision.agentKey : undefined} tag={runVersionTag(run.agentRevision)} />
+        </Text>
+      ) : null}
 
       {comparison ? (
         <Stack gap="md">

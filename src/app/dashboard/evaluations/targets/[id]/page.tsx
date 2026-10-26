@@ -8,6 +8,8 @@ import { useDeleteResource, ResourceUsageSection } from '@/components/common/con
 import { useTranslations } from '@/lib/i18n';
 import { IconArrowLeft, IconPencil, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { configVersionTag } from '@/components/agents/agentVersionTag';
 import CreateTargetModal from '@/components/evaluations/CreateTargetModal';
 import type { EvalTargetView, ModelOption } from '@/components/evaluations/types';
 
@@ -115,7 +117,13 @@ export default function EvaluationTargetDetailPage() {
           <Row label="Name" value={target.name} />
           <Row label="Key" value={target.key} mono />
           <Row label="Kind" value={target.kind} />
-          <Row label={REFERENCE_LABEL[target.kind]} value={target.modelKey ?? target.agentKey ?? target.ragModuleKey ?? '—'} mono />
+          <Row
+            label={REFERENCE_LABEL[target.kind]}
+            value={target.kind === 'agent'
+              ? <AgentWithVersion name={target.agentKey ?? '—'} tag={configVersionTag(target.agentVersion)} />
+              : target.modelKey ?? target.ragModuleKey ?? '—'}
+            mono
+          />
           {target.kind === 'rag' && (
             <>
               <Row label="Top K" value={target.retrievalTopK ?? 'module default'} />

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Menu, Text } from '@mantine/core';
+import { Button, Group, Loader, Menu, Text, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
@@ -10,6 +10,9 @@ import { IconDots, IconPencil, IconPlayerPlay, IconShield, IconTrash } from '@ta
 import DetailShell from '@/components/common/ui/DetailShell';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatTile from '@/components/common/ui/StatTile';
+import AgentWithVersion from '@/components/agents/AgentWithVersion';
+import { configVersionTag, runVersionTag } from '@/components/agents/agentVersionTag';
+import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
 import CreateCampaignModal from '@/components/redteam/CreateCampaignModal';
 import RunScanModal from '@/components/redteam/RunScanModal';
 import type { ProbeCatalogView, RedTeamCampaignView, RedTeamRunView, SelectOption } from '@/components/redteam/types';
@@ -48,6 +51,7 @@ export default function RedTeamCampaignDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [editing, setEditing] = useState(false);
+  const { canRunAgentTests } = useAgentTestAccess();
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -106,6 +110,15 @@ export default function RedTeamCampaignDetailPage() {
     { key: 'asr', label: 'Attack success', render: (r) => <span>{r.aggregate ? pct(r.aggregate.attackSuccessRate) : '—'}</span> },
     { key: 'vuln', label: 'Vulnerable', render: (r) => <span className={r.aggregate && r.aggregate.vulnerable > 0 ? 'ds-badge ds-badge-err' : ''}>{r.aggregate ? r.aggregate.vulnerable : '—'}</span> },
     { key: 'review', label: 'Needs review', render: (r) => <span>{r.aggregate ? r.aggregate.needsReview : '—'}</span> },
+    { key: 'agent', label: 'Agent', render: (r) => (
+      r.targetKind === 'agent'
+        ? (
+          <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
+            <AgentWithVersion name={r.targetRef} tag={runVersionTag(r.agentRevision)} />
+          </span>
+        )
+        : <span className="ds-faint">—</span>
+    ) },
     { key: 'started', label: 'Started', render: (r) => <span className="ds-faint" style={{ fontSize: 12 }}>{fmtDate(r.startedAt ?? r.createdAt)}</span> },
   ];
 
@@ -121,6 +134,8 @@ export default function RedTeamCampaignDetailPage() {
   }
 
   const latest = runs.find((r) => r.aggregate)?.aggregate;
+  // Scanning an agent needs Write on Agents; the server refuses it otherwise.
+  const scanBlocked = campaign.targetKind === 'agent' && !canRunAgentTests;
 
   return (
     <DetailShell
@@ -131,15 +146,29 @@ export default function RedTeamCampaignDetailPage() {
       meta={
         <span>
           <span className="ds-mono">{campaign.key}</span> · {campaign.targetKind}{' '}
-          <span className="ds-mono">{campaign.agentKey ?? campaign.modelKey}</span>
+          <span className="ds-mono">
+            {campaign.targetKind === 'agent'
+              ? <AgentWithVersion name={campaign.agentKey ?? '—'} tag={configVersionTag(campaign.agentVersion)} />
+              : campaign.modelKey}
+          </span>
           {campaign.schedule?.enabled ? <> · <span className="ds-badge ds-badge-info ds-mono">{campaign.schedule.cron}</span></> : null}
         </span>
       }
       actions={
         <>
-          <Button color="teal" size="sm" leftSection={<IconPlayerPlay size={14} />} onClick={() => setScanOpen(true)}>
-            Run scan
-          </Button>
+          <Tooltip label={AGENT_TEST_ACCESS_HINT} disabled={!scanBlocked} withArrow multiline w={240}>
+            {/* `data-disabled`, not `disabled`: a native one swallows the hover the tooltip needs. */}
+            <Button
+              color="teal"
+              size="sm"
+              leftSection={<IconPlayerPlay size={14} />}
+              data-disabled={scanBlocked || undefined}
+              aria-disabled={scanBlocked || undefined}
+              onClick={scanBlocked ? (event) => event.preventDefault() : () => setScanOpen(true)}
+            >
+              Run scan
+            </Button>
+          </Tooltip>
           <Menu position="bottom-end" withinPortal>
             <Menu.Target><Button variant="default" size="sm" px={8}><IconDots size={16} /></Button></Menu.Target>
             <Menu.Dropdown>
@@ -171,7 +200,7 @@ export default function RedTeamCampaignDetailPage() {
           icon: <IconPlayerPlay size={26} stroke={1.7} />,
           title: 'No scans yet',
           description: 'Run a scan to see vulnerability results here.',
-          primaryAction: { label: 'Run scan', icon: <IconPlayerPlay size={14} />, onClick: () => setScanOpen(true) },
+          primaryAction: scanBlocked ? undefined : { label: 'Run scan', icon: <IconPlayerPlay size={14} />, onClick: () => setScanOpen(true) },
         }}
       />
 

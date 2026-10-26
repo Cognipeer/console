@@ -42,6 +42,8 @@ export interface DataGridRowAction<T> {
   color?: 'red' | 'teal' | 'gray' | 'blue' | 'orange' | undefined;
   onClick?: (row: T) => void;
   disabled?: boolean | ((row: T) => boolean);
+  /** Said on hover while the action is disabled: why it is. */
+  disabledReason?: ReactNode;
   hidden?: boolean | ((row: T) => boolean);
   divider?: boolean;
 }
@@ -586,18 +588,30 @@ export function RowActionItems<T>({ actions, row }: { actions: DataGridRowAction
         const hasItem = a.label !== undefined || a.onClick !== undefined;
         const disabled =
           typeof a.disabled === 'function' ? a.disabled(row) : !!a.disabled;
+        // A native `disabled` swallows the hover a tooltip listens to, so an action
+        // that says why it is off is only marked disabled and its click ignored.
+        const reason = disabled ? a.disabledReason : undefined;
+        const item = (
+          <Menu.Item
+            color={a.color}
+            leftSection={a.icon}
+            disabled={disabled && !reason}
+            data-disabled={reason ? true : undefined}
+            aria-disabled={reason ? true : undefined}
+            onClick={reason ? undefined : () => a.onClick?.(row)}
+          >
+            {a.label}
+          </Menu.Item>
+        );
         return (
           <Fragment key={a.id ?? `${idx}`}>
             {a.divider ? <Menu.Divider /> : null}
             {hasItem ? (
-              <Menu.Item
-                color={a.color}
-                leftSection={a.icon}
-                disabled={disabled}
-                onClick={() => a.onClick?.(row)}
-              >
-                {a.label}
-              </Menu.Item>
+              reason ? (
+                <Tooltip label={reason} position="left" withArrow multiline w={220}>
+                  {item}
+                </Tooltip>
+              ) : item
             ) : null}
           </Fragment>
         );

@@ -6,7 +6,10 @@
  * trigger-oriented — designed for CI/automation:
  *
  *   GET  /client/v1/evaluation/suites             – list configured suites
- *   POST /client/v1/evaluation/suites/:key/run    – run a suite (synchronous)
+ *   POST /client/v1/evaluation/suites/:key/run    – run a suite (synchronous);
+ *        optional body `{ agent_version }`: "published", "draft" or a version
+ *        number, for agent targets. Running an agent target also needs write
+ *        access to Agents (403 otherwise), whichever version is asked for
  *   GET  /client/v1/evaluation/runs               – list runs (?suite_key, ?limit)
  *   GET  /client/v1/evaluation/runs/:id           – get one run + per-item scores
  *
@@ -20,6 +23,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getRun, listRuns, listSuites, runSuite } from '@/lib/services/evaluation/service';
+import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
+import { parseAgentRunOverride } from '@/lib/shared/agentRevision';
 import {
   toRunSummary,
   toRunView,
@@ -27,9 +32,11 @@ import {
 } from '@/lib/services/evaluation/clientEvaluationShared';
 import {
   getApiTokenContextForRequest,
+  readOptionalJsonObjectBody,
   sendApiTokenError,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
 
 const logger = createLogger('api:client-evaluation');
 
@@ -41,6 +48,9 @@ function clampLimit(raw: unknown): number | undefined {
 }
 
 function fail(reply: import('fastify').FastifyReply, error: unknown, scope: string) {
+  // A refusal (403, or the 503 when the engine cannot decide) is answered as the gate answers it, never as a 404 or a 500.
+  const refused = sendAgentTestRefusal(reply, error);
+  if (refused) return refused;
   logger.error(`Client evaluation ${scope} error`, { error });
   const message = error instanceof Error ? error.message : 'Internal error';
   return (
@@ -65,15 +75,34 @@ export const clientEvaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
       if (!key) return reply.code(400).send({ error: 'suite key is required' });
+      // The body is optional: existing callers POST with none. One that is
+      // sent must parse, or the run would quietly test the default revision.
+      let body: Record<string, unknown>;
+      try {
+        body = readOptionalJsonObjectBody(request);
+      } catch {
+        return reply.code(400).send({ error: 'Request body must be a JSON object' });
+      }
+      const revision = parseAgentRunOverride(body.agent_version, 'agent_version');
+      if (!revision.ok) return reply.code(400).send({ error: revision.error });
       const run = await runSuite({
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         createdBy: ctx.tokenRecord.userId ?? 'api-token',
         suiteKey: key,
+        agentVersion: revision.revision,
+        // Asked by the service once it knows the suite's target is an agent, before a run row exists. For a
+        // token it is the owner's permission, capped by the token's scope.
+        authorizeAgentRun: () => requireAgentTestAccess(request),
       });
       return reply.code(201).send({ run: toRunView(run) });
     } catch (error) {
+      if (error instanceof AgentRevisionError) return reply.code(400).send({ error: error.message });
+      // The same suite on the same revision is already running (a different revision may run alongside).
+      if (error instanceof Error && error.message.toLowerCase().includes('already in progress')) {
+        return reply.code(409).send({ error: error.message });
+      }
       return fail(reply, error, 'run suite');
     }
   }));

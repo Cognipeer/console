@@ -23,12 +23,21 @@ import type {
   EvaluationDatasetSource,
   EvaluationTurnMode,
   EvaluationDatasetItemQuery,
+  AgentRevision,
+  IAgentRunRevision,
 } from '@/lib/database';
 import { runEvaluation } from './runner';
 import { EMBEDDING_SCORERS, JUDGE_SCORERS } from './scorers';
 import { compareEvaluationRuns, type EvalComparison } from './compare';
 import type { DatasetItem, RunItemResult, ScorerConfig } from './types';
 import { buildEmbedInvoker, buildJudgeInvoker, buildTargetInvoker, type EvaluationModelContext } from './adapters';
+import { sameAgentRevision, agentRevisionLabel, storedAgentRevision } from '@/lib/shared/agentRevision';
+import {
+  AgentRevisionError,
+  assertAgentRevisionRunnable,
+  startAgentRevision,
+  type StartedAgentRevision,
+} from '@/lib/services/agents/agentRevision';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
@@ -148,8 +157,8 @@ export interface CreateTargetInput {
   description?: string;
   kind: EvaluationTargetKind;
   agentKey?: string;
-  /** Pin to one published agent version; absent/null follows the published one. */
-  agentVersion?: number | null;
+  /** Default revision of an agent target: a published version, the saved draft, or absent/null to follow the published one. */
+  agentVersion?: number | 'draft' | null;
   modelKey?: string;
   external?: IEvaluationTarget['external'];
   /** `rag` targets: which Knowledge Engine module to retrieve from, and how much. */
@@ -183,6 +192,8 @@ export async function createTarget(
     description: input.description,
     kind: input.kind,
     agentKey: input.agentKey,
+    // Agent targets only, and only a real pin: absent already means "follow the published version".
+    ...(input.kind === 'agent' && input.agentVersion != null ? { agentVersion: input.agentVersion } : {}),
     modelKey: input.modelKey,
     external: input.external,
     ragModuleKey: input.ragModuleKey,
@@ -215,15 +226,37 @@ export async function getTarget(tenantDbName: string, id: string): Promise<WithI
   return record ? toView(record) : null;
 }
 
+/** Target fields a PATCH may clear by sending `null`. */
+type ClearableTargetField =
+  | 'description'
+  | 'retrievalTopK'
+  | 'retrievalMinScore'
+  | 'systemPrompt'
+  | 'promptKey'
+  | 'promptVersion'
+  | 'responseFormat'
+  | 'maxTokens'
+  | 'defaultParams';
+
+/**
+ * A target PATCH: a key that is absent leaves the stored value alone (never
+ * pass `undefined` for it), and `null` clears an optional one. Both providers
+ * read it that way.
+ */
+export type UpdateTargetInput = Partial<
+  Omit<IEvaluationTarget, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt' | 'updatedAt' | ClearableTargetField>
+> & { [K in ClearableTargetField]?: IEvaluationTarget[K] | null };
+
 export async function updateTarget(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Omit<IEvaluationTarget, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt' | 'updatedAt'>>,
+  data: UpdateTargetInput,
 ): Promise<WithId<IEvaluationTarget> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const updated = await db.updateEvaluationTarget(id, { ...data, updatedBy });
+  // The provider type has no `null` for an optional field, but both mixins store one as a cleared value.
+  const updated = await db.updateEvaluationTarget(id, { ...data, updatedBy } as Parameters<typeof db.updateEvaluationTarget>[1]);
   return updated ? toView(updated) : null;
 }
 
@@ -639,15 +672,28 @@ export async function getSuite(tenantDbName: string, id: string): Promise<WithId
   return record ? toView(record) : null;
 }
 
+/**
+ * A suite PATCH: a key that is absent leaves the stored value alone (never pass
+ * `undefined` for it), and `null` clears the description or a model key.
+ */
+export type UpdateSuiteInput = Partial<
+  Pick<IEvaluationSuite, 'name' | 'targetKey' | 'datasetKey' | 'scorers' | 'runConfig' | 'projectId'>
+> & {
+  description?: string | null;
+  judgeModelKey?: string | null;
+  embeddingModelKey?: string | null;
+};
+
 export async function updateSuite(
   tenantDbName: string,
   id: string,
   updatedBy: string,
-  data: Partial<Pick<IEvaluationSuite, 'name' | 'description' | 'targetKey' | 'datasetKey' | 'scorers' | 'judgeModelKey' | 'embeddingModelKey' | 'runConfig' | 'projectId'>>,
+  data: UpdateSuiteInput,
 ): Promise<WithId<IEvaluationSuite> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const updated = await db.updateEvaluationSuite(id, { ...data, updatedBy });
+  // The provider type has no `null` for an optional field, but both mixins store one as a cleared value.
+  const updated = await db.updateEvaluationSuite(id, { ...data, updatedBy } as Parameters<typeof db.updateEvaluationSuite>[1]);
   return updated ? toView(updated) : null;
 }
 
@@ -706,6 +752,18 @@ export interface RunSuiteParams {
   projectId?: string;
   createdBy: string;
   suiteKey: string;
+  /**
+   * Agent targets: run this revision instead of the target's default
+   * (`agentVersion`). Refused for any other kind of target.
+   */
+  agentVersion?: AgentRevision;
+  /**
+   * Asked once the suite's target is known to be an agent, before anything
+   * about the agent is looked at and before a run row is written; it throws to
+   * refuse. Only the request that starts a run can answer for its caller, so
+   * this is never queued (a scheduler has no caller to ask).
+   */
+  authorizeAgentRun?: () => Promise<void>;
 }
 
 /**
@@ -737,14 +795,39 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
   const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
   if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
   assertTurnModeSupported(target, suite.runConfig?.turnMode);
+  // Before the revision check below, which says whether a version exists.
+  if (target.kind === 'agent') await params.authorizeAgentRun?.();
+
+  // A run's own request wins over the target's default. Resolved before the
+  // guard below, which compares revisions, and checked now so that a version
+  // that was never published refuses the run instead of failing every item.
+  let agentRevision: IAgentRunRevision | undefined;
+  if (target.kind === 'agent' && target.agentKey) {
+    const requested = params.agentVersion ?? storedAgentRevision(target.agentVersion);
+    await assertAgentRevisionRunnable(tenantDbName, target.agentKey, projectId, requested);
+    agentRevision = { requested, agentKey: target.agentKey };
+  } else if (params.agentVersion !== undefined && target.kind !== 'agent') {
+    throw new AgentRevisionError(
+      `Evaluation target "${target.key}" is not an agent target, so a run cannot ask for an agent version`,
+    );
+  }
 
   // Guard against duplicate/concurrent runs of the same suite. Reject if a
   // recent run is still in progress; stale 'running' rows (>1h, from a hard
-  // crash) are ignored so a suite can never get permanently locked.
-  const inFlight = await db.listEvaluationRuns({ projectId, suiteKey: suite.key, status: 'running', limit: 1 });
-  const recentStart = inFlight[0]?.startedAt ? new Date(inFlight[0].startedAt).getTime() : 0;
-  if (inFlight.length > 0 && Date.now() - recentStart < 60 * 60 * 1000) {
-    throw new Error(`A run for suite "${suite.key}" is already in progress`);
+  // crash) are ignored so a suite can never get permanently locked. Runs that
+  // test different revisions of the agent are not duplicates — comparing the
+  // draft with the published version is the point of asking for one — but a
+  // run with no recorded revision could be testing anything, so it blocks.
+  const inFlight = await db.listEvaluationRuns({ projectId, suiteKey: suite.key, status: 'running', limit: 20 });
+  const conflict = inFlight.some((other) => {
+    const recentStart = other.startedAt ? new Date(other.startedAt).getTime() : 0;
+    if (Date.now() - recentStart >= 60 * 60 * 1000) return false;
+    return !other.agentRevision || !agentRevision || sameAgentRevision(other.agentRevision.requested, agentRevision.requested);
+  });
+  if (conflict) {
+    throw new Error(
+      `A run for suite "${suite.key}" is already in progress${agentRevision ? ` on ${agentRevisionLabel(agentRevision.requested)}` : ''}`,
+    );
   }
 
   const run = await db.createEvaluationRun({
@@ -761,6 +844,7 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
       failed: 0,
     },
     items: [],
+    ...(agentRevision ? { agentRevision } : {}),
     createdBy,
   });
   return toView(run);
@@ -788,6 +872,16 @@ export async function executeRun(
     if (!suite) throw new Error(`Evaluation suite "${suiteKey}" not found`);
     const target = await db.findEvaluationTargetByKey(suite.targetKey, projectId);
     if (!target) throw new Error(`Evaluation target "${suite.targetKey}" not found`);
+    // A run was authorized for the target its suite named when the run was
+    // created (an agent target needs Write on Agents, asked then). A suite
+    // pointed elsewhere while the run waited would run a target nobody was
+    // asked about, so the run stops instead.
+    const created = await db.findEvaluationRunById(runId);
+    if (created && created.targetKey !== target.key) {
+      throw new Error(
+        `Suite "${suite.key}" now points at target "${target.key}", not at "${created.targetKey}" this run was started for; start the run again`,
+      );
+    }
     const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
     if (!dataset) throw new Error(`Evaluation dataset "${suite.datasetKey}" not found`);
     // Re-checked here and not only at enqueue time: a queued run reloads the
@@ -806,7 +900,19 @@ export async function executeRun(
     }));
     const scorers: ScorerConfig[] = suite.scorers.map(mapScorer);
 
-    await db.updateEvaluationRun(runId, { status: 'running', startedAt: new Date() });
+    // Pinned once, as the run starts: `published` becomes the version published
+    // right now, so every item runs one config even if someone publishes midway.
+    let started: StartedAgentRevision | undefined;
+    if (target.kind === 'agent' && target.agentKey) {
+      const requested = created?.agentRevision?.requested ?? params.agentVersion ?? storedAgentRevision(target.agentVersion);
+      started = await startAgentRevision(tenantDbName, target.agentKey, projectId, requested);
+    }
+
+    await db.updateEvaluationRun(runId, {
+      status: 'running',
+      startedAt: new Date(),
+      ...(started ? { agentRevision: started.revision } : {}),
+    });
 
     const ctx: EvaluationModelContext = { tenantDbName, tenantId, projectId: projectId ?? '', userId: createdBy };
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
@@ -825,7 +931,7 @@ export async function executeRun(
     const result = await runEvaluation({
       items,
       scorers,
-      invokeTarget: makeTarget(target, ctx),
+      invokeTarget: makeTarget(target, ctx, started ? { agentRun: started.selector } : {}),
       invokeJudge: needJudge ? makeJudge(suite.judgeModelKey, ctx) : undefined,
       invokeEmbed: needEmbed ? makeEmbed(suite.embeddingModelKey, ctx) : undefined,
       config: { concurrency: suite.runConfig?.concurrency, turnMode: suite.runConfig?.turnMode },
@@ -846,6 +952,10 @@ export async function executeRun(
       },
     });
 
+    // A draft is read afresh by every item, so a save during the run means the
+    // later items may have run a different config than the earlier ones.
+    const draftChanged = started?.revision.version === null && (await started.draftChanged());
+
     const updated = await db.updateEvaluationRun(runId, {
       status: 'completed',
       progress: {
@@ -855,6 +965,7 @@ export async function executeRun(
       },
       aggregate: result.aggregate,
       items: result.items.map(toRunItem),
+      ...(started && draftChanged ? { agentRevision: { ...started.revision, draftChanged: true } } : {}),
       finishedAt: new Date(),
     });
     return toView(updated ?? (await db.findEvaluationRunById(runId))!);

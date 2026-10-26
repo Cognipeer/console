@@ -77,6 +77,13 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   [Browsers through the MCP module](#browsers-through-the-mcp-module)). `@cognipeer/console-sdk` 4 drops
   `client.browserMcp`.
 
+- **Testing an agent needs write access to Agents.** Running an evaluation suite whose target is an agent, scanning an
+  agent red-team campaign, and creating or changing an agent target or campaign also need `agents` Write, the level of
+  Studio chat and of the agent API. It is checked before a run is created. An API token gets its owner's level capped by
+  its scope, so a CI token without the Agents scope now gets `403` (`service: "agents"`, `required: "write"`) on agent
+  suites and agent campaigns: add the scope to it. Tests of a model, a Knowledge Engine module or an external endpoint
+  are not affected. See [Calls that need a second service](docs/guide/authorization.md#calls-that-need-a-second-service).
+
 ### Agent runs and run classes
 
 - Every agent turn from the API is a **run** (`run_<id>`) on one engine: Responses, chat completions, A2A, sessions,
@@ -670,3 +677,23 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - `maxPages` is a hard cap: a run returns at most that many pages, and downloaded files count toward it as documented.
 - Knowledge Engine document and chunk totals are now updated atomically, so concurrent ingests into one module no
   longer overwrite each other's counts.
+
+### Agent tests on the draft or a chosen version
+
+- An Evaluation suite on an **agent target** and a Red Team scan of an **agent campaign** can test the agent's **draft**
+  or any **published version**, not only the published one. The target or the campaign keeps a default (`agentVersion`:
+  the published version, a version number or `"draft"`), and one run can ask for another (`agentVersion` on the
+  dashboard, `agent_version` on the client API). See
+  [Choosing the agent version for a test](docs/guide/evaluation-and-analysis.md#choosing-the-agent-version-for-a-test).
+- Every run records what answered (`agentRevision`, `agent_revision` on the client API): the version the published one
+  resolved to when the run started, or the draft, with a fingerprint and `draftChanged` when the draft was saved during
+  the run. The agent's name carries that version on targets, campaigns, runs and comparisons.
+- A suite or a campaign runs once at a time per version (a second start is `409`); different versions run side by side.
+  A campaign with an enabled schedule cannot default to the draft, and the EU AI Act compliance report leaves draft
+  scans out.
+- A pinned version chosen when a target is created is now stored. Before, it was dropped on every database (on
+  MongoDB only editing the target stored it, on SQLite not even that), so the target ran the published version.
+- **A PATCH changes only what it is sent.** On MongoDB, a PATCH of an evaluation suite, a red-team campaign or a custom
+  probe stored `null` for every field it left out; now only an explicit `null` clears a field that may be
+  empty. A custom-probe PATCH without `detectors` keeps the stored detectors instead of resetting them. Moving a target
+  or a campaign to another agent without a version drops its pinned version.

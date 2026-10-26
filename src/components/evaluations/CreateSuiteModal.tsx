@@ -13,6 +13,7 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import { configVersionTag } from '@/components/agents/agentVersionTag';
 import type { EvalDatasetView, EvalScorerView, EvalSuiteView, EvalTargetView, ModelOption } from './types';
 
 interface CreateSuiteModalProps {
@@ -147,14 +148,17 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
         {
           method: isEdit ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
+          // An absent key leaves the stored value alone on an edit, so a field the form left
+          // empty is sent as `null` (`''` for the description) to clear it. A create reads
+          // `null` as absent, so the same body serves both.
           body: JSON.stringify({
             name: v.name.trim(),
-            description: v.description || undefined,
+            description: v.description || (isEdit ? '' : undefined),
             targetKey: v.targetKey,
             datasetKey: v.datasetKey,
             scorers,
-            judgeModelKey: v.useJudge ? v.judgeModelKey : undefined,
-            embeddingModelKey: usesEmbedding(v) ? v.embeddingModelKey : undefined,
+            judgeModelKey: v.useJudge ? v.judgeModelKey : null,
+            embeddingModelKey: usesEmbedding(v) ? v.embeddingModelKey : null,
             runConfig: { turnMode: v.turnMode },
           }),
         },
@@ -174,7 +178,11 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
     }
   };
 
-  const targetOptions = targets.map((t) => ({ value: t.key, label: `${t.name} (${t.kind})` }));
+  // An agent target also says which version it follows, so two targets on one agent can be told apart.
+  const targetOptions = targets.map((t) => ({
+    value: t.key,
+    label: `${t.name} (${t.kind}${t.kind === 'agent' ? ` · ${configVersionTag(t.agentVersion).label}` : ''})`,
+  }));
   const datasetOptions = datasets.map((d) => ({ value: d.key, label: `${d.name} (${d.itemCount} items)` }));
 
   const v = form.getValues();
