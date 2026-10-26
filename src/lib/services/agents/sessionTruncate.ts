@@ -281,6 +281,9 @@ export function planRerun(messages: readonly IAgentConversationMessage[], target
                 usage: {
                     ...(message.usage.inputTokens !== undefined ? { inputTokens: message.usage.inputTokens } : {}),
                     ...(message.usage.outputTokens !== undefined ? { outputTokens: message.usage.outputTokens } : {}),
+                    ...(message.usage.cachedInputTokens !== undefined ? { cachedInputTokens: message.usage.cachedInputTokens } : {}),
+                    ...(message.usage.cachedWriteTokens !== undefined ? { cachedWriteTokens: message.usage.cachedWriteTokens } : {}),
+                    ...(message.usage.reasoningTokens !== undefined ? { reasoningTokens: message.usage.reasoningTokens } : {}),
                     ...(message.usage.totalTokens !== undefined ? { totalTokens: message.usage.totalTokens } : {}),
                     ...(message.usage.costUsd !== undefined ? { costUsd: message.usage.costUsd } : {}),
                 },

@@ -10,7 +10,14 @@
 
 import type { IAgentConversationMessage } from '@/lib/database/provider/types.domain';
 
-/** The usage a session turn stores. `cachedInputTokens` is a discounted slice of `inputTokens`, not an addition to it. */
+/**
+ * The usage a session turn stores, in the console's canonical shape: `inputTokens` is the
+ * whole prompt, `cachedInputTokens` (reads) and `cachedWriteTokens` are SUBSETS of it, each
+ * billed at its own rate, `reasoningTokens` is a subset of `outputTokens`, and `totalTokens`
+ * is input + output. The gateway chat model hands the SDK exactly this basis. The two
+ * subsets that are only sometimes present (`cachedWriteTokens`, `reasoningTokens`) carry no
+ * key when they are 0.
+ */
 export type PlaygroundUsage = NonNullable<IAgentConversationMessage['usage']>;
 
 /**
@@ -28,7 +35,7 @@ export function normalizePlaygroundUsage(usage: unknown): { usage: PlaygroundUsa
     if (!usage || typeof usage !== 'object') return undefined;
     const raw = usage as Record<string, unknown>;
 
-    const ledger = normalizeUsageLedger(raw.totals);
+    const ledger = normalizeUsageLedger(raw.totals, raw.perRequest);
     if (ledger) return { usage: ledger };
 
     const pick = (...keys: string[]): number | undefined => {
@@ -47,13 +54,29 @@ export function normalizePlaygroundUsage(usage: unknown): { usage: PlaygroundUsa
         'cacheReadInputTokens',
         'cache_read_input_tokens',
     );
+    const cachedWriteTokens = pick(
+        'cachedWriteTokens',
+        'cache_write_tokens',
+        'cacheWriteInputTokens',
+        'cache_creation_input_tokens',
+    );
+    const reasoningTokens = pick('reasoningTokens', 'reasoning_tokens');
     const totalTokens = pick('totalTokens', 'total_tokens')
         ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
 
     if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) {
         return undefined;
     }
-    return { usage: { inputTokens, outputTokens, cachedInputTokens, totalTokens } };
+    return {
+        usage: {
+            inputTokens,
+            outputTokens,
+            cachedInputTokens,
+            ...(cachedWriteTokens ? { cachedWriteTokens } : {}),
+            ...(reasoningTokens ? { reasoningTokens } : {}),
+            totalTokens,
+        },
+    };
 }
 
 /**
@@ -63,12 +86,16 @@ export function normalizePlaygroundUsage(usage: unknown): { usage: PlaygroundUsa
  * touched cost together, and showing only the main model would under-report a
  * run that summarized or delegated.
  *
+ * The totals have no cache-write or reasoning slot, so those two come from the SDK's
+ * per-request entries (`perRequest[i].usage`): a cache write rides in the message usage
+ * the provider adapter reported (`raw`), reasoning in `completion_tokens_details`.
+ *
  * A delegated turn is counted once here. The SDK (0.15) merges the sub-agents'
  * model calls into the parent's ledger — each `perRequest` entry tagged with its
  * `subagent` — so these totals already are the whole turn; nothing adds the
  * sub-agents' usage on top of them.
  */
-export function normalizeUsageLedger(totals: unknown): PlaygroundUsage | undefined {
+export function normalizeUsageLedger(totals: unknown, perRequest?: unknown): PlaygroundUsage | undefined {
     if (!totals || typeof totals !== 'object') return undefined;
     const entries = Object.values(totals as Record<string, unknown>)
         .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object');
@@ -85,17 +112,43 @@ export function normalizeUsageLedger(totals: unknown): PlaygroundUsage | undefin
     const totalTokens = sum('total') || inputTokens + outputTokens;
 
     if (inputTokens === 0 && outputTokens === 0 && totalTokens === 0) return undefined;
-    return { inputTokens, outputTokens, cachedInputTokens, totalTokens };
+
+    let cachedWriteTokens = 0;
+    let reasoningTokens = 0;
+    if (Array.isArray(perRequest)) {
+        const num = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+        for (const request of perRequest) {
+            const used = (request as { usage?: Record<string, any> } | null)?.usage;
+            if (!used || typeof used !== 'object') continue;
+            cachedWriteTokens += num(used.prompt_tokens_details?.cache_write_tokens)
+                || num(used.raw?.prompt_tokens_details?.cache_write_tokens)
+                || num(used.raw?.cache_write_tokens);
+            reasoningTokens += num(used.completion_tokens_details?.reasoning_tokens)
+                || num(used.raw?.completion_tokens_details?.reasoning_tokens);
+        }
+    }
+    return {
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        ...(cachedWriteTokens > 0 ? { cachedWriteTokens } : {}),
+        ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+        totalTokens,
+    };
 }
 
 /** Sums two usages field by field; a field neither has stays absent, and a cost is kept only when both legs priced theirs. */
 export function addPlaygroundUsage(a: PlaygroundUsage, b: PlaygroundUsage): PlaygroundUsage {
     const sum = (x?: number, y?: number): number | undefined => (x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0));
     const costUsd = a.costUsd !== undefined && b.costUsd !== undefined ? a.costUsd + b.costUsd : undefined;
+    const cachedWriteTokens = sum(a.cachedWriteTokens, b.cachedWriteTokens);
+    const reasoningTokens = sum(a.reasoningTokens, b.reasoningTokens);
     const merged: PlaygroundUsage = {
         inputTokens: sum(a.inputTokens, b.inputTokens),
         outputTokens: sum(a.outputTokens, b.outputTokens),
         cachedInputTokens: sum(a.cachedInputTokens, b.cachedInputTokens),
+        ...(cachedWriteTokens !== undefined ? { cachedWriteTokens } : {}),
+        ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
         totalTokens: sum(a.totalTokens, b.totalTokens),
     };
     if (costUsd !== undefined) merged.costUsd = costUsd;
