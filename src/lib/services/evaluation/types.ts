@@ -90,7 +90,12 @@ export interface ExpectedToolCall {
 export interface EvalUsage {
   inputTokens?: number;
   outputTokens?: number;
+  /** Subset of inputTokens served from the prompt cache. */
   cachedInputTokens?: number;
+  /** Subset of inputTokens written to the prompt cache. */
+  cachedWriteTokens?: number;
+  /** Subset of outputTokens spent on reasoning. */
+  reasoningTokens?: number;
   costUsd?: number;
 }
 
@@ -350,7 +355,7 @@ export interface RunAggregate {
   avgLatencyMs: number | null;
   /** Sum of per-item usage.costUsd; present only if any item reported usage. */
   totalCostUsd?: number;
-  /** Sum of per-item tokens (input + output + cached); ditto. */
+  /** Sum of per-item tokens (input + output; cached is a subset of input); ditto. */
   totalTokens?: number;
 }
 

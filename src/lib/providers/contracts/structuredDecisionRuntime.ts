@@ -17,6 +17,7 @@ import type { DecisionRequest, DecisionResult, DecisionRuntime } from '../domain
 import type { ModelProviderRuntime, ModelRuntimeConfig } from '../domains/model';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
+import { toGatewayUsage } from '@/lib/services/models/gatewayUsage';
 import {
   buildDecisionQuestionsPrompt,
   buildDecisionResponseFormat,
@@ -55,10 +56,22 @@ export class DecisionBackendError extends Error {
   }
 }
 
-function extractUsage(response: ChatCompletionResponse): DecisionResult['usage'] {
+/**
+ * Canonical gateway usage (input includes cache read/write, output includes
+ * reasoning; cache/reasoning counts are subsets), converted with the client's driver.
+ */
+function extractUsage(response: ChatCompletionResponse, driver: string | undefined): DecisionResult['usage'] {
   const u = response.usage;
   if (!u || (!u.inputTokens && !u.outputTokens)) return undefined;
-  return { inputTokens: u.inputTokens, outputTokens: u.outputTokens };
+  const g = toGatewayUsage(driver, u);
+  return {
+    inputTokens: g.inputTokens ?? 0,
+    outputTokens: g.outputTokens ?? 0,
+    totalTokens: g.totalTokens ?? 0,
+    ...(g.cachedInputTokens ? { cachedInputTokens: g.cachedInputTokens } : {}),
+    ...(g.cachedWriteTokens ? { cachedWriteTokens: g.cachedWriteTokens } : {}),
+    ...(g.reasoningTokens ? { reasoningTokens: g.reasoningTokens } : {}),
+  };
 }
 
 function buildMessages(request: DecisionRequest, includeRationale: boolean): UnifiedMessage[] {
@@ -109,7 +122,7 @@ export function createStructuredDecisionRuntime(
         ...(options?.signal ? { signal: options.signal } : {}),
       });
 
-      const usage = extractUsage(response);
+      const usage = extractUsage(response, client.driver);
       const backend = { kind: 'structured' as const, provider };
 
       const refusal = response.providerFields?.refusal;

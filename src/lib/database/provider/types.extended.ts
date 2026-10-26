@@ -1441,6 +1441,10 @@ export interface IBatchJobItem {
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
+    /** Subsets of inputTokens (cache read / cache write) and of outputTokens (reasoning). */
+    cachedInputTokens?: number;
+    cachedWriteTokens?: number;
+    reasoningTokens?: number;
   };
   startedAt?: Date;
   endedAt?: Date;

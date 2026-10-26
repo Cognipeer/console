@@ -66,7 +66,7 @@ describe('createStructuredDecisionRuntime', () => {
 
     expect(result.answers.sentiment).toMatchObject({ type: 'choice', choice: 'pos', confidence_source: 'self_reported' });
     expect(result.answers.urgent).toEqual({ type: 'boolean', probability: 0.05 });
-    expect(result.usage).toEqual({ inputTokens: 120, outputTokens: 18 });
+    expect(result.usage).toEqual({ inputTokens: 120, outputTokens: 18, totalTokens: 138 });
     expect(result.backend).toEqual({ kind: 'structured', provider: 'openai' });
   });
 
@@ -102,6 +102,25 @@ describe('createStructuredDecisionRuntime', () => {
     expect(result.answers.sentiment).toMatchObject({ choice: 'neg' });
   });
 
+  it('returns canonical usage: driver fold plus cache/reasoning subsets', async () => {
+    const { runtime, invoke } = fakeRuntime({
+      content: JSON.stringify({ answers: { sentiment: { pos: 0.9, neg: 0.1 }, urgent: 0.05 } }),
+    });
+    invoke.mockResolvedValue({
+      id: 'r1', model: 'm', toolCalls: [], finishReason: 'stop', raw: {},
+      content: JSON.stringify({ answers: { sentiment: { pos: 0.9, neg: 0.1 }, urgent: 0.05 } }),
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, cachedInputTokens: 90, cachedWriteTokens: 5, cachedOutputTokens: 0, reasoningTokens: 2 },
+    });
+    // Rebuild the client so it advertises the anthropic driver.
+    const driverRuntime: ModelProviderRuntime = {
+      createNativeChatClient: vi.fn().mockResolvedValue({ complete: invoke, driver: 'anthropic' }),
+    };
+    const result = await createStructuredDecisionRuntime(driverRuntime, config, 'anthropic').decide(request);
+    expect(result.usage).toEqual({
+      inputTokens: 105, outputTokens: 4, totalTokens: 109, cachedInputTokens: 90, cachedWriteTokens: 5, reasoningTokens: 2,
+    });
+  });
+
   it('turns an upstream refusal into refusal answers, keeping usage', async () => {
     const { runtime } = fakeRuntime({
       content: '',
@@ -110,7 +129,7 @@ describe('createStructuredDecisionRuntime', () => {
     });
     const result = await createStructuredDecisionRuntime(runtime, config, 'openai').decide(request);
     expect(result.answers).toEqual({ sentiment: { type: 'refusal' }, urgent: { type: 'refusal' } });
-    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
+    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 4, totalTokens: 14 });
   });
 
   it('omits usage it was not given and includes the rationale only when asked', async () => {

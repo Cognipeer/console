@@ -3,6 +3,7 @@ import type {
   OcrExtractInput,
   OcrResult,
   OcrPageResult,
+  OcrUsage,
 } from '../domains/ocr';
 import type { ModelProviderRuntime, ModelRuntimeConfig, NativeChatClient } from '../domains/model';
 import type { ChatCompletionResponse } from '@cognipeer/agent-sdk';
@@ -10,6 +11,7 @@ import { imageUrlToPart } from './nativeParts';
 import { looksLikePdf, renderPdfToPngDataUrls } from './pdfRender';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
+import { toGatewayUsage } from '@/lib/services/models/gatewayUsage';
 
 const DEFAULT_OCR_PROMPT = `You are an OCR engine. Extract every visible textual element from the provided document image(s) and return the result as STRICT JSON matching this TypeScript type:
 
@@ -70,10 +72,33 @@ function toDataUrl(input: OcrExtractInput): string {
   return `data:${contentType};base64,${base64}`;
 }
 
+/** Canonical gateway usage of one VLM call (inputTokens already includes cache read/write). */
 interface UsageMeta {
-  input_tokens?: number;
-  output_tokens?: number;
-  total_tokens?: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  cachedWriteTokens: number;
+  reasoningTokens: number;
+}
+
+function emptyUsage(): UsageMeta {
+  return { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, cachedWriteTokens: 0, reasoningTokens: 0 };
+}
+
+/** Optional cache/reasoning keys appear on the result only when positive. */
+function usageResult(u: UsageMeta): Pick<
+  OcrUsage,
+  'inputTokens' | 'outputTokens' | 'totalTokens' | 'cachedInputTokens' | 'cachedWriteTokens' | 'reasoningTokens'
+> {
+  return {
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    totalTokens: u.totalTokens,
+    ...(u.cachedInputTokens > 0 ? { cachedInputTokens: u.cachedInputTokens } : {}),
+    ...(u.cachedWriteTokens > 0 ? { cachedWriteTokens: u.cachedWriteTokens } : {}),
+    ...(u.reasoningTokens > 0 ? { reasoningTokens: u.reasoningTokens } : {}),
+  };
 }
 
 /** Run the VLM on a single image data URL and parse its JSON response. */
@@ -93,10 +118,16 @@ async function ocrSingleImage(
     }],
   });
   const parsed = tryParseJson(response.content ?? '');
+  // Convert once with the client's driver: anthropic/bedrock input excludes the
+  // cache read/write, vertex output excludes thinking tokens.
+  const canonical = toGatewayUsage(client.driver, response.usage);
   const usage: UsageMeta = {
-    input_tokens: response.usage?.inputTokens,
-    output_tokens: response.usage?.outputTokens,
-    total_tokens: response.usage?.totalTokens,
+    inputTokens: canonical.inputTokens ?? 0,
+    outputTokens: canonical.outputTokens ?? 0,
+    totalTokens: canonical.totalTokens ?? 0,
+    cachedInputTokens: canonical.cachedInputTokens ?? 0,
+    cachedWriteTokens: canonical.cachedWriteTokens ?? 0,
+    reasoningTokens: canonical.reasoningTokens ?? 0,
   };
   return { parsed, usage, raw: response.raw ?? response };
 }
@@ -157,16 +188,19 @@ export function createVlmOcrRuntime(
 
         const pages: OcrPageResult[] = [];
         let language: string | undefined;
-        const totals: UsageMeta = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+        const totals = emptyUsage();
         const rawPages: unknown[] = [];
 
         for (let i = 0; i < rendered.dataUrls.length; i++) {
           const { parsed, usage, raw } = await ocrSingleImage(chatModel, prompt, rendered.dataUrls[i]);
           pages.push({ pageNumber: i + 1, text: parsed.text });
           if (!language && parsed.language) language = parsed.language;
-          totals.input_tokens! += usage.input_tokens ?? 0;
-          totals.output_tokens! += usage.output_tokens ?? 0;
-          totals.total_tokens! += usage.total_tokens ?? 0;
+          totals.inputTokens += usage.inputTokens;
+          totals.outputTokens += usage.outputTokens;
+          totals.totalTokens += usage.totalTokens;
+          totals.cachedInputTokens += usage.cachedInputTokens;
+          totals.cachedWriteTokens += usage.cachedWriteTokens;
+          totals.reasoningTokens += usage.reasoningTokens;
           rawPages.push(raw);
         }
 
@@ -175,9 +209,7 @@ export function createVlmOcrRuntime(
           pages,
           language: language || input.language,
           usage: {
-            inputTokens: totals.input_tokens,
-            outputTokens: totals.output_tokens,
-            totalTokens: totals.total_tokens,
+            ...usageResult(totals),
             pages: rendered.totalPages,
             inputBytes: pdfBytes.byteLength,
           },
@@ -194,9 +226,7 @@ export function createVlmOcrRuntime(
         pages: parsed.pages,
         language: parsed.language || input.language,
         usage: {
-          inputTokens: usage.input_tokens,
-          outputTokens: usage.output_tokens,
-          totalTokens: usage.total_tokens,
+          ...usageResult(usage),
           inputBytes:
             input.document.kind === 'bytes' ? input.document.data.byteLength : undefined,
         },

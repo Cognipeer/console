@@ -8,6 +8,9 @@ import type {
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
+import { fireAndForget } from '@/lib/core/asyncTask';
+import { toGatewayUsage } from '@/lib/services/models/gatewayUsage';
+import { logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogger';
 
 const logger = createLogger('guardrail-evaluator');
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -31,7 +34,13 @@ interface LlmCallContext {
   failMode?: GuardrailFailMode;
 }
 
-async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: string): Promise<string> {
+/** The judge's reply plus the canonical gateway usage the call billed. */
+interface LlmCallResult {
+  content: string;
+  usage: TokenUsage;
+}
+
+async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: string): Promise<LlmCallResult> {
   const db = await getDatabase();
   await db.switchToTenant(ctx.tenantDbName);
   const model = await db.findModelByKey(ctx.modelKey, ctx.projectId);
@@ -62,6 +71,7 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
     options: { maxRetries: 0 },
   });
 
+  const startedAt = Date.now();
   const response = await withResilience(
     () => client.complete({
       messages: [
@@ -72,7 +82,24 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
     { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
   );
 
-  return response.content ?? '';
+  const usage = toGatewayUsage(client.driver, response.usage);
+
+  // Metering only: the judge bypasses the gateway, so write its usage row here.
+  // No quota enforcement, and a failed write never touches the verdict.
+  fireAndForget('log-guardrail-judge-usage', () =>
+    logModelUsage(ctx.tenantDbName, model, {
+      requestId: randomUUID(),
+      route: 'guardrail',
+      status: 'success',
+      providerRequest: { model: ctx.modelKey, purpose: 'guardrail-judge' },
+      providerResponse: { finish_reason: response.finishReason },
+      latencyMs: Date.now() - startedAt,
+      usage,
+      finishReason: response.finishReason,
+    }),
+  );
+
+  return { content: response.content ?? '', usage };
 }
 
 /**
@@ -272,7 +299,7 @@ export async function runModerationPolicy(
   const validCategories = new Set(enabledCats);
 
   try {
-    const raw = await callLlm({ ...ctx, modelKey: effectiveModelKey }, MODERATION_SYSTEM_PROMPT, userPrompt);
+    const { content: raw } = await callLlm({ ...ctx, modelKey: effectiveModelKey }, MODERATION_SYSTEM_PROMPT, userPrompt);
     const parsed = safeParseJson<{ allowed: boolean; violations: Array<{ category: string; severity: string; explanation: string; guidance?: string }> }>(raw);
 
     if (!parsed) {
@@ -365,7 +392,7 @@ export async function runPromptShieldPolicy(
   const validCategories = PROMPT_SHIELD_ISSUES.map((i) => i.id);
 
   try {
-    const raw = await callLlm({ ...ctx, modelKey: effectiveModelKey }, PROMPT_SHIELD_SYSTEM_PROMPT, userPrompt);
+    const { content: raw } = await callLlm({ ...ctx, modelKey: effectiveModelKey }, PROMPT_SHIELD_SYSTEM_PROMPT, userPrompt);
     const parsed = safeParseJson<{ safe: boolean; issues: Array<{ category: string; severity: string; explanation: string }> }>(raw);
 
     if (!parsed) {
@@ -426,7 +453,7 @@ export async function runCustomPromptPolicy(
   const userPrompt = `${hardening}\n\nMessage to evaluate:\n${block}`;
 
   try {
-    const raw = await callLlm(ctx, CUSTOM_SYSTEM_PROMPT_WRAPPER(customPrompt), userPrompt);
+    const { content: raw } = await callLlm(ctx, CUSTOM_SYSTEM_PROMPT_WRAPPER(customPrompt), userPrompt);
     const parsed = safeParseJson<{ passed: boolean; reason: string }>(raw);
 
     if (!parsed) {

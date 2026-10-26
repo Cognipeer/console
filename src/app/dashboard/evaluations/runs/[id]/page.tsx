@@ -32,7 +32,8 @@ function usd(value?: number): string {
 function itemTokens(i: EvalRunItemView): number | undefined {
   const u = i.usage;
   if (!u) return undefined;
-  return (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cachedInputTokens ?? 0);
+  // Cached tokens are a subset of the input: never added on top.
+  return (u.inputTokens ?? 0) + (u.outputTokens ?? 0);
 }
 
 export default function EvaluationRunDetailPage() {

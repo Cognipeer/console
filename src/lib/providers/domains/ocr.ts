@@ -79,6 +79,12 @@ export interface OcrUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** Subset of inputTokens served from the prompt cache (VLM OCR). */
+  cachedInputTokens?: number;
+  /** Subset of inputTokens written to the prompt cache (VLM OCR). */
+  cachedWriteTokens?: number;
+  /** Subset of outputTokens spent on reasoning (VLM OCR). */
+  reasoningTokens?: number;
 }
 
 export interface OcrResult {
