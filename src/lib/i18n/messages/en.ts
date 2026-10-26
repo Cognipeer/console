@@ -19,6 +19,7 @@ import { consoleIdentityEn } from './consoleIdentity.en';
 import { iamDirectoryEn } from './iamDirectory.en';
 import { projectTabsEn } from './projectTabs.en';
 import { portalsNowEn } from './portalsNow.en';
+import { managedToolsEn } from './managedTools.en';
 import { tracingHealthEn } from './tracingHealth.en';
 import { projectsAccessEn } from './projectsAccess.en';
 
@@ -391,6 +392,14 @@ export const en = {
     ocrDescription: 'Batch OCR + extraction over files and images with summary and structured output',
     portals: 'Portals',
     portalsDescription: 'Chat pages that give your people a simple way to use selected agents',
+    connectors: 'Connectors',
+    connectorsDescription: 'Connect external systems such as GitHub once and use them from agents as tools',
+    connectorsCatalog: 'Catalog',
+    connectorsCatalogDescription: 'Connector types you can add, with what each one offers',
+    connectorsInstalled: 'Installed',
+    connectorsOauthApps: 'OAuth apps',
+    connectorsOauthAppsDescription: 'The OAuth applications connectors sign in with',
+    connectorsSettings: 'Settings',
   },
   navigationFeedback: {
     loadingPage: 'Loading page…',
@@ -502,6 +511,7 @@ export const en = {
     edit: 'Edit',
     new: 'New',
     portals: 'Portals',
+    connectors: 'Connectors',
     iamPeople: 'People',
     iamGroups: 'Groups',
     iamTokens: 'Tokens',
@@ -1247,6 +1257,7 @@ export const en = {
       ldap: 'LDAP Directory',
       portals: 'Portals',
       channels: 'Channels',
+      connectors: 'Connectors',
       resources: 'Resource Registry',
       iam: 'Authorization Engine',
       webhooks: 'Webhooks',
@@ -4022,6 +4033,7 @@ export const en = {
   healthDigest: healthDigestEn,
   consoleIdentity: consoleIdentityEn,
   analyticsDashboards: analyticsDashboardsEn,
+  managedTools: managedToolsEn,
   memory: {
     title: 'Agent Memory',
     subtitle: 'Persistent memory with vector-backed semantic search',

@@ -48,6 +48,8 @@ interface ToolSourceGroup {
   description?: string;
   /** Source type label (OpenAPI / MCP / System) */
   typeLabel: string;
+  /** A connector's tool (managed by another module): listed with a Connector badge. */
+  managed?: boolean;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
@@ -130,6 +132,7 @@ export function ToolSelectorModal({
   onChange,
 }: ToolSelectorModalProps) {
   const t = useTranslations('agents');
+  const tm = useTranslations('managedTools');
 
   // Data
   const [sources, setSources] = useState<ToolSourceGroup[]>([]);
@@ -198,12 +201,13 @@ export function ToolSelectorModal({
       if (toolsRes.ok) {
         const toolsData = await toolsRes.json();
         const toolGroups: ToolSourceGroup[] = (toolsData.tools ?? []).map(
-          (t: { key: string; name: string; description?: string; type: string; actions: { key: string; name: string; description: string }[] }) => ({
+          (t: { key: string; name: string; description?: string; type: string; managedBy?: { id: string }; actions: { key: string; name: string; description: string }[] }) => ({
             source: 'tool' as const,
             sourceKey: t.key,
             name: t.name,
             description: t.description,
-            typeLabel: t.type === 'openapi' ? 'OpenAPI' : 'MCP',
+            typeLabel: t.type === 'openapi' ? 'OpenAPI' : t.type === 'connector' ? 'Connector' : 'MCP',
+            managed: Boolean(t.managedBy),
             tools: (t.actions ?? []).map((a) => ({
               name: a.key,
               description: a.description || a.name,
@@ -489,6 +493,11 @@ export function ToolSelectorModal({
                         {count > 0 && (
                           <Badge size="xs" variant="light" color="blue">
                             {count}/{group.tools.length}
+                          </Badge>
+                        )}
+                        {group.managed && (
+                          <Badge size="xs" variant="light" color="grape">
+                            {tm('badge')}
                           </Badge>
                         )}
                         <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>

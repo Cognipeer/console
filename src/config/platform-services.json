@@ -251,6 +251,35 @@
       "enterpriseModule": "portals"
     },
     {
+      "id": "connectors",
+      "href": "/dashboard/connectors",
+      "icon": "IconPlugConnected",
+      "category": "build",
+      "navLabelKey": "connectors",
+      "navDescriptionKey": "connectorsDescription",
+      "tags": [
+        "connectors",
+        "integrations",
+        "github",
+        "tools",
+        "mcp"
+      ],
+      "searchKeywords": [
+        "connector",
+        "connectors",
+        "integration",
+        "entegrasyon",
+        "ba\u011flay\u0131c\u0131",
+        "github",
+        "oauth",
+        "data source",
+        "tool marketplace"
+      ],
+      "badge": "new",
+      "requiresEnterprise": true,
+      "enterpriseModule": "connectors"
+    },
+    {
       "id": "config",
       "href": "/dashboard/config",
       "icon": "IconLock",

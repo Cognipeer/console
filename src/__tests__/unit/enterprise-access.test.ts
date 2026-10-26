@@ -37,6 +37,13 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/reports/dashboard')).toBe('reports');
   });
 
+  it('gates the connectors API, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/connectors')).toBe('connectors');
+    expect(getEnterpriseModuleForPath('/api/connectors/abc/accounts')).toBe('connectors');
+    expect(getEnterpriseModuleForPath('/api/connectors/oauth/callback')).toBe('connectors');
+    expect(getEnterpriseModuleForPath('/api/connectorsx')).toBeNull();
+  });
+
   it('gates the portal admin API and the end-user runtime, bare collection path included', () => {
     expect(getEnterpriseModuleForPath('/api/portals')).toBe('portals');
     expect(getEnterpriseModuleForPath('/api/portals/abc123/stats')).toBe('portals');

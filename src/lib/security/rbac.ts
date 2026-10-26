@@ -21,6 +21,7 @@ export type PermissionService =
   | 'pii'
   | 'mcp'
   | 'tools'
+  | 'connectors'
   | 'sandbox'
   /**
    * @deprecated Folded into `guardrails`. Kept in the union ONLY so a stored
@@ -100,6 +101,8 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'agents', label: 'Agents', description: 'AI agents and agent versions.', category: 'build' },
   { id: 'mcp', label: 'MCP Hub', description: 'MCP server configuration, proxy APIs, monitoring and audit.', category: 'build' },
   { id: 'tools', label: 'Agent Tools', description: 'Tool definitions used by agents (managed under the Agents module).', category: 'build' },
+  // Enterprise module. Connections to external systems (an organization account per connector) and the tools they manage.
+  { id: 'connectors', label: 'Connectors', description: 'Connections to external systems such as GitHub: organization accounts, OAuth apps and the tools they manage.', category: 'build' },
   { id: 'vector', label: 'Knowledge Index', description: 'Vector providers, indexes and vector operations.', category: 'data' },
   { id: 'memory', label: 'Agent Memory', description: 'Memory stores and memory items.', category: 'data' },
   { id: 'files', label: 'Document Store', description: 'File buckets and file objects.', category: 'data' },
@@ -321,6 +324,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/pii', service: 'pii' },
   { prefix: '/api/mcp', service: 'mcp' },
   { prefix: '/api/tools', service: 'tools' },
+  { prefix: '/api/connectors', service: 'connectors' },
   // Spec import helper (URL fetch) used by the MCP/Tool create dialogs.
   { prefix: '/api/specs', service: 'tools' },
   { prefix: '/api/browser', service: 'browser' },

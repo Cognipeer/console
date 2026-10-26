@@ -2,7 +2,8 @@
  * Remote MCP client — speaks JSON-RPC over HTTP (streamable HTTP transport)
  * to an upstream MCP server, through the shared SSRF-guarded fetch.
  *
- * The gateway calls remote servers statelessly: one POST per JSON-RPC call.
+ * Calls are stateless first: one POST per JSON-RPC call. A streamable HTTP
+ * server that requires a session gets one opened for the call (see `rpcCall`).
  * Servers that require the legacy HTTP+SSE session dance are not supported
  * for proxying; 'sse' transport still attempts plain POSTs (many servers
  * accept both), and fails with a clear error otherwise.
@@ -28,6 +29,8 @@ export interface RemoteMcpTarget {
   auth?: IMcpAuthConfig;
   /** Caller-supplied, policy-filtered runtime headers; merged after static auth. */
   extraHeaders?: Record<string, string>;
+  /** Aborts the HTTP requests of a call (an agent turn's signal). */
+  signal?: AbortSignal;
 }
 
 export function buildUpstreamAuthHeaders(auth: IMcpAuthConfig | undefined): Record<string, string> {
@@ -110,20 +113,33 @@ async function readSseResponse(response: Response, id: number): Promise<JsonRpcM
   throw new Error('MCP server closed the SSE stream without answering the request');
 }
 
-async function rpcCall(
-  target: RemoteMcpTarget,
-  method: string,
-  params?: Record<string, unknown>,
-): Promise<unknown> {
-  const id = ++rpcId;
-  const authHeaders = buildUpstreamAuthHeaders(target.auth);
-  const headers: Record<string, string> = {
+const SESSION_HEADER = 'Mcp-Session-Id';
+
+function requestHeaders(target: RemoteMcpTarget, sessionId?: string): Record<string, string> {
+  return {
     'Content-Type': 'application/json',
     // Streamable HTTP servers may respond with JSON or an SSE stream.
     Accept: 'application/json, text/event-stream',
-    ...authHeaders,
+    ...buildUpstreamAuthHeaders(target.auth),
     ...(target.extraHeaders ?? {}),
+    ...(sessionId ? { [SESSION_HEADER]: sessionId } : {}),
   };
+}
+
+/** Headers that must not follow a redirect to another origin: everything but the two content headers. */
+function sensitiveHeaderNames(headers: Record<string, string>): string[] {
+  return Object.keys(headers).filter((name) => name !== 'Content-Type' && name !== 'Accept');
+}
+
+/** One POST: a JSON-RPC request, its JSON or SSE answer, and the session id the server sent, if any. */
+async function exchange(
+  target: RemoteMcpTarget,
+  method: string,
+  params?: Record<string, unknown>,
+  sessionId?: string,
+): Promise<{ result: unknown; sessionId?: string }> {
+  const id = ++rpcId;
+  const headers = requestHeaders(target, sessionId);
 
   const response = await safeFetch(target.url, {
     method: 'POST',
@@ -134,10 +150,11 @@ async function rpcCall(
       method,
       ...(params !== undefined ? { params } : {}),
     }),
+    ...(target.signal ? { signal: target.signal } : {}),
   }, {
     // Credentials injected for this upstream do not follow a redirect to
     // another origin.
-    sensitiveHeaders: [...Object.keys(authHeaders), ...Object.keys(target.extraHeaders ?? {})],
+    sensitiveHeaders: sensitiveHeaderNames(headers),
   });
 
   if (!response.ok) {
@@ -153,7 +170,67 @@ async function rpcCall(
   if (payload.error) {
     throw new Error(`MCP error ${payload.error.code ?? ''}: ${payload.error.message ?? 'unknown'}`);
   }
-  return payload.result;
+  return { result: payload.result, sessionId: response.headers.get(SESSION_HEADER) ?? undefined };
+}
+
+const CLIENT_INFO = { name: 'cognipeer-mcp-gateway', version: '1.0.0' };
+
+/** `initialize`, then `notifications/initialized`. Undefined when the server hands out no session id. */
+async function openSession(target: RemoteMcpTarget): Promise<string | undefined> {
+  const { sessionId } = await exchange(target, 'initialize', {
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: CLIENT_INFO,
+  });
+  if (!sessionId) return undefined;
+  const headers = requestHeaders(target, sessionId);
+  const response = await safeFetch(target.url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ jsonrpc: JSONRPC_VERSION, method: 'notifications/initialized' }),
+    ...(target.signal ? { signal: target.signal } : {}),
+  }, { sensitiveHeaders: sensitiveHeaderNames(headers) });
+  // 202 with no body; nothing in it matters.
+  await response.text().catch(() => '');
+  return sessionId;
+}
+
+/** Upstreams that refused a call without a session and handed one out on `initialize`. */
+const sessionUpstreams = new Set<string>();
+
+/**
+ * One JSON-RPC call. A server that requires a session answers a call without
+ * one with 400 or 404 (streamable HTTP); the call then opens a session and is
+ * sent once more inside it, and later calls to that upstream open the session
+ * first. A session is not reused across calls.
+ */
+async function rpcCall(
+  target: RemoteMcpTarget,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<unknown> {
+  if (method !== 'initialize' && sessionUpstreams.has(target.url)) {
+    return (await exchange(target, method, params, await openSession(target))).result;
+  }
+  try {
+    return (await exchange(target, method, params)).result;
+  } catch (error) {
+    const sessionRefusal = error instanceof McpUpstreamError && (error.status === 400 || error.status === 404);
+    if (method === 'initialize' || !sessionRefusal) throw error;
+    const sessionId = await openSession(target).catch(() => undefined);
+    if (!sessionId) throw error;
+    sessionUpstreams.add(target.url);
+    return (await exchange(target, method, params, sessionId)).result;
+  }
+}
+
+/** A JSON-RPC call whose result the caller reads itself (Tools keeps its own `tools/call` result rules). */
+export function remoteRpc(
+  target: RemoteMcpTarget,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<unknown> {
+  return rpcCall(target, method, params);
 }
 
 /** List tools on a remote MCP server, following `nextCursor` across pages. */
@@ -184,7 +261,7 @@ export async function remoteDiscover(target: RemoteMcpTarget): Promise<McpDiscov
     instructions = readInitializeInstructions(await rpcCall(target, 'initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'cognipeer-mcp-gateway', version: '1.0.0' },
+      clientInfo: CLIENT_INFO,
     }));
   } catch {
     instructions = undefined;

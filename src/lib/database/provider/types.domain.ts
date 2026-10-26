@@ -2395,10 +2395,20 @@ export interface IAlertEvent {
 
 // ── Tool (unified tool system) types ─────────────────────────────────────
 
-export type ToolSourceType = 'openapi' | 'mcp';
+/**
+ * `connector`: a tool the enterprise Connectors module owns, whose actions are
+ * the connector package's own actions (`connector_action`). It is never
+ * created through the Tools API.
+ */
+export type ToolSourceType = 'openapi' | 'mcp' | 'connector';
 export type ToolStatus = 'active' | 'disabled';
 
-export type ToolAuthType = 'none' | 'token' | 'header' | 'basic';
+/**
+ * `connector`: no stored secret. The tool belongs to a connector (enterprise
+ * Connectors module), and its credential is resolved for each call from the
+ * connector's account (see src/enterprise/tool-credentials.ts).
+ */
+export type ToolAuthType = 'none' | 'token' | 'header' | 'basic' | 'connector';
 
 export interface IToolAuthConfig {
   type: ToolAuthType;
@@ -2410,6 +2420,8 @@ export interface IToolAuthConfig {
   /** For 'basic': username + password */
   username?: string;
   password?: string;
+  /** For 'connector': the id of the connector that owns the tool and supplies its credential. */
+  connectorId?: string;
   /**
    * AES-256-GCM ciphertext (base64) holding `token`/`headerValue`/`password`
    * once sealed for storage — see `@/lib/services/tools/secretVault`. Only
@@ -2426,8 +2438,8 @@ export interface IToolAction {
   description: string;
   /** JSON Schema for tool input parameters */
   inputSchema: Record<string, unknown>;
-  /** How this action is executed */
-  executionType: 'openapi_http' | 'mcp_call';
+  /** How this action is executed (`connector_action`: by the Connectors module, see src/enterprise/tool-actions.ts) */
+  executionType: 'openapi_http' | 'mcp_call' | 'connector_action';
   /** OpenAPI-specific: HTTP method */
   httpMethod?: string;
   /** OpenAPI-specific: Path template */

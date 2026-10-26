@@ -93,7 +93,7 @@ import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPe
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
 import { currentTurnSignal, runWithTurnSignal } from '@/lib/core/turnSignal';
-import { executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
+import { addSecretValues, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import {
     resolveAgentBindingMcpServer,
     resolveAgentBindingTool,
@@ -2292,6 +2292,7 @@ export async function buildBoundTools(
                             try {
                                 const { result, latencyMs, isError } = await executeToolAction(
                                     toolRecord, action.key, args, toolRuntimeHeaders,
+                                    { onSecrets: (values) => addSecretValues(toolSecretValues, values) },
                                 );
                                 // An MCP `isError` result is a failed call: logged as one, the text still reaches the model.
                                 log(

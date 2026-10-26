@@ -14,7 +14,12 @@ const tool = {
   actions: [{ key: 'do', name: 'do', executionType: 'mcp_call', mcpToolName: 'do' }],
 } as unknown as ITool;
 
-const reply = (result: unknown) => ({ ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1, result }) });
+const reply = (result: unknown) => ({
+  ok: true,
+  status: 200,
+  headers: new Headers({ 'content-type': 'application/json' }),
+  json: async () => ({ jsonrpc: '2.0', id: 1, result }),
+});
 
 beforeEach(() => vi.clearAllMocks());
 
