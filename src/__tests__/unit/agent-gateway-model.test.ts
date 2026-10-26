@@ -57,6 +57,11 @@ import { createStreamGate, evaluateGuardrail } from '@/lib/services/guardrail';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { buildGatewayChatModel, type GatewayChatModelInput } from '@/lib/services/agents/gatewayChatModel';
 import { createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
+import { createOutputLimitTap } from '@/lib/services/agents/outputLimitNotice';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const sdkVersion: string = JSON.parse(readFileSync(join(process.cwd(), 'node_modules/@cognipeer/agent-sdk/package.json'), 'utf8')).version;
 
 const llm = (key: string, extra: object = {}) => ({
   _id: `${key}-id`, tenantId: 't', projectId: 'p', name: key, key, providerKey: `prov-${key}`, providerDriver: 'openai',
@@ -666,5 +671,61 @@ describe('a Dynamic LLM as the agent model', () => {
     expect(upstream.calls[0].body.reasoning_effort).toBe('low');
     await runWithRoutingCaller({ channel: 'api' }, async () => (await build('router', { requestReasoning: { effort: 'low' } })).invoke(USER));
     expect(upstream.calls[1].body.reasoning_effort).toBe('medium');
+  });
+});
+
+describe('output limit through the real core (retry, truncation, reset)', () => {
+  /** The output limit a request body carried (the spelling depends on the driver). */
+  const sentLimit = (call: { body: Record<string, any> }) => call.body.max_completion_tokens ?? call.body.max_tokens;
+  const final = (parts: any[]) => parts.find((part) => typeof part === 'object' && part.role);
+
+  it('a tool call cut off at the limit is retried with the doubled limit, and the retry\'s answer is the turn\'s', async () => {
+    let calls = 0;
+    upstream = stubUpstream(() => {
+      calls += 1;
+      return json(calls === 1
+        ? completion({ content: null, toolCalls: [{ id: 'c1', name: 'lookup', arguments: '{"q":"app' }], finish: 'length' })
+        : completion({ content: 'recovered' }));
+    });
+    const tap = createOutputLimitTap();
+    const reply = await (await build('m', { overrides: { max_tokens: 100 }, outputLimitTap: tap })).invoke(USER) as any;
+    expect(reply.content).toBe('recovered');
+    expect(upstream.calls.map(sentLimit)).toEqual([100, 200]);
+    expect(tap.latest()).toBeUndefined();
+  });
+
+  it('streamed, a tool call cut off at the limit is retried the same way and never reaches the loop half-built', async () => {
+    let calls = 0;
+    upstream = stubUpstream(() => {
+      calls += 1;
+      return calls === 1
+        ? sse([chunk.text('thinking out loud'), chunk.tool(0, { id: 'c1', name: 'lookup', arguments: '{"q":"app' }), chunk.finish('length')])
+        : sse([chunk.text('recovered'), chunk.finish('stop')]);
+    });
+    const parts: any[] = [];
+    for await (const part of (await build('m', { overrides: { max_tokens: 100 } })).stream!(USER)) parts.push(part);
+    expect(upstream.calls.map(sentLimit)).toEqual([100, 200]);
+    // The failed attempt's tool-call fragments are discarded by the `reset` chunk, which agent-sdk
+    // >= 0.21 honours; 0.20 ignores it and keeps accumulating, so the check applies from 0.21 on.
+    const sdkMinor = Number(String(sdkVersion).split('.')[1] ?? 0);
+    if (sdkMinor >= 21) expect(final(parts).tool_calls ?? []).toHaveLength(0);
+    expect(final(parts).content).toContain('recovered');
+  });
+
+  it('an answer cut off at the limit keeps its text and reports a partial turn (non-streamed and streamed)', async () => {
+    upstream = stubUpstream(() => json(completion({ content: 'half an ans', finish: 'length' })));
+    const tap = createOutputLimitTap();
+    const reply = await (await build('m', { outputLimitTap: tap })).invoke(USER) as any;
+    expect(reply.content).toBe('half an ans');
+    expect(tap.latest()).toMatchObject({ kind: 'truncated' });
+    expect(upstream.calls).toHaveLength(1);
+
+    upstream = stubUpstream(() => sse([chunk.text('half an '), chunk.text('ans'), chunk.finish('length')]));
+    const streamTap = createOutputLimitTap();
+    const parts: any[] = [];
+    for await (const part of (await build('m', { outputLimitTap: streamTap })).stream!(USER)) parts.push(part);
+    expect(final(parts).content).toBe('half an ans');
+    expect(streamTap.latest()).toMatchObject({ kind: 'truncated' });
+    expect(upstream.calls).toHaveLength(1);
   });
 });

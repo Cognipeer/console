@@ -44,14 +44,15 @@ import type { NativeReasoning } from '@/lib/providers/domains/model';
 import { normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import { executeModelCall } from '@/lib/services/models/gatewayCore';
 import { GuardrailBlockError } from '@/lib/services/models/gatewayGuardrails';
-import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { CONTEXT_WINDOW_EXCEEDED_REASON, OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
 import { nativeRequestToWire } from '@/lib/services/models/openaiAdapter';
 import type { GatewayChatRequest, ModelCallInput, ModelCallOutcome } from '@/lib/services/models/gatewayTypes';
 import type { TokenUsage as GatewayUsage, UsageCostResult } from '@/lib/services/models/usageLogger';
 import { isSyntheticActor } from './syntheticActor';
 import { addRunUsage } from './runUsage';
-import { outputLimitNotice } from './outputLimitNotice';
+import { contextWindowNotice, outputLimitNotice, type OutputLimitReport, type OutputLimitTap } from './outputLimitNotice';
 
 export { normalizeNativeReasoning };
 
@@ -106,12 +107,18 @@ export interface GatewayChatModelInput {
   onRouted?: (modelKey: string) => void;
   /** The run's `limits.maxTotalOutputTokens`: a raised-limit retry never plans past what is left of it. */
   maxTotalOutputTokens?: number;
+  /**
+   * Told how each call ends at its output limit (a notice instead of an answer, or an
+   * answer cut off), for the turn's outcome. Absent = the turn only gets the text.
+   */
+  outputLimitTap?: OutputLimitTap;
 }
 
 /**
- * The limit to retry with after a model hit `limit` without answering: double,
- * capped by what the model record declares as its maximum output and by what is
- * left of the run's output-token budget. `undefined` when no larger limit is available.
+ * The limit to retry with after a model hit `limit` (the limit that call ran with)
+ * without answering: double, capped by the model's maximum output (what the record
+ * declares, else the built-in table) and by what is left of the run's output-token
+ * budget. `undefined` when no larger limit is available.
  */
 export function raisedOutputLimit(
   limit: number | undefined,
@@ -119,13 +126,22 @@ export function raisedOutputLimit(
   budgetLeft?: number,
 ): number | undefined {
   if (!limit || limit <= 0) return undefined;
-  const settings = (model.settings ?? {}) as AnyRecord;
-  const declared = [settings.maxOutputTokens, settings.maxOutput]
-    .find((value): value is number => typeof value === 'number' && value > 0);
+  const max = modelMaxOutputTokens(model);
   let next = limit * 2;
-  if (declared) next = Math.min(next, declared);
+  if (max) next = Math.min(next, max);
   if (budgetLeft !== undefined) next = Math.min(next, budgetLeft);
   return next > limit ? Math.floor(next) : undefined;
+}
+
+/** A provider's 400 about the output limit it was sent (a raised value the model does not accept). */
+function rejectsOutputLimit(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { status, statusCode, param, message } = error as { status?: unknown; statusCode?: unknown; param?: unknown; message?: unknown };
+  const code = status ?? statusCode;
+  if (code !== undefined && code !== 400) return false;
+  if (typeof param === 'string' && /^max_(completion_|output_)?tokens$/.test(param)) return true;
+  return typeof message === 'string'
+    && /max_(completion_|output_)?tokens|max(imum)? (output|completion) tokens|output (token|length)/i.test(message);
 }
 
 /** The SDK provider family whose capabilities (structured output, strict tools) fit the model's driver. */
@@ -268,9 +284,10 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       ...reasoningWire(requestPick ?? request.reasoning),
     };
     if (limitOverride !== undefined) {
-      // The raised limit replaces whichever spelling the request carried.
+      // The raised limit wins over every spelling the request carried (the core reads
+      // max_completion_tokens before max_tokens), so both say the same number.
       wire.max_tokens = limitOverride;
-      if ('max_completion_tokens' in wire) wire.max_completion_tokens = limitOverride;
+      wire.max_completion_tokens = limitOverride;
     }
     return {
       tenantDbName: input.tenantDbName,
@@ -313,6 +330,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     usageBasis: {},
 
     async complete(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+      input.outputLimitTap?.clear();
       // What the attempts that hit the output limit burned: the provider bills them, so
       // the SDK ledger (budgets, cost) must see them next to the answer the retry gives.
       const carried: { usage?: SdkUsage } = {};
@@ -325,47 +343,62 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         if (!(error instanceof OutputTokenLimitError)) throw error;
         carry(error);
         const raised = nextLimit(error);
-        if (raised !== undefined) {
-          try {
-            const retried = await completeOnce(request, raised);
-            const usage = addSdkUsage(carried.usage, retried.usage);
-            return usage ? { ...retried, usage } : retried;
-          } catch (retryError) {
-            if (!(retryError instanceof OutputTokenLimitError)) throw retryError;
+        if (raised === undefined) return limitResponse(error, error.limit, carried.usage);
+        try {
+          const retried = await completeOnce(request, raised);
+          const usage = addSdkUsage(carried.usage, retried.usage);
+          return usage ? { ...retried, usage } : retried;
+        } catch (retryError) {
+          if (retryError instanceof OutputTokenLimitError) {
             carry(retryError);
-            return limitResponse(retryError.limit ?? raised, carried.usage);
+            return limitResponse(retryError, retryError.limit ?? raised, carried.usage);
           }
+          // The model refuses the raised limit: the first attempt's ending stands.
+          if (rejectsOutputLimit(retryError)) return limitResponse(error, error.limit, carried.usage);
+          throw retryError;
         }
-        return limitResponse(error.limit, carried.usage);
       }
     },
 
     async *completeStream(request: ChatCompletionRequest): AsyncGenerator<ChatCompletionChunk, void, unknown> {
+      input.outputLimitTap?.clear();
       // The usage of the attempts that hit the output limit (their `done` chunk is not
       // forwarded): it rides on the retry's final chunk, or on the limit notice.
-      const carried: { usage?: SdkUsage } = {};
+      // `streamed`: pieces of an attempt already reached the SDK, which must drop them.
+      const carried: { usage?: SdkUsage; streamed?: boolean } = {};
       try {
         yield* streamOnce(request, undefined, carried);
         return;
       } catch (error) {
         if (!(error instanceof OutputTokenLimitError)) throw error;
         const raised = nextLimit(error);
-        let finalLimit = error.limit;
+        let ending = error;
+        let endingLimit = error.limit;
         if (raised !== undefined) {
+          // The failed attempt's text, tool-call pieces and thinking are an abandoned answer.
+          yield resetChunk();
+          carried.streamed = false;
           try {
             yield* streamOnce(request, raised, carried);
             return;
           } catch (retryError) {
-            if (!(retryError instanceof OutputTokenLimitError)) throw retryError;
-            finalLimit = retryError.limit ?? raised;
+            if (retryError instanceof OutputTokenLimitError) {
+              ending = retryError;
+              endingLimit = retryError.limit ?? raised;
+            } else if (!rejectsOutputLimit(retryError)) {
+              throw retryError;
+            }
           }
         }
-        yield limitChunk(finalLimit, carried.usage);
+        if (carried.streamed) yield resetChunk();
+        yield limitChunk(ending, endingLimit, carried.usage);
       }
     },
   };
 
   const nextLimit = (error: OutputTokenLimitError): number | undefined => {
+    // A full context window is not cured by a larger output limit.
+    if (error.rawFinishReason === CONTEXT_WINDOW_EXCEEDED_REASON) return undefined;
     const budgetLeft = input.maxTotalOutputTokens !== undefined
       ? Math.max(0, input.maxTotalOutputTokens - spentOutputTokens)
       : undefined;
@@ -374,24 +407,44 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
 
   const emptyUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0 };
 
-  /** The graceful end of a turn whose model cannot fit an answer in its output limit (`burned`: what the failed attempts used). */
-  const limitResponse = (limit?: number, burned?: SdkUsage): ChatCompletionResponse => ({
+  /** What the turn says and reports for a call that ended at a limit (`burned`: what the failed attempts used). */
+  const limitEnding = (error: OutputTokenLimitError, limit?: number): { text: string; report: OutputLimitReport } => {
+    const contextWindow = error.rawFinishReason === CONTEXT_WINDOW_EXCEEDED_REASON;
+    const report: OutputLimitReport = { kind: 'notice', ...(limit ? { limit } : {}), ...(contextWindow ? { contextWindow: true } : {}) };
+    input.outputLimitTap?.record(report);
+    return { text: contextWindow ? contextWindowNotice() : outputLimitNotice(limit), report };
+  };
+
+  /** The graceful end of a turn whose model cannot fit an answer in its output limit. */
+  const limitResponse = (error: OutputTokenLimitError, limit?: number, burned?: SdkUsage): ChatCompletionResponse => ({
     id: `limit_${crypto.randomUUID()}`,
     model: model.modelId,
-    content: outputLimitNotice(limit),
+    content: limitEnding(error, limit).text,
     toolCalls: [],
     usage: burned ?? emptyUsage,
     finishReason: 'stop',
     raw: null,
   });
 
-  const limitChunk = (limit?: number, burned?: SdkUsage): ChatCompletionChunk => ({
+  const limitChunk = (error: OutputTokenLimitError, limit?: number, burned?: SdkUsage): ChatCompletionChunk => ({
     id: `limit_${crypto.randomUUID()}`,
     model: model.modelId,
-    delta: { content: outputLimitNotice(limit) },
+    delta: { content: limitEnding(error, limit).text },
     ...(burned ? { usage: burned } : {}),
     finishReason: 'stop',
   });
+
+  /**
+   * "Forget what this call streamed so far": agent-sdk >= 0.21 clears its accumulated
+   * content, tool calls and reasoning on it (the thinking blocks of an abandoned attempt
+   * must not be replayed with the next answer); older SDKs ignore the field.
+   */
+  const resetChunk = (): ChatCompletionChunk => ({
+    id: `reset_${crypto.randomUUID()}`,
+    model: model.modelId,
+    delta: {},
+    reset: true,
+  } as unknown as ChatCompletionChunk);
 
   const completeOnce = async (request: ChatCompletionRequest, limitOverride?: number): Promise<ChatCompletionResponse> => {
     {
@@ -413,6 +466,8 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       // A Dynamic LLM primary that hit its output limit before the fallback answered: billed, so counted.
       const usage = outcome.burnedUsage ? addSdkUsage(own, sdkUsage(outcome.burnedUsage)) : own;
       const counted = usage ? { ...named, usage } : named;
+      // An answer cut off at the limit: the text is the model's own, the turn is partial.
+      if (outcome.truncated) input.outputLimitTap?.record({ kind: 'truncated', ...(limitOverride ? { limit: limitOverride } : {}) });
       return outcome.includeReasoning === false ? withoutReasoningText(counted) : counted;
     }
   };
@@ -420,7 +475,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
   async function* streamOnce(
     request: ChatCompletionRequest,
     limitOverride?: number,
-    carried?: { usage?: SdkUsage },
+    carried?: { usage?: SdkUsage; streamed?: boolean },
   ): AsyncGenerator<ChatCompletionChunk, void, unknown> {
     {
       let outcome: ModelCallOutcome;
@@ -439,7 +494,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       // A tool-call fragment names its call by index; the SDK joins fragments by id.
       const idByIndex = new Map<number, { id: string; name?: string }>();
       let lastCall: { id: string; name?: string } | undefined;
-      let limit: Error | undefined;
+      let limit: OutputTokenLimitError | undefined;
 
       let finished = false;
       try {
@@ -465,6 +520,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
           });
           const blocks = event.reasoningPayload?.blocks;
           const summary = showReasoning ? event.reasoning : undefined;
+          if (carried) carried.streamed = true;
           if (summary && input.onReasoning) {
             try { input.onReasoning(summary); } catch { /* a display callback must not fail the run */ }
           }
@@ -499,6 +555,8 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
             continue;
           }
           const usage = addSdkUsage(carried?.usage, own);
+          // An answer cut off at the limit: the text is the model's own, the turn is partial.
+          if (event.truncated) input.outputLimitTap?.record({ kind: 'truncated', ...(limitOverride ? { limit: limitOverride } : {}) });
           yield {
             id,
             model: modelName,
@@ -529,7 +587,11 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         }
 
         if (event.type === 'output_limit') {
-          limit = Object.assign(new OutputTokenLimitError(), { message: event.error.message });
+          // The limit the call ran with and the provider's own stop reason ride on the event.
+          limit = Object.assign(
+            new OutputTokenLimitError(event.limit, event.rawFinishReason ? { rawFinishReason: event.rawFinishReason } : undefined),
+            { message: event.error.message },
+          );
           continue;
         }
 

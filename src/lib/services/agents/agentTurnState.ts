@@ -26,7 +26,12 @@
 
 import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from 'node:zlib';
 
-import { parseOutputLimitNotice } from './outputLimitNotice';
+import {
+    isOutputLimitNoticeMessage,
+    isOutputLimitNoticeStop,
+    outputLimitStopDetail,
+    type OutputLimitReport,
+} from './outputLimitNotice';
 import { clientToolMeta } from './agentClientTools';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
@@ -251,7 +256,9 @@ function pickCarried(state: AgentSdkSmartState | undefined): CarriedState {
             .filter((message): message is AgentSdkMessage => message !== null)
             // The system prompt is rebuilt from the CURRENT config every turn;
             // a stored one would pin the prompt the conversation started with.
-            .filter((message) => message.role !== 'system'),
+            .filter((message) => message.role !== 'system')
+            // A limit notice is the console's words, not the model's: the next turn must not see it.
+            .filter((message) => !isOutputLimitNoticeMessage(message)),
     );
     return carried;
 }
@@ -451,7 +458,7 @@ export async function saveConversationState(
  */
 export function buildTurnInputState(input: {
     carried: CarriedState | null;
-    transcript: Array<{ role: string; content: string; attachments?: IAgentMessageAttachment[] }>;
+    transcript: Array<{ role: string; content: string; attachments?: IAgentMessageAttachment[]; stopReason?: string; stopDetail?: string }>;
     userMessage: string;
     /**
      * What the model is shown as the user turn when it is more than the text —
@@ -475,12 +482,15 @@ export function buildTurnInputState(input: {
 }): AgentSdkSmartState {
     const replay = input.attachments;
     const history: AgentSdkMessage[] = input.carried?.messages
-        ?? input.transcript.map((m) => ({
-            role: m.role,
-            content: replay && m.role === 'user' && m.attachments?.length
-                ? rebuildUserTurn(m.content, m.attachments, { supportsVision: replay.supportsVision })
-                : m.content,
-        }) as AgentSdkMessage);
+        ?? input.transcript
+            // The turn that ended with a limit notice has no answer of the model's to replay.
+            .filter((m) => !(m.role === 'assistant' && isOutputLimitNoticeStop(m.stopReason, m.stopDetail)))
+            .map((m) => ({
+                role: m.role,
+                content: replay && m.role === 'user' && m.attachments?.length
+                    ? rebuildUserTurn(m.content, m.attachments, { supportsVision: replay.supportsVision })
+                    : m.content,
+            }) as AgentSdkMessage);
 
     let userContent: string | unknown[] = input.userContent ?? input.userMessage;
     if (replay && replay.supportsVision && replay.carryRecentImages > 0) {
@@ -580,6 +590,8 @@ export function describeTurnOutcome(
     result: Pick<AgentSdkInvokeResult, 'content' | 'state'>,
     /** How many messages the run started with — only text written after that counts. */
     inputMessageCount: number,
+    /** How the run's last model call ended at its output limit, as the chat model reported it (outputLimitNotice.ts). */
+    outputLimit?: OutputLimitReport,
 ): AgentTurnOutcome {
     const ctx = ((result.state as { ctx?: Record<string, unknown> } | undefined)?.ctx ?? {}) as Record<string, unknown>;
     const content = result.content || '';
@@ -602,18 +614,17 @@ export function describeTurnOutcome(
                 : undefined;
     }
 
-    // The model could not fit an answer in its output limit even after a raised
-    // retry: the turn ended gracefully with a notice (gatewayChatModel.ts).
-    if (stopReason === 'completed') {
-        const notice = parseOutputLimitNotice(content);
-        if (notice) {
-            return {
-                stopReason: 'limit',
-                stopDetail: `maxOutputTokens${notice.limit ? ` (${notice.limit})` : ''} reached by the model`,
-                content,
-                partial: true,
-            };
-        }
+    // The model's last call ended at its output limit (gatewayChatModel.ts): either it
+    // could not fit an answer even after a raised retry, and the turn ended gracefully
+    // with a notice, or its answer was cut off and is partial. The chat model reports
+    // it; the text of `content` is never read for it.
+    if (stopReason === 'completed' && outputLimit) {
+        return {
+            stopReason: 'limit',
+            stopDetail: outputLimitStopDetail(outputLimit),
+            content,
+            partial: true,
+        };
     }
 
     if (stopReason === 'completed' || content.trim()) {
