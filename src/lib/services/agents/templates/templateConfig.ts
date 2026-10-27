@@ -60,12 +60,24 @@ export function buildTemplateConfig(template: AgentTemplate, picks: TemplateConf
  * takes (so it goes through the same validation a hand-made trigger does):
  * always disabled and unpinned (it runs the published version).
  */
-export function buildTriggerBody(trigger: AgentTemplateTrigger, timezone: string): Record<string, unknown> {
+export function buildTriggerBody(trigger: AgentTemplateTrigger, timezone: string, connectorId?: string): Record<string, unknown> {
   return {
     name: trigger.name,
     type: trigger.type,
     ...(trigger.type === 'schedule' && trigger.schedule ? { schedule: { cron: trigger.schedule.cron, timezone } } : {}),
     ...(trigger.type === 'webhook' && trigger.webhook ? { webhook: structuredClone(trigger.webhook) } : {}),
+    ...(trigger.type === 'connector' && trigger.connector
+      ? {
+        connector: {
+          connector_id: connectorId,
+          trigger: trigger.connector.trigger,
+          params: structuredClone(trigger.connector.params ?? {}),
+          ...(trigger.connector.events ? { events: [...trigger.connector.events] } : {}),
+          ...(trigger.connector.filter ? { filter: structuredClone(trigger.connector.filter) } : {}),
+          include_payload: trigger.connector.includePayload,
+        },
+      }
+      : {}),
     prompt: trigger.prompt,
     ...(trigger.variables ? { variables: structuredClone(trigger.variables) } : {}),
     enabled: false,

@@ -149,6 +149,7 @@ export const agentTemplatesEn = {
     trigger: {
       schedule: 'Schedule · {cron}',
       webhook: 'Webhook · {preset}',
+      connector: 'Connector event · {package} · {trigger}',
       manual: 'Manual',
       events: 'events: {events}',
     },

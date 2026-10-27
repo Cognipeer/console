@@ -63,7 +63,7 @@ function writeDepsFor(request: FastifyRequest, context: ProjectContext): AgentTe
       canNameBucket: (bucketKey) => requestCanNameBucket(request, scope, bucketKey),
       canReferenceConfig: () => requestHasConfigRead(request, scope.projectId),
     }),
-    prepareTriggerWrite: ({ body, agent }) => prepareTriggerWrite({ body, agent, scope }),
+    prepareTriggerWrite: ({ body, agent, actorId }) => prepareTriggerWrite({ body, agent, scope, ...(actorId ? { actorId } : {}) }),
   };
 }
 

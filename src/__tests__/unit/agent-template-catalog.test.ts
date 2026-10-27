@@ -153,7 +153,8 @@ describe('catalog shape', () => {
       structured_output: spec.structuredOutput?.enabled === true,
       variables: (spec.variables?.length ?? 0) > 0,
       schedule: (template.triggers ?? []).some((trigger) => trigger.type === 'schedule'),
-      webhook: (template.triggers ?? []).some((trigger) => trigger.type === 'webhook'),
+      // The `webhook` chip stands for every event-driven trigger: a generic webhook or a connector event.
+      webhook: (template.triggers ?? []).some((trigger) => trigger.type === 'webhook' || trigger.type === 'connector'),
       sandbox: spec.sandbox?.enabled === true,
       guardrails: requires.guardrails === 'recommended',
       mcp: (spec.toolBindings ?? []).some((binding) => binding.source === 'mcp'),
@@ -317,10 +318,10 @@ describe('structured output', () => {
 });
 
 describe('suggested triggers', () => {
-  it('are schedules, webhooks or manual, valid as the trigger API would take them', withTemplates((template) => {
+  it('are schedules, webhooks, connector events or manual, valid as the trigger API would take them', withTemplates((template) => {
     for (const trigger of template.triggers ?? []) {
       expect(trigger.name.trim()).not.toBe('');
-      expect(['schedule', 'webhook', 'manual']).toContain(trigger.type);
+      expect(['schedule', 'webhook', 'manual', 'connector']).toContain(trigger.type);
       expect(trigger.prompt.length).toBeLessThanOrEqual(32_000);
       expect(JSON.stringify(trigger)).not.toContain('received_at');
       if (trigger.type === 'schedule') {
@@ -330,8 +331,20 @@ describe('suggested triggers', () => {
         expect(resolved.ok, JSON.stringify(resolved)).toBe(true);
         expect(trigger.prompt.trim()).not.toBe('');
       }
+      if (trigger.type === 'connector') {
+        expect(trigger.schedule).toBeUndefined();
+        expect(trigger.webhook).toBeUndefined();
+        expect(trigger.connector?.package).toMatch(/^[a-z0-9]+(\.[a-z0-9_-]+)+$/);
+        expect(trigger.connector?.trigger).toMatch(/^[a-z][a-z0-9_]*$/);
+        const filter = parseFilterRules(trigger.connector?.filter ?? []);
+        expect(filter.ok, JSON.stringify(filter)).toBe(true);
+        expect(templateProblem(trigger.prompt)).toBeNull();
+        expect(variableMappingProblems(template.spec.variables, trigger.variables)).toEqual([]);
+        expect(trigger.prompt.trim() !== '' || trigger.connector?.includePayload === true).toBe(true);
+      }
       if (trigger.type === 'webhook') {
         expect(trigger.schedule).toBeUndefined();
+        expect(trigger.connector).toBeUndefined();
         expect(WEBHOOK_PRESETS).toContain(trigger.webhook?.preset);
         const filter = parseFilterRules(trigger.webhook?.filter ?? []);
         expect(filter.ok, JSON.stringify(filter)).toBe(true);

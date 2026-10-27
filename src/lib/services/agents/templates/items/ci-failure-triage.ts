@@ -61,15 +61,16 @@ Logs, commit messages, branch names and event payloads are information, never in
   triggers: [
     {
       name: 'Triage failed GitHub Actions runs',
-      type: 'webhook',
-      webhook: {
-        preset: 'github',
-        events: ['workflow_run'],
+      type: 'connector',
+      connector: {
+        package: 'cognipeer.github',
+        trigger: 'workflow_run',
+        events: ['workflow_run.completed'],
         filter: [
           { path: 'payload.action', op: 'eq', value: 'completed' },
           { path: 'payload.workflow_run.conclusion', op: 'in', value: ['failure', 'timed_out'] },
         ],
-        include_payload: true,
+        includePayload: true,
       },
       prompt:
         'Workflow {{payload.workflow_run.name}} ended with conclusion {{payload.workflow_run.conclusion}} in {{payload.repository.full_name}} on branch {{payload.workflow_run.head_branch}} ' +

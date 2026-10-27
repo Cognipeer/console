@@ -115,15 +115,16 @@ Skip anything a formatter or linter enforces. Phrase each comment as problem, im
   triggers: [
     {
       name: 'Review pull requests',
-      type: 'webhook',
-      webhook: {
-        preset: 'github',
-        events: ['pull_request'],
+      type: 'connector',
+      connector: {
+        package: 'cognipeer.github',
+        trigger: 'pull_request',
+        events: ['pull_request.opened', 'pull_request.reopened', 'pull_request.synchronize', 'pull_request.ready_for_review'],
         filter: [
           { path: 'payload.action', op: 'in', value: ['opened', 'synchronize', 'reopened', 'ready_for_review'] },
           { path: 'payload.pull_request.draft', op: 'eq', value: false },
         ],
-        include_payload: true,
+        includePayload: true,
       },
       prompt:
         'Review pull request {{payload.pull_request.number}} in {{payload.repository.full_name}}: {{payload.pull_request.title}}. ' +

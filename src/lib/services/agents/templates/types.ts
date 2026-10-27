@@ -21,6 +21,7 @@ import type {
   IAgent,
   IAgentConfig,
 } from '@/lib/database';
+import type { ConnectorSubscriptionWire } from '@/lib/shared/connectorTriggers';
 import type { ManifestResources } from '@/lib/services/agents/manifestResources';
 
 /** The order the gallery lists the categories in. */
@@ -66,7 +67,7 @@ export type AgentTemplateSurface = typeof AGENT_TEMPLATE_SURFACES[number];
 export interface AgentTemplateTrigger {
   /** English; the owner can rename it. */
   name: string;
-  type: 'schedule' | 'webhook' | 'manual';
+  type: 'schedule' | 'webhook' | 'manual' | 'connector';
   /** The timezone is the one the user picked when creating the agent (their browser's by default, else UTC). */
   schedule?: { cron: string };
   webhook?: {
@@ -76,8 +77,21 @@ export interface AgentTemplateTrigger {
     include_payload?: boolean;
   };
   /**
-   * Webhook: a Mustache template over the delivery (`payload`, `headers`,
-   * `event`, `delivery_id`, `preset`, `trigger`, `agent`; never `received_at`).
+   * Connector: an event of a connector package (`package` = the package id,
+   * `trigger` = one it declares). The trigger is created on the connector the
+   * user picks at instantiate time (`connector_id`); without one it is skipped.
+   */
+  connector?: {
+    package: string;
+    trigger: string;
+    params?: Record<string, unknown>;
+    events?: string[];
+    filter?: AgentTriggerWebhookFilterRule[];
+    includePayload: boolean;
+  };
+  /**
+   * Webhook and connector: a Mustache template over the event (`payload`, `headers`,
+   * `event`, `delivery_id`, `preset`, `trigger`, `agent`, `connector`; never `received_at`).
    * Other types: the literal message.
    */
   prompt: string;
@@ -194,6 +208,10 @@ export interface InstantiateTemplateInput {
   timezone?: string;
   /** Publish version 1 right away (API, triggers and A2A run the published version). Default false. */
   publish?: boolean;
+  /** The connector the template's connector triggers listen to (every connector trigger without an entry in `connector_ids`). */
+  connector_id?: string;
+  /** Connector per suggested connector trigger, by the trigger's name in the template. */
+  connector_ids?: Record<string, string>;
 }
 
 /** What is left to do after the agent exists. */
@@ -225,12 +243,25 @@ export interface InstantiatedTemplateTrigger {
   schedule?: { cron: string; timezone: string };
   /** The URL to give the sender and the secret it signs with: shown this once, only its last four characters after that. */
   webhook?: { url: string; preset: string; auth: string; secret?: string };
+  /** A connector trigger: the connector and the subscription it was bound to (its secret, in manual setup, is shown this once). */
+  connector?: { connectorId: string; trigger: string; subscription: ConnectorSubscriptionWire | null };
+}
+
+/** A suggested trigger that was not created. */
+export interface SkippedTemplateTrigger {
+  name: string;
+  /** `connector_required`: no connector was picked for it (or the Connectors module is not part of this edition). */
+  reason: 'connector_required';
+  /** The connector package the trigger needs. */
+  package: string;
 }
 
 export interface InstantiateTemplateResult {
   agent: IAgent;
   template: { key: string; version: number; catalogVersion: number };
   triggers: InstantiatedTemplateTrigger[];
+  /** Suggested triggers that need a connector and were not created. */
+  skipped_triggers: SkippedTemplateTrigger[];
   setup: AgentTemplateSetupItem[];
   /** Notes from the same validation a Studio save runs (they do not stop the agent from being created). */
   warnings: Array<{ field: string; message: string }>;

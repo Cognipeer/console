@@ -152,7 +152,9 @@ export default function TemplateDetailDrawer({ templateKey, onClose, onUse }: Te
                         ? t('ui.trigger.schedule', { cron: line.cron })
                         : line.kind === 'webhook'
                           ? t('ui.trigger.webhook', { preset: line.preset }) + (line.events.length ? ` (${t('ui.trigger.events', { events: line.events.join(', ') })})` : '')
-                          : t('ui.trigger.manual')}</span>
+                          : line.kind === 'connector'
+                            ? t('ui.trigger.connector', { package: line.package, trigger: line.trigger }) + (line.events.length ? ` (${t('ui.trigger.events', { events: line.events.join(', ') })})` : '')
+                            : t('ui.trigger.manual')}</span>
                     </li>
                   );
                 })}

@@ -31,11 +31,12 @@ import { createAgentRecord, deleteAgentRecord, getAgentById, publishAgent } from
 import { resolveAgentKnowledgeModule } from '@/lib/services/agents/bindingResolution';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone } from '@/lib/services/agents/agentTriggerSchedule';
 import {
-  createAgentTrigger,
+  createAgentTriggerHosted,
   serializeAgentTrigger,
   type NewTriggerWrite,
   type TriggerWrite,
 } from '@/lib/services/agents/agentTriggers';
+import { toSubscriptionWire } from '@/lib/services/agents/agentTriggerConnectorHost';
 import type { AgentConfigIssue } from '@/lib/services/agents/agentConfigValidation';
 import { createSkill, deleteSkill } from '@/lib/services/agents/skillService';
 import { listRagModules } from '@/lib/services/rag/ragService';
@@ -57,6 +58,7 @@ import type {
   AgentTemplateSummary,
   InstantiatedTemplateTrigger,
   InstantiateTemplateResult,
+  SkippedTemplateTrigger,
 } from './types';
 
 const logger = createLogger('agent-templates');
@@ -98,7 +100,7 @@ export interface AgentTemplateWriteDeps {
   /** A new agent's config as the Studio's create route stores it: normalized, guardrail bindings checked, validated. */
   prepareAgentConfig(config: IAgentConfig): Promise<PreparedAgentConfig>;
   /** A trigger body in the shape `POST /agents/:id/triggers` takes, checked against the created agent. */
-  prepareTriggerWrite(input: { body: Record<string, unknown>; agent: IAgent }): Promise<PreparedTriggerWrite>;
+  prepareTriggerWrite(input: { body: Record<string, unknown>; agent: IAgent; actorId?: string }): Promise<PreparedTriggerWrite>;
 }
 
 // ── Listing ──────────────────────────────────────────────────────────────
@@ -189,6 +191,8 @@ export interface ParsedInstantiateInput {
   createTriggers: boolean;
   timezone: string;
   publish: boolean;
+  connectorId?: string;
+  connectorIds: Record<string, string>;
 }
 
 const invalid = (code: string, message: string) => new AgentTemplateError(400, code, message);
@@ -205,6 +209,18 @@ function readFlag(value: unknown, field: string, fallback: boolean): boolean {
   if (value === undefined || value === null) return fallback;
   if (typeof value !== 'boolean') throw invalid('invalid_request', `${field} must be true or false`);
   return value;
+}
+
+/** `connector_ids`: connector ids by the suggested trigger's name. */
+function readConnectorIds(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) throw invalid('invalid_request', 'connector_ids must be an object of trigger names to connector ids');
+  const out: Record<string, string> = {};
+  for (const [name, id] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof id !== 'string' || !id.trim()) throw invalid('invalid_request', 'connector_ids must be an object of trigger names to connector ids');
+    out[name] = id.trim();
+  }
+  return out;
 }
 
 function readOptionalText(value: unknown, field: string): string | undefined {
@@ -238,6 +254,8 @@ export function parseInstantiateInput(raw: unknown): ParsedInstantiateInput {
   if (!isValidTriggerTimezone(timezone)) throw invalid('invalid_timezone', 'timezone must be an IANA timezone name, like "Europe/Istanbul"');
 
   const sandboxTemplateKey = readOptionalText(body.sandboxTemplateKey, 'sandboxTemplateKey');
+  const connectorId = readOptionalText(body.connector_id, 'connector_id');
+  const connectorIds = readConnectorIds(body.connector_ids);
   return {
     ...(name ? { name } : {}),
     ...(description ? { description } : {}),
@@ -249,6 +267,8 @@ export function parseInstantiateInput(raw: unknown): ParsedInstantiateInput {
     createTriggers: readFlag(body.createTriggers, 'createTriggers', true),
     timezone,
     publish: readFlag(body.publish, 'publish', false),
+    ...(connectorId ? { connectorId } : {}),
+    connectorIds,
   };
 }
 
@@ -382,15 +402,29 @@ async function createSuggestedTriggers(
   timezone: string,
   userId: string,
   deps: AgentTemplateWriteDeps,
-): Promise<InstantiatedTemplateTrigger[]> {
+  connectors: Pick<ParsedInstantiateInput, 'connectorId' | 'connectorIds'>,
+): Promise<{ created: InstantiatedTemplateTrigger[]; skipped: SkippedTemplateTrigger[] }> {
   const created: InstantiatedTemplateTrigger[] = [];
+  const skipped: SkippedTemplateTrigger[] = [];
   for (const suggestion of template.triggers ?? []) {
-    const prepared = await deps.prepareTriggerWrite({ body: buildTriggerBody(suggestion, timezone), agent });
+    // A connector trigger needs a connector of its package; without one (or without the module) it is left out.
+    const connectorId = suggestion.type === 'connector' ? connectors.connectorIds[suggestion.name] ?? connectors.connectorId : undefined;
+    const skip = () => skipped.push({ name: suggestion.name, reason: 'connector_required', package: suggestion.connector?.package ?? '' });
+    if (suggestion.type === 'connector' && (!suggestion.connector || !connectorId)) {
+      skip();
+      continue;
+    }
+    const prepared = await deps.prepareTriggerWrite({ body: buildTriggerBody(suggestion, timezone, connectorId), agent, actorId: userId });
+    if (!prepared.ok && suggestion.type === 'connector') {
+      // The picked connector is not one the trigger can use (another package, deleted) or there is no module.
+      skip();
+      continue;
+    }
     if (!prepared.ok) {
       const summary = prepared.errors.slice(0, 3).map((issue) => `${issue.field}: ${issue.message}`).join('; ');
       throw new AgentTemplateError(400, 'invalid_template_trigger', `The suggested trigger "${suggestion.name}" is not valid - ${summary}`, { issues: prepared.errors });
     }
-    const trigger = await createAgentTrigger(
+    const { trigger, connectorView } = await createAgentTriggerHosted(
       scope,
       agent.key,
       { ...prepared.write, name: prepared.write.name!, prompt: prepared.write.prompt ?? '' } as NewTriggerWrite,
@@ -400,7 +434,7 @@ async function createSuggestedTriggers(
     created.push({
       id: view.id,
       name: view.name,
-      type: view.type === 'schedule' || view.type === 'webhook' ? view.type : 'manual',
+      type: view.type === 'schedule' || view.type === 'webhook' || view.type === 'connector' ? view.type : 'manual',
       enabled: view.enabled,
       ...(view.type === 'schedule' ? { schedule: view.schedule } : {}),
       ...(view.type === 'webhook'
@@ -413,9 +447,12 @@ async function createSuggestedTriggers(
           },
         }
         : {}),
+      ...(view.type === 'connector'
+        ? { connector: { connectorId: view.connector.connector_id, trigger: view.connector.trigger, subscription: toSubscriptionWire(connectorView) } }
+        : {}),
     });
   }
-  return created;
+  return { created, skipped };
 }
 
 /** Removes what a failed create left: the agent (its triggers go with it), then the skills this call added. Best effort, one by one. */
@@ -500,9 +537,9 @@ async function createFromTemplate(
     });
     created.agentId = String(agent._id);
 
-    const triggers = input.createTriggers
-      ? await createSuggestedTriggers(scope, template, agent, input.timezone, userId, deps)
-      : [];
+    const { created: triggers, skipped: skippedTriggers } = input.createTriggers
+      ? await createSuggestedTriggers(scope, template, agent, input.timezone, userId, deps, input)
+      : { created: [], skipped: [] };
     if (input.publish) {
       await publishAgent(scope.tenantDbName, created.agentId, userId, `Created from the "${template.key}" template`);
     }
@@ -515,6 +552,7 @@ async function createFromTemplate(
       agent: (await getAgentById(scope.tenantDbName, created.agentId)) ?? agent,
       template: templateRef,
       triggers,
+      skipped_triggers: skippedTriggers,
       setup: buildSetupItems({
         template,
         knowledgeKeys: input.knowledgeKeys,

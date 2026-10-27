@@ -129,12 +129,16 @@ export function describeContents(template: AgentTemplateDetail): TemplateContent
 export type TriggerLine =
   | { kind: 'schedule'; cron: string; name: string }
   | { kind: 'webhook'; preset: string; events: string[]; name: string }
+  | { kind: 'connector'; package: string; trigger: string; events: string[]; name: string }
   | { kind: 'manual'; name: string };
 
 export function describeTrigger(trigger: AgentTemplateTrigger): TriggerLine {
   if (trigger.type === 'schedule') return { kind: 'schedule', cron: trigger.schedule?.cron ?? '', name: trigger.name };
   if (trigger.type === 'webhook') {
     return { kind: 'webhook', preset: trigger.webhook?.preset ?? 'generic', events: trigger.webhook?.events ?? [], name: trigger.name };
+  }
+  if (trigger.type === 'connector') {
+    return { kind: 'connector', package: trigger.connector?.package ?? '', trigger: trigger.connector?.trigger ?? '', events: trigger.connector?.events ?? [], name: trigger.name };
   }
   return { kind: 'manual', name: trigger.name };
 }

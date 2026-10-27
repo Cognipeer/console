@@ -141,6 +141,7 @@ export const agentTemplatesTr: typeof agentTemplatesEn = {
     trigger: {
       schedule: 'Zamanlama · {cron}',
       webhook: 'Webhook tetikleyici · {preset}',
+      connector: 'Bağlayıcı olayı · {package} · {trigger}',
       manual: 'Elle',
       events: 'olaylar: {events}',
     },

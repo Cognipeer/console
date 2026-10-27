@@ -418,7 +418,9 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
                             ? t('ui.trigger.schedule', { cron: line.cron })
                             : line.kind === 'webhook'
                               ? t('ui.trigger.webhook', { preset: line.preset })
-                              : t('ui.trigger.manual')}
+                              : line.kind === 'connector'
+                                ? t('ui.trigger.connector', { package: line.package, trigger: line.trigger })
+                                : t('ui.trigger.manual')}
                         </span>
                       </li>
                     );

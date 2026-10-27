@@ -126,7 +126,9 @@ describe('what a template will create', () => {
 
   it('describes triggers by type', () => {
     const lines = detailOf('pr-reviewer').triggers.map(describeTrigger);
-    expect(lines[0]).toMatchObject({ kind: 'webhook', preset: 'github' });
+    expect(lines[0]).toMatchObject({ kind: 'connector', package: 'cognipeer.github', trigger: 'pull_request' });
+    const generic = AGENT_TEMPLATES.flatMap((template) => template.triggers ?? []).find((trigger) => trigger.type === 'webhook')!;
+    expect(describeTrigger(generic)).toMatchObject({ kind: 'webhook', preset: 'generic' });
     const scheduled = AGENT_TEMPLATES.flatMap((template) => template.triggers ?? []).find((trigger) => trigger.type === 'schedule')!;
     expect(describeTrigger(scheduled)).toMatchObject({ kind: 'schedule', cron: scheduled.schedule!.cron });
   });
@@ -211,9 +213,10 @@ describe('creating the agent', () => {
     agent: { _id: 'a1', key: 'pr-reviewer', name: 'PR bot' } as unknown as InstantiateTemplateResult['agent'],
     template: { key: 'pr-reviewer', version: 1, catalogVersion: 1 },
     triggers: [
-      { id: 't1', name: 'Review pull requests', type: 'webhook', enabled: false, webhook: { url: 'https://c.example/hooks/x', preset: 'github', auth: 'hmac', secret: 'whsec_once' } },
+      { id: 't1', name: 'Review pull requests', type: 'webhook', enabled: false, webhook: { url: 'https://c.example/hooks/x', preset: 'generic', auth: 'bearer', secret: 'whsec_once' } },
       { id: 't2', name: 'Manual', type: 'manual', enabled: false },
     ],
+    skipped_triggers: [],
     setup: [{ code: 'webhook_secret', severity: 'info', message: '' }],
     warnings: [],
   };

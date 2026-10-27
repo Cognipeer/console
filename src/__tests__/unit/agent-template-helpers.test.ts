@@ -243,12 +243,12 @@ describe('buildTemplateConfig', () => {
 
 describe('buildTriggerBody', () => {
   const webhook: AgentTemplateTrigger = {
-    name: 'On push', type: 'webhook', webhook: { preset: 'github', events: ['push'], include_payload: true }, prompt: 'Review {{payload.after}}.', variables: { sha: '{{payload.after}}' },
+    name: 'On push', type: 'webhook', webhook: { preset: 'generic', events: ['push'], include_payload: true }, prompt: 'Review {{payload.after}}.', variables: { sha: '{{payload.after}}' },
   };
 
   it('is the body POST /agents/:id/triggers takes: disabled, unpinned, with the type\'s one settings object', () => {
     expect(buildTriggerBody(webhook, 'UTC')).toEqual({
-      name: 'On push', type: 'webhook', webhook: { preset: 'github', events: ['push'], include_payload: true },
+      name: 'On push', type: 'webhook', webhook: { preset: 'generic', events: ['push'], include_payload: true },
       prompt: 'Review {{payload.after}}.', variables: { sha: '{{payload.after}}' }, enabled: false, version: null,
     });
   });
@@ -263,6 +263,25 @@ describe('buildTriggerBody', () => {
   it('a manual trigger has no settings, and one without variables sends none', () => {
     const body = buildTriggerBody({ name: 'Run now', type: 'manual', prompt: 'Go.' }, 'UTC');
     expect(body).toEqual({ name: 'Run now', type: 'manual', prompt: 'Go.', enabled: false, version: null });
+  });
+
+  it('a connector trigger carries the picked connector, its trigger and the narrowing, and copies them', () => {
+    const connector: AgentTemplateTrigger = {
+      name: 'On PR', type: 'connector', prompt: 'Review {{payload.number}}.',
+      connector: { package: 'cognipeer.github', trigger: 'pull_request', params: { labels: ['a'] }, events: ['pull_request.opened'], filter: [{ path: 'payload.action', op: 'eq', value: 'opened' }], includePayload: true },
+    };
+    const body = buildTriggerBody(connector, 'UTC', 'conn-1') as { connector: { events: string[]; params: { labels: string[] } } };
+    expect(body).toEqual({
+      name: 'On PR', type: 'connector', prompt: 'Review {{payload.number}}.', enabled: false, version: null,
+      connector: {
+        connector_id: 'conn-1', trigger: 'pull_request', params: { labels: ['a'] }, events: ['pull_request.opened'],
+        filter: [{ path: 'payload.action', op: 'eq', value: 'opened' }], include_payload: true,
+      },
+    });
+    body.connector.events.push('x');
+    body.connector.params.labels.push('b');
+    expect(connector.connector!.events).toEqual(['pull_request.opened']);
+    expect(connector.connector!.params).toEqual({ labels: ['a'] });
   });
 
   it('copies what it hands over: changing the body never changes the template', () => {
@@ -303,7 +322,7 @@ describe('parseInstantiateInput', () => {
 
   it('needs only the model, and gives everything else its default', () => {
     expect(parseInstantiateInput({ modelKey: 'main' })).toEqual({
-      modelKey: 'main', knowledgeKeys: [], guardrailKeys: [], createTriggers: true, timezone: 'UTC', publish: false,
+      modelKey: 'main', knowledgeKeys: [], guardrailKeys: [], connectorIds: {}, createTriggers: true, timezone: 'UTC', publish: false,
     });
   });
 
@@ -313,13 +332,21 @@ describe('parseInstantiateInput', () => {
       createTriggers: false, timezone: 'Europe/Istanbul', publish: true,
     })).toEqual({
       modelKey: 'main', name: 'My agent', description: 'Does things', key: 'my-agent', knowledgeKeys: ['a'], guardrailKeys: ['g'], sandboxTemplateKey: 'python',
-      createTriggers: false, timezone: 'Europe/Istanbul', publish: true,
+      connectorIds: {}, createTriggers: false, timezone: 'Europe/Istanbul', publish: true,
     });
     expect(parseInstantiateInput({ modelKey: 'm', name: null, description: null, key: null, knowledgeKeys: null, guardrailKeys: null, timezone: null, createTriggers: null, publish: null })).toEqual({
-      modelKey: 'm', knowledgeKeys: [], guardrailKeys: [], createTriggers: true, timezone: 'UTC', publish: false,
+      modelKey: 'm', knowledgeKeys: [], guardrailKeys: [], connectorIds: {}, createTriggers: true, timezone: 'UTC', publish: false,
     });
     expect(parseInstantiateInput({ modelKey: 'm', name: '   ', description: '  ' })).not.toHaveProperty('name');
     expect(parseInstantiateInput({ modelKey: 'm', name: '   ', description: '  ' })).not.toHaveProperty('description');
+  });
+
+  it('reads connector_id and connector_ids (by trigger name)', () => {
+    expect(parseInstantiateInput({ modelKey: 'm', connector_id: ' c1 ', connector_ids: { 'On PR': ' c2 ' } })).toMatchObject({ connectorId: 'c1', connectorIds: { 'On PR': 'c2' } });
+    expect(parseInstantiateInput({ modelKey: 'm', connector_id: null })).not.toHaveProperty('connectorId');
+    expect(refusal({ modelKey: 'm', connector_id: 7 }).status).toBe(400);
+    expect(refusal({ modelKey: 'm', connector_ids: ['c1'] }).status).toBe(400);
+    expect(refusal({ modelKey: 'm', connector_ids: { a: 3 } }).status).toBe(400);
   });
 
   it('refuses with a 400 and a code the caller can branch on', () => {
