@@ -310,7 +310,9 @@ describe('anthropic native client', () => {
     expect(calls[0].url).toBe('https://api.anthropic.com/v1/messages');
     expect(calls[0].headers['x-api-key']).toBe('sk-ant');
     expect(calls[0].body).toMatchObject({
-      model: 'claude-sonnet-4-5', max_tokens: 21333, temperature: 0.2, system: 'be brief',
+      model: 'claude-sonnet-4-5', max_tokens: 21333, temperature: 0.2,
+      // Prompt caching is on by default for Claude, so the SDK marks the system prompt.
+      system: [{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }],
       tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
     });
     expect(res.content).toBe('Hi');
@@ -447,11 +449,16 @@ describe('vertex native client', () => {
     expect(res.usage).toMatchObject({ inputTokens: 12, totalTokens: 15 });
   });
 
-  it('"none" is a zero thinking budget', async () => {
-    const { calls, fetch } = recorder(generate);
-    const client = await (await make()).createNativeChatClient!(config('gemini-2.5-pro'), { fetch });
-    await client.complete({ ...USER, reasoning: { effort: 'none' } });
-    expect(calls.find((c) => c.url.includes('generateContent'))!.body.generationConfig.thinkingConfig).toMatchObject({ thinkingBudget: 0 });
+  it('"none" is a zero thinking budget, or the minimum on a model that cannot turn thinking off', async () => {
+    const budgetFor = async (model: string) => {
+      const { calls, fetch } = recorder(generate);
+      const client = await (await make()).createNativeChatClient!(config(model), { fetch });
+      await client.complete({ ...USER, reasoning: { effort: 'none' } });
+      return calls.find((c) => c.url.includes('generateContent'))!.body.generationConfig.thinkingConfig;
+    };
+    expect(await budgetFor('gemini-2.5-flash')).toMatchObject({ thinkingBudget: 0 });
+    // Gemini 2.5 Pro always thinks (budget 128-32768), so "none" is its smallest budget.
+    expect(await budgetFor('gemini-2.5-pro')).toMatchObject({ thinkingBudget: 128 });
   });
 
   it('embeds through the :predict endpoint', async () => {

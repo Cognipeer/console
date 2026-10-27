@@ -761,10 +761,10 @@ export function buildCostEstimator(
         for (const name of entry.names) if (name) byName.set(name.toLowerCase(), { pricing: entry.pricing, model: entry.model });
     }
     if (byName.size === 0 && !fallbackPricing) return undefined;
-    // `cacheWriteTokens` is not in agent-sdk 0.20's estimator args (a later SDK passes it);
-    // the live budget stop prices a cache write at the input rate until then, and
-    // `priceAgentTurn` (post-turn) prices it exactly. `inputTokens` is the whole prompt,
-    // cache read + write included (the gateway's canonical usage).
+    // agent-sdk >= 0.21 passes `cacheWriteTokens` in the estimator args, so the live
+    // budget stop prices a cache write at its own rate, as `priceAgentTurn` does
+    // post-turn. `inputTokens` is the whole prompt, cache read + write included (the
+    // gateway's canonical usage).
     return (args) => {
         const name = args.modelName?.toLowerCase();
         // A sub-agent's model nobody priced counts as free here (the owner is warned) rather than at the parent's rate.
