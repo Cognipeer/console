@@ -3446,6 +3446,61 @@ export const en = {
       responses: 'Calls /responses. Pick it for models that are only served there, or for reasoning summaries. The upstream must support the Responses API.',
     },
   },
+  modelPromptCaching: {
+    title: 'Prompt caching',
+    badge: 'New',
+    description:
+      'Reuses the unchanged start of a request (tools, system prompt, earlier turns), so repeated input bills at the cache-read price.',
+    switch: 'Cache prompts',
+    caption: {
+      claude: 'On by default for Claude models.',
+      nova: 'Off by default for Nova models.',
+      other: 'Off by default for this model.',
+      off: 'Off: requests go out without cache markers. Every call bills its full input at the input price.',
+    },
+    what: {
+      label: 'What to cache',
+      auto: 'Conversation (recommended)',
+      static: 'Tools and system prompt only',
+      staticNova: 'System prompt only',
+      autoHint: 'Tools, system prompt and the conversation so far. Each agent step reads the earlier turns from cache.',
+      staticHint: 'Only the tool definitions and the system prompt are cached. Earlier turns are billed at the input price.',
+      novaHint: 'Nova caches the system prompt and messages. Tool definitions are not cached on this family.',
+    },
+    billing: {
+      line: "Billed with this model's prices: cache read {read} / 1M, cache write {write} / 1M.",
+      inputPrice: 'the input price',
+      assumedWrite: '{multiplier} x the input price (assumed)',
+      edit: 'Edit in Pricing',
+    },
+    priceWarning: {
+      text: 'Cache prices are empty, so cached tokens bill at the input price and the savings do not show in cost reports.',
+      assumedWrite: 'The cache write price is assumed at {multiplier} x the input price.',
+      fill: 'Fill from catalog',
+      orSet: 'or set them in Pricing.',
+      setInPricing: 'Set them in Pricing.',
+    },
+    markers: {
+      before: 'Requests that bring their own',
+      on: 'markers keep them.',
+      off: 'markers still keep them.',
+    },
+    automatic: {
+      text: 'This provider caches long prompts by itself. There is nothing to set here.',
+      usage: 'Cached input shows up in usage as cached tokens and bills at the cache-read price set in Pricing.',
+    },
+    none: {
+      bedrock: 'Bedrock has no prompt caching for this model family, so no cache markers are sent.',
+      other: 'This provider has no prompt caching for this model, so no cache markers are sent.',
+    },
+    detail: {
+      effective: 'Cache prompts',
+      on: 'On',
+      off: 'Off',
+      fiveMinutes: 'Cached prompts live for 5 minutes.',
+      edit: 'Edit',
+    },
+  },
   modelReasoning: {
     title: 'Reasoning',
     description:

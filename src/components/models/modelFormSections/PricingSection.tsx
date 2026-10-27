@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { NumberInput, TextInput } from '@mantine/core';
 import { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import CatalogPriceFill, { type CatalogFillMeta } from '@/components/models/CatalogPriceFill';
+import { PRICING_SECTION_ID } from './promptCachingIds';
 import type { FieldProps } from './types';
 
 interface PricingSectionProps {
@@ -43,7 +44,7 @@ export default function PricingSection({
   children,
 }: PricingSectionProps) {
   return (
-    <FormSection number={number} title="Pricing" description={description} done={done}>
+    <FormSection id={PRICING_SECTION_ID} number={number} title="Pricing" description={description} done={done}>
       <FormRow cols={2}>
         <FormField label="Currency">
           <TextInput placeholder="USD" {...currencyProps} />

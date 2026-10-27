@@ -22,6 +22,7 @@ import {
   PricingSection,
   ProviderSection,
   ReasoningSection,
+  PromptCachingSection,
   RequestParamsSection,
   UpstreamApiSection,
 } from '@/components/models/modelFormSections';
@@ -29,6 +30,9 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBrain, IconDeviceFloppy, IconShield } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { normalizePromptCaching } from '@/components/models/promptCachingForm';
+import { useCatalogCachePrices } from '@/components/models/useCatalogCachePrices';
+import { promptCachingSupport } from '@/lib/services/models/promptCaching';
 import { reasoningFormFromSettings, reasoningSettingsPatch } from '@/components/models/reasoningForm';
 import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
@@ -194,7 +198,7 @@ interface EditModelModalProps {
   /** Called after a successful save (the caller refreshes its list / detail). */
   onSaved: () => void;
   /** Open scrolled to this section with its first control focused (a shortcut from the model page). */
-  initialSection?: 'reasoning';
+  initialSection?: 'reasoning' | 'promptCaching';
 }
 
 export default function EditModelModal({ modelId: editModelId, opened, onClose, onSaved, initialSection }: EditModelModalProps) {
@@ -266,6 +270,13 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     () =>
       modelProviders.find((candidate) => candidate.key === form.values.providerKey) ?? null,
     [form.values.providerKey, modelProviders],
+  );
+
+  // The catalog's cache prices for "Fill from catalog" in Prompt caching (only asked while caching is on offer).
+  const catalogCachePrices = useCatalogCachePrices(
+    form.values.modelId ?? '',
+    model?.category === 'llm' &&
+      promptCachingSupport(selectedProvider?.driver, form.values.modelId).support === 'explicit',
   );
 
   // What the model id is known to accept — the boxes start from it until someone ticks one.
@@ -579,6 +590,13 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             ...(model.category === 'llm'
               ? reasoningSettingsPatch(reasoningFormFromSettings(values.settings), null, values.settings)
               : {}),
+            // Only a change from the provider's default is stored; `null` removes the key (back to the default).
+            ...(model.category === 'llm'
+              ? {
+                  promptCaching:
+                    normalizePromptCaching(values.settings.promptCaching, selectedProvider?.driver, values.modelId) ?? null,
+                }
+              : {}),
           },
           isMultimodal: isMultimodalFor(shownInputModalities(inputModalities, inferredModalities)),
           supportsToolCalls: values.supportsToolCalls,
@@ -848,6 +866,35 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
               if (reasoning) settings.reasoning = reasoning; else delete settings.reasoning;
               if (returnReasoning === false) settings.returnReasoning = false; else delete settings.returnReasoning;
               form.setFieldValue('settings', settings);
+            }}
+          />
+        ) : null}
+
+        {isLlm ? (
+          <PromptCachingSection
+            number={sectionNumber()}
+            driver={selectedProvider?.driver}
+            modelId={form.values.modelId ?? undefined}
+            value={normalizePromptCaching(form.values.settings.promptCaching, selectedProvider?.driver, form.values.modelId)}
+            onChange={(next) => {
+              const settings = { ...form.values.settings };
+              if (next) settings.promptCaching = next; else delete settings.promptCaching;
+              form.setFieldValue('settings', settings);
+            }}
+            pricing={{
+              currency: form.values.pricing.currency,
+              cached: form.values.pricing.cachedTokenPer1M,
+              cacheWrite: form.values.pricing.cacheWriteTokenPer1M,
+            }}
+            focusOnMount={initialSection === 'promptCaching'}
+            catalogPrices={catalogCachePrices}
+            onFillCatalog={(prices) => {
+              if (prices.cachedTokenPer1M > 0 && !(Number(form.values.pricing.cachedTokenPer1M) > 0)) {
+                form.setFieldValue('pricing.cachedTokenPer1M', prices.cachedTokenPer1M);
+              }
+              if (prices.cacheWriteTokenPer1M > 0 && !(Number(form.values.pricing.cacheWriteTokenPer1M) > 0)) {
+                form.setFieldValue('pricing.cacheWriteTokenPer1M', prices.cacheWriteTokenPer1M);
+              }
             }}
           />
         ) : null}

@@ -35,6 +35,7 @@ import {
   PricingSection,
   ProviderSection,
   ReasoningSection,
+  PromptCachingSection,
   RequestParamsSection,
   UpstreamApiSection,
 } from './modelFormSections';
@@ -45,6 +46,9 @@ import {
   parseRequestDefaults,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
+import { normalizePromptCaching } from '@/components/models/promptCachingForm';
+import { useCatalogCachePrices } from '@/components/models/useCatalogCachePrices';
+import { promptCachingSupport, type PromptCachingSettings } from '@/lib/services/models/promptCaching';
 import { EMPTY_REASONING_FORM, reasoningSettingsPatch, type ReasoningFormValue } from '@/components/models/reasoningForm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
@@ -145,6 +149,8 @@ interface FormValues {
     requestDefaults: string;
     allowUnknownPassthrough: boolean;
     upstreamApi: UpstreamApi;
+    /** Only what differs from the provider's default; undefined = the default. */
+    promptCaching?: PromptCachingSettings;
   };
   ocr: {
     mode: OcrMode;
@@ -510,6 +516,10 @@ export default function CreateModelModal({
               ? { allowUnknownPassthrough: true }
               : {}),
             ...(isLlmCategory(values.category) ? definedOnly(reasoningSettingsPatch(values.reasoning, undefined)) : {}),
+            // Only a change from the provider's default is stored (a Claude model caches without a stored value).
+            ...(isLlmCategory(values.category) && normalizePromptCaching(values.settings.promptCaching, selectedProvider?.driver, values.modelId)
+              ? { promptCaching: normalizePromptCaching(values.settings.promptCaching, selectedProvider?.driver, values.modelId) }
+              : {}),
             // P1 decision models are always served by the structured-output emulator
             // over the chat model named below; `native` is reserved for later phases.
             ...(values.category === 'decision'
@@ -653,6 +663,10 @@ export default function CreateModelModal({
     maxOutputTokens: isLlm ? formValues.capabilities.maxOutputTokens : undefined,
     maxTokens: formValues.settings.maxTokens,
   }).map((warning) => tWizard(`limitWarnings.${warning}`));
+  const catalogCachePrices = useCatalogCachePrices(
+    formValues.modelId,
+    isLlm && promptCachingSupport(selectedProvider?.driver, formValues.modelId).support === 'explicit',
+  );
   let sectionCounter = 0;
   const sectionNumber = () => ++sectionCounter;
 
@@ -966,6 +980,30 @@ export default function CreateModelModal({
             settings={formValues.settings}
           value={formValues.reasoning}
           onChange={(patch) => setFieldValue('reasoning', { ...formValues.reasoning, ...patch })}
+        />
+      ) : null}
+
+      {isLlm ? (
+        <PromptCachingSection
+          number={sectionNumber()}
+          driver={selectedProvider?.driver}
+          modelId={formValues.modelId}
+          value={formValues.settings.promptCaching}
+          onChange={(next) => setFieldValue('settings.promptCaching', next)}
+          pricing={{
+            currency: formValues.pricing.currency,
+            cached: formValues.pricing.cachedTokenPer1M,
+            cacheWrite: formValues.pricing.cacheWriteTokenPer1M,
+          }}
+          catalogPrices={catalogCachePrices}
+          onFillCatalog={(prices) => {
+            if (prices.cachedTokenPer1M > 0 && !(Number(formValues.pricing.cachedTokenPer1M) > 0)) {
+              setFieldValue('pricing.cachedTokenPer1M', prices.cachedTokenPer1M);
+            }
+            if (prices.cacheWriteTokenPer1M > 0 && !(Number(formValues.pricing.cacheWriteTokenPer1M) > 0)) {
+              setFieldValue('pricing.cacheWriteTokenPer1M', prices.cacheWriteTokenPer1M);
+            }
+          }}
         />
       ) : null}
 

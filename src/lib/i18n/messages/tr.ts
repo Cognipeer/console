@@ -285,6 +285,61 @@ export const tr: typeof en = {
       responses: '/responses cagrilir. Yalnizca orada sunulan modeller veya muhakeme ozetleri icin secin. Upstream Responses API\'sini desteklemelidir.',
     },
   },
+  modelPromptCaching: {
+    title: 'İstem önbelleği',
+    badge: 'Yeni',
+    description:
+      'İsteğin değişmeyen başlangıcını (araçlar, sistem istemi, önceki turlar) yeniden kullanır; tekrarlanan girdi önbellek okuma fiyatından faturalanır.',
+    switch: 'İstemleri önbelleğe al',
+    caption: {
+      claude: 'Claude modellerinde varsayılan olarak açık.',
+      nova: 'Nova modellerinde varsayılan olarak kapalı.',
+      other: 'Bu modelde varsayılan olarak kapalı.',
+      off: 'Kapalı: istekler önbellek işaretleri olmadan gider. Her çağrı girdisinin tamamını girdi fiyatından faturalar.',
+    },
+    what: {
+      label: 'Ne önbelleğe alınsın',
+      auto: 'Konuşma (önerilir)',
+      static: 'Yalnızca araçlar ve sistem istemi',
+      staticNova: 'Yalnızca sistem istemi',
+      autoHint: 'Araçlar, sistem istemi ve o ana kadarki konuşma. Her ajan adımı önceki turları önbellekten okur.',
+      staticHint: 'Yalnızca araç tanımları ve sistem istemi önbelleğe alınır. Önceki turlar girdi fiyatından faturalanır.',
+      novaHint: 'Nova sistem istemini ve mesajları önbelleğe alır. Bu ailede araç tanımları önbelleğe alınmaz.',
+    },
+    billing: {
+      line: 'Bu modelin fiyatlarıyla faturalanır: önbellek okuma {read} / 1M, önbellek yazma {write} / 1M.',
+      inputPrice: 'girdi fiyatı',
+      assumedWrite: 'girdi fiyatının {multiplier} katı (varsayım)',
+      edit: 'Fiyatlandırmada düzenle',
+    },
+    priceWarning: {
+      text: 'Önbellek fiyatları boş, bu yüzden önbellekteki token\'lar girdi fiyatından faturalanır ve tasarruf maliyet raporlarında görünmez.',
+      assumedWrite: 'Önbellek yazma fiyatı girdi fiyatının {multiplier} katı olarak varsayılır.',
+      fill: 'Katalogdan doldur',
+      orSet: 'ya da Fiyatlandırma bölümünden girin.',
+      setInPricing: 'Fiyatlandırma bölümünden girin.',
+    },
+    markers: {
+      before: 'Kendi',
+      on: 'işaretlerini getiren istekler bunları korur.',
+      off: 'işaretlerini getiren istekler bunları yine korur.',
+    },
+    automatic: {
+      text: 'Bu sağlayıcı uzun istemleri kendiliğinden önbelleğe alır. Burada ayarlanacak bir şey yok.',
+      usage: 'Önbellekten gelen girdi kullanımda önbelleğe alınmış token olarak görünür ve Fiyatlandırma\'da girilen önbellek okuma fiyatından faturalanır.',
+    },
+    none: {
+      bedrock: 'Bedrock bu model ailesi için istem önbelleği sunmaz, bu yüzden önbellek işareti gönderilmez.',
+      other: 'Bu sağlayıcı bu model için istem önbelleği sunmaz, bu yüzden önbellek işareti gönderilmez.',
+    },
+    detail: {
+      effective: 'İstemleri önbelleğe al',
+      on: 'Açık',
+      off: 'Kapalı',
+      fiveMinutes: 'Önbelleğe alınan istemler 5 dakika yaşar.',
+      edit: 'Düzenle',
+    },
+  },
   modelReasoning: {
     title: 'Akıl yürütme',
     description:
