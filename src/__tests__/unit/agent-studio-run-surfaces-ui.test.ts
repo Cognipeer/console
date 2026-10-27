@@ -233,13 +233,7 @@ describe('a failed load is not an empty list', () => {
   });
 });
 
-describe('chips a keyboard can reach', () => {
-  it('the filter examples are buttons', () => {
-    const form = { ...emptyTriggerForm(), type: 'webhook' as const, webhookPreset: 'github' as const };
-    const markup = renderToStaticMarkup(wrap(h(WebhookFields, { form, set: () => undefined, storedStandardSecret: false, errorOf: () => undefined })));
-    expect(markup).toMatch(/<button[^>]*type="button"[^>]*>(<span[^>]*>)*Opened \/ synchronize/);
-  });
-
+describe('controls a keyboard can reach', () => {
   // One editor session for both checks.
   it('in the trigger editor: the cron presets are buttons that say which one is selected, and a save that fails on the network says so', async () => {
     fetchMock.mockImplementation((_url: string, init?: { method?: string }) => (init?.method === 'POST' ? Promise.reject(new Error('offline')) : json({ data: [] })));

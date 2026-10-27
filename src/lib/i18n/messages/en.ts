@@ -4865,6 +4865,7 @@ export const en = {
       runsFilterClear: 'Show all runs',
       sessionsFilterClear: 'Show all sessions',
       typeWebhook: 'Webhook',
+      typeConnector: 'Connector',
       summaryWebhookAny: '{preset} · every event',
       tabSettings: 'Settings',
       tabTest: 'Test',

@@ -55,7 +55,7 @@ import {
     type WebhookPreset,
 } from './triggerForm';
 
-export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset, string> = {
+export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset | 'github' | 'gitlab' | 'azure_devops', string> = {
     github: 'presetGithub',
     gitlab: 'presetGitlab',
     azure_devops: 'presetAzureDevops',
@@ -63,10 +63,7 @@ export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset, string> = {
 };
 
 const AUTH_LABEL_KEY: Record<WebhookAuth, string> = {
-    github_signature: 'authGithubSignature',
-    gitlab_token: 'authGitlabToken',
     standard_webhooks: 'authStandardWebhooks',
-    basic: 'authBasic',
     header: 'authHeader',
     bearer: 'authBearer',
     signature: 'authSignature',
@@ -148,7 +145,7 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
                 ) : null}
             </Group>
 
-            <FormField label={t('webhookEvents')} hint={t(preset === 'azure_devops' ? 'webhookEventsHintAzure' : 'webhookEventsHint')} optional>
+            <FormField label={t('webhookEvents')} hint={t('webhookEventsHint')} optional>
                 <TagsInput
                     value={form.webhookEvents}
                     data={[...WEBHOOK_EVENT_SUGGESTIONS[preset]]}
@@ -254,30 +251,16 @@ function CopyValue({ value, label }: { value: string; label: string }) {
     );
 }
 
-/** The sender's setup steps for the preset and auth mode. */
-function ConnectSteps({ preset, auth, headerName }: { preset: WebhookPreset; auth: WebhookAuth; headerName: string }) {
+/** The sender's setup steps for the auth mode. */
+function ConnectSteps({ auth, headerName }: { auth: WebhookAuth; headerName: string }) {
     const t = useTranslations('agents.triggers');
     const steps: Array<{ text: string; strong?: boolean }> = [];
-    switch (preset) {
-        case 'github':
-            steps.push({ text: t('connectGithub1') }, { text: t('connectGithub2') }, { text: t('connectGithubContentType'), strong: true }, { text: t('connectGithub3') }, { text: t('connectGithub4') });
-            break;
-        case 'gitlab':
-            steps.push({ text: t('connectGitlab1') }, { text: t('connectGitlab2') });
-            steps.push({ text: t(auth === 'standard_webhooks' ? 'connectGitlabSigning' : 'connectGitlabToken') }, { text: t('connectGitlab3') });
-            break;
-        case 'azure_devops':
-            steps.push({ text: t('connectAzure1') }, { text: t('connectAzure2') }, { text: t('connectAzureResource'), strong: true });
-            steps.push({ text: auth === 'basic' ? t('connectAzureBasic') : t('connectAzureHeader', { header: headerName }) });
-            break;
-        default:
-            steps.push({ text: t('connectGenericJson') });
-            if (auth === 'bearer') steps.push({ text: t('connectGenericBearer') });
-            else if (auth === 'signature') steps.push({ text: t('connectGenericSignature') });
-            else if (auth === 'header') steps.push({ text: t('connectGenericHeader', { header: headerName }) });
-            else steps.push({ text: t('connectGenericStandard') });
-            steps.push({ text: t('connectGenericDedup') });
-    }
+    steps.push({ text: t('connectGenericJson') });
+    if (auth === 'bearer') steps.push({ text: t('connectGenericBearer') });
+    else if (auth === 'signature') steps.push({ text: t('connectGenericSignature') });
+    else if (auth === 'header') steps.push({ text: t('connectGenericHeader', { header: headerName }) });
+    else steps.push({ text: t('connectGenericStandard') });
+    steps.push({ text: t('connectGenericDedup') });
     return (
         <List type="ordered" size="sm" spacing={4}>
             {steps.map((step) => (
@@ -361,7 +344,7 @@ export function WebhookConnectCard({ agentId, triggerId, webhook, revealedSecret
                 {previousUntil ? (
                     <Text size="xs" c="dimmed">{t('connectPreviousUntil', { time: new Date(previousUntil * 1000).toLocaleString(locale) })}</Text>
                 ) : null}
-                <ConnectSteps preset={preset} auth={auth} headerName={webhook.header_name ?? ''} />
+                <ConnectSteps auth={auth} headerName={webhook.header_name ?? ''} />
 
                 <Stack gap={6}>
                     <Text size="sm" fw={500}>{t('rotate')}</Text>

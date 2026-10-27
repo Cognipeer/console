@@ -1,7 +1,7 @@
 /**
  * The trigger editor's form state and its mapping to / from the triggers API
  * (`/api/agents/:agentId/triggers`): a trigger's `type` and the one settings
- * object named after it (`schedule`, `once`, `webhook`). Pure, so it is tested
+ * object named after it (`schedule`, `once`, `webhook`, `connector`). Pure, so it is tested
  * without rendering.
  */
 
@@ -14,21 +14,19 @@ export type TriggerRow = ReturnType<typeof serializeAgentTrigger>;
 
 /** The types the editor offers, in order. A new type is added here and in the editor's switch. */
 export const TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook'] as const;
-export type TriggerType = (typeof TRIGGER_TYPES)[number];
+/** The types a trigger can have: the editor offers `TRIGGER_TYPES`; a `connector` trigger is edited by the Connectors module's parts. */
+export type TriggerType = (typeof TRIGGER_TYPES)[number] | 'connector';
 
 // ── Webhook ──────────────────────────────────────────────────────────────
 // The preset / auth lists mirror agentTriggerWebhookAuth.ts, which uses node:crypto
 // and cannot be imported here; trigger-form.test.ts keeps the two equal.
 
-export const WEBHOOK_PRESETS = ['github', 'gitlab', 'azure_devops', 'generic'] as const;
+export const WEBHOOK_PRESETS = ['generic'] as const;
 export type WebhookPreset = (typeof WEBHOOK_PRESETS)[number];
-export type WebhookAuth = 'github_signature' | 'gitlab_token' | 'standard_webhooks' | 'basic' | 'header' | 'bearer' | 'signature';
+export type WebhookAuth = 'standard_webhooks' | 'header' | 'bearer' | 'signature';
 
 /** The auth modes each preset offers; the first is its default. */
 export const WEBHOOK_PRESET_AUTH: Record<WebhookPreset, readonly WebhookAuth[]> = {
-    github: ['github_signature'],
-    gitlab: ['gitlab_token', 'standard_webhooks'],
-    azure_devops: ['basic', 'header'],
     generic: ['bearer', 'signature', 'header', 'standard_webhooks'],
 };
 
@@ -54,143 +52,21 @@ export const WEBHOOK_TEMPLATE_VARIABLES = [
 
 /** Event-name suggestions per preset (generic senders name their own). */
 export const WEBHOOK_EVENT_SUGGESTIONS: Record<WebhookPreset, readonly string[]> = {
-    github: ['pull_request', 'pull_request_review', 'pull_request_review_comment', 'push', 'issues', 'issue_comment', 'release', 'workflow_run'],
-    gitlab: ['merge_request', 'push', 'tag_push', 'note', 'issue', 'work_item', 'pipeline', 'build', 'release', 'deployment'],
-    azure_devops: [
-        'git.pullrequest.created', 'git.pullrequest.updated', 'git.pullrequest.merged', 'ms.vss-code.git-pullrequest-comment-event',
-        'git.push', 'build.complete', 'workitem.created', 'workitem.updated', 'workitem.commented',
-    ],
     generic: [],
 };
 
-/** GitHub / GitLab "Actions" chips: compiled to a `<path> in [...]` rule placed first in the filter. */
-export const WEBHOOK_ACTION_PATH: Partial<Record<WebhookPreset, string>> = {
-    github: 'payload.action',
-    gitlab: 'payload.object_attributes.action',
-};
+/** "Actions" chips (a `<path> in [...]` rule placed first in the filter): none for a generic webhook. */
+export const WEBHOOK_ACTION_PATH: Partial<Record<WebhookPreset, string>> = {};
 
-export const WEBHOOK_ACTION_SUGGESTIONS: Partial<Record<WebhookPreset, readonly string[]>> = {
-    github: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'edited', 'closed', 'created', 'submitted', 'completed'],
-    gitlab: ['open', 'update', 'reopen', 'approved', 'merge', 'close'],
-};
+export const WEBHOOK_ACTION_SUGGESTIONS: Partial<Record<WebhookPreset, readonly string[]>> = {};
 
 /** One-click filter examples per preset (i18n key under agents.triggers → rows they add). */
 export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key: string; rows: WebhookFilterRow[] }>> = {
-    github: [
-        {
-            key: 'exampleGithubOpened',
-            rows: [
-                { path: 'payload.action', op: 'in', value: 'opened, synchronize, reopened' },
-                { path: 'payload.pull_request.draft', op: 'neq', value: 'true' },
-            ],
-        },
-        { key: 'exampleGithubMain', rows: [{ path: 'payload.pull_request.base.ref', op: 'eq', value: 'main' }] },
-        { key: 'exampleGithubMembers', rows: [{ path: 'payload.pull_request.author_association', op: 'in', value: 'OWNER, MEMBER, COLLABORATOR' }] },
-    ],
-    gitlab: [
-        { key: 'exampleGitlabMr', rows: [{ path: 'payload.object_attributes.action', op: 'in', value: 'open, update' }] },
-        { key: 'exampleGitlabNotDraft', rows: [{ path: 'payload.object_attributes.draft', op: 'neq', value: 'true' }] },
-    ],
-    azure_devops: [
-        { key: 'exampleAdoMain', rows: [{ path: 'payload.resource.targetRefName', op: 'eq', value: 'refs/heads/main' }] },
-        {
-            key: 'exampleAdoCompleted',
-            rows: [
-                { path: 'payload.resource.status', op: 'eq', value: 'completed' },
-                { path: 'payload.resource.mergeStatus', op: 'eq', value: 'succeeded' },
-            ],
-        },
-    ],
     generic: [],
 };
 
 /** A sample delivery per preset for the editor's Test tab: what the sender would post (trimmed to the fields a trigger is likely to use). */
 export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, string>; payload: Record<string, unknown> }> = {
-    github: {
-        headers: {
-            'x-github-event': 'pull_request',
-            'x-github-delivery': '00000000-0000-4000-8000-000000000001',
-            'x-github-hook-id': '123456789',
-            'user-agent': 'GitHub-Hookshot/0000000',
-        },
-        payload: {
-            action: 'opened',
-            number: 42,
-            pull_request: {
-                id: 1000000042,
-                number: 42,
-                state: 'open',
-                locked: false,
-                title: 'Add retry to the importer',
-                body: 'Retries a failed import up to three times with a short back-off.',
-                draft: false,
-                merged: false,
-                author_association: 'MEMBER',
-                html_url: 'https://github.com/example/repo/pull/42',
-                user: { login: 'octocat', id: 583231, type: 'User' },
-                labels: [{ name: 'enhancement' }],
-                base: { ref: 'main', sha: '9a4f1c2d8b7e6a5f4c3b2a1908f7e6d5c4b3a291', repo: { full_name: 'example/repo' } },
-                head: { ref: 'feature/retry', sha: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1', repo: { full_name: 'example/repo' } },
-                commits: 3,
-                additions: 48,
-                deletions: 6,
-                changed_files: 4,
-                created_at: '2026-10-17T09:30:00Z',
-                updated_at: '2026-10-17T09:30:00Z',
-            },
-            repository: { id: 1296269, name: 'repo', full_name: 'example/repo', private: false, html_url: 'https://github.com/example/repo', default_branch: 'main' },
-            sender: { login: 'octocat', id: 583231, type: 'User' },
-        },
-    },
-    gitlab: {
-        headers: { 'x-gitlab-event': 'Merge Request Hook', 'x-gitlab-event-uuid': '00000000-0000-4000-8000-000000000002', 'webhook-id': 'msg_sample_1' },
-        payload: {
-            object_kind: 'merge_request',
-            event_type: 'merge_request',
-            user: { id: 1, name: 'Jane Doe', username: 'jane' },
-            project: { id: 15, name: 'repo', path_with_namespace: 'example/repo', web_url: 'https://gitlab.example.com/example/repo', default_branch: 'main' },
-            object_attributes: {
-                id: 99,
-                iid: 7,
-                title: 'Add retry to the importer',
-                description: 'Retries a failed import up to three times with a short back-off.',
-                action: 'open',
-                state: 'opened',
-                draft: false,
-                source_branch: 'feature/retry',
-                target_branch: 'main',
-                url: 'https://gitlab.example.com/example/repo/-/merge_requests/7',
-                last_commit: { id: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1', message: 'Retry failed imports' },
-                created_at: '2026-10-17 09:30:00 UTC',
-            },
-            labels: [{ title: 'enhancement' }],
-        },
-    },
-    azure_devops: {
-        headers: {},
-        payload: {
-            id: '6a1c3a1e-0000-4000-8000-000000000001',
-            eventType: 'git.pullrequest.created',
-            publisherId: 'tfs',
-            message: { text: 'Jane Doe created pull request 12 (Add retry to the importer)' },
-            resource: {
-                pullRequestId: 12,
-                title: 'Add retry to the importer',
-                description: 'Retries a failed import up to three times with a short back-off.',
-                status: 'active',
-                mergeStatus: 'succeeded',
-                isDraft: false,
-                sourceRefName: 'refs/heads/feature/retry',
-                targetRefName: 'refs/heads/main',
-                lastMergeSourceCommit: { commitId: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1' },
-                createdBy: { displayName: 'Jane Doe', uniqueName: 'jane@example.com' },
-                creationDate: '2026-10-17T09:30:00Z',
-                repository: { id: '5a1b2c3d-0000-4000-8000-000000000003', name: 'repo', project: { name: 'Example' } },
-                url: 'https://dev.azure.com/example/Example/_apis/git/repositories/repo/pullRequests/12',
-            },
-            createdDate: '2026-10-17T09:30:01Z',
-        },
-    },
     generic: {
         headers: { 'x-cognipeer-event-id': 'evt_sample_1' },
         payload: {
@@ -238,7 +114,7 @@ export interface TriggerForm {
     /** Standard Webhooks only: the sender's `whsec_…` secret; empty keeps the stored one. */
     webhookSecret: string;
     webhookEvents: string[];
-    /** GitHub / GitLab only (WEBHOOK_ACTION_PATH). */
+    /** Only for presets with WEBHOOK_ACTION_PATH (none for a generic webhook). */
     webhookActions: string[];
     webhookFilter: WebhookFilterRow[];
     webhookIncludePayload: boolean;
@@ -298,8 +174,8 @@ export function emptyTriggerForm(timezone = browserTimezone(), now = new Date())
         callbackSecret: '',
         callbackSigned: false,
         responseFormatText: '',
-        webhookPreset: 'github',
-        webhookAuth: 'github_signature',
+        webhookPreset: 'generic',
+        webhookAuth: 'bearer',
         webhookHeaderName: DEFAULT_WEBHOOK_HEADER_NAME,
         webhookSecret: '',
         webhookEvents: [],
@@ -409,8 +285,8 @@ export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<R
 
 /**
  * Whether the filter limits who can start the trigger (an author / sender
- * rule). On GitHub, GitLab and Azure DevOps anyone who can open a pull request
- * can otherwise start it; the editor shows a hint, never a prefill.
+ * rule). Anyone who can reach the sender's repository or form can otherwise
+ * start it; the editor shows a hint, never a prefill.
  */
 export function hasWebhookAuthorRule(form: TriggerForm): boolean {
     return form.webhookFilter.some((row) => /^payload\..*(author|sender|user|createdBy)/i.test(row.path.trim()));
@@ -436,7 +312,7 @@ export function parseMetadataLines(text: string): Record<string, string> | null 
 /** The editor's state for a stored trigger. */
 export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserTimezone()): TriggerForm {
     const base = emptyTriggerForm(fallbackTimezone);
-    const type: TriggerType = (TRIGGER_TYPES as readonly string[]).includes(trigger.type) ? trigger.type : 'manual';
+    const type: TriggerType = (TRIGGER_TYPES as readonly string[]).includes(trigger.type) || trigger.type === 'connector' ? trigger.type : 'manual';
     return {
         ...base,
         ...(trigger.type === 'webhook' ? webhookFormFields(trigger.webhook as StoredWebhook, base) : {}),
@@ -496,6 +372,9 @@ export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: tru
                 },
             };
         }
+        case 'connector':
+            // Edited by the Connectors module's parts: the type alone keeps the stored settings.
+            return { ok: true, body: { type: 'connector' } };
         default:
             return { ok: true, body: { type: 'manual' } };
     }

@@ -44,6 +44,7 @@ import {
     IconPlus,
     IconRepeat,
     IconTrash,
+    IconPlug,
     IconWebhook,
 } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
@@ -92,6 +93,7 @@ const TYPE_LABEL_KEY: Record<TriggerType, string> = {
     once: 'typeOnce',
     manual: 'typeManual',
     webhook: 'typeWebhook',
+    connector: 'typeConnector',
 };
 
 const TYPE_ICON: Record<TriggerType, ReactNode> = {
@@ -99,6 +101,7 @@ const TYPE_ICON: Record<TriggerType, ReactNode> = {
     once: <IconClockPlay size={14} />,
     manual: <IconHandClick size={14} />,
     webhook: <IconWebhook size={14} />,
+    connector: <IconPlug size={14} />,
 };
 
 const WEBHOOK_PROMPT_PLACEHOLDER = 'Review pull request #{{payload.number}}: {{payload.pull_request.title}}';

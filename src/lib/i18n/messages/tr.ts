@@ -3372,6 +3372,7 @@ export const tr: typeof en = {
       runsFilterClear: 'Tüm çalıştırmaları göster',
       sessionsFilterClear: 'Tüm oturumları göster',
       typeWebhook: 'Webhook',
+      typeConnector: 'Bağlayıcı',
       summaryWebhookAny: '{preset} · her olay',
       tabSettings: 'Ayarlar',
       tabTest: 'Test',

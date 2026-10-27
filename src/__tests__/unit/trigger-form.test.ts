@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { messages } from '@/lib/i18n/messages';
 import {
+  TRIGGER_TYPES,
   WEBHOOK_EVENT_SUGGESTIONS,
   WEBHOOK_FILTER_EXAMPLES,
   WEBHOOK_FILTER_OPS,
@@ -117,9 +118,8 @@ describe('webhook trigger', () => {
     }, [], null, now);
     expect(built.ok && built.body.type).toBe('webhook');
     expect(built.ok && built.body.webhook).toEqual({
-      preset: 'github', auth: 'github_signature', events: ['pull_request'], include_payload: true,
+      preset: 'generic', auth: 'bearer', events: ['pull_request'], include_payload: true,
       filter: [
-        { path: 'payload.action', op: 'in', value: ['opened', 'reopened'] },
         { path: 'payload.pull_request.draft', op: 'neq', value: 'true' },
         { path: 'payload.labels.*.name', op: 'in', value: ['bug', 'ui'] },
       ],
@@ -146,11 +146,11 @@ describe('webhook trigger', () => {
   });
 
   it('Standard Webhooks needs the sender’s secret unless the stored trigger already has one', () => {
-    const form = { ...webhookForm(), webhookPreset: 'gitlab' as const, webhookAuth: 'standard_webhooks' as const };
+    const form = { ...webhookForm(), webhookPreset: 'generic' as const, webhookAuth: 'standard_webhooks' as const };
     expect(triggerBodyFromForm(form, [], null, now)).toEqual({ ok: false, problem: { field: 'webhookSecret', key: 'standardSecretRequired' } });
     const pasted = triggerBodyFromForm({ ...form, webhookSecret: ' whsec_abc ' }, [], null, now);
     expect(pasted.ok && pasted.body.webhook).toMatchObject({ auth: 'standard_webhooks', secret: 'whsec_abc' });
-    const row = storedWebhook({ preset: 'gitlab', auth: 'standard_webhooks' });
+    const row = storedWebhook({ preset: 'generic', auth: 'standard_webhooks' });
     const kept = triggerBodyFromForm(form, [], row, now);
     expect(kept.ok && 'secret' in (kept.body.webhook as object)).toBe(false);
     // A secret typed for another auth mode is never sent (the server generates those).
@@ -160,15 +160,15 @@ describe('webhook trigger', () => {
 
   it('a stored webhook fills the form; its first action rule becomes the Actions chips', () => {
     const form = formFromTrigger(storedWebhook({
-      preset: 'gitlab', auth: 'gitlab_token', header_name: null, events: ['merge_request'], include_payload: false,
-      filter: [{ path: 'payload.object_attributes.action', op: 'in', value: ['open', 'update'] }, { path: 'payload.user.username', op: 'in', value: ['jane', 'joe'] }],
+      preset: 'generic', auth: 'bearer', header_name: null, events: ['merge_request'], include_payload: false,
+      filter: [{ path: 'payload.user.username', op: 'in', value: ['jane', 'joe'] }],
     }), 'UTC');
     expect(form).toMatchObject({
-      type: 'webhook', webhookPreset: 'gitlab', webhookAuth: 'gitlab_token', webhookEvents: ['merge_request'], webhookIncludePayload: false,
-      webhookActions: ['open', 'update'], webhookFilter: [{ path: 'payload.user.username', op: 'in', value: 'jane, joe' }], webhookSecret: '',
+      type: 'webhook', webhookPreset: 'generic', webhookAuth: 'bearer', webhookEvents: ['merge_request'], webhookIncludePayload: false,
+      webhookActions: [], webhookFilter: [{ path: 'payload.user.username', op: 'in', value: 'jane, joe' }], webhookSecret: '',
     });
     expect(hasWebhookAuthorRule(form)).toBe(true);
-    expect(hasWebhookAuthorRule({ ...form, webhookFilter: [{ path: 'payload.object_attributes.draft', op: 'neq', value: 'true' }] })).toBe(false);
+    expect(hasWebhookAuthorRule({ ...form, webhookFilter: [{ path: 'payload.draft', op: 'neq', value: 'true' }] })).toBe(false);
   });
 
   it('a mapping field keeps a template as text and brings a literal to the declared type', () => {
@@ -178,6 +178,31 @@ describe('webhook trigger', () => {
     expect(webhookVariableValue({ name: 'b', type: 'boolean' }, 'false')).toBe(false);
     expect(webhookVariableValue({ name: 'j', type: 'json' }, '{"a":1}')).toEqual({ a: 1 });
     expect(webhookVariableValue({ name: 's', type: 'string' }, '42')).toBe('42');
+  });
+});
+
+describe('connector trigger', () => {
+  const connectorRow = (): TriggerRow => ({
+    ...rest, type: 'connector',
+    connector: {
+      connector_id: 'c1', trigger: 'pull_request', params: { repository: 'acme/api' }, schedule: null, events: ['pull_request.opened'],
+      filter: [], include_payload: true, subscription_id: 'sub1', package_id: 'cognipeer.github', kind: 'webhook', label: 'GitHub',
+    },
+    connector_available: true,
+  } as unknown as TriggerRow);
+
+  it('the community form sends only the type: the connector object belongs to the enterprise editor', () => {
+    const built = triggerBodyFromForm({ ...base(), type: 'connector' }, [], null, now);
+    expect(built.ok && built.body.type).toBe('connector');
+    expect(built.ok && ['schedule', 'once', 'webhook'].some((key) => key in built.body)).toBe(false);
+  });
+
+  it('a stored connector trigger opens as a connector form, not as manual', () => {
+    expect(formFromTrigger(connectorRow(), 'UTC').type).toBe('connector');
+  });
+
+  it('the type list offered to create a trigger does not include connector (the editor adds it when the module is present)', () => {
+    expect([...TRIGGER_TYPES]).toEqual(['schedule', 'once', 'manual', 'webhook']);
   });
 });
 
@@ -221,7 +246,7 @@ describe('strings', () => {
     const keys = [
       ...WEBHOOK_FILTER_OPS.map((op) => `op_${op}`),
       ...['accepted', 'duplicate', 'filtered', 'ignored', 'unauthorized', 'rejected', 'failed'].map((outcome) => `outcome_${outcome}`),
-      ...['presetGithub', 'presetGitlab', 'presetAzureDevops', 'presetGeneric'].flatMap((key) => [key, `${key}Hint`]),
+      ...['presetGeneric'].flatMap((key) => [key, `${key}Hint`]),
       ...WEBHOOK_PRESETS.flatMap((preset) => WEBHOOK_FILTER_EXAMPLES[preset].map((example) => example.key)),
     ];
     expect(Object.keys(WEBHOOK_EVENT_SUGGESTIONS).sort()).toEqual([...WEBHOOK_PRESETS].sort());
@@ -247,19 +272,7 @@ describe('the Test tab samples and the variables offered', () => {
     expect(WEBHOOK_CONTEXT_ROOTS).toContain('received_at');
   });
 
-  it('a GitHub sample reads like a delivery: the number is in the pull request too, with the head commit, the link and the sender', () => {
-    const rendered = renderWebhookTemplate(
-      'PR {{payload.pull_request.number}} {{payload.number}} {{payload.pull_request.head.sha}} {{payload.pull_request.html_url}} {{payload.sender.login}}',
-      view('github'),
-    );
-    expect(rendered).toBe('PR 42 42 "3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1" "https://github.com/example/repo/pull/42" "octocat"');
-  });
-
-  it('the GitLab, Azure DevOps and generic samples carry what their prompts and filters name', () => {
-    expect(renderWebhookTemplate('{{payload.object_attributes.iid}} {{payload.object_attributes.url}} {{payload.object_attributes.last_commit.id}}', view('gitlab')))
-      .toContain('7 "https://gitlab.example.com/example/repo/-/merge_requests/7" "3b7c');
-    expect(renderWebhookTemplate('{{payload.resource.pullRequestId}} {{payload.resource.lastMergeSourceCommit.commitId}} {{payload.resource.createdBy.uniqueName}}', view('azure_devops')))
-      .toBe('12 "3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1" "jane@example.com"');
+  it('the generic sample carries what its prompts and filters name', () => {
     expect(renderWebhookTemplate('{{payload.ticket.id}} {{payload.id}} {{payload.ticket.url}}', view('generic'))).toContain('"T-1001" "evt_sample_1"');
   });
 
