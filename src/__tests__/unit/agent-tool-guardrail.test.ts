@@ -91,6 +91,8 @@ vi.mock('@/lib/services/mcp', () => ({
 // configured, `enforce` one with its own binding.
 vi.mock('@/lib/services/mcp/mcpService', () => ({
   resolveMcpGuardrailBinding: hoisted.resolveMcpGuardrailBinding,
+  getToolAnnotationOverrides: () => ({}),
+  resolveSourceType: (server: { sourceType?: string }) => server.sourceType ?? 'openapi',
 }));
 
 vi.mock('@/lib/services/browser', () => ({
