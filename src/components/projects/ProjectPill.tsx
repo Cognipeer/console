@@ -1,10 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { useParams } from 'next/navigation';
 import { Loader, Menu, Text, UnstyledButton } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useQuery } from '@tanstack/react-query';
 import { IconCheck, IconChevronDown } from '@tabler/icons-react';
+import { pathAfterProjectSwitch } from './projectSwitchPath';
 
 type Project = {
   _id: string;
@@ -14,6 +16,7 @@ type Project = {
 
 export default function ProjectPill() {
   const [submitting, setSubmitting] = useState(false);
+  const params = useParams();
 
   const projectsQuery = useQuery<{ projects: Project[]; activeProjectId?: string }>(
     {
@@ -55,7 +58,10 @@ export default function ProjectPill() {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error || 'Failed to set active project');
       }
-      window.location.reload();
+      // A record of the project being left goes back to its list; any other page reloads in place.
+      const next = pathAfterProjectSwitch(window.location.pathname, params);
+      if (next) window.location.assign(next);
+      else window.location.reload();
     } catch (error) {
       notifications.show({
         title: 'Project',
