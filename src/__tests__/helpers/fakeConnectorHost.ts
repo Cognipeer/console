@@ -1,0 +1,189 @@
+/**
+ * A stand-in for the enterprise Connectors module: the `ConnectorTriggerHost`
+ * seam over an in-memory subscription table, with a call log so tests can
+ * assert the order in which core calls it, and switches to make a step fail.
+ *
+ * Two connectors exist: `conn-1` (package `cognipeer.github`, triggers
+ * `pull_request` and `workflow_run`, both webhooks) and `conn-poll` (package
+ * `cognipeer.jira`, trigger `issue_updated`, a poll). Anything else is unknown.
+ * Subscriptions are shared by (connector, trigger, params, schedule) like the
+ * real module's; `bindings` counts the triggers bound to one.
+ */
+
+import type { AgentTriggerConnector, IAgentTrigger } from '@/lib/database';
+import type {
+  ConnectorTriggerHost,
+  ConnectorTriggerScope,
+  ConnectorTriggerView,
+} from '@/enterprise/connector-triggers';
+
+interface Subscription {
+  id: string;
+  key: string;
+  kind: 'webhook' | 'poll';
+  status: ConnectorTriggerView['status'];
+  secret: string | null;
+  bound: Set<string>;
+}
+
+const TRIGGERS: Record<string, Record<string, { packageId: string; kind: 'webhook' | 'poll'; label: string }>> = {
+  'conn-1': {
+    pull_request: { packageId: 'cognipeer.github', kind: 'webhook', label: 'GitHub - Pull request' },
+    workflow_run: { packageId: 'cognipeer.github', kind: 'webhook', label: 'GitHub - Workflow run' },
+  },
+  'conn-poll': {
+    issue_updated: { packageId: 'cognipeer.jira', kind: 'poll', label: 'Jira - Issue updated' },
+  },
+};
+
+export interface FakeConnectorHost {
+  host: ConnectorTriggerHost;
+  /** `<method>:<triggerId or connector id>` in call order. */
+  calls: string[];
+  /** The scopes the host was called with. */
+  scopes: ConnectorTriggerScope[];
+  subscriptions: Map<string, Subscription>;
+  /** Make the next call of a method throw (`attach`, `detach`, `view`, `sample`, `rotate`, `retry`). */
+  failing: Set<string>;
+  /** Make `attach` answer a `failed` view instead of `active`. */
+  attachStatus: ConnectorTriggerView['status'];
+  /** What `sample` answers; null = none. */
+  sampleEvent: { eventType: string; data: unknown } | null;
+  /** The triggers (by id) bound to a subscription, from the host's own table. */
+  boundTo: (subscriptionId: string) => string[];
+}
+
+export function createFakeConnectorHost(): FakeConnectorHost {
+  const calls: string[] = [];
+  const scopes: ConnectorTriggerScope[] = [];
+  const subscriptions = new Map<string, Subscription>();
+  const failing = new Set<string>();
+  let counter = 0;
+
+  const state: FakeConnectorHost = {
+    host: null as unknown as ConnectorTriggerHost,
+    calls,
+    scopes,
+    subscriptions,
+    failing,
+    attachStatus: 'active',
+    sampleEvent: { eventType: 'pull_request.opened', data: { action: 'opened', number: 42, repository: { full_name: 'acme/api' } } },
+    boundTo: (subscriptionId) => [...(subscriptions.get(subscriptionId)?.bound ?? [])],
+  };
+
+  const keyOf = (settings: AgentTriggerConnector) => JSON.stringify([settings.connectorId, settings.trigger, settings.params, settings.schedule ?? null]);
+  const fail = (method: string) => {
+    if (failing.has(method)) throw new Error(`${method} failed`);
+  };
+  const viewOf = (subscription: Subscription, secret?: string | null): ConnectorTriggerView => ({
+    subscriptionId: subscription.id,
+    status: subscription.status,
+    kind: subscription.kind,
+    reason: subscription.status === 'failed' ? 'The vendor refused the registration.' : null,
+    callbackUrl: subscription.kind === 'webhook' ? `https://console.example/api/public/connectors/${subscription.id}` : null,
+    secretHint: subscription.secret ? subscription.secret.slice(-4) : null,
+    secret: secret ?? null,
+    autoRegistered: subscription.status === 'active',
+    bindings: subscription.bound.size,
+  });
+
+  state.host = {
+    async prepare(scope, input) {
+      calls.push('prepare');
+      scopes.push(scope);
+      const settings = input.settings as AgentTriggerConnector;
+      const catalog = TRIGGERS[settings.connectorId];
+      if (!catalog) return { ok: false, errors: [{ field: 'connector.connector_id', message: 'No such connector in this project' }] };
+      const trigger = catalog[settings.trigger];
+      if (!trigger) return { ok: false, errors: [{ field: 'connector.trigger', message: 'The connector\'s package has no such trigger' }] };
+      if (settings.params && 'bad' in settings.params) return { ok: false, errors: [{ field: 'connector.params.bad', message: 'Not a parameter of this trigger' }] };
+      if (trigger.kind === 'poll' && !settings.schedule) return { ok: false, errors: [{ field: 'connector.schedule', message: 'A poll trigger needs a schedule' }] };
+      return {
+        ok: true,
+        settings: {
+          ...settings,
+          schedule: trigger.kind === 'poll' ? settings.schedule ?? null : null,
+          packageId: trigger.packageId,
+          kind: trigger.kind,
+          label: trigger.label,
+        },
+      };
+    },
+
+    async attach(scope, trigger) {
+      calls.push(`attach:${String(trigger._id)}`);
+      scopes.push(scope);
+      fail('attach');
+      if (trigger.type !== 'connector') throw new Error('attach called for a trigger that is not a connector one');
+      const key = keyOf(trigger.connector);
+      let subscription = [...subscriptions.values()].find((item) => item.key === key);
+      let secret: string | null = null;
+      if (!subscription) {
+        counter += 1;
+        secret = `whsec_fake_${counter}_${'x'.repeat(12)}`;
+        subscription = {
+          id: `sub_${counter}`,
+          key,
+          kind: trigger.connector.kind ?? 'webhook',
+          status: state.attachStatus,
+          secret,
+          bound: new Set(),
+        };
+        subscriptions.set(subscription.id, subscription);
+      }
+      subscription.bound.add(String(trigger._id));
+      return { settings: { ...trigger.connector, subscriptionId: subscription.id }, view: viewOf(subscription, secret) };
+    },
+
+    async detach(scope, trigger) {
+      calls.push(`detach:${String(trigger._id)}`);
+      scopes.push(scope);
+      fail('detach');
+      if (trigger.type !== 'connector' || !trigger.connector.subscriptionId) return;
+      const subscription = subscriptions.get(trigger.connector.subscriptionId);
+      if (!subscription) return;
+      subscription.bound.delete(String(trigger._id));
+      if (subscription.bound.size === 0) subscriptions.delete(subscription.id);
+    },
+
+    async view(scope, trigger: IAgentTrigger) {
+      calls.push(`view:${String(trigger._id)}`);
+      scopes.push(scope);
+      fail('view');
+      if (trigger.type !== 'connector' || !trigger.connector.subscriptionId) return null;
+      const subscription = subscriptions.get(trigger.connector.subscriptionId);
+      return subscription ? viewOf(subscription) : null;
+    },
+
+    async sample(scope, trigger) {
+      calls.push(`sample:${String(trigger._id)}`);
+      scopes.push(scope);
+      fail('sample');
+      return state.sampleEvent;
+    },
+
+    async rotate(scope, trigger) {
+      calls.push(`rotate:${String(trigger._id)}`);
+      scopes.push(scope);
+      fail('rotate');
+      if (trigger.type !== 'connector' || !trigger.connector.subscriptionId) return null;
+      const subscription = subscriptions.get(trigger.connector.subscriptionId);
+      if (!subscription) return null;
+      if (subscription.kind === 'poll') return viewOf(subscription);
+      subscription.secret = `whsec_rotated_${'y'.repeat(14)}`;
+      return viewOf(subscription, subscription.secret);
+    },
+
+    async retry(scope, trigger) {
+      calls.push(`retry:${String(trigger._id)}`);
+      scopes.push(scope);
+      fail('retry');
+      if (trigger.type !== 'connector' || !trigger.connector.subscriptionId) return null;
+      const subscription = subscriptions.get(trigger.connector.subscriptionId);
+      if (!subscription) return null;
+      subscription.status = 'active';
+      return viewOf(subscription);
+    },
+  };
+  return state;
+}

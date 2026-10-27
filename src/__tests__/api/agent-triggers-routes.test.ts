@@ -402,7 +402,7 @@ describe('dashboard: /agents/:agentId/triggers', () => {
 describe('webhook trigger (SPEC-webhooks W6)', () => {
   /** The `webhook` settings object of a request. */
   const WEBHOOK = {
-    preset: 'github', events: ['pull_request'],
+    preset: 'generic', events: ['pull_request'],
     filter: [{ path: 'payload.action', op: 'in', value: ['opened', 'synchronize'] }],
   };
   const STANDARD = `whsec_${Buffer.alloc(32, 3).toString('base64')}`;
@@ -420,9 +420,9 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
     expect(secret).toMatch(/^whsec_/);
     expect(created.webhook.url).toMatch(new RegExp(`/api/public/hooks/${tenantId}/wh_[A-Za-z0-9_-]{24}$`));
     expect(created.webhook).toEqual({
-      url: created.webhook.url, preset: 'github', auth: 'github_signature', header_name: null,
+      url: created.webhook.url, preset: 'generic', auth: 'bearer', header_name: null,
       secret, secret_hint: secret.slice(-4), secret_source: 'generated', previous_secret_valid_until: null,
-      events: ['pull_request'], filter: WEBHOOK.filter, include_payload: true,
+      events: ['pull_request'], filter: WEBHOOK.filter, include_payload: true, retired: false,
     });
     expect(['schedule', 'once'].some((key) => key in created)).toBe(false);
     const read = await client('GET', `/${created.id}`);
@@ -439,8 +439,12 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
       [{ prompt: '{{> partial}}' }, 'prompt'],
       [{ prompt: '{{payload.labels.*.name}}' }, 'prompt'],
       [{ webhook: { ...WEBHOOK, filter: [{ path: 'payload.constructor', op: 'exists' }] } }, 'webhook.filter[0].path'],
-      [{ webhook: { ...WEBHOOK, preset: 'gitlab', auth: 'standard_webhooks' } }, 'webhook.secret'],
-      [{ webhook: { ...WEBHOOK, auth: 'bearer' } }, 'webhook.auth'],
+      [{ webhook: { ...WEBHOOK, auth: 'standard_webhooks' } }, 'webhook.secret'],
+      [{ webhook: { ...WEBHOOK, auth: 'basic' } }, 'webhook.auth'],
+      [{ webhook: { ...WEBHOOK, auth: 'github_signature' } }, 'webhook.auth'],
+      [{ webhook: { ...WEBHOOK, preset: 'github' } }, 'webhook.preset'],
+      [{ webhook: { ...WEBHOOK, preset: 'gitlab' } }, 'webhook.preset'],
+      [{ webhook: { ...WEBHOOK, preset: 'azure_devops' } }, 'webhook.preset'],
       [{ variables: { days: '{{secret.x}}' } }, 'variables.days'],
     ] as Array<[Record<string, unknown>, string]>) {
       const res = await client('POST', '', { name: 'Bad', type: 'webhook', webhook: WEBHOOK, prompt: 'ok', variables: { days: '{{payload.number}}' }, ...body });
@@ -450,9 +454,9 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
   });
 
   it('PATCH keeps the hook id and secret; to Standard Webhooks needs the sender’s secret; away from it generates one', async () => {
-    const created = await create({ preset: 'gitlab' });
+    const created = await create({ preset: 'generic' });
     const url = created.webhook.url;
-    const kept = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { preset: 'gitlab', events: ['merge_request'] } });
+    const kept = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { preset: 'generic', events: ['merge_request'] } });
     expect(json<WebhookAnswer>(kept).webhook).toMatchObject({ url, events: ['merge_request'] });
     expect(json<WebhookAnswer>(kept).webhook).not.toHaveProperty('secret');
 
@@ -464,7 +468,7 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
     expect(signing.body).not.toContain(STANDARD);
     expect(json<WebhookAnswer>(signing).webhook).not.toHaveProperty('secret');
 
-    const back = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { auth: 'gitlab_token' } });
+    const back = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { auth: 'bearer' } });
     expect(json<WebhookAnswer>(back).webhook).toMatchObject({ url, secret: expect.stringMatching(/^whsec_/) });
   });
 
@@ -517,26 +521,26 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
   it('Run now with a sample payload builds the delivery’s turn (trigger manual, external content); dry_run creates nothing', async () => {
     const created = await create(WEBHOOK, { metadata: { team: 'platform' } });
     const payload = { action: 'opened', number: 7 };
-    const dry = await client('POST', `/${created.id}/run`, { payload, headers: { 'X-GitHub-Event': 'pull_request', 'X-GitHub-Delivery': 'd-9' }, dry_run: true });
+    const dry = await client('POST', `/${created.id}/run`, { payload, headers: { 'X-Cognipeer-Event': 'pull_request', 'X-Cognipeer-Event-Id': 'd-9' }, dry_run: true });
     expect(dry.statusCode).toBe(200);
     expect(json(dry)).toMatchObject({
       object: 'agent.trigger.dry_run', matched: true, reason: null, event: 'pull_request', delivery_id: 'd-9',
       variables: { days: 7 }, errors: [],
     });
     expect(json<{ prompt: string }>(dry).prompt).toContain('Review PR 7.');
-    const missed = json(await client('POST', `/${created.id}/run`, { payload: { action: 'closed' }, headers: { 'x-github-event': 'pull_request' }, dry_run: true }));
+    const missed = json(await client('POST', `/${created.id}/run`, { payload: { action: 'closed' }, headers: { 'x-cognipeer-event': 'pull_request' }, dry_run: true }));
     expect(missed).toMatchObject({ matched: false, reason: 'rule 1 (payload.action in) did not match (value: string, 6 chars)' });
     expect(hoisted.fireTrigger).not.toHaveBeenCalled();
 
     hoisted.fireTrigger.mockResolvedValue({ kind: 'accepted', run: run() });
     // Run now does not apply the events / filter: a closed PR still runs.
-    const fired = await client('POST', `/${created.id}/run`, { payload: { action: 'closed', number: 8 }, headers: { 'x-github-event': 'pull_request' } });
+    const fired = await client('POST', `/${created.id}/run`, { payload: { action: 'closed', number: 8 }, headers: { 'x-cognipeer-event': 'pull_request' } });
     expect(fired.statusCode).toBe(202);
     const input = hoisted.fireTrigger.mock.calls[0][2];
     expect(input).toMatchObject({
       trigger: 'manual', externalContent: true, variables: { days: 8 }, literalVariables: [], metadata: { webhook_event: 'pull_request' },
     });
-    expect(input.message).toMatch(/^This run was started by an incoming webhook \(github · pull_request\)\./);
+    expect(input.message).toMatch(/^This run was started by an incoming webhook \(generic · pull_request\)\./);
     expect(input.message).toContain('Webhook event (JSON):');
 
     const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', ...SCHEDULE, prompt: 'x' }));
@@ -546,7 +550,7 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
 
   it('Run now with a sample payload names the variables that are not event content (they fill the system prompt); the event\'s own stay in the message', async () => {
     const created = await create(WEBHOOK, { variables: { days: '{{payload.number}}', region: 'eu' } });
-    const sample = { payload: { action: 'opened', number: 9 }, headers: { 'x-github-event': 'pull_request' } };
+    const sample = { payload: { action: 'opened', number: 9 }, headers: { 'x-cognipeer-event': 'pull_request' } };
     hoisted.fireTrigger.mockResolvedValue({ kind: 'accepted', run: run() });
 
     // `region` is written in the trigger; `days` comes out of the event.

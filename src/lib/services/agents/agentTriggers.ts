@@ -1,7 +1,7 @@
 /**
  * Agent triggers — a saved way of starting an agent: a prompt (+ variables) and a
  * `type` with that type's settings object (a cron `schedule` in a timezone,
- * `once`, `manual`, or an incoming `webhook`). Every fire is an ordinary
+ * `once`, `manual`, an incoming `webhook` or a `connector` event). Every fire is an ordinary
  * AgentRun (`channel: 'trigger'`, `triggerId`), started through `startAgentRun`
  * like any API run, so a trigger's history is the runs list filtered by
  * trigger and its runs get the queue, caps, callbacks and webhooks every other
@@ -15,6 +15,7 @@ import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
 import type {
   AgentResponseFormat,
+  AgentTriggerConnector,
   AgentTriggerTypeSettings,
   IAgentConfig,
   DatabaseProvider,
@@ -28,10 +29,18 @@ import { AgentQuotaExceededError, AgentSpendLimitError } from './agentErrors';
 import { resolveRunVariables, type VariableIssue } from './agentVariables';
 import { publicAgentRunId, resolveAgentRunLimits, startAgentRun } from './agentRunService';
 import { createConversation, resolveAgentConfig } from './agentService';
+import { getConnectorTriggerHost, type ConnectorTriggerView } from '@/enterprise/connector-triggers';
 import { serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import { initialNextFireAt } from './agentTriggerSchedule';
 import { serializeWebhook } from './agentTriggerWebhookIntake';
+import {
+  attachConnectorTrigger,
+  connectorScope,
+  detachConnectorTrigger,
+  persistConnectorSettings,
+  sameConnectorSubscription,
+} from './agentTriggerConnectorHost';
 
 const logger = createLogger('agent-trigger');
 
@@ -67,6 +76,8 @@ export interface FireTriggerInput {
    * in the message.
    */
   literalVariables?: string[];
+  /** The event behind the fire, kept on the run for its engine (`IAgentRun.triggerData`, at most 64 KiB of JSON). */
+  triggerData?: Record<string, unknown>;
   /** Merged over the trigger's metadata (≤ 16 keys together). */
   metadata?: Record<string, string> | null;
   idempotencyKey?: string;
@@ -224,6 +235,7 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
             unattended: true,
             ...(input.externalContent ? { externalContent: true } : {}),
             ...(input.externalContent && input.literalVariables?.length ? { literalVariables: input.literalVariables } : {}),
+            ...(input.triggerData ? { triggerData: input.triggerData } : {}),
             ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
             idempotencyConversationScope: null,
             callback: callback.url ? { url: callback.url, ...(callback.secret ? { secret: callback.secret } : {}) } : null,
@@ -358,6 +370,7 @@ function typeSettingsOf(source: AgentTriggerTypeSettings): AgentTriggerTypeSetti
     case 'schedule': return { type: 'schedule', schedule: source.schedule };
     case 'once': return { type: 'once', once: source.once };
     case 'webhook': return { type: 'webhook', webhook: source.webhook };
+    case 'connector': return { type: 'connector', connector: source.connector };
     default: return { type: 'manual' };
   }
 }
@@ -440,9 +453,84 @@ export function deleteAgentTrigger(scope: TriggerScope, trigger: IAgentTrigger):
   });
 }
 
+// ── With the Connectors module ───────────────────────────────────────────
+
+/** A connector trigger's subscription as the host showed it when it was bound (the one-time secret is only in this view). */
+export interface HostedTrigger {
+  trigger: IAgentTrigger;
+  connectorView: ConnectorTriggerView | null;
+}
+
+/** After a connector trigger was stored: binds it to its subscription and stores the settings the host changed. */
+async function attachStored(scope: TriggerScope, trigger: IAgentTrigger, userId: string): Promise<HostedTrigger> {
+  if (trigger.type !== 'connector') return { trigger, connectorView: null };
+  const attached = await attachConnectorTrigger(connectorScope(scope, userId), trigger);
+  if (!attached.settings) return { trigger, connectorView: attached.view };
+  const stored = await persistConnectorSettings(scope.tenantDbName, trigger, attached.settings);
+  return { trigger: stored ?? trigger, connectorView: attached.view };
+}
+
+/** `createAgentTrigger`, then (for a connector trigger) the host binds it to its subscription. */
+export async function createAgentTriggerHosted(
+  scope: TriggerScope,
+  agentKey: string,
+  write: NewTriggerWrite,
+  userId: string,
+  now = new Date(),
+): Promise<HostedTrigger> {
+  return attachStored(scope, await createAgentTrigger(scope, agentKey, write, userId, now), userId);
+}
+
+/**
+ * `updateAgentTrigger` with the host: a connector trigger that changes type, or
+ * points at another subscription, gives up its binding first; a stored connector
+ * trigger is (re)bound afterwards. Null when the trigger no longer exists.
+ */
+export async function updateAgentTriggerHosted(
+  scope: TriggerScope,
+  existing: IAgentTrigger,
+  write: TriggerWrite,
+  userId: string,
+  now = new Date(),
+): Promise<HostedTrigger | null> {
+  const rebinding = existing.type === 'connector' && write.type !== undefined
+    && (write.type !== 'connector' || !sameConnectorSubscription(existing.connector, write.connector));
+  if (rebinding) await detachConnectorTrigger(connectorScope(scope, userId), existing);
+  // A trigger moved to another subscription starts without the old binding.
+  const toWrite: TriggerWrite = rebinding && write.type === 'connector'
+    ? { ...write, connector: { ...write.connector, subscriptionId: null } }
+    : write;
+  const updated = await updateAgentTrigger(scope, existing, toWrite, userId, now);
+  if (!updated) return null;
+  return attachStored(scope, updated, userId);
+}
+
+/** `deleteAgentTrigger`; a connector trigger gives up its binding first. */
+export async function deleteAgentTriggerHosted(scope: TriggerScope, trigger: IAgentTrigger, userId: string): Promise<boolean> {
+  await detachConnectorTrigger(connectorScope(scope, userId), trigger);
+  return deleteAgentTrigger(scope, trigger);
+}
+
 // ── Wire shape (§5.7) ────────────────────────────────────────────────────
 
 const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);
+
+/** The wire shape of a trigger's `connector` settings. */
+export function serializeConnector(connector: AgentTriggerConnector) {
+  return {
+    connector_id: connector.connectorId,
+    trigger: connector.trigger,
+    params: connector.params ?? {},
+    schedule: connector.schedule ? { cron: connector.schedule.cron, timezone: connector.schedule.timezone } : null,
+    events: connector.events ?? [],
+    filter: connector.filter ?? [],
+    include_payload: connector.includePayload,
+    subscription_id: connector.subscriptionId ?? null,
+    package_id: connector.packageId ?? null,
+    kind: connector.kind ?? null,
+    label: connector.label ?? null,
+  };
+}
 
 /** `type` and the one settings object of that type (manual has none), as the API spells them. */
 function serializeTypeSettings(trigger: IAgentTrigger) {
@@ -450,6 +538,7 @@ function serializeTypeSettings(trigger: IAgentTrigger) {
     case 'schedule': return { type: 'schedule' as const, schedule: { cron: trigger.schedule.cron, timezone: trigger.schedule.timezone } };
     case 'once': return { type: 'once' as const, once: { run_at: new Date(trigger.once.runAt).toISOString() } };
     case 'webhook': return { type: 'webhook' as const, webhook: serializeWebhook(trigger.webhook, trigger.tenantId) };
+    case 'connector': return { type: 'connector' as const, connector: serializeConnector(trigger.connector), connector_available: getConnectorTriggerHost() !== null };
     default: return { type: 'manual' as const };
   }
 }
