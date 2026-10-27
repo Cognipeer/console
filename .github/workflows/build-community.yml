@@ -9,8 +9,6 @@ permissions:
   packages: write
   actions: read
 
-# env:
-#   FORCE_CHECKS: 'false'
 
 concurrency:
   group: console-community-test-${{ github.ref_name }}
