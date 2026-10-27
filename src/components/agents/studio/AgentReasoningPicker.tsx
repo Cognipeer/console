@@ -11,6 +11,7 @@
 
 import { NumberInput, Select, Stack, Text } from '@mantine/core';
 import { useTranslations } from '@/lib/i18n';
+import { reasoningForcedNoneOnChat } from '@/lib/providers/unsupportedParams';
 import { reasoningTextNeedsResponses } from '@/lib/services/models/upstreamApi';
 import { REASONING_EFFORTS, reasoningControlForDriver, type ReasoningEffort } from '@/lib/services/models/reasoning';
 
@@ -54,7 +55,8 @@ export function reasoningPickerOptions(
     const driver = model.providerDriver || (model.providerKey ? driverByProviderKey[model.providerKey] : undefined);
     const control = reasoningControlForDriver(driver, model.modelId);
     if (control.kind === 'none') {
-        if (!driver || model.capabilities?.supportsReasoning) {
+        // A Bedrock model that does not carry thinking gets no reasoning from the client, whatever its capability flag says.
+        if (!driver || (driver !== 'bedrock' && model.capabilities?.supportsReasoning)) {
             return { kind: 'effort', efforts: [...REASONING_EFFORTS], budget: false };
         }
         return undefined;
@@ -94,6 +96,8 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
 
     const driver = model?.providerDriver || (model?.providerKey ? driverByProviderKey[model.providerKey] : undefined);
     const responsesHint = reasoningTextNeedsResponses(driver, model?.modelId, model?.settings);
+    // GPT-5.1+ / gpt-6 on Chat Completions: with tools the level picked here is not used (Responses keeps it).
+    const forcedNoneHint = reasoningForcedNoneOnChat(driver, model?.modelId, model?.settings);
 
     const controls = (
         <>
@@ -138,6 +142,11 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
             {responsesHint ? (
                 <Text size="xs" c="dimmed" data-testid={testId ? `${testId}-responses-hint` : undefined}>
                     {tm('hint.responsesOnly')}
+                </Text>
+            ) : null}
+            {forcedNoneHint ? (
+                <Text size="xs" c="orange" data-testid={testId ? `${testId}-forced-none-hint` : undefined}>
+                    {tm('hint.forcedNoneOnChat')}
                 </Text>
             ) : null}
         </>

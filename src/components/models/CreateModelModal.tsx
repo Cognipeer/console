@@ -39,12 +39,13 @@ import {
   UpstreamApiSection,
 } from './modelFormSections';
 import {
+  blankMaxTokensPlaceholder,
   detectUnsupportedParams,
+  limitWarnings,
   parseRequestDefaults,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
 import { EMPTY_REASONING_FORM, reasoningSettingsPatch, type ReasoningFormValue } from '@/components/models/reasoningForm';
-import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -641,6 +642,17 @@ export default function CreateModelModal({
   const dirty = opened && Boolean(formValues.name || formValues.key || formValues.modelId);
   const canSubmit = !noProviders && validProvider && validIdentity && validPricing;
   const isLlm = CAPABILITY_CATEGORIES.includes(formValues.category);
+  // What a blank "Default max tokens" amounts to, and the limits that do not fit together (shown, never blocking).
+  const blankMaxTokensText = blankMaxTokensPlaceholder({
+    driver: selectedProvider?.driver,
+    modelId: formValues.modelId,
+    maxOutputTokens: isLlm ? formValues.capabilities.maxOutputTokens : undefined,
+  }, tWizard('fields.runtimeMaxTokens.modelDefaultSplit'), tWizard('fields.runtimeMaxTokens.providerDefault'));
+  const limitNotes = limitWarnings({
+    contextWindow: isLlm ? formValues.capabilities.contextWindow : undefined,
+    maxOutputTokens: isLlm ? formValues.capabilities.maxOutputTokens : undefined,
+    maxTokens: formValues.settings.maxTokens,
+  }).map((warning) => tWizard(`limitWarnings.${warning}`));
   let sectionCounter = 0;
   const sectionNumber = () => ++sectionCounter;
 
@@ -939,9 +951,11 @@ export default function CreateModelModal({
         maxTokens={{
           label: tWizard('fields.runtimeMaxTokens.label'),
           hint: tWizard('fields.runtimeMaxTokens.description'),
+          placeholder: blankMaxTokensText,
           props: form.getInputProps('settings.maxTokens'),
         }}
         temperatureProps={form.getInputProps('settings.temperature')}
+        warnings={limitNotes}
       />
 
       {isLlm ? (
@@ -952,9 +966,6 @@ export default function CreateModelModal({
             settings={formValues.settings}
           value={formValues.reasoning}
           onChange={(patch) => setFieldValue('reasoning', { ...formValues.reasoning, ...patch })}
-          forcedNoneWithTools={Boolean(
-            detectForcedParams(selectedProvider?.driver, formValues.modelId, true).forced?.reasoning_effort,
-          )}
         />
       ) : null}
 
@@ -968,6 +979,7 @@ export default function CreateModelModal({
 
       <RequestParamsSection
         number={sectionNumber()}
+        driver={selectedProvider?.driver}
         autoDropped={autoDropped}
         autoDrop={{
           checked: formValues.settings.autoDropUnsupportedParams,

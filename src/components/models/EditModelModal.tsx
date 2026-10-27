@@ -30,12 +30,14 @@ import { notifications } from '@mantine/notifications';
 import { IconBrain, IconDeviceFloppy, IconShield } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { reasoningFormFromSettings, reasoningSettingsPatch } from '@/components/models/reasoningForm';
-import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
+  blankMaxTokensPlaceholder,
   detectUnsupportedParams,
   formatRequestDefaults,
+  limitWarnings,
+  numberSettingOrNull,
   parseRequestDefaults,
   toStringArray,
   validateRequestDefaults,
@@ -562,6 +564,8 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           },
           settings: {
             ...values.settings,
+            // A cleared "Default max tokens" is `null` too: the key is removed instead of being stored as ''.
+            maxTokens: numberSettingOrNull(values.settings.maxTokens),
             // `null` clears the key server-side, so emptying the editor removes
             // the defaults rather than persisting an empty object. Reached only
             // when the text is genuinely empty — invalid JSON is rejected above.
@@ -642,6 +646,17 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
 
   const isLlm = model.category === 'llm';
   const validIdentity = Boolean(form.values.name && form.values.modelId);
+  // What a blank "Default max tokens" amounts to, and the limits that do not fit together (shown, never blocking).
+  const blankMaxTokensText = blankMaxTokensPlaceholder({
+    driver: selectedProvider?.driver,
+    modelId: form.values.modelId,
+    maxOutputTokens: form.values.maxOutputTokens,
+  }, tWizard('fields.runtimeMaxTokens.modelDefaultSplit'), tWizard('fields.runtimeMaxTokens.providerDefault'));
+  const limitNotes = limitWarnings({
+    contextWindow: form.values.contextWindow,
+    maxOutputTokens: form.values.maxOutputTokens,
+    maxTokens: form.values.settings.maxTokens,
+  }).map((warning) => tWizard(`limitWarnings.${warning}`));
   const sectionNumber = (() => {
     let n = 0;
     return () => ++n;
@@ -812,8 +827,10 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           maxTokens={{
             label: tWizard('fields.runtimeMaxTokens.label'),
             hint: tWizard('fields.runtimeMaxTokens.description'),
+            placeholder: blankMaxTokensText,
             props: form.getInputProps('settings.maxTokens'),
           }}
+          warnings={limitNotes}
         />
 
         {isLlm ? (
@@ -832,9 +849,6 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
               if (returnReasoning === false) settings.returnReasoning = false; else delete settings.returnReasoning;
               form.setFieldValue('settings', settings);
             }}
-            forcedNoneWithTools={Boolean(
-              detectForcedParams(selectedProvider?.driver, form.values.modelId, true).forced?.reasoning_effort,
-            )}
           />
         ) : null}
 
@@ -853,6 +867,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
         {isLlm ? (
           <RequestParamsSection
             number={sectionNumber()}
+            driver={selectedProvider?.driver}
             autoDropped={autoDropped}
             autoDrop={{
               checked: form.values.settings.autoDropUnsupportedParams !== false,

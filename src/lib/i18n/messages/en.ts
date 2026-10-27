@@ -3468,13 +3468,15 @@ export const en = {
     },
     hint: {
       responsesOnly: 'Reasoning text is only returned over the Responses API. Set Upstream API to Responses to see it.',
+      forcedNoneOnChat:
+        'With tools in a request this model runs without reasoning on Chat Completions, whatever effort is set: the provider rejects any other effort next to function tools. The Responses upstream API keeps reasoning with tools (set Upstream API to Responses).',
       effort: 'Sent as reasoning_effort. When set here it wins over the value in an API request.',
       budget: 'A level is turned into a thinking token budget; enter an exact budget below to override it.',
       toggle: 'This engine only has thinking on or off.',
       none: '',
     },
     budgetLabel: 'Thinking budget (tokens)',
-    budgetHint: 'Overrides the level. The output cap is raised above the budget automatically.',
+    budgetHint: "Overrides the level. The model's own output limit is raised above the budget automatically; a max_tokens sent by the caller is a hard cap: the budget is shrunk to fit it, or thinking is dropped when nothing fits.",
     budgetPlaceholder: 'From the level',
     includeThoughts: {
       label: 'Ask for thoughts',
@@ -3626,7 +3628,9 @@ export const en = {
       },
       runtimeMaxTokens: {
         label: 'Default max tokens',
-        description: 'Output limit applied to every request that does not set its own max_tokens. Blank = the provider or model default. Keep it at or below Maximum output tokens.',
+        description: 'Output limit applied to every request that does not set its own max_tokens. Blank = the provider or model default. Keep it at or below Maximum output tokens. Reasoning (thinking) tokens count against this limit.',
+        providerDefault: 'Provider default',
+        modelDefaultSplit: 'Model default: {streaming} streaming / {nonStreaming} non-streaming',
       },
     },
     review: {
@@ -3668,6 +3672,11 @@ export const en = {
       name: 'Model name is required.',
       modelId: 'Provider model ID is required.',
       maxOutputTokens: 'Maximum output tokens cannot exceed the context window.',
+    },
+    // Shown next to the limits, never blocking the save.
+    limitWarnings: {
+      defaultAboveMaxOutput: 'Default max tokens is above Maximum output tokens: requests that use it can be rejected by the provider.',
+      maxOutputAboveContext: 'Maximum output tokens is larger than the context window, so a response can never reach it.',
     },
   },
   playground: {

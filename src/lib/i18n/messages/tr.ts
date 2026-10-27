@@ -307,13 +307,15 @@ export const tr: typeof en = {
     },
     hint: {
       responsesOnly: 'Akıl yürütme metni yalnızca Responses API üzerinden döner. Görmek için Upstream API\'yi Responses yapın.',
+      forcedNoneOnChat:
+        'İstekte araç varsa bu model Chat Completions üzerinde, hangi seviye ayarlı olursa olsun akıl yürütme olmadan çalışır: sağlayıcı fonksiyon araçlarının yanında başka bir seviyeyi reddeder. Responses upstream API\'si araçlarla birlikte akıl yürütmeyi korur (Upstream API\'yi Responses yapın).',
       effort: 'reasoning_effort olarak gönderilir. Burada ayarlıysa API isteğindeki değerin önüne geçer.',
       budget: 'Seviye bir düşünme token bütçesine çevrilir; üzerine yazmak için aşağıya tam bütçe girin.',
       toggle: 'Bu motorda yalnızca düşünme açık veya kapalı olabilir.',
       none: '',
     },
     budgetLabel: 'Düşünme bütçesi (token)',
-    budgetHint: 'Seviyenin üzerine yazar. Çıktı sınırı bütçenin üstüne otomatik çıkarılır.',
+    budgetHint: "Seviyenin üzerine yazar. Modelin kendi çıktı sınırı bütçenin üstüne otomatik çıkarılır; çağıranın gönderdiği max_tokens ise kesin sınırdır: bütçe buna sığacak şekilde küçültülür, hiçbir şey sığmıyorsa düşünme kapatılır.",
     budgetPlaceholder: 'Seviyeden gelir',
     includeThoughts: {
       label: 'Düşünceleri iste',
@@ -408,7 +410,9 @@ export const tr: typeof en = {
       },
       runtimeMaxTokens: {
         label: 'Varsayılan maksimum token',
-        description: 'Kendi max_tokens değerini belirtmeyen her isteğe uygulanan çıktı sınırı. Boşsa sağlayıcının veya modelin varsayılanı geçerlidir. Maksimum çıktı token sayısının altında veya eşit tutun.',
+        description: 'Kendi max_tokens değerini belirtmeyen her isteğe uygulanan çıktı sınırı. Boşsa sağlayıcının veya modelin varsayılanı geçerlidir. Maksimum çıktı token sayısının altında veya eşit tutun. Akıl yürütme (düşünme) token\'ları da bu sınıra dahildir.',
+        providerDefault: 'Sağlayıcı varsayılanı',
+        modelDefaultSplit: 'Model varsayılanı: {streaming} akışlı / {nonStreaming} akışsız',
       },
     },
     review: {
@@ -423,6 +427,11 @@ export const tr: typeof en = {
     validation: {
       ...en.modelWizard.validation,
       maxOutputTokens: 'Maksimum çıktı token sayısı bağlam penceresini aşamaz.',
+    },
+    // Sınırların yanında gösterilir, kaydetmeyi engellemez.
+    limitWarnings: {
+      defaultAboveMaxOutput: 'Varsayılan maksimum token, maksimum çıktı token sayısının üzerinde: bunu kullanan istekler sağlayıcı tarafından reddedilebilir.',
+      maxOutputAboveContext: 'Maksimum çıktı token sayısı bağlam penceresinden büyük, bu yüzden bir yanıt ona hiçbir zaman ulaşamaz.',
     },
   },
   account: {
