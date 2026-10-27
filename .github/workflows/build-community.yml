@@ -1,8 +1,15 @@
-name: Console Community Build (TEST)
+name: Console Community Build
 
 on:
   push:
-    branches: [fix/devops-pipeline-build-duration]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+-community'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Yeniden calistirilacak vX.Y.Z-community tag'i
+        required: true
+        type: string
 
 permissions:
   contents: read
