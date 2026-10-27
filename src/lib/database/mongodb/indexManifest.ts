@@ -107,6 +107,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { enabled: 1, nextFireAt: 1 }, options: { name: 'idx_enabled_nextFireAt' } },
     // An incoming webhook finds its trigger by the URL's hook id.
     { key: { 'webhook.hookId': 1 }, options: { name: 'idx_webhook_hookId' } },
+    // The Connectors module finds the triggers bound to one subscription.
+    { key: { 'connector.subscriptionId': 1 }, options: { name: 'idx_connector_subscription' } },
   ],
   // Webhook delivery log: listed per trigger newest first; expiresAt serves the retention sweep.
   agent_trigger_deliveries: [

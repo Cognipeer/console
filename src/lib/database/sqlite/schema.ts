@@ -765,6 +765,7 @@ export const TENANT_SCHEMA_SQL = `
     schedule TEXT,
     once TEXT,
     webhook TEXT,
+    connector TEXT,
     prompt TEXT NOT NULL,
     variables TEXT,
     version INTEGER,
@@ -778,6 +779,7 @@ export const TENANT_SCHEMA_SQL = `
     lastStatus TEXT,
     lastError TEXT,
     hookId TEXT,
+    connectorSubscriptionId TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -2515,6 +2517,7 @@ export const TENANT_SCHEMA_SQL = `
     unattended INTEGER,
     externalContent INTEGER,
     literalVariables TEXT,
+    triggerData TEXT,
     background INTEGER,
     -- Which event the callback bookkeeping is for; the continuation's trigger and answerer; the accountable principal.
     callbackEventId TEXT,

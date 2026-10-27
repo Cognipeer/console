@@ -139,6 +139,7 @@ import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
 import { isToolOutput } from '@/lib/services/tools/toolOutput';
 import { effectiveActionAnnotations, mcpToolMarkings } from '@/lib/services/tools/actionAnnotations';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
+import { detachConnectorTriggers } from './agentTriggerConnectorHost';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
 import {
@@ -3227,6 +3228,8 @@ export async function deleteAgentRecord(
         // Its triggers (and their webhook delivery logs) go with it: nothing could fire them any more.
         if (deleted && agent) {
             const triggers = await db.listAgentTriggers({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            // A connector trigger gives up its subscription while its row still exists.
+            await detachConnectorTriggers({ tenantId: agent.tenantId, tenantDbName }, triggers);
             for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
             await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
         }
@@ -3762,6 +3765,8 @@ export interface AgentChatRequest {
      * block is closed with a line saying where the external data ends.
      */
     externalContent?: boolean;
+    /** The event behind a webhook / connector trigger fire (`IAgentRun.triggerData`); a FlowBase agent hands it to its flow. */
+    triggerData?: Record<string, unknown>;
     /**
      * Incremental answer text — internal agents (model token stream) and
      * connected agents (SSE) alike. Functions cannot cross the job queue, so
@@ -4300,6 +4305,8 @@ async function runFlowAgentTurn(input: {
     userId?: string;
     accountableUserId?: string;
     unattended?: boolean;
+    /** The trigger event behind the run (`AgentChatRequest.triggerData`). */
+    triggerData?: Record<string, unknown>;
     source: 'agent' | 'agent-playground';
     onTextChunk?: (text: string) => void;
 }): Promise<{
@@ -4333,6 +4340,7 @@ async function runFlowAgentTurn(input: {
         ...(input.runtimeContext?.tokenId ? { tokenId: input.runtimeContext.tokenId } : {}),
         ...(input.accountableUserId ? { accountableUserId: input.accountableUserId } : {}),
         ...(input.unattended !== undefined ? { unattended: input.unattended } : {}),
+        ...(input.triggerData ? { triggerData: input.triggerData } : {}),
         ...(previousFlow ? { previous: { runId: previousFlow.runId, ...(previousFlow.eventSeq !== undefined ? { eventSeq: previousFlow.eventSeq } : {}) } } : {}),
     });
     const content = await evaluateBoundGuardrails({
@@ -5765,6 +5773,7 @@ async function runAgentChatTurn(
             userId: request.userId,
             ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
             unattended: request.unattended,
+            ...(request.triggerData ? { triggerData: request.triggerData } : {}),
             source: 'agent',
             onTextChunk,
         });

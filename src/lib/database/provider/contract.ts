@@ -1253,6 +1253,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<boolean>;
   /** The trigger whose `webhook` has this hook id (tenant DB), or null. */
   findAgentTriggerByHookId(hookId: string): Promise<IAgentTrigger | null>;
+  /** The connector triggers bound to a subscription (tenant DB), oldest first. */
+  listAgentTriggersBySubscription(subscriptionId: string): Promise<IAgentTrigger[]>;
+  /** How many connector triggers are bound to a subscription; `enabledOnly` counts the enabled ones. */
+  countAgentTriggersBySubscription(subscriptionId: string, opts?: { enabledOnly?: boolean }): Promise<number>;
 
   // ── Agent trigger webhook deliveries (tenant-specific) ──
   recordAgentTriggerDelivery(record: Omit<IAgentTriggerDelivery, '_id'>): Promise<IAgentTriggerDelivery>;

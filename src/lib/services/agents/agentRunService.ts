@@ -134,11 +134,11 @@ const MAX_CALLBACK_URL_LENGTH = 2_048;
 const MIN_CALLBACK_SECRET_LENGTH = 16;
 const MAX_CALLBACK_SECRET_LENGTH = 256;
 export const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
-/** Idempotency-Key prefixes of the runs triggers start (`trigger:<id>:<slot>`, `hook:<id>:…`); refused from clients. */
+/** Idempotency-Key prefixes of the runs triggers start (`trigger:<id>:<slot>`, `hook:<id>:…`, `ctrig:<id>:…`); refused from clients. */
 /** What can start a run (the runs list's `trigger` filter). */
-export const AGENT_RUN_TRIGGERS: ReadonlyArray<NonNullable<IAgentRun['trigger']>> = ['request', 'schedule', 'once', 'manual', 'webhook'];
+export const AGENT_RUN_TRIGGERS: ReadonlyArray<NonNullable<IAgentRun['trigger']>> = ['request', 'schedule', 'once', 'manual', 'webhook', 'connector'];
 
-export const RESERVED_IDEMPOTENCY_PREFIXES = ['hook:', 'trigger:'] as const;
+export const RESERVED_IDEMPOTENCY_PREFIXES = ['hook:', 'trigger:', 'ctrig:'] as const;
 
 export function isReservedIdempotencyKey(key: string): boolean {
   return RESERVED_IDEMPOTENCY_PREFIXES.some((prefix) => key.startsWith(prefix));
@@ -542,6 +542,8 @@ export interface StartAgentRunInput {
    * `{{variables.*}}` next to the declared defaults. Kept on the row.
    */
   literalVariables?: string[];
+  /** The event behind a webhook / connector trigger fire (see `IAgentRun.triggerData`). Kept on the row. */
+  triggerData?: Record<string, unknown> | null;
   /** The request asked for `background: true`: kept on the row (a stream runs inline, yet reads back as background). */
   background?: boolean;
   /** Inline only: the caller runs the agent's client tools (chat completions `tool_calls`). */
@@ -860,6 +862,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       ...(input.unattended ? { unattended: true } : {}),
       ...(input.externalContent ? { externalContent: true } : {}),
       ...(input.externalContent && input.literalVariables?.length ? { literalVariables: input.literalVariables } : {}),
+      ...(input.triggerData ? { triggerData: input.triggerData } : {}),
       ...(input.background ? { background: true } : {}),
       queueGeneration: 1,
     };
@@ -1384,6 +1387,7 @@ export async function queueAgentRunResume(input: {
         ...(source?.unattended ? { unattended: true } : {}),
         ...(source?.externalContent ? { externalContent: true } : {}),
         ...(source?.externalContent && source.literalVariables?.length ? { literalVariables: source.literalVariables } : {}),
+        ...(source?.triggerData ? { triggerData: source.triggerData } : {}),
         ...(source?.variables ? { variables: source.variables } : {}),
         ...(source?.responseFormat ? { responseFormat: source.responseFormat } : {}),
         queueGeneration: 1,
@@ -1711,8 +1715,9 @@ export async function requestAgentRunCancellation(
  * external content, variables whose values taken from outside never fill the
  * system prompt (the declared defaults and `literalVariables` still do).
  */
-function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent' | 'literalVariables'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent' | 'literalVariables'> {
+function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent' | 'literalVariables' | 'triggerData'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent' | 'literalVariables' | 'triggerData'> {
   return {
+    ...(run.triggerData ? { triggerData: run.triggerData } : {}),
     ...(run.unattended === true ? { unattended: true } : {}),
     ...(run.externalContent === true
       ? {

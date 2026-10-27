@@ -2,15 +2,17 @@
  * SQLite Provider – Agent triggers mixin
  *
  * A trigger's `type` is a column; the settings of that type are one JSON
- * column named after it (`schedule`, `once`, `webhook`; manual has none, the
+ * column named after it (`schedule`, `once`, `webhook`, `connector`; manual has none, the
  * others stay NULL), their dates as ISO strings. `nextFireAt` is its own
  * column: the scheduler's `(enabled, nextFireAt)` index reads it; so is a
- * webhook trigger's `hookId` (the incoming webhook's lookup). A webhook
+ * webhook trigger's `hookId` (the incoming webhook's lookup) and a connector
+ * trigger's `connectorSubscriptionId` (the Connectors module's lookup). A webhook
  * trigger's delivery log is `agent_trigger_deliveries`.
  */
 
 import type {
   AgentTriggerPatch,
+  AgentTriggerConnector,
   AgentTriggerSchedule,
   AgentTriggerType,
   AgentTriggerTypeSettings,
@@ -40,6 +42,8 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
           ? this.toJson({ ...record.webhook, previousSecretExpiresAt: iso(record.webhook.previousSecretExpiresAt) })
           : null;
         out.hookId = record.type === 'webhook' ? record.webhook.hookId : null;
+        out.connector = record.type === 'connector' ? this.toJson(record.connector) : null;
+        out.connectorSubscriptionId = record.type === 'connector' ? record.connector.subscriptionId ?? null : null;
       }
       if (record.prompt !== undefined) out.prompt = record.prompt;
       if (record.version !== undefined) out.version = record.version ?? null;
@@ -71,6 +75,7 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
         // Defaults for the optional columns a new trigger leaves out.
         description: null, version: null, variables: null, metadata: null, callback: null, responseFormat: null,
         nextFireAt: null, lastFireAt: null, lastRunId: null, lastStatus: null, lastError: null, updatedBy: null, hookId: null,
+        connectorSubscriptionId: null,
         ...this.triggerColumns(record),
       };
       const names = Object.keys(columns);
@@ -167,6 +172,20 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
         .prepare(`SELECT * FROM ${TABLES.agentTriggers} WHERE hookId = @hookId LIMIT 1`)
         .get({ hookId }) as SqliteRow | undefined;
       return row ? this.mapAgentTrigger(row) : null;
+    }
+
+    async listAgentTriggersBySubscription(subscriptionId: string): Promise<IAgentTrigger[]> {
+      const rows = this.getTenantDb()
+        .prepare(`SELECT * FROM ${TABLES.agentTriggers} WHERE connectorSubscriptionId = @subscriptionId ORDER BY createdAt ASC, rowid ASC`)
+        .all({ subscriptionId }) as SqliteRow[];
+      return rows.map((row) => this.mapAgentTrigger(row));
+    }
+
+    async countAgentTriggersBySubscription(subscriptionId: string, opts?: { enabledOnly?: boolean }): Promise<number> {
+      const row = this.getTenantDb()
+        .prepare(`SELECT COUNT(*) AS n FROM ${TABLES.agentTriggers} WHERE connectorSubscriptionId = @subscriptionId${opts?.enabledOnly ? ' AND enabled = 1' : ''}`)
+        .get({ subscriptionId }) as { n: number };
+      return Number(row.n);
     }
 
     // ── Webhook deliveries ────────────────────────────────────────
@@ -293,6 +312,10 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
           return webhook
             ? { type: 'webhook', webhook: { ...webhook, previousSecretExpiresAt: webhook.previousSecretExpiresAt ? new Date(String(webhook.previousSecretExpiresAt)) : null } }
             : manual;
+        }
+        case 'connector': {
+          const connector = this.parseJson<AgentTriggerConnector | null>(row.connector, null);
+          return connector ? { type: 'connector', connector } : manual;
         }
         default:
           return manual;

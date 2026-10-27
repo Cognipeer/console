@@ -3327,29 +3327,33 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
-/** The sender an incoming webhook is set up for (its event / delivery id headers and auth choices). */
-export type AgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
+/** The sender an incoming webhook is set up for. Vendor webhooks are connector triggers; only the generic webhook is built in. */
+export type AgentTriggerWebhookPreset = 'generic';
 
 /**
- * How a delivery proves it knows the trigger's secret. The first three sign
+ * Vendor presets that older triggers were stored with. Read-only legacy: such a
+ * trigger no longer receives deliveries (its URL answers 410), can not be
+ * written, and can be converted to a connector or a generic webhook trigger.
+ */
+export type RetiredAgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops';
+
+/**
+ * How a delivery proves it knows the trigger's secret. The first two sign
  * the raw body (checked once the body is read); the rest carry the secret in a
  * header (checked before the body is read).
  */
 export type AgentTriggerWebhookAuth =
-  /** `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(secret, raw body)>`. */
-  | 'github_signature'
   /** Standard Webhooks: `webhook-id` / `webhook-timestamp` / `webhook-signature: v1,<base64>`; the sender's `whsec_` secret. */
   | 'standard_webhooks'
   /** `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`. */
   | 'signature'
-  /** `X-Gitlab-Token: <secret>`. */
-  | 'gitlab_token'
   /** `Authorization: Bearer <secret>`. */
   | 'bearer'
-  /** `Authorization: Basic base64(<any user>:<secret>)`. */
-  | 'basic'
   /** `<headerName>: <secret>`. */
   | 'header';
+
+/** Auth modes of retired vendor presets; stored on old triggers only (see `RetiredAgentTriggerWebhookPreset`). */
+export type RetiredAgentTriggerWebhookAuth = 'github_signature' | 'gitlab_token' | 'basic';
 
 /** One filter rule over the delivery (all rules must match). */
 export interface AgentTriggerWebhookFilterRule {
@@ -3366,8 +3370,8 @@ export interface AgentTriggerWebhookFilterRule {
 export interface AgentTriggerWebhook {
   /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
   hookId: string;
-  preset: AgentTriggerWebhookPreset;
-  auth: AgentTriggerWebhookAuth;
+  preset: AgentTriggerWebhookPreset | RetiredAgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth | RetiredAgentTriggerWebhookAuth;
   /** Auth `header` only; lower-case. */
   headerName?: string | null;
   /** `encryptObject(secret)`; never serialized. */
@@ -3428,7 +3432,7 @@ export interface AgentTriggerOnce {
 }
 
 /** What starts a trigger's runs. */
-export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook';
+export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook' | 'connector';
 
 /**
  * A trigger's type and the ONE settings object named after it (`manual` has
@@ -3440,7 +3444,8 @@ export type AgentTriggerTypeSettings =
   | { type: 'once'; once: AgentTriggerOnce }
   /** Only started on request (Run now, `POST …/triggers/{id}/run`). */
   | { type: 'manual' }
-  | { type: 'webhook'; webhook: AgentTriggerWebhook };
+  | { type: 'webhook'; webhook: AgentTriggerWebhook }
+  | { type: 'connector'; connector: AgentTriggerConnector };
 
 export type AgentTriggerDeliveryOutcome =
   'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
@@ -5336,7 +5341,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** The surface that created the run. */
   channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | 'reminder' | 'messaging' | null;
   triggerId?: string | null;
-  trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
+  trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | 'connector' | null;
   /**
    * No interactive user on the run (a trigger fire): a gated tool follows the
    * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.
@@ -5355,6 +5360,12 @@ export interface IAgentRun extends IUsageAttributionFields {
    * continuation keeps it.
    */
   literalVariables?: string[] | null;
+  /**
+   * The event behind a webhook / connector trigger fire (`{ event, delivery_id, payload, connector }`),
+   * kept for the run's engine, for example a FlowBase agent's `{{ trigger.payload.* }}`. Only with the
+   * trigger's `includePayload`; at most 64 KiB of JSON. Absent = none.
+   */
+  triggerData?: Record<string, unknown> | null;
   /** Per-request structured output; the worker and a resume re-apply it. */
   responseFormat?: AgentResponseFormat | null;
   /** Validated agent variables (`IAgentConfig.variables`). */

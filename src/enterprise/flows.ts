@@ -60,6 +60,8 @@ export interface FlowAgentTurnInput extends FlowsScope {
   tokenId?: string;
   accountableUserId?: string;
   unattended?: boolean;
+  /** The event behind a webhook / connector trigger fire (`{ event, delivery_id, payload, connector }`), for the flow's trigger data. */
+  triggerData?: Record<string, unknown>;
   /** The previous assistant message's flow metadata, when there is one. */
   previous?: { runId: string; eventSeq?: number };
 }

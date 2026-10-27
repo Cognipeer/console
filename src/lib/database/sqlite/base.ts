@@ -1165,6 +1165,8 @@ export class SQLiteProviderBase {
       // Trigger runs: unattended (no one to ask), external content (event values stay out of the system
       // prompt) and the variable names whose values did not come from the event (JSON list).
       ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'], ['literalVariables', 'TEXT'],
+      // The event behind a webhook / connector trigger fire (JSON, at most 64 KiB), for the engine behind the run.
+      ['triggerData', 'TEXT'],
       // The request's `background: true` on a run that streams inline.
       ['background', 'INTEGER'],
       // The event the callback bookkeeping belongs to; what continues a paused turn and who
@@ -1180,6 +1182,10 @@ export class SQLiteProviderBase {
     // An incoming webhook finds its trigger by the URL's hook id (copied out of the `webhook` JSON).
     this.ensureTableColumn(db, TABLES.agentTriggers, 'hookId', 'hookId TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_triggers_hook ON ${TABLES.agentTriggers}(hookId)`);
+    // A connector trigger: its settings (JSON) and the subscription they are bound to (copied out of the JSON, for the Connectors module's lookup).
+    this.ensureTableColumn(db, TABLES.agentTriggers, 'connector', 'connector TEXT');
+    this.ensureTableColumn(db, TABLES.agentTriggers, 'connectorSubscriptionId', 'connectorSubscriptionId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_triggers_connector_sub ON ${TABLES.agentTriggers}(connectorSubscriptionId)`);
     // Session files: ordinary file records tagged with the conversation they belong
     // to. Indexed here (not in the schema SQL) because an older table has no such
     // column until the lines above add it.

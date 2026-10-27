@@ -488,6 +488,8 @@ export type {
   NewAgentTrigger,
   AgentTriggerWebhookAuth,
   AgentTriggerWebhookPreset,
+  RetiredAgentTriggerWebhookAuth,
+  RetiredAgentTriggerWebhookPreset,
   AgentTriggerWebhookFilterRule,
   AgentTriggerConnector,
   IAgentTriggerDelivery,
