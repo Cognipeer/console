@@ -15,6 +15,7 @@ import type {
   InstantiateTemplateInput,
   InstantiateTemplateResult,
   InstantiatedTemplateTrigger,
+  SkippedTemplateTrigger,
 } from '@/lib/services/agents/templates/types';
 import { AGENT_TEMPLATE_CATEGORIES } from '@/lib/services/agents/templates/types';
 
@@ -143,6 +144,12 @@ export function describeTrigger(trigger: AgentTemplateTrigger): TriggerLine {
   return { kind: 'manual', name: trigger.name };
 }
 
+/** The connector packages the template's connector triggers listen to, in the order they first appear. */
+export function connectorPackages(template: Pick<AgentTemplateDetail, 'triggers'>): string[] {
+  const packages = template.triggers.flatMap((trigger) => (trigger.type === 'connector' && trigger.connector ? [trigger.connector.package] : []));
+  return [...new Set(packages)];
+}
+
 // ── The "use template" form ──────────────────────────────────────────────
 
 export interface UseTemplateForm {
@@ -154,8 +161,20 @@ export interface UseTemplateForm {
   guardrailKeys: string[];
   sandboxTemplateKey: string | null;
   createTriggers: boolean;
+  /** The connector picked per package (`null` = none on purpose); a package that is absent has not been decided yet. */
+  connectors: Record<string, string | null>;
   timezone: string;
   publish: boolean;
+}
+
+/** The connector ids of each package the project has, as the connector select lists them. */
+export type ConnectorChoices = Record<string, readonly string[]>;
+
+/** The connector a package's triggers will listen to: the one picked, else the only one the project has, else none. */
+export function selectedConnector(form: Pick<UseTemplateForm, 'connectors'>, pkg: string, available: readonly string[]): string | null {
+  const picked = form.connectors[pkg];
+  if (picked !== undefined) return picked !== null && available.includes(picked) ? picked : null;
+  return available.length === 1 ? available[0]! : null;
 }
 
 export function browserTimezone(): string {
@@ -181,6 +200,7 @@ export function initialForm(
     guardrailKeys: [],
     sandboxTemplateKey: template.requires.sandbox ? sandboxDefault : null,
     createTriggers: template.triggers.length > 0,
+    connectors: {},
     timezone,
     publish: false,
   };
@@ -200,8 +220,11 @@ export function formBlockers(template: AgentTemplateDetail, form: UseTemplateFor
   return blockers;
 }
 
-/** The body of `POST /api/agents/templates/:key/instantiate`. */
-export function buildInstantiateBody(template: AgentTemplateDetail, form: UseTemplateForm): InstantiateTemplateInput {
+/**
+ * The body of `POST /api/agents/templates/:key/instantiate`. `connectors` lists the connectors the project has per
+ * package: the connector triggers get the one selected for their package, and are left to the server to skip without one.
+ */
+export function buildInstantiateBody(template: AgentTemplateDetail, form: UseTemplateForm, connectors: ConnectorChoices = {}): InstantiateTemplateInput {
   const name = form.name.trim();
   const key = form.key.trim();
   const body: InstantiateTemplateInput = { name, modelKey: form.modelKey ?? '' };
@@ -210,6 +233,15 @@ export function buildInstantiateBody(template: AgentTemplateDetail, form: UseTem
   if (form.guardrailKeys.length > 0) body.guardrailKeys = form.guardrailKeys;
   if (template.requires.sandbox && form.sandboxTemplateKey) body.sandboxTemplateKey = form.sandboxTemplateKey;
   if (template.triggers.length > 0) body.createTriggers = form.createTriggers;
+  if (form.createTriggers) {
+    const ids: Record<string, string> = {};
+    for (const trigger of template.triggers) {
+      if (trigger.type !== 'connector' || !trigger.connector) continue;
+      const id = selectedConnector(form, trigger.connector.package, connectors[trigger.connector.package] ?? []);
+      if (id) ids[trigger.name] = id;
+    }
+    if (Object.keys(ids).length > 0) body.connector_ids = ids;
+  }
   body.timezone = form.timezone || 'UTC';
   body.publish = form.publish;
   return body;
@@ -242,4 +274,14 @@ export async function instantiateTemplateRequest(
 /** The triggers whose webhook the sender still has to be given. */
 export function webhookTriggers(result: Pick<InstantiateTemplateResult, 'triggers'>): InstantiatedTemplateTrigger[] {
   return result.triggers.filter((trigger) => Boolean(trigger.webhook));
+}
+
+/** The connector triggers the project could not get: the template asked for a connector that was not given (or the module is absent). */
+export function skippedTriggers(result: Pick<InstantiateTemplateResult, 'skipped_triggers'>): SkippedTemplateTrigger[] {
+  return result.skipped_triggers ?? [];
+}
+
+/** The connector triggers set up by hand: the sender still has to be given the callback URL (and, once, the secret). */
+export function manualConnectorTriggers(result: Pick<InstantiateTemplateResult, 'triggers'>): InstantiatedTemplateTrigger[] {
+  return result.triggers.filter((trigger) => trigger.connector?.subscription?.status === 'manual' && Boolean(trigger.connector.subscription.callback_url));
 }

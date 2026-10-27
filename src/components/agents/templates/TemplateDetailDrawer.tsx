@@ -7,7 +7,7 @@ import { IconAlertTriangle, IconCheck } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import styles from './AgentTemplatesPage.module.css';
 import { TemplateIcon } from './templateIcons';
-import { describeContents, describeTrigger, isUsable } from './templatesModel';
+import { connectorPackages, describeContents, describeTrigger, isUsable } from './templatesModel';
 import { useTemplateDetail } from './useTemplateDetail';
 
 export interface TemplateDetailDrawerProps {
@@ -160,6 +160,9 @@ export default function TemplateDetailDrawer({ templateKey, onClose, onUse }: Te
                 })}
               </ul>
               <p className="ds-muted" style={{ fontSize: 12, marginTop: 6 }}>{t('ui.drawer.triggersNote')}</p>
+              {connectorPackages(template).length > 0 ? (
+                <p className="ds-muted" style={{ fontSize: 12, marginTop: 4 }}>{t('ui.drawer.triggersConnectorNote')}</p>
+              ) : null}
             </section>
           ) : null}
 

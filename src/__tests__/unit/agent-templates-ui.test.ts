@@ -20,6 +20,7 @@ import {
   EMPTY_GALLERY_FILTER,
   InstantiateRequestError,
   buildInstantiateBody,
+  connectorPackages,
   describeContents,
   describeTrigger,
   filterTemplates,
@@ -29,6 +30,9 @@ import {
   instantiateTemplateRequest,
   isFilterActive,
   isUsable,
+  manualConnectorTriggers,
+  selectedConnector,
+  skippedTriggers,
   webhookTriggers,
   type GalleryFilter,
 } from '@/components/agents/templates/templatesModel';
@@ -205,6 +209,66 @@ describe('the use-template form', () => {
     expect(analystBody.sandboxTemplateKey).toBe('multi-base');
     expect(analystBody).not.toHaveProperty('knowledgeKeys');
     expect(analystBody).not.toHaveProperty('key');
+  });
+});
+
+describe('connector triggers in the use-template form', () => {
+  const models = ['gpt-main'];
+  const pr = detailOf('pr-reviewer');
+  const formFor = (template: AgentTemplateDetail, patch: Partial<ReturnType<typeof initialForm>> = {}) =>
+    ({ ...initialForm(template, { models, sandboxTemplates: [] }, 'UTC'), name: 'Bot', ...patch });
+
+  it('knows which connector packages a template listens to', () => {
+    expect(connectorPackages(pr)).toEqual(['cognipeer.github']);
+    expect(connectorPackages(detailOf('ci-failure-triage'))).toEqual(['cognipeer.github']);
+    expect(connectorPackages(detailOf('customer-support'))).toEqual([]);
+  });
+
+  it('takes the picked connector, else the only one the project has, else none', () => {
+    const form = formFor(pr);
+    expect(selectedConnector(form, 'cognipeer.github', ['c1'])).toBe('c1');
+    expect(selectedConnector(form, 'cognipeer.github', ['c1', 'c2'])).toBeNull();
+    expect(selectedConnector(form, 'cognipeer.github', [])).toBeNull();
+    expect(selectedConnector({ connectors: { 'cognipeer.github': 'c2' } }, 'cognipeer.github', ['c1', 'c2'])).toBe('c2');
+    // Cleared on purpose: the only connector is not used behind the user’s back.
+    expect(selectedConnector({ connectors: { 'cognipeer.github': null } }, 'cognipeer.github', ['c1'])).toBeNull();
+    // A connector that is no longer in the project is not sent.
+    expect(selectedConnector({ connectors: { 'cognipeer.github': 'gone' } }, 'cognipeer.github', ['c1'])).toBeNull();
+  });
+
+  it('sends the connector per connector trigger, by the trigger’s name in the template', () => {
+    const body = buildInstantiateBody(pr, formFor(pr), { 'cognipeer.github': ['c1'] });
+    expect(body.connector_ids).toEqual({ 'Review pull requests': 'c1' });
+    expect(buildInstantiateBody(pr, formFor(pr, { connectors: { 'cognipeer.github': 'c2' } }), { 'cognipeer.github': ['c1', 'c2'] }).connector_ids)
+      .toEqual({ 'Review pull requests': 'c2' });
+  });
+
+  it('sends none when there is none to pick (the server then skips the trigger), or when no triggers are asked for', () => {
+    expect(buildInstantiateBody(pr, formFor(pr), {})).not.toHaveProperty('connector_ids');
+    expect(buildInstantiateBody(pr, formFor(pr), { 'cognipeer.github': ['c1', 'c2'] })).not.toHaveProperty('connector_ids');
+    expect(buildInstantiateBody(pr, formFor(pr, { createTriggers: false }), { 'cognipeer.github': ['c1'] })).not.toHaveProperty('connector_ids');
+  });
+
+  it('gives only the connector triggers a connector, not the generic webhook next to them', () => {
+    const ci = detailOf('ci-failure-triage');
+    const connectorTrigger = ci.triggers.find((trigger) => trigger.type === 'connector')!;
+    const body = buildInstantiateBody(ci, formFor(ci), { 'cognipeer.github': ['c1'] });
+    expect(body.connector_ids).toEqual({ [connectorTrigger.name]: 'c1' });
+    expect(ci.triggers.some((trigger) => trigger.type === 'webhook')).toBe(true);
+  });
+
+  it('reads the skipped triggers and the manual connector setups from the answer', () => {
+    const answer = {
+      triggers: [
+        { id: 't1', name: 'A', type: 'connector', enabled: false, connector: { connectorId: 'c1', trigger: 'pull_request', subscription: { subscription_id: 's', status: 'manual', kind: 'webhook', callback_url: 'https://c.example/h', secret: 'once', bindings: 1 } } },
+        { id: 't2', name: 'B', type: 'connector', enabled: false, connector: { connectorId: 'c1', trigger: 'issues', subscription: { subscription_id: 's2', status: 'active', kind: 'webhook', callback_url: 'https://c.example/h2', bindings: 1 } } },
+        { id: 't3', name: 'C', type: 'manual', enabled: false },
+      ],
+      skipped_triggers: [{ name: 'D', reason: 'connector_required', package: 'cognipeer.github' }],
+    } as unknown as InstantiateTemplateResult;
+    expect(manualConnectorTriggers(answer).map((trigger) => trigger.id)).toEqual(['t1']);
+    expect(skippedTriggers(answer)).toEqual([{ name: 'D', reason: 'connector_required', package: 'cognipeer.github' }]);
+    expect(skippedTriggers({} as InstantiateTemplateResult)).toEqual([]);
   });
 });
 
