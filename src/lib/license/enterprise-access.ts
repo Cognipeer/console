@@ -33,6 +33,8 @@ export interface EnterpriseApiRule {
    * flow with no server-to-customer-network connection), letting a SaaS
    * backend dial an admin-supplied host:port is an SSRF-shaped risk, so the
    * module is blocked outright rather than merely license-gated on SaaS.
+   * Cluster administration is onprem-only too: the nodes it manages are the
+   * operator's own processes, which a hosted tenant does not run.
    */
   requiresOnPrem?: boolean;
 }
@@ -56,8 +58,12 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     exemptPrefixes: ['/api/sandbox/agent/'],
   },
   {
+    // Cluster administration (node registry + per-instance node assignment).
+    // Onprem-only (404 on SaaS) — see `requiresOnPrem`'s doc comment;
+    // instanceAssignmentStore applies the matching check at run time.
     module: 'cluster',
     prefixes: ['/api/cluster/'],
+    requiresOnPrem: true,
   },
   {
     module: 'prompt-optimizer',

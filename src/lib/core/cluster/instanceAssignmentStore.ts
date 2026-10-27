@@ -7,8 +7,14 @@
  *
  * Reads are cached for short TTL to avoid hammering the DB on hot paths
  * (agent execution, browser action). Writes invalidate the cache.
+ *
+ * Assignments are only honoured on a self-hosted (onprem) deployment: they are
+ * managed from the cluster admin surface, which is onprem-only (see the
+ * `cluster` rule in enterprise-access.ts). On a hosted deployment nobody can
+ * see or remove one, so every instance takes the unassigned path.
  */
 
+import { getConfig } from '../config';
 import { createLogger } from '../logger';
 import { getDatabase, type IInstanceAssignment, type InstanceEntityType } from '@/lib/database';
 import { resolveDefaultNodeName } from './defaultNode';
@@ -57,6 +63,7 @@ export async function findInstanceAssignment(
   entityType: InstanceEntityType,
   entityId: string,
 ): Promise<IInstanceAssignment | null> {
+  if (!getConfig().deployment.isOnPrem) return null;
   const cached = getCached(entityType, entityId);
   if (cached) return cached.value;
 

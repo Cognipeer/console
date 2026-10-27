@@ -660,6 +660,7 @@
       ],
       "tenantAdminOnly": true,
       "requiresEnterprise": true,
+      "requiresOnPrem": true,
       "enterpriseModule": "cluster",
       "settings": true
     },

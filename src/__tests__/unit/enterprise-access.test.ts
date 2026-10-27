@@ -123,6 +123,17 @@ describe('checkEnterpriseApiAccess', () => {
     expect(checkEnterpriseApiAccess('/api/ldap/config', 'ENTERPRISE', undefined, true)).toBeNull();
   });
 
+  it('blocks cluster administration with 404 on SaaS even for an active ENTERPRISE license', () => {
+    const denial = checkEnterpriseApiAccess('/api/cluster/overview', 'ENTERPRISE', undefined, false);
+    expect(denial?.status).toBe(404);
+    expect(denial?.body).toMatchObject({ module: 'cluster', requiresOnPrem: true });
+  });
+
+  it('allows cluster administration only when both onprem and ENTERPRISE', () => {
+    expect(checkEnterpriseApiAccess('/api/cluster/overview', 'FREE', undefined, true)?.status).toBe(402);
+    expect(checkEnterpriseApiAccess('/api/cluster/assignments/agent/t1:a', 'ENTERPRISE', undefined, true)).toBeNull();
+  });
+
   it('does not require onprem for modules that never set requiresOnPrem', () => {
     expect(checkEnterpriseApiAccess('/api/gpu-fleet/hosts', 'ENTERPRISE', undefined, false)).toBeNull();
   });
