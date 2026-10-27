@@ -7,15 +7,18 @@
 
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
+import type { ConnectorSubscriptionWire, ConnectorTriggerFormValue } from '@/lib/shared/connectorTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 
 /** A trigger as the API returns it. */
 export type TriggerRow = ReturnType<typeof serializeAgentTrigger>;
 
-/** The types the editor offers, in order. A new type is added here and in the editor's switch. */
-export const TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook'] as const;
-/** The types a trigger can have: the editor offers `TRIGGER_TYPES`; a `connector` trigger is edited by the Connectors module's parts. */
-export type TriggerType = (typeof TRIGGER_TYPES)[number] | 'connector';
+/** The types a trigger can have, in the order the editor offers them (`connector` only where the Connectors module is). */
+export const TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook', 'connector'] as const;
+export type TriggerType = (typeof TRIGGER_TYPES)[number];
+
+/** A trigger as the API returns it by id: a connector trigger also carries the state of its subscription. */
+export type ConnectorTriggerRow = TriggerRow & { connector_subscription?: ConnectorSubscriptionWire | null };
 
 // ── Webhook ──────────────────────────────────────────────────────────────
 // The preset / auth lists mirror agentTriggerWebhookAuth.ts, which uses node:crypto
@@ -50,15 +53,18 @@ export const WEBHOOK_TEMPLATE_VARIABLES = [
     'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'trigger.id', 'trigger.name', 'agent.key',
 ] as const;
 
+/**
+ * The tags offered for a connector trigger's prompt: the same view as a webhook's, without headers (a connector event
+ * has none) and with the connector in place of the preset. Also a subset of the roots the server accepts.
+ */
+export const CONNECTOR_TEMPLATE_VARIABLES = [
+    'payload.…', 'event', 'delivery_id', 'connector.name', 'connector.trigger', 'trigger.id', 'trigger.name', 'agent.key',
+] as const;
+
 /** Event-name suggestions per preset (generic senders name their own). */
 export const WEBHOOK_EVENT_SUGGESTIONS: Record<WebhookPreset, readonly string[]> = {
     generic: [],
 };
-
-/** "Actions" chips (a `<path> in [...]` rule placed first in the filter): none for a generic webhook. */
-export const WEBHOOK_ACTION_PATH: Partial<Record<WebhookPreset, string>> = {};
-
-export const WEBHOOK_ACTION_SUGGESTIONS: Partial<Record<WebhookPreset, readonly string[]>> = {};
 
 /** One-click filter examples per preset (i18n key under agents.triggers → rows they add). */
 export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key: string; rows: WebhookFilterRow[] }>> = {
@@ -114,10 +120,12 @@ export interface TriggerForm {
     /** Standard Webhooks only: the sender's `whsec_…` secret; empty keeps the stored one. */
     webhookSecret: string;
     webhookEvents: string[];
-    /** Only for presets with WEBHOOK_ACTION_PATH (none for a generic webhook). */
-    webhookActions: string[];
+    /** The filter rules of a webhook and of a connector trigger (both match over the event). */
     webhookFilter: WebhookFilterRow[];
+    /** Whether the event payload goes to the agent: a webhook's and a connector trigger's. */
     webhookIncludePayload: boolean;
+    /** The connector picker's value (connector, trigger, parameters, events, poll schedule); null until one is picked. */
+    connector: ConnectorTriggerFormValue | null;
 }
 
 export const CRON_PRESETS = [
@@ -179,9 +187,9 @@ export function emptyTriggerForm(timezone = browserTimezone(), now = new Date())
         webhookHeaderName: DEFAULT_WEBHOOK_HEADER_NAME,
         webhookSecret: '',
         webhookEvents: [],
-        webhookActions: [],
         webhookFilter: [],
         webhookIncludePayload: true,
+        connector: null,
     };
 }
 
@@ -238,42 +246,65 @@ interface StoredWebhook {
     auth?: string;
     header_name?: string | null;
     events?: string[];
-    filter?: Array<{ path: string; op: string; value?: unknown }>;
+    filter?: StoredFilterRule[];
     include_payload?: boolean;
 }
 
-/** The webhook part of the form from a stored `webhook`: an action rule first in the filter becomes the Actions chips. */
+type StoredFilterRule = { path: string; op: string; value?: unknown };
+
+/** Stored filter rules as editable rows. */
+function filterRows(rules: StoredFilterRule[] | undefined): WebhookFilterRow[] {
+    return (rules ?? []).map((rule) => ({
+        path: rule.path,
+        op: (WEBHOOK_FILTER_OPS as readonly string[]).includes(rule.op) ? rule.op as WebhookFilterOp : 'eq',
+        value: listText(rule.value),
+    }));
+}
+
+/** The webhook part of the form from a stored `webhook`. A retired vendor preset opens as the generic one. */
 function webhookFormFields(webhook: StoredWebhook, base: TriggerForm): Partial<TriggerForm> {
     const preset = (WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset ?? '') ? webhook.preset as WebhookPreset : 'generic';
     const auth = WEBHOOK_PRESET_AUTH[preset].includes(webhook.auth as WebhookAuth) ? webhook.auth as WebhookAuth : WEBHOOK_PRESET_AUTH[preset][0];
-    const rules = [...(webhook.filter ?? [])];
-    const actionPath = WEBHOOK_ACTION_PATH[preset];
-    let actions: string[] = [];
-    const first = rules[0];
-    if (actionPath && first && first.path === actionPath && first.op === 'in' && Array.isArray(first.value) && first.value.every((item) => typeof item === 'string')) {
-        actions = first.value as string[];
-        rules.shift();
-    }
     return {
         webhookPreset: preset,
         webhookAuth: auth,
         webhookHeaderName: webhook.header_name ?? base.webhookHeaderName,
         webhookEvents: [...(webhook.events ?? [])],
-        webhookActions: actions,
-        webhookFilter: rules.map((rule) => ({
-            path: rule.path,
-            op: (WEBHOOK_FILTER_OPS as readonly string[]).includes(rule.op) ? rule.op as WebhookFilterOp : 'eq',
-            value: listText(rule.value),
-        })),
+        webhookFilter: filterRows(webhook.filter),
         webhookIncludePayload: webhook.include_payload !== false,
     };
 }
 
-/** The filter rules a save sends: the Actions chips first, then the rows. */
+/** A stored trigger's `connector` object as the API returns it. */
+interface StoredConnector {
+    connector_id: string;
+    trigger: string;
+    params?: Record<string, unknown>;
+    schedule?: { cron: string; timezone: string } | null;
+    events?: string[];
+    filter?: StoredFilterRule[];
+    include_payload?: boolean;
+}
+
+/** The connector part of the form from a stored `connector`: the picker's value, the filter rows and whether the payload is included. */
+function connectorFormFields(connector: StoredConnector, base: TriggerForm): Partial<TriggerForm> {
+    return {
+        connector: {
+            connectorId: connector.connector_id,
+            trigger: connector.trigger,
+            params: { ...(connector.params ?? {}) },
+            events: [...(connector.events ?? [])],
+            scheduleCron: connector.schedule?.cron ?? '',
+            scheduleTimezone: connector.schedule?.timezone ?? base.timezone,
+        },
+        webhookFilter: filterRows(connector.filter),
+        webhookIncludePayload: connector.include_payload !== false,
+    };
+}
+
+/** The filter rules a save sends: the rows with a path and a value. */
 export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<Record<string, unknown>> } | { ok: false; index: number } {
     const rules: Array<Record<string, unknown>> = [];
-    const actionPath = WEBHOOK_ACTION_PATH[form.webhookPreset];
-    if (actionPath && form.webhookActions.length > 0) rules.push({ path: actionPath, op: 'in', value: [...form.webhookActions] });
     for (const [index, row] of form.webhookFilter.entries()) {
         if (!row.path.trim() && !row.value.trim()) continue;
         const rule = ruleFromRow(row);
@@ -281,15 +312,6 @@ export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<R
         rules.push(rule);
     }
     return { ok: true, rules };
-}
-
-/**
- * Whether the filter limits who can start the trigger (an author / sender
- * rule). Anyone who can reach the sender's repository or form can otherwise
- * start it; the editor shows a hint, never a prefill.
- */
-export function hasWebhookAuthorRule(form: TriggerForm): boolean {
-    return form.webhookFilter.some((row) => /^payload\..*(author|sender|user|createdBy)/i.test(row.path.trim()));
 }
 
 export function formatMetadataLines(metadata: Record<string, string> | null | undefined): string {
@@ -312,10 +334,11 @@ export function parseMetadataLines(text: string): Record<string, string> | null 
 /** The editor's state for a stored trigger. */
 export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserTimezone()): TriggerForm {
     const base = emptyTriggerForm(fallbackTimezone);
-    const type: TriggerType = (TRIGGER_TYPES as readonly string[]).includes(trigger.type) || trigger.type === 'connector' ? trigger.type : 'manual';
+    const type: TriggerType = (TRIGGER_TYPES as readonly string[]).includes(trigger.type) ? trigger.type : 'manual';
     return {
         ...base,
         ...(trigger.type === 'webhook' ? webhookFormFields(trigger.webhook as StoredWebhook, base) : {}),
+        ...(trigger.type === 'connector' ? connectorFormFields(trigger.connector as StoredConnector, base) : {}),
         name: trigger.name,
         description: trigger.description ?? '',
         enabled: trigger.enabled,
@@ -331,6 +354,19 @@ export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserT
         callbackSigned: Boolean(trigger.callback?.signed),
         responseFormatText: trigger.response_format ? JSON.stringify(trigger.response_format, null, 2) : '',
     };
+}
+
+/** A webhook trigger that used a retired vendor preset: it receives nothing any more (the server answers 410). */
+export function isRetiredWebhook(trigger: TriggerRow): boolean {
+    return trigger.type === 'webhook' && (trigger.webhook as { retired?: boolean }).retired === true;
+}
+
+/**
+ * The form for the connector trigger that replaces a retired vendor webhook trigger: its name, prompt, variables,
+ * filter and payload choice carry over; the connector, its trigger and the events are picked again.
+ */
+export function connectorFormFromRetired(trigger: TriggerRow, fallbackTimezone = browserTimezone()): TriggerForm {
+    return { ...formFromTrigger(trigger, fallbackTimezone), type: 'connector', connector: null, webhookEvents: [] };
 }
 
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
@@ -372,9 +408,30 @@ export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: tru
                 },
             };
         }
-        case 'connector':
-            // Edited by the Connectors module's parts: the type alone keeps the stored settings.
-            return { ok: true, body: { type: 'connector' } };
+        case 'connector': {
+            const picked = form.connector;
+            if (!picked || !picked.connectorId || !picked.trigger) return { ok: false, problem: { field: 'connector', key: 'connectorRequired' } };
+            const cron = picked.scheduleCron.trim();
+            if (cron && validateTriggerCron(cron)) return { ok: false, problem: { field: 'connector', key: 'previewInvalid' } };
+            const filter = webhookFilterBody(form);
+            if (!filter.ok) return { ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } };
+            return {
+                ok: true,
+                body: {
+                    type: 'connector',
+                    connector: {
+                        connector_id: picked.connectorId,
+                        trigger: picked.trigger,
+                        params: picked.params,
+                        events: [...picked.events],
+                        // Only a poll trigger has a schedule.
+                        ...(cron ? { schedule: { cron, timezone: picked.scheduleTimezone || form.timezone } } : {}),
+                        filter: filter.rules,
+                        include_payload: form.webhookIncludePayload,
+                    },
+                },
+            };
+        }
         default:
             return { ok: true, body: { type: 'manual' } };
     }

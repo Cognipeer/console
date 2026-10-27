@@ -2,13 +2,17 @@
 
 /**
  * Triggers of one agent: saved ways of starting it — a prompt (+ variables) and a
- * type (a schedule, one time, by hand, or an incoming webhook) with that type's
- * settings. Each fire is a background run; "Runs" opens Sessions → Background
- * runs filtered to the trigger.
+ * type (a schedule, one time, by hand, an incoming webhook or a connector event)
+ * with that type's settings. Each fire is a background run; "Runs" opens
+ * Sessions → Background runs filtered to the trigger.
  *
  * The editor is a full-screen FormShell; deleting asks through the shared
  * confirm dialog. A saved webhook trigger's editor stays open with its Connect
- * card (the secret is shown there once) and the Test / Deliveries tabs.
+ * card (the secret is shown there once) and the Test / Deliveries tabs; a saved
+ * connector trigger's with the subscription's status and the same two tabs. The
+ * connector choice is offered only where the Connectors module is (the
+ * enterprise parts behind `EnterpriseConnectorTriggerUi`). A webhook trigger of
+ * a retired vendor preset is marked and can be converted to a connector trigger.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -39,42 +43,59 @@ import {
     IconClockPlay,
     IconHandClick,
     IconHistory,
+    IconInfoCircle,
     IconPencil,
     IconPlayerPlay,
+    IconPlug,
+    IconPlugConnected,
     IconPlus,
+    IconRefresh,
     IconRepeat,
     IconTrash,
-    IconPlug,
     IconWebhook,
 } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import EmptyState from '@/components/common/EmptyState';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
 import { useDeleteResource } from '@/components/common/confirm';
+import {
+    ConnectorTriggerPicker,
+    ConnectorTriggerStatus,
+    useConnectorTriggerCatalog,
+    type ConnectorTriggerCatalogState,
+} from '@/components/enterprise/EnterpriseConnectorTriggerUi';
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import type { ConnectorSubscriptionWire } from '@/lib/shared/connectorTriggers';
 import { upcomingCronFires, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 import {
+    CONNECTOR_TEMPLATE_VARIABLES,
     CRON_PRESETS,
     TRIGGER_TYPES,
+    connectorFormFromRetired,
     emptyTriggerForm,
     formFromTrigger,
+    isRetiredWebhook,
     triggerBodyFromForm,
     timezoneOptions,
     webhookVariableText,
     webhookVariableValue,
+    type ConnectorTriggerRow,
     type TriggerForm,
     type TriggerFormProblem,
     type TriggerRow,
     type TriggerType,
 } from './triggerForm';
+import { ConnectorTestPanel } from './TriggerConnectorParts';
 import {
     WEBHOOK_PRESET_LABEL_KEY,
     WebhookConnectCard,
     WebhookDeliveriesPanel,
+    WebhookFields,
+    WebhookFilterEditor,
+    WebhookIncludePayload,
     WebhookTemplateVariables,
     WebhookTestPanel,
-    WebhookFields,
 } from './TriggerWebhookParts';
 
 export interface AgentTriggersPanelProps {
@@ -105,17 +126,26 @@ const TYPE_ICON: Record<TriggerType, ReactNode> = {
 };
 
 const WEBHOOK_PROMPT_PLACEHOLDER = 'Review pull request #{{payload.number}}: {{payload.pull_request.title}}';
+const CONNECTOR_PROMPT_PLACEHOLDER = 'Handle this {{event}} event and report what needs attention.';
 
 /** The `webhook` settings object of a stored trigger, as far as the list summary reads it. */
 type StoredWebhookSummary = { preset?: string; events?: string[] };
 
-/** The message of an API error body (`{ error: { message } }`), else the status. */
-async function errorMessage(res: Response): Promise<string> {
-    const data = await res.json().catch(() => null) as { error?: { message?: string } | string } | null;
+/** What an API error body (`{ error: { message, errors? } }`) says: the message, and the fields a validation failure names. */
+async function readFailure(res: Response): Promise<{ message: string; fields: Array<{ field: string; message: string }> }> {
+    const data = await res.json().catch(() => null) as { error?: { message?: string; errors?: Array<{ field: string; message: string }> } | string } | null;
     const error = data?.error;
-    if (typeof error === 'string') return error;
-    return error?.message ?? `HTTP ${res.status}`;
+    if (typeof error === 'string') return { message: error, fields: [] };
+    return { message: error?.message ?? `HTTP ${res.status}`, fields: Array.isArray(error?.errors) ? error.errors : [] };
 }
+
+/** The message of an API error body, else the status. */
+async function errorMessage(res: Response): Promise<string> {
+    return (await readFailure(res)).message;
+}
+
+/** The subscription state a trigger answer carries (create, update and get-one answers of a connector trigger). */
+const subscriptionOf = (row: TriggerRow) => (row as ConnectorTriggerRow).connector_subscription;
 
 function formatInZone(date: Date, locale: string, timeZone?: string): string {
     try {
@@ -135,7 +165,8 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
     const [triggers, setTriggers] = useState<TriggerRow[] | null>(null);
     const [loadFailed, setLoadFailed] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
-    const [editing, setEditing] = useState<{ trigger: TriggerRow | null } | null>(null);
+    const [editing, setEditing] = useState<{ trigger: TriggerRow | null; convert?: boolean } | null>(null);
+    const catalog = useConnectorTriggerCatalog();
 
     const load = useCallback(async () => {
         try {
@@ -158,6 +189,12 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
             const webhook = trigger.webhook as StoredWebhookSummary;
             const preset = t(WEBHOOK_PRESET_LABEL_KEY[webhook.preset as keyof typeof WEBHOOK_PRESET_LABEL_KEY] ?? 'presetGeneric');
             return webhook.events && webhook.events.length > 0 ? `${preset} · ${webhook.events.join(', ')}` : t('summaryWebhookAny', { preset });
+        }
+        if (trigger.type === 'connector') {
+            const connector = trigger.connector;
+            const label = connector.label ?? connector.package_id ?? connector.trigger;
+            const summary = connector.events.length > 0 ? t('summaryConnector', { label, events: connector.events.join(', ') }) : t('summaryConnectorAny', { label });
+            return connector.kind === 'poll' && connector.schedule ? `${summary} · ${connector.schedule.cron}` : summary;
         }
         if (trigger.type === 'schedule') return t('summarySchedule', { cron: trigger.schedule.cron ?? '', timezone: trigger.schedule.timezone ?? '' });
         if (trigger.type === 'once' && trigger.once.run_at) return t('summaryOnce', { time: formatInZone(new Date(trigger.once.run_at), locale) });
@@ -239,6 +276,11 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                         const last = fromEpoch(trigger.last_fire_at);
                         const triggerType: TriggerType = trigger.type in TYPE_LABEL_KEY ? trigger.type : 'manual';
                         const summary = typeSummary(trigger);
+                        const retired = isRetiredWebhook(trigger);
+                        const connectorKind = trigger.type === 'connector' && trigger.connector.kind === 'poll' ? 'poll' : 'webhook';
+                        const typeLabel = trigger.type === 'connector' ? t(connectorKind === 'poll' ? 'kindConnectorPoll' : 'kindConnectorWebhook') : t(TYPE_LABEL_KEY[triggerType]);
+                        const typeIcon = trigger.type === 'connector' ? (connectorKind === 'poll' ? <IconRefresh size={14} /> : <IconWebhook size={14} />) : TYPE_ICON[triggerType];
+                        const connectorGone = trigger.type === 'connector' && !trigger.connector_available;
                         return (
                             <Group
                                 key={trigger.id}
@@ -250,11 +292,23 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                                 style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
                             >
                                 <Stack gap={2} style={{ flex: '1 1 220px', minWidth: 0 }}>
-                                    <Text size="sm" fw={500} truncate title={trigger.name}>{trigger.name}</Text>
+                                    <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+                                        <Text size="sm" fw={500} truncate title={trigger.name}>{trigger.name}</Text>
+                                        {retired ? (
+                                            <Tooltip label={t('retiredHint')} withArrow multiline maw={320}>
+                                                <Badge color="orange" variant="light" size="sm" style={{ flexShrink: 0 }}>{t('retired')}</Badge>
+                                            </Tooltip>
+                                        ) : null}
+                                        {connectorGone ? (
+                                            <Tooltip label={t('connectorUnavailable')} withArrow multiline maw={320}>
+                                                <Badge color="gray" variant="light" size="sm" style={{ flexShrink: 0 }}>{t('connectorUnavailableBadge')}</Badge>
+                                            </Tooltip>
+                                        ) : null}
+                                    </Group>
                                     <Group gap={6} wrap="nowrap" c="dimmed" style={{ minWidth: 0 }}>
-                                        <Tooltip label={t(TYPE_LABEL_KEY[triggerType])} withArrow>
-                                            <Box component="span" role="img" aria-label={t(TYPE_LABEL_KEY[triggerType])} style={{ display: 'inline-flex', flexShrink: 0 }}>
-                                                {TYPE_ICON[triggerType]}
+                                        <Tooltip label={typeLabel} withArrow>
+                                            <Box component="span" role="img" aria-label={typeLabel} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                                                {typeIcon}
                                             </Box>
                                         </Tooltip>
                                         <Text size="xs" c="dimmed" ff={triggerType === 'schedule' ? 'monospace' : undefined} truncate title={summary}>{summary}</Text>
@@ -292,11 +346,20 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                                         onChange={(event) => void toggle(trigger, event.currentTarget.checked)}
                                     />
                                     <Group gap={2} wrap="nowrap">
-                                        <Tooltip label={t('runNow')} withArrow>
-                                            <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === trigger.id} aria-label={t('runNow')} onClick={() => void runNow(trigger)}>
-                                                <IconPlayerPlay size={14} />
-                                            </ActionIcon>
-                                        </Tooltip>
+                                        {retired && catalog.available ? (
+                                            <Tooltip label={t('convert')} withArrow>
+                                                <ActionIcon size="sm" variant="subtle" color="orange" aria-label={t('convert')} onClick={() => setEditing({ trigger, convert: true })}>
+                                                    <IconPlugConnected size={14} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        ) : null}
+                                        {retired || connectorGone ? null : (
+                                            <Tooltip label={t('runNow')} withArrow>
+                                                <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === trigger.id} aria-label={t('runNow')} onClick={() => void runNow(trigger)}>
+                                                    <IconPlayerPlay size={14} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        )}
                                         <Tooltip label={t('history')} withArrow>
                                             <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('history')} onClick={() => onShowRuns({ id: trigger.id, name: trigger.name })}>
                                                 <IconHistory size={14} />
@@ -325,11 +388,13 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                     agentId={agentId}
                     agentName={agentName}
                     trigger={editing.trigger}
+                    convert={editing.convert}
+                    catalog={catalog}
                     declaredVariables={declaredVariables}
                     versions={versions}
                     onClose={() => setEditing(null)}
                     onSaved={(saved, keepOpen) => {
-                        // A webhook trigger stays open on the saved row: its Connect card holds the URL and the secret.
+                        // A webhook or connector trigger stays open on the saved row: its Connect card or status holds the URL and the secret.
                         setEditing(keepOpen ? { trigger: saved } : null);
                         notifications.show({ color: 'teal', message: t('saved') });
                         void load();
@@ -347,6 +412,9 @@ interface TriggerEditorProps {
     agentId: string;
     agentName: string;
     trigger: TriggerRow | null;
+    /** Edit a retired vendor webhook trigger as the connector trigger that replaces it. */
+    convert?: boolean;
+    catalog: ConnectorTriggerCatalogState;
     declaredVariables?: IAgentVariable[];
     versions: number[];
     onClose: () => void;
@@ -356,22 +424,49 @@ interface TriggerEditorProps {
 
 type EditorTab = 'settings' | 'test' | 'deliveries';
 
-function TriggerEditor({ agentId, agentName, trigger, declaredVariables, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
+function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declaredVariables, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
     const t = useTranslations('agents.triggers');
     const locale = useLocale();
-    const [form, setForm] = useState<TriggerForm>(() => (trigger ? formFromTrigger(trigger) : emptyTriggerForm()));
+    const [form, setForm] = useState<TriggerForm>(() => (trigger ? (convert ? connectorFormFromRetired(trigger) : formFromTrigger(trigger)) : emptyTriggerForm()));
     const [problem, setProblem] = useState<TriggerFormProblem | null>(null);
+    /** Field errors the server named for the connector part, keyed like its answer (`connector.params.<key>`). */
+    const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
     const [saving, setSaving] = useState(false);
     const [tab, setTab] = useState<EditorTab>('settings');
     /** The webhook secret from the last save / rotation: shown once, never read back. */
     const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
-    const storedWebhook = trigger?.type === 'webhook' ? trigger.webhook as Parameters<typeof WebhookConnectCard>[0]['webhook'] : null;
+    const retired = trigger ? isRetiredWebhook(trigger) : false;
+    // A retired trigger receives nothing: no Connect card, no Test, no deliveries.
+    const storedWebhook = trigger?.type === 'webhook' && !retired ? trigger.webhook as Parameters<typeof WebhookConnectCard>[0]['webhook'] : null;
+    const savedConnector = trigger?.type === 'connector' ? trigger : null;
+    const savedId = trigger?.id;
+    /** The subscription of a saved connector trigger. Lists do not carry it; a create / update answer does (with the secret, once). */
+    const [subscription, setSubscription] = useState<ConnectorSubscriptionWire | null | undefined>(() => (trigger ? subscriptionOf(trigger) : undefined));
     const zones = useMemo(() => timezoneOptions(), []);
     const set = <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => {
         setForm((prev) => ({ ...prev, [key]: value }));
         setProblem(null);
+        setServerErrors({});
     };
     const errorOf = (field: TriggerFormProblem['field']) => (problem?.field === field ? t(problem.key) : undefined);
+    const connectorErrors: Record<string, string> = {
+        ...serverErrors,
+        ...(problem?.field === 'connector' ? { [problem.key === 'previewInvalid' ? 'connector.schedule' : 'connector.connector_id']: t(problem.key) } : {}),
+    };
+
+    const loadSubscription = useCallback(async () => {
+        if (!savedId) return;
+        try {
+            const res = await fetch(`/api/agents/${agentId}/triggers/${savedId}`, { cache: 'no-store' });
+            if (!res.ok) return;
+            setSubscription(subscriptionOf(await res.json() as TriggerRow) ?? null);
+        } catch {
+            // The status stays as it was; the next open or retry reads it again.
+        }
+    }, [agentId, savedId]);
+
+    const needsSubscription = Boolean(savedConnector) && subscription === undefined;
+    useEffect(() => { if (needsSubscription) void loadSubscription(); }, [needsSubscription, loadSubscription]);
 
     const preview = useMemo(() => {
         if (form.type !== 'schedule' || validateTriggerCron(form.cron)) return null;
@@ -392,11 +487,14 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
                 body: JSON.stringify(built.body),
             });
             if (!res.ok) {
-                notifications.show({ color: 'red', message: t('saveFailed', { message: await errorMessage(res) }) });
+                const failure = await readFailure(res);
+                setServerErrors(Object.fromEntries(failure.fields.filter((issue) => issue.field.startsWith('connector')).map((issue) => [issue.field, issue.message])));
+                notifications.show({ color: 'red', message: t('saveFailed', { message: failure.message }) });
                 return;
             }
             const saved = await res.json() as TriggerRow;
-            const keepOpen = saved.type === 'webhook';
+            const keepOpen = saved.type === 'webhook' || saved.type === 'connector';
+            if (saved.type === 'connector') setSubscription(subscriptionOf(saved) ?? null);
             if (saved.type === 'webhook') {
                 // The answer that created or replaced a generated secret carries it in `webhook.secret` — shown once.
                 const secret = (saved.webhook as { secret?: string }).secret;
@@ -411,15 +509,31 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
         }
     };
 
+    /** "Connector · Trigger" for the summary, from the catalog; the trigger's own name until the catalog has it. */
+    function connectorSummary(): string {
+        const picked = form.connector;
+        if (!picked) return t('typeConnector');
+        const entry = catalog.connectors.find((item) => item.id === picked.connectorId);
+        const title = entry?.triggers.find((item) => item.name === picked.trigger)?.title ?? picked.trigger;
+        return [entry?.name, title, ...picked.events].filter(Boolean).join(' · ');
+    }
+
     const typeSummary = form.type === 'schedule'
         ? `${form.cron} (${form.timezone})`
         : form.type === 'once'
             ? (form.onceMode === 'in' ? `+${form.delayAmount} ${t(form.delayUnit)}` : form.runAtLocal.replace('T', ' '))
             : form.type === 'webhook'
                 ? [t(WEBHOOK_PRESET_LABEL_KEY[form.webhookPreset]), ...form.webhookEvents].join(' · ')
-                : t('typeManual');
+                : form.type === 'connector'
+                    ? connectorSummary()
+                    : t('typeManual');
     const webhook = form.type === 'webhook';
+    const connector = form.type === 'connector';
+    /** A webhook's and a connector trigger's prompt is a template over the event, and its variables a mapping. */
+    const eventDriven = webhook || connector;
     const declared = declaredVariables ?? [];
+    // Connector triggers are offered where the module is; an existing one stays selectable so it can be seen and removed.
+    const offeredTypes = TRIGGER_TYPES.filter((type) => type !== 'connector' || catalog.available || connector);
 
     const settings = (
         <>
@@ -434,10 +548,11 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
             </FormSection>
 
             <FormSection number={2} title={t('sectionType')} description={t('sectionTypeDescription')}>
+                {retired && !convert ? <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('retiredNotice')}</Alert> : null}
                 <SegmentedControl
                     value={form.type}
                     onChange={(value) => set('type', value as TriggerType)}
-                    data={TRIGGER_TYPES.map((type) => ({ value: type, label: t(TYPE_LABEL_KEY[type]) }))}
+                    data={offeredTypes.map((type) => ({ value: type, label: t(TYPE_LABEL_KEY[type]) }))}
                 />
                 {form.type === 'schedule' ? (
                     <Stack gap="sm">
@@ -518,22 +633,45 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
                         errorOf={errorOf}
                     />
                 ) : null}
+                {connector ? (
+                    <Stack gap="md">
+                        {catalog.available ? (
+                            <>
+                                {catalog.error ? (
+                                    <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />} role="alert">
+                                        <Group justify="space-between" wrap="nowrap" gap="sm">
+                                            <Text size="sm">{t('connectorCatalogFailed')}</Text>
+                                            <Button size="compact-xs" variant="light" color="red" onClick={() => catalog.reload()}>{t('retry')}</Button>
+                                        </Group>
+                                    </Alert>
+                                ) : null}
+                                <ConnectorTriggerPicker value={form.connector} onChange={(value) => set('connector', value)} errors={connectorErrors} disabled={saving} />
+                                <WebhookFilterEditor form={form} set={set} errorOf={errorOf} />
+                                <WebhookIncludePayload form={form} set={set} />
+                            </>
+                        ) : (
+                            <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('connectorUnavailable')}</Alert>
+                        )}
+                        <Alert color="blue" variant="light" icon={<IconInfoCircle size={14} />}>{t('connectorUnattendedHint')}</Alert>
+                    </Stack>
+                ) : null}
             </FormSection>
 
             <FormSection number={3} title={t('sectionPrompt')} description={t('sectionPromptDescription')}>
-                <FormField label={t('prompt')} hint={t(webhook ? 'webhookPromptHint' : 'promptHint')}>
+                <FormField label={t('prompt')} hint={t(eventDriven ? 'webhookPromptHint' : 'promptHint')}>
                     <Textarea
                         autosize
                         minRows={4}
                         maxRows={14}
-                        ff={webhook ? 'monospace' : undefined}
+                        ff={eventDriven ? 'monospace' : undefined}
                         value={form.prompt}
-                        placeholder={webhook ? WEBHOOK_PROMPT_PLACEHOLDER : t('promptPlaceholder')}
+                        placeholder={webhook ? WEBHOOK_PROMPT_PLACEHOLDER : connector ? CONNECTOR_PROMPT_PLACEHOLDER : t('promptPlaceholder')}
                         onChange={(event) => set('prompt', event.currentTarget.value)}
                     />
                 </FormField>
                 {webhook ? <WebhookTemplateVariables /> : null}
-                {declared.length > 0 && webhook ? (
+                {connector ? <WebhookTemplateVariables variables={CONNECTOR_TEMPLATE_VARIABLES} /> : null}
+                {declared.length > 0 && eventDriven ? (
                     <Stack gap="sm">
                         <Text size="sm" fw={500}>{t('variablesTitle')}</Text>
                         <Text size="xs" c="dimmed">{t('webhookVariablesHint')}</Text>
@@ -554,7 +692,7 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
                         ))}
                     </Stack>
                 ) : null}
-                {declared.length > 0 && !webhook ? (
+                {declared.length > 0 && !eventDriven ? (
                     <Stack gap="sm">
                         <Text size="sm" fw={500}>{t('variablesTitle')}</Text>
                         <Text size="xs" c="dimmed">{t('variablesHint')}</Text>
@@ -580,7 +718,7 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
                             onChange={(value) => set('version', !value || value === 'published' ? null : Number(value))}
                         />
                     </FormField>
-                    <FormField label={t('class')} hint={t(webhook ? 'webhookClassHint' : 'classHint')}>
+                    <FormField label={t('class')} hint={t(eventDriven ? 'webhookClassHint' : 'classHint')}>
                         <SegmentedControl
                             value={form.runClass}
                             onChange={(value) => set('runClass', value as TriggerForm['runClass'])}
@@ -628,7 +766,7 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
                 </SummaryGroup>
             )}
         >
-            {storedWebhook && trigger ? (
+            {trigger && (storedWebhook || savedConnector) ? (
                 <Tabs value={tab} onChange={(value) => setTab((value as EditorTab | null) ?? 'settings')} keepMounted={false}>
                     <Tabs.List mb="md">
                         <Tabs.Tab value="settings">{t('tabSettings')}</Tabs.Tab>
@@ -637,21 +775,35 @@ function TriggerEditor({ agentId, agentName, trigger, declaredVariables, version
                     </Tabs.List>
                     <Tabs.Panel value="settings">
                         <Stack gap="md">
-                            <WebhookConnectCard
-                                agentId={agentId}
-                                triggerId={trigger.id}
-                                webhook={storedWebhook}
-                                revealedSecret={revealedSecret}
-                                onSecret={setRevealedSecret}
-                            />
+                            {storedWebhook ? (
+                                <WebhookConnectCard
+                                    agentId={agentId}
+                                    triggerId={trigger.id}
+                                    webhook={storedWebhook}
+                                    revealedSecret={revealedSecret}
+                                    onSecret={setRevealedSecret}
+                                />
+                            ) : null}
+                            {savedConnector ? (
+                                <ConnectorTriggerStatus
+                                    agentId={agentId}
+                                    triggerId={trigger.id}
+                                    subscription={subscription ?? null}
+                                    onChanged={() => void loadSubscription()}
+                                />
+                            ) : null}
                             {settings}
                         </Stack>
                     </Tabs.Panel>
                     <Tabs.Panel value="test">
-                        <WebhookTestPanel agentId={agentId} triggerId={trigger.id} preset={form.webhookPreset} />
+                        {savedConnector ? (
+                            <ConnectorTestPanel agentId={agentId} triggerId={trigger.id} connectorId={savedConnector.connector.connector_id} trigger={savedConnector.connector.trigger} />
+                        ) : (
+                            <WebhookTestPanel agentId={agentId} triggerId={trigger.id} preset={form.webhookPreset} />
+                        )}
                     </Tabs.Panel>
                     <Tabs.Panel value="deliveries">
-                        <WebhookDeliveriesPanel agentId={agentId} triggerId={trigger.id} onShowRuns={() => onShowRuns({ id: trigger.id, name: trigger.name })} />
+                        <WebhookDeliveriesPanel agentId={agentId} triggerId={trigger.id} connector={Boolean(savedConnector)} onShowRuns={() => onShowRuns({ id: trigger.id, name: trigger.name })} />
                     </Tabs.Panel>
                 </Tabs>
             ) : settings}
