@@ -144,7 +144,7 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
     if (quotaContext && embeddingUsage) {
       try {
         const model = await getModelByKey(ctx.tenantDbName, modelKey, ctx.projectId ?? '');
-        if (model) settledCost = calculateCost(model.pricing, embeddingUsage);
+        if (model) settledCost = calculateCost(model.pricing, embeddingUsage, model);
       } catch (error) {
         logger.warn('Batch budget usage update failed', { error, itemId });
       }

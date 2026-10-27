@@ -171,10 +171,13 @@ interface EvalCanonicalUsage {
   reasoningTokens?: number;
 }
 
+/** A model's pricing with the driver + id its cache-write rate follows. */
+interface EvalPricedModel { pricing: IModelPricing; providerDriver?: string; modelId?: string }
+
 /** Map the inference layer's TokenUsage onto the engine's EvalUsage. */
 function toEvalUsage(
   usage: EvalCanonicalUsage | undefined,
-  pricing: IModelPricing | null,
+  priced: EvalPricedModel | null,
 ): EvalUsage | undefined {
   if (!usage) return undefined;
   const evalUsage: EvalUsage = {
@@ -185,14 +188,14 @@ function toEvalUsage(
     ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
     ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
   };
-  if (pricing) {
-    evalUsage.costUsd = calculateCost(pricing, {
+  if (priced) {
+    evalUsage.costUsd = calculateCost(priced.pricing, {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cachedInputTokens: usage.cachedInputTokens,
       cachedWriteTokens: usage.cachedWriteTokens,
       reasoningTokens: usage.reasoningTokens,
-    }).totalCost;
+    }, { providerDriver: priced.providerDriver, modelId: priced.modelId }).totalCost;
   }
   return evalUsage;
 }
@@ -356,15 +359,16 @@ function toUserMessage(item: DatasetItem): string {
  * can be computed without a DB round-trip per invocation. Resolution failures
  * degrade to "no pricing" — the run must never fail over cost bookkeeping.
  */
-function buildPricingResolver(ctx: EvaluationModelContext, modelKey: string): () => Promise<IModelPricing | null> {
-  let cached: Promise<IModelPricing | null> | undefined;
+function buildPricingResolver(ctx: EvaluationModelContext, modelKey: string): () => Promise<EvalPricedModel | null> {
+  let cached: Promise<EvalPricedModel | null> | undefined;
   return () => {
     cached ??= (async () => {
       try {
         const db = await getDatabase();
         await db.switchToTenant(ctx.tenantDbName);
         const models = await db.listModels(ctx.projectId ? { projectId: ctx.projectId } : undefined);
-        return models.find((m) => m.key === modelKey)?.pricing ?? null;
+        const found = models.find((m) => m.key === modelKey);
+        return found?.pricing ? { pricing: found.pricing, providerDriver: found.providerDriver, modelId: found.modelId } : null;
       } catch {
         return null;
       }
@@ -477,7 +481,7 @@ export function buildTargetInvoker(
 ): TargetInvoker {
   const resolvePricing = target.kind === 'model' && target.modelKey
     ? buildPricingResolver(ctx, target.modelKey)
-    : () => Promise.resolve(null);
+    : () => Promise.resolve<EvalPricedModel | null>(null);
   const resolveInvocationPath = target.kind === 'model' && target.modelKey
     ? buildInvocationPathResolver(ctx, target.modelKey)
     : undefined;

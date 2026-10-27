@@ -230,7 +230,7 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
       ...(ocrUsage.reasoningTokens ? { reasoningTokens: ocrUsage.reasoningTokens } : {}),
     };
     if (ocr.model?.pricing) {
-      const c = calculateCost(ocr.model.pricing, ocrTokenUsage);
+      const c = calculateCost(ocr.model.pricing, ocrTokenUsage, ocr.model);
       totals.costOcr += c.totalCost;
       totals.cost += c.totalCost;
       totals.currency = c.currency;

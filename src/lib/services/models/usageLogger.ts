@@ -22,7 +22,7 @@ import {
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
 import { recordRoutedUsage } from './dynamicRoutingState';
-import { resolveTokenRates } from './pricingRates';
+import { resolveTokenRates, tokenRateOptionsFor } from './pricingRates';
 
 export { hasCacheReadPrice, hasCacheWritePrice, resolveTokenRates, type TokenRates } from './pricingRates';
 
@@ -77,17 +77,22 @@ export interface UsageCostResult {
   /** The cache-write slice of the prompt. */
   cacheWriteCost: number;
   totalCost: number;
-  /** Cache tokens this cost priced at the input rate because the model has no
-   *  price entered for them. Absent when nothing was assumed. */
+  /** Cache tokens this cost priced at an assumed rate (the input rate, 1.25 x it for a Claude cache write)
+   *  because the model has no price entered for them. Absent when nothing was assumed. */
   assumedRates?: Array<'cacheRead' | 'cacheWrite'>;
 }
 
+/**
+ * `model` (driver + model id) lets the cache-write rate follow the provider: a Claude model whose cache-write
+ * price was not entered is billed at 1.25 x the input price and flagged as assumed (see `resolveTokenRates`).
+ */
 export function calculateCost(
   pricing: IModelPricing,
   usage: TokenUsage,
+  model?: { providerDriver?: string; modelId?: string },
 ): UsageCostResult {
   const currency = pricing.currency || 'USD';
-  const rates = resolveTokenRates(pricing);
+  const rates = resolveTokenRates(pricing, model ? tokenRateOptionsFor(model.providerDriver, model.modelId) : undefined);
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
   const cachedTokens = usage.cachedInputTokens ?? 0;
@@ -161,6 +166,8 @@ export async function logModelUsage(
     /** Dynamic LLM child rows: the baseline model's pricing, used to record
      *  what this call's realized usage would have cost there. Not persisted. */
     routingBaselinePricing?: IModelPricing;
+    /** Driver + model id of the baseline model (its cache-write rate follows the provider). */
+    routingBaselineModel?: { providerDriver?: string; modelId?: string };
     /** Explicit attribution for call sites outside the request ALS scope. */
     attribution?: Partial<UsageAttribution>;
     /** Agent the call runs for; the usage rollup's `agent` dimension, and a column of the row. */
@@ -185,7 +192,7 @@ export async function logModelUsage(
   // flows into calculateCost / pricingSnapshot.
   const pricingSnapshot = {
     ...model.pricing,
-    ...calculateCost(model.pricing, usage),
+    ...calculateCost(model.pricing, usage, model),
   };
   // The cache counts are subsets of inputTokens: a total never adds them again.
   const totalTokens =
@@ -197,7 +204,7 @@ export async function logModelUsage(
   if (routing?.role === 'child' && payload.routingBaselinePricing && !payload.cacheHit) {
     routing = {
       ...routing,
-      baselineCostUsd: calculateCost(payload.routingBaselinePricing, usage).totalCost,
+      baselineCostUsd: calculateCost(payload.routingBaselinePricing, usage, payload.routingBaselineModel).totalCost,
     };
   }
   if (routing && (routing.role === 'child' || routing.role === 'decider')) {

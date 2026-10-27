@@ -43,6 +43,7 @@ import {
   computeOutputTokenLimit,
   fitThinkingToLimit,
 } from '@/lib/services/models/outputLimits';
+import { promptCachingProviderOption } from '@/lib/services/models/promptCaching';
 import { withFileReferenceRestore, withInlineReasoningNormalization } from './wireNormalization';
 import type {
   ModelRuntimeConfig,
@@ -431,6 +432,23 @@ export function buildProviderConfig(
   } as NativeProviderSpec['provider'];
 }
 
+/**
+ * The provider config with the model's "Cache prompts" switch applied: `prompt_caching` goes on the Anthropic /
+ * Bedrock / Vertex (Claude) provider when the switch resolves to ON, and nothing is added otherwise. The client
+ * is built per call from the model record, so a changed switch takes effect on the next call (no pooled
+ * provider instance to invalidate). A request's own `cache_control` markers and a `cache_control` in the
+ * model's extra body are not touched by this: the SDK keeps them whether or not `prompt_caching` is on.
+ */
+export function withPromptCaching<T extends object>(
+  provider: T,
+  driver: string,
+  modelId: string,
+  modelSettings: unknown,
+): T {
+  const option = promptCachingProviderOption(driver, modelId, modelSettings);
+  return option ? ({ ...provider, prompt_caching: option } as T) : provider;
+}
+
 export interface BuildNativeChatClientInput {
   driver: string;
   spec: NativeProviderSpec;
@@ -446,7 +464,12 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
   const modelId = config.modelId;
   const provider: BaseProvider = await (async () => {
     const { createProvider } = await import('@cognipeer/agent-sdk');
-    return createProvider(buildProviderConfig(spec, overrides, input.transport, config.options?.maxRetries));
+    return createProvider(withPromptCaching(
+      buildProviderConfig(spec, overrides, input.transport, config.options?.maxRetries),
+      driver,
+      config.modelId,
+      settings,
+    ));
   })();
 
   // The model's maximum output as the gateway resolved it (the record's declared value or the built-in table);

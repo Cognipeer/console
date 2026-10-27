@@ -608,7 +608,9 @@ export async function resolveDynamicCompletion(args: {
   if (mode === 'enforce' && proposedReason) reason = `${reason}; ${proposedReason}`;
   if (chosenModelKey === router.key) chosenModelKey = '';
 
-  const baselinePricing = (await loadModel(baselineModelKey))?.pricing;
+  const baselineLoaded = await loadModel(baselineModelKey);
+  const baselinePricing = baselineLoaded?.pricing;
+  const baselineModel = baselineLoaded ? { providerDriver: baselineLoaded.providerDriver, modelId: baselineLoaded.modelId } : undefined;
 
   const buildRouting = (
     role: 'router' | 'child',
@@ -670,7 +672,7 @@ export async function resolveDynamicCompletion(args: {
         ...withoutRouterHandoff(input.context),
         routingDepth: depth + 1,
         callerContext,
-        routedBy: { routing, baselinePricing },
+        routedBy: { routing, baselinePricing, baselineModel },
       },
     });
   };

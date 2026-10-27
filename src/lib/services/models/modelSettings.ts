@@ -30,6 +30,7 @@ const OBJECT_KEYS = new Set([
   'dynamic',
   'extraBody',
   'ocr',
+  'promptCaching',
   'reasoning',
   'requestDefaults',
 ]);

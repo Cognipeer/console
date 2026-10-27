@@ -117,6 +117,8 @@ export interface RoutedBy {
   routing: IModelUsageRouting;
   /** Baseline model pricing: the child row records its usage priced there. */
   baselinePricing?: IModelPricing;
+  /** Baseline model's driver + id, so its cache-write rate is priced like the child's. */
+  baselineModel?: { providerDriver?: string; modelId?: string };
 }
 
 export interface ModelCallInput {

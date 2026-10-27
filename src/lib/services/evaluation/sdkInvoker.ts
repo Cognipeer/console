@@ -35,6 +35,9 @@
  * gateway path does log; that difference is by design). Run items still carry
  * the measured per-invocation usage/cost via the adapter's pricing math.
  *
+ * The model's "Cache prompts" switch is applied as in the gateway (`withPromptCaching`), so an evaluation of a
+ * Bedrock / Vertex Claude model measures the cached cost profile production runs under.
+ *
  * The call is sized like a gateway call: the output limit comes from
  * `resolveNativeCall` (the native client's own resolver: caller cap > the
  * model's "Default max tokens" > driver default, thinking headroom, model
@@ -54,7 +57,7 @@ import type {
   TokenUsage as SdkTokenUsage,
   UnifiedMessage,
 } from '@cognipeer/agent-sdk';
-import { modelDefaultReasoning, normalizeNativeReasoning, resolveNativeCall } from '@/lib/providers/contracts/nativeClients';
+import { modelDefaultReasoning, normalizeNativeReasoning, resolveNativeCall, withPromptCaching } from '@/lib/providers/contracts/nativeClients';
 import { azureApiVersion, predatesAzureResponses } from '@/lib/providers/contracts/azureApiVersion';
 import { openAiResponseFormatToNative } from '@/lib/services/models/openaiAdapter';
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
@@ -216,22 +219,22 @@ export async function resolveSdkProviderConfig(
     }
     case 'bedrock': {
       const sessionToken = nonEmptyString(creds.sessionToken);
-      return {
+      return withPromptCaching({
         provider: 'bedrock',
         region: require(nonEmptyString(settings.region), 'region'),
         accessKeyId: require(nonEmptyString(creds.accessKeyId), 'accessKeyId'),
         secretAccessKey: require(nonEmptyString(creds.secretAccessKey), 'secretAccessKey'),
         ...(sessionToken ? { sessionToken } : {}),
-      };
+      }, 'bedrock', primaryReplicaModel(model).modelId, model.settings);
     }
     case 'vertex': {
       const serviceAccountJson = nonEmptyString(creds.serviceAccountKey);
-      return {
+      return withPromptCaching({
         provider: 'vertex',
         projectId: require(nonEmptyString(settings.projectId), 'projectId'),
         location: require(nonEmptyString(settings.location), 'location'),
         ...(serviceAccountJson ? { serviceAccountJson } : {}),
-      };
+      }, 'vertex', primaryReplicaModel(model).modelId, model.settings);
     }
     default:
       throw new SdkProviderMappingError(record.driver, 'no native agent-sdk provider for this driver');

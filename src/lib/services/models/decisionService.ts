@@ -263,7 +263,7 @@ export async function handleDecisionRequest(params: {
     ...(result.usage?.cachedWriteTokens ? { cachedWriteTokens: result.usage.cachedWriteTokens } : {}),
     ...(result.usage?.reasoningTokens ? { reasoningTokens: result.usage.reasoningTokens } : {}),
   };
-  const cost = calculateCost(model.pricing, usage);
+  const cost = calculateCost(model.pricing, usage, model);
 
   fireAndForget('log-decision-usage', () =>
     logModelUsage(tenantDbName, model, {

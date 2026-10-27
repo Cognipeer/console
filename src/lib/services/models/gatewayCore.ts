@@ -305,6 +305,13 @@ function messagesFor(client: NativeChatClient, messages: UnifiedMessage[]): Unif
   const openAiSchema = OPENAI_SCHEMA_DRIVERS.has(client.driver);
   return messages.map((message) => {
     if (typeof message.content === 'string') return message;
+    // The adapter keeps a client's cache breakpoint on the part (and a system / tool message as parts when one is
+    // marked). Anthropic, Bedrock, Vertex and OpenAI-compatible servers read it; OpenAI and Azure never send it, so
+    // for them a message kept as parts only for the breakpoint goes back to the plain text it always was.
+    if ((message.role === 'system' || message.role === 'tool') && (client.driver === 'openai' || client.driver === 'azure')) {
+      const texts = message.content.filter((part) => part.type === 'text') as Array<{ text: string }>;
+      if (texts.length === message.content.length) return { ...message, content: texts.map((part) => part.text).filter(Boolean).join('\n') };
+    }
     const parts = message.content.flatMap((part): ContentPart[] => {
       if (!KNOWN_PART_TYPES.has(part.type)) return openAiSchema ? [part] : [];
       if (openAiSchema && part.type === 'image' && (part as ImagePartWithDetail).detail) {
@@ -466,7 +473,7 @@ function settleUsage(
   usage: TokenUsage,
   row: Omit<Parameters<typeof logModelUsage>[2], 'usage'>,
 ): UsageCostResult {
-  const cost = calculateCost(state.model.pricing, usage);
+  const cost = calculateCost(state.model.pricing, usage, state.model);
   state.context.onUsageSettled?.(cost, usage);
   usageRow(state, label, { ...row, usage } as Parameters<typeof logModelUsage>[2]);
   return cost;
@@ -604,7 +611,7 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
   // Dynamic LLM attribution: rows this call writes carry the router decision
   // that caused them (and the baseline pricing to measure savings against).
   const routedByLog = context.routedBy
-    ? { routing: context.routedBy.routing, routingBaselinePricing: context.routedBy.baselinePricing }
+    ? { routing: context.routedBy.routing, routingBaselinePricing: context.routedBy.baselinePricing, routingBaselineModel: context.routedBy.baselineModel }
     : {};
 
   const model = await getModelByKey(tenantDbName, modelKey, projectId);

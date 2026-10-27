@@ -34,6 +34,7 @@ import type {
 } from './types';
 import { applyModelCapabilityOverrides, ModelCapabilityValidationError, ModelKeyConflictError } from './modelCapabilities';
 import { validateUpstreamApi } from './upstreamApi';
+import { validatePromptCaching } from './promptCaching';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 
 const logger = createLogger('model-service');
@@ -206,6 +207,11 @@ function assertUpstreamApi(settings: unknown, driver: string | undefined): void 
   if (problem) throw new ModelCapabilityValidationError(problem);
 }
 
+function assertPromptCaching(settings: unknown): void {
+  const problem = validatePromptCaching(settings);
+  if (problem) throw new ModelCapabilityValidationError(problem);
+}
+
 export async function createModel(
   tenantDbName: string,
   tenantId: string,
@@ -225,6 +231,7 @@ export async function createModel(
 
   ensureProviderSupportsCategory(provider, payload.category);
   assertUpstreamApi(payload.settings, provider.driver);
+  assertPromptCaching(payload.settings);
   validateSettingsDynamicConfig(payload.settings);
   const createDynamic = settingsDynamicConfig(payload.settings);
   if (createDynamic) {
@@ -663,6 +670,8 @@ export async function updateModel(
       updatePayload.providerDriver ?? existing.providerDriver,
     );
   }
+
+  if (updatePayload.settings !== undefined) assertPromptCaching(updatePayload.settings);
 
   // `updates.settings` may attach a brand-new `dynamic` config or (via a
   // caller's shallow merge, e.g. the `PUT /models/:id` route) wholesale

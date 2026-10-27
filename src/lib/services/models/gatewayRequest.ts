@@ -8,6 +8,7 @@
 import { AGENT_REASONING_OVERRIDE, hasExplicitThinking, normalizeReasoning, resolveGatewayReasoning } from '@/lib/services/models/reasoning';
 import { computeOutputTokenLimit, modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { createLogger } from '@/lib/core/logger';
+import { PROMPT_CACHING_OPENAI_DRIVERS } from '@/lib/services/models/promptCaching';
 import type { IModel } from '@/lib/database';
 import { requestReasoningEffortAccepted, resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
 import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
@@ -409,6 +410,15 @@ export function resolveOutputTokenLimit(
  * deep so a caller's `chat_template_kwargs: { enable_thinking: true }` does not
  * erase a sibling key the operator set on the model.
  */
+/**
+ * OpenAI's prompt-cache request fields: a routing key, the retention (`in_memory` | `24h`, before GPT-5.6) and the
+ * options object (`{ ttl: '30m' | '12h', mode? }`, GPT-5.6 and later). They go to OpenAI and Azure OpenAI as the
+ * caller wrote them, with or without the model's "Allow extra parameters" switch; to an OpenAI-compatible or Together
+ * upstream (which may be a server that rejects them) only when that switch is on; and to no other provider:
+ * Anthropic, Bedrock and Vertex would answer a field they do not know with a 400.
+ */
+export const OPENAI_PROMPT_CACHE_FIELDS: readonly string[] = ['prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options'];
+
 export function buildPassthroughBody(
   modelSettings: unknown,
   body: Record<string, unknown>,
@@ -417,6 +427,9 @@ export function buildPassthroughBody(
 ): Record<string, unknown> | undefined {
   const settings = asRecord(modelSettings);
   const bedrock = driver === 'bedrock';
+  const cacheFieldsUpstream = driver !== undefined && PROMPT_CACHING_OPENAI_DRIVERS.has(driver);
+  // OpenAI and Azure know the fields for certain; a compatible server is only sent them when the operator opted into passthrough.
+  const cacheFieldsAlways = driver === 'openai' || driver === 'azure';
   // Bedrock: the caller's fields are collected apart and land only in `additionalModelRequestFields` (below).
   const callerFields: Record<string, unknown> = {};
   const defaults = asRecord(settings.requestDefaults);
@@ -439,7 +452,8 @@ export function buildPassthroughBody(
     const accept = (key: string) =>
       !KNOWN_REQUEST_FIELDS.has(key)
       && !PASSTHROUGH_DENYLIST.has(key.toLowerCase())
-      && !blockedNames.has(key.toLowerCase());
+      && !blockedNames.has(key.toLowerCase())
+      && (cacheFieldsUpstream || !OPENAI_PROMPT_CACHE_FIELDS.includes(key));
 
     const mergeField = (key: string, value: unknown) => {
       if (bedrock) {
@@ -476,6 +490,12 @@ export function buildPassthroughBody(
     for (const [key, value] of Object.entries(asRecord(body.extra_body))) {
       if (!accept(key)) continue;
       mergeField(key, value);
+    }
+  }
+
+  if (cacheFieldsAlways) {
+    for (const key of OPENAI_PROMPT_CACHE_FIELDS) {
+      if (body[key] !== undefined && body[key] !== null && !blockedNames.has(key)) merged[key] = body[key];
     }
   }
 

@@ -194,7 +194,7 @@ async function loadTraceModelPricer(tenantDbName: string, projectId?: string): P
       const externalEntry = externalByName.get(lookup);
       const pricing = hubModel?.pricing
         ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
-      const costUsd = pricing ? calculateCost(pricing, tokens).totalCost : 0;
+      const costUsd = pricing ? calculateCost(pricing, tokens, hubModel).totalCost : 0;
       return { refKey: hubModel?.key ?? modelName, costUsd };
     },
   };

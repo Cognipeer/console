@@ -1701,16 +1701,16 @@ async function buildAgentCostEstimator(
     if (!limited && subagentModels.length === 0) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
     const models: Parameters<typeof buildCostEstimator>[0] = [
-        { names: [primary.key, primary.modelId], pricing: primary.pricing },
+        { names: [primary.key, primary.modelId], pricing: primary.pricing, model: primary },
     ];
     for (const child of subagentModels) {
         if (child.key && child.key === primary.key) continue;
-        models.push({ names: [child.key, child.modelId], pricing: child.pricing, noFallback: true });
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing, model: child, noFallback: true });
         if (limited && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
             onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted against the cost limit or the session budget.`);
         }
     }
-    const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
+    const estimator = buildCostEstimator(models, primary.pricing, calculateCost, primary);
     if (!estimator && limited) {
         logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
@@ -2117,7 +2117,7 @@ async function resolveChildPrompt(
 }
 
 /** What the cost estimator needs of a model: the names its requests are reported under, and its prices. */
-type PricedModel = { key?: string; modelId?: string; pricing?: IModelPricing | null };
+type PricedModel = { key?: string; modelId?: string; providerDriver?: string; pricing?: IModelPricing | null };
 
 /**
  * Builds the gateway chat model for a sub-agent's model override. Answers why
@@ -2169,7 +2169,7 @@ export async function buildSubagentModel(
         return {
             ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
-            model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+            model: { key: model.key, modelId: model.modelId, providerDriver: model.providerDriver, pricing: model.pricing },
             takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
         };
     } catch (error) {
@@ -5756,7 +5756,7 @@ async function runAgentChatTurn(
         // What the turn cost: kept on the message (the session's running total
         // is the sum of these) and, with a session budget, checked against it.
         const turnCostUsd = usage
-            ? await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage })
+            ? await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, model, usage })
             : undefined;
         if (usage && turnCostUsd !== undefined) usage.costUsd = turnCostUsd;
         const budget = budgetPlan
@@ -6097,6 +6097,7 @@ export function extractPlaygroundSteps(
 async function priceTurn(
     pricing: IModelPricing | null | undefined,
     usage: AgentPlaygroundChatResult['usage'],
+    model?: { providerDriver?: string; modelId?: string },
 ): Promise<number | undefined> {
     if (!pricing || !usage) return undefined;
     try {
@@ -6106,7 +6107,7 @@ async function priceTurn(
             outputTokens: usage.outputTokens,
             cachedInputTokens: usage.cachedInputTokens,
             ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
-        }).totalCost;
+        }, model).totalCost;
     } catch {
         return undefined;
     }
@@ -6142,6 +6143,8 @@ async function priceAgentTurn(input: {
     costEstimator: ReturnType<typeof buildCostEstimator>;
     pricing: IModelPricing | null | undefined;
     usage: AgentPlaygroundChatResult['usage'];
+    /** Driver + model id of the pricing's model (a Claude cache write follows the provider's rate). */
+    model?: { providerDriver?: string; modelId?: string };
 }): Promise<number | undefined> {
     const perRequest = (input.result.state as {
         usage?: {
@@ -6183,7 +6186,7 @@ async function priceAgentTurn(input: {
         }
         return cost;
     }
-    return priceTurn(input.pricing, input.usage);
+    return priceTurn(input.pricing, input.usage, input.model);
 }
 
 /**
@@ -6554,7 +6557,7 @@ async function runPlaygroundChatTurn(
         };
 
         const costUsd = await priceAgentTurn({
-            plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage: playgroundResult.usage,
+            plan: budgetPlan, result, costEstimator, pricing: model.pricing, model, usage: playgroundResult.usage,
         });
         if (costUsd !== undefined && playgroundResult.usage) {
             playgroundResult.usage.costUsd = costUsd;
@@ -7250,7 +7253,7 @@ async function runAgentResumeTurn(
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const flowRecord = turnFlowRecord(flow, () => compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined));
         const steps = extractPlaygroundSteps(result, priorExecutionIds, hitlLog);
-        const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
+        const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, model, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
         // The usage the turn reports (response, run result, `agent.message` event) is every leg of it —
         // the SDK counts only the leg it just ran. The stored message keeps its own leg.
