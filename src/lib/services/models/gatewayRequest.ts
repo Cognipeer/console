@@ -413,8 +413,12 @@ export function buildPassthroughBody(
   modelSettings: unknown,
   body: Record<string, unknown>,
   blockedNames: Set<string>,
+  driver?: string,
 ): Record<string, unknown> | undefined {
   const settings = asRecord(modelSettings);
+  const bedrock = driver === 'bedrock';
+  // Bedrock: the caller's fields are collected apart and land only in `additionalModelRequestFields` (below).
+  const callerFields: Record<string, unknown> = {};
   const defaults = asRecord(settings.requestDefaults);
   const explicit = asRecord(settings.extraBody);
   const merged: Record<string, unknown> = { ...defaults, ...explicit };
@@ -438,6 +442,22 @@ export function buildPassthroughBody(
       && !blockedNames.has(key.toLowerCase());
 
     const mergeField = (key: string, value: unknown) => {
+      if (bedrock) {
+        // Converse's own top-level fields (`guardrailConfig`, `serviceTier` ...) belong to the operator's model
+        // record: a caller's extra field is model-specific data and goes under `additionalModelRequestFields`.
+        if (key.startsWith('__') || BEDROCK_REQUEST_OWNED_FIELDS.has(key)) return;
+        if (key === 'additionalModelRequestFields') {
+          if (isPlainObject(value)) {
+            for (const [k, v] of Object.entries(value)) {
+              if (!k.startsWith('__')) callerFields[k] = v;
+            }
+          }
+          return;
+        }
+        const existing = callerFields[key];
+        callerFields[key] = isPlainObject(existing) && isPlainObject(value) ? { ...existing, ...value } : value;
+        return;
+      }
       const existing = merged[key];
       merged[key] = isPlainObject(existing) && isPlainObject(value)
         ? { ...existing, ...value }
@@ -459,8 +479,16 @@ export function buildPassthroughBody(
     }
   }
 
+  if (bedrock && Object.keys(callerFields).length > 0) {
+    const operatorFields = asRecord(merged.additionalModelRequestFields);
+    merged.additionalModelRequestFields = { ...operatorFields, ...callerFields };
+  }
+
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
+
+/** Converse request fields the gateway builds itself; a caller's passthrough never carries them on Bedrock. */
+const BEDROCK_REQUEST_OWNED_FIELDS: ReadonlySet<string> = new Set(['messages', 'system', 'inferenceConfig', 'toolConfig']);
 
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -510,7 +538,7 @@ export function resolveModelInvocationConfig(
     (body as { [AGENT_REASONING_OVERRIDE]?: unknown })[AGENT_REASONING_OVERRIDE],
     { driver: model.providerDriver, modelId: model.modelId },
   );
-  const extraBody = buildPassthroughBody(model.settings, body, blockedLower);
+  const extraBody = buildPassthroughBody(model.settings, body, blockedLower, model.providerDriver);
 
   if (extraBody) {
     modelSettings.extraBody = extraBody;

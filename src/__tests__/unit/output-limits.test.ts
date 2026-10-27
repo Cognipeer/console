@@ -149,9 +149,9 @@ describe('computeOutputTokenLimit: thinking headroom', () => {
     expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: sonnet5, override: 2000, reasoning: { effort: 'high' } })).toBe(2000);
     expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: sonnet5, override: 2000, configured: 50000, reasoning: { effort: 'max' } })).toBe(2000);
     expect(computeOutputTokenLimit({ driver: 'bedrock', modelId: 'anthropic.claude-sonnet-5-5-v1:0', override: 3000, reasoning: { effort: 'high' } })).toBe(3000);
-    // A thinking budget still needs room above it: the API refuses a budget at or above max_tokens.
-    expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: 'claude-sonnet-4-5', override: 2000, reasoning: { budgetTokens: 5000 } }))
-      .toBe(5000 + THINKING_ANSWER_HEADROOM);
+    // A thinking budget does not raise it either: the budget is fitted under the cap instead (fitThinkingToLimit).
+    expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: 'claude-sonnet-4-5', override: 2000, reasoning: { budgetTokens: 5000 } })).toBe(2000);
+    expect(computeOutputTokenLimit({ driver: 'bedrock', modelId: 'eu.anthropic.claude-sonnet-4-5-v1:0', override: 2000, reasoning: { effort: 'high' } })).toBe(2000);
   });
 
   it('adaptive on a default: the model maximum already clears every effort', () => {
@@ -170,7 +170,7 @@ describe('computeOutputTokenLimit: thinking headroom', () => {
     expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: sonnet5, configured: 1000, reasoning: { effort: 'none' } })).toBe(1000);
     expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: sonnet5, configured: 1000, reasoning: { effort: 'max' }, explicitThinking: true })).toBe(1000);
     expect(computeOutputTokenLimit({ driver: 'anthropic', modelId: sonnet5, configured: 1000 })).toBe(1000);
-    expect(computeOutputTokenLimit({ driver: 'openai', modelId: 'gpt-5', configured: 1000, reasoning: { effort: 'max' } })).toBe(1000);
+    expect(computeOutputTokenLimit({ driver: 'openai', modelId: 'gpt-4o', configured: 1000, reasoning: { effort: 'max' } })).toBe(1000);
   });
 
   it('budget style: above the budget by the answer headroom, and the reported value is the raised one', () => {
@@ -335,6 +335,62 @@ describe('the gateway limit and the native client send the same number', () => {
       body: {},
       stream: true,
       expected: EFFORT_BUDGETS.medium + THINKING_ANSWER_HEADROOM,
+    },
+    {
+      name: "budget thinking keeps a caller's small max_tokens (the budget is fitted under it, the cap is not raised)",
+      model: model({ modelId: 'claude-sonnet-4-5', settings: { reasoning: { effort: 'high' } } }),
+      body: { max_tokens: 3000 },
+      stream: true,
+      expected: 3000,
+    },
+    {
+      name: "bedrock Claude budget thinking keeps a caller's max_tokens too",
+      model: model({ providerDriver: 'bedrock', modelId: 'eu.anthropic.claude-sonnet-4-5-v1:0', settings: { reasoning: { effort: 'high' } } }),
+      body: { max_tokens: 5000 },
+      stream: true,
+      expected: 5000,
+    },
+    {
+      name: 'budget thinking: a model limit only just above the budget is raised to budget + the answer headroom',
+      model: model({ modelId: 'claude-sonnet-4-5', settings: { reasoning: { effort: 'high' }, maxTokens: 20000 } }),
+      body: {},
+      stream: true,
+      expected: EFFORT_BUDGETS.high + THINKING_ANSWER_HEADROOM,
+    },
+    {
+      name: "an openai reasoning model's small Default max tokens is raised to the table value of its effort",
+      model: model({ providerDriver: 'openai', modelId: 'gpt-5.2', settings: { reasoning: { effort: 'high' }, maxTokens: 400 } }),
+      body: {},
+      stream: false,
+      expected: ADAPTIVE_MIN_OUTPUT_TOKENS.high,
+    },
+    {
+      name: "an openai reasoning model keeps a caller's max_completion_tokens (a hard cap)",
+      model: model({ providerDriver: 'openai', modelId: 'gpt-5.2', settings: { reasoning: { effort: 'high' }, maxTokens: 400 } }),
+      body: { max_completion_tokens: 300 },
+      stream: false,
+      expected: 300,
+    },
+    {
+      name: 'an openai reasoning model with effort none keeps its limit',
+      model: model({ providerDriver: 'openai', modelId: 'gpt-5.2', settings: { reasoning: { effort: 'none' }, maxTokens: 400 } }),
+      body: {},
+      stream: false,
+      expected: 400,
+    },
+    {
+      name: 'azure gpt-5: the effort its rule maps to (max -> high) sizes the limit',
+      model: model({ providerDriver: 'azure', modelId: 'gpt-5', settings: { reasoning: { effort: 'max' }, maxTokens: 1000 } }),
+      body: {},
+      stream: true,
+      expected: ADAPTIVE_MIN_OUTPUT_TOKENS.high,
+    },
+    {
+      name: 'a non-reasoning openai model keeps its limit whatever the configured effort',
+      model: model({ providerDriver: 'openai', modelId: 'gpt-4o', settings: { reasoning: { effort: 'high' }, maxTokens: 400 } }),
+      body: {},
+      stream: false,
+      expected: 400,
     },
     {
       name: 'bedrock Claude with no limit set stays unset',

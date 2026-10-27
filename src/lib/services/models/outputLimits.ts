@@ -12,17 +12,23 @@
  * `maxCompletionTokens` > `maxTokens` > the driver default, then the thinking
  * headroom, then capped by the model maximum when the value is a default or a
  * bump (an explicit value is never lowered). The caller's value is a hard cap:
- * adaptive thinking never raises it.
+ * thinking never raises it (a budget is fitted to it instead, `fitThinkingToLimit`).
  */
 
+import { mapReasoningEffort } from '@cognipeer/agent-sdk/model-rules';
 import type { IModel } from '@/lib/database';
-import { modelIdCandidates } from './modelRules';
+import { modelIdCandidates, resolveRuleForDriver } from './modelRules';
 import {
   GEMINI_ANSWER_HEADROOM,
+  OPENAI_SCHEMA_DRIVERS,
+  bedrockCarriesThinking,
+  effortForBudget,
+  fitThinkingBudget,
   normalizeReasoning,
   translateAnthropicThinking,
   translateVertexThinking,
   type NormalizedReasoning,
+  type ReasoningEffort,
 } from './reasoning';
 
 /**
@@ -125,8 +131,8 @@ export interface OutputLimitInput {
   modelMax?: number;
   /**
    * The caller's own limit for this call (the request's `max_tokens` or a retry's raised value). It beats
-   * `configured` and is a hard cap: adaptive thinking does not need room above it, so it is never raised
-   * for it (a thinking budget still is: the API refuses a budget at or above `max_tokens`).
+   * `configured` and is a hard cap: thinking is never given room above it, so it is never raised for it.
+   * Adaptive thinking fits itself into it; a thinking budget is fitted under it (`fitThinkingToLimit`).
    */
   override?: number;
   /**
@@ -148,8 +154,10 @@ export interface OutputLimitInput {
  *  - anthropic requires one: the model maximum (else 8192) when nothing is configured, a default for a
  *    non-streaming call never above NON_STREAM_DEFAULT_CAP. Other drivers send none by default.
  *  - Claude thinking (anthropic, bedrock-Claude) shares the limit with the answer. Adaptive thinking:
- *    at least ADAPTIVE_MIN_OUTPUT_TOKENS[effort], unless the caller set the limit; budget thinking: above
- *    the budget by the answer headroom.
+ *    at least ADAPTIVE_MIN_OUTPUT_TOKENS[effort]; budget thinking: budget + the answer headroom at least.
+ *    Neither ever raises the caller's own limit.
+ *  - An OpenAI-schema reasoning model (reasoning tokens count against `max_(completion_)tokens`) with an
+ *    effort configured and a limit set: at least ADAPTIVE_MIN_OUTPUT_TOKENS[effort]. Not the caller's own.
  *  - Vertex Gemini with a thinking budget and a limit set: at least budget + GEMINI_ANSWER_HEADROOM.
  *  - A default or a raise stops at the model maximum; an explicit value above it stays.
  */
@@ -189,7 +197,7 @@ function raisedForThinking(
 
   if (driver === 'anthropic' || driver === 'bedrock') {
     // Extended thinking on Bedrock is a Claude feature; the other Converse families carry their own envelope.
-    if (driver === 'bedrock' && !/anthropic|claude/i.test(modelId ?? '')) return undefined;
+    if (driver === 'bedrock' && !bedrockCarriesThinking(modelId)) return undefined;
     if (input.explicitThinking) return undefined;
     const thinking = translateAnthropicThinking(reasoning, limit, modelId);
     if (thinking?.thinking.type === 'adaptive') {
@@ -199,15 +207,94 @@ function raisedForThinking(
       const effort = thinking.outputConfig?.effort;
       return effort ? Math.max(limit, ADAPTIVE_MIN_OUTPUT_TOKENS[effort]) : undefined;
     }
-    if (thinking?.thinking.type === 'enabled') return thinking.maxTokens;
+    // A caller's own limit stays as it is for a budget too: the budget is fitted under it instead
+    // (`fitThinkingToLimit`), or the call runs without thinking when nothing fits.
+    if (thinking?.thinking.type === 'enabled') return callerCapped ? undefined : thinking.maxTokens;
     return undefined;
   }
 
+  if (driver !== undefined && OPENAI_SCHEMA_DRIVERS.has(driver)) {
+    // Reasoning tokens count against the limit here too. Only a limit the model's record set is raised:
+    // a caller's is a hard cap, and none set means the provider's own maximum applies.
+    if (limit === undefined || callerCapped) return undefined;
+    const effort = openAiReasoningEffort(driver, modelId, reasoning);
+    return effort ? Math.max(limit, ADAPTIVE_MIN_OUTPUT_TOKENS[effort]) : undefined;
+  }
+
   if (driver === 'vertex') {
-    if (limit === undefined) return undefined;
+    // A caller's cap is not raised here: the budget is fitted under it instead (`fitThinkingToLimit`). The one
+    // exception is Pro, where thinking cannot be off: a cap below its minimum budget (128) + GEMINI_ANSWER_HEADROOM
+    // cannot be honoured, and the SDK sends that sum (2176).
+    if (limit === undefined || callerCapped) return undefined;
     const budget = translateVertexThinking(reasoning)?.thinkingConfig.thinkingBudget;
     if (budget === undefined || budget <= 0) return undefined;
     return Math.max(limit, budget + GEMINI_ANSWER_HEADROOM);
   }
   return undefined;
+}
+
+/**
+ * The effort an OpenAI-schema reasoning model runs at, to size its limit for; undefined = nothing to size for.
+ * Only a configured effort counts (a token budget counts as the effort it stands for: that is what the client
+ * sends, `effortForBudget`); `none` thinks nothing. Only a model its SDK rule knows to reason is sized: an id only
+ * the family's permissive default matched (a vanity deployment, a self-hosted model) is left as the operator set it.
+ * The rule maps the effort to the nearest one the model takes, like the SDK does on the wire.
+ */
+function openAiReasoningEffort(
+  driver: string,
+  modelId: string | undefined,
+  reasoning: NormalizedReasoning,
+): Exclude<ReasoningEffort, 'none'> | undefined {
+  const asked = reasoning.effort ?? (reasoning.budgetTokens ? effortForBudget(reasoning.budgetTokens) : undefined);
+  if (!asked || asked === 'none') return undefined;
+  const rule = resolveRuleForDriver(driver, modelId);
+  if (!rule || rule.isDefault || rule.reasoning.style !== 'effort') return undefined;
+  const effort = mapReasoningEffort(rule, asked).effort;
+  return effort && effort !== 'none' ? effort : undefined;
+}
+
+/**
+ * The reasoning a call is handed to the SDK with, given the limit it is sent with.
+ *
+ * The SDK raises `max_tokens` itself when it is below a thinking budget + its own reserve (or below its own floor).
+ * For a limit that cannot move - a caller's cap, the model maximum - that would be a silent raise. So budget-style
+ * Claude thinking (anthropic, bedrock-Claude) is fitted to the limit: the budget is shrunk to what fits under it, or,
+ * when the limit leaves no room for the smallest budget, the call runs without thinking (undefined). Everything else
+ * (adaptive thinking, other drivers, a budget that already fits, an operator's own thinking block) comes back as given.
+ *
+ * Vertex Gemini likewise: the SDK raises `maxOutputTokens` when it is below budget + GEMINI_ANSWER_HEADROOM, so a numeric
+ * budget is shrunk to `limit - GEMINI_ANSWER_HEADROOM`; under the model's minimum (0 on Flash = thinking off, 128 on Pro)
+ * the minimum is sent. Dynamic (-1), levels and no-thinking are left alone.
+ * On Pro (thinking cannot be off) a cap below minimum budget + GEMINI_ANSWER_HEADROOM (128 + 2048 = 2176) therefore
+ * cannot be honoured: the SDK sends 2176.
+ */
+export function fitThinkingToLimit<T extends NormalizedReasoning>(
+  reasoning: T | undefined,
+  input: { driver?: string; modelId?: string; limit?: number; explicitThinking?: boolean },
+): T | undefined {
+  const { driver, modelId, limit } = input;
+  if (!reasoning || limit === undefined) return reasoning;
+  if (driver === 'vertex') return fitVertexThinking(reasoning, modelId, limit);
+  if (driver !== 'anthropic' && driver !== 'bedrock') return reasoning;
+  if (driver === 'bedrock' && !bedrockCarriesThinking(modelId)) return reasoning;
+  if (input.explicitThinking) return reasoning;
+  const thinking = translateAnthropicThinking(reasoning, limit, modelId);
+  if (thinking?.thinking.type !== 'enabled') return reasoning;
+  const fitted = fitThinkingBudget(thinking.thinking.budget_tokens, limit);
+  if (fitted === undefined) return undefined;
+  return fitted === thinking.thinking.budget_tokens ? reasoning : { ...reasoning, budgetTokens: fitted };
+}
+
+/** Smallest thinking budget a Gemini model takes: Pro cannot turn thinking off (128), Flash can (0). */
+function minGeminiBudget(modelId: string | undefined): number {
+  return /pro/i.test(modelId ?? '') ? 128 : 0;
+}
+
+function fitVertexThinking<T extends NormalizedReasoning>(reasoning: T, modelId: string | undefined, limit: number): T {
+  const budget = translateVertexThinking(reasoning)?.thinkingConfig.thinkingBudget;
+  if (budget === undefined || budget <= 0 || limit >= budget + GEMINI_ANSWER_HEADROOM) return reasoning;
+  const fitted = Math.max(limit - GEMINI_ANSWER_HEADROOM, minGeminiBudget(modelId));
+  // 0 means off, and a falsy `budgetTokens` would fall back to the effort's budget: say it as the effort.
+  if (fitted <= 0) return { ...reasoning, effort: 'none', budgetTokens: undefined };
+  return { ...reasoning, budgetTokens: fitted };
 }

@@ -1,6 +1,7 @@
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime, NativeProviderSpec } from '../domains/model';
-import { resolveUnsupportedParamNames } from '../unsupportedParams';
+import { isOpenAiSchemaDriver, resolveUnsupportedParamNames } from '../unsupportedParams';
+import { ProviderSettingsError } from '../errors';
 import { resolveRuleForDriver } from '@/lib/services/models/modelRules';
 import { type NormalizedReasoning, normalizeReasoning } from '@/lib/services/models/reasoning';
 import { ANTHROPIC_DEFAULT_MAX_TOKENS, buildNativeChatClient, buildNativeEmbedder } from './nativeClients';
@@ -20,6 +21,9 @@ import {
 } from './openaiAudioHelpers';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { createVlmOcrRuntime } from './vlmOcrHelpers';
+import { azureApiVersion } from './azureApiVersion';
+
+export { azureApiVersion } from './azureApiVersion';
 import { normalizeAnthropicBaseUrl } from './anthropicBaseUrl';
 import { OPENAI_REALTIME_TRANSCRIPTION_URL } from './openaiRealtimeTranscription';
 
@@ -134,10 +138,16 @@ function emitsCompletionTokens(modelId: string | undefined): boolean {
  * request verbatim. This is exactly the
  * case the setting exists for — an Azure deployment or a vanity model id whose
  * name does not match the provider-side regex.
+ *
+ * Only an OpenAI-schema upstream has a `max_completion_tokens` field. Anthropic,
+ * Bedrock and Vertex carry the cap in their own (the budget stays as
+ * `maxCompletionTokens`, which their native client reads), so the extra body would
+ * only put a key into their request that they do not define.
  */
 function applyMaxTokensRename(
   result: ModelSettingsOverrides,
   modelId: string | undefined,
+  driver: string | undefined,
 ): void {
   const budget = result.maxTokens;
   if (budget === undefined) return;
@@ -145,7 +155,7 @@ function applyMaxTokensRename(
   result.maxCompletionTokens ??= budget;
   result.maxTokensRenamed = true;
 
-  if (!emitsCompletionTokens(modelId)) {
+  if (isOpenAiSchemaDriver(driver) && !emitsCompletionTokens(modelId)) {
     result.extraBody = { max_completion_tokens: budget, ...(result.extraBody ?? {}) };
   }
 }
@@ -296,7 +306,7 @@ export function resolveOverrides(
   }
 
   if (blocked.has('maxTokens') && !blocked.has('maxCompletionTokens')) {
-    applyMaxTokensRename(result, modelId);
+    applyMaxTokensRename(result, modelId, driver);
   }
 
   if (blocked.has('streamOptions')) {
@@ -755,6 +765,13 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
   },
 };
 
+/**
+ * An AWS region id: two letters, an optional `-gov`, a direction and a number (`us-east-1`, `ap-southeast-2`,
+ * `us-gov-west-1`). The region is typed in, so any region Bedrock is offered in can be used, not only the few the
+ * form used to list; the check keeps a stray word or a pasted endpoint out of the hostname the client builds from it.
+ */
+const AWS_REGION_ID = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
+
 export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime, BedrockCredentials, BedrockSettings> = {
   id: 'bedrock',
   version: '1.0.0',
@@ -800,19 +817,28 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
           {
             name: 'region',
             label: 'Region',
-            type: 'select',
+            type: 'text',
             required: true,
-            options: [
-              { label: 'us-east-1', value: 'us-east-1' },
-              { label: 'us-west-2', value: 'us-west-2' },
-              { label: 'eu-central-1', value: 'eu-central-1' },
-              { label: 'ap-southeast-1', value: 'ap-southeast-1' },
-            ],
+            placeholder: 'us-east-1',
+            description: 'AWS region id of the Bedrock endpoint, for example us-east-1, us-west-2, eu-central-1 or ap-southeast-1.',
             scope: 'settings',
           },
         ],
       },
     ],
+  },
+  // Save-time only: `createRuntime` stays lenient, so a provider that is already stored keeps working.
+  validateSettings({ settings }) {
+    const region = typeof settings.region === 'string' ? settings.region.trim() : '';
+    if (!region) {
+      throw new ProviderSettingsError('region', 'Region is required (for example us-east-1).');
+    }
+    if (!AWS_REGION_ID.test(region)) {
+      throw new ProviderSettingsError(
+        'region',
+        'Region must be an AWS region id in lower case, such as us-east-1, eu-west-1 or ap-northeast-1.',
+      );
+    }
   },
   createRuntime: ({ credentials, settings }) => {
     const accessKeyId = ensureValue(credentials.accessKeyId, 'AWS accessKeyId is required.');
@@ -1032,12 +1058,7 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
      * `settings.azureApiVersion` — the same escape hatch LiteLLM's per-model
      * `api_version` gives.
      */
-    const apiVersionFor = (modelSettings: unknown) => {
-      const override = (modelSettings as Record<string, unknown> | undefined)?.azureApiVersion;
-      return typeof override === 'string' && override.trim().length > 0
-        ? override.trim()
-        : apiVersion;
-    };
+    const apiVersionFor = (modelSettings: unknown) => azureApiVersion(apiVersion, modelSettings);
 
     const runtime: ModelProviderRuntime = {
       ...nativeClientMethods('azure', () => runtime),

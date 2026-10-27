@@ -15,7 +15,12 @@
 const NUMERIC_KEYS = new Set([
   'frequencyPenalty',
   'maxCompletionTokens',
+  // The model's maximum output, in the spellings a settings blob carries it: the output-limit resolver reads it
+  // behind `typeof === 'number'`, so a stringified value would be ignored like any other knob above.
+  'maxOutput',
+  'maxOutputTokens',
   'maxTokens',
+  'max_output_tokens',
   'presencePenalty',
   'temperature',
   'topP',

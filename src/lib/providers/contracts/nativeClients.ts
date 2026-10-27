@@ -32,8 +32,17 @@ import type {
 import { createLogger } from '@/lib/core/logger';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
-import { hasExplicitThinking } from '@/lib/services/models/reasoning';
-import { ANTHROPIC_FALLBACK_OUTPUT_TOKENS, computeOutputTokenLimit } from '@/lib/services/models/outputLimits';
+import {
+  OPENAI_SCHEMA_DRIVERS,
+  bedrockCarriesThinking,
+  effortForBudget,
+  hasExplicitThinking,
+} from '@/lib/services/models/reasoning';
+import {
+  ANTHROPIC_FALLBACK_OUTPUT_TOKENS,
+  computeOutputTokenLimit,
+  fitThinkingToLimit,
+} from '@/lib/services/models/outputLimits';
 import { withFileReferenceRestore, withInlineReasoningNormalization } from './wireNormalization';
 import type {
   ModelRuntimeConfig,
@@ -53,10 +62,14 @@ import type { ModelSettingsOverrides } from './modelContracts';
  */
 export const ANTHROPIC_DEFAULT_MAX_TOKENS = ANTHROPIC_FALLBACK_OUTPUT_TOKENS;
 
-/** Drivers whose wire format is OpenAI Chat Completions. */
-export const OPENAI_SCHEMA_DRIVERS: ReadonlySet<string> = new Set(['openai', 'openai-compatible', 'azure', 'together']);
+/** Drivers whose wire format is OpenAI Chat Completions (defined with the reasoning rules that need it, pure). */
+export { OPENAI_SCHEMA_DRIVERS };
 
 type AnyRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is AnyRecord {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
 
 const logger = createLogger('native-model-client');
 
@@ -198,7 +211,7 @@ export function resolveNativeMaxTokens(input: {
   modelId: string;
   overrides: ModelSettingsOverrides;
   reasoning?: unknown;
-  /** The request's own limit; beats the model record's and is a hard cap (no adaptive headroom on top). */
+  /** The request's own limit; beats the model record's and is a hard cap (no thinking headroom on top). */
   requestMaxTokens?: number;
   stream?: boolean;
   modelMax?: number;
@@ -214,6 +227,126 @@ export function resolveNativeMaxTokens(input: {
     reasoning: input.reasoning,
     explicitThinking: (driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody),
   });
+}
+
+/**
+ * The limit AND the reasoning ONE call is sent with, decided together (same input as `resolveNativeMaxTokens`).
+ *
+ *  - A limit that cannot move (the caller's own cap) leaves a thinking budget no room to be raised, and the SDK raises
+ *    `max_tokens` itself when it is below the budget + its reserve: so the budget is fitted under the limit, or the call
+ *    runs without thinking when nothing fits (`fitThinkingToLimit`). The gateway and the native client agree on the
+ *    number: it is the caller's, thinking or not.
+ *  - An OpenAI-schema SDK provider reads the reasoning EFFORT only, so a token budget with no effort (`budget_tokens`,
+ *    the `max_tokens` of an OpenRouter-style `reasoning` object) is sent as the effort it stands for.
+ */
+export function resolveNativeCall(input: {
+  driver: string;
+  modelId: string;
+  overrides: ModelSettingsOverrides;
+  reasoning?: ChatCompletionRequest['reasoning'];
+  requestMaxTokens?: number;
+  stream?: boolean;
+  modelMax?: number;
+}): { maxTokens: number | undefined; reasoning: ChatCompletionRequest['reasoning'] } {
+  const { driver, modelId, overrides } = input;
+  const maxTokens = resolveNativeMaxTokens(input);
+  let reasoning = fitThinkingToLimit(input.reasoning, {
+    driver,
+    modelId,
+    limit: maxTokens,
+    explicitThinking: (driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody),
+  });
+  if (reasoning && OPENAI_SCHEMA_DRIVERS.has(driver) && reasoning.effort === undefined && (reasoning.budgetTokens ?? 0) > 0) {
+    reasoning = { ...reasoning, effort: effortForBudget(reasoning.budgetTokens as number) };
+  }
+  return { maxTokens, reasoning };
+}
+
+/**
+ * The reasoning a model's own settings send on every call (before the call's limit is known), or undefined when this
+ * driver / model must not carry it. Extended thinking on Bedrock is a Claude feature, the other Converse families have
+ * their own reasoning envelope and are left alone; and an operator-supplied `thinking` block in the extra body is the
+ * whole instruction: a second, translated one would conflict with it.
+ */
+export function modelDefaultReasoning(
+  driver: string,
+  modelId: string,
+  overrides: ModelSettingsOverrides,
+  reasoning: NativeReasoning | undefined,
+): NativeReasoning | undefined {
+  if (driver === 'bedrock' && !bedrockCarriesThinking(modelId)) return undefined;
+  if ((driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody)) return undefined;
+  return reasoning;
+}
+
+/**
+ * Converse top-level fields the SDK builds from the request itself. An extra body (the operator's or a caller's
+ * passthrough) does not get to replace them: the gateway's resolved limit, system prompt and tools are the last word.
+ */
+const BEDROCK_REQUEST_FIELDS: ReadonlySet<string> = new Set(['messages', 'system', 'inferenceConfig', 'toolConfig']);
+
+/**
+ * The extra body of a Bedrock call. It is handed to the SDK AS IS: the SDK sends Converse's own top-level fields
+ * (`guardrailConfig`, `performanceConfig`, `serviceTier`, `requestMetadata` ...) at the top level, merges an explicit
+ * `additionalModelRequestFields` and puts every other key (`top_k`, `anthropic_beta` ...) into it, so nothing is
+ * wrapped here.
+ */
+function bedrockExtra(extra: AnyRecord | undefined): AnyRecord | undefined {
+  if (!extra) return undefined;
+  // `__*` keys are the SDK's escape hatches (`__top` forces keys to the Converse top level): never forwarded.
+  const out = Object.fromEntries(
+    Object.entries(extra).filter(([key]) => !BEDROCK_REQUEST_FIELDS.has(key) && !key.startsWith('__')),
+  );
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * A caller's extra body on Bedrock: everything goes into `additionalModelRequestFields` (its own fields of that name
+ * merged in), never to the Converse top level - only the operator's model-level extra body reaches the top level.
+ * A caller's `guardrailConfig` is therefore inert model-specific data, not a replacement for the operator's.
+ */
+function bedrockRequestExtra(extra: AnyRecord | undefined): AnyRecord | undefined {
+  const safe = bedrockExtra(extra);
+  if (!safe) return undefined;
+  const { additionalModelRequestFields, ...rest } = safe;
+  const fields = { ...(isRecord(additionalModelRequestFields) ? additionalModelRequestFields : {}), ...rest };
+  return Object.keys(fields).length > 0 ? { additionalModelRequestFields: fields } : undefined;
+}
+
+/**
+ * The top-level Gemini request keys the model's extra body may set on Vertex. The SDK assigns the extra body
+ * SHALLOWLY at the top level of the request, so `generationConfig`, `tools` or `toolConfig` in it would replace the ones
+ * it built (limit, thinking, tools), and the OpenAI-style keys of a requestDefaults are errors there. `safetySettings`
+ * and `labels` are request-level fields of their own that the SDK does not set.
+ */
+const VERTEX_EXTRA_FIELDS = ['safetySettings', 'labels'] as const;
+
+function vertexExtra(extra: AnyRecord | undefined): AnyRecord | undefined {
+  if (!extra) return undefined;
+  const out: AnyRecord = {};
+  for (const key of VERTEX_EXTRA_FIELDS) {
+    if (extra[key] !== undefined) out[key] = extra[key];
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * A request's extra body over the model's. One level deep for Converse's `additionalModelRequestFields`: a request adding
+ * one model-specific field must not wipe the ones the model record sets.
+ */
+function mergeExtra(driver: string, base: AnyRecord | undefined, overlay: AnyRecord | undefined): AnyRecord | undefined {
+  if (driver === 'bedrock') {
+    base = bedrockExtra(base);
+    overlay = bedrockRequestExtra(overlay);
+  }
+  if (!base && !overlay) return undefined;
+  const merged: AnyRecord = { ...(base ?? {}), ...(overlay ?? {}) };
+  const baseFields = base?.additionalModelRequestFields;
+  const overlayFields = overlay?.additionalModelRequestFields;
+  if (driver === 'bedrock' && isRecord(baseFields) && isRecord(overlayFields)) {
+    merged.additionalModelRequestFields = { ...baseFields, ...overlayFields };
+  }
+  return merged;
 }
 
 /**
@@ -235,11 +368,11 @@ export function buildNativeOptions(input: {
 
   // The Messages API refuses a request without `max_tokens`; the default is the model maximum (or a floor),
   // and thinking tokens come out of the same limit - see `computeOutputTokenLimit`.
-  const maxTokens = resolveNativeMaxTokens({
+  const { maxTokens, reasoning } = resolveNativeCall({
     driver,
     modelId: input.modelId,
     overrides,
-    reasoning: input.reasoning,
+    reasoning: modelDefaultReasoning(driver, input.modelId, overrides, input.reasoning),
     // The gateway marks a limit the caller set (gatewayRequest.ts `buildChatModelSettings`).
     requestMaxTokens: firstPositive(input.settings.requestMaxTokens),
     stream: input.stream,
@@ -247,11 +380,11 @@ export function buildNativeOptions(input: {
   });
 
   let extra: AnyRecord | undefined = overrides.extraBody ? { ...overrides.extraBody } : undefined;
-  // Converse carries model-specific parameters in its own envelope.
-  if (driver === 'bedrock' && extra) extra = { additionalModelRequestFields: extra };
-  // The LangChain Vertex client never forwarded the extra body; it would land
-  // at the top level of the Gemini request, where OpenAI-style keys are errors.
-  if (driver === 'vertex') extra = undefined;
+  // Converse: the SDK sorts the extra body into its top level and `additionalModelRequestFields` itself.
+  if (driver === 'bedrock') extra = bedrockExtra(extra);
+  // The LangChain Vertex client never forwarded the extra body; it would land at the top level of the Gemini
+  // request, where OpenAI-style keys are errors. Only the request-level keys Gemini defines on its own go through.
+  if (driver === 'vertex') extra = vertexExtra(extra);
 
   const options: NativeModelOptions = {
     model: input.modelId,
@@ -262,12 +395,7 @@ export function buildNativeOptions(input: {
     ...(openAiSchema && overrides.frequencyPenalty !== undefined ? { frequencyPenalty: overrides.frequencyPenalty } : {}),
   };
 
-  // An operator-supplied `thinking` block in the extra body is the whole
-  // instruction: a second, translated one would conflict with it.
-  // Extended thinking on Bedrock is a Claude feature; the other Converse families have
-  // their own reasoning envelope and are left alone.
-  const reasoning = driver === 'bedrock' && !/anthropic|claude/i.test(input.modelId) ? undefined : input.reasoning;
-  if (reasoning && !((driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody))) {
+  if (reasoning) {
     // The provider turns it into the wire form itself (`reasoning_effort`, `reasoning: {effort, summary}`, thinking).
     options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
   }
@@ -325,18 +453,22 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
   // without it the table by model id applies.
   const modelMax = firstPositive(settings.maxOutputTokens, settings.max_output_tokens);
 
+  // The settings carry the full normalized reasoning (includeThoughts too); the typed
+  // overrides only know effort/summary.
+  const settingsReasoning = normalizeNativeReasoning(settings.reasoning) ?? normalizeNativeReasoning(overrides.reasoning);
   const defaults = buildNativeOptions({
     driver,
     modelId,
     overrides,
     settings,
     modelMax,
-    // The settings carry the full normalized reasoning (includeThoughts too); the typed
-    // overrides only know effort/summary.
-    reasoning: normalizeNativeReasoning(settings.reasoning) ?? normalizeNativeReasoning(overrides.reasoning),
+    reasoning: settingsReasoning,
   });
-  const { transformRequest, extra: defaultExtra, reasoning: defaultReasoning, ...scalarDefaults } = defaults;
+  // `defaults.reasoning` is fitted to the settings' own limit; every call fits the model's default again to ITS limit.
+  const { transformRequest, extra: defaultExtra, reasoning: fittedDefaultReasoning, ...scalarDefaults } = defaults;
   void scalarDefaults.model;
+  void fittedDefaultReasoning;
+  const defaultReasoning = modelDefaultReasoning(driver, modelId, overrides, settingsReasoning);
 
   const prepare = async (request: NativeChatRequest, stream: boolean): Promise<ChatCompletionRequest> => {
     const merged: ChatCompletionRequest = {
@@ -352,25 +484,40 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
     for (const key of Object.keys(merged) as Array<keyof ChatCompletionRequest>) {
       if (merged[key] === undefined) delete merged[key];
     }
-    const reasoning = request.reasoning ?? defaultReasoning;
+    const requested = request.reasoning ?? defaultReasoning;
     // Thinking cannot continue a tool loop whose signed blocks were lost on the
     // way in: that call runs without it (the first turn of the loop kept it).
     const mustDropThinking = (driver === 'anthropic' || driver === 'bedrock') && hasUnreplayableToolTurn(merged.messages);
-    if (reasoning && !mustDropThinking) merged.reasoning = reasoning;
-    // Decided per call: the request's own value beats the model record's, a non-streaming default is capped,
-    // and the thinking headroom only applies when the call actually thinks.
-    const maxTokens = resolveNativeMaxTokens({
+    // Decided per call, limit and reasoning together: the request's own value beats the model record's, a non-streaming
+    // default is capped, the thinking headroom only applies when the call actually thinks, and a limit that cannot
+    // move (the caller's cap) is never raised for a budget: the budget is fitted under it, or thinking is dropped.
+    const call = resolveNativeCall({
       driver,
       modelId,
       overrides,
-      reasoning: mustDropThinking ? undefined : reasoning,
+      reasoning: mustDropThinking ? undefined : requested,
       requestMaxTokens: request.maxTokens ?? firstPositive(settings.requestMaxTokens),
       stream,
       modelMax,
     });
-    if (maxTokens !== undefined) merged.maxTokens = maxTokens;
+    if (call.reasoning) merged.reasoning = call.reasoning;
+    else delete merged.reasoning;
+    if (call.maxTokens !== undefined) merged.maxTokens = call.maxTokens;
     else delete merged.maxTokens;
-    if (defaultExtra || request.extra) merged.extra = { ...(defaultExtra ?? {}), ...(request.extra ?? {}) };
+    if (requested && !mustDropThinking && (!call.reasoning || call.reasoning.budgetTokens !== requested.budgetTokens)) {
+      logger.debug('Thinking fitted to the output limit of the call', {
+        driver,
+        modelId,
+        limit: call.maxTokens,
+        requestedBudget: requested.budgetTokens,
+        effort: requested.effort,
+        dropped: !call.reasoning,
+      });
+    }
+    // Nothing per request on Vertex (see `vertexExtra`); Bedrock keeps its Converse envelope sorted by the SDK.
+    const extra = mergeExtra(driver, defaultExtra, driver === 'vertex' ? undefined : request.extra);
+    if (extra) merged.extra = extra;
+    else delete merged.extra;
     if (stream && overrides.streamUsage === false && merged.streamUsage === undefined) merged.streamUsage = false;
     const out = await transformRequest!(merged);
     return out ?? merged;

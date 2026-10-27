@@ -116,7 +116,8 @@ describe('openai native client', () => {
     const client = await (await make()).createNativeChatClient!(config('gpt-5.2', { temperature: 0.4, topP: 0.9, maxTokens: 500 }), { fetch });
     await client.complete({ ...USER, reasoning: { effort: 'high' } });
     expect(calls[0].url).toBe('https://api.openai.com/v1/chat/completions');
-    expect(calls[0].body).toMatchObject({ max_completion_tokens: 500, reasoning_effort: 'high' });
+    // Reasoning tokens count against the limit: the model's small 500 is raised to the table value of effort high.
+    expect(calls[0].body).toMatchObject({ max_completion_tokens: 32768, reasoning_effort: 'high' });
     expect(calls[0].body.max_tokens).toBeUndefined();
     expect(calls[0].body.temperature).toBeUndefined();
     expect(calls[0].body.top_p).toBeUndefined();
@@ -220,7 +221,8 @@ describe('azure native client', () => {
     const client = await (await make()).createNativeChatClient!(config('gpt-5', { maxTokens: 90 }), { fetch });
     await client.complete({ ...USER, reasoning: { effort: 'medium' } });
     expect(calls[0].url).toContain('/openai/deployments/gpt-5/chat/completions');
-    expect(calls[0].body).toMatchObject({ max_completion_tokens: 90, reasoning_effort: 'medium' });
+    // The model's small 90 is raised to the table value of effort medium.
+    expect(calls[0].body).toMatchObject({ max_completion_tokens: 16384, reasoning_effort: 'medium' });
   });
 
   it('embeds against the embedding DEPLOYMENT, not the chat one', async () => {

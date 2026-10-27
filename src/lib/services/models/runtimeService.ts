@@ -6,7 +6,7 @@ import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/p
 import type { IProviderRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
-import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
+import { runtimePool, hashRuntimeConfig } from '@/lib/core/runtimePool';
 
 export interface ModelRuntimeContext {
   runtime: ModelProviderRuntime;
@@ -36,11 +36,13 @@ export async function buildModelRuntime(
   }
 
   const cacheKey = `model:${tenantId}:${record.key}`;
-  const credHash = hashCredentials(credentials);
+  // The settings (a baseUrl, a region, an API version, ...) shape the runtime as much as the credentials do: hashed
+  // with the credentials only, an edited setting would go unseen until the pooled runtime expired.
+  const configHash = hashRuntimeConfig({ driver: record.driver, credentials, settings: record.settings ?? {} });
 
   const runtime = await runtimePool.getOrCreate<ModelProviderRuntime>(
     cacheKey,
-    credHash,
+    configHash,
     async () => {
       const providerLog = createLogger(`model:${record.key}`);
       return providerRegistry.createRuntime<ModelProviderRuntime>(
