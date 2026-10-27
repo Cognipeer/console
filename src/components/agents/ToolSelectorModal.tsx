@@ -24,6 +24,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconPlus,
+  IconRoute,
   IconServer,
   IconSearch,
   IconTool,
@@ -33,6 +34,7 @@ import {
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
+import { useFlowToolSource } from '@/components/enterprise/EnterpriseFlowAgentUi';
 
 export type ToolBinding = IAgentToolBinding;
 
@@ -46,7 +48,7 @@ interface ToolSourceGroup {
   /** Human-readable name */
   name: string;
   description?: string;
-  /** Source type label (OpenAPI / MCP / System) */
+  /** Source type label (OpenAPI / MCP / System / Flow) */
   typeLabel: string;
   /** A connector's tool (managed by another module): listed with a Connector badge. */
   managed?: boolean;
@@ -133,6 +135,8 @@ export function ToolSelectorModal({
 }: ToolSelectorModalProps) {
   const t = useTranslations('agents');
   const tm = useTranslations('managedTools');
+  // Flows as a tool source, where Flows are available (Enterprise): null otherwise.
+  const flowTools = useFlowToolSource();
 
   // Data
   const [sources, setSources] = useState<ToolSourceGroup[]>([]);
@@ -151,6 +155,9 @@ export function ToolSelectorModal({
 
   // Per-binding config state for system tools (e.g. browser_use needs a browserId)
   const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
+
+  // Flow summaries by key, to bind a flow the way the Flows tab does (draft-only flows run their draft)
+  const [flowsByKey, setFlowsByKey] = useState<Record<string, unknown>>({});
 
   // Picker options per config-only system tool (sourceKey → browsers / web search instances)
   const [systemOptions, setSystemOptions] = useState<Record<string, Array<{ value: string; label: string }>>>({});
@@ -263,6 +270,18 @@ export function ToolSelectorModal({
         crawler: crawlers.map((c) => ({ value: c.key, label: `${c.name} (${c.key})` })),
       }));
 
+      // Flows (headless ones, published or draft). A person without flows access, or an edition
+      // without the service, simply gets no group.
+      try {
+        if (flowTools) {
+          const loaded = await flowTools.load(value);
+          setFlowsByKey(loaded.known);
+          allGroups.push(...loaded.groups);
+        }
+      } catch {
+        /* the flows service is optional here */
+      }
+
       allGroups.unshift(...SYSTEM_TOOLS.map((tool) => ({
         source: 'system' as const,
         sourceKey: tool.sourceKey,
@@ -293,7 +312,7 @@ export function ToolSelectorModal({
     } finally {
       setLoading(false);
     }
-  }, [value]);
+  }, [value, flowTools]);
 
   useEffect(() => {
     if (opened) loadSources();
@@ -351,6 +370,13 @@ export function ToolSelectorModal({
         map.set(id, binding);
       }
       map.get(id)!.toolNames.push(toolName);
+    }
+
+    // A flow binding keeps what the Flows tab set (description, wait time, version); a new one is built the same way.
+    if (flowTools) {
+      for (const [id, binding] of map) {
+        if (binding.source === 'flow') map.set(id, flowTools.rebuildBinding(binding, value, flowsByKey));
+      }
     }
 
     for (const tool of SYSTEM_TOOLS) {
@@ -457,7 +483,7 @@ export function ToolSelectorModal({
               const allSelected = count === group.tools.length && group.tools.length > 0;
               const someSelected = count > 0 && !allSelected;
               const systemTool = systemToolFor(group.source, group.sourceKey);
-              const GroupIcon = systemTool?.icon ?? IconServer;
+              const GroupIcon = systemTool?.icon ?? (group.source === 'flow' ? IconRoute : IconServer);
               const options = systemTool ? systemOptions[group.sourceKey] ?? [] : [];
 
               return (
@@ -475,7 +501,7 @@ export function ToolSelectorModal({
                         ) : (
                           <IconChevronRight size={16} />
                         )}
-                        <ThemeIcon size="sm" variant="light" color={group.source === 'system' ? 'grape' : 'blue'}>
+                        <ThemeIcon size="sm" variant="light" color={group.source === 'system' ? 'grape' : group.source === 'flow' ? 'indigo' : 'blue'}>
                           <GroupIcon size={12} />
                         </ThemeIcon>
                         <div>

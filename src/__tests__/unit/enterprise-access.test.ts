@@ -76,6 +76,15 @@ describe('getEnterpriseModuleForPath', () => {
     expect(checkEnterpriseApiAccess('/api/entity-health/summary', 'ENTERPRISE')).toBeNull();
   });
 
+  it('gates the Flows API, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/flows')).toBe('flows');
+    expect(getEnterpriseModuleForPath('/api/flows/runs/abc')).toBe('flows');
+    expect(getEnterpriseModuleForPath('/api/client/v1/flows/my-flow/runs')).toBe('flows');
+    expect(getEnterpriseModuleForPath('/api/flowsx')).toBeNull();
+    expect(checkEnterpriseApiAccess('/api/flows', 'FREE')?.body.module).toBe('flows');
+    expect(checkEnterpriseApiAccess('/api/flows/abc', 'ENTERPRISE')).toBeNull();
+  });
+
   it('does not gate community paths', () => {
     expect(getEnterpriseModuleForPath('/api/models')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/rag/documents')).toBeNull();

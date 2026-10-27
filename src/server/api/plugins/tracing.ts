@@ -356,6 +356,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
             // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
             // response somewhere in the session).
             truncated: query.truncated === 'true' ? true : undefined,
+            // Only the sessions that ran under one flow (a hidden agent a flow owns, or an agent one of its steps ran).
+            ...(query.flowId?.trim() ? { flowId: query.flowId.trim() } : {}),
             ...metadataFilter,
           });
           const total = latest.total;
@@ -459,6 +461,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
             status: query.status,
             threadId: query.threadId,
             to: query.to,
+            ...(query.flowId?.trim() ? { flowId: query.flowId.trim() } : {}),
             ...metadataFilter,
           });
           const total = latest.total;

@@ -55,7 +55,8 @@ export type PermissionService =
   | 'channels'
   | 'resources'
   | 'iam'
-  | 'webhooks';
+  | 'webhooks'
+  | 'flows';
 
 /**
  * Tenant-wide roles.
@@ -86,6 +87,15 @@ export interface RbacServiceDefinition {
   category: 'build' | 'data' | 'operate' | 'admin';
   adminService?: boolean;
   /**
+   * What an ordinary member (`user` / `project_admin` role) holds on this service
+   * when nobody granted anything explicitly. Unset means `write`, the long-standing
+   * default. `read` lets members see the service without being able to change it:
+   * mutations still need `write` (unlike `adminService`, which needs `admin`), which a
+   * user grant, a group grant, a project override or a policy supplies. Owners and
+   * admins always hold `admin`; `portal_user` always holds `none`.
+   */
+  defaultMemberLevel?: 'none' | 'read';
+  /**
    * The service is retired and survives only so persisted grants naming it stay
    * readable. It must keep resolving through `getServiceDefinition` (otherwise
    * the fallback silently hands out the `models` definition), but a permission
@@ -99,6 +109,9 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'models', label: 'Model Hub', description: 'Models, providers and inference setup.', category: 'build' },
   { id: 'prompts', label: 'Prompt Studio', description: 'Prompt templates and versions.', category: 'build' },
   { id: 'agents', label: 'Agents', description: 'AI agents and agent versions.', category: 'build' },
+  // Visual, versioned flows that drive an agent (FlowBase agents), run as agent tools or on their own. Members
+  // see them by default; building and running needs write, publishing/deleting/importing from Studio needs admin.
+  { id: 'flows', label: 'Flows', description: 'Visual flows: build, publish, run and review runs. Used by FlowBase agents and as agent tools.', category: 'build', defaultMemberLevel: 'read' },
   { id: 'mcp', label: 'MCP Hub', description: 'MCP server configuration, proxy APIs, monitoring and audit.', category: 'build' },
   { id: 'tools', label: 'Agent Tools', description: 'Tool definitions used by agents (managed under the Agents module).', category: 'build' },
   // Enterprise module. Connections to external systems (an organization account per connector) and the tools they manage.
@@ -200,6 +213,7 @@ export function minPermission(
 // the portal's own access list, which the handler enforces per request.
 const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/browser', service: 'browser' },
+  { prefix: '/api/client/v1/flows', service: 'flows' },
   { prefix: '/api/client/v1/crawler', service: 'crawler' },
   { prefix: '/api/client/v1/websearch', service: 'websearch' },
   { prefix: '/api/client/v1/ocr-jobs', service: 'ocr' },
@@ -328,6 +342,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // Spec import helper (URL fetch) used by the MCP/Tool create dialogs.
   { prefix: '/api/specs', service: 'tools' },
   { prefix: '/api/browser', service: 'browser' },
+  { prefix: '/api/flows', service: 'flows' },
   { prefix: '/api/crawler', service: 'crawler' },
   { prefix: '/api/websearch', service: 'websearch' },
   { prefix: '/api/ocr-jobs', service: 'ocr' },
@@ -474,7 +489,8 @@ export function getRoleDefaultPermission(
   }
 
   // project_admin kept for backward compat with legacy user records
-  return role === 'project_admin' || role === 'user' ? 'write' : 'none';
+  if (role !== 'project_admin' && role !== 'user') return 'none';
+  return definition.defaultMemberLevel ?? 'write';
 }
 
 /**
@@ -499,7 +515,7 @@ export function getEffectiveProjectPermission(
     return userProject.role === 'project_admin' ? 'read' : 'none';
   }
 
-  return 'write';
+  return definition.defaultMemberLevel ?? 'write';
 }
 
 /**

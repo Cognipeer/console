@@ -1143,6 +1143,10 @@ export class SQLiteProviderBase {
     // `mapPiiPolicyRow` reads that back as `undefined`, which every caller
     // (`scanWithPolicy`, etc.) treats as 'regex' — pre-existing behaviour.
     this.ensureTableColumn(db, TABLES.piiPolicies, 'engine', 'engine TEXT');
+    // Hidden agents owned by a flow node: `owner` is the JSON, `ownerFlowId` the indexed copy (NULL for every ordinary agent).
+    this.ensureTableColumn(db, TABLES.agents, 'owner', 'owner TEXT');
+    this.ensureTableColumn(db, TABLES.agents, 'ownerFlowId', 'ownerFlowId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agents_owner_flow ON ${TABLES.agents}(ownerFlowId)`);
     // Sealed HMAC secret for agent-run callbacks (agentRunService).
     this.ensureTableColumn(db, TABLES.agentRuns, 'callbackSecret', 'callbackSecret TEXT');
     this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');

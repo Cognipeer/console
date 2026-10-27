@@ -643,7 +643,8 @@ export const agentTriggersApiPlugin: FastifyPluginAsync = async (app) => {
   // Dashboard: the agent `:agentId` names in the session's project.
   const dashboard = (handler: TriggerHandler, logMessage: string) => withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedAgent(request, reply);
+      // A hidden agent a flow owns has no triggers: the flow is what starts it.
+      const scoped = await requireScopedAgent(request, reply, { owned: 'refuse' });
       if (!scoped) return reply;
       const { session, projectId, agent } = scoped;
       const quotaContext = {

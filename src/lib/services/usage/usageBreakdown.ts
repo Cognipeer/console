@@ -12,6 +12,7 @@
  * "unattributed / legacy" bucket.
  */
 
+import { getFlowsHost } from '@/enterprise/flows';
 import { getDatabase } from '@/lib/database';
 import type { IUsageDaily } from '@/lib/database';
 
@@ -56,6 +57,8 @@ export interface UsageBreakdownEntry {
   name?: string;
   /** Secondary label: user email. */
   label?: string;
+  /** Set on a row that stands for a flow: the usage of the hidden agents its "AI Agent" steps own. */
+  flow?: { id: string; key: string; name: string };
   requests: number;
   errors: number;
   inputTokens: number;
@@ -180,6 +183,7 @@ export async function resolveUsageEntityNames(
     for (const entry of entries) {
       if (entry.id !== '') entry.name = entry.id;
     }
+    if (groupBy === 'agent') await attributeOwnedAgentsToFlows(entries);
     return;
   }
 
@@ -206,6 +210,59 @@ export async function resolveUsageEntityNames(
       entry.label = user.email;
     }
   }
+}
+
+/**
+ * A hidden agent a flow owns is not an agent of its own: its usage is the flow's. The rows of the agents one
+ * flow owns become one row, `Flow: <name>` (id `flow:<key>`), carrying the flow. Rows are changed in place.
+ */
+async function attributeOwnedAgentsToFlows(entries: UsageBreakdownEntry[]): Promise<void> {
+  const keys = entries.filter((entry) => entry.id !== '' && !entry.flow).map((entry) => entry.id);
+  if (keys.length === 0) return;
+  const db = await getDatabase();
+  const flows = new Map<string, { id: string; key: string; name: string } | null>();
+  const flowOfAgentKey = new Map<string, { id: string; key: string; name: string }>();
+  for (const key of keys) {
+    // Only the keys flows mint can be owned; skip the lookup for the rest.
+    if (!key.startsWith('flow-')) continue;
+    try {
+      const agent = await db.findAgentByKey(key);
+      if (!agent?.owner) continue;
+      let flow = flows.get(agent.owner.flowId);
+      if (flow === undefined) {
+        const row = await getFlowsHost()?.describeFlow(
+          { tenantDbName: db.getCurrentTenantDbName() ?? '', tenantId: agent.tenantId, projectId: agent.projectId },
+          { id: agent.owner.flowId },
+        );
+        flow = row ? { id: row.id, key: row.key, name: row.name } : null;
+        flows.set(agent.owner.flowId, flow);
+      }
+      // A flow that no longer exists keeps the agent's own row.
+      if (flow) flowOfAgentKey.set(key, flow);
+    } catch {
+      // The row keeps its agent key.
+    }
+  }
+  if (flowOfAgentKey.size === 0) return;
+  const merged = new Map<string, UsageBreakdownEntry>();
+  const rest: UsageBreakdownEntry[] = [];
+  for (const entry of entries) {
+    const flow = flowOfAgentKey.get(entry.id);
+    if (!flow) {
+      rest.push(entry);
+      continue;
+    }
+    const id = `flow:${flow.key}`;
+    const into = merged.get(id) ?? { id, name: `Flow: ${flow.name}`, flow, requests: 0, errors: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
+    into.requests += entry.requests;
+    into.errors += entry.errors;
+    into.inputTokens += entry.inputTokens;
+    into.outputTokens += entry.outputTokens;
+    into.totalTokens += entry.totalTokens;
+    into.costUsd += entry.costUsd;
+    merged.set(id, into);
+  }
+  entries.splice(0, entries.length, ...[...rest, ...merged.values()].sort((a, b) => b.costUsd - a.costUsd));
 }
 
 export interface GetUsageBreakdownOptions {

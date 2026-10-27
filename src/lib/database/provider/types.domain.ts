@@ -1,6 +1,7 @@
 import type { ObjectId } from 'mongodb';
 import type { EntityMetricType, IUsageAttributionFields } from './types.base';
 import type { IConfigGroupRef, IConfigValueRef } from './types.extended';
+import type { AgentFlowConfig, AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 
 // ── Guardrail types ────────────────────────────────────────────────────────
 
@@ -2534,8 +2535,11 @@ export interface IToolRequestAggregate {
 
 export type AgentStatus = 'active' | 'inactive' | 'draft';
 
-/** How an agent is backed: a native model-config agent, or a connected external endpoint. */
-export type AgentKind = 'native' | 'external';
+/**
+ * How an agent is backed: a native model-config agent ("Smart Agent"), a connected
+ * external endpoint ("Connected Agent"), or a conversation flow ("FlowBase Agent").
+ */
+export type AgentKind = 'native' | 'external' | 'flow';
 
 /** Wire protocol used to reach an external (connected) agent. */
 export type ExternalAgentProtocol = 'a2a' | 'openai-chat' | 'openai-responses';
@@ -3037,6 +3041,8 @@ export interface IAgentConfig {
   kind?: AgentKind;
   /** Connection settings — present only when kind === 'external'. */
   connection?: IExternalAgentConnection;
+  /** Flow that drives each conversation turn — present only when kind === 'flow'. */
+  flow?: AgentFlowConfig;
   /** Advanced agent-sdk runtime knobs (Settings → Advanced). */
   runtime?: IAgentRuntimeConfig;
   /** JSON-schema contract for the final answer. */
@@ -3311,13 +3317,13 @@ export interface IAgentSandboxConfig {
 
 /** A single tool-source binding for an agent */
 export interface IAgentToolBinding {
-  /** Source type – 'tool' (unified), 'mcp' (legacy), or 'system' (built-in like browser_use) */
-  source: 'tool' | 'mcp' | 'system';
-  /** Identifier of the source (tool key, MCP server key, or system tool key) */
+  /** Source type – 'tool' (unified), 'mcp' (legacy), 'system' (built-in like browser_use) or 'flow' (a published Flow) */
+  source: 'tool' | 'mcp' | 'system' | 'flow';
+  /** Identifier of the source (tool key, MCP server key, system tool key, or flow key) */
   sourceKey: string;
   /** Action/tool names selected from that source */
   toolNames: string[];
-  /** Optional configuration for the binding (e.g. { browserId } for system browser_use) */
+  /** Optional configuration for the binding (e.g. { browserId } for system browser_use; FlowToolBindingConfig for 'flow') */
   config?: Record<string, unknown>;
 }
 
@@ -3483,6 +3489,17 @@ export type AgentTriggerPatch =
   & Partial<Omit<IAgentTriggerBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
   & (AgentTriggerTypeSettings | { type?: undefined });
 
+/**
+ * Who owns a hidden agent. An owned agent is created and managed by its
+ * owner (today: a flow node) and never shows up in agent lists, pickers,
+ * portals, channels or discovery surfaces; it runs on the normal agent engine.
+ */
+export interface IAgentOwner {
+  kind: 'flow';
+  flowId: string;
+  nodeId: string;
+}
+
 export interface IAgent {
   _id?: ObjectId | string;
   tenantId: string;
@@ -3492,6 +3509,8 @@ export interface IAgent {
   description?: string;
   config: IAgentConfig;
   status: AgentStatus;
+  /** Present for a hidden agent owned by a flow node; absent for every ordinary agent. */
+  owner?: IAgentOwner;
   /** Currently published version number (null = never published) */
   publishedVersion?: number | null;
   /** Latest version number (incremented on each publish) */
@@ -3648,6 +3667,11 @@ export interface IAgentConversationMessage {
      */
     origin?: 'reminder';
     reminder?: { runId: string; message: string; setAt?: string };
+    /**
+     * FlowBase agents (`kind: 'flow'`) only: the flow run behind this reply, and what it waits for.
+     * The chat can render `wait.form` / `widgets` as UI; `content` already carries a text version of both.
+     */
+    flow?: AgentFlowReplyMeta;
   };
   /** Wall-clock time the turn took, measured server-side. */
   latencyMs?: number;

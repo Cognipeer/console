@@ -353,6 +353,33 @@ const tracingSessionResolver: BreadcrumbResolver = {
 };
 
 /**
+ * Flow runs: `/dashboard/tracing/flows/:runId`. Label is `<flow name> run`.
+ */
+const tracingFlowRunResolver: BreadcrumbResolver = {
+  id: 'custom:tracing-flow-run',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (
+      segments[0] !== 'dashboard'
+      || segments[1] !== 'tracing'
+      || segments[2] !== 'flows'
+    ) return [];
+    const runId = segments[3];
+    if (!runId) return [];
+
+    const label = await cached(ctx, `tracingFlowRun:${runId}`, async () => {
+      const body = await fetchJson<{ run?: { flowName?: string } }>(
+        `/api/flows/runs/${encodeURIComponent(runId)}`,
+      );
+      const flowName = body?.run?.flowName;
+      return flowName ? `${flowName} run` : 'Run';
+    });
+
+    return label ? [{ index: 3, label }] : [];
+  },
+};
+
+/**
  * Tracing threads: `/dashboard/tracing/threads/:id`.
  * Endpoint has no name field, so synthesize "<agent> thread" from the
  * first agent involved in the thread.
@@ -477,6 +504,7 @@ const CUSTOM_RESOLVERS: BreadcrumbResolver[] = [
   entityHealthKeyResolver,
   vectorIndexResolver,
   tracingSessionResolver,
+  tracingFlowRunResolver,
   tracingThreadResolver,
   iamResolver,
 ];

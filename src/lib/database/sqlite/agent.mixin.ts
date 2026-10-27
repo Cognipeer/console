@@ -57,9 +57,9 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       db.prepare(`
         INSERT INTO ${TABLES.agents}
         (id, tenantId, projectId, key, name, description, config, status,
-         publishedVersion, latestVersion, metadata, createdBy, updatedBy, createdAt, updatedAt)
+         publishedVersion, latestVersion, metadata, ownerFlowId, owner, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @config, @status,
-         @publishedVersion, @latestVersion, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @publishedVersion, @latestVersion, @metadata, @ownerFlowId, @owner, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: agent.tenantId,
@@ -72,6 +72,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         publishedVersion: agent.publishedVersion ?? null,
         latestVersion: agent.latestVersion ?? null,
         metadata: this.toJson(agent.metadata ?? {}),
+        ownerFlowId: agent.owner?.flowId ?? null,
+        owner: agent.owner ? this.toJson(agent.owner) : null,
         createdBy: agent.createdBy,
         updatedBy: agent.updatedBy ?? null,
         createdAt: now,
@@ -99,6 +101,11 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
+      if (data.owner !== undefined) {
+        sets.push('owner = @owner', 'ownerFlowId = @ownerFlowId');
+        params.owner = data.owner ? this.toJson(data.owner) : null;
+        params.ownerFlowId = data.owner?.flowId ?? null;
+      }
 
       db.prepare(`UPDATE ${TABLES.agents} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findAgentById(id);
@@ -128,10 +135,18 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       projectId?: string;
       status?: AgentStatus;
       search?: string;
+      owned?: 'include' | 'only';
+      ownerFlowId?: string;
     }): Promise<IAgent[]> {
       const db = this.getTenantDb();
       const conditions: string[] = [];
       const params: Record<string, unknown> = {};
+
+      // Hidden agents owned by a flow node are not part of the agents users manage unless asked for.
+      const owned = filters?.ownerFlowId !== undefined ? 'only' : filters?.owned;
+      if (owned === 'only') conditions.push('ownerFlowId IS NOT NULL');
+      else if (owned !== 'include') conditions.push('ownerFlowId IS NULL');
+      if (filters?.ownerFlowId !== undefined) { conditions.push('ownerFlowId = @ownerFlowId'); params.ownerFlowId = filters.ownerFlowId; }
 
       if (filters?.projectId !== undefined) { conditions.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { conditions.push('status = @status'); params.status = filters.status; }
@@ -145,13 +160,23 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return rows.map((r) => this.mapAgent(r));
     }
 
-    async countAgents(projectId?: string): Promise<number> {
+    async countAgents(projectId?: string, options?: { owned?: 'include' }): Promise<number> {
       const db = this.getTenantDb();
-      let sql = `SELECT COUNT(*) as cnt FROM ${TABLES.agents}`;
+      const conditions: string[] = [];
       const params: Record<string, unknown> = {};
-      if (projectId !== undefined) { sql += ' WHERE projectId = @projectId'; params.projectId = projectId; }
+      if (projectId !== undefined) { conditions.push('projectId = @projectId'); params.projectId = projectId; }
+      if (options?.owned !== 'include') conditions.push('ownerFlowId IS NULL');
+      const sql = `SELECT COUNT(*) as cnt FROM ${TABLES.agents}${conditions.length ? ` WHERE ${conditions.join(' AND ')}` : ''}`;
       const row = db.prepare(sql).get(params) as SqliteRow;
       return Number(row.cnt) || 0;
+    }
+
+    async listOwnedAgentKeys(projectId?: string): Promise<string[]> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = {};
+      let sql = `SELECT key FROM ${TABLES.agents} WHERE ownerFlowId IS NOT NULL`;
+      if (projectId !== undefined) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
+      return (db.prepare(sql).all(params) as SqliteRow[]).map((row) => String(row.key));
     }
 
     // ── Agent Version operations ─────────────────────────────────
@@ -434,12 +459,17 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       runtimeStatus?: AgentSessionRuntimeStatus;
       limit: number;
       after?: { createdAt: Date; id: string };
+      excludeAgentKeys?: string[];
       ownOnly?: { userId: string; viewableAgentKeys?: string[] };
     }): Promise<IAgentConversationListItem[]> {
       const db = this.getTenantDb();
       const conditions: string[] = ['projectId = @projectId'];
       const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
       if (filters.agentKey) { conditions.push('agentKey = @agentKey'); params.agentKey = filters.agentKey; }
+      if (filters.excludeAgentKeys?.length) {
+        const names = filters.excludeAgentKeys.map((key, i) => { params[`xKey${i}`] = key; return `@xKey${i}`; });
+        conditions.push(`agentKey NOT IN (${names.join(', ')})`);
+      }
       if (filters.ownOnly) {
         // The caller's own sessions, and every session of the agents they may view; nothing else - an agent that
         // is not named (including one that no longer exists) shows only what the caller started.
@@ -485,6 +515,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       projectId: string;
       runtimeStatuses?: AgentSessionRuntimeStatus[];
       ids?: string[];
+      excludeAgentKeys?: string[];
       ownOnly?: { userId: string; viewableAgentKeys?: string[] };
       before?: { updatedAt: Date; id: string };
       limit: number;
@@ -493,6 +524,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (filters.runtimeStatuses?.length === 0 || filters.ids?.length === 0) return [];
       const conditions: string[] = ['projectId = @projectId'];
       const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
+      if (filters.excludeAgentKeys?.length) {
+        const names = filters.excludeAgentKeys.map((key, i) => { params[`xKey${i}`] = key; return `@xKey${i}`; });
+        conditions.push(`agentKey NOT IN (${names.join(', ')})`);
+      }
       if (filters.ids) {
         const names = filters.ids.map((id, i) => { params[`id${i}`] = id; return `@id${i}`; });
         conditions.push(`id IN (${names.join(', ')})`);
@@ -1031,6 +1066,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             ? undefined
             : Number(row.latestVersion),
         metadata: row.metadata ? this.parseJson(row.metadata, {}) : undefined,
+        ...(row.owner ? { owner: this.parseJson(row.owner, undefined as unknown as IAgent['owner']) } : {}),
         createdBy: String(row.createdBy),
         updatedBy: row.updatedBy ? String(row.updatedBy) : undefined,
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,

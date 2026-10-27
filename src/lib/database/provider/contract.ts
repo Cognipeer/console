@@ -1683,12 +1683,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   deleteAgent(id: string): Promise<boolean>;
   findAgentById(id: string): Promise<IAgent | null>;
   findAgentByKey(key: string, projectId?: string): Promise<IAgent | null>;
+  /**
+   * Lists the agents users manage. Hidden agents owned by a flow node (`owner`)
+   * are EXCLUDED unless `owned` opts in: `'include'` lists both, `'only'` just
+   * the owned ones. `ownerFlowId` narrows to one flow's agents (and implies
+   * `'only'`).
+   */
   listAgents(filters?: {
     projectId?: string;
     status?: AgentStatus;
     search?: string;
+    owned?: 'include' | 'only';
+    ownerFlowId?: string;
   }): Promise<IAgent[]>;
-  countAgents(projectId?: string): Promise<number>;
+  /** Counts the agents users manage; owned (flow-hidden) agents are excluded unless `owned: 'include'`. */
+  countAgents(projectId?: string, options?: { owned?: 'include' }): Promise<number>;
+  /** The keys of the hidden agents flows own (of one project, or all): what the session and run lists leave out. */
+  listOwnedAgentKeys(projectId?: string): Promise<string[]>;
 
   // ── Agent Version operations (tenant-specific) ──
   createAgentVersion(
@@ -1790,6 +1801,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     runtimeStatus?: AgentSessionRuntimeStatus;
     limit: number;
     after?: { createdAt: Date; id: string };
+    /** Leave out the sessions of these agents (the hidden agents a flow owns). */
+    excludeAgentKeys?: string[];
     /**
      * The caller may view other people's sessions of only some agents (`viewableAgentKeys`; none when absent):
      * a row is returned when `userId` started it or its agent is one of those; a row of any other agent - one
@@ -1810,6 +1823,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     projectId: string;
     runtimeStatuses?: AgentSessionRuntimeStatus[];
     ids?: string[];
+    /** Leave out the sessions of these agents (the hidden agents a flow owns). */
+    excludeAgentKeys?: string[];
     ownOnly?: { userId: string; viewableAgentKeys?: string[] };
     before?: { updatedAt: Date; id: string };
     limit: number;
@@ -2362,6 +2377,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     cursor?: string;
     /** Only the runs this user queued (the list of a caller who may not see other people's). */
     userId?: string;
+    /** Leave out the runs of these agents (the hidden agents a flow owns). */
+    excludeAgentKeys?: string[];
     limit?: number;
   }): Promise<IAgentRun[]>;
   /**

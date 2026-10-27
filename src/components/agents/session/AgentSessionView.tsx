@@ -149,7 +149,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig; reminders?: { enabled?: boolean } };
+    config?: AgentToolConfig & { kind?: 'native' | 'external' | 'flow'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig; reminders?: { enabled?: boolean } };
 }
 
 interface VersionOption {

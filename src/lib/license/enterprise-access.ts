@@ -166,6 +166,13 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'health',
     prefixes: ['/api/entity-health/'],
   },
+  {
+    // Flows: visual flows, FlowBase agents and flows as agent tools. Gates the admin API (/api/flows). The client
+    // prefix is listed for discoverability: bearer routes never reach this guard, so the client handlers check the
+    // license themselves.
+    module: 'flows',
+    prefixes: ['/api/flows/', '/api/client/v1/flows/'],
+  },
 ];
 
 export interface EnterpriseDenial {

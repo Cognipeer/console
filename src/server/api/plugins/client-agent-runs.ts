@@ -35,6 +35,7 @@ import {
   type StartAgentRunExecution,
 } from '@/lib/services/agents/agentRunService';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { listOwnedAgentKeys } from '@/lib/services/agents/ownedAgentKeys';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
@@ -461,10 +462,13 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId: ctx.projectId,
         actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
       });
+      // The runs of a flow's hidden agents belong to the flow run that started them.
+      const hiddenAgentKeys = await listOwnedAgentKeys(ctx.tenantDbName, ctx.projectId);
       const rows = await listAgentRuns(ctx.tenantDbName, {
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         excludeModes: ['sync'],
+        ...(hiddenAgentKeys.length > 0 ? { excludeAgentKeys: hiddenAgentKeys } : {}),
         ...(agentKey ? { agentKey } : {}),
         ...(text('session_id') ? { conversationId: text('session_id') } : {}),
         ...(status ? { status } : {}),

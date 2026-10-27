@@ -275,6 +275,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, eventId: 1 }, options: { name: 'idx_tenant_eventId' } },
     { key: { status: 1, createdAt: 1 }, options: { name: 'idx_status_createdAt' } },
   ],
+  // Hidden agents owned by a flow node are found by their flow (flow delete, lifecycle, the flow's agent summary).
+  agents: [{ key: { 'owner.flowId': 1 }, options: { name: 'idx_agents_owner_flow' } }],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },
@@ -375,6 +377,7 @@ export const RETENTION_AGE_INDEXES: ReadonlyArray<readonly [collection: string, 
   ['browser_sessions', 'createdAt'],
   ['crawl_results', 'createdAt'],
   ['browser_flow_runs', 'createdAt'],
+  ['flow_runs', 'createdAt'],
   ['batch_job_items', 'createdAt'],
   ['ocr_job_items', 'createdAt'],
   ['vector_migration_logs', 'createdAt'],

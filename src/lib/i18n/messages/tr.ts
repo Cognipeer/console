@@ -17,6 +17,7 @@ import { alertsTr, incidentsTr } from './alerts.tr';
 import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
+import { flowsTr } from './flows.tr';
 import { filesBucketTr } from './filesBucket.tr';
 import { filesCommonTr } from './filesCommon.tr';
 import { filesCreateTr } from './filesCreate.tr';
@@ -1116,6 +1117,7 @@ export const tr: typeof en = {
       resources: 'Kaynak Kaydı',
       iam: 'Yetki Motoru',
       webhooks: 'Webhook’lar',
+      flows: 'Akışlar',
     },
     action: {
       group: {
@@ -1274,6 +1276,7 @@ export const tr: typeof en = {
   incidents: incidentsTr,
   tracingHealth: tracingHealthTr,
   entityHealth: entityHealthTr,
+  flows: flowsTr,
   agentTemplates: agentTemplatesTr,
   healthDigest: healthDigestTr,
   consoleIdentity: consoleIdentityTr,
@@ -1695,6 +1698,8 @@ export const tr: typeof en = {
     agentSessions: 'Oturumlar',
     agentSessionsActive: 'Aktif',
     agentSessionsAll: 'Tümü',
+    flowRuns: 'Akış çalıştırmaları',
+    flowRunsDescription: 'Projedeki akışların tüm çalıştırmaları: testler, ajan çağrıları, API ve zamanlamalar',
     entityHealth: 'Sağlık',
     entityHealthDescription: 'Ajanların, modellerin, bilgi tabanlarının, MCP sunucularının ve araçların sağlığı',
     evaluations: 'Değerlendirme',
@@ -2627,6 +2632,7 @@ export const tr: typeof en = {
     automations: 'Arka plan işleri',
     iam: 'IAM merkezi',
     health: 'Sağlık',
+    flows: 'Akışlar',
     healthAgent: 'Ajanlar',
     healthModel: 'Modeller',
     healthKb: 'Bilgi tabanları',
@@ -2812,6 +2818,8 @@ export const tr: typeof en = {
     createAgentDesc: 'Modellerinizle çalışan yerel bir agent oluşturun',
     connectAgentDesc: 'A2A veya OpenAI uyumlu API’lerle harici bir agent bağlayın',
     connectedBadge: 'Bağlı',
+    kindSmart: 'Akıllı Ajan',
+    kindConnected: 'Bağlı',
     notFound: 'Agent bulunamadı',
     // Bir kod bloğunun kopyala düğmesi (CopyableCode: Kullanım sekmesi ile A2A bölümü ortak kullanır).
     copy: 'Kopyala',

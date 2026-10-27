@@ -72,6 +72,8 @@ tags:
     description: Model Context Protocol servers (execute, SSE, message transports)
   - name: Browser
     description: Managed browser automation sessions and actions
+  - name: Flows
+    description: Visual flows and their runs - list flows, start a run, inspect, cancel, resume and approve
   - name: Automations
     description: Scheduled and triggered automation workflows
   - name: Crawler
@@ -4627,6 +4629,537 @@ paths:
                 $ref: "#/components/schemas/BrowserSnapshotResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows:
+    get:
+      tags:
+        - Flows
+      summary: List flows
+      description: Lists the project's flows, newest edit first. Needs `read` on the `flows` service. Members hold `read` by default.
+      operationId: listFlows
+      parameters:
+        - name: agentKey
+          in: query
+          required: false
+          description: Only flows that belong to this agent.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - active
+              - archived
+        - name: search
+          in: query
+          required: false
+          description: Case-insensitive match on name, key and description.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: A page of flows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Flow"
+                  total:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/runs:
+    get:
+      tags:
+        - Flows
+      summary: List flow runs
+      description: Lists runs of the project's flows, newest first. A caller with only `read` on `flows` gets run summaries without `input` and `output`; `write` returns them.
+      operationId: listFlowRuns
+      parameters:
+        - name: flowId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: agentKey
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - queued
+              - running
+              - waiting
+              - succeeded
+              - failed
+              - canceled
+        - name: trigger
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - manual
+              - test
+              - api
+              - agent_tool
+              - agent_conversation
+              - webhook
+              - schedule
+              - subflow
+              - import
+        - name: since
+          in: query
+          required: false
+          description: ISO 8601 timestamp; only runs created at or after it.
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: ISO 8601 timestamp; only runs created before it.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: A page of runs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FlowRun"
+                  total:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/runs/{runId}:
+    get:
+      tags:
+        - Flows
+      summary: Get a flow run
+      description: Returns one run. With `steps=1` it also returns the step records with their input and output (truncated at 256 KB each); that needs `write` on `flows`.
+      operationId: getFlowRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: steps
+          in: query
+          required: false
+          description: "`1` or `true` includes the step records."
+          schema:
+            type: string
+            enum:
+              - "1"
+              - "true"
+              - "0"
+              - "false"
+      responses:
+        "200":
+          description: The run, and its steps when requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run:
+                    $ref: "#/components/schemas/FlowRun"
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/runs/{runId}/events:
+    get:
+      tags:
+        - Flows
+      summary: List the events of a flow run
+      description: Returns the run's events in order (`seq` ascending), for example the messages a conversation flow emitted. Needs `write` on `flows`.
+      operationId: listFlowRunEvents
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: after
+          in: query
+          required: false
+          description: Only events with a `seq` greater than this.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        "200":
+          description: Events of the run.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        seq:
+                          type: integer
+                        type:
+                          type: string
+                        at:
+                          type: string
+                          format: date-time
+                        data:
+                          type: object
+                          additionalProperties: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/runs/{runId}/cancel:
+    post:
+      tags:
+        - Flows
+      summary: Cancel a flow run
+      description: Cancels a queued, running or waiting run. Needs `write` on `flows`.
+      operationId: cancelFlowRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The canceled run.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run:
+                    $ref: "#/components/schemas/FlowRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/runs/{runId}/resume:
+    post:
+      tags:
+        - Flows
+      summary: Resume a waiting flow run
+      description: |-
+        Answers a run that waits for input or a form (`payload` is `{ "message": "..." }` or `{ "values": { ... } }`), or skips a delay (`payload` omitted). Needs `write` on `flows`. Answers 202 while the run keeps going after `waitMs`. A run in an `agent_action` wait is answered on the agent's session, not here: this call is refused with 409 while the agent still waits, and only nudges the run once the agent has been answered.
+      operationId: resumeFlowRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                payload:
+                  type: object
+                  additionalProperties: true
+                waitMs:
+                  type: integer
+                  minimum: 0
+                  maximum: 120000
+                  description: How long to wait for the run to settle before answering.
+      responses:
+        "200":
+          description: The run settled (finished or waits again).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowRunResult"
+        "202":
+          description: The run is still working.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowRunResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/runs/{runId}/approval:
+    post:
+      tags:
+        - Flows
+      summary: Decide a flow approval
+      description: Approves or rejects a run that waits at a human approval step. The step's approver list decides who may; without one, a holder of `admin` on `flows`. A step that requires a distinct approver refuses the person who started the run. The call itself needs `read` on `flows`; the approver rule above is what authorizes the decision.
+      operationId: decideFlowApproval
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - decision
+              properties:
+                decision:
+                  type: string
+                  enum:
+                    - approved
+                    - rejected
+                comment:
+                  type: string
+                  maxLength: 2000
+      responses:
+        "200":
+          description: The decision was recorded and the run settled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowRunResult"
+        "202":
+          description: The decision was recorded; the run is still working.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowRunResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/{idOrKey}:
+    get:
+      tags:
+        - Flows
+      summary: Get a flow
+      description: Returns one flow by id or key, with its draft definition. Needs `read` on `flows`.
+      operationId: getFlow
+      parameters:
+        - name: idOrKey
+          in: path
+          required: true
+          description: The flow id or key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The flow.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flow:
+                    allOf:
+                      - $ref: "#/components/schemas/Flow"
+                      - type: object
+                        properties:
+                          draft:
+                            type: object
+                            additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /flows/{idOrKey}/runs:
+    post:
+      tags:
+        - Flows
+      summary: Start a flow run
+      description: |-
+        Starts a run of the published version (default), a numbered version or the draft, and waits up to `waitMs` for it to settle. Needs `write` on `flows`.
+
+        A run that fails is still a successful request: the failure is in `run.status` and `run.error`. The call answers `200` when the run settled (finished or is waiting for a person) and `202` when it keeps working after `waitMs`; poll `GET /flows/runs/{runId}`. A repeated `Idempotency-Key` (header or `idempotencyKey`) returns the earlier run.
+      operationId: startFlowRun
+      parameters:
+        - name: idOrKey
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input:
+                  type: object
+                  additionalProperties: true
+                  description: Values for the flow's declared inputs.
+                version:
+                  description: "`published` (default), `draft` or a version number."
+                  oneOf:
+                    - type: string
+                      enum:
+                        - draft
+                        - published
+                    - type: integer
+                      minimum: 1
+                waitMs:
+                  type: integer
+                  minimum: 0
+                  maximum: 120000
+                idempotencyKey:
+                  type: string
+                  maxLength: 255
+                unattended:
+                  type: boolean
+                  description: No person can answer this run's approvals or questions.
+                chatId:
+                  type: string
+                  pattern: "^[A-Za-z0-9_-]{1,100}$"
+                  description: >-
+                    The caller's chat this run is one message of. Agent steps set to remember the whole chat
+                    (the default) continue the same agent conversation across the runs of a chat. Scoped to the
+                    caller: two callers never share a chat.
+            example:
+              input:
+                customer: acme
+              waitMs: 30000
+      responses:
+        "200":
+          description: The run settled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowRunResult"
+        "202":
+          description: The run is still working.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowRunResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
   /budgets:
@@ -29990,6 +30523,124 @@ components:
           format: date-time
           description: '`alert.resolved` only.'
       required: [ruleId, ruleName, metric, entityType, entityKey, value, threshold, baseline, severity, incidentId, firedAt]
+    Flow:
+      type: object
+      description: A flow (summary). `draft` is added by the single-flow endpoint.
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - archived
+        surface:
+          type: string
+          enum:
+            - headless
+            - conversation
+        agentKey:
+          type: string
+        revision:
+          type: integer
+        publishedVersion:
+          type: integer
+        publishedAt:
+          type: string
+          format: date-time
+        tags:
+          type: array
+          items:
+            type: string
+        inputs:
+          type: array
+          description: The declared inputs of the draft.
+          items:
+            type: object
+            additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    FlowRun:
+      type: object
+      description: One run of a flow. `input` and `output` are omitted for callers that hold only `read` on `flows`.
+      properties:
+        id:
+          type: string
+        flowId:
+          type: string
+        flowKey:
+          type: string
+        flowName:
+          type: string
+        flowVersion:
+          type: integer
+          nullable: true
+          description: The published version that ran, or null for a draft run.
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - waiting
+            - succeeded
+            - failed
+            - canceled
+        failureReason:
+          type: string
+        error:
+          type: object
+          additionalProperties: true
+        trigger:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+        output:
+          type: object
+          additionalProperties: true
+        agentKey:
+          type: string
+        sessionId:
+          type: string
+        conversationId:
+          type: string
+        wait:
+          type: object
+          additionalProperties: true
+          description: |-
+            What a waiting run waits for: `kind` is `delay`, `approval`, `input`, `form`, `subflow` or `agent_action`.
+            An `agent_action` wait means a step's agent paused for a tool approval or a question and a person attends the run (a test run from the editor, a manual run): `data` is `{ agentId, agentKey, agentName, sessionId, runId, actions: [{ id, kind: tool_approval | question, toolName?, args?, question? }] }` and `timeoutAt` is when the step gives up (it then fails with `agent_action_timeout`). The person answers the agent on its session; the flow continues by itself. A run nobody attends (an API, schedule or webhook start) does not wait: the step fails with `agent_requires_action`.
+        stepCount:
+          type: integer
+        durationMs:
+          type: integer
+        queuedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    FlowRunResult:
+      type: object
+      properties:
+        run:
+          $ref: "#/components/schemas/FlowRun"
+        settled:
+          type: boolean
+          description: True when the run finished or waits for a person; false while it keeps working.
   responses:
     AegisRemoved:
       description: "Gone — the Aegis enforcement plane has been removed. The body names the replacement path when there is one; a `Link` header with `rel=\"successor-version\"` repeats it."

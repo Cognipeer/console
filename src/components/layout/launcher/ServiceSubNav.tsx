@@ -45,6 +45,7 @@ import {
   IconChartHistogram,
   IconStethoscope,
   IconRobot,
+  IconRoute,
   IconPhoto,
   IconScan,
   IconShieldCheck,
@@ -342,6 +343,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
           !p.startsWith('/dashboard/tracing/health') &&
           !p.startsWith('/dashboard/tracing/sessions') &&
           !p.startsWith('/dashboard/tracing/threads') &&
+          !p.startsWith('/dashboard/tracing/flows') &&
           !p.startsWith('/dashboard/tracing/agents')),
     },
     {
@@ -373,6 +375,16 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/tracing/agents',
       icon: IconRobot,
       matcher: (p) => p.startsWith('/dashboard/tracing/agents'),
+    },
+    {
+      // Runs of every flow (test runs, agent calls, API, schedules). Hidden without `flows` access.
+      id: 'flow-runs',
+      label: 'Flow runs',
+      labelKey: 'flowRuns',
+      href: '/dashboard/tracing/flows',
+      icon: IconRoute,
+      matcher: (p) => p.startsWith('/dashboard/tracing/flows'),
+      requiresService: 'flows',
     },
   ],
   cost: [

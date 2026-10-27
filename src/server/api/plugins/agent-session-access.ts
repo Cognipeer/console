@@ -57,6 +57,7 @@ import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import {
   authorizationRefusalOf,
   authorizeResourceForRequest,
+  authorizeServiceForRequest,
   refreshRequestPrincipal,
   requireProjectContextForRequest,
   resourceRefusalError,
@@ -100,8 +101,8 @@ export interface LoadSessionOptions {
   need: SessionNeed;
   /** The session must belong to this agent (the dashboard routes name one). */
   agentKey?: string;
-  /** The agent, when the caller has it: saves the lookup of its registry id. */
-  agent?: Pick<IAgent, '_id' | 'key'> | null;
+  /** The agent, when the caller has it: saves the lookup of its registry id (and says whether a flow owns it). */
+  agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
   /** The project the session must belong to. Default: the one the request runs in. */
   projectId?: string;
   /** People besides the session's creator who count as its owner (the person whose turn raised a request). */
@@ -150,8 +151,29 @@ async function agentIdOf(
   conversation: Pick<IAgentConversation, 'agentKey' | 'projectId'>,
   known: LoadSessionOptions['agent'],
 ): Promise<string> {
-  const agent = known !== undefined ? known : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
+  const agent = known !== undefined ? known : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
   return agent?._id ? String(agent._id) : conversation.agentKey;
+}
+
+/**
+ * A session of a hidden agent a flow owns follows the FLOW: `flows` read to view it, `flows` write to change or
+ * continue it (nobody is "another person's session" there). Null for an ordinary agent.
+ */
+async function decideOwnedSessionAccess(
+  request: FastifyRequest,
+  need: SessionNeed,
+  actor: SessionActor,
+): Promise<SessionDecision> {
+  const level = need === 'view' ? 'read' : 'write';
+  const result = await authorizeServiceForRequest(request, 'flows', { level });
+  if (result.allowed) return { ok: true, userId: actor.userId, owner: false };
+  return {
+    ok: false,
+    status: 403,
+    reason: 'forbidden',
+    need: need === 'view' ? 'view' : 'manage',
+    ...(result.decisionId ? { decisionId: result.decisionId } : {}),
+  };
 }
 
 /** Runs one engine question; an outage (the handler-level 503) is an answer here, not an exception. */
@@ -179,7 +201,12 @@ export async function decideSessionAccess(
   // The person who started it needs nothing beyond the route's own service check.
   if (actor.userId && owners.some((id) => id === actor.userId)) return { ok: true, userId: actor.userId, owner: true };
 
-  const agentId = await agentIdOf(actor.tenantDbName, conversation, options.agent);
+  const known = options.agent !== undefined
+    ? options.agent
+    : await getAgentByKey(actor.tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
+  if (known?.owner) return decideOwnedSessionAccess(request, options.need, actor);
+
+  const agentId = await agentIdOf(actor.tenantDbName, conversation, known);
   /** One engine question; null when the answer is yes. */
   const decide = async (action: SessionAction): Promise<Exclude<SessionDecision, { ok: true }> | null> => {
     const answer = await ask(action, async () => authorizeResourceForRequest(request, {
@@ -280,7 +307,7 @@ export async function sessionStreamStillAllowed(
     await refreshRequestPrincipal(request);
     const actor = options.actor ?? await sessionActorOf(request);
     const projectId = options.projectId ?? actor.projectId;
-    if ((await serviceLevelForRequest(request, 'agents', { projectId })) === 'none') return false;
+    if ((await serviceLevelForRequest(request, options.agent?.owner ? 'flows' : 'agents', { projectId })) === 'none') return false;
     const loaded = await loadSessionForPrincipal(request, conversationId, { ...options, actor, projectId, need: 'view' });
     return loaded.ok;
   } catch {
@@ -394,10 +421,12 @@ export interface SessionListScope {
  */
 export async function sessionListScope(
   request: FastifyRequest,
-  input: { agent?: Pick<IAgent, '_id' | 'key'> | null; projectId?: string; actor?: SessionActor },
+  input: { agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null; projectId?: string; actor?: SessionActor },
 ): Promise<SessionListScope> {
   const actor = input.actor ?? await sessionActorOf(request);
   const projectId = input.projectId ?? actor.projectId;
+  // A hidden agent a flow owns: whoever may read the flow (the route asked) sees all its sessions.
+  if (input.agent?.owner) return { userId: actor.userId };
   if (input.agent) {
     return await canViewOthersSessions(request, { agent: input.agent, projectId, actor })
       ? { userId: actor.userId }

@@ -1757,6 +1757,8 @@ export const TENANT_SCHEMA_SQL = `
     metadata TEXT DEFAULT '{}',
     publishedVersion INTEGER,
     latestVersion INTEGER,
+    owner TEXT,
+    ownerFlowId TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,

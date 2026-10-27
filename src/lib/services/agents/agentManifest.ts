@@ -265,6 +265,14 @@ export function validateAgentManifest(input: unknown): string[] {
     if (kind === 'external' && !spec.connection?.url) {
         issues.push('spec.connection.url is required for connected agents');
     }
+    // A flow is referenced by id/key of this tenant's Flows service and is not part of the manifest, so
+    // a FlowBase agent or a flow tool would arrive pointing at nothing. Move flows with Flow export/import.
+    if (kind === 'flow') {
+        issues.push('spec.kind "flow" (FlowBase agents) cannot be imported: export the flow and its agent separately');
+    }
+    (spec.toolBindings ?? []).forEach((binding, index) => {
+        if (binding?.source === 'flow') issues.push(`spec.toolBindings[${index}]: flow tools cannot be imported (flows are not part of an agent manifest)`);
+    });
 
     const names = new Set<string>();
     for (const subagent of spec.subagents ?? []) {

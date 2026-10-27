@@ -19,6 +19,9 @@ describe('enterpriseModuleForPath', () => {
   it('covers the enterprise pages that live outside their service', () => {
     expect(enterpriseModuleForPath('/dashboard/abacus')).toBe('cost');
     expect(enterpriseModuleForPath('/dashboard/abacus/parity')).toBe('cost');
+    expect(enterpriseModuleForPath('/dashboard/tracing/flows')).toBe('flows');
+    expect(enterpriseModuleForPath('/dashboard/tracing/flows/run-1')).toBe('flows');
+    expect(enterpriseModuleForPath('/dashboard/tracing/sessions')).toBeUndefined();
   });
 
   it('leaves community pages and look-alike paths alone', () => {

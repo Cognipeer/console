@@ -28,6 +28,7 @@ import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import { buildMongoConversationSearchCondition, findConversationSearchMatch, normalizeConversationSearch } from '../provider/conversationSearch';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { definedFields } from './definedFields';
 
 /** A conversation as the rest of the app sees it: without the internal turn-owner marker. */
 function withoutTurnOwner<T extends object>(conversation: T): Omit<T, 'runtimeTurnId'> {
@@ -45,7 +46,9 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     ): Promise<IAgent> {
       const db = this.getTenantDb();
       const now = new Date();
-      const doc = { ...agent, createdAt: now, updatedAt: now };
+      // `owner: undefined` would be stored as null; an ordinary agent simply has no `owner` field.
+      const { owner, ...rest } = agent;
+      const doc = { ...rest, ...(owner ? { owner } : {}), createdAt: now, updatedAt: now };
       const result = await db
         .collection(COLLECTIONS.agents)
         .insertOne(doc);
@@ -57,8 +60,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       data: Partial<Omit<IAgent, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IAgent | null> {
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
+      const updateData: Record<string, unknown> = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IAgent>(COLLECTIONS.agents)
         .findOneAndUpdate(
@@ -102,9 +104,16 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       projectId?: string;
       status?: AgentStatus;
       search?: string;
+      owned?: 'include' | 'only';
+      ownerFlowId?: string;
     }): Promise<IAgent[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = {};
+      // Hidden agents owned by a flow node are not part of the agents users manage unless asked for.
+      const owned = filters?.ownerFlowId !== undefined ? 'only' : filters?.owned;
+      if (filters?.ownerFlowId !== undefined) filter['owner.flowId'] = filters.ownerFlowId;
+      else if (owned === 'only') filter['owner.flowId'] = { $exists: true, $ne: null };
+      else if (owned !== 'include') filter.owner = null;
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.status) filter.status = filters.status;
       if (filters?.search) {
@@ -123,11 +132,20 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgent[];
     }
 
-    async countAgents(projectId?: string): Promise<number> {
+    async countAgents(projectId?: string, options?: { owned?: 'include' }): Promise<number> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = {};
       if (projectId !== undefined) filter.projectId = projectId;
+      if (options?.owned !== 'include') filter.owner = null;
       return db.collection(COLLECTIONS.agents).countDocuments(filter);
+    }
+
+    async listOwnedAgentKeys(projectId?: string): Promise<string[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { 'owner.flowId': { $exists: true, $ne: null } };
+      if (projectId !== undefined) filter.projectId = projectId;
+      const docs = await db.collection(COLLECTIONS.agents).find(filter, { projection: { key: 1 } }).toArray();
+      return docs.map((doc) => String(doc.key));
     }
 
     // ── Agent Version operations ───────────────────────────────
@@ -394,11 +412,18 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       runtimeStatus?: AgentSessionRuntimeStatus;
       limit: number;
       after?: { createdAt: Date; id: string };
+      excludeAgentKeys?: string[];
       ownOnly?: { userId: string; viewableAgentKeys?: string[] };
     }): Promise<IAgentConversationListItem[]> {
       const db = this.getTenantDb();
       const match: Record<string, unknown> = { projectId: filters.projectId };
       if (filters.agentKey) match.agentKey = filters.agentKey;
+      if (filters.excludeAgentKeys?.length) {
+        // With a named agent too: `agentKey` is one condition on one field.
+        match.agentKey = filters.agentKey
+          ? { $eq: filters.agentKey, $nin: filters.excludeAgentKeys }
+          : { $nin: filters.excludeAgentKeys };
+      }
       if (filters.ownOnly) {
         // The caller's own sessions, and every session of the agents they may view; nothing else - an agent that
         // is not named (including one that no longer exists) shows only what the caller started.
@@ -436,11 +461,13 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       projectId: string;
       runtimeStatuses?: AgentSessionRuntimeStatus[];
       ids?: string[];
+      excludeAgentKeys?: string[];
       ownOnly?: { userId: string; viewableAgentKeys?: string[] };
       before?: { updatedAt: Date; id: string };
       limit: number;
     }): Promise<IAgentConversationActivityRow[]> {
       const match: Record<string, unknown> = { projectId: filters.projectId };
+      if (filters.excludeAgentKeys?.length) match.agentKey = { $nin: filters.excludeAgentKeys };
       // Narrowing lists that cannot match anything need no query.
       if (filters.runtimeStatuses?.length === 0 || filters.ids?.length === 0) return [];
       if (filters.ids) {

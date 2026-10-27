@@ -807,7 +807,18 @@ export function generateAgentProject(
         );
     }
 
+    if (config.kind === 'flow') {
+        warnings.push(
+            'This is a FlowBase agent: a flow in the console answers each turn, there is no model loop to export. The generated project is a shell with no standalone equivalent of the flow.',
+        );
+    }
+
     const bindings = config.toolBindings ?? [];
+    if (bindings.some((b) => b.source === 'flow')) {
+        warnings.push(
+            'Flow tools run on the console Flows engine and have no standalone equivalent; they are left out of the generated project.',
+        );
+    }
     const hasTools = bindings.some((b) => b.source === 'tool' || b.source === 'mcp');
     const hasSystemTools = bindings.some((b) => b.source === 'system');
     const hasKnowledge = Boolean(config.knowledgeEngineKey);

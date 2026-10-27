@@ -24,7 +24,7 @@ export interface TraceSessionRef {
 
 export interface TraceSessionLookups {
     getConversationById: (tenantDbName: string, conversationId: string) => Promise<IAgentConversation | null>;
-    getAgentByKey: (tenantDbName: string, key: string, projectId?: string) => Promise<IAgent | null>;
+    getAgentByKey: (tenantDbName: string, key: string, projectId?: string, options?: { includeOwned?: boolean }) => Promise<IAgent | null>;
 }
 
 /**
@@ -45,7 +45,7 @@ export async function resolveTraceSession(
     }
     if (!conversation || conversation.projectId !== input.projectId) return null;
 
-    const agent = await lookups.getAgentByKey(input.tenantDbName, conversation.agentKey, input.projectId);
+    const agent = await lookups.getAgentByKey(input.tenantDbName, conversation.agentKey, input.projectId, { includeOwned: true });
     if (!agent) return null;
     return { agentId: String(agent._id), sessionId: String(conversation._id) };
 }

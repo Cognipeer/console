@@ -7,6 +7,7 @@ import {
   type ApplyAgentDocumentImportInput,
 } from '@/lib/services/agents/import/importService';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { authz } from '@/lib/iam/routeAuthz';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentConversationActivityRow, IAgentConversationMessageTally, IAgentRun, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -137,6 +138,9 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 import { BucketNamingForbiddenError } from '@/lib/services/agents/attachmentsBucketAccess';
+import { guardAgentAccess, OWNED_BY_FLOW_BODY, type AgentAccessOptions } from './agent-owned-access';
+import { isOwnedAgent } from '@/lib/utils/ownedAgents';
+import { getFlowsHost } from '@/enterprise/flows';
 import {
   applyConfigGuardrailBindings,
   bucketNamingForbiddenBody,
@@ -194,7 +198,7 @@ async function agentInProjectScope(
  * The caller's project context plus the agent `:agentId` names, or null —
  * with the 404 already sent — when it is missing or out of scope.
  */
-export async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) {
+export async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply, options: AgentAccessOptions = {}) {
   const context = await requireProjectContextForRequest(request);
   const { agentId } = request.params as { agentId: string };
   const agent = await agentInProjectScope(context.session.tenantDbName, agentId, context.projectId, context.user);
@@ -202,8 +206,15 @@ export async function requireScopedAgent(request: FastifyRequest, reply: Fastify
     void reply.code(404).send({ error: 'Agent not found' });
     return null;
   }
+  // A hidden agent owned by a flow is governed by the flow's service, not `agents` (agent-owned-access.ts).
+  if (!await guardAgentAccess(request, reply, agent, {
+    tenantDbName: context.session.tenantDbName, tenantId: context.session.tenantId, projectId: context.projectId,
+  }, options)) return null;
   return { ...context, agentId, agent };
 }
+
+/** The routes under an agent: open to a holder of `agents`, or of `flows` for an agent a flow owns (agent-owned-access.ts). */
+const AGENT_SCOPED = { config: authz.serviceAnyOf(['agents', 'flows']) };
 
 /**
  * `requireScopedAgent` plus the session `:sessionId` names - scoped to this
@@ -220,9 +231,9 @@ export async function requireScopedAgent(request: FastifyRequest, reply: Fastify
 export async function requireScopedSession(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { need: SessionNeed | 'none' },
+  options: { need: SessionNeed | 'none' } & AgentAccessOptions,
 ) {
-  const scoped = await requireScopedAgent(request, reply);
+  const scoped = await requireScopedAgent(request, reply, { owned: options.owned });
   if (!scoped) return null;
   const { sessionId } = request.params as { sessionId: string };
   if (options.need === 'none') {
@@ -465,6 +476,7 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
     void reply.code(404).send({ error: 'Agent not found' });
     return null;
   }
+  if (!await guardAgentAccess(request, reply, agent, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId })) return null;
   // Continuing a session somebody else started is acting on it: the owner always may, anybody else needs
   // `agent.session_manage_others` and `agent.session_view_others` (the reply is built from what the session holds).
   // Asked first, so a refusal does not reveal whether the session is read-only.
@@ -854,7 +866,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       // form said otherwise. Stored explicitly so it shows (and can be changed)
       // in Configure → Approvals & questions. The client API's create route does
       // not do this: an API-created agent keeps running unattended.
-      if (prepared.config.kind !== 'external' && prepared.config.humanInTheLoop === undefined) {
+      if (prepared.config.kind !== 'external' && prepared.config.kind !== 'flow' && prepared.config.humanInTheLoop === undefined) {
         prepared.config.humanInTheLoop = structuredClone(DASHBOARD_AGENT_HITL_DEFAULTS);
       }
 
@@ -876,7 +888,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -890,7 +902,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/agents/:agentId', withApiRequestContext(async (request, reply) => {
+  app.patch('/agents/:agentId', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -899,6 +911,20 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const invalidStatus = invalidAgentStatusBody(body);
       if (invalidStatus) return reply.code(400).send(invalidStatus);
       let warnings: AgentConfigIssue[] = [];
+      if (isOwnedAgent(existing)) {
+        // The owner never changes, and an owned agent stays a plain native agent that is not exposed anywhere.
+        if (body.owner !== undefined) {
+          return reply.code(400).send({ error: 'The owner of an agent cannot be changed', type: 'owner_immutable', code: 'owner_immutable' });
+        }
+        const config = body.config as Record<string, unknown> | undefined;
+        if (config && typeof config === 'object' && config.kind !== undefined && config.kind !== 'native') {
+          return reply.code(400).send({ error: 'An agent inside a flow must be a native agent', type: 'invalid_request', code: 'invalid_kind' });
+        }
+        const metadata = body.metadata as Record<string, unknown> | undefined;
+        if (metadata && typeof metadata === 'object' && metadata.a2a !== undefined) {
+          return reply.code(400).send({ error: 'An agent inside a flow cannot be exposed over A2A', type: 'invalid_request', code: 'a2a_not_allowed' });
+        }
+      }
 
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;
@@ -925,6 +951,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         } else if (existing.config?.kind === 'external') {
           // Guard: never let a native-shaped config silently clobber a stored
           // connected agent's connection (e.g. a stray playground auto-save).
+          delete body.config;
+        } else if (existing.config?.kind === 'flow' && cfg.kind !== 'flow') {
+          // Same guard for a FlowBase agent: a native-shaped save must not drop its flow.
           delete body.config;
         } else {
           const checked = await validateNativeConfigUpdate(cfg, existing.key, {
@@ -956,9 +985,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/agents/:agentId', withApiRequestContext(async (request, reply) => {
+  app.delete('/agents/:agentId', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedAgent(request, reply);
+      // An owned agent is deleted only with its flow.
+      const scoped = await requireScopedAgent(request, reply, { owned: 'refuse' });
       if (!scoped) return reply;
       const deleted = await deleteAgentRecord(scoped.session.tenantDbName, scoped.agentId);
 
@@ -972,7 +1002,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/versions', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/versions', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1040,9 +1070,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // ── Manifest export / import ───────────────────────────────────────────
 
-  app.get('/agents/:agentId/export', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/export', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedAgent(request, reply);
+      const scoped = await requireScopedAgent(request, reply, { owned: 'refuse' });
       if (!scoped) return reply;
       const { agent, agentId, projectId, session } = scoped;
       const query = (request.query ?? {}) as { format?: string; version?: string; download?: string; include?: string };
@@ -1245,6 +1275,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
       if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      if (agent.owner) return reply.code(409).send(OWNED_BY_FLOW_BODY);
 
       const target = body?.target ?? 'server';
       if (!['cli', 'server', 'worker', 'lambda'].includes(target)) {
@@ -1301,6 +1332,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         // route cannot confirm that another project's agent exists.
         throw new Error(`Agent "${agentId}" not found`);
       }
+      // An owned agent is published with its flow (flowService.publishFlow), never on its own.
+      if (scoped.owner) return reply.code(409).send(OWNED_BY_FLOW_BODY);
       const published = await publishValidatedAgent(
         request,
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
@@ -1381,7 +1414,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // Background runs of one agent, newest first (Sessions → Background runs).
-  app.get('/agents/:agentId/runs', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/runs', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1426,7 +1459,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/agents/:agentId/runs/:runId/cancel', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/runs/:runId/cancel', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1485,7 +1518,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // A reminder that has not fired yet, started now (Sessions → Reminders "Fire now").
-  app.post('/agents/:agentId/runs/:runId/fire', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/runs/:runId/fire', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1521,7 +1554,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // The reminders the agent set itself, newest first (Sessions → Reminders; a session's own with `sessionId`).
-  app.get('/agents/:agentId/reminders', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/reminders', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1597,7 +1630,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * in the body (what the editor currently holds). The Configure page calls
    * this to mark broken fields before Save.
    */
-  app.post('/agents/:agentId/validate', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/validate', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1739,7 +1772,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/sessions', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1798,7 +1831,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/sessions', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -1841,7 +1874,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/sessions/:sessionId', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       // Scope check, not just existence - a session id valid for a sibling agent (or project) in the same
       // tenant must 404 here too - and the caller's right to read what somebody else started.
@@ -1877,7 +1910,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // `{ budget: { maxCostUsd, onReach } | null }` adds, changes or removes the
   // session's budget. A paused session is continued with `…/continue` (Studio
   // calls this, then that).
-  app.patch('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+  app.patch('/agents/:agentId/sessions/:sessionId', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
@@ -1908,7 +1941,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * Works for a turn started from anywhere — the playground, the API, a portal
    * — and on any node. Nothing to stop is a 200 with `cancelled: false`.
    */
-  app.post('/agents/:agentId/sessions/:sessionId/cancel', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/sessions/:sessionId/cancel', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
@@ -1944,7 +1977,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * `/chat/stream`. A refusal (402, 409, 404) is a normal JSON response either
    * way: the stream only opens once there is a turn to report.
    */
-  app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/sessions/:sessionId/continue', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
       // A turn in the session: its owner always may; anybody else must be allowed to change AND to view it.
@@ -2053,7 +2086,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+  app.delete('/agents/:agentId/sessions/:sessionId', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       // Deleting somebody else's session is acting on it: the owner always may, anybody else needs
       // `agent.session_manage_others`.
@@ -2068,7 +2101,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // ── Session event log + pending actions ──
 
-  app.get('/agents/:agentId/sessions/:sessionId/events', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/sessions/:sessionId/events', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
@@ -2083,7 +2116,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/sessions/:sessionId/events/stream', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/sessions/:sessionId/events/stream', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
       scoped = await requireScopedSession(request, reply, { need: 'view' });
@@ -2104,7 +2137,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // Counts and reasons are for everyone who can read agents; the words people wrote (and
   // who wrote them) only for those who can change them (`canReadComments` says which).
 
-  app.get('/agents/:agentId/sessions/:sessionId/feedback', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/sessions/:sessionId/feedback', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
@@ -2128,7 +2161,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/feedback', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/feedback', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -2156,7 +2189,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/feedback/summary', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/feedback/summary', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -2170,7 +2203,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/sessions/:sessionId/actions', withApiRequestContext(async (request, reply) => {
+  app.get('/agents/:agentId/sessions/:sessionId/actions', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
@@ -2204,7 +2237,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * A refusal (404, 403, 409, 410, 400) is a normal JSON response either way:
    * the stream only opens once there is a continuation to report.
    */
-  app.post('/agents/:agentId/sessions/:sessionId/actions/:actionId/resolve', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/sessions/:sessionId/actions/:actionId/resolve', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
       // Who may answer is asked below, of the request itself: `agent.approve` for a tool approval, the session's
@@ -2306,6 +2339,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(200).send({ status: 'requires_action', pendingActions: outcome.pendingActions });
       }
       if (outcome.kind === 'resumed') {
+        // A flow step waiting on this agent's answer continues now (the sweeper would find it within a minute).
+        if (isOwnedAgent(scoped.agent)) {
+          await getFlowsHost()?.wakeAgentActionWaits(
+            { tenantDbName: scoped.session.tenantDbName, tenantId: scoped.session.tenantId, projectId: scoped.projectId },
+            { flowId: scoped.agent.owner.flowId, sessionId: conversationId },
+          ).catch((error) => logger.warn('Could not wake the flow run waiting on the agent', { error: error instanceof Error ? error.message : String(error) }));
+        }
         if (wantsStream) {
           startStream();
           send('result', outcome.result);
@@ -2360,7 +2400,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * runs here instead, which is the right trade for a dashboard-only debug
    * surface and the reason this is not the path production traffic takes.
    */
-  app.post('/agents/:agentId/chat/stream', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/chat/stream', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     const turn = await prepareDashboardTurn(request, reply);
     if (!turn) return reply;
 
@@ -2469,7 +2509,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     return reply;
   }));
 
-  app.post('/agents/:agentId/chat', withApiRequestContext(async (request, reply) => {
+  app.post('/agents/:agentId/chat', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
     try {
       const turn = await prepareDashboardTurn(request, reply);
       if (!turn) return reply;

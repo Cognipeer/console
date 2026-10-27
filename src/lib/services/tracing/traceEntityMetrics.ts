@@ -420,7 +420,7 @@ export interface RecordAgentSessionOutcomeParams {
   session: Pick<
     IAgentTracingSession,
     'sessionId' | 'agentName' | 'status' | 'durationMs' | 'endedAt' | 'totalInputTokens' | 'totalOutputTokens'
-  >;
+  > & Partial<Pick<IAgentTracingSession, 'metadata'>>;
   /** Outcome the caller read earlier; the stored one is re-read under a per-session lock and wins. */
   previousOutcome?: IAgentTracingSession['metricsOutcome'];
   source: TraceMetricsSource;
@@ -550,11 +550,14 @@ export async function recordAgentSessionOutcome(
   try {
     const agentKey = params.session.agentName?.trim();
     if (!agentKey || !isTerminalSessionStatus(params.session.status)) return null;
+    // A hidden agent a flow owns is not an agent of its own: the flow's runs carry its health.
+    if (params.session.metadata?.flowOwned === 'true') return null;
 
     const lockKey = `${params.tenantDbName}\u0001${params.projectId ?? ''}\u0001${params.session.sessionId}`;
     return await withOutcomeLock(lockKey, async () => {
       const stored = await runWithTenantScope(params.tenantDbName, (db) =>
         db.findAgentTracingSessionById(params.session.sessionId, params.projectId || undefined));
+      if (stored?.metadata?.flowOwned === 'true') return null;
       // The stored status is the truth: a concurrent event may have flipped it after the caller read the session.
       const status = stored && isTerminalSessionStatus(stored.status)
         ? normalized(stored.status)

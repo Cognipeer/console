@@ -124,6 +124,20 @@ function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
     };
   }
 
+  if (cfg.kind === 'flow') {
+    // A FlowBase agent has no model loop: only the flow that answers each turn (and the guardrails
+    // its input and answer pass through) is stored. `validateAgentConfig` checks the flow reference.
+    const flow = (cfg.flow && typeof cfg.flow === 'object' ? cfg.flow : {}) as Record<string, unknown>;
+    return {
+      kind: 'flow',
+      flow: {
+        entryFlowId: typeof flow.entryFlowId === 'string' ? flow.entryFlowId.trim() : '',
+        ...(flow.version === 'draft' || flow.version === 'published' ? { version: flow.version } : {}),
+      },
+      ...carriedGuardrailFields(cfg),
+    };
+  }
+
   if (typeof cfg.modelKey !== 'string' || !cfg.modelKey) {
     throw new Error('Model configuration is required');
   }
@@ -403,6 +417,12 @@ export async function validateNativeConfigUpdate(
   // The config replaces the stored one wholesale, so the projected legacy
   // slots must be written on the SAME object — leaving them out would clear
   // the columns an older binary still reads.
+  if (cfg.kind === 'flow') {
+    // Rebuilt in place (the caller stores `cfg` itself): a flow agent keeps no model or tool settings.
+    const normalized = normalizeAgentConfig(cfg);
+    for (const key of Object.keys(cfg)) delete cfg[key];
+    Object.assign(cfg, normalized);
+  }
   const config = cfg as IAgentConfig;
   const bindingError = await applyConfigGuardrailBindings(config, scope.tenantDbName, scope.projectId, scope.user);
   if (bindingError) return { badRequest: { error: bindingError } };

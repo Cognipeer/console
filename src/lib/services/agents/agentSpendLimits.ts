@@ -127,7 +127,7 @@ export async function assertQueuedTurnSpendAllowed(input: {
   await db.switchToTenant(input.tenantDbName);
   const agent = await db.findAgentByKey(input.agentKey, input.projectId);
   const config = agent?.config;
-  if (!config?.modelKey || (config.kind === 'external' && config.connection)) return;
+  if (!config?.modelKey || config.kind === 'flow' || (config.kind === 'external' && config.connection)) return;
   const scope = await resolveAgentSpendScope(input);
   await assertAgentTurnSpendAllowed(scope, config);
 }

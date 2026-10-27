@@ -454,6 +454,7 @@ export type {
   IMcpHubExposureConfig,
   McpHubStatus,
   IAgent,
+  IAgentOwner,
   IAgentConfig,
   IAgentConversation,
   IAgentConversationActivityRow,

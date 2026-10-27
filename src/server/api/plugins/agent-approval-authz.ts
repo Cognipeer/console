@@ -48,7 +48,7 @@ import {
 } from '@/lib/services/agents/agentActionResolution';
 import { resolveHitlConfig, type ResolvedHitlConfig } from '@/lib/services/agents/agentHumanInTheLoop';
 import { runWithTenantDb } from '@/lib/services/agents/agentRunService';
-import { authorizationRefusalOf, authorizeResourceForRequest } from '../fastify-utils';
+import { authorizationRefusalOf, authorizeResourceForRequest, authorizeServiceForRequest } from '../fastify-utils';
 import { decideSessionAccess, sessionActorOf, type SessionActor } from './agent-session-access';
 
 interface ApprovalQuestion {
@@ -58,7 +58,7 @@ interface ApprovalQuestion {
   raisedBy?: ReadonlyArray<string | null | undefined>;
   approvers: ResolvedHitlConfig['approvers'];
   /** The agent, when the caller has it; read by key otherwise (a deleted agent is asked about by its key). */
-  agent?: Pick<IAgent, '_id' | 'key'> | null;
+  agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
   /** A "no" shapes a screen rather than refuses a request (nothing is logged or audited). */
   quiet?: boolean;
   /** The caller's identity and project, when the route already resolved them. */
@@ -70,7 +70,7 @@ async function agentResourceId(question: ApprovalQuestion): Promise<string> {
   const { conversation } = question;
   const agent = question.agent !== undefined
     ? question.agent
-    : await getAgentByKey(question.tenantDbName, conversation.agentKey, conversation.projectId);
+    : await getAgentByKey(question.tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
   return agent?._id ? String(agent._id) : conversation.agentKey;
 }
 
@@ -78,6 +78,14 @@ async function agentResourceId(question: ApprovalQuestion): Promise<string> {
 async function askToApprove(request: FastifyRequest, question: ApprovalQuestion): Promise<ApprovalVerdict & { policyIds?: string[] }> {
   const { conversation } = question;
   try {
+    // A hidden agent a flow owns is approved by whoever may change the flow (`flows` write), not by the agents rules.
+    const agent = question.agent !== undefined
+      ? question.agent
+      : await getAgentByKey(question.tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
+    if (agent?.owner) {
+      const flows = await authorizeServiceForRequest(request, 'flows', { level: 'write' });
+      return flows.allowed ? { allowed: true } : { allowed: false, ...(flows.decisionId ? { decisionId: flows.decisionId } : {}) };
+    }
     const result = await authorizeResourceForRequest(request, {
       action: 'agent.approve',
       resource: agentSessionResource({
@@ -173,7 +181,7 @@ export async function describeAnswerAbility(
     tenantDbName: string;
     conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
     actions: ReadonlyArray<Pick<IAgentPendingAction, '_id' | 'kind' | 'status' | 'createdBy' | 'agentKey' | 'projectId' | 'agentVersion'>>;
-    agent?: Pick<IAgent, '_id' | 'key'> | null;
+    agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
     /** The caller's identity and project, when the route already resolved them (saves resolving them per request). */
     actor?: SessionActor;
   },
@@ -208,7 +216,7 @@ async function abilityOf(
     conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
     action: Pick<IAgentPendingAction, 'kind' | 'createdBy'>;
     approvers: ResolvedHitlConfig['approvers'];
-    agent?: Pick<IAgent, '_id' | 'key'> | null;
+    agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
     actor?: SessionActor;
   },
 ): Promise<AnswerAbility> {
@@ -271,7 +279,7 @@ export async function authorizeEndingOpenRequests(
   input: {
     tenantDbName: string;
     conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus'>;
-    agent?: (Pick<IAgent, '_id' | 'key'> & { config?: IAgentConfig }) | null;
+    agent?: (Pick<IAgent, '_id' | 'key' | 'owner'> & { config?: IAgentConfig }) | null;
   },
 ): Promise<ApprovalVerdict> {
   const { tenantDbName, conversation } = input;
@@ -280,7 +288,7 @@ export async function authorizeEndingOpenRequests(
   if (open.length === 0) return { allowed: true };
   const agent = input.agent !== undefined
     ? input.agent
-    : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
+    : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
   return askToApprove(request, {
     tenantDbName,
     conversation,
@@ -301,7 +309,7 @@ export async function refuseCancelPending(
   input: {
     tenantDbName: string;
     conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus'> | null | undefined;
-    agent: Pick<IAgent, '_id' | 'key'> & { config?: IAgentConfig };
+    agent: Pick<IAgent, '_id' | 'key' | 'owner'> & { config?: IAgentConfig };
   },
 ): Promise<{ decisionId?: string; unavailable?: boolean } | null> {
   const { conversation, agent } = input;

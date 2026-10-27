@@ -422,12 +422,17 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       createdBefore?: Date;
       cursor?: string;
       userId?: string;
+      excludeAgentKeys?: string[];
       limit?: number;
     }): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
       const conds = ['tenantId = @tenantId', 'projectId = @projectId'];
       const params: Record<string, unknown> = { tenantId: filter.tenantId, projectId: filter.projectId };
       if (filter.agentKey) { conds.push('agentKey = @agentKey'); params.agentKey = filter.agentKey; }
+      if (filter.excludeAgentKeys?.length) {
+        const names = filter.excludeAgentKeys.map((key, i) => { params[`xKey${i}`] = key; return `@xKey${i}`; });
+        conds.push(`agentKey NOT IN (${names.join(', ')})`);
+      }
       if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
       if (filter.triggerId) { conds.push('triggerId = @triggerId'); params.triggerId = filter.triggerId; }
       if (filter.channel) { conds.push('channel = @channel'); params.channel = filter.channel; }

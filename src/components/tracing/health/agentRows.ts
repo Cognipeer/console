@@ -4,12 +4,15 @@
  */
 
 import type { HealthMetricValues } from './healthSeries';
+import { hasFlowAttribution, type TracingFlowBlock } from '../flowAttribution';
 
 export type AgentAlertPhase = 'firing' | 'pending' | null;
 export type AgentAlertSeverity = 'critical' | 'warning' | 'info';
 
 export interface AgentHealthApiRow {
   name: string;
+  /** Set on a row of an agent a flow owns: it belongs to the flow, not to the agent list (dropped defensively). */
+  flow?: TracingFlowBlock | null;
   totals: HealthMetricValues;
   previous: HealthMetricValues | null;
   spark: { requests: number[]; errorRate: (number | null)[]; p95Ms: (number | null)[] };
@@ -25,6 +28,8 @@ export type AgentAlertState = 'firing' | 'pending' | 'ok' | 'uncovered' | 'unkno
 
 export interface AgentDirectoryApiRow {
   name: string;
+  /** See {@link AgentHealthApiRow.flow}. */
+  flow?: TracingFlowBlock | null;
   sessionsCount: number;
   latestSessionAt: string | null;
   latestStatus: string | null;
@@ -73,6 +78,9 @@ export function mergeAgentRows(
   directory: AgentDirectoryApiRow[] | null,
   alertsAvailable?: boolean,
 ): AgentListRow[] {
+  // Agents a flow owns are listed under their flow (Flow runs), never as stand-alone agents.
+  health = health.filter((agent) => !hasFlowAttribution(agent));
+  directory = directory ? directory.filter((agent) => !hasFlowAttribution(agent)) : directory;
   const known = new Map((directory ?? []).map((agent) => [agent.name, agent]));
   const rows: AgentListRow[] = health.map((agent) => {
     const entry = known.get(agent.name);

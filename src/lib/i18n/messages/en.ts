@@ -8,6 +8,7 @@ import { alertsEn, incidentsEn } from './alerts.en';
 import { analyticsDashboardsEn } from './analyticsDashboards.en';
 import { directorySyncEn } from './directorySync.en';
 import { entityHealthEn } from './entityHealth.en';
+import { flowsEn } from './flows.en';
 import { filesBucketEn } from './filesBucket.en';
 import { filesCommonEn } from './filesCommon.en';
 import { filesCreateEn } from './filesCreate.en';
@@ -295,6 +296,8 @@ export const en = {
     promptsDescription: 'Templates and reusable instructions',
     agentTracing: 'Agent Observability',
     agentTracingDescription: 'Monitor sessions and runs',
+    flowRuns: 'Flow runs',
+    flowRunsDescription: 'Every run of the project’s flows: tests, agent calls, API and schedules',
     entityHealth: 'Health',
     entityHealthDescription: 'Health of agents, models, knowledge bases, MCP servers and tools',
     vector: 'Knowledge Index',
@@ -462,6 +465,7 @@ export const en = {
     overview: 'Overview',
     tracing: 'Agent Observability',
     health: 'Health',
+    flows: 'Flows',
     healthAgent: 'Agents',
     healthModel: 'Models',
     healthKb: 'Knowledge bases',
@@ -1261,6 +1265,7 @@ export const en = {
       resources: 'Resource Registry',
       iam: 'Authorization Engine',
       webhooks: 'Webhooks',
+      flows: 'Flows',
     },
     action: {
       group: {
@@ -4029,6 +4034,7 @@ export const en = {
   incidents: incidentsEn,
   tracingHealth: tracingHealthEn,
   entityHealth: entityHealthEn,
+  flows: flowsEn,
   agentTemplates: agentTemplatesEn,
   healthDigest: healthDigestEn,
   consoleIdentity: consoleIdentityEn,
@@ -4319,6 +4325,8 @@ export const en = {
     createAgentDesc: 'Build a native agent powered by your models',
     connectAgentDesc: 'Connect an external agent over a2a or OpenAI-compatible APIs',
     connectedBadge: 'Connected',
+    kindSmart: 'Smart Agent',
+    kindConnected: 'Connected',
     notFound: 'Agent not found',
     // The copy button of a code block (CopyableCode: the Usage tab and the A2A section share it).
     copy: 'Copy',

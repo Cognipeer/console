@@ -36,7 +36,7 @@ export type TitleSetting = 'off' | 'agent_model' | (string & {});
 export function resolveTitleModelKey(setting: TitleSetting | null | undefined, config: Pick<IAgentConfig, 'modelKey' | 'kind'> | undefined): string | null {
     if (!setting || setting === 'off') return null;
     if (setting === 'agent_model') {
-        return config && config.kind !== 'external' && config.modelKey ? config.modelKey : null;
+        return config && config.kind !== 'external' && config.kind !== 'flow' && config.modelKey ? config.modelKey : null;
     }
     return setting.trim() || null;
 }

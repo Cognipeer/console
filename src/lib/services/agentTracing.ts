@@ -3,6 +3,7 @@
  * Business logic for agent tracing operations
  */
 
+import { getFlowsHost } from '@/enterprise/flows';
 import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
@@ -321,6 +322,8 @@ const THREAD_SESSION_PROJECTION = {
   totalCachedInputTokens: 1,
   modelsUsed: 1,
   toolsUsed: 1,
+  // The flow tags of a session that ran under a flow (the `flow` block of the thread's sessions).
+  metadata: 1,
 } as const;
 
 const AGENT_OVERVIEW_SESSION_PROJECTION = {
@@ -350,6 +353,8 @@ const AGENT_DIRECTORY_SESSION_PROJECTION = {
   agentName: 1,
   startedAt: 1,
   status: 1,
+  // Sessions of a hidden agent a flow owns (`metadata.flowOwned`) are left out of the directory.
+  metadata: 1,
 } as const;
 
 
@@ -655,6 +660,100 @@ export interface AgentTracingAgentSummary extends AgentTracingTokenSummary {
   averageDurationMs: number;
 }
 
+/** The flow a trace session ran under (a hidden agent a flow owns, or an agent a flow step ran). */
+export interface TraceFlowRef {
+  id: string;
+  key?: string;
+  name?: string;
+  runId?: string;
+  nodeKey?: string;
+}
+
+/** The `flow` block of a trace session, read from its metadata tags (`flowId`, `flowKey`, `flowName`, `flowRunId`, `flowNodeKey`). */
+export function traceFlowOf(metadata: unknown): TraceFlowRef | undefined {
+  if (!metadata || typeof metadata !== 'object') return undefined;
+  const meta = metadata as Record<string, unknown>;
+  const text = (key: string) => (typeof meta[key] === 'string' && meta[key] ? (meta[key] as string) : undefined);
+  const id = text('flowId');
+  if (!id) return undefined;
+  return {
+    id,
+    ...(text('flowKey') ? { key: text('flowKey') } : {}),
+    ...(text('flowName') ? { name: text('flowName') } : {}),
+    ...(text('flowRunId') ? { runId: text('flowRunId') } : {}),
+    ...(text('flowNodeKey') ? { nodeKey: text('flowNodeKey') } : {}),
+  };
+}
+
+/** Is this session one of a hidden agent a flow owns? Such an agent is never listed on its own. */
+export function isFlowOwnedTrace(metadata: unknown): boolean {
+  return Boolean(metadata && typeof metadata === 'object' && (metadata as Record<string, unknown>).flowOwned === 'true');
+}
+
+/** Hidden agents of the project by display name -> their flow, so per-agent aggregates can be grouped under the flow. */
+async function ownedAgentFlows(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  tenantId: string | undefined,
+  projectId: string,
+): Promise<Map<string, { flowId: string; flowName: string }>> {
+  const index = new Map<string, { flowId: string; flowName: string }>();
+  const owned = await db.listAgents({ projectId, owned: 'only' }).catch(() => []);
+  if (owned.length === 0) return index;
+  const names = new Map<string, string>();
+  for (const agent of owned) {
+    const flowId = agent.owner?.flowId;
+    if (!flowId) continue;
+    if (!names.has(flowId)) {
+      const flow = await getFlowsHost()
+        ?.describeFlow({ tenantDbName: db.getCurrentTenantDbName() ?? '', tenantId: tenantId ?? agent.tenantId, projectId }, { id: flowId })
+        .catch(() => null);
+      names.set(flowId, flow?.name ?? flowId);
+    }
+    index.set(agent.name, { flowId, flowName: names.get(flowId)! });
+  }
+  return index;
+}
+
+/** Folds the per-agent rows of hidden agents into one `Flow: <name>` row per flow. */
+function regroupOwnedAgentRows(
+  rows: AgentTracingAgentSummary[],
+  index: Map<string, { flowId: string; flowName: string }>,
+): Array<AgentTracingAgentSummary & { flow?: { id: string; name: string } }> {
+  if (index.size === 0) return rows;
+  const kept: Array<AgentTracingAgentSummary & { flow?: { id: string; name: string } }> = [];
+  const groups = new Map<string, AgentTracingAgentSummary & { flow: { id: string; name: string } }>();
+  for (const row of rows) {
+    const flow = index.get(row.name);
+    if (!flow) {
+      kept.push(row);
+      continue;
+    }
+    const label = `Flow: ${flow.flowName}`;
+    const group = groups.get(flow.flowId);
+    if (!group) {
+      groups.set(flow.flowId, { ...row, name: label, label, flow: { id: flow.flowId, name: flow.flowName } });
+      continue;
+    }
+    const sessions = group.sessionsCount + row.sessionsCount;
+    group.averageDurationMs = sessions > 0 ? Math.round((group.averageDurationMs * group.sessionsCount + row.averageDurationMs * row.sessionsCount) / sessions) : 0;
+    group.sessionsCount = sessions;
+    group.totalEvents += row.totalEvents;
+    group.totalInputTokens += row.totalInputTokens;
+    group.totalOutputTokens += row.totalOutputTokens;
+    group.totalCachedInputTokens += row.totalCachedInputTokens;
+    group.totalTokens += row.totalTokens;
+    group.averageInputTokensPerSession = sessions > 0 ? Math.round(group.totalInputTokens / sessions) : 0;
+    group.averageOutputTokensPerSession = sessions > 0 ? Math.round(group.totalOutputTokens / sessions) : 0;
+    group.averageCachedInputTokensPerSession = sessions > 0 ? Math.round(group.totalCachedInputTokens / sessions) : 0;
+    group.averageTokensPerSession = sessions > 0 ? Math.round(group.totalTokens / sessions) : 0;
+    if (row.latestSessionAt && (!group.latestSessionAt || row.latestSessionAt > group.latestSessionAt)) {
+      group.latestSessionAt = row.latestSessionAt;
+      group.latestStatus = row.latestStatus;
+    }
+  }
+  return [...kept, ...groups.values()];
+}
+
 export interface DashboardOverview {
   recentSessions: AgentTracingSessionSummary[];
   recentAgents: AgentTracingAgentSummary[];
@@ -835,6 +934,8 @@ export class AgentTracingService {
       skip?: string;
       metadataKey?: string;
       metadataValue?: string;
+      /** Only threads with a session that ran under this flow. */
+      flowId?: string;
     },
   ) {
     const db = await getDatabase();
@@ -848,8 +949,8 @@ export class AgentTracingService {
       to: filters?.to,
       limit: filters?.limit || '50',
       skip: filters?.skip || '0',
-      metadataKey: filters?.metadataKey,
-      metadataValue: filters?.metadataValue,
+      metadataKey: filters?.flowId ? 'flowId' : filters?.metadataKey,
+      metadataValue: filters?.flowId ? filters.flowId : filters?.metadataValue,
     }, projectId);
 
     return result;
@@ -917,6 +1018,7 @@ export class AgentTracingService {
       modelsUsed,
       toolsUsed,
       sessions: sorted.map((s) => ({
+        ...(traceFlowOf(s.metadata) ? { flow: traceFlowOf(s.metadata) } : {}),
         sessionId: s.sessionId,
         agentName: s.agentName,
         agentVersion: s.agentVersion,
@@ -948,7 +1050,15 @@ export class AgentTracingService {
       const db = await getDatabase();
       await db.switchToTenant(tenantDbName);
 
-      return await db.aggregateAgentTracingDashboard(filters, projectId);
+      const overview = await db.aggregateAgentTracingDashboard(filters, projectId);
+      // Hidden agents a flow owns are not agents of their own: their rows are folded into one `Flow: <name>` row per flow.
+      const index = await ownedAgentFlows(db, undefined, projectId);
+      if (index.size === 0) return overview;
+      return {
+        ...overview,
+        recentAgents: regroupOwnedAgentRows(overview.recentAgents ?? [], index),
+        analytics: { ...overview.analytics, agents: regroupOwnedAgentRows(overview.analytics?.agents ?? [], index) },
+      };
     } catch (error) {
       logger.error('Error in getDashboardOverview', { error });
       throw error;
@@ -971,12 +1081,18 @@ export class AgentTracingService {
       skip?: string;
       metadataKey?: string;
       metadataValue?: string;
+      /** Only sessions that ran under this flow (a hidden agent a flow owns, or an agent one of its steps ran). */
+      flowId?: string;
       /** Only sessions with `truncatedEvents > 0`. */
       truncated?: boolean;
     },
   ) {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+
+    // `flowId` is the metadata filter on the flow tag; it is one filter, so it cannot be combined with another metadata filter.
+    const metadataKey = filters?.flowId ? 'flowId' : filters?.metadataKey;
+    const metadataValue = filters?.flowId ? filters.flowId : filters?.metadataValue;
 
     const result = await db.listAgentTracingSessions({
       agentName: filters?.agent,
@@ -987,13 +1103,15 @@ export class AgentTracingService {
       to: filters?.to,
       limit: filters?.limit || '50',
       skip: filters?.skip || '0',
-      metadataKey: filters?.metadataKey,
-      metadataValue: filters?.metadataValue,
+      metadataKey,
+      metadataValue,
       truncated: filters?.truncated,
     }, projectId);
 
     return {
       sessions: result.sessions.map((s) => ({
+        // The flow the session ran under, when it did: a hidden agent's session belongs to its flow.
+        ...(traceFlowOf(s.metadata) ? { flow: traceFlowOf(s.metadata) } : {}),
         sessionId: s.sessionId,
         threadId: s.threadId,
         agentName: s.agentName,
@@ -1390,6 +1508,8 @@ export class AgentTracingService {
     for (const session of sessions) {
       const name = session.agentName;
       if (!name) continue;
+      // A hidden agent a flow owns is listed under its flow, not as an agent.
+      if (isFlowOwnedTrace(session.metadata)) continue;
       const entry = byAgent.get(name) ?? {
         name,
         sessionsCount: 0,
