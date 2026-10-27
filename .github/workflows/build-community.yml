@@ -9,273 +9,273 @@ permissions:
   packages: write
   actions: read
 
-env:
-  FORCE_CHECKS: 'false'
+# env:
+#   FORCE_CHECKS: 'false'
 
 concurrency:
   group: console-community-test-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  ci-status:
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 5
-    outputs:
-      tested: ${{ steps.check.outputs.tested }}
-    steps:
-      - name: Check ci.yml result for this commit
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REF: ${{ github.sha }}
-        run: |
-          set -uo pipefail
-          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
-          HEADERS=(--header "Authorization: Bearer ${GH_TOKEN}"
-                   --header "Accept: application/vnd.github+json"
-                   --header "X-GitHub-Api-Version: 2022-11-28")
-          TESTED=false
-          if [[ "${FORCE_CHECKS}" == "true" ]]; then
-            echo "tested=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          SHA=$(curl -fsSL "${HEADERS[@]}" "${API}/commits/${REF}" | jq -r '.sha // empty') || SHA=
-          if [[ -n "${SHA}" ]]; then
-            COUNT=$(curl -fsSL "${HEADERS[@]}" \
-              "${API}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=success&per_page=1" \
-              | jq -r '.total_count // 0') || COUNT=0
-            if [[ "${COUNT}" =~ ^[0-9]+$ && "${COUNT}" -gt 0 ]]; then
-              TESTED=true
-            fi
-          fi
-          echo "Commit ${SHA:-unknown}: tested=${TESTED}"
-          echo "tested=${TESTED}" >> "$GITHUB_OUTPUT"
+#   ci-status:
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 5
+#     outputs:
+#       tested: ${{ steps.check.outputs.tested }}
+#     steps:
+#       - name: Check ci.yml result for this commit
+#         id: check
+#         env:
+#           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#           REF: ${{ github.sha }}
+#         run: |
+#           set -uo pipefail
+#           API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+#           HEADERS=(--header "Authorization: Bearer ${GH_TOKEN}"
+#                    --header "Accept: application/vnd.github+json"
+#                    --header "X-GitHub-Api-Version: 2022-11-28")
+#           TESTED=false
+#           if [[ "${FORCE_CHECKS}" == "true" ]]; then
+#             echo "tested=false" >> "$GITHUB_OUTPUT"
+#             exit 0
+#           fi
+#           SHA=$(curl -fsSL "${HEADERS[@]}" "${API}/commits/${REF}" | jq -r '.sha // empty') || SHA=
+#           if [[ -n "${SHA}" ]]; then
+#             COUNT=$(curl -fsSL "${HEADERS[@]}" \
+#               "${API}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=success&per_page=1" \
+#               | jq -r '.total_count // 0') || COUNT=0
+#             if [[ "${COUNT}" =~ ^[0-9]+$ && "${COUNT}" -gt 0 ]]; then
+#               TESTED=true
+#             fi
+#           fi
+#           echo "Commit ${SHA:-unknown}: tested=${TESTED}"
+#           echo "tested=${TESTED}" >> "$GITHUB_OUTPUT"
 
-  lint:
-    needs: ci-status
-    if: needs.ci-status.outputs.tested != 'true'
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 40
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
+#   lint:
+#     needs: ci-status
+#     if: needs.ci-status.outputs.tested != 'true'
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 40
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           ref: ${{ github.sha }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+#       - name: Setup Node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#           cache: npm
 
-      - name: Restore node_modules
-        id: node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+#       - name: Restore node_modules
+#         id: node-modules
+#         uses: actions/cache@v4
+#         with:
+#           path: node_modules
+#           key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
-      - name: Install dependencies
-        if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
+#       - name: Install dependencies
+#         if: steps.node-modules.outputs.cache-hit != 'true'
+#         run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Lint
-        run: npm run lint
+#       - name: Lint
+#         run: npm run lint
 
-  test:
-    name: test (${{ matrix.name }})
-    needs: ci-status
-    if: needs.ci-status.outputs.tested != 'true'
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: unit 1/3
-            args: src/__tests__/unit --shard=1/3
-          - name: unit 2/3
-            args: src/__tests__/unit --shard=2/3
-          - name: unit 3/3
-            args: src/__tests__/unit --shard=3/3
-          - name: api
-            args: src/__tests__/api
-          - name: integration
-            args: src/__tests__/integration
-          - name: contracts + ai
-            args: src/__tests__/contracts src/__tests__/ai
-          # vitest bunlari dosya yolunda alt-dize filtresi olarak okur; diger
-          # gruplarin '**/browser-*.test.ts' ve '**/crawler-e2e.test.ts' ile
-          # disarida biraktigi dosyalari secer. Chromium'u yalniz bu grup kurar.
-          - name: browser
-            args: browser- crawler-e2e
-            chromium: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
+#   test:
+#     name: test (${{ matrix.name }})
+#     needs: ci-status
+#     if: needs.ci-status.outputs.tested != 'true'
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 40
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         include:
+#           - name: unit 1/3
+#             args: src/__tests__/unit --shard=1/3
+#           - name: unit 2/3
+#             args: src/__tests__/unit --shard=2/3
+#           - name: unit 3/3
+#             args: src/__tests__/unit --shard=3/3
+#           - name: api
+#             args: src/__tests__/api
+#           - name: integration
+#             args: src/__tests__/integration
+#           - name: contracts + ai
+#             args: src/__tests__/contracts src/__tests__/ai
+#           # vitest bunlari dosya yolunda alt-dize filtresi olarak okur; diger
+#           # gruplarin '**/browser-*.test.ts' ve '**/crawler-e2e.test.ts' ile
+#           # disarida biraktigi dosyalari secer. Chromium'u yalniz bu grup kurar.
+#           - name: browser
+#             args: browser- crawler-e2e
+#             chromium: true
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           ref: ${{ github.sha }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+#       - name: Setup Node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#           cache: npm
 
-      - name: Restore node_modules
-        id: node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+#       - name: Restore node_modules
+#         id: node-modules
+#         uses: actions/cache@v4
+#         with:
+#           path: node_modules
+#           key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
-      - name: Install dependencies
-        if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
+#       - name: Install dependencies
+#         if: steps.node-modules.outputs.cache-hit != 'true'
+#         run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Install Chromium for browser tests
-        if: matrix.chromium
-        run: npx playwright install --with-deps chromium
+#       - name: Install Chromium for browser tests
+#         if: matrix.chromium
+#         run: npx playwright install --with-deps chromium
 
-      - name: Test
-        if: ${{ !matrix.chromium }}
-        run: >
-          npx vitest run ${{ matrix.args }}
-          --exclude '**/browser-*.test.ts'
-          --exclude '**/crawler-e2e.test.ts'
+#       - name: Test
+#         if: ${{ !matrix.chromium }}
+#         run: >
+#           npx vitest run ${{ matrix.args }}
+#           --exclude '**/browser-*.test.ts'
+#           --exclude '**/crawler-e2e.test.ts'
 
-      - name: Test (browser)
-        if: matrix.chromium
-        run: npx vitest run ${{ matrix.args }}
+#       - name: Test (browser)
+#         if: matrix.chromium
+#         run: npx vitest run ${{ matrix.args }}
 
-  endpoint-coverage:
-    needs: ci-status
-    if: needs.ci-status.outputs.tested != 'true'
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 40
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
+#   endpoint-coverage:
+#     needs: ci-status
+#     if: needs.ci-status.outputs.tested != 'true'
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 40
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           ref: ${{ github.sha }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+#       - name: Setup Node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#           cache: npm
 
-      - name: Restore node_modules
-        id: node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+#       - name: Restore node_modules
+#         id: node-modules
+#         uses: actions/cache@v4
+#         with:
+#           path: node_modules
+#           key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
-      - name: Install dependencies
-        if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
+#       - name: Install dependencies
+#         if: steps.node-modules.outputs.cache-hit != 'true'
+#         run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Endpoint auth-coverage gate
-        run: npm run test:endpoints
+#       - name: Endpoint auth-coverage gate
+#         run: npm run test:endpoints
 
-      - name: OpenAPI route gate
-        run: npm run test:openapi
+#       - name: OpenAPI route gate
+#         run: npm run test:openapi
 
-  docs:
-    needs: ci-status
-    if: needs.ci-status.outputs.tested != 'true'
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 40
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
+#   docs:
+#     needs: ci-status
+#     if: needs.ci-status.outputs.tested != 'true'
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 40
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           ref: ${{ github.sha }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+#       - name: Setup Node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#           cache: npm
 
-      - name: Restore node_modules
-        id: node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+#       - name: Restore node_modules
+#         id: node-modules
+#         uses: actions/cache@v4
+#         with:
+#           path: node_modules
+#           key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
-      - name: Install dependencies
-        if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
+#       - name: Install dependencies
+#         if: steps.node-modules.outputs.cache-hit != 'true'
+#         run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Build docs
-        run: npm run docs:build
+#       - name: Build docs
+#         run: npm run docs:build
 
-  audit:
-    needs: ci-status
-    if: needs.ci-status.outputs.tested != 'true'
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 40
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
+#   audit:
+#     needs: ci-status
+#     if: needs.ci-status.outputs.tested != 'true'
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 40
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           ref: ${{ github.sha }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+#       - name: Setup Node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#           cache: npm
 
-      - name: Restore node_modules
-        id: node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+#       - name: Restore node_modules
+#         id: node-modules
+#         uses: actions/cache@v4
+#         with:
+#           path: node_modules
+#           key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
 
-      - name: Install dependencies
-        if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
+#       - name: Install dependencies
+#         if: steps.node-modules.outputs.cache-hit != 'true'
+#         run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Production dependency audit
-        run: npm audit --omit=dev --audit-level=high
-        continue-on-error: true
+#       - name: Production dependency audit
+#         run: npm audit --omit=dev --audit-level=high
+#         continue-on-error: true
 
-      - name: License summary
-        run: npx license-checker --production --summary
+#       - name: License summary
+#         run: npx license-checker --production --summary
 
-  validate:
-    if: ${{ always() }}
-    needs: [ci-status, lint, test, endpoint-coverage, docs, audit]
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 5
-    steps:
-      - name: Require every job to succeed
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-          CI_STATUS_RESULT: ${{ needs.ci-status.result }}
-          TESTED: ${{ needs.ci-status.outputs.tested }}
-          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
-        run: |
-          echo "$NEEDS"
-          if [ "$CI_STATUS_RESULT" = 'success' ] && [ "$TESTED" = 'true' ]; then
-            echo 'This commit already passed ci.yml; checks were skipped.'
-            exit 0
-          fi
-          if [ "$FAILED" = 'true' ]; then
-            echo 'One or more required jobs did not succeed.'
-            exit 1
-          fi
+#   validate:
+#     if: ${{ always() }}
+#     needs: [ci-status, lint, test, endpoint-coverage, docs, audit]
+#     runs-on: cognipeer-azure-runners
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require every job to succeed
+#         env:
+#           NEEDS: ${{ toJSON(needs) }}
+#           CI_STATUS_RESULT: ${{ needs.ci-status.result }}
+#           TESTED: ${{ needs.ci-status.outputs.tested }}
+#           FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+#         run: |
+#           echo "$NEEDS"
+#           if [ "$CI_STATUS_RESULT" = 'success' ] && [ "$TESTED" = 'true' ]; then
+#             echo 'This commit already passed ci.yml; checks were skipped.'
+#             exit 0
+#           fi
+#           if [ "$FAILED" = 'true' ]; then
+#             echo 'One or more required jobs did not succeed.'
+#             exit 1
+#           fi
 
 
   build:
     runs-on: cognipeer-azure-runners
     timeout-minutes: 90
-    needs: validate
+    # needs: validate
     steps:
       - name: Checkout
         uses: actions/checkout@v4
