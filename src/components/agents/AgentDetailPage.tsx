@@ -85,6 +85,7 @@ import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig
 import AgentClientToolsPanel from './studio/AgentClientToolsPanel';
 import { normalizeClientTools } from './studio/clientToolsSettings';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
+import { boundToolKinds, type KindSourceRecord } from './studio/hitlSettings';
 import ClientToolsSurfaces from './studio/ClientToolsSurfaces';
 import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
@@ -320,6 +321,8 @@ export default function AgentDetailPage() {
   const [callbackConfig, setCallbackConfig] = useState<IAgentCallbackConfig | undefined>(undefined);
   const [budgetConfig, setBudgetConfig] = useState<IAgentConfig['budget']>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
+  // The records behind the bound tools: the approvals table reads what each tool does (reads / writes…) from them.
+  const [toolRecords, setToolRecords] = useState<{ tools: KindSourceRecord[]; mcp: KindSourceRecord[] }>({ tools: [], mcp: [] });
   const [remindersConfig, setRemindersConfig] = useState<IAgentRemindersConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
   const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
@@ -668,6 +671,38 @@ export default function AgentDetailPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [activeTab, configureTab, deployTab, agent]);
+
+  // Records of the bound tools, loaded once per set of bound sources (a refresh failing leaves "no hints", which asks).
+  const boundSourceKeys = toolBindings
+    .filter((binding) => binding.source === 'tool' || binding.source === 'mcp')
+    .map((binding) => `${binding.source}:${binding.sourceKey}`)
+    .sort()
+    .join('|');
+  useEffect(() => {
+    if (!boundSourceKeys) {
+      setToolRecords({ tools: [], mcp: [] });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [toolsRes, mcpRes] = await Promise.all([
+          fetch('/api/tools', { cache: 'no-store' }),
+          fetch('/api/mcp', { cache: 'no-store' }),
+        ]);
+        const toolsData = toolsRes.ok ? await toolsRes.json() : {};
+        const mcpData = mcpRes.ok ? await mcpRes.json() : {};
+        if (!cancelled) setToolRecords({ tools: toolsData.tools ?? [], mcp: mcpData.servers ?? [] });
+      } catch {
+        // Keep what is shown: the table then reads those tools as "no hints".
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [boundSourceKeys]);
+  const toolKinds = useMemo(
+    () => boundToolKinds(toolBindings, toolRecords.tools, toolRecords.mcp),
+    [toolBindings, toolRecords],
+  );
 
   const publishedVersionNumber = agent?.publishedVersion ?? null;
   useEffect(() => {
@@ -1515,6 +1550,7 @@ export default function AgentDetailPage() {
                 value={hitlConfig}
                 onChange={setHitlConfig}
                 clientTools={clientToolsConfig}
+                toolKinds={toolKinds}
                 toolConfig={{
                   toolBindings,
                   knowledgeBindings: configForm.values.knowledgeBindings.filter((b) => b.key),
@@ -1525,9 +1561,9 @@ export default function AgentDetailPage() {
                   sandbox: sandboxConfig,
                 }}
               />,
-              hitlConfig?.toolApproval?.enabled || hitlConfig?.askUser?.enabled ? (
+              hitlConfig?.toolApproval?.enabled !== false || hitlConfig?.askUser?.enabled ? (
                 <Badge size="xs" color="orange" variant="light" w="fit-content">
-                  {[hitlConfig?.toolApproval?.enabled ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
+                  {[hitlConfig?.toolApproval?.enabled !== false ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
                     .filter(Boolean).join(' + ')}
                 </Badge>
               ) : null,

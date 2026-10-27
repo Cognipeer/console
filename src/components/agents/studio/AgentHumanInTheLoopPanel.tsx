@@ -8,9 +8,13 @@
  * behaves (how long it waits, what a timeout does, who may answer, what a new
  * message does meanwhile) is a stored setting here, not a constant.
  *
- * An agent with no `humanInTheLoop` at all never pauses; the first switch turned
- * on creates the object. What the per-tool table shows as "asks / does not ask"
- * is computed by the same function the runtime uses (`toolApprovalPolicy`).
+ * An agent with no `humanInTheLoop` at all has made no choice and asks like a new one (a tool that is not
+ * read-only waits for approval); only switching approval off stores `enabled: false`. The per-tool table
+ * lists each tool with where it comes from and what it does (reads / writes / destructive / no hints). A
+ * tool that is not read-only asks by default; "Never ask" is the owner's explicit choice and goes through
+ * a confirmation. The table sits inside the global switch on purpose: with the switch off nothing asks, so
+ * there is nothing to set per tool. What it shows as "asks / does not ask" is computed by the same function
+ * the runtime uses (`toolApprovalPolicy`).
  * A tool's exceptions (by argument) are edited in `AgentToolExceptionsModal`.
  */
 
@@ -35,7 +39,8 @@ import { HITL_DEFAULTS, resolveHitlConfig } from '@/lib/services/agents/agentHum
 import { useTranslations } from '@/lib/i18n';
 import { ConfigBlock, describedSelectOption } from './ConfigSection';
 import AgentToolExceptionsModal from './AgentToolExceptionsModal';
-import { hitlToolRows, patchHitl, setToolChoice, setToolExceptions, type HitlToolRow, type ToolPolicyChoice } from './hitlSettings';
+import ConfirmModal from '@/components/common/ui/ConfirmModal';
+import { hitlToolRows, patchHitl, setToolChoice, setToolExceptions, type HitlToolKinds, type HitlToolRow } from './hitlSettings';
 import type { AgentToolConfig } from '../session/sessionTools';
 
 export interface AgentHumanInTheLoopPanelProps {
@@ -45,16 +50,33 @@ export interface AgentHumanInTheLoopPanelProps {
     toolConfig: AgentToolConfig;
     /** The agent's client tools (Configure → Client tools): listed in the per-tool table too. */
     clientTools?: IAgentClientToolConfig[];
+    /** What each bound tool does, by tool name (read from the tool records); a bound tool missing here counts as "no hints". */
+    toolKinds?: HitlToolKinds;
 }
 
-export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, clientTools }: AgentHumanInTheLoopPanelProps) {
+export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, clientTools, toolKinds }: AgentHumanInTheLoopPanelProps) {
     const t = useTranslations('agents.hitl');
     const resolved = resolveHitlConfig(value);
-    const rows = hitlToolRows(toolConfig, value, clientTools);
+    const rows = hitlToolRows(toolConfig, value, clientTools, toolKinds);
     const set = (patch: Partial<IAgentHumanInTheLoopConfig>) => onChange(patchHitl(value, patch));
     const canPause = resolved.toolApprovalEnabled || resolved.askUserEnabled;
     // The row as it was when its exceptions editor opened (null = closed).
     const [editing, setEditing] = useState<HitlToolRow | null>(null);
+    // The row whose "Never ask" is waiting for the owner's confirmation (null = none).
+    const [confirmNever, setConfirmNever] = useState<HitlToolRow | null>(null);
+    const kindLabel = {
+        reads: t('kindReads'),
+        writes: t('kindWrites'),
+        destructive: t('kindDestructive'),
+        nohints: t('kindNoHints'),
+    } as const;
+    const kindHint = {
+        reads: t('kindReadsHint'),
+        writes: t('kindWritesHint'),
+        destructive: t('kindDestructiveHint'),
+        nohints: t('kindNoHintsHint'),
+    } as const;
+    const kindColor = { reads: 'gray', writes: 'orange', destructive: 'red', nohints: 'yellow' } as const;
     const exceptionCount = (count: number) => (count === 1 ? t('exceptionsOne') : t('exceptionsMany', { count }));
 
     const timeoutOptions = [
@@ -139,7 +161,8 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                             <Table.Tr>
                                                 <Table.Th>{t('toolColumn')}</Table.Th>
                                                 <Table.Th w={150}>{t('sourceColumn')}</Table.Th>
-                                                <Table.Th w={380}>{t('policyColumn')}</Table.Th>
+                                                <Table.Th w={110}>{t('kindColumn')}</Table.Th>
+                                                <Table.Th w={300}>{t('policyColumn')}</Table.Th>
                                                 <Table.Th w={150}>{t('exceptionsColumn')}</Table.Th>
                                             </Table.Tr>
                                         </Table.Thead>
@@ -149,13 +172,6 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                                     <Table.Td>
                                                         <Group gap={6} wrap="wrap">
                                                             <Text size="sm" ff="monospace">{row.name}</Text>
-                                                            {row.readOnly ? (
-                                                                <Tooltip label={t('readOnlyHint')} withArrow>
-                                                                    <Badge size="xs" variant="outline" color="gray">
-                                                                        {t('readOnlyHint')}
-                                                                    </Badge>
-                                                                </Tooltip>
-                                                            ) : null}
                                                             {row.stale ? (
                                                                 <Badge size="xs" variant="light" color="yellow">{t('staleHint')}</Badge>
                                                             ) : null}
@@ -168,26 +184,45 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                                         </Text>
                                                     </Table.Td>
                                                     <Table.Td>
-                                                        <Group gap="xs" wrap="wrap">
+                                                        <Tooltip label={kindHint[row.kind]} withArrow multiline w={260}>
+                                                            <Badge size="xs" variant="light" color={kindColor[row.kind]}>{kindLabel[row.kind]}</Badge>
+                                                        </Tooltip>
+                                                    </Table.Td>
+                                                    <Table.Td>
+                                                        {row.readOnly || row.stale ? (
+                                                            <Group gap="xs" wrap="wrap">
+                                                                <Text size="xs" c="dimmed">{t(row.effective === 'always' ? 'willAsk' : 'willNotAsk')}</Text>
+                                                                {row.choice !== 'default' ? (
+                                                                    // A setting stored for a read-only tool, or for a tool the agent no longer has: visible, and removable.
+                                                                    <Button
+                                                                        size="compact-xs"
+                                                                        variant="subtle"
+                                                                        color="gray"
+                                                                        onClick={() => onChange(setToolChoice(value, row.name, 'default'))}
+                                                                    >
+                                                                        {t('choiceReset', { choice: row.choice === 'always' ? t('policyAlways') : t('policyNever') })}
+                                                                    </Button>
+                                                                ) : null}
+                                                            </Group>
+                                                        ) : (
                                                             <SegmentedControl
                                                                 size="xs"
-                                                                value={row.choice}
-                                                                onChange={(choice) => onChange(setToolChoice(value, row.name, choice as ToolPolicyChoice))}
+                                                                value={row.effective === 'always' ? 'ask' : 'never'}
+                                                                onChange={(choice) => {
+                                                                    if (choice === 'never') {
+                                                                        setConfirmNever(row);
+                                                                        return;
+                                                                    }
+                                                                    // "Ask" is the default; where this tool's default is not to ask it has to be said out loud.
+                                                                    onChange(setToolChoice(value, row.name, row.askChoice));
+                                                                }}
                                                                 data={[
-                                                                    { value: 'default', label: t('policyDefault') },
-                                                                    { value: 'always', label: t('policyAlways') },
+                                                                    { value: 'ask', label: t('choiceAsk') },
                                                                     { value: 'never', label: t('policyNever') },
                                                                 ]}
                                                                 aria-label={row.name}
                                                             />
-                                                            <Badge
-                                                                size="xs"
-                                                                variant="light"
-                                                                color={row.effective === 'always' ? 'orange' : 'gray'}
-                                                            >
-                                                                {row.effective === 'always' ? t('willAsk') : t('willNotAsk')}
-                                                            </Badge>
-                                                        </Group>
+                                                        )}
                                                     </Table.Td>
                                                     <Table.Td>
                                                         <Button
@@ -207,6 +242,20 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                     </Table>
                                 )}
                             </Stack>
+
+                            <ConfirmModal
+                                opened={confirmNever !== null}
+                                onClose={() => setConfirmNever(null)}
+                                title={t('neverConfirmTitle', { tool: confirmNever?.name ?? '' })}
+                                message={t(confirmNever?.kind === 'destructive' ? 'neverConfirmDestructive' : 'neverConfirmBody', { tool: confirmNever?.name ?? '' })}
+                                confirmLabel={t('policyNever')}
+                                cancelLabel={t('neverConfirmCancel')}
+                                confirmColor={confirmNever?.kind === 'destructive' ? 'red' : 'orange'}
+                                onConfirm={() => {
+                                    if (confirmNever) onChange(setToolChoice(value, confirmNever.name, 'never'));
+                                    setConfirmNever(null);
+                                }}
+                            />
 
                             <AgentToolExceptionsModal
                                 opened={editing !== null}

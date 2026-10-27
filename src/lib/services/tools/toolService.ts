@@ -27,6 +27,7 @@ import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/too
 import { remoteListTools, remoteRpc } from '@/lib/services/mcp/remoteMcpClient';
 import { getToolCredentialResolver } from '@/enterprise/tool-credentials';
 import { getToolActionExecutor } from '@/enterprise/tool-actions';
+import { effectiveActionAnnotations, openApiActionAnnotations, sanitizeAnnotations } from './actionAnnotations';
 import { mergeAuthConfigUpdate, openAuthConfig, sealAuthConfig } from './secretVault';
 import type {
   CreateToolInput,
@@ -174,6 +175,7 @@ export function parseOpenApiToActions(specString: string, format: SpecFormatHint
         executionType: 'openapi_http',
         httpMethod: method.toUpperCase(),
         httpPath: path,
+        annotations: openApiActionAnnotations(method),
       });
     }
   }
@@ -205,14 +207,19 @@ export async function discoverMcpTools(
       ...(extraHeaders ? { extraHeaders } : {}),
     });
 
-    return mcpTools.map((t) => ({
-      key: slugify(t.name, SLUG_OPTIONS),
-      name: t.name,
-      description: t.description || t.name,
-      inputSchema: t.inputSchema || { type: 'object', properties: {} },
-      executionType: 'mcp_call' as const,
-      mcpToolName: t.name,
-    }));
+    return mcpTools.map((t) => {
+      // The server's own markings (readOnlyHint, destructiveHint…), kept as sent; the tool's title rides along.
+      const annotations = sanitizeAnnotations({ ...(t.annotations ?? {}), ...(t.title ? { title: t.title } : {}) });
+      return {
+        key: slugify(t.name, SLUG_OPTIONS),
+        name: t.name,
+        description: t.description || t.name,
+        inputSchema: t.inputSchema || { type: 'object', properties: {} },
+        executionType: 'mcp_call' as const,
+        mcpToolName: t.name,
+        ...(annotations ? { annotations } : {}),
+      };
+    });
   } catch (err) {
     logger.error('Failed to discover MCP tools', { endpoint, error: err });
     throw new Error(`Failed to discover MCP tools: ${err instanceof Error ? err.message : String(err)}`);
@@ -750,7 +757,11 @@ export function serializeTool(tool: ITool): ToolView {
     description: tool.description,
     type: tool.type,
     status: tool.status,
-    actions: tool.actions,
+    // Read through `effectiveActionAnnotations`, so a record saved before the field existed shows its markings too.
+    actions: tool.actions.map((action) => {
+      const annotations = effectiveActionAnnotations(action);
+      return Object.keys(annotations).length > 0 ? { ...action, annotations } : action;
+    }),
     upstreamBaseUrl: tool.upstreamBaseUrl,
     mcpEndpoint: tool.mcpEndpoint,
     mcpTransport: tool.mcpTransport,

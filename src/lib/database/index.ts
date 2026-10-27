@@ -524,6 +524,7 @@ export type {
   IExternalAgentConnection,
   ITool,
   IToolAction,
+  IToolActionAnnotations,
   IToolAuthConfig,
   IToolRequestLog,
   IToolRequestAggregate,

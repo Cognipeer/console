@@ -102,7 +102,8 @@ const systemOf = (messages: Seen) => String(messages.find((m) => m.role === 'sys
 async function createAgent(config: Partial<IAgentConfig>) {
   await db.createAgent({
     tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Ops',
-    config: { modelKey: 'gpt-4o', ...config }, status: 'active', createdBy: OWNER,
+    // These tests are about reminders, not tool approval: the agent runs its tools unasked unless a test says otherwise.
+    config: { modelKey: 'gpt-4o', humanInTheLoop: { toolApproval: { enabled: false } }, ...config }, status: 'active', createdBy: OWNER,
   });
 }
 

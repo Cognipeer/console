@@ -564,8 +564,20 @@ describe('unattended callers', () => {
     expect(model.offered.flat()).not.toContain('ask_user_question');
   });
 
-  it('an agent with no human-in-the-loop settings is unaffected by being unattended', async () => {
+  it('an agent with no human-in-the-loop settings refuses the call unattended, and the message names the fix', async () => {
     await createAgent();
+    const model = scriptModel(oneToolScript('ls'));
+    const response = await chat(String((await newConversation())._id), 'list', { unattended: true });
+    expect(response.status).toBe('completed');
+    expect(executed).toEqual([]);
+    const refusal = String(model.seen.at(-1)!.find((m) => m.role === 'tool')?.content);
+    expect(refusal).toContain('no approver is available');
+    expect(refusal).toContain('Never ask');
+    expect(refusal).toContain('humanInTheLoop');
+  });
+
+  it('an agent that switched approval off is unaffected by being unattended', async () => {
+    await createAgent({ humanInTheLoop: { toolApproval: { enabled: false } } });
     scriptModel(oneToolScript('ls'));
     const response = await chat(String((await newConversation())._id), 'list', { unattended: true });
     expect(response.status).toBe('completed');
@@ -945,9 +957,20 @@ describe('(f) a new message while a request is open', () => {
   });
 });
 
-describe('(g) back-compat: an agent without humanInTheLoop never pauses', () => {
-  it('runs the tool straight away and writes none of the new fields', async () => {
-    await createAgent(); // no humanInTheLoop
+describe('(g) an agent without humanInTheLoop has made no choice: it asks', () => {
+  it('pauses on a tool that is not read-only, like a dashboard agent', async () => {
+    await createAgent(); // no humanInTheLoop (an agent created through the client API)
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const response = await chat(id, 'list');
+
+    expect(response.status).toBe('requires_action');
+    expect(executed).toEqual([]);
+    expect(await db.listAgentPendingActions(id, { status: 'pending' })).toHaveLength(1);
+  });
+
+  it('switching approval off is the owner\'s explicit choice: the tool runs straight away and nothing is written', async () => {
+    await createAgent({ humanInTheLoop: { toolApproval: { enabled: false } } });
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
     const response = await chat(id, 'list');

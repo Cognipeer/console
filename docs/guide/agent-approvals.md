@@ -9,15 +9,15 @@ The turn is paused, not lost. When the request is answered, the **same turn** ca
 
 ## Turning it on
 
-**Build → Approvals & questions**, per agent. An agent created in Studio starts with tool approval on (every tool asks) and questions off. An agent created through the API starts with neither.
+**Build → Approvals & questions**, per agent. Tool approval is on for every agent until its owner switches it off: a tool that is not marked read-only asks before it runs (see [which tools ask](#which-tools-ask)). That includes agents created through the API without a `humanInTheLoop` setting. Questions are off until switched on.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Let the agent ask the user questions | off | Adds the `ask_user_question` tool. The agent can pause with a structured question and options. |
 | Allow free-text answers | on | Besides the offered options, the person can type their own answer. Off: every question must offer options. |
-| Ask before tools run | off (on in Studio-created agents) | A tool call waits for approval. |
-| Tools not listed below | Always ask | What happens to a tool with no setting of its own. |
-| Per-tool settings | none | Override the default for one tool: Default, Always ask, Never ask. The name is the one the model sees. |
+| Ask before tools run | on | A call to a tool that is not read-only waits for approval. Off: no tool asks. |
+| Tools not listed below | Always ask | What happens to a tool that is not read-only and has no setting of its own. |
+| Per-tool settings | none | One row per tool with its source and type (*reads*, *writes*, *destructive*, *no hints*). A tool that is not read-only offers **Ask (default)** or **Never ask**; choosing *Never ask* asks you to confirm, with a stronger warning for a destructive tool. A read-only tool does not ask. The name is the one the model sees. |
 | Wait for an answer (minutes) | 1440 | How long a request stays open. `0` = never expires. |
 | When time runs out | Deny and continue | **Deny and continue**: the tool is refused (or the question skipped) and the agent carries on in the background. **Cancel the request**: the request is dropped and the session goes back to idle. |
 | Who can answer | The session owner and project admins | Only the person who started the session; the owner and project admins; or anyone with access to the agent. This is the input of the **Approve** permission below. |
@@ -58,9 +58,18 @@ Restricting approvals therefore never stops people from answering their own sess
 
 The session page and the Sessions list do not guess from the viewer's role: the dashboard sends, with each open request, `canResolve` and, when it is false, `resolveBlockedReason` (`approvers_owner`, `approvers_admin`, `approvers_member`, `session_owner`, `policy`, or `unavailable` when the engine could not be asked). Rows of the Sessions list carry the same for the whole session, so the **Waiting for you** badge (and the status filter of that name) is only shown to somebody who could answer; everybody else sees **Waiting for an approver**, in the session header, the side panel, the drawer and the composer. For a request the viewer may not answer the cards say why and their controls (**Approve**, **Deny**, **Edit arguments**, **Don't ask again**, or **Send** and **Skip** for a question) are disabled. When the server could not check (`unavailable`) the notice is shown and the controls stay usable: that is no "no". The server decides again when the answer is sent either way. If the engine cannot decide at all, answering returns `503 authorization_unavailable` (with a `decisionId`), never a `403`, and nothing is recorded.
 
-### What is not asked about
+### Which tools ask
 
-Tools that only read are never asked about, unless you set them to *Always ask*: `knowledge_*`, `memory_search`, `read`, `sandbox_list_files`, `sandbox_preview_link`, `web_search`, `session_files_list` and the question tool itself. Everything else Console builds follows the default: bound, MCP and custom tools, memory writes, `sandbox_exec`, `sandbox_run_code`, `sandbox_write_file`.
+A tool asks unless it is marked read-only. The marking comes from where the tool comes from, never from its name alone:
+
+| Source | Read-only when | Type shown |
+| --- | --- | --- |
+| MCP server | The server reports `readOnlyHint: true` in `tools/list`, or the operator set it on the server's tool (the operator's setting wins). Console's own internal servers only read. A tool proxied from an OpenAPI operation without a hint reads when its method is `GET` or `HEAD`. | *reads*, *writes* (`readOnlyHint: false`), *destructive* (`destructiveHint: true`), or *no hints* when nothing is reported |
+| OpenAPI / HTTP tool | Its method is `GET` or `HEAD`. Every other method may change something. | *reads* or *writes* |
+| Managed tool (for example a connector action) | Its owner marked it read-only. | as marked |
+| A tool Console builds | It is one of `knowledge_*`, `memory_search`, `read`, `sandbox_list_files`, `sandbox_preview_link`, `web_search`, `session_files_list` and the question tool. Everything else (memory writes, `sandbox_exec`, `sandbox_run_code`, `sandbox_write_file`, …) may change something. | *reads* or *writes* |
+
+A tool with no marking is treated as one that changes data: it asks. A per-tool setting always wins, so a read-only tool set to *Always ask* asks, and a tool set to *Never ask* runs without asking. MCP hints are reported by the server; for a server you do not fully trust, check its tools in the server's settings or keep them on *Ask*.
 
 The agent-sdk's own tools (plan, context, delegation, skills) are never gated.
 
@@ -151,7 +160,7 @@ Over A2A, a paused task reports the state `input-required` with the requests in 
 
 ## Client tools (`client_tool`)
 
-A client tool is a tool the agent calls but **its caller runs** — read what is selected on a page, look an order up in the customer's own system, open a record — without any server-side connector. The author declares them on the agent: *Build → Client tools* (`config.clientTools`), each with a name, a description, an input schema and a timeout. Whether a call waits for a person is **not** set there: the tools appear in this section's per-tool table (as `client`) and follow *Ask before tools run* and the per-tool setting like any other tool. A tool can be switched off without deleting it.
+A client tool is a tool the agent calls but **its caller runs** — read what is selected on a page, look an order up in the customer's own system, open a record — without any server-side connector. The author declares them on the agent: *Build → Client tools* (`config.clientTools`), each with a name, a description, an input schema and a timeout. Whether a call waits for a person is **not** set there: the tools appear in this section's per-tool table (as `client`). Unlike the agent's own tools they ask by default only once *Ask before tools run* was switched on explicitly (`toolApproval.enabled: true`); until then only a tool set to *Ask* in the table asks. A tool can be switched off without deleting it.
 
 Where the tools are offered is explicit. *Build → Client tools → Where these tools are offered* has one switch per surface, all on by default:
 
@@ -224,7 +233,7 @@ The caller runs the tool and answers with `output` or `error` (table above). The
 
 Some runs have nobody to answer: [triggers](/guide/agent-triggers), evaluations and red-team cases, and the OpenAI-shaped endpoints, which have no way to send an answer. The *When nobody can answer* setting decides what a gated tool does there:
 
-- **Deny the tool call** (default): the tool does not run, the model is told no approver is available and the run goes on. Questions are not asked.
+- **Deny the tool call** (default): the tool does not run, the model is told no approver is available (and how the owner can let the tool run unattended: *Never ask* for that tool, or `humanInTheLoop.toolApproval.tools` with `"never"` over the API) and the run goes on. Questions are not asked.
 - **Pause and wait for approval in Studio:** behaves like an attended run; the request waits in the session until someone answers it.
 - **Run without approval:** the tool runs. An explicit opt-in for agents whose owner accepts that.
 

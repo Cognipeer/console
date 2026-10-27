@@ -91,7 +91,8 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
-import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
+import { getToolAnnotationOverrides, resolveMcpGuardrailBinding, resolveSourceType } from '@/lib/services/mcp/mcpService';
+import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { currentTurnSignal, runWithTurnSignal } from '@/lib/core/turnSignal';
 import { addSecretValues, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import {
@@ -134,6 +135,7 @@ import {
 } from './toolMedia';
 import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
 import { isToolOutput } from '@/lib/services/tools/toolOutput';
+import { effectiveActionAnnotations, mcpToolMarkings } from '@/lib/services/tools/actionAnnotations';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
@@ -227,6 +229,8 @@ import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
     applyToolBlocks,
+    classifyTool,
+    clientApprovalConfig,
     denyUnattendedTools,
     gateChildTools,
     resolveHitlConfig,
@@ -2311,7 +2315,8 @@ export async function buildBoundTools(
                         },
                     ),
                 });
-                tools.push(tool);
+                // Whether the call asks for approval is decided from the action's markings (`classifyTool`).
+                tools.push(Object.assign(tool, { hitlKind: classifyTool(action.name, effectiveActionAnnotations(action)) }));
                 definitions.push({ name: action.name, description, parameters: action.inputSchema });
             }
         } else if (binding.source === 'mcp') {
@@ -2344,6 +2349,8 @@ export async function buildBoundTools(
             // either layer. `guard` is the no-op when the agent binds nothing.
             const mcpBinding = resolveMcpGuardrailBinding(server);
             const guardAtAgent = mcpBinding.mode === 'off';
+            const annotationOverrides = getToolAnnotationOverrides(server);
+            const sourceAnnotations = defaultAnnotationsForSource(resolveSourceType(server));
 
             for (const toolName of binding.toolNames) {
                 const mcpToolDef = server.tools.find((t) => t.name === toolName);
@@ -2383,7 +2390,12 @@ export async function buildBoundTools(
                         )
                         : dispatch,
                 });
-                tools.push(tool);
+                const markings = mcpToolMarkings(
+                    mcpToolDef,
+                    Object.hasOwn(annotationOverrides, toolName) ? annotationOverrides[toolName] : undefined,
+                    sourceAnnotations,
+                );
+                tools.push(Object.assign(tool, { hitlKind: classifyTool(mcpToolDef.name, markings) }));
                 definitions.push({ name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema });
             }
         } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
@@ -4608,6 +4620,8 @@ async function buildLocalAgentRun(input: {
         ? (config.clientTools ?? []).filter((tool) => tool.enabled !== false).map(({ enabled: _enabled, ...tool }) => tool as Omit<typeof tool, 'needsApproval'>)
         : [];
     const declaredClientTools = [...ownClientTools, ...(input.embedded?.clientTools ?? [])];
+    // A caller's own tools are not covered by the "no choice made means ask" rule: only an explicit switch asks about them.
+    const clientApprovalPolicy = clientApprovalConfig(hitl);
     if (declaredClientTools.length > 0) {
         if (input.canPause === false || (input.unattended && !input.answersClientTools) || !input.conversation) {
             logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
@@ -4630,7 +4644,7 @@ async function buildLocalAgentRun(input: {
             // unattended runs may go ahead (`allow`), and then without asking.
             const offered = declaredClientTools.filter((tool) => {
                 if (taken.has(tool.name) || seen.has(tool.name)) return false;
-                if (input.unattended && clientToolNeedsApproval(tool, hitl) && hitl.unattended !== 'allow') {
+                if (input.unattended && clientToolNeedsApproval(tool, clientApprovalPolicy) && hitl.unattended !== 'allow') {
                     warnings.add(`Client tool "${tool.name}" was not offered: it needs approval and this caller cannot answer one.`);
                     return false;
                 }
@@ -4648,7 +4662,7 @@ async function buildLocalAgentRun(input: {
                     guard: toolGuard,
                     allowedTools,
                     // Nobody can be asked on an unattended run: what got this far was allowed to go ahead.
-                    approvalPolicy: input.unattended ? { ...hitl, toolApprovalEnabled: false } : hitl,
+                    approvalPolicy: input.unattended ? { ...hitl, toolApprovalEnabled: false } : clientApprovalPolicy,
                     exceptions: hitl.toolApprovalEnabled ? { byTool: hitl.toolExceptions, log: hitlLog } : undefined,
                 });
                 clientTools = built.tools;
