@@ -1,10 +1,11 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { Loader, Menu, Text, UnstyledButton } from '@mantine/core';
+import { useEffect, useMemo, useState } from 'react';
+import { Combobox, Group, Loader, Text, UnstyledButton, useCombobox } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useQuery } from '@tanstack/react-query';
-import { IconCheck, IconChevronDown } from '@tabler/icons-react';
+import { IconCheck, IconChevronDown, IconSearch } from '@tabler/icons-react';
+import { includesFolded } from '@/lib/shared/searchFold';
 
 type Project = {
   _id: string;
@@ -14,6 +15,16 @@ type Project = {
 
 export default function ProjectPill() {
   const [submitting, setSubmitting] = useState(false);
+  const [search, setSearch] = useState('');
+  // The search box takes the focus as the list opens, so typing filters at once
+  // and Enter switches to the highlighted (first) match.
+  const combobox = useCombobox({
+    onDropdownOpen: () => combobox.focusSearchInput(),
+    onDropdownClose: () => {
+      combobox.resetSelectedOption();
+      setSearch('');
+    },
+  });
 
   const projectsQuery = useQuery<{ projects: Project[]; activeProjectId?: string }>(
     {
@@ -35,6 +46,18 @@ export default function ProjectPill() {
 
   const activeId = projectsQuery.data?.activeProjectId;
   const activeProject = projects.find((p) => p._id === activeId);
+  const visible = useMemo(
+    () => projects.filter((p) => includesFolded(p.name, search) || includesFolded(p.key, search)),
+    [projects, search],
+  );
+
+  // A typed search highlights its first match; an empty one highlights nothing,
+  // so Enter on an untouched list changes nothing.
+  useEffect(() => {
+    if (search.trim()) combobox.selectFirstOption();
+    else combobox.resetSelectedOption();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the store is stable; re-run on the query only
+  }, [search, visible.length]);
   const loading = projectsQuery.isLoading;
   const errorMessage = projectsQuery.isError
     ? projectsQuery.error instanceof Error
@@ -74,16 +97,27 @@ export default function ProjectPill() {
     );
   }
 
+  const disabled = loading || submitting || projects.length === 0;
+
   return (
-    <Menu
+    <Combobox
+      store={combobox}
       position="bottom-end"
       shadow="md"
-      width={240}
+      width={260}
       withinPortal
-      disabled={loading || submitting || projects.length === 0}
+      onOptionSubmit={(projectId) => {
+        combobox.closeDropdown();
+        void handleSwitch(projectId);
+      }}
     >
-      <Menu.Target>
-        <UnstyledButton className="ds-project-pill" aria-label="Switch project">
+      <Combobox.Target withAriaAttributes={false}>
+        <UnstyledButton
+          className="ds-project-pill"
+          aria-label="Switch project"
+          disabled={disabled}
+          onClick={() => combobox.toggleDropdown()}
+        >
           <span className="ds-project-dot" aria-hidden="true" />
           <span className="ds-project-label">
             {loading ? 'Loading…' : activeProject?.name ?? 'Default Project'}
@@ -94,28 +128,39 @@ export default function ProjectPill() {
             <IconChevronDown size={13} stroke={1.7} />
           )}
         </UnstyledButton>
-      </Menu.Target>
-      <Menu.Dropdown>
-        <Menu.Label>Switch project</Menu.Label>
-        {projects.map((p) => (
-          <Menu.Item
-            key={p._id}
-            onClick={() => void handleSwitch(p._id)}
-            rightSection={
-              p._id === activeId ? (
-                <IconCheck size={13} stroke={2} color="var(--ds-accent)" />
-              ) : null
-            }
-          >
-            <Text size="sm" fw={p._id === activeId ? 600 : 400}>
-              {p.name}
-            </Text>
-            <Text size="xs" c="dimmed" className="ds-mono">
-              {p.key}
-            </Text>
-          </Menu.Item>
-        ))}
-      </Menu.Dropdown>
-    </Menu>
+      </Combobox.Target>
+      <Combobox.Dropdown>
+        <Combobox.Search
+          value={search}
+          onChange={(event) => setSearch(event.currentTarget.value)}
+          placeholder="Search projects"
+          aria-label="Search projects"
+          leftSection={<IconSearch size={14} stroke={1.7} />}
+        />
+        <Combobox.Options mah={320} style={{ overflowY: 'auto' }}>
+          {visible.length === 0 ? (
+            <Combobox.Empty>No project found</Combobox.Empty>
+          ) : (
+            visible.map((p) => (
+              <Combobox.Option key={p._id} value={p._id} active={p._id === activeId}>
+                <Group justify="space-between" wrap="nowrap" gap="xs">
+                  <div style={{ minWidth: 0 }}>
+                    <Text size="sm" fw={p._id === activeId ? 600 : 400} truncate>
+                      {p.name}
+                    </Text>
+                    <Text size="xs" c="dimmed" className="ds-mono" truncate>
+                      {p.key}
+                    </Text>
+                  </div>
+                  {p._id === activeId ? (
+                    <IconCheck size={13} stroke={2} color="var(--ds-accent)" />
+                  ) : null}
+                </Group>
+              </Combobox.Option>
+            ))
+          )}
+        </Combobox.Options>
+      </Combobox.Dropdown>
+    </Combobox>
   );
 }
