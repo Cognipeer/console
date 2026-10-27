@@ -1,36 +1,66 @@
-name: Console Community Build
+name: Console Community Build (TEST)
 
 on:
   push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+-community'
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Yeniden calistirilacak vX.Y.Z-community tag'i
-        required: true
-        type: string
+    branches: [fix/devops-pipeline-build-duration]
 
 permissions:
   contents: read
   packages: write
+  actions: read
+
+env:
+  FORCE_CHECKS: 'false'
 
 concurrency:
-  group: console-community-${{ inputs.release_tag || github.ref_name }}
-  cancel-in-progress: false
+  group: console-community-test-${{ github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
-  # Checks moved over from ci.yml. They run in parallel, the same way as there
-  # (see the comments in that file for the matrix details); `validate` is the
-  # single gate that collects them all, and `build` stays dependent on it.
+  ci-status:
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 5
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - name: Check ci.yml result for this commit
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          HEADERS=(--header "Authorization: Bearer ${GH_TOKEN}"
+                   --header "Accept: application/vnd.github+json"
+                   --header "X-GitHub-Api-Version: 2022-11-28")
+          TESTED=false
+          if [[ "${FORCE_CHECKS}" == "true" ]]; then
+            echo "tested=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SHA=$(curl -fsSL "${HEADERS[@]}" "${API}/commits/${REF}" | jq -r '.sha // empty') || SHA=
+          if [[ -n "${SHA}" ]]; then
+            COUNT=$(curl -fsSL "${HEADERS[@]}" \
+              "${API}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=success&per_page=1" \
+              | jq -r '.total_count // 0') || COUNT=0
+            if [[ "${COUNT}" =~ ^[0-9]+$ && "${COUNT}" -gt 0 ]]; then
+              TESTED=true
+            fi
+          fi
+          echo "Commit ${SHA:-unknown}: tested=${TESTED}"
+          echo "tested=${TESTED}" >> "$GITHUB_OUTPUT"
+
   lint:
+    needs: ci-status
+    if: needs.ci-status.outputs.tested != 'true'
     runs-on: cognipeer-azure-runners
     timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -38,7 +68,15 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Lint
@@ -46,6 +84,8 @@ jobs:
 
   test:
     name: test (${{ matrix.name }})
+    needs: ci-status
+    if: needs.ci-status.outputs.tested != 'true'
     runs-on: cognipeer-azure-runners
     timeout-minutes: 40
     strategy:
@@ -74,7 +114,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -82,7 +122,15 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Install Chromium for browser tests
@@ -101,13 +149,15 @@ jobs:
         run: npx vitest run ${{ matrix.args }}
 
   endpoint-coverage:
+    needs: ci-status
+    if: needs.ci-status.outputs.tested != 'true'
     runs-on: cognipeer-azure-runners
     timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -115,7 +165,15 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Endpoint auth-coverage gate
@@ -125,13 +183,15 @@ jobs:
         run: npm run test:openapi
 
   docs:
+    needs: ci-status
+    if: needs.ci-status.outputs.tested != 'true'
     runs-on: cognipeer-azure-runners
     timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -139,20 +199,30 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Build docs
         run: npm run docs:build
 
   audit:
+    needs: ci-status
+    if: needs.ci-status.outputs.tested != 'true'
     runs-on: cognipeer-azure-runners
     timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -160,7 +230,15 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Production dependency audit
@@ -172,16 +250,22 @@ jobs:
 
   validate:
     if: ${{ always() }}
-    needs: [lint, test, endpoint-coverage, docs, audit]
+    needs: [ci-status, lint, test, endpoint-coverage, docs, audit]
     runs-on: cognipeer-azure-runners
     timeout-minutes: 5
     steps:
       - name: Require every job to succeed
         env:
           NEEDS: ${{ toJSON(needs) }}
+          CI_STATUS_RESULT: ${{ needs.ci-status.result }}
+          TESTED: ${{ needs.ci-status.outputs.tested }}
           FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
         run: |
           echo "$NEEDS"
+          if [ "$CI_STATUS_RESULT" = 'success' ] && [ "$TESTED" = 'true' ]; then
+            echo 'This commit already passed ci.yml; checks were skipped.'
+            exit 0
+          fi
           if [ "$FAILED" = 'true' ]; then
             echo 'One or more required jobs did not succeed.'
             exit 1
@@ -190,44 +274,23 @@ jobs:
 
   build:
     runs-on: cognipeer-azure-runners
-    environment: production
     timeout-minutes: 90
     needs: validate
-    outputs:
-      image_digest: ${{ steps.identity.outputs.digest }}
-      commit_sha: ${{ steps.vars.outputs.commit_sha }}
-      release_tag: ${{ steps.vars.outputs.release_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ github.sha }}
 
       - name: Capture release identity
         id: vars
         run: |
           set -euo pipefail
-          TAG="${{ inputs.release_tag || github.ref_name }}"
-          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-community$ ]] \
-            || { echo "::error::Tag '${TAG}' beklenen formatta degil (vX.Y.Z-community)."; exit 1; }
+          TAG="test-$(git rev-parse --short HEAD)"
           {
             echo "commit_sha=$(git rev-parse HEAD)"
             echo "release_tag=${TAG}"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Verify managed release with CRM
-        env:
-          WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
-          PRODUCT: console
-          TARGET_KEY: community
-          CRM_ENVIRONMENT: artifacts
-          COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
-          RELEASE_VERSION: ${{ steps.vars.outputs.release_tag }}
-          IMAGE_REF: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
-          RELEASE_STATUS: pending
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: bash ci/notify-release-crm.sh
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -255,6 +318,8 @@ jobs:
           file: ./Dockerfile
           push: true
           provenance: mode=min
+          cache-from: type=registry,ref=ghcr.io/cognipeer/console:buildcache
+          cache-to: type=registry,ref=ghcr.io/cognipeer/console:buildcache,mode=max
           tags: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           labels: |
             org.opencontainers.image.version=${{ steps.vars.outputs.release_tag }}
@@ -277,103 +342,3 @@ jobs:
             || { echo "::error::Community image digest changed or is missing."; exit 1; }
           assert_image_identity "${IMAGE_REF}" "${DIGEST}" "${SOURCE_COMMIT_SHA}"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-
-  sync-console-ee:
-    runs-on: cognipeer-azure-runners
-    timeout-minutes: 40
-    needs: build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.build.outputs.release_tag }}
-
-      - name: Create release automation token
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.RELEASE_AUTOMATION_APP_ID }}
-          private-key: ${{ secrets.RELEASE_AUTOMATION_PRIVATE_KEY }}
-          owner: Cognipeer
-          repositories: console-ee
-          permission-contents: write
-          permission-pull-requests: read
-          permission-metadata: read
-
-      - name: Update Console Enterprise compatibility pin
-        env:
-          DISPATCH_TOKEN: ${{ steps.app-token.outputs.token }}
-          COMMUNITY_TAG: ${{ needs.build.outputs.release_tag }}
-          COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
-        run: |
-          set -euo pipefail
-          [[ -n "${DISPATCH_TOKEN}" ]] \
-            || { echo "::error::GitHub release automation App token yok."; exit 1; }
-
-          SEAM_CONTRACT_VERSION=$(grep -oE 'SEAM_CONTRACT_VERSION = [0-9]+' \
-            src/enterprise/registry.ts | grep -oE '[0-9]+$')
-          [[ -n "${SEAM_CONTRACT_VERSION}" ]] \
-            || { echo "::error::Community registry SEAM_CONTRACT_VERSION bildirmiyor."; exit 1; }
-
-          PAYLOAD=$(jq -n \
-            --arg tag "${COMMUNITY_TAG}" \
-            --arg sha "${COMMUNITY_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --argjson seamContractVersion "${SEAM_CONTRACT_VERSION}" \
-            '{
-              event_type: "community-released",
-              client_payload: {
-                tag: $tag, sha: $sha, repository: $repository,
-                seamContractVersion: $seamContractVersion
-              }
-            }')
-
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Authorization: Bearer ${DISPATCH_TOKEN}" \
-            --header "Accept: application/vnd.github+json" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            --data "${PAYLOAD}" \
-            https://api.github.com/repos/Cognipeer/console-ee/dispatches
-
-      - name: Wait for Console Enterprise compatibility merge
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          COMMUNITY_TAG: ${{ needs.build.outputs.release_tag }}
-          COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
-          CONSOLE_EE_REPOSITORY: Cognipeer/console-ee
-        run: bash ci/wait-community-compat.sh
-
-  notify-crm:
-    if: always() && needs.build.result != 'skipped'
-    environment: production
-    runs-on: cognipeer-azure-runners
-    needs: [build, sync-console-ee]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.build.outputs.release_tag }}
-
-      - name: Report community artifact to CRM
-        env:
-          WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
-          PRODUCT: console
-          TARGET_KEY: community
-          CRM_ENVIRONMENT: artifacts
-          BUILD_RESULT: ${{ needs.build.result }}
-          COMPAT_SYNC_RESULT: ${{ needs.sync-console-ee.result }}
-          COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
-          IMAGE_REF: ghcr.io/cognipeer/console:${{ needs.build.outputs.release_tag }}
-          IMMUTABLE_REF: ghcr.io/cognipeer/console@${{ needs.build.outputs.image_digest }}
-          RELEASE_VERSION: ${{ needs.build.outputs.release_tag }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          RELEASE_STATUS=succeeded
-          if [[ "${BUILD_RESULT}" != "success" || "${COMPAT_SYNC_RESULT}" != "success" ]]; then
-            RELEASE_STATUS=failed
-          fi
-          export RELEASE_STATUS
-          bash ci/notify-release-crm.sh
