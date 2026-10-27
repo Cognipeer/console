@@ -3387,6 +3387,35 @@ export interface AgentTriggerWebhook {
   includePayload: boolean;
 }
 
+/**
+ * The settings of a `connector` trigger: an event a connector package declares
+ * (a vendor webhook or a poll on a schedule) fires the trigger. The enterprise
+ * Connectors module validates the settings and owns the subscription behind
+ * them (vendor registration or poll cursor); see `src/enterprise/connector-triggers.ts`.
+ */
+export interface AgentTriggerConnector {
+  /** The connector in the trigger's project. */
+  connectorId: string;
+  /** The trigger name the connector's package declares. */
+  trigger: string;
+  /** Parameter values, as the Connectors module normalized them; never secret. */
+  params: Record<string, unknown>;
+  /** Poll triggers only: when to poll (5-field cron in an IANA timezone). */
+  schedule?: AgentTriggerSchedule | null;
+  /** Event types to accept; empty / absent = every event the trigger emits. */
+  events?: string[] | null;
+  /** All must match (≤ 20); paths over the event view, as for webhook triggers. */
+  filter?: AgentTriggerWebhookFilterRule[] | null;
+  /** Append the event data (JSON) to the message. */
+  includePayload: boolean;
+  /** The subscription the Connectors module bound the trigger to. */
+  subscriptionId?: string | null;
+  /** Copied at save time for lists: the package, the trigger's kind and its label ("GitHub · Pull request"). */
+  packageId?: string | null;
+  kind?: 'webhook' | 'poll' | null;
+  label?: string | null;
+}
+
 /** The settings of a `schedule` trigger: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
 export interface AgentTriggerSchedule {
   cron: string;
