@@ -46,7 +46,13 @@ import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
 import { replicaOrder, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
 import { MAX_ROUTING_DEPTH, getDynamicRoutingConfig } from './dynamicRouting';
-import { normalizeInferenceError, OutputTokenLimitError, type OutputLimitDialect } from './openaiErrors';
+import {
+  UpstreamFinishError,
+  isUsageBookedError,
+  normalizeInferenceError,
+  OutputTokenLimitError,
+  type OutputLimitDialect,
+} from './openaiErrors';
 import { buildCacheVariantKey, isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
 import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
 import {
@@ -78,8 +84,16 @@ import {
   openAiResponseToNative,
   toOpenAIChatResponse,
 } from './openaiAdapter';
-import { StreamAssembler, finishWithToolCalls, frameHasContent, fromGateFrame, toGateFrame, wireFinishReason } from './gatewayStream';
-import { estimateInputTokens, estimateTokensFromText, toGatewayUsage, toWireUsage } from './gatewayUsage';
+import {
+  StreamAssembler,
+  finishWithToolCalls,
+  frameHasContent,
+  fromGateFrame,
+  isProviderErrorFinish,
+  toGateFrame,
+  wireFinishReason,
+} from './gatewayStream';
+import { estimateInputTokens, estimateTokensFromText, floorOutputAtEstimate, toGatewayUsage, toWireUsage } from './gatewayUsage';
 import type {
   GatewayChatRequest,
   ContentPart,
@@ -489,6 +503,7 @@ async function prepareCall(state: CallState, activeModel: IModel) {
     state.includeReasoning,
     activeModel.providerDriver,
     supportsUpstreamApiChoice(activeModel.providerDriver) ? resolveUpstreamApi(activeModel.settings) : undefined,
+    activeModel.modelId,
   );
   if (visibleReasoning) modelSettings.reasoning = visibleReasoning;
   // The resolved invocation settings are a fresh object (sampling, limits, reasoning):
@@ -547,9 +562,12 @@ type Prepared = Awaited<ReturnType<typeof prepareCall>>;
  * 1's last user text, so a hit would replay step 1's tool call forever, and two
  * agents with different system prompts would trade answers. Such calls bypass the
  * cache: anything that offers tools, replays tool turns, or comes from an agent.
+ * An evaluation call (a judge, dataset generation, the prompt optimizer) bypasses it
+ * too: it measures what the model says NOW, and a cached answer would score the cache.
  */
 function isCacheableConversation(request: ModelCallInput['request'], wire: AnyRecord, route: string): boolean {
   if (route.startsWith('agent.')) return false;
+  if (route === 'evaluation' || route.startsWith('evaluation.')) return false;
   if ((request.tools?.length ?? 0) > 0) return false;
   if (Array.isArray(wire.tools) && wire.tools.length > 0) return false;
   if (Array.isArray(wire.functions) && wire.functions.length > 0) return false;
@@ -790,9 +808,10 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
  */
 function logFailedCall(state: CallState, error: unknown): void {
   if (error instanceof GuardrailBlockError) return;
-  // Booked already, with the tokens the provider billed for it: a second, empty
-  // row would double the request count.
-  if (error instanceof OutputTokenLimitError && error.usageBooked) return;
+  // Booked already, with the tokens the provider billed for it (an output-limit hit,
+  // a call the provider ended in an error finish): a second, empty row would double
+  // the request count.
+  if (isUsageBookedError(error)) return;
   const cancelled = Boolean(state.context.signal?.aborted);
   if (!cancelled && !state.context.logFailures) return;
   const message = error instanceof Error ? error.message : String(error);
@@ -868,6 +887,38 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
   }
 
   const usage = toGatewayUsage(client.driver, native.usage);
+
+  // The provider ended the call in its OWN error finish (Gemini MALFORMED_FUNCTION_CALL, Bedrock
+  // malformed_tool_use ...): what it produced is unusable, and a `stop` on the wire would hand the caller
+  // a broken tool call as a finished answer. The call fails as an upstream error - but the provider
+  // billed what it burned, so the call is settled once (budget and row, whatever `logFailures` says)
+  // before the error leaves, the way a limit hit is.
+  if (isProviderErrorFinish(native.rawFinishReason, native.finishReason)) {
+    const failure = new UpstreamFinishError(native.rawFinishReason);
+    const cost = settleUsage(state, 'log-chat-usage', usage, {
+      requestId,
+      route: state.route,
+      status: 'error',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        messages: state.loggedMessages,
+        overrides,
+        stream: false,
+        ...describeRequestContract(wire),
+        ...replicaTrace(model, servingReplica, completed.failed),
+      }),
+      providerResponse: sanitizeForLogging({
+        error: failure.message,
+        finish_reason: failure.rawFinishReason ?? 'error',
+        ...(failure.rawFinishReason ? { raw_finish_reason: failure.rawFinishReason } : {}),
+      }),
+      errorMessage: failure.message,
+      latencyMs,
+      cacheHit: false,
+      finishReason: failure.rawFinishReason ?? 'error',
+    });
+    throw new UpstreamFinishError(native.rawFinishReason, { usage, cost, usageBooked: true });
+  }
 
   // A `length` finish is a limit hit when there is no ANSWER: no visible text (judged on the content
   // AFTER the inline reasoning was split out: a model that spent its budget inside `<reasoning>` has
@@ -1174,6 +1225,11 @@ async function* streamEvents(args: {
   /** The terminal chunk said `length`: the output limit (or the context window) ended the answer. */
   let lengthFinish = false;
   let rawLengthFinish: string | undefined;
+  /**
+   * The terminal chunk was the provider's own error finish (a malformed tool call ...): the call fails. Nothing
+   * more of it is delivered, and the stream is read on to its end only for the usage that trails that chunk.
+   */
+  let finishFailure: UpstreamFinishError | undefined;
   /** True once gated characters actually reached the caller. */
   let releasedGatedText = false;
 
@@ -1189,18 +1245,37 @@ async function* streamEvents(args: {
   // output (text, reasoning summary and tool-call arguments). The log marks it
   // `usage_estimated` (and `output_tokens_estimated`) so a measured count and a
   // guessed one stay distinguishable downstream.
+  const estimatedOutputTokens = (): number => estimateTokensFromText(
+    assembler.content
+    + assembler.reasoningSummary
+    + assembler.toolCalls().map((call) => call.arguments).join(''),
+  );
   const estimatedUsage = (): TokenUsage => {
     const inputTokens = estimateInputTokens(wire.messages, wire.tools);
-    const outputTokens = estimateTokensFromText(
-      assembler.content
-      + assembler.reasoningSummary
-      + assembler.toolCalls().map((call) => call.arguments).join(''),
-    );
+    const outputTokens = estimatedOutputTokens();
     return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, toolCalls: toolCallCount() };
   };
-  const partialUsage = (): TokenUsage => {
-    if (assembler.usage) return { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() };
-    return estimatedUsage();
+  /** The provider sent a terminal chunk (a finish reason, or its own error finish): its usage is the final count. */
+  const finishArrived = () => pendingFinish !== undefined || finishFailure !== undefined;
+  /**
+   * The provider's own count says the output limit this call sent is spent. For a stream with no finish
+   * reason that count is the only word on how it ended; no usage, or no limit sent, says nothing.
+   */
+  const outputLimitSpent = (): boolean => {
+    if (!assembler.usage || outputTokenLimit === undefined) return false;
+    const spent = toGatewayUsage(driver, assembler.usage).outputTokens ?? 0;
+    return spent > 0 && spent >= outputTokenLimit;
+  };
+  // What a stream that stopped short is booked at (a hang-up, a failure, a guardrail block). The
+  // provider's usage chunks are cumulative, and an early one (Anthropic's `message_start`) holds the
+  // exact prompt with an output of about 1 - so for a stream with no terminal chunk that count is only
+  // a floor: the booked output is the larger of it and the estimate from what was streamed, and the
+  // log is flagged only when the estimate won. A stream that finished keeps the provider's own usage.
+  const partialBooking = (): { usage: TokenUsage; estimated: boolean } => {
+    if (!assembler.usage) return { usage: estimatedUsage(), estimated: true };
+    const provider = { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() };
+    if (finishArrived()) return { usage: provider, estimated: false };
+    return floorOutputAtEstimate(provider, estimatedOutputTokens());
   };
   // A stream that completed carries the provider's usage; an upstream that never
   // sent it (it ignored or rejected `stream_options.include_usage`) still billed
@@ -1328,7 +1403,8 @@ async function* streamEvents(args: {
   const settleCancelled = () => {
     settled = true;
     const latencyMs = Date.now() - startedAt;
-    settleUsage(state, 'log-stream-cancelled', partialUsage(), {
+    const booking = partialBooking();
+    settleUsage(state, 'log-stream-cancelled', booking.usage, {
       requestId,
       route: state.route,
       status: 'cancelled',
@@ -1341,7 +1417,7 @@ async function* streamEvents(args: {
       providerResponse: sanitizeForLogging({
         cancelled: 'client_disconnected',
         partial: partialMessage(),
-        ...(assembler.usage ? {} : { output_tokens_estimated: true, usage_estimated: true }),
+        ...(booking.estimated ? { output_tokens_estimated: true, usage_estimated: true } : {}),
       }),
       latencyMs,
     });
@@ -1363,7 +1439,7 @@ async function* streamEvents(args: {
     blockCtl.abort();
 
     // The provider generated and billed these tokens whether or not they were delivered.
-    const blockedUsage = partialUsage();
+    const blocked = partialBooking();
     // A stream that already settled (a limit hit that completed before the block
     // landed) has had its budget debit: the row is written, the debit is not repeated.
     const blockRow = {
@@ -1382,7 +1458,7 @@ async function* streamEvents(args: {
         partial_delivery: releasedGatedText,
         // The provider produced this whether or not we delivered it.
         partial: partialMessage(),
-        ...(assembler.usage ? {} : { output_tokens_estimated: true, usage_estimated: true }),
+        ...(blocked.estimated ? { output_tokens_estimated: true, usage_estimated: true } : {}),
       }),
       errorMessage: blockMessage,
       latencyMs: Date.now() - startedAt,
@@ -1391,7 +1467,7 @@ async function* streamEvents(args: {
     if (!settled) {
       settled = true;
       // The same estimator the cancel path uses, for the same reason.
-      settleUsage(state, 'log-stream-guardrail-block', blockedUsage, blockRow);
+      settleUsage(state, 'log-stream-guardrail-block', blocked.usage, blockRow);
     } else {
       // Whatever settled first already wrote the tokens on its own row.
       usageRow(state, 'log-stream-guardrail-block', { ...blockRow, usage: {} });
@@ -1454,6 +1530,12 @@ async function* streamEvents(args: {
 
     for await (const chunk of withFirst(opened.value.first, opened.value.gen)) {
       assembler.push(chunk);
+      // The provider's own error finish (a malformed tool call ...): the call fails, so nothing more of
+      // it is delivered. The stream is still read to its end, for the usage that trails the terminal chunk.
+      if (!finishFailure && isProviderErrorFinish(chunk.rawFinishReason, chunk.finishReason)) {
+        finishFailure = new UpstreamFinishError(chunk.rawFinishReason);
+      }
+      if (finishFailure) continue;
       const delta = chunk.delta ?? {};
 
       let contentText: string | undefined = delta.content || undefined;
@@ -1510,6 +1592,23 @@ async function* streamEvents(args: {
       if (out.blocked !== undefined) {
         yield* beginBlock(out.blocked);
         return;
+      }
+    }
+
+    // The call fails as an upstream error. What the provider burned is booked once, by the catch below.
+    if (finishFailure) throw finishFailure;
+
+    // A stream that ended with no terminal chunk at all (the upstream dropped the connection, a proxy closed
+    // it) has no finish reason to tell a limit hit from a clean end - its usage does. When the provider's own
+    // count says the output limit this call sent is spent, the answer was cut off, and it is judged exactly as
+    // a `length` finish is: no visible text (or, in the agent loop, a tool call) is a limit hit; otherwise the
+    // text is delivered with finish `length`, flagged truncated. No usage, or no limit sent, keeps the
+    // synthetic finish below.
+    if (pendingFinish === undefined && outputLimitSpent()) {
+      pendingFinish = 'length';
+      lengthFinish = true;
+      if (assembler.toolCallCount > 0 ? runsToolCalls(state.route) : !hasFinalOutput) {
+        outputLimitError = buildLimitError(state, outputTokenLimit, undefined);
       }
     }
 
@@ -1655,10 +1754,11 @@ async function* streamEvents(args: {
     // The provider bills what it generated before it failed, so a stream that had
     // already produced output (or reported usage) is booked. One that failed
     // before its first chunk generated nothing: no estimate of an input it never
-    // billed.
+    // billed. A call the provider ended in its own error finish was billed whole.
     const produced = Boolean(
-      assembler.usage || assembler.content || assembler.reasoningSummary || assembler.toolCallCount > 0,
+      finishFailure || assembler.usage || assembler.content || assembler.reasoningSummary || assembler.toolCallCount > 0,
     );
+    const booking = produced ? partialBooking() : undefined;
     const errorRow = {
       requestId,
       route: state.route,
@@ -1666,19 +1766,26 @@ async function* streamEvents(args: {
       providerRequest: requestLog({ ...describeRequestContract(wire), ...replicaTrace(model, servingReplica, opened.failed) }),
       providerResponse: sanitizeForLogging({
         error: normalized.error.message,
-        ...(produced && !assembler.usage ? { usage_estimated: true } : {}),
+        ...(finishFailure?.rawFinishReason ? { raw_finish_reason: finishFailure.rawFinishReason } : {}),
+        ...(booking?.estimated ? { usage_estimated: true } : {}),
       }),
       errorMessage: normalized.error.message,
       latencyMs,
-      finishReason: assembler.finishReason === "error" ? undefined : assembler.finishReason,
+      finishReason: finishFailure
+        ? (finishFailure.rawFinishReason ?? 'error')
+        : (assembler.finishReason === 'error' ? undefined : assembler.finishReason),
     } satisfies Omit<Parameters<typeof logModelUsage>[2], 'usage'>;
-    if (produced && !settled && !donePending) {
+    if (booking && !settled && !donePending) {
       settled = true;
-      settleUsage(state, 'log-stream-error', partialUsage(), errorRow);
+      settleUsage(state, 'log-stream-error', booking.usage, errorRow);
     } else {
       usageRow(state, 'log-stream-error', { ...errorRow, usage: {} });
     }
-    yield { type: 'failed', error: normalized.error, status: normalized.status };
+    yield {
+      type: 'failed',
+      error: normalized.error,
+      status: normalized.status,
+    };
   } finally {
     // A consumer that stopped reading right after a terminal event still gets its
     // bookkeeping: the block's abort + row, or the success row.

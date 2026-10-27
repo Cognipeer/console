@@ -11,14 +11,16 @@
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
-import type { IOcrJob, IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
+import type { IModel, IOcrJob, IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
 import {
   handleChatCompletion,
   handleOcrRequest,
 } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, type TokenUsage } from '@/lib/services/models/usageLogger';
-import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { OutputTokenLimitError, UpstreamFinishError } from '@/lib/services/models/openaiErrors';
+import { NON_STREAM_DEFAULT_CAP, modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { downloadFile } from '@/lib/services/files/fileService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { OcrDocumentSource, OcrFeature } from '@/lib/providers';
@@ -64,6 +66,35 @@ function extractMessageText(response: unknown): string {
       .join('');
   }
   return '';
+}
+
+/** Whether the reply was cut off at the output limit (the first choice's finish reason says so). */
+function wasCutOff(response: unknown): boolean {
+  const choices = (response as { choices?: Array<{ finish_reason?: unknown }> } | null | undefined)?.choices;
+  return isTruncatedFinishReason(normalizeFinishReason(choices?.[0]?.finish_reason));
+}
+
+function positiveNumber(...values: unknown[]): number | undefined {
+  return values.find((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+}
+
+/**
+ * The `max_tokens` the summary / structured steps are sent with, or undefined to leave the limit to the model's own
+ * setting. An OCR item has no request body to take one from, and a document's summary or extraction is long: so a
+ * model whose maximum is known (declared in the Model Hub, or a Claude the built-in table knows) is asked for that,
+ * not for the gateway's default. Never above NON_STREAM_DEFAULT_CAP, the most a non-streaming call is given by
+ * default: a document can fill much of the context window, and a limit as large as the model's whole maximum
+ * (128000 for a current Claude) would not fit next to it. A limit the operator configured on the model that is
+ * already as large is left alone rather than restated (an explicit value is a hard cap: it would also drop the
+ * thinking headroom the gateway adds to a configured limit).
+ */
+function llmStepMaxTokens(model: IModel | null | undefined): number | undefined {
+  const modelMax = modelMaxOutputTokens(model);
+  if (modelMax === undefined) return undefined;
+  const wanted = Math.min(modelMax, NON_STREAM_DEFAULT_CAP);
+  const settings = (model?.settings ?? {}) as Record<string, unknown>;
+  const configured = positiveNumber(settings.maxCompletionTokens, settings.maxTokens);
+  return configured !== undefined && configured >= wanted ? undefined : wanted;
 }
 
 async function resolveDocument(
@@ -181,6 +212,11 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     const result: IOcrJobItemResult = {};
     const usage: NonNullable<IOcrJobItem['usage']> = { ocr: ocrUsage as Record<string, unknown> };
 
+    // Steps whose reply was cut off at the output limit: the item still succeeds (the text it has is kept),
+    // but the result says which part is incomplete. 'ocr' = a VLM page whose transcription was cut off.
+    const truncatedSteps: NonNullable<IOcrJobItemResult['truncated']> = [];
+    if (ocr.response?.pages?.some((p) => p.truncated)) truncatedSteps.push('ocr');
+
     if (job.outputs.includes('full_text')) result.fullText = fullText;
     result.pages = ocrUsage.pages;
 
@@ -209,7 +245,7 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     if (needsLlm && job.llmModelKey) {
       const llmModel = await getModelByKey(ctx.tenantDbName, job.llmModelKey, projectId);
       llmPricing = llmModel?.pricing;
-
+      const stepMaxTokens = llmStepMaxTokens(llmModel);
       if (job.outputs.includes('summary')) {
         const resp = await handleChatCompletion({
           tenantDbName: ctx.tenantDbName,
@@ -220,9 +256,11 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
               { role: 'system', content: job.summaryPrompt || DEFAULT_SUMMARY_PROMPT },
               { role: 'user', content: fullText },
             ],
+            ...(stepMaxTokens !== undefined ? { max_tokens: stepMaxTokens } : {}),
           },
         });
         result.summary = extractMessageText(resp.response).trim();
+        if (wasCutOff(resp.response)) truncatedSteps.push('summary');
         usage.llm = { ...(usage.llm ?? {}), summary: resp.usage };
         accumulateLlm(totals, resp.usage, llmModel?.pricing);
       }
@@ -244,18 +282,29 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
               type: 'json_schema',
               json_schema: { name: 'extraction', schema: job.structuredSchema },
             },
+            ...(stepMaxTokens !== undefined ? { max_tokens: stepMaxTokens } : {}),
           },
         });
         const raw = extractMessageText(resp.response);
-        try {
-          result.structured = JSON.parse(stripJsonFences(raw)) as Record<string, unknown>;
-        } catch {
-          result.structured = { _raw: raw, _parseError: true };
+        if (wasCutOff(resp.response)) {
+          // A reply cut at the limit is not the object the schema asked for (the JSON stops mid-value, and one that
+          // still parses is missing fields). Kept raw and flagged, never stored as a parsed result.
+          result.structured = { _raw: raw, _truncated: true };
+          truncatedSteps.push('structured');
+        } else {
+          try {
+            result.structured = JSON.parse(stripJsonFences(raw)) as Record<string, unknown>;
+          } catch {
+            result.structured = { _raw: raw, _parseError: true };
+          }
         }
         usage.llm = { ...(usage.llm ?? {}), structured: resp.usage };
         accumulateLlm(totals, resp.usage, llmModel?.pricing);
       }
+
     }
+
+    if (truncatedSteps.length > 0) result.truncated = truncatedSteps;
 
     totals.totalTokens = totals.inputTokens + totals.outputTokens;
     usage.inputTokens = totals.inputTokens;
@@ -325,7 +374,7 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // An output-limit hit burned real LLM tokens that never reached a response.
-    if (err instanceof OutputTokenLimitError && err.usage) {
+    if ((err instanceof OutputTokenLimitError || err instanceof UpstreamFinishError) && err.usage) {
       accumulateLlm(totals, err.usage, llmPricing);
     }
     totals.totalTokens = totals.inputTokens + totals.outputTokens;

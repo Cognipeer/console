@@ -19,7 +19,8 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, type TokenUsage, type UsageCostResult } from '@/lib/services/models/usageLogger';
-import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { OutputTokenLimitError, UpstreamFinishError } from '@/lib/services/models/openaiErrors';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { uploadFile } from '@/lib/services/files/fileService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { checkBudget } from '@/lib/quota/quotaGuard';
@@ -93,6 +94,7 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
 
     let response: Record<string, unknown> | undefined;
     let usage: IBatchJobItem['usage'];
+    let finishReason: string | undefined;
     if (job.endpoint === '/v1/embeddings') {
       const result = await handleEmbeddingRequest({
         tenantDbName: ctx.tenantDbName,
@@ -120,12 +122,18 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       response = result.response;
       // result.usage is already canonical gateway usage: keep it as is, never re-fold.
       usage = canonicalItemUsage(result.usage as TokenUsage | undefined);
+      finishReason = finishReasonOf(response);
     }
 
+    // A reply cut off at the output limit WITH text is a success (the text is returned, as the sync endpoint does:
+    // 200 + finish_reason length); the item says so, so a consumer reading results does not take it for a complete
+    // answer. (One with nothing to show never gets here: the gateway fails it as an OutputTokenLimitError.)
     patch = {
       status: 'succeeded',
       responseStatusCode: 200,
       responseBody: response,
+      ...(finishReason ? { finishReason } : {}),
+      ...(isTruncatedFinishReason(finishReason) ? { truncated: true } : {}),
       usage,
       endedAt: new Date(),
     };
@@ -156,12 +164,13 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       endedAt: new Date(),
     };
     // A limit hit burned real tokens: keep them on the item and in the aggregates.
-    const burned = error instanceof OutputTokenLimitError ? canonicalItemUsage(error.usage) : undefined;
+    const billedError = error instanceof OutputTokenLimitError || error instanceof UpstreamFinishError ? error : undefined;
+    const burned = billedError ? canonicalItemUsage(billedError.usage) : undefined;
     if (burned) {
       patch.usage = burned;
       addUsageToDelta(delta, burned);
     }
-    if (error instanceof OutputTokenLimitError && error.cost && !settledCost) settledCost = error.cost;
+    if (billedError?.cost && !settledCost) settledCost = billedError.cost;
     delta.itemsFailed = 1;
   }
 
@@ -190,6 +199,13 @@ class BatchItemError extends Error {
     this.name = 'BatchItemError';
     this.statusCode = statusCode;
   }
+}
+
+/** The first choice's finish reason of a chat completion response body, normalized (undefined when it has none). */
+function finishReasonOf(response: Record<string, unknown> | undefined): string | undefined {
+  const choices = response?.choices;
+  if (!Array.isArray(choices)) return undefined;
+  return normalizeFinishReason((choices[0] as { finish_reason?: unknown } | undefined)?.finish_reason);
 }
 
 /** Sums the costs one item settled (a Dynamic LLM's decider or scorer, then its child). */

@@ -1967,7 +1967,44 @@ describe('handleChatCompletion · Dynamic LLM', () => {
       },
     );
     stubUpstream((call) => call.headers.authorization === 'Bearer p-big'
-      ? json({ error: { message: 'primary down', type: 'invalid_request_error' } }, 400)
+      ? json({ error: { message: 'primary down', type: 'server_error' } }, 503)
+      : json(completion({ content: 'ok' })));
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    expect(result.routing?.decision).toBe('fallback');
+    expect(result.routing?.chosenModelKey).toBe('small');
+  });
+
+  it('also falls back when the chosen model fails with a 400 (its credentials, deployment or config are its own)', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      fallbackModelKey: 'small',
+      rules: [
+        {
+          label: 'always',
+          targetModelKey: 'big',
+          matchType: 'all',
+          conditions: [{ signal: 'messageCount', operator: 'gte', value: 1 }],
+        },
+      ],
+    });
+    wireModels(router);
+
+    const runtimes = new Map<string, ModelProviderRuntime>();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_db: string, _tid: string, providerKey: string) => {
+        if (!runtimes.has(providerKey)) runtimes.set(providerKey, await openAiRuntime({}, providerKey));
+        return { runtime: runtimes.get(providerKey) };
+      },
+    );
+    stubUpstream((call) => call.headers.authorization === 'Bearer p-big'
+      ? json({ error: { message: 'bad deployment', type: 'invalid_request_error' } }, 400)
       : json(completion({ content: 'ok' })));
 
     const result = await handleChatCompletion({

@@ -296,7 +296,9 @@ describe('usage of an attempt that hit the output limit (agent ledger)', () => {
     executeModelCall.mockImplementation(async () => ({
       requestId: 'q', stream: coreStream(done(failedAttempt, { outputLimitReached: true, wireFinishReason: 'length', nativeUsage: { inputTokens: 50 } }), limitHit),
     }));
-    const chat = await build() as unknown as Stream;
+    // The event names no limit, so the retry is sized from what the attempt burned (VTX-2); the run's
+    // output budget is spent, so no retry is made and the single attempt's usage is what the notice carries.
+    const chat = await build({ maxTotalOutputTokens: 100 }) as unknown as Stream;
     const parts: any[] = [];
     for await (const part of chat.stream(USER)) parts.push(part);
     const last = parts[parts.length - 1];

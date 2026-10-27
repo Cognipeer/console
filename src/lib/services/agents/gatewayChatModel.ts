@@ -21,9 +21,11 @@
  *  - **Abort.** The agent loop's signal ends the upstream request; the core logs the
  *    call `cancelled`.
  *  - **Reasoning.** The agent's own pick is the in-process override (above the
- *    Model Hub default); an API request's value is the lowest rung. Reasoning
- *    blocks and their signatures stay inside the loop (the next request replays
- *    them); the Model Hub "return reasoning" switch removes only the TEXT.
+ *    Model Hub default); an API request's value is the lowest rung. A side pass
+ *    that names its purpose (a summary, a reflection) brings a pick of its own,
+ *    which wins for that call. Reasoning blocks and their signatures stay inside
+ *    the loop (the next request replays them); the Model Hub "return reasoning"
+ *    switch removes only the TEXT.
  *  - **One input verdict per turn.** The model object lives for one run; its turn key
  *    makes the core evaluate the latest user message once, not at every step of the
  *    tool loop.
@@ -48,11 +50,17 @@ import { CONTEXT_WINDOW_EXCEEDED_REASON, OutputTokenLimitError } from '@/lib/ser
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
 import { nativeRequestToWire } from '@/lib/services/models/openaiAdapter';
-import type { GatewayChatRequest, ModelCallInput, ModelCallOutcome } from '@/lib/services/models/gatewayTypes';
+import type { GatewayCallContext, GatewayChatRequest, ModelCallInput, ModelCallOutcome } from '@/lib/services/models/gatewayTypes';
 import type { TokenUsage as GatewayUsage, UsageCostResult } from '@/lib/services/models/usageLogger';
 import { isSyntheticActor } from './syntheticActor';
 import { addRunUsage } from './runUsage';
-import { contextWindowNotice, outputLimitNotice, type OutputLimitReport, type OutputLimitTap } from './outputLimitNotice';
+import {
+  contextWindowNotice,
+  outputLimitNotice,
+  outputLimitRetrySeparator,
+  type OutputLimitReport,
+  type OutputLimitTap,
+} from './outputLimitNotice';
 
 export { normalizeNativeReasoning };
 
@@ -60,6 +68,10 @@ export { normalizeNativeReasoning };
 export type NativeAgentReasoning = NativeReasoning;
 
 type AnyRecord = Record<string, unknown>;
+
+/** The router module, loaded once on first use (a lazy import keeps it out of the agent's static graph). */
+let routingModule: Promise<typeof import('@/lib/services/models/gatewayRouting')> | undefined;
+const loadRouting = () => (routingModule ??= import('@/lib/services/models/gatewayRouting'));
 
 export function isDynamicModel(model: IModel | undefined): boolean {
   return Boolean(model && getDynamicRoutingConfig(model));
@@ -118,19 +130,26 @@ export interface GatewayChatModelInput {
  * The limit to retry with after a model hit `limit` (the limit that call ran with)
  * without answering: double, capped by the model's maximum output (what the record
  * declares, else the built-in table) and by what is left of the run's output-token
- * budget. `undefined` when no larger limit is available.
+ * budget. Where nothing was configured (`limit` is undefined: the provider's own
+ * default applied) `observed`, the output tokens the failed attempt burned
+ * (reasoning included), stands in for it: that is where the model was stopped. With
+ * neither, the model's maximum is the one thing left to try. `undefined` when no
+ * larger limit is available.
  */
 export function raisedOutputLimit(
   limit: number | undefined,
   model: IModel,
   budgetLeft?: number,
+  observed?: number,
 ): number | undefined {
-  if (!limit || limit <= 0) return undefined;
   const max = modelMaxOutputTokens(model);
-  let next = limit * 2;
+  const sent = limit && limit > 0 ? limit : undefined;
+  const floor = sent ?? (observed && observed > 0 ? observed : undefined);
+  let next = floor !== undefined ? floor * 2 : max;
+  if (next === undefined) return undefined;
   if (max) next = Math.min(next, max);
   if (budgetLeft !== undefined) next = Math.min(next, budgetLeft);
-  return next > limit ? Math.floor(next) : undefined;
+  return next > (floor ?? 0) ? Math.floor(next) : undefined;
 }
 
 /** A provider's 400 about the output limit it was sent (a raised value the model does not accept). */
@@ -142,6 +161,20 @@ function rejectsOutputLimit(error: unknown): boolean {
   if (typeof param === 'string' && /^max_(completion_|output_)?tokens$/.test(param)) return true;
   return typeof message === 'string'
     && /max_(completion_|output_)?tokens|max(imum)? (output|completion) tokens|output (token|length)/i.test(message);
+}
+
+/** What a call says it is for, when it says (the SDK names its side passes, e.g. a summary); an older SDK sends nothing. */
+function requestPurpose(request: ChatCompletionRequest): string | undefined {
+  const purpose = (request as unknown as { purpose?: unknown }).purpose;
+  return typeof purpose === 'string' && purpose.trim() ? purpose.trim() : undefined;
+}
+
+/** What one attempt of a call learns about the Dynamic LLM it ran through (per attempt: concurrent calls never share it). */
+interface RouteNotes {
+  /** Run on this child and decide nothing: the retry of an attempt that ran there. */
+  pin?: string;
+  /** The child the attempt ran on, once the router chose it (also when the attempt then failed). */
+  routed?: string;
 }
 
 /** The SDK provider family whose capabilities (structured output, strict tools) fit the model's driver. */
@@ -160,6 +193,18 @@ function providerFamily(model: IModel): 'openai' | 'azure' | 'anthropic' | 'bedr
 
 /** agent-sdk's own usage shape (what the SDK ledger, its budgets and message usage are built from). */
 type SdkUsage = ChatCompletionResponse['usage'];
+
+/**
+ * What the attempts of a streamed call that hit the output limit leave behind. `usage`: what they
+ * burned (it rides on the retry's final chunk, or on the limit notice). `streamed`: pieces of an
+ * attempt already reached the SDK, which must drop them. `reasoned`: some of those pieces were
+ * thinking text, which a live view has shown and cannot take back.
+ */
+interface CarriedAttempts {
+  usage?: SdkUsage;
+  streamed?: boolean;
+  reasoned?: boolean;
+}
 
 /**
  * What the agent-sdk is handed as a call's usage: the CORE's canonical gateway usage
@@ -260,7 +305,12 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
   // Output tokens this run's calls have spent (for the budget check of a retry).
   let spentOutputTokens = 0;
 
-  const callInput = (request: ChatCompletionRequest, stream: boolean, limitOverride?: number): ModelCallInput => {
+  const callInput = async (
+    request: ChatCompletionRequest,
+    stream: boolean,
+    limitOverride?: number,
+    notes?: RouteNotes,
+  ): Promise<ModelCallInput> => {
     const native: GatewayChatRequest = {
       messages: request.messages,
       ...(request.tools?.length ? { tools: request.tools } : {}),
@@ -289,6 +339,42 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       wire.max_tokens = limitOverride;
       wire.max_completion_tokens = limitOverride;
     }
+    // A call that names its purpose is a side pass of the SDK (a summary, a reflection): what it asks
+    // for is its own, so the reasoning it carries beats the agent's pick for that call. A main-loop
+    // call carries the loop's preset instead of anyone's choice and stays below the agent's pick.
+    const callPurpose = requestPurpose(request);
+    const callPick = callPurpose ? normalizeNativeReasoning(request.reasoning) : undefined;
+    const reasoningPick = callPick ?? agentPick;
+    // The call's own purpose over what the agent built the model for (a title, a model check); the route stays.
+    const purpose = callPurpose ?? input.purpose;
+    const context: GatewayCallContext = {
+      route: input.route ?? 'agent.chat',
+      signal: request.signal,
+      ...(actorId ? { attribution: { userId: actorId } } : {}),
+      // Who is asking comes from the run's own routing scope; the agent adds its key.
+      ...(input.agentKey ? { callerContext: { agentKey: input.agentKey } } : {}),
+      ...(reasoningPick ? { reasoningOverride: reasoningPick } : {}),
+      ...(input.showReasoning === false ? { showReasoning: false } : {}),
+      requestTags: {
+        ...(input.agentKey ? { agentKey: input.agentKey } : {}),
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        ...(purpose ? { purpose } : {}),
+      },
+      logFailures: true,
+      guardrailTurnKey: turnKey,
+      onUsageSettled: settle,
+    };
+    // A Dynamic LLM decides once per call: the retry of an attempt runs on the child that attempt ran
+    // on (no second decision), and every attempt says which child it ran on, a failed one included.
+    let routed = context;
+    if (notes && isDynamicModel(model)) {
+      const sink = notes;
+      const { withRouterHandoff } = await loadRouting();
+      routed = withRouterHandoff(context, {
+        ...(sink.pin ? { pin: sink.pin } : {}),
+        onChild: (modelKey) => { sink.routed = modelKey; },
+      });
+    }
     return {
       tenantDbName: input.tenantDbName,
       tenantId: input.tenantId,
@@ -297,29 +383,15 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       request: native,
       wire,
       stream,
-      context: {
-        route: input.route ?? 'agent.chat',
-        signal: request.signal,
-        ...(actorId ? { attribution: { userId: actorId } } : {}),
-        // Who is asking comes from the run's own routing scope; the agent adds its key.
-        ...(input.agentKey ? { callerContext: { agentKey: input.agentKey } } : {}),
-        ...(agentPick ? { reasoningOverride: agentPick } : {}),
-        ...(input.showReasoning === false ? { showReasoning: false } : {}),
-        requestTags: {
-          ...(input.agentKey ? { agentKey: input.agentKey } : {}),
-          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-          ...(input.purpose ? { purpose: input.purpose } : {}),
-        },
-        logFailures: true,
-        guardrailTurnKey: turnKey,
-        onUsageSettled: settle,
-      },
+      context: routed,
     };
   };
 
-  const noteRoute = (outcome: ModelCallOutcome) => {
+  const noteRoute = (outcome: ModelCallOutcome, notes: RouteNotes) => {
     const routed = outcome.routing?.chosenModelKey;
-    if (routed) input.onRouted?.(routed);
+    if (!routed) return;
+    notes.routed = routed;
+    input.onRouted?.(routed);
   };
 
   const provider = {
@@ -337,15 +409,17 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       const carry = (error: OutputTokenLimitError) => {
         if (error.usage) carried.usage = addSdkUsage(carried.usage, sdkUsage(error.usage));
       };
+      // The child a Dynamic LLM ran the first attempt on: the retry runs there too.
+      const first: RouteNotes = {};
       try {
-        return await completeOnce(request);
+        return await completeOnce(request, undefined, first);
       } catch (error) {
         if (!(error instanceof OutputTokenLimitError)) throw error;
         carry(error);
-        const raised = nextLimit(error);
+        const raised = await nextLimit(error, first, carried.usage);
         if (raised === undefined) return limitResponse(error, error.limit, carried.usage);
         try {
-          const retried = await completeOnce(request, raised);
+          const retried = await completeOnce(request, raised, { pin: first.routed });
           const usage = addSdkUsage(carried.usage, retried.usage);
           return usage ? { ...retried, usage } : retried;
         } catch (retryError) {
@@ -364,22 +438,31 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       input.outputLimitTap?.clear();
       // The usage of the attempts that hit the output limit (their `done` chunk is not
       // forwarded): it rides on the retry's final chunk, or on the limit notice.
-      // `streamed`: pieces of an attempt already reached the SDK, which must drop them.
-      const carried: { usage?: SdkUsage; streamed?: boolean } = {};
+      const carried: CarriedAttempts = {};
+      // The child a Dynamic LLM ran the first attempt on: the retry runs there too.
+      const first: RouteNotes = {};
       try {
-        yield* streamOnce(request, undefined, carried);
+        yield* streamOnce(request, undefined, carried, first);
         return;
       } catch (error) {
         if (!(error instanceof OutputTokenLimitError)) throw error;
-        const raised = nextLimit(error);
+        const raised = await nextLimit(error, first, carried.usage);
         let ending = error;
         let endingLimit = error.limit;
         if (raised !== undefined) {
           // The failed attempt's text, tool-call pieces and thinking are an abandoned answer.
           yield resetChunk();
+          const showedThinking = carried.reasoned;
           carried.streamed = false;
+          carried.reasoned = false;
+          // A live view still shows that attempt's thinking (a stream cannot take it back):
+          // tell it where the retry's begins.
+          if (showedThinking) {
+            yield retrySeparatorChunk();
+            carried.streamed = true;
+          }
           try {
-            yield* streamOnce(request, raised, carried);
+            yield* streamOnce(request, raised, carried, { pin: first.routed });
             return;
           } catch (retryError) {
             if (retryError instanceof OutputTokenLimitError) {
@@ -396,13 +479,32 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     },
   };
 
-  const nextLimit = (error: OutputTokenLimitError): number | undefined => {
+  /** The record of the child a Dynamic LLM routed to, whose output ceiling is the one that applies; `null` when it cannot be read. */
+  const routedModel = async (modelKey: string): Promise<IModel | null> => {
+    try {
+      const { getModelByKey } = await import('@/lib/services/models/modelService');
+      return await getModelByKey(input.tenantDbName, modelKey, input.projectId);
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * The limit to retry a call with after `error` (the failed attempt `notes` describes; `burned`: what the
+   * attempts so far used), or `undefined` when no retry should be made.
+   */
+  const nextLimit = async (error: OutputTokenLimitError, notes: RouteNotes, burned?: SdkUsage): Promise<number | undefined> => {
     // A full context window is not cured by a larger output limit.
     if (error.rawFinishReason === CONTEXT_WINDOW_EXCEEDED_REASON) return undefined;
     const budgetLeft = input.maxTotalOutputTokens !== undefined
       ? Math.max(0, input.maxTotalOutputTokens - spentOutputTokens)
       : undefined;
-    return raisedOutputLimit(error.limit, model, budgetLeft);
+    // A Dynamic LLM has no ceiling of its own: the child that ran has one, and the retry runs on that
+    // child. A child that cannot be read leaves the ceiling unknown, so nothing is raised blind.
+    const capped = notes.routed && isDynamicModel(model) ? await routedModel(notes.routed) : model;
+    if (!capped) return undefined;
+    // Nothing configured (the error names no limit): the failed attempt's own output tokens say where it stopped.
+    return raisedOutputLimit(error.limit, capped, budgetLeft, error.usage?.outputTokens ?? burned?.outputTokens);
   };
 
   const emptyUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0 };
@@ -415,14 +517,20 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     return { text: contextWindow ? contextWindowNotice() : outputLimitNotice(limit), report };
   };
 
-  /** The graceful end of a turn whose model cannot fit an answer in its output limit. */
+  /**
+   * The graceful end of a turn whose model cannot fit an answer in its output limit. It finishes
+   * `length`, not `stop`: the text is the console's notice, no answer of the model's, and a reader
+   * of the finish reason (a summarizer) must be able to tell. With no tool call the SDK's loop ends
+   * the turn on `length` as it does on `stop`; the turn's outcome and the stored message are
+   * flagged through the tap (`limitEnding`), never from the text or the finish reason.
+   */
   const limitResponse = (error: OutputTokenLimitError, limit?: number, burned?: SdkUsage): ChatCompletionResponse => ({
     id: `limit_${crypto.randomUUID()}`,
     model: model.modelId,
     content: limitEnding(error, limit).text,
     toolCalls: [],
     usage: burned ?? emptyUsage,
-    finishReason: 'stop',
+    finishReason: 'length',
     raw: null,
   });
 
@@ -431,8 +539,25 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     model: model.modelId,
     delta: { content: limitEnding(error, limit).text },
     ...(burned ? { usage: burned } : {}),
-    finishReason: 'stop',
+    finishReason: 'length',
   });
+
+  /**
+   * One thinking delta that says "the thinking above belonged to an attempt that ran out of output
+   * tokens; the retry's follows": the live protocol has no event that takes shown thinking back, so
+   * the separator is part of the thinking stream (and of the message's assembled thinking text).
+   */
+  const retrySeparatorChunk = (): ChatCompletionChunk => {
+    const separator = outputLimitRetrySeparator();
+    if (input.onReasoning) {
+      try { input.onReasoning(separator); } catch { /* a display callback must not fail the run */ }
+    }
+    return {
+      id: `retry_${crypto.randomUUID()}`,
+      model: model.modelId,
+      delta: { reasoning: { summary: separator } },
+    };
+  };
 
   /**
    * "Forget what this call streamed so far": agent-sdk >= 0.21 clears its accumulated
@@ -446,15 +571,19 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     reset: true,
   } as unknown as ChatCompletionChunk);
 
-  const completeOnce = async (request: ChatCompletionRequest, limitOverride?: number): Promise<ChatCompletionResponse> => {
+  const completeOnce = async (
+    request: ChatCompletionRequest,
+    limitOverride?: number,
+    notes: RouteNotes = {},
+  ): Promise<ChatCompletionResponse> => {
     {
       let outcome: ModelCallOutcome;
       try {
-        outcome = await executeModelCall(callInput(request, false, limitOverride));
+        outcome = await executeModelCall(await callInput(request, false, limitOverride, notes));
       } catch (error) {
         throw await asAgentBlock(error);
       }
-      noteRoute(outcome);
+      noteRoute(outcome, notes);
       const response = outcome.result?.response;
       if (!response) throw new Error('The gateway returned no answer');
       const named = response.toolCalls?.some((call) => !call.id)
@@ -475,16 +604,17 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
   async function* streamOnce(
     request: ChatCompletionRequest,
     limitOverride?: number,
-    carried?: { usage?: SdkUsage; streamed?: boolean },
+    carried?: CarriedAttempts,
+    notes: RouteNotes = {},
   ): AsyncGenerator<ChatCompletionChunk, void, unknown> {
     {
       let outcome: ModelCallOutcome;
       try {
-        outcome = await executeModelCall(callInput(request, true, limitOverride));
+        outcome = await executeModelCall(await callInput(request, true, limitOverride, notes));
       } catch (error) {
         throw await asAgentBlock(error);
       }
-      noteRoute(outcome);
+      noteRoute(outcome, notes);
       const events = outcome.stream;
       if (!events) throw new Error('The gateway returned no stream');
 
@@ -520,7 +650,11 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
           });
           const blocks = event.reasoningPayload?.blocks;
           const summary = showReasoning ? event.reasoning : undefined;
-          if (carried) carried.streamed = true;
+          if (carried) {
+            carried.streamed = true;
+            // Thinking text a live view now shows (and cannot take back if this attempt is abandoned).
+            if (summary) carried.reasoned = true;
+          }
           if (summary && input.onReasoning) {
             try { input.onReasoning(summary); } catch { /* a display callback must not fail the run */ }
           }

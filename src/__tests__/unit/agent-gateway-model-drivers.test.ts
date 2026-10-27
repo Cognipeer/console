@@ -296,7 +296,8 @@ describe('azure', () => {
     const model = await build({ modelId: 'gpt-5', settings: { maxTokens: 90 } }, { fetch, reasoning: { effort: 'medium' } });
     await model.invoke(USER);
     expect(calls[0].url).toContain('/openai/deployments/gpt-5/chat/completions');
-    expect(calls[0].body.max_completion_tokens).toBe(90);
+    // The model's small 90 is raised to the table value of effort medium (reasoning tokens count against the limit).
+    expect(calls[0].body.max_completion_tokens).toBe(16384);
     expect(calls[0].body.reasoning_effort).toBe('medium');
   });
 

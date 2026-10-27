@@ -1,5 +1,6 @@
 import { redactDataUrls } from '@/lib/services/logRedaction';
 import { isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
+import { UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
 import type { TokenUsage, UsageCostResult } from './usageLogger';
 
 export type OpenAIErrorBody = {
@@ -14,7 +15,7 @@ export type NormalizedOpenAIError = {
   error: OpenAIErrorBody;
 };
 
-/** What a limit-hit call was billed, carried on its OutputTokenLimitError. */
+/** What a failed call the core billed was billed, carried on its OutputTokenLimitError or UpstreamFinishError. */
 export type OutputTokenLimitBilling = {
   /** The call's gateway usage (`toGatewayUsage` rule): the provider bills a cut-off call too. */
   usage?: TokenUsage;
@@ -74,9 +75,49 @@ export class OutputTokenLimitError extends Error {
   }
 }
 
-/** The core already wrote this call's usage row (an output-limit hit it billed): callers must not log another. */
+/**
+ * A finish reason the provider names must be a plain token before it reaches a message, a code or a usage row:
+ * a stray character set in an upstream's stop reason must not be echoed into any of them.
+ */
+const PROVIDER_FINISH_TOKEN = /^[\w.:-]{1,64}$/;
+
+/**
+ * A call the provider ended in its OWN error finish: Gemini's `MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL`,
+ * Bedrock's `malformed_model_output` / `malformed_tool_use` (the agent-sdk normalizes the finish to `error`).
+ * What the model produced is unusable, and reading the finish as a clean `stop` would hand the caller a broken
+ * answer, so the call FAILS as an upstream error (502, a code derived from the raw reason). The provider billed
+ * what it burned, so the core books it before this leaves, exactly as it does a limit hit (`usageBooked`).
+ */
+export class UpstreamFinishError extends UpstreamRequestError {
+  /** The wire `error.code`: the provider's raw reason in lower snake case (`malformed_function_call`), `provider_error` when it named none. */
+  readonly code: string;
+  /** The provider's own stop reason, as it sent it. Absent when it sent none (the SDK's bare `error`). */
+  readonly rawFinishReason?: string;
+  readonly usage?: TokenUsage;
+  readonly cost?: UsageCostResult;
+  readonly usageBooked?: boolean;
+
+  constructor(rawFinishReason?: string, billing?: OutputTokenLimitBilling) {
+    const raw = rawFinishReason?.trim();
+    // The SDK's own word for an error finish (`error`) is not a provider reason: it names nothing.
+    const named = raw && PROVIDER_FINISH_TOKEN.test(raw) && raw.toLowerCase() !== 'error' ? raw : undefined;
+    super(
+      `The model provider ended the call with an error finish reason${named ? ` (${named})` : ''}, `
+      + 'so the answer or tool call it produced cannot be used.',
+      502,
+    );
+    this.name = 'UpstreamFinishError';
+    this.code = named ? named.toLowerCase().replace(/[.:-]/g, '_') : 'provider_error';
+    if (named) this.rawFinishReason = named;
+    if (billing?.usage) this.usage = billing.usage;
+    if (billing?.cost) this.cost = billing.cost;
+    if (billing?.usageBooked) this.usageBooked = true;
+  }
+}
+
+/** The core already wrote this call's usage row (an output-limit hit or an error finish it billed): callers must not log another. */
 export function isUsageBookedError(error: unknown): boolean {
-  return error instanceof OutputTokenLimitError && error.usageBooked === true;
+  return (error instanceof OutputTokenLimitError || error instanceof UpstreamFinishError) && error.usageBooked === true;
 }
 
 type ErrorRecord = Record<string, unknown>;
@@ -242,6 +283,11 @@ export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
       'output_token_limit_exceeded',
       'max_completion_tokens',
     );
+  }
+
+  // The provider's own error finish is its fault, not the caller's: a 502 with the code its raw reason names.
+  if (error instanceof UpstreamFinishError) {
+    return normalized(error.status, error.message, 'server_error', error.code);
   }
 
   // A switched-off service keeps its own status (403, or 402 when the license

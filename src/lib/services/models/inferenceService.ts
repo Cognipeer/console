@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { AGENT_REASONING_OVERRIDE } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import { abortErrorFrom, withResilience } from '@/lib/core/resilience';
@@ -1447,8 +1448,12 @@ export async function handleOcrRequest(params: {
   // The OCR factory itself decides native vs VLM based on the contract. We pass
   // the requested mode through modelSettings.ocr.mode so VLM-only providers can
   // refuse a native request explicitly if they wanted to.
+  // The model's declared maximum output is injected the way a chat call gets it, so a VLM read sizes its
+  // page calls from it (Model Hub-declared maximum included).
+  const declaredMax = modelMaxOutputTokens(model);
   const ocrSettings = {
     ...((model.settings ?? {}) as Record<string, unknown>),
+    ...(declaredMax !== undefined ? { maxOutputTokens: declaredMax } : {}),
     ocr: {
       ...(((model.settings ?? {}) as Record<string, unknown>).ocr as
         | Record<string, unknown>
@@ -1465,9 +1470,13 @@ export async function handleOcrRequest(params: {
     }),
   );
 
+  // A VLM read is many page calls that already retry and time out one by one: the whole extract is neither
+  // retried (every page would be billed again) nor held to the single-request timeout.
   const result: OcrResult = await withResilience(
     () => ocrRuntime.extract(input),
-    { key: `ocr:${model.providerKey}` },
+    mode === 'vlm'
+      ? { key: `ocr:${model.providerKey}`, retry: { enabled: false }, timeoutMs: 0 }
+      : { key: `ocr:${model.providerKey}` },
   );
 
   const latencyMs = Date.now() - start;

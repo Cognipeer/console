@@ -200,10 +200,10 @@ export function BatchJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const stmt = db.prepare(`
         INSERT INTO ${TABLES.batchJobItems}
         (id, tenantId, batchId, "index", customId, requestBody, status,
-         responseStatusCode, responseBody, errorMessage, usage,
+         responseStatusCode, responseBody, errorMessage, usage, finishReason, truncated,
          startedAt, endedAt, createdAt, updatedAt)
         VALUES (@id, @tenantId, @batchId, @index, @customId, @requestBody, @status,
-         @responseStatusCode, @responseBody, @errorMessage, @usage,
+         @responseStatusCode, @responseBody, @errorMessage, @usage, @finishReason, @truncated,
          @startedAt, @endedAt, @createdAt, @updatedAt)
       `);
       const created: IBatchJobItem[] = [];
@@ -222,6 +222,8 @@ export function BatchJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
             responseBody: record.responseBody ? this.toJson(record.responseBody) : null,
             errorMessage: record.errorMessage ?? null,
             usage: record.usage ? this.toJson(record.usage) : null,
+            finishReason: record.finishReason ?? null,
+            truncated: record.truncated === undefined ? null : record.truncated ? 1 : 0,
             startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
             endedAt: record.endedAt ? new Date(record.endedAt).toISOString() : null,
             createdAt: now,
@@ -256,6 +258,8 @@ export function BatchJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         sets.push('usage = @usage');
         params.usage = data.usage == null ? null : this.toJson(data.usage);
       }
+      if (data.finishReason !== undefined) { sets.push('finishReason = @finishReason'); params.finishReason = data.finishReason ?? null; }
+      if (data.truncated !== undefined) { sets.push('truncated = @truncated'); params.truncated = data.truncated == null ? null : data.truncated ? 1 : 0; }
       const dateFields: Array<'startedAt' | 'endedAt'> = ['startedAt', 'endedAt'];
       for (const f of dateFields) {
         if ((data as Record<string, unknown>)[f] !== undefined) {
@@ -306,6 +310,8 @@ export function BatchJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         usage: row.usage
           ? this.parseJson(row.usage, undefined as unknown as IBatchJobItem['usage'])
           : undefined,
+        ...(row.finishReason != null ? { finishReason: row.finishReason as string } : {}),
+        ...(row.truncated != null ? { truncated: Number(row.truncated) === 1 } : {}),
         startedAt: this.toDate(row.startedAt),
         endedAt: this.toDate(row.endedAt),
         createdAt: this.toDate(row.createdAt),

@@ -21,10 +21,12 @@ import type { ParsedDecisionRequest } from '@/lib/providers/contracts/decisionHe
 import { mergeRoutingCaller } from './routingCallerContext';
 import { getModelByKey } from './modelService';
 import { logModelUsage, type TokenUsage } from './usageLogger';
-import { OutputTokenLimitError } from './openaiErrors';
+import { OutputTokenLimitError, UpstreamFinishError } from './openaiErrors';
+import { GuardrailBlockError } from './gatewayGuardrails';
+import { modelMaxOutputTokens } from './outputLimits';
 import { describeRequestContract, sanitizeForLogging } from './gatewayRequest';
 import { openAiMessagesToNative, type OpenAIMessage } from './openaiAdapter';
-import type { ModelCallInput, ModelCallOutcome } from './gatewayTypes';
+import type { GatewayCallContext, ModelCallInput, ModelCallOutcome } from './gatewayTypes';
 import {
   COMPLEXITY_QUESTION_ID,
   DECIDER_QUESTION_ID,
@@ -112,6 +114,71 @@ interface ResolvedChoice {
   reason?: string;
 }
 
+// ── Router hand-off ───────────────────────────────────────────────────────
+// A caller that retries a Dynamic LLM call (the agent's raised-limit retry) must run the SAME child
+// again, and a call that failed returns no outcome to say which child that was. Both travel on the
+// call's context under one internal key, so the context type stays as it is.
+
+/** What an in-process caller hands a Dynamic LLM call, and what the router tells it back. */
+export interface RouterHandoff {
+  /** Run this child and make no decision (rules, decider, pool, guards): the retry of a call that ran there. */
+  pin?: string;
+  /** Told which child each attempt of the call runs (the fallback included), as soon as it is chosen. */
+  onChild?: (modelKey: string) => void;
+}
+
+const HANDOFF_KEY = '__routerHandoff';
+
+/** The context with `handoff` on it (a copy: the caller's own context stays as it is). */
+export function withRouterHandoff(context: GatewayCallContext, handoff: RouterHandoff): GatewayCallContext {
+  return { ...context, [HANDOFF_KEY]: handoff } as GatewayCallContext;
+}
+
+function routerHandoffOf(context: GatewayCallContext | undefined): RouterHandoff | undefined {
+  const handoff = (context as unknown as Record<string, unknown> | undefined)?.[HANDOFF_KEY];
+  return handoff && typeof handoff === 'object' ? handoff as RouterHandoff : undefined;
+}
+
+/** The context a child runs under: the hand-off was for this router, not for whatever it routes to. */
+function withoutRouterHandoff(context: GatewayCallContext | undefined): GatewayCallContext | undefined {
+  if (!context || !(HANDOFF_KEY in context)) return context;
+  const rest = { ...context } as unknown as Record<string, unknown>;
+  delete rest[HANDOFF_KEY];
+  return rest as unknown as GatewayCallContext;
+}
+
+// ── Fallback ──────────────────────────────────────────────────────────────
+
+/**
+ * Whether a primary's failure moves the call to the router's fallback model. Only two things do not: the
+ * caller hanging up (nobody is waiting) and a guardrail's verdict (it stands for the whole call). Every other
+ * failure falls back, 400 / 401 / 403 / 404 included: the credentials, the deployment and the config are the
+ * primary's own, so a second model may well answer.
+ */
+function shouldFallBack(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false;
+  if (error instanceof GuardrailBlockError) return false;
+  return true;
+}
+
+/** Every spelling of the output limit on the wire body, and on the native request. */
+const WIRE_LIMIT_FIELDS = ['max_completion_tokens', 'max_tokens', 'max_output_tokens'] as const;
+const REQUEST_LIMIT_FIELDS = ['maxCompletionTokens', 'maxTokens'] as const;
+
+/** `record` with each output-limit field above `max` lowered to it; the same object when none is. */
+function lowerOutputLimits<T extends object>(record: T, fields: readonly string[], max: number): T {
+  const entries = record as unknown as Record<string, unknown>;
+  let lowered: Record<string, unknown> | undefined;
+  for (const field of fields) {
+    const value = entries[field];
+    if (typeof value === 'number' && value > max) {
+      lowered ??= { ...entries };
+      lowered[field] = max;
+    }
+  }
+  return (lowered ?? record) as T;
+}
+
 export async function resolveDynamicCompletion(args: {
   input: ModelCallInput;
   /** The OpenAI-shaped view the routing signals, the conversation id and the router row read. */
@@ -126,6 +193,16 @@ export async function resolveDynamicCompletion(args: {
   const { tenantDbName, tenantId, projectId, stream } = input;
   const onUsageSettled = input.context?.onUsageSettled;
   const callerContext = mergeRoutingCaller(input.context?.callerContext);
+  const handoff = routerHandoffOf(input.context);
+  // A retry names the child its first attempt ran on: the decision is not made twice (and a decider is not paid twice).
+  const pinnedKey = handoff?.pin && handoff.pin !== router.key ? handoff.pin : undefined;
+  const noteChild = (modelKey: string) => {
+    try {
+      handoff?.onChild?.(modelKey);
+    } catch {
+      /* the caller's note never fails a call */
+    }
+  };
   const start = Date.now();
   const routerRequestId =
     typeof wire.request_id === 'string' && wire.request_id.length > 0
@@ -169,8 +246,8 @@ export async function resolveDynamicCompletion(args: {
   let deciderModelKey: string | undefined;
   let deciderLatencyMs: number | undefined;
 
-  // Lazy rule signals — computed only when a rule references them.
-  if (config.strategy === 'rule-based') {
+  // Lazy rule signals — computed only when a rule references them (no rule runs on a pinned retry).
+  if (!pinnedKey && config.strategy === 'rule-based') {
     const rules = config.rules ?? [];
     // Group membership is only looked up when a rule asks for it.
     if (
@@ -268,7 +345,11 @@ export async function resolveDynamicCompletion(args: {
     conversationId,
   });
 
-  if (config.strategy === 'rule-based') {
+  if (pinnedKey) {
+    target = { modelKey: pinnedKey };
+    route = 'pinned';
+    reason = `Retry pinned to "${pinnedKey}", the model that served the first attempt`;
+  } else if (config.strategy === 'rule-based') {
     const rule = evaluateRules(config.rules ?? [], signals);
     if (rule) {
       target = normalizeTarget(rule);
@@ -362,7 +443,8 @@ export async function resolveDynamicCompletion(args: {
   }
 
   const segment = segmentKey(route, signals);
-  const costAware = Boolean(target.pool) || Boolean(guards);
+  // A pinned retry runs exactly the model it names: no pool, guard or shadow decision moves it.
+  const costAware = !pinnedKey && (Boolean(target.pool) || Boolean(guards));
 
   // ── Layer 2: the pool's policy picks a candidate ───────────────────────
   const estimateFixed = async (modelKey: string): Promise<{ modelKey: string; estimatedCostUsd?: number; predictedOutputTokens?: number }> => {
@@ -470,7 +552,7 @@ export async function resolveDynamicCompletion(args: {
   let guard: string | undefined;
   let guardReason: string | undefined;
   let rejectReason: string | undefined;
-  if (guards && proposed.modelKey) {
+  if (guards && !pinnedKey && proposed.modelKey) {
     const [conversationCostUsd, budgetUsedPct] = await Promise.all([
       guards.conversationBudgetUsd !== undefined ? getConversationCost() : Promise.resolve(undefined),
       guards.budget ? getBudgetPct() : Promise.resolve(undefined),
@@ -563,17 +645,33 @@ export async function resolveDynamicCompletion(args: {
     baselineModelKey,
   });
 
-  const runChild = (childKey: string, routing: IModelUsageRouting) =>
-    execute({
-      ...input,
+  /**
+   * The call with its output limit under the maximum `childKey` declares (the same call when it declares none,
+   * or when the limit already fits). A limit sized for the primary would be a certain 400 at a fallback that can
+   * write less; this is the one place an explicit limit is lowered, and only on the fallback's leg.
+   */
+  const fitOutputLimit = async (call: ModelCallInput, childKey: string): Promise<{ call: ModelCallInput; limit?: number }> => {
+    const max = modelMaxOutputTokens(await loadModel(childKey));
+    if (!max) return { call };
+    const fittedWire = call.wire ? lowerOutputLimits(call.wire, WIRE_LIMIT_FIELDS, max) : call.wire;
+    const fittedRequest = lowerOutputLimits(call.request, REQUEST_LIMIT_FIELDS, max);
+    if (fittedWire === call.wire && fittedRequest === call.request) return { call };
+    return { call: { ...call, ...(fittedWire ? { wire: fittedWire } : {}), request: fittedRequest }, limit: max };
+  };
+
+  const runChild = (childKey: string, routing: IModelUsageRouting, call: ModelCallInput = input) => {
+    noteChild(childKey);
+    return execute({
+      ...call,
       modelKey: childKey,
       context: {
-        ...input.context,
+        ...withoutRouterHandoff(input.context),
         routingDepth: depth + 1,
         callerContext,
         routedBy: { routing, baselinePricing },
       },
     });
+  };
 
   const logDecision = (
     routing: IModelUsageRouting,
@@ -625,18 +723,32 @@ export async function resolveDynamicCompletion(args: {
     if (!chosenModelKey) throw new Error('No target model resolved for dynamic router');
     childResult = await runChild(chosenModelKey, buildRouting('child', chosenModelKey, decision, reason));
   } catch (primaryError) {
-    if (config.fallbackModelKey && config.fallbackModelKey !== chosenModelKey && config.fallbackModelKey !== router.key) {
+    if (
+      config.fallbackModelKey
+      && config.fallbackModelKey !== chosenModelKey
+      && config.fallbackModelKey !== router.key
+      // No target at all is what the fallback is for; any other failure has to be one a second model can cure.
+      && (!chosenModelKey || shouldFallBack(primaryError, input.context?.signal))
+    ) {
       finalModelKey = config.fallbackModelKey;
       finalDecision = 'fallback';
       finalReason = `${reason}; primary "${chosenModelKey || '(none)'}" failed, fell back to "${config.fallbackModelKey}"`;
       try {
+        const fitted = await fitOutputLimit(input, finalModelKey);
+        if (fitted.limit !== undefined) {
+          finalReason += `; output limit lowered to the fallback's maximum (${fitted.limit})`;
+        }
         childResult = await runChild(
           finalModelKey,
           buildRouting('child', finalModelKey, finalDecision, finalReason),
+          fitted.call,
         );
         // A primary that hit its output limit was billed (its row is written):
         // the run totalling this call must see those tokens next to the answer.
-        if (primaryError instanceof OutputTokenLimitError && primaryError.usage) {
+        if (
+          (primaryError instanceof OutputTokenLimitError || primaryError instanceof UpstreamFinishError)
+          && primaryError.usage
+        ) {
           childResult = { ...childResult, burnedUsage: primaryError.usage };
         }
       } catch (fallbackError) {

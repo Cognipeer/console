@@ -1027,6 +1027,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.incidents, 'reopenedAt', 'reopenedAt TEXT');
     this.ensureTableColumn(db, TABLES.incidents, 'reopenCount', 'reopenCount INTEGER');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'finishReason', 'finishReason TEXT');
+    this.ensureTableColumn(db, TABLES.batchJobItems, 'finishReason', 'finishReason TEXT');
+    this.ensureTableColumn(db, TABLES.batchJobItems, 'truncated', 'truncated INTEGER');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'cachedWriteTokens', 'cachedWriteTokens INTEGER DEFAULT 0');
     // Agent run attribution on usage rows (the per-turn ledger).

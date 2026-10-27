@@ -14,7 +14,9 @@
  * `describeTurnOutcome` turns a report into `stopReason: 'limit'` (incomplete
  * details reason `max_output_tokens`) for Studio, the API and portals. A
  * `notice` is no answer of the model's: the message is flagged
- * (`markOutputLimitNotice`) and left out of the history the next turn replays.
+ * (`markOutputLimitNotice`) and left out of the history the next turn replays,
+ * and the call that carries it finishes `length` (not `stop`), so a reader of
+ * the finish reason (a summarizer) can tell it from an answer.
  * The text is the English rendering of i18n key `agents.outputLimit.message`.
  */
 export const OUTPUT_LIMIT_MESSAGE_KEY = 'agents.outputLimit.message';
@@ -52,6 +54,15 @@ export function outputLimitNotice(limit?: number): string {
   return `The model reached its output token limit before it could answer${detail}. `
     + 'Raise max_tokens (the agent\'s "Max output tokens per call", or the model\'s "Default max tokens") '
     + 'or lower the reasoning effort, then try again.';
+}
+
+/**
+ * What a live view of the turn's thinking shows where the model starts again with a higher output limit:
+ * the failed attempt's thinking is already on screen (a stream cannot take it back) and the retry's follows
+ * it. English, like the notice above.
+ */
+export function outputLimitRetrySeparator(): string {
+  return '\n\n[Retrying with a higher output limit]\n\n';
 }
 
 /** The notice for a model whose context window is full: more output tokens would not help. */
