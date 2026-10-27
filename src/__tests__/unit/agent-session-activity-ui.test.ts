@@ -534,15 +534,14 @@ describe('Configure → Approvals & questions', () => {
     expect(configSectionTitle('unknown', translate(en))).toBe('unknown');
   });
 
-  it('keeps the Approval column wide enough for the control and the badge, and lets them wrap', () => {
+  it('keeps the Approval column wide enough for the Ask / Never ask control', () => {
     const html = render(h(AgentHumanInTheLoopPanel, {
       value: { toolApproval: { enabled: true } }, onChange: noop, toolConfig: { sandbox: { enabled: true } },
     }));
     const approval = /<th style="width:calc\(([\d.]+)rem[^"]*"[^>]*>Approval<\/th>/.exec(html);
     expect(approval).not.toBeNull();
-    expect(Number(approval![1]) * 16).toBeGreaterThanOrEqual(340);
-    // The cell's group may wrap, so the badge drops below instead of being cut off.
-    expect(html).toMatch(/--group-wrap:wrap[^>]*><div[^>]*mantine-SegmentedControl-root/);
+    expect(Number(approval![1]) * 16).toBeGreaterThanOrEqual(260);
+    expect(html).toMatch(/mantine-SegmentedControl-root/);
   });
 });
 

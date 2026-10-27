@@ -2431,6 +2431,20 @@ export interface IToolAuthConfig {
   sealed?: string;
 }
 
+/**
+ * What a tool action says about its own effects (the MCP `ToolAnnotations` shape). Agent approval reads
+ * `readOnlyHint` first: an action that is not marked read-only asks before it runs, by default.
+ */
+export interface IToolActionAnnotations {
+  title?: string;
+  /** True = the action only reads. Absent or false = it may change something. */
+  readOnlyHint?: boolean;
+  /** With `readOnlyHint` not true: the change may destroy or overwrite data. */
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface IToolAction {
   /** Unique key within the tool (slug of operationId or tool name) */
   key: string;
@@ -2446,6 +2460,12 @@ export interface IToolAction {
   httpPath?: string;
   /** MCP-specific: original tool name on the MCP server */
   mcpToolName?: string;
+  /**
+   * Markings of the action. MCP tools store what the server sent in `tools/list`; OpenAPI actions get
+   * `readOnlyHint` from the HTTP method; managed tools carry the markings their owner sets. Absent on
+   * records saved before this field: read them with `effectiveActionAnnotations`.
+   */
+  annotations?: IToolActionAnnotations;
 }
 
 export interface ITool {
@@ -3162,7 +3182,11 @@ export interface IAgentHumanInTheLoopConfig {
   /** Let the model ask the user a structured question mid-run. */
   askUser?: { enabled: boolean; /** Default true. */ allowFreeText?: boolean };
   toolApproval?: {
-    enabled: boolean;
+    /**
+     * `false` switches approval off. Unset means on for the agent's own and bound tools; tools the caller
+     * runs (client tools) follow only an explicit `true`.
+     */
+    enabled?: boolean;
     /** Policy for every tool not named in `tools` and not read-only. Default `always`. */
     defaultPolicy?: AgentToolApprovalPolicy;
     /** Per-tool override; the key is the tool name as the model sees it. */
