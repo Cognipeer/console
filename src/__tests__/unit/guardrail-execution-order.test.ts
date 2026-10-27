@@ -95,6 +95,12 @@ vi.mock('@/lib/services/usage/usageEvents', () => ({
   resolveUsageAttribution: vi.fn(() => ({})),
 }));
 
+// The LLM judge meters its call; the real usage logger would pull in the PII
+// service, whose regex-family import is mocked down to its runner below.
+vi.mock('@/lib/services/models/usageLogger', () => ({
+  logModelUsage: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('@/lib/services/guardrail/families/pii', () => ({ runPiiPolicy: hoisted.objectAdapter }));
 vi.mock('@/lib/services/guardrail/families/secrets', () => ({
   runSecretsPolicy: hoisted.objectAdapter,

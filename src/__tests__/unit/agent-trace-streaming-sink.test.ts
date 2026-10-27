@@ -163,6 +163,22 @@ describe('a hosted run is traced while it runs', () => {
         expect(hoisted.outcomes).toEqual([]);
     });
 
+    it('stores the cache write of a call and leaves the input alone: a hosted event is already inclusive, whatever usageBasis it carries', async () => {
+        const { make, sessionId } = sinkFor('s-cache');
+        const sink = await make();
+        sink.onEvent({
+            ...aiCall(sessionId, 1, { input: 550, output: 20 }),
+            cacheWriteTokens: 30, cachedInputTokens: 500, usageBasis: { inputExcludesCache: true },
+        });
+        sink.onEvent(aiCall(sessionId, 2, { input: 100, output: 10 }));
+        await streamedCount(2);
+
+        expect(hoisted.events[0]).toMatchObject({ inputTokens: 550, outputTokens: 20, cachedWriteTokens: 30 });
+        // No key at all when the call wrote nothing (a Mongo `null` would be stored otherwise).
+        expect(hoisted.events[1]).not.toHaveProperty('cachedWriteTokens');
+        expect(hoisted.sessions.get(sessionId)).toMatchObject({ totalInputTokens: 650 });
+    });
+
     it('completes the session at the end without storing an event twice, deleting what was streamed, or booking it again', async () => {
         const { make, sessionId } = sinkFor('s-done');
         const sink = await make();

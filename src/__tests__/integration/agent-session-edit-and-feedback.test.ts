@@ -289,6 +289,12 @@ describe('planRerun', () => {
     expect(plan.previousVersions[1].usage).toEqual({ inputTokens: 10, outputTokens: 5, costUsd: 0.01 });
   });
 
+  it('regenerate keeps the cache and reasoning split of the answer it replaces', () => {
+    const usage = { inputTokens: 550, outputTokens: 40, cachedInputTokens: 500, cachedWriteTokens: 30, reasoningTokens: 12, totalTokens: 590, costUsd: 0.02 };
+    const plan = planRerun([message('user', 'q', 1), message('assistant', 'old answer', 2, { usage })], { mode: 'regenerate', messageIndex: 1 });
+    expect(plan.previousVersions[0].usage).toEqual(usage);
+  });
+
   it('keeps at most five earlier answers', () => {
     const versions = Array.from({ length: 5 }, (_, i) => ({ content: `v${i}`, timestamp: at(i) }));
     const plan = planRerun([message('user', 'q', 1), message('assistant', 'now', 2, { previousVersions: versions })], { mode: 'regenerate', messageIndex: 1 });

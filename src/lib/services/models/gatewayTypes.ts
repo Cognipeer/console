@@ -62,8 +62,13 @@ export interface GatewayCallContext {
   callerContext?: RoutingCallerContext;
   /**
    * Called with the REALIZED cost once usage is known: for a stream long after
-   * the call returned. Fires for success and for a cancelled stream with partial
-   * usage, never for a call that produced no usage.
+   * the call returned. Fires for every call that billed tokens: success, a call
+   * that hit its output limit (the burned prompt and capped output are settled
+   * before the error is thrown), a stream whose upstream sent no usage (settled
+   * on an estimate, see `ModelStreamDone.usageEstimated`), a cancelled or
+   * guardrail-blocked stream (estimated when the provider had not reported yet)
+   * and a stream that failed after it had produced output. Never for a call that
+   * failed before the provider generated anything.
    */
   onUsageSettled?: (cost: UsageCostResult, usage?: TokenUsage) => void;
   /** Aborts the upstream request; a streamed call that is aborted is logged `cancelled` with estimated output tokens. */
@@ -175,6 +180,11 @@ export interface ModelStreamDone {
   wireFinishReason: string;
   /** The model hit its output limit without producing an answer. */
   outputLimitReached: boolean;
+  /**
+   * `usage` is the core's estimate (chars/4 over the request and the streamed answer), because the
+   * upstream never sent usage. It is booked and settled, but never put on the OpenAI wire usage frame.
+   */
+  usageEstimated?: boolean;
 }
 
 export type ModelStreamEvent =
@@ -210,6 +220,13 @@ export interface ModelCallOutcome {
   requestId: string;
   latencyMs?: number;
   usage?: TokenUsage;
+  /**
+   * Tokens an earlier attempt of the SAME request burned without an answer (a
+   * Dynamic LLM's primary that hit its output limit before the fallback served
+   * it). Already booked on that attempt's row; carried so a caller that totals a
+   * run (the agent ledger) sees them. Never part of `usage` or the wire.
+   */
+  burnedUsage?: TokenUsage;
   cacheHit?: boolean;
   routing?: IModelUsageRouting;
   /**

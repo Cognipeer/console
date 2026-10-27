@@ -99,7 +99,15 @@ export interface DecisionResult {
   answers: Record<string, DecisionAnswer>;
   /** Console extension: present only when `include_rationale` was requested and produced. */
   rationale?: string;
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    /** Subsets of inputTokens / outputTokens (structured backends only). */
+    cachedInputTokens?: number;
+    cachedWriteTokens?: number;
+    reasoningTokens?: number;
+  };
   /** Vendor-side identifiers worth a trace row (native backends only). */
   upstream?: { request_id?: string; latency_ms?: number };
   backend: DecisionBackendInfo;

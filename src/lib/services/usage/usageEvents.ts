@@ -112,6 +112,9 @@ export interface UsageEventInput {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `inputTokens` written to the provider's prompt cache. Threaded
+   *  into the `usage_daily` rollup increment, mirroring `cachedInputTokens`. */
+  cachedWriteTokens?: number;
   /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
    *  never added into `totalTokens` or `costUsd`. Threaded straight into the
    *  `usage_daily` rollup increment, mirroring `cachedInputTokens`. */

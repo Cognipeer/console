@@ -121,9 +121,11 @@ export const shouldDisplaySectionField = (value: unknown): boolean => {
 };
 
 /**
- * Share of total input tokens (uncached + cached) that were served from cache.
- * Cached tokens are billed/counted separately from `inputTokens`, so the total
- * prompt volume is `inputTokens + cachedInputTokens` — not `inputTokens` alone.
+ * Share of input tokens that were served from the prompt cache.
+ * `cachedInputTokens` is a SUBSET of `inputTokens` (inputTokens already counts
+ * uncached + cache-read + cache-write), so the rate is cached / input, clamped
+ * to [0, 1] (legacy trace rows stored with a native exclusive input can hold
+ * cached > input).
  */
 export const calcCacheHitRate = (
   inputTokens: number | null | undefined,
@@ -131,8 +133,7 @@ export const calcCacheHitRate = (
 ): number => {
   const input = inputTokens ?? 0;
   const cached = cachedInputTokens ?? 0;
-  const total = input + cached;
-  return total > 0 ? cached / total : 0;
+  return input > 0 ? Math.min(1, Math.max(0, cached / input)) : 0;
 };
 
 export const formatBytes = (bytes: number | null | undefined): string => {

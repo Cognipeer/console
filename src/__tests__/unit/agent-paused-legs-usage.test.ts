@@ -19,6 +19,17 @@ describe('usage of a turn that paused and resumed', () => {
     expect(legs?.costUsd).toBeCloseTo(0.3);
   });
 
+  it('sums the cache write and reasoning slices of the legs; a slice no leg has stays absent', () => {
+    const legs = pausedLegsUsage([
+      { role: 'user' },
+      paused({ inputTokens: 10, outputTokens: 5, totalTokens: 15, cachedWriteTokens: 4, reasoningTokens: 2 }),
+      paused({ inputTokens: 20, outputTokens: 5, totalTokens: 25, cachedWriteTokens: 6 }),
+    ]);
+    expect(legs).toMatchObject({ cachedWriteTokens: 10, reasoningTokens: 2 });
+    expect(addPlaygroundUsage({ inputTokens: 1 }, { inputTokens: 2 })).not.toHaveProperty('cachedWriteTokens');
+    expect(addPlaygroundUsage({ inputTokens: 1 }, { inputTokens: 2 })).not.toHaveProperty('reasoningTokens');
+  });
+
   it('is undefined when the last message did not pause', () => {
     expect(pausedLegsUsage([{ role: 'user' }, { role: 'assistant', usage: { totalTokens: 5 } }])).toBeUndefined();
   });

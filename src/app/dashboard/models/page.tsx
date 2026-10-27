@@ -75,10 +75,18 @@ interface ModelsDashboardOverview {
   errorCalls: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** Prompt-cache READ tokens, a subset of totalInputTokens. */
+  totalCachedInputTokens?: number;
+  /** Prompt-cache WRITE tokens, a subset of totalInputTokens. */
+  totalCachedWriteTokens?: number;
   totalTokens: number;
   totalToolCalls: number;
+  /** Semantic (response) cache hits. */
   cacheHits: number;
+  /** Semantic cache hit rate (cacheHits / totalCalls), not the prompt cache. */
   cacheHitRate: number;
+  /** Prompt cache: cached input tokens / input tokens. */
+  promptCacheHitRate?: number;
   avgLatencyMs: number | null;
   totalCost: number;
   currency: string;
@@ -735,7 +743,11 @@ export default function ModelsPage() {
                 value={fmtNum(dashboardData?.overview.totalTokens ?? 0)}
                 delta={`in: ${fmtNum(
                   dashboardData?.overview.totalInputTokens ?? 0,
-                )} · out: ${fmtNum(dashboardData?.overview.totalOutputTokens ?? 0)}`}
+                )} · out: ${fmtNum(dashboardData?.overview.totalOutputTokens ?? 0)}${
+                  (dashboardData?.overview.totalCachedInputTokens ?? 0) > 0
+                    ? ` · prompt cache ${fmtPct(dashboardData?.overview.promptCacheHitRate ?? 0)} of input`
+                    : ''
+                }`}
               />
               <StatTile
                 label="Avg latency"
@@ -746,7 +758,7 @@ export default function ModelsPage() {
                     : '—'
                 }
                 unit={dashboardData?.overview.avgLatencyMs != null ? 'ms' : undefined}
-                delta={`${fmtNum(dashboardData?.overview.cacheHits ?? 0)} cache hits (${fmtPct(
+                delta={`${fmtNum(dashboardData?.overview.cacheHits ?? 0)} semantic-cache hits (${fmtPct(
                   dashboardData?.overview.cacheHitRate ?? 0,
                 )})`}
               />

@@ -38,9 +38,10 @@ vi.mock('@/lib/database', () => ({
 
 import { OCR_ITEM_HELD_WHILE_PAUSED, processOcrItem } from '@/lib/services/ocrJobs/ocrJobRunner';
 import { sendOcrJobWebhook } from '@/lib/services/ocrJobs/ocrJobWebhook';
-import { handleOcrRequest } from '@/lib/services/models/inferenceService';
+import { handleChatCompletion, handleOcrRequest } from '@/lib/services/models/inferenceService';
 
 const sendWebhook = sendOcrJobWebhook as unknown as ReturnType<typeof vi.fn>;
+const handleChat = handleChatCompletion as unknown as ReturnType<typeof vi.fn>;
 const handleOcr = handleOcrRequest as unknown as ReturnType<typeof vi.fn>;
 
 const CTX = { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', userId: 'user-1' };
@@ -202,5 +203,79 @@ describe('processOcrItem', () => {
     expect(db.updateOcrJobItem).toHaveBeenCalledTimes(1);
     expect(db.updateOcrJobItem).toHaveBeenCalledWith('item-1', { errorMessage: OCR_ITEM_HELD_WHILE_PAUSED });
     expect(db.incrementOcrJobAggregates).not.toHaveBeenCalled();
+  });
+
+  it('rolls the OCR tokens and pages into the job aggregates when the summary step throws', async () => {
+    db.findOcrJobItemById.mockResolvedValue(makeItem());
+    db.findOcrJobById.mockResolvedValue(makeJob({ outputs: ['summary'], llmModelKey: 'llm-model' }));
+    db.incrementOcrJobAggregates.mockResolvedValue(makeJob({ itemsFailed: 1, itemsTotal: 2 }));
+    handleChat.mockRejectedValue(new Error('summary boom'));
+
+    await processOcrItem(CTX, 'item-1');
+
+    expect(db.incrementOcrJobAggregates).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ itemsFailed: 1, usageInputTokens: 10, usageOutputTokens: 0, usagePages: 1, usageOcrTokens: 10 }),
+      expect.any(Object),
+    );
+    expect(db.updateOcrJobItem).toHaveBeenCalledWith(
+      'item-1',
+      expect.objectContaining({ status: 'failed', usage: expect.objectContaining({ inputTokens: 10, pages: 1 }) }),
+    );
+  });
+
+  it('keeps the summary tokens when the structured step fails after it', async () => {
+    db.findOcrJobItemById.mockResolvedValue(makeItem());
+    db.findOcrJobById.mockResolvedValue(
+      makeJob({ outputs: ['summary', 'structured'], llmModelKey: 'llm-model', structuredSchema: { type: 'object' } }),
+    );
+    db.incrementOcrJobAggregates.mockResolvedValue(makeJob({ itemsFailed: 1, itemsTotal: 2 }));
+    handleChat
+      .mockResolvedValueOnce({
+        response: { choices: [{ message: { content: 'sum' } }] },
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      })
+      .mockRejectedValueOnce(new Error('structured boom'));
+
+    await processOcrItem(CTX, 'item-1');
+
+    expect(db.incrementOcrJobAggregates).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ itemsFailed: 1, usageInputTokens: 110, usageOutputTokens: 20, usageLlmTokens: 120 }),
+      expect.any(Object),
+    );
+  });
+
+  it('a failure after the success aggregates does not count the item\'s tokens and cost again', async () => {
+    db.findOcrJobItemById.mockResolvedValue(makeItem());
+    db.findOcrJobById.mockResolvedValue(makeJob());
+    db.incrementOcrJobAggregates.mockResolvedValue(makeJob({ itemsProcessed: 1, itemsFailed: 0, itemsTotal: 2 }));
+    // The callback-status write that follows the success rollup fails (once).
+    let failed = false;
+    db.updateOcrJobItem.mockImplementation(async (_id: string, patch: Record<string, unknown>) => {
+      if ('callbackStatus' in patch && !failed) {
+        failed = true;
+        throw new Error('db down');
+      }
+      return makeItem(patch);
+    });
+
+    await processOcrItem(CTX, 'item-1');
+
+    const increments = db.incrementOcrJobAggregates.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    expect(increments[0]).toMatchObject({ itemsProcessed: 1, usagePages: 1 });
+    // The catch still records the failure, but carries no second copy of the usage.
+    expect(increments.slice(1)).toEqual([{ itemsFailed: 1 }]);
+  });
+
+  it('a pre-OCR failure still increments only itemsFailed', async () => {
+    db.findOcrJobItemById.mockResolvedValue(makeItem());
+    db.findOcrJobById.mockResolvedValue(makeJob());
+    db.incrementOcrJobAggregates.mockResolvedValue(makeJob({ itemsFailed: 1, itemsTotal: 2 }));
+    handleOcr.mockRejectedValue(new Error('ocr boom'));
+
+    await processOcrItem(CTX, 'item-1');
+
+    expect(db.incrementOcrJobAggregates).toHaveBeenCalledWith('job-1', { itemsFailed: 1 }, expect.any(Object));
   });
 });

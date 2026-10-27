@@ -2657,6 +2657,16 @@ export async function createInternalTracingSink(
                 usage?.cacheReadInputTokens ??
                 usage?.cache_read_input_tokens,
             );
+            // The write slice of the prompt. The SDK event's `usageBasis` is deliberately NOT
+            // applied to any of these numbers: the gateway chat model hands the SDK the
+            // console's canonical (inclusive) usage, so a hosted event already says it right.
+            const cachedWriteTokens = toOptionalNumber(
+                event?.cacheWriteTokens ??
+                usage?.cachedWriteTokens ??
+                usage?.cacheWriteTokens ??
+                usage?.cache_write_tokens ??
+                usage?.cache_creation_input_tokens,
+            );
             const diagnostics = extractInternalTraceDiagnostics(event);
             // Strip the keys `extractInternalTraceDiagnostics` already
             // consumed so the same value never lands in both the
@@ -2706,6 +2716,8 @@ export async function createInternalTracingSink(
             inputTokens,
             outputTokens,
             cachedInputTokens,
+            // Only a positive count: a null would land in Mongo for every call without a cache write.
+            ...(cachedWriteTokens ? { cachedWriteTokens } : {}),
             totalTokens: event.totalTokens ?? undefined,
             finishReason: diagnostics.finishReason,
             reasoningTokens: diagnostics.reasoningTokens,
@@ -6030,7 +6042,9 @@ export function extractPlaygroundSteps(
 }
 
 /**
- * Prices a turn from the model's own `pricing` record.
+ * Prices a turn from the model's own `pricing` record. `usage` is the console's
+ * canonical shape: `inputTokens` is the whole prompt, with the cache-read and
+ * cache-write counts as subsets of it, each billed at its own rate.
  *
  * Returns undefined rather than 0 when the model has no pricing configured —
  * a displayed "$0.00" reads as "this was free", which is a different claim
@@ -6047,10 +6061,23 @@ async function priceTurn(
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             cachedInputTokens: usage.cachedInputTokens,
+            ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
         }).totalCost;
     } catch {
         return undefined;
     }
+}
+
+/** The cache-write count of one SDK ledger request: a ledger field if the SDK has one, else the raw message usage. */
+function ledgerCacheWriteTokens(usage: {
+    prompt_tokens_details?: { cache_write_tokens?: number };
+    raw?: { prompt_tokens_details?: { cache_write_tokens?: number }; cache_write_tokens?: number };
+} | undefined): number {
+    return Number(
+        usage?.prompt_tokens_details?.cache_write_tokens
+        ?? usage?.raw?.prompt_tokens_details?.cache_write_tokens
+        ?? usage?.raw?.cache_write_tokens,
+    ) || 0;
 }
 
 /**
@@ -6062,7 +6089,8 @@ async function priceTurn(
  * ran on), so the turn's total at the primary model's price would charge a
  * cheaper or dearer child at the wrong rate. Otherwise (or when the SDK
  * reported no per-request usage) it is the turn's total usage at the primary
- * model's price.
+ * model's price. Both read the console's canonical usage (the gateway chat model hands the
+ * SDK inclusive prompt/completion counts), so the two agree on a single-request turn.
  */
 async function priceAgentTurn(input: {
     plan: SessionBudgetPlan | null;
@@ -6079,8 +6107,14 @@ async function priceAgentTurn(input: {
                 usage?: {
                     prompt_tokens?: number;
                     completion_tokens?: number;
-                    prompt_tokens_details?: { cached_tokens?: number };
+                    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
                     completion_tokens_details?: { reasoning_tokens?: number };
+                    // The SDK message usage as the provider adapter reported it: agent-sdk
+                    // 0.20's ledger keeps a cache write only here, not in the normalized fields.
+                    raw?: {
+                        prompt_tokens_details?: { cache_write_tokens?: number };
+                        cache_write_tokens?: number;
+                    };
                 };
             }>;
         };
@@ -6099,6 +6133,7 @@ async function priceAgentTurn(input: {
                 inputTokens: Number(request.usage?.prompt_tokens) || 0,
                 outputTokens: Number(request.usage?.completion_tokens) || 0,
                 cachedInputTokens: Number(request.usage?.prompt_tokens_details?.cached_tokens) || 0,
+                cacheWriteTokens: ledgerCacheWriteTokens(request.usage),
                 reasoningTokens: Number(request.usage?.completion_tokens_details?.reasoning_tokens) || 0,
             }) || 0;
         }

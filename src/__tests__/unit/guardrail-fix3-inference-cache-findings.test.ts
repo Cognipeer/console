@@ -43,6 +43,7 @@ vi.mock('@/lib/services/models/semanticCacheService', () => ({
 
 vi.mock('@/lib/services/models/usageLogger', () => ({
   logModelUsage: vi.fn().mockResolvedValue(undefined),
+  calculateCost: vi.fn(() => ({ currency: 'USD', inputCost: 0, outputCost: 0, cachedCost: 0, cacheWriteCost: 0, totalCost: 0 })),
 }));
 
 vi.mock('@/lib/services/guardrail', () => ({

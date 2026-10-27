@@ -18,7 +18,16 @@ vi.mock('@/lib/core/resilience', () => ({
   withResilience: vi.fn((fn: () => unknown) => fn()),
 }));
 
+vi.mock('@/lib/core/asyncTask', () => ({
+  fireAndForget: vi.fn((_label: string, fn: () => Promise<void>) => { void fn().catch(() => undefined); }),
+}));
+
+vi.mock('@/lib/services/models/usageLogger', () => ({
+  logModelUsage: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getDatabase } from '@/lib/database';
+import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import {
   safeParseJson,
@@ -105,6 +114,25 @@ describe('runModerationPolicy', () => {
 
   it('returns no findings when allowed', async () => {
     primeLlm('{"allowed": true, "violations": []}');
+    expect(await runModerationPolicy('fine', MODERATION_POLICY, CTX, 'block')).toHaveLength(0);
+  });
+
+  it('meters the judge call with a guardrail usage row (canonical usage), verdict unchanged', async () => {
+    primeLlm('{"allowed": true, "violations": []}');
+    expect(await runModerationPolicy('fine', MODERATION_POLICY, CTX, 'block')).toHaveLength(0);
+    expect(logModelUsage).toHaveBeenCalledTimes(1);
+    const [tenantDb, , payload] = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(tenantDb).toBe('tenant_acme');
+    expect(payload).toMatchObject({
+      route: 'guardrail',
+      status: 'success',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    });
+  });
+
+  it('a failing usage write never changes the verdict', async () => {
+    primeLlm('{"allowed": true, "violations": []}');
+    (logModelUsage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('db down'));
     expect(await runModerationPolicy('fine', MODERATION_POLICY, CTX, 'block')).toHaveLength(0);
   });
 

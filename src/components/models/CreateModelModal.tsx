@@ -47,11 +47,20 @@ import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/u
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
-const DEFAULT_PRICING = {
+// Cache prices default to blank: a blank price is billed at the input price,
+// and is only saved when a number is entered.
+const DEFAULT_PRICING: {
+  currency: string;
+  inputTokenPer1M: number;
+  outputTokenPer1M: number;
+  cachedTokenPer1M: number | '';
+  cacheWriteTokenPer1M: number | '';
+} = {
   currency: 'USD',
   inputTokenPer1M: 0,
   outputTokenPer1M: 0,
-  cachedTokenPer1M: 0,
+  cachedTokenPer1M: '',
+  cacheWriteTokenPer1M: '',
 };
 
 const CAPABILITY_KEYS = {
@@ -119,6 +128,7 @@ interface FormValues {
     inputTokenPer1M: number | '';
     outputTokenPer1M: number | '';
     cachedTokenPer1M: number | '';
+    cacheWriteTokenPer1M: number | '';
     inputSecondPer1K: number | '';
     inputCharacterPer1M: number | '';
     pagePer1K: number | '';
@@ -215,6 +225,7 @@ export default function CreateModelModal({
         inputTokenPer1M: DEFAULT_PRICING.inputTokenPer1M,
         outputTokenPer1M: DEFAULT_PRICING.outputTokenPer1M,
         cachedTokenPer1M: DEFAULT_PRICING.cachedTokenPer1M,
+        cacheWriteTokenPer1M: DEFAULT_PRICING.cacheWriteTokenPer1M,
         inputSecondPer1K: '',
         inputCharacterPer1M: '',
         pagePer1K: '',
@@ -252,7 +263,9 @@ export default function CreateModelModal({
         outputTokenPer1M: (value: number | '') =>
           value === '' || value < 0 ? 'Must be a non-negative number' : null,
         cachedTokenPer1M: (value: number | '') =>
-          value === '' || value < 0 ? 'Must be a non-negative number' : null,
+          value !== '' && value < 0 ? 'Must be a non-negative number' : null,
+        cacheWriteTokenPer1M: (value: number | '') =>
+          value !== '' && value < 0 ? 'Must be a non-negative number' : null,
       },
     },
   });
@@ -451,7 +464,12 @@ export default function CreateModelModal({
             currency: values.pricing.currency || DEFAULT_PRICING.currency,
             inputTokenPer1M: Number(values.pricing.inputTokenPer1M ?? 0),
             outputTokenPer1M: Number(values.pricing.outputTokenPer1M ?? 0),
-            cachedTokenPer1M: Number(values.pricing.cachedTokenPer1M ?? 0),
+            ...(toNumber(values.pricing.cachedTokenPer1M) !== undefined
+              ? { cachedTokenPer1M: toNumber(values.pricing.cachedTokenPer1M) }
+              : {}),
+            ...(toNumber(values.pricing.cacheWriteTokenPer1M) !== undefined
+              ? { cacheWriteTokenPer1M: toNumber(values.pricing.cacheWriteTokenPer1M) }
+              : {}),
             ...(toNumber(values.pricing.inputSecondPer1K) !== undefined
               ? { inputSecondPer1K: toNumber(values.pricing.inputSecondPer1K) }
               : {}),
@@ -592,13 +610,24 @@ export default function CreateModelModal({
           value={`${formValues.pricing.outputTokenPer1M || 0} ${formValues.pricing.currency || 'USD'}`}
           mono
         />
-        {formValues.pricing.cachedTokenPer1M ? (
-          <SummaryKV
-            label="Cached / 1M"
-            value={`${formValues.pricing.cachedTokenPer1M} ${formValues.pricing.currency || 'USD'}`}
-            mono
-          />
-        ) : null}
+        <SummaryKV
+          label="Cache read / 1M"
+          value={
+            formValues.pricing.cachedTokenPer1M
+              ? `${formValues.pricing.cachedTokenPer1M} ${formValues.pricing.currency || 'USD'}`
+              : 'input rate'
+          }
+          mono
+        />
+        <SummaryKV
+          label="Cache write / 1M"
+          value={
+            formValues.pricing.cacheWriteTokenPer1M
+              ? `${formValues.pricing.cacheWriteTokenPer1M} ${formValues.pricing.currency || 'USD'}`
+              : 'input rate'
+          }
+          mono
+        />
       </SummaryGroup>
 
       <SummaryGroup title="Pre-flight">
@@ -807,10 +836,13 @@ export default function CreateModelModal({
         inputProps={form.getInputProps('pricing.inputTokenPer1M')}
         outputProps={form.getInputProps('pricing.outputTokenPer1M')}
         cachedProps={form.getInputProps('pricing.cachedTokenPer1M')}
+        cacheWriteProps={form.getInputProps('pricing.cacheWriteTokenPer1M')}
         onApplyCatalog={(pricing) => {
           setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
           setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
-          setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
+          // 0 = the catalog has no such price; keep the field blank.
+          setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M || '');
+          setFieldValue('pricing.cacheWriteTokenPer1M', pricing.cacheWriteTokenPer1M || '');
         }}
       >
         {formValues.category === 'stt' && (

@@ -984,6 +984,8 @@ export class SQLiteProviderBase {
     // tenant DB files, which predate these columns.
     this.ensureTableColumn(db, TABLES.agentTracingEvents, 'finishReason', 'finishReason TEXT');
     this.ensureTableColumn(db, TABLES.agentTracingEvents, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
+    // Cache-WRITE subset of inputTokens (never added on top); old rows read as 0.
+    this.ensureTableColumn(db, TABLES.agentTracingEvents, 'cachedWriteTokens', 'cachedWriteTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'totalReasoningTokens', 'totalReasoningTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'truncatedEvents', 'truncatedEvents INTEGER DEFAULT 0');
 
@@ -1026,6 +1028,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.incidents, 'reopenCount', 'reopenCount INTEGER');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'finishReason', 'finishReason TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'cachedWriteTokens', 'cachedWriteTokens INTEGER DEFAULT 0');
     // Agent run attribution on usage rows (the per-turn ledger).
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'agentKey', 'agentKey TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'channel', 'channel TEXT');
@@ -1034,6 +1037,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'runId', 'runId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'traceSessionId', 'traceSessionId TEXT');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.usageDaily, 'cachedWriteTokens', 'cachedWriteTokens INTEGER NOT NULL DEFAULT 0');
 
     // external_model_pricing.versions (effective-dated price history) was
     // added after the table shipped; ensure on boot for DBs created before.

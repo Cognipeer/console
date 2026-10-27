@@ -540,7 +540,8 @@ export default function ThreadDetailPage({
     );
   }
 
-  const totalTokens = thread.totalInputTokens + thread.totalOutputTokens + thread.totalCachedInputTokens;
+  // inputTokens already includes the cached slice; never add it on top.
+  const totalTokens = thread.totalInputTokens + thread.totalOutputTokens;
 
   const headerActions = hasInProgressSession ? (
     <Badge size="sm" variant="light" radius="xl" color="blue">

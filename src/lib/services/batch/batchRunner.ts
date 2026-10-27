@@ -18,7 +18,8 @@ import {
   handleEmbeddingRequest,
 } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
-import { calculateCost } from '@/lib/services/models/usageLogger';
+import { calculateCost, type TokenUsage, type UsageCostResult } from '@/lib/services/models/usageLogger';
+import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
 import { uploadFile } from '@/lib/services/files/fileService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { checkBudget } from '@/lib/quota/quotaGuard';
@@ -72,12 +73,17 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
   const modelKey = String(requestBody.model ?? '');
   const delta: BatchJobAggregateDelta = {};
   let patch: Partial<IBatchJobItem>;
+  let quotaContext: ReturnType<typeof quotaContextFor> = null;
+  // Cost the gateway settled for this item (served model's pricing). It fires for
+  // limit hits too, so success and failure share this one budget debit.
+  let settledCost = undefined as UsageCostResult | undefined;
+  let embeddingUsage: IBatchJobItem['usage'];
 
   try {
     // An item queued before 'models' was switched off fails here with its own
     // status (403/402) rather than being retried by the queue.
     await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'models');
-    const quotaContext = quotaContextFor(ctx, job, modelKey);
+    quotaContext = quotaContextFor(ctx, job, modelKey);
     if (quotaContext) {
       const budget = await checkBudget(quotaContext);
       if (!budget.allowed) {
@@ -97,6 +103,7 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       response = result.response as Record<string, unknown> | undefined;
       // Embedding usage travels inside the OpenAI-shaped response body.
       usage = mapUsage(response?.usage as Record<string, number> | undefined);
+      embeddingUsage = usage;
     } else {
       const result = await handleChatCompletion({
         tenantDbName: ctx.tenantDbName,
@@ -104,9 +111,15 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
         modelKey,
         projectId: ctx.projectId ?? '',
         body: requestBody,
+        // Fires once per billed call: a Dynamic LLM settles its decider or
+        // complexity scorer before the child, so the costs add up.
+        onUsageSettled: (cost) => {
+          settledCost = addSettledCost(settledCost, cost);
+        },
       });
       response = result.response;
-      usage = mapUsage(result.usage as Record<string, number> | undefined);
+      // result.usage is already canonical gateway usage: keep it as is, never re-fold.
+      usage = canonicalItemUsage(result.usage as TokenUsage | undefined);
     }
 
     patch = {
@@ -117,20 +130,13 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       endedAt: new Date(),
     };
     delta.itemsSucceeded = 1;
-    if (usage?.inputTokens) delta.usageInputTokens = usage.inputTokens;
-    if (usage?.outputTokens) delta.usageOutputTokens = usage.outputTokens;
-    if (usage?.totalTokens) delta.usageTotalTokens = usage.totalTokens;
+    addUsageToDelta(delta, usage);
 
-    // Consume budget with the real cost (mirrors the sync inference path).
-    if (quotaContext && usage) {
+    // Embeddings have no settle hook: price their wire usage with the model's rates.
+    if (quotaContext && embeddingUsage) {
       try {
         const model = await getModelByKey(ctx.tenantDbName, modelKey, ctx.projectId ?? '');
-        if (model) {
-          const cost = calculateCost(model.pricing, usage);
-          if (cost.currency === 'USD' && Number.isFinite(cost.totalCost) && cost.totalCost > 0) {
-            await checkBudget(quotaContext, { usd: cost.totalCost });
-          }
-        }
+        if (model) settledCost = calculateCost(model.pricing, embeddingUsage);
       } catch (error) {
         logger.warn('Batch budget usage update failed', { error, itemId });
       }
@@ -149,7 +155,26 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       errorMessage: error instanceof Error ? error.message : 'Batch item failed',
       endedAt: new Date(),
     };
+    // A limit hit burned real tokens: keep them on the item and in the aggregates.
+    const burned = error instanceof OutputTokenLimitError ? canonicalItemUsage(error.usage) : undefined;
+    if (burned) {
+      patch.usage = burned;
+      addUsageToDelta(delta, burned);
+    }
+    if (error instanceof OutputTokenLimitError && error.cost && !settledCost) settledCost = error.cost;
     delta.itemsFailed = 1;
+  }
+
+  // One budget debit path for success and limit hit alike (mirrors the sync inference path).
+  if (quotaContext && settledCost) {
+    const cost: UsageCostResult = settledCost;
+    if (cost.currency === 'USD' && Number.isFinite(cost.totalCost) && cost.totalCost > 0) {
+      try {
+        await checkBudget(quotaContext, { usd: cost.totalCost });
+      } catch (error) {
+        logger.warn('Batch budget usage update failed', { error, itemId });
+      }
+    }
   }
 
   const updated = await db.updateBatchJobItem(itemId, patch);
@@ -167,6 +192,46 @@ class BatchItemError extends Error {
   }
 }
 
+/** Sums the costs one item settled (a Dynamic LLM's decider or scorer, then its child). */
+function addSettledCost(total: UsageCostResult | undefined, cost: UsageCostResult): UsageCostResult {
+  if (!total) return cost;
+  // One currency per budget: a cost in another currency is left to the debit's USD guard.
+  if (total.currency !== cost.currency) return total;
+  return {
+    ...total,
+    inputCost: total.inputCost + cost.inputCost,
+    outputCost: total.outputCost + cost.outputCost,
+    cachedCost: total.cachedCost + cost.cachedCost,
+    cacheWriteCost: total.cacheWriteCost + cost.cacheWriteCost,
+    totalCost: total.totalCost + cost.totalCost,
+  };
+}
+
+/** Usage an item stores: the canonical fields verbatim; totalTokens is input + output, never + cached. */
+function canonicalItemUsage(usage: TokenUsage | undefined): IBatchJobItem['usage'] {
+  if (!usage) return undefined;
+  const inputTokens = usage.inputTokens ?? 0;
+  const outputTokens = usage.outputTokens ?? 0;
+  const totalTokens = usage.totalTokens ?? (inputTokens + outputTokens);
+  if (!inputTokens && !outputTokens && !totalTokens) return undefined;
+  const stored = {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    ...(usage.cachedInputTokens ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+    ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
+  };
+  return stored;
+}
+
+function addUsageToDelta(delta: BatchJobAggregateDelta, usage: IBatchJobItem['usage']): void {
+  if (usage?.inputTokens) delta.usageInputTokens = usage.inputTokens;
+  if (usage?.outputTokens) delta.usageOutputTokens = usage.outputTokens;
+  if (usage?.totalTokens) delta.usageTotalTokens = usage.totalTokens;
+}
+
+/** Wire (OpenAI-shaped) usage of the embeddings branch; there are no cache fields there. */
 function mapUsage(usage: Record<string, number> | undefined): IBatchJobItem['usage'] {
   if (!usage) return undefined;
   const inputTokens = usage.inputTokens ?? usage.promptTokens ?? usage.prompt_tokens;

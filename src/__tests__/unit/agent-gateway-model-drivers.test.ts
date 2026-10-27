@@ -392,6 +392,41 @@ describe('anthropic', () => {
     expect(reply.usage).toMatchObject({ completion_tokens: 5, prompt_tokens_details: { cached_tokens: 7 } });
   });
 
+  it('hands the agent inclusive usage: cache read + write folded into the prompt, kept as subsets', async () => {
+    const { fetch } = recorder(() => json(messageResponse(
+      [{ type: 'text', text: 'Hi' }],
+      { input_tokens: 20, output_tokens: 5, cache_read_input_tokens: 500, cache_creation_input_tokens: 30 },
+    )));
+    const model = await build({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }, { fetch });
+    const reply = await model.invoke(USER);
+    expect(reply.usage).toMatchObject({
+      prompt_tokens: 550, completion_tokens: 5, total_tokens: 555,
+      prompt_tokens_details: { cached_tokens: 500, cache_write_tokens: 30 },
+    });
+  });
+
+  it('streamed: the final usage is inclusive too', async () => {
+    const event = (type: string, data: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const body = [
+      event('message_start', { message: { id: 'msg_1', model: 'claude-sonnet-4-5', usage: { input_tokens: 20, output_tokens: 1, cache_read_input_tokens: 500, cache_creation_input_tokens: 30 } } }),
+      event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }),
+      event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Hi' } }),
+      event('content_block_stop', { index: 0 }),
+      event('message_delta', { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }),
+      event('message_stop', {}),
+    ].join('');
+    const { fetch } = recorder(() => new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    const model = await build({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }, { fetch });
+    const parts: any[] = [];
+    for await (const part of model.stream!(USER)) parts.push(part);
+    expect(parts[parts.length - 1]).toMatchObject({
+      usage: {
+        prompt_tokens: 550, completion_tokens: 5, total_tokens: 555,
+        prompt_tokens_details: { cached_tokens: 500, cache_write_tokens: 30 },
+      },
+    });
+  });
+
   it('a configured token limit wins over the floor; a custom base URL is honoured', async () => {
     useProvider('anthropic', { apiKey: 'sk-ant' }, { baseUrl: 'https://claude-proxy.example' });
     const { calls, fetch } = recorder(() => json(messageResponse([{ type: 'text', text: 'ok' }])));
@@ -520,7 +555,22 @@ describe('bedrock', () => {
     });
     expect(reply.content).toBe('Hi');
     expect(reply.tool_calls).toMatchObject([{ id: 'tu1', function: { name: 'lookup', arguments: '{"q":"x"}' } }]);
-    expect(reply.usage).toMatchObject({ prompt_tokens: 20, completion_tokens: 6 });
+    // Bedrock's input excludes the cache read: the agent gets the prompt whole (20 + 4), the read stays a subset.
+    expect(reply.usage).toMatchObject({ prompt_tokens: 24, completion_tokens: 6, total_tokens: 30, prompt_tokens_details: { cached_tokens: 4 } });
+  });
+
+  it('hands the agent inclusive usage: cache read + write folded into the prompt, kept as subsets', async () => {
+    const { fetch } = recorder(() => json({
+      output: { message: { role: 'assistant', content: [{ text: 'Hi' }] } },
+      stopReason: 'end_turn',
+      usage: { inputTokens: 20, outputTokens: 6, totalTokens: 26, cacheReadInputTokens: 500, cacheWriteInputTokens: 30 },
+    }));
+    const model = await build({ providerDriver: 'bedrock', modelId: 'eu.anthropic.claude-sonnet-4-5-v1:0' }, { fetch });
+    const reply = await model.invoke(USER);
+    expect(reply.usage).toMatchObject({
+      prompt_tokens: 550, completion_tokens: 6, total_tokens: 556,
+      prompt_tokens_details: { cached_tokens: 500, cache_write_tokens: 30 },
+    });
   });
 
   it('reasoning effort goes into additionalModelRequestFields.thinking next to the operator\'s extra body', async () => {
@@ -593,7 +643,11 @@ describe('vertex', () => {
     expect(generate.body.tools[0].functionDeclarations[0]).toMatchObject({ name: 'lookup' });
     expect(reply.content).toBe('Hi');
     expect(reply.tool_calls).toMatchObject([{ function: { name: 'lookup', arguments: '{"q":"x"}' }, thoughtSignature: 'sig-9' }]);
-    expect(reply.usage).toMatchObject({ prompt_tokens: 12, total_tokens: 15 });
+    // Vertex leaves the thinking tokens out of the candidates count; the agent gets them in the completion, as a subset.
+    expect(reply.usage).toMatchObject({
+      prompt_tokens: 12, completion_tokens: 4, total_tokens: 16,
+      prompt_tokens_details: { cached_tokens: 2 }, completion_tokens_details: { reasoning_tokens: 1 },
+    });
   });
 
   it('reasoning effort becomes thinkingConfig.thinkingBudget; "none" is a zero budget', async () => {

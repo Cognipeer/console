@@ -48,7 +48,7 @@ import { replicaOrder, modelForReplica, shouldTryNextReplica, type ResolvedRepli
 import { MAX_ROUTING_DEPTH, getDynamicRoutingConfig } from './dynamicRouting';
 import { normalizeInferenceError, OutputTokenLimitError } from './openaiErrors';
 import { buildCacheVariantKey, isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
-import { calculateCost, logModelUsage, type TokenUsage } from './usageLogger';
+import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
 import {
   describeRequestContract,
   resolveModelInvocationConfig,
@@ -79,7 +79,7 @@ import {
   toOpenAIChatResponse,
 } from './openaiAdapter';
 import { StreamAssembler, finishWithToolCalls, frameHasContent, fromGateFrame, toGateFrame, wireFinishReason } from './gatewayStream';
-import { estimateTokensFromText, toGatewayUsage, toWireUsage } from './gatewayUsage';
+import { estimateInputTokens, estimateTokensFromText, toGatewayUsage, toWireUsage } from './gatewayUsage';
 import type {
   GatewayChatRequest,
   ContentPart,
@@ -405,6 +405,23 @@ function usageRow(state: CallState, label: string, payload: Parameters<typeof lo
   );
 }
 
+/**
+ * Books one call's usage: the budget settle (`onUsageSettled`, with the REALIZED
+ * cost) and the usage row. Every path that bills tokens goes through here, so the
+ * budget debit and the row can never disagree about what was spent.
+ */
+function settleUsage(
+  state: CallState,
+  label: string,
+  usage: TokenUsage,
+  row: Omit<Parameters<typeof logModelUsage>[2], 'usage'>,
+): UsageCostResult {
+  const cost = calculateCost(state.model.pricing, usage);
+  state.context.onUsageSettled?.(cost, usage);
+  usageRow(state, label, { ...row, usage } as Parameters<typeof logModelUsage>[2]);
+  return cost;
+}
+
 /** Everything needed to place ONE call, resolved for the replica that will serve it. */
 async function prepareCall(state: CallState, activeModel: IModel) {
   const { runtime } = await buildModelRuntime(
@@ -721,6 +738,9 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
  */
 function logFailedCall(state: CallState, error: unknown): void {
   if (error instanceof GuardrailBlockError) return;
+  // Booked already, with the tokens the provider billed for it: a second, empty
+  // row would double the request count.
+  if (error instanceof OutputTokenLimitError && error.usageBooked) return;
   const cancelled = Boolean(state.context.signal?.aborted);
   if (!cancelled && !state.context.logFailures) return;
   const message = error instanceof Error ? error.message : String(error);
@@ -795,15 +815,38 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     }
   }
 
+  const usage = toGatewayUsage(client.driver, native.usage);
+
   if (
     native.finishReason === 'length'
     && !guardrailContentToText(rawText).trim()
     && native.toolCalls.length === 0
   ) {
-    throw new OutputTokenLimitError(outputTokenLimit);
+    // The provider billed the prompt and the capped output (reasoning included)
+    // even though no answer came back, so the call is settled - budget and row,
+    // whatever `logFailures` says - before the error leaves.
+    const limitError = new OutputTokenLimitError(outputTokenLimit);
+    const cost = settleUsage(state, 'log-chat-usage', usage, {
+      requestId,
+      route: state.route,
+      status: 'error',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        messages: state.loggedMessages,
+        overrides,
+        stream: false,
+        ...describeRequestContract(wire),
+        ...replicaTrace(model, servingReplica, completed.failed),
+      }),
+      providerResponse: sanitizeForLogging({ finish_reason: 'length', output_token_limit: true }),
+      errorMessage: limitError.message,
+      latencyMs,
+      cacheHit: false,
+      finishReason: 'length',
+    });
+    throw new OutputTokenLimitError(outputTokenLimit, { usage, cost, usageBooked: true });
   }
 
-  const usage = toGatewayUsage(client.driver, native.usage);
   if (native.toolCalls.length > 0) usage.toolCalls = native.toolCalls.length;
   const wireFinish = finishWithToolCalls(
     client.driver,
@@ -820,9 +863,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     includeReasoning: state.includeReasoning,
   });
 
-  context.onUsageSettled?.(calculateCost(model.pricing, usage), usage);
-
-  usageRow(state, 'log-chat-usage', {
+  settleUsage(state, 'log-chat-usage', usage, {
     requestId,
     route: state.route,
     status: 'success',
@@ -836,7 +877,6 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     }),
     providerResponse: sanitizeForLogging(wireResponse),
     latencyMs,
-    usage,
     cacheHit: false,
     finishReason: wireFinish,
   });
@@ -1076,16 +1116,34 @@ async function* streamEvents(args: {
 
   // A cancelled stream almost never carries provider usage: the counts ride on
   // the terminal chunk, which is precisely the chunk the client did not stay for.
-  // Reporting zero there writes off output the provider generated and bills us
-  // for, so fall back to an estimate over the text we did stream - the same
-  // chars/4 rule the quota pre-flight uses. The log marks it
-  // `output_tokens_estimated` so a measured count and a guessed one stay
-  // distinguishable downstream. Input tokens are never guessed.
+  // Reporting zero there writes off a prompt and output the provider billed us
+  // for, so fall back to an estimate - the same chars/4 rule the quota
+  // pre-flight uses: the request we sent for the input (booked as uncached, a
+  // conservative over-count for a cached prompt) and what we saw streamed for the
+  // output (text, reasoning summary and tool-call arguments). The log marks it
+  // `usage_estimated` (and `output_tokens_estimated`) so a measured count and a
+  // guessed one stay distinguishable downstream.
+  const estimatedUsage = (): TokenUsage => {
+    const inputTokens = estimateInputTokens(wire.messages, wire.tools);
+    const outputTokens = estimateTokensFromText(
+      assembler.content
+      + assembler.reasoningSummary
+      + assembler.toolCalls().map((call) => call.arguments).join(''),
+    );
+    return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, toolCalls: toolCallCount() };
+  };
   const partialUsage = (): TokenUsage => {
     if (assembler.usage) return { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() };
-    const outputTokens = estimateTokensFromText(assembler.content);
-    return { outputTokens, totalTokens: outputTokens, toolCalls: toolCallCount() };
+    return estimatedUsage();
   };
+  // A stream that completed carries the provider's usage; an upstream that never
+  // sent it (it ignored or rejected `stream_options.include_usage`) still billed
+  // the call, so that is estimated rather than booked as free.
+  const finalUsage = (): { usage: TokenUsage; estimated: boolean } => (
+    assembler.usage
+      ? { usage: { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() }, estimated: false }
+      : { usage: estimatedUsage(), estimated: true }
+  );
 
   const partialMessage = () => ({
     role: 'assistant',
@@ -1204,9 +1262,7 @@ async function* streamEvents(args: {
   const settleCancelled = () => {
     settled = true;
     const latencyMs = Date.now() - startedAt;
-    const cancelledUsage = partialUsage();
-    context.onUsageSettled?.(calculateCost(model.pricing, cancelledUsage), cancelledUsage);
-    usageRow(state, 'log-stream-cancelled', {
+    settleUsage(state, 'log-stream-cancelled', partialUsage(), {
       requestId,
       route: state.route,
       status: 'cancelled',
@@ -1219,10 +1275,9 @@ async function* streamEvents(args: {
       providerResponse: sanitizeForLogging({
         cancelled: 'client_disconnected',
         partial: partialMessage(),
-        ...(assembler.usage ? {} : { output_tokens_estimated: true }),
+        ...(assembler.usage ? {} : { output_tokens_estimated: true, usage_estimated: true }),
       }),
       latencyMs,
-      usage: cancelledUsage,
     });
     auditStreamedOutput(`${state.route}:stream:cancelled`);
   };
@@ -1243,12 +1298,9 @@ async function* streamEvents(args: {
 
     // The provider generated and billed these tokens whether or not they were delivered.
     const blockedUsage = partialUsage();
-    if (!settled) {
-      settled = true;
-      context.onUsageSettled?.(calculateCost(model.pricing, blockedUsage), blockedUsage);
-    }
-
-    usageRow(state, 'log-stream-guardrail-block', {
+    // A stream that already settled (a limit hit that completed before the block
+    // landed) has had its budget debit: the row is written, the debit is not repeated.
+    const blockRow = {
       requestId,
       route: state.route,
       // 'error' rather than a new status: the non-streaming path throws
@@ -1264,14 +1316,20 @@ async function* streamEvents(args: {
         partial_delivery: releasedGatedText,
         // The provider produced this whether or not we delivered it.
         partial: partialMessage(),
-        ...(assembler.usage ? {} : { output_tokens_estimated: true }),
+        ...(assembler.usage ? {} : { output_tokens_estimated: true, usage_estimated: true }),
       }),
       errorMessage: blockMessage,
       latencyMs: Date.now() - startedAt,
-      // The same estimator the cancel path uses, for the same reason.
-      usage: blockedUsage,
       finishReason: 'content_filter',
-    });
+    } satisfies Omit<Parameters<typeof logModelUsage>[2], 'usage'>;
+    if (!settled) {
+      settled = true;
+      // The same estimator the cancel path uses, for the same reason.
+      settleUsage(state, 'log-stream-guardrail-block', blockedUsage, blockRow);
+    } else {
+      // Whatever settled first already wrote the tokens on its own row.
+      usageRow(state, 'log-stream-guardrail-block', { ...blockRow, usage: {} });
+    }
 
     // The gate was built with `audit: false`, so this is still the single
     // post-hoc `output.pre` row for the answer - and it audits the aggregated
@@ -1303,21 +1361,20 @@ async function* streamEvents(args: {
     if (settled) return;
     settled = true;
     const latencyMs = Date.now() - startedAt;
-    const usage: TokenUsage = assembler.usage
-      ? { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() }
-      : { toolCalls: toolCallCount() };
+    const { usage, estimated } = finalUsage();
 
-    context.onUsageSettled?.(calculateCost(model.pricing, usage), usage);
-
-    usageRow(state, 'log-stream-usage', {
+    settleUsage(state, 'log-stream-usage', usage, {
       requestId,
       route: state.route,
       status: outputLimitError ? 'error' : 'success',
       providerRequest: requestLog({ ...describeRequestContract(wire), ...replicaTrace(model, servingReplica, opened.failed) }),
-      providerResponse: sanitizeForLogging({ ...partialMessage(), finish_reason: finish }),
+      providerResponse: sanitizeForLogging({
+        ...partialMessage(),
+        finish_reason: finish,
+        ...(estimated ? { usage_estimated: true } : {}),
+      }),
       errorMessage: outputLimitError?.message,
       latencyMs,
-      usage,
       finishReason: finish,
     });
 
@@ -1456,9 +1513,7 @@ async function* streamEvents(args: {
       : undefined;
     if (syntheticFinish) yield { type: 'finish', finishReason: syntheticFinish };
 
-    const usage: TokenUsage = assembler.usage
-      ? { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() }
-      : { toolCalls: toolCallCount() };
+    const { usage, estimated: usageEstimated } = finalUsage();
 
     // `usage` is only allowed on the wire when the caller asked for it with
     // `stream_options.include_usage`, and then only on a dedicated final frame.
@@ -1480,6 +1535,7 @@ async function* streamEvents(args: {
       response,
       usage,
       ...(assembler.usage ? { nativeUsage: assembler.usage } : {}),
+      ...(usageEstimated ? { usageEstimated: true } : {}),
       wireFinishReason: finishForSettle,
       outputLimitReached: Boolean(outputLimitError),
     };
@@ -1506,17 +1562,32 @@ async function* streamEvents(args: {
     }
 
     const normalized = normalizeInferenceError(error);
-    usageRow(state, 'log-stream-error', {
+    // The provider bills what it generated before it failed, so a stream that had
+    // already produced output (or reported usage) is booked. One that failed
+    // before its first chunk generated nothing: no estimate of an input it never
+    // billed.
+    const produced = Boolean(
+      assembler.usage || assembler.content || assembler.reasoningSummary || assembler.toolCallCount > 0,
+    );
+    const errorRow = {
       requestId,
       route: state.route,
       status: 'error',
       providerRequest: requestLog({ ...describeRequestContract(wire), ...replicaTrace(model, servingReplica, opened.failed) }),
-      providerResponse: sanitizeForLogging({ error: normalized.error.message }),
+      providerResponse: sanitizeForLogging({
+        error: normalized.error.message,
+        ...(produced && !assembler.usage ? { usage_estimated: true } : {}),
+      }),
       errorMessage: normalized.error.message,
       latencyMs,
-      usage: {},
       finishReason: assembler.finishReason === "error" ? undefined : assembler.finishReason,
-    });
+    } satisfies Omit<Parameters<typeof logModelUsage>[2], 'usage'>;
+    if (produced && !settled && !donePending) {
+      settled = true;
+      settleUsage(state, 'log-stream-error', partialUsage(), errorRow);
+    } else {
+      usageRow(state, 'log-stream-error', { ...errorRow, usage: {} });
+    }
     yield { type: 'failed', error: normalized.error, status: normalized.status };
   } finally {
     // A consumer that stopped reading right after a terminal event still gets its

@@ -713,6 +713,12 @@ export function compactedToolResults(
 // ── Cost ────────────────────────────────────────────────────────────────────
 
 /**
+ * The SDK's estimator, with the cache-write slot a later SDK passes (0.20's args have
+ * none, so a live call simply omits it).
+ */
+export type AgentCostEstimator = (args: Parameters<CostEstimator>[0] & { cacheWriteTokens?: number }) => number;
+
+/**
  * The SDK enforces `limits.maxCostUsd` only through a `costEstimator` — with
  * none, the limit was silently a no-op. Prices each model call from the
  * console model's own `pricing`, the same numbers the bill uses.
@@ -724,8 +730,8 @@ export function compactedToolResults(
 export function buildCostEstimator(
     models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null; /** A model with no price of its own that must not be priced at the fallback rate (a sub-agent's). */ noFallback?: boolean }>,
     fallback: IModelPricing | null | undefined,
-    calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }) => { totalCost: number },
-): CostEstimator | undefined {
+    calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cachedWriteTokens?: number }) => { totalCost: number },
+): AgentCostEstimator | undefined {
     // A pricing record of zeros is "nobody entered prices", not "free": it
     // would price every call at $0 and the cap would never fire.
     const priced = (pricing: IModelPricing | null | undefined): pricing is IModelPricing =>
@@ -741,6 +747,10 @@ export function buildCostEstimator(
         for (const name of entry.names) if (name) byName.set(name.toLowerCase(), entry.pricing);
     }
     if (byName.size === 0 && !fallbackPricing) return undefined;
+    // `cacheWriteTokens` is not in agent-sdk 0.20's estimator args (a later SDK passes it);
+    // the live budget stop prices a cache write at the input rate until then, and
+    // `priceAgentTurn` (post-turn) prices it exactly. `inputTokens` is the whole prompt,
+    // cache read + write included (the gateway's canonical usage).
     return (args) => {
         const name = args.modelName?.toLowerCase();
         // A sub-agent's model nobody priced counts as free here (the owner is warned) rather than at the parent's rate.
@@ -751,6 +761,7 @@ export function buildCostEstimator(
             inputTokens: args.inputTokens,
             outputTokens: args.outputTokens,
             cachedInputTokens: args.cachedInputTokens,
+            cachedWriteTokens: args.cacheWriteTokens,
         }).totalCost;
     };
 }

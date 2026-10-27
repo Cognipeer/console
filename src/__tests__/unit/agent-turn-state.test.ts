@@ -16,7 +16,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { ASK_USER_TOOL_NAME, createSmartAgent, createTool, type Message, type SmartAgentEvent } from '@cognipeer/agent-sdk';
 
@@ -422,6 +422,26 @@ describe('state persistence helpers', () => {
     it('treats zero prices as "not priced", so maxCostUsd is not silently a no-op at $0', () => {
         const calc = () => ({ totalCost: 0 });
         expect(buildCostEstimator([{ names: ['m'], pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 } as never }], undefined, calc)).toBeUndefined();
+    });
+
+    it('forwards the cache-write count to the pricing function (the SDK arg `cacheWriteTokens` becomes `cachedWriteTokens`)', () => {
+        const calc = vi.fn((_pricing: unknown, _usage: unknown) => ({ totalCost: 1 }));
+        const pricing = { inputTokenPer1M: 1, outputTokenPer1M: 1 } as never;
+        const estimator = buildCostEstimator([{ names: ['m'], pricing }], pricing, calc as never)!;
+        estimator({ modelName: 'm', inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, cacheWriteTokens: 30 });
+        expect(calc).toHaveBeenCalledWith(pricing, { inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, cachedWriteTokens: 30 });
+    });
+
+    it('prices a cache-heavy request with the shared rule: read and write slices at their own rate, a blank price at the input rate', async () => {
+        const { calculateCost } = await import('@/lib/services/models/usageLogger');
+        const full = { inputTokenPer1M: 3, outputTokenPer1M: 15, cachedTokenPer1M: 0.3, cacheWriteTokenPer1M: 3.75 } as never;
+        const blank = { inputTokenPer1M: 3, outputTokenPer1M: 15 } as never;
+        const request = { modelName: 'm', inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, cacheWriteTokens: 30 };
+        // 20 uncached + 500 read + 30 write of the 550-token prompt, plus 5 output.
+        expect(buildCostEstimator([{ names: ['m'], pricing: full }], full, calculateCost)!(request))
+            .toBeCloseTo((20 * 3 + 500 * 0.3 + 30 * 3.75 + 5 * 15) / 1_000_000, 10);
+        expect(buildCostEstimator([{ names: ['m'], pricing: blank }], blank, calculateCost)!(request))
+            .toBeCloseTo((550 * 3 + 5 * 15) / 1_000_000, 10);
     });
 });
 

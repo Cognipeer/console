@@ -41,6 +41,27 @@ const byType = (type: string) => calls().filter((call) => call.entityType === ty
 describe('recordTraceEventMetrics', () => {
   beforeEach(() => hoisted.recordEntityMetric.mockClear());
 
+  it('hands the cache-write count to the pricer so the model metric cost includes the write slice', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const capturing: TraceModelPricerLoader = async () => ({
+      price: (name, tokens) => {
+        seen.push({ ...tokens });
+        return { refKey: name, costUsd: 0 };
+      },
+    });
+
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'tracing',
+      pricerLoader: capturing,
+      events: [
+        { id: 'a', type: 'ai_call', status: 'success', model: 'claude-x', inputTokens: 1000, outputTokens: 10, cachedInputTokens: 200, cachedWriteTokens: 300, timestamp: at() },
+      ],
+    });
+
+    expect(seen).toContainEqual({ inputTokens: 1000, outputTokens: 10, cachedInputTokens: 200, cachedWriteTokens: 300 });
+  });
+
   it('emits agent counters plus a model row per ai_call and a tool row per tool_call for external traces', async () => {
     await recordTraceEventMetrics({
       ...base,

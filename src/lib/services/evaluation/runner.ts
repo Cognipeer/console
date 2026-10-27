@@ -197,7 +197,7 @@ function sumUsage(usages: Array<EvalUsage | undefined>): EvalUsage | undefined {
   const present = usages.filter((u): u is EvalUsage => Boolean(u));
   if (present.length === 0) return undefined;
   const total: EvalUsage = {};
-  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'costUsd'] as const) {
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'cachedWriteTokens', 'reasoningTokens', 'costUsd'] as const) {
     const sum = sumDefined(present.map((u) => u[key]));
     if (sum !== undefined) total[key] = sum;
   }
@@ -230,12 +230,9 @@ function aggregate(items: RunItemResult[]): RunAggregate {
   const totals = withUsage.length
     ? {
         totalCostUsd: withUsage.reduce((sum, i) => sum + (i.usage?.costUsd ?? 0), 0),
+        // Cached and reasoning tokens are subsets of input / output: never added on top.
         totalTokens: withUsage.reduce(
-          (sum, i) =>
-            sum +
-            (i.usage?.inputTokens ?? 0) +
-            (i.usage?.outputTokens ?? 0) +
-            (i.usage?.cachedInputTokens ?? 0),
+          (sum, i) => sum + (i.usage?.inputTokens ?? 0) + (i.usage?.outputTokens ?? 0),
           0,
         ),
       }

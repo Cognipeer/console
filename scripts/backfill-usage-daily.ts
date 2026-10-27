@@ -97,6 +97,7 @@ interface DayBucket {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cachedWriteTokens: number;
   totalTokens: number;
   costUsd: number;
   latencyMsSum: number;
@@ -191,6 +192,7 @@ async function main(): Promise<number> {
                 inputTokens: 0,
                 outputTokens: 0,
                 cachedInputTokens: 0,
+                cachedWriteTokens: 0,
                 totalTokens: 0,
                 costUsd: 0,
                 latencyMsSum: 0,
@@ -201,6 +203,7 @@ async function main(): Promise<number> {
               bucket.inputTokens += log.inputTokens ?? 0;
               bucket.outputTokens += log.outputTokens ?? 0;
               bucket.cachedInputTokens += log.cachedInputTokens ?? 0;
+              bucket.cachedWriteTokens += log.cachedWriteTokens ?? 0;
               bucket.totalTokens += log.totalTokens ?? 0;
               bucket.costUsd += log.pricingSnapshot?.totalCost ?? 0;
               if (typeof log.latencyMs === 'number') {
@@ -234,6 +237,7 @@ async function main(): Promise<number> {
             inputTokens: row.inputTokens,
             outputTokens: row.outputTokens,
             cachedInputTokens: row.cachedInputTokens,
+            cachedWriteTokens: row.cachedWriteTokens,
             totalTokens: row.totalTokens,
             costUsd: row.costUsd,
             latencyMsSum: row.latencyMsSum,

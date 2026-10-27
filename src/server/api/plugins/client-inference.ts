@@ -13,7 +13,7 @@ import {
   handleEmbeddingRequest,
   handleImageRequest,
 } from '@/lib/services/models/inferenceService';
-import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { isUsageBookedError, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
@@ -71,6 +71,7 @@ import {
   checkBudget,
   checkPerRequestLimits,
   checkRateLimit,
+  settleUsageBudget,
 } from '@/lib/quota/quotaGuard';
 import {
   anthropicErrorBody,
@@ -712,6 +713,14 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
           apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
           projectId: auth.projectId,
         },
+        // The core settles every billed call here - streamed, limit hits and
+        // cancellations included - with the cost of the model that served it,
+        // as the chat route does. A post-hoc debit from `result.usage` never
+        // saw a stream (its usage arrives after this returns) or a limit hit
+        // (that throws).
+        onUsageSettled: (cost) => {
+          void settleUsageBudget(quotaContext, cost);
+        },
       });
       requestId = result.requestId;
 
@@ -720,24 +729,6 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         void checkRateLimit(quotaContext, { tokens: actualOutputTokens }).catch((error) =>
           logger.error('Failed to update messages rate limit usage', { error }),
         );
-      }
-
-      if (result.usage) {
-        const usage = result.usage;
-        void getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
-          .then((model) => {
-            if (!model) return undefined;
-            const cost = calculateCost(model.pricing, usage);
-            if (
-              cost.currency !== 'USD'
-              || !Number.isFinite(cost.totalCost)
-              || cost.totalCost <= 0
-            ) {
-              return undefined;
-            }
-            return checkBudget(quotaContext, { usd: cost.totalCost });
-          })
-          .catch((error) => logger.error('Failed to update messages budget usage', { error }));
       }
 
       if (result.stream) {
@@ -781,7 +772,8 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       const normalizedError = normalizeInferenceError(error);
 
       try {
-        const model = modelKey
+        // A limit hit the core billed already has its row.
+        const model = modelKey && !isUsageBookedError(error)
           ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
           : null;
         if (model) {

@@ -36,6 +36,8 @@ const PAYLOAD: Record<string, unknown> = {
     input_cost_per_token: 0.0000025,
     output_cost_per_token: 0.00001,
     cache_read_input_token_cost: 0.00000125,
+    cache_creation_input_token_cost: 0.000003125,
+    cache_creation_input_token_cost_above_1hr: 0.000005,
     max_input_tokens: 128000,
     max_output_tokens: 16384,
     litellm_provider: 'openai',
@@ -159,11 +161,13 @@ describe('parseCatalogJson', () => {
       inputTokenPer1M: 2.5,
       outputTokenPer1M: 10,
       cachedTokenPer1M: 1.25,
+      cacheWriteTokenPer1M: 3.125, // 5-minute price; the _above_1hr variant is ignored
     });
     expect(gpt4o?.provider).toBe('openai');
     expect(gpt4o?.maxInputTokens).toBe(128000);
     const embedding = entries.find((entry) => entry.key === 'text-embedding-3-small');
     expect(embedding?.pricing.cachedTokenPer1M).toBeUndefined();
+    expect(embedding?.pricing.cacheWriteTokenPer1M).toBeUndefined();
   });
 });
 

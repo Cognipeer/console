@@ -13,6 +13,7 @@
 
 import crypto from 'node:crypto';
 import vm from 'node:vm';
+import { resolveTokenRates } from '@/lib/services/models/pricingRates';
 import type {
   DynamicPoolPolicy,
   IDynamicComplexityConfig,
@@ -250,8 +251,8 @@ export function rulesReferenceSignal(
 
 /**
  * Estimate a request's USD cost against one model's pricing: input tokens at
- * the input rate (the `cachedShare` of them at the cached rate when the model
- * prices cache reads), plus the expected output at the output rate. Callers
+ * the input rate (the `cachedShare` of them at the cache-read rate; a model
+ * with no cache-read price bills them at the input rate), plus the expected output at the output rate. Callers
  * pass the caller's max_tokens (worst case) or a history-based prediction as
  * `outputTokens`; without either the estimate is input-only.
  */
@@ -262,7 +263,7 @@ export function estimateRequestCostUsd(
   cachedShare = 0,
 ): number {
   const share = Math.min(1, Math.max(0, cachedShare));
-  const cachedRate = pricing.cachedTokenPer1M ?? pricing.inputTokenPer1M ?? 0;
+  const cachedRate = resolveTokenRates(pricing).cacheRead;
   const inputCost =
     ((pricing.inputTokenPer1M ?? 0) * inputTokensEst * (1 - share) +
       cachedRate * inputTokensEst * share) /

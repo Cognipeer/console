@@ -186,7 +186,8 @@ describe('attribution and usage', () => {
         if (typeof part === 'string') controller.abort();
       }
     });
-    expect(stopped.totalTokens).toBe(Math.ceil('a partial answer'.length / 4));
+    // Estimated both ways (chars/4): the prompt that was sent ('hi') and what streamed back.
+    expect(stopped.totalTokens).toBe(Math.ceil('hi'.length / 4) + Math.ceil('a partial answer'.length / 4));
   });
 
   it('a failing call is an error row, and nothing is settled for it', async () => {
@@ -542,6 +543,54 @@ describe('a Dynamic LLM as the agent model', () => {
     const byRoute = rows().map((row) => row.route).sort();
     expect(byRoute).toEqual(['agent.chat', 'chat.completions.router']);
     expect(rows().find((row) => row.route === 'agent.chat')).toMatchObject({ providerRequest: { agentKey: 'a1' }, routing: { role: 'child', chosenModelKey: 'big' } });
+  });
+
+  it('hands the agent the CHILD\'s inclusive usage when the router (no driver of its own) routes to an anthropic model', async () => {
+    const toClaude = llm('router', {
+      providerKey: 'dynamic', providerDriver: 'dynamic',
+      settings: { dynamic: { strategy: 'rule-based', defaultModelKey: 'claude', rules: [] } },
+    });
+    useModels(toClaude, llm('claude', { providerKey: 'prov-claude', providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5', settings: { maxTokens: 9000 } }));
+    upstream = stubUpstream(() => json({
+      id: 'msg', model: 'claude', type: 'message', role: 'assistant', stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Hi' }],
+      usage: { input_tokens: 20, output_tokens: 5, cache_read_input_tokens: 500, cache_creation_input_tokens: 30 },
+    }));
+    const model = await build('router', { route: 'agent.chat' });
+    const reply = await model.invoke(USER) as any;
+    // Folded once, with the child's driver: 20 + 500 + 30, never twice and never with the router's.
+    expect(reply.usage).toMatchObject({
+      prompt_tokens: 550, completion_tokens: 5, total_tokens: 555,
+      prompt_tokens_details: { cached_tokens: 500, cache_write_tokens: 30 },
+    });
+  });
+
+  it('counts what a primary that hit its output limit burned next to the fallback\'s answer', async () => {
+    const router = llm('router', {
+      providerKey: 'dynamic', providerDriver: 'dynamic',
+      settings: { dynamic: { strategy: 'rule-based', defaultModelKey: 'big', fallbackModelKey: 'small', rules: [] } },
+    });
+    useModels(router, llm('big', { providerKey: 'prov-big' }), llm('small', { providerKey: 'prov-small' }));
+    let calls = 0;
+    upstream = stubUpstream(() => {
+      calls += 1;
+      return calls === 1
+        ? json({
+          id: 'c1', object: 'chat.completion', created: 1, model: 'big',
+          choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'length' }],
+          usage: { prompt_tokens: 40, completion_tokens: 64, total_tokens: 104 },
+        })
+        : json({
+          id: 'c2', object: 'chat.completion', created: 1, model: 'small',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 40, completion_tokens: 5, total_tokens: 45 },
+        });
+    });
+    const model = await build('router', { route: 'agent.chat' });
+    const reply = await model.invoke(USER) as any;
+    expect(reply.content).toBe('ok');
+    // Both provider calls were billed; the SDK ledger sees both.
+    expect(reply.usage).toMatchObject({ prompt_tokens: 80, completion_tokens: 69, total_tokens: 149 });
   });
 
   it('streams through a routed child: text deltas, then one assembled message with the tool call', async () => {

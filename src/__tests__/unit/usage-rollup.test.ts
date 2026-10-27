@@ -75,6 +75,7 @@ describe('usage rollup end-to-end', () => {
             latencyMs: 100,
             inputTokens: 10,
             outputTokens: 5,
+            cachedWriteTokens: 4,
             totalTokens: 15,
             costUsd: 0.01,
             units: { toolCalls: 1 },
@@ -99,6 +100,7 @@ describe('usage rollup end-to-end', () => {
     expect(row.refKey).toBe('gpt-4o');
     expect(row.requests).toBe(3);
     expect(row.errors).toBe(1);
+    expect(row.cachedWriteTokens).toBe(12);
     expect(row.totalTokens).toBe(45);
     expect(row.costUsd).toBeCloseTo(0.03, 10);
     expect(row.latencyMsSum).toBe(300);
