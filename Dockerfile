@@ -90,7 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=runner-tools /usr/bin/docker /usr/bin/docker
 COPY --from=runner-tools /usr/local/bin/kubectl /usr/local/bin/kubectl
 
-COPY --from=production-deps /app/node_modules ./node_modules
+COPY --from=production-deps --chown=node:node /app/node_modules ./node_modules
 
 RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-playwright-build \
     && ./node_modules/.bin/playwright install-deps chromium \
@@ -98,20 +98,27 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-playwright-bu
 
 RUN mkdir -p /home/node/.cache/ms-playwright && \
     mkdir -p /app/data && \
-    chown -R node:node /home/node
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/next.config.mjs ./next.config.mjs
-COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/docker ./docker
-COPY --from=builder /app/scripts ./scripts
-COPY --from=builder /app/mail-templates ./mail-templates
+    chown -R node:node /home/node /app/data && \
+    chown node:node /app
 
+USER node
+
+RUN ./node_modules/.bin/playwright install chromium
+
+COPY --from=builder --chown=node:node /app/package.json ./package.json
+COPY --from=builder --chown=node:node /app/next.config.mjs ./next.config.mjs
+COPY --from=builder --chown=node:node /app/tsconfig.json ./tsconfig.json
+COPY --from=builder --chown=node:node /app/.next ./.next
+COPY --from=builder --chown=node:node /app/public ./public
+COPY --from=builder --chown=node:node /app/src ./src
+COPY --from=builder --chown=node:node /app/docker ./docker
+COPY --from=builder --chown=node:node /app/scripts ./scripts
+COPY --from=builder --chown=node:node /app/mail-templates ./mail-templates
+
+USER root
 
 RUN mkdir -p /app/.next/cache/images && \
-    chown -R node:node /app && \
+    chown -R node:node /app/.next/cache && \
     # OpenShift's default restricted SCC ignores the image's USER/UID and
     # runs the container as an arbitrary, unpredictable UID instead — but
     # that UID is always a member of GID 0. `chown node:node` alone leaves
@@ -124,8 +131,6 @@ RUN mkdir -p /app/.next/cache/images && \
     chmod -R g=u /app/.next/cache
 
 USER node
-
-RUN ./node_modules/.bin/playwright install chromium
 
 EXPOSE 3000
 # Invoke node directly instead of `npm start`. `npm` as PID 1 does not

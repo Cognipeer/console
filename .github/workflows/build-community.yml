@@ -255,6 +255,8 @@ jobs:
           file: ./Dockerfile
           push: true
           provenance: mode=min
+          cache-from: type=registry,ref=ghcr.io/cognipeer/console:buildcache
+          cache-to: type=registry,ref=ghcr.io/cognipeer/console:buildcache,mode=max
           tags: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           labels: |
             org.opencontainers.image.version=${{ steps.vars.outputs.release_tag }}
