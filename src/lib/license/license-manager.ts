@@ -284,8 +284,12 @@ export class LicenseManager {
       this.getFreeLimits(),
       normalizeLimits(payload.limits),
     );
-    const expiresAt = tenant.licenseExpiresAt
-      ?? (typeof payload.exp === 'number' ? new Date(payload.exp * 1000) : undefined);
+    // The API-token auth cache stores the tenant as JSON (Redis), so a Date comes
+    // back as an ISO string; without this every cached request fails on `.getTime()`.
+    const stored = tenant.licenseExpiresAt == null ? undefined : new Date(tenant.licenseExpiresAt);
+    const expiresAt = stored && !Number.isNaN(stored.getTime())
+      ? stored
+      : (typeof payload.exp === 'number' ? new Date(payload.exp * 1000) : undefined);
 
     if (expiresAt && expiresAt.getTime() <= Date.now()) {
       return {

@@ -132,4 +132,37 @@ describe('LicenseManager.getEffectiveLicenseForTenant', () => {
     expect(license.limits.maxProjects).toBe(10);
     expect((license.limits as Record<string, unknown>).quotas).toBeUndefined();
   });
+
+  describe('licenseExpiresAt that is not a Date (a tenant read back from the Redis auth cache)', () => {
+    const tenant = (licenseExpiresAt: unknown) => ({
+      _id: 'tenant-1',
+      licenseId: 'lic-1',
+      licensePayload: { licenseId: 'lic-1', licenseType: 'ENTERPRISE' },
+      licenseStatus: 'active',
+      licenseType: 'ENTERPRISE',
+      licenseExpiresAt,
+    }) as never;
+    const future = new Date(Date.now() + 365 * 86_400_000);
+    const past = new Date(Date.now() - 86_400_000);
+
+    it.each([
+      ['ISO string', future.toISOString()],
+      ['epoch milliseconds', future.getTime()],
+    ])('keeps an unexpired license active when the expiry is an %s', (_label, value) => {
+      const license = LicenseManager.getEffectiveLicenseForTenant(tenant(value));
+      expect(license.status).toBe('active');
+      expect(license.expiresAt?.getTime()).toBe(future.getTime());
+    });
+
+    it('still expires a license whose string expiry is in the past', () => {
+      const license = LicenseManager.getEffectiveLicenseForTenant(tenant(past.toISOString()));
+      expect(license.status).toBe('expired');
+    });
+
+    it('ignores an unparseable expiry instead of throwing', () => {
+      const license = LicenseManager.getEffectiveLicenseForTenant(tenant('not-a-date'));
+      expect(license.status).toBe('active');
+      expect(license.expiresAt).toBeUndefined();
+    });
+  });
 });
