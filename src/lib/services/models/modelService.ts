@@ -261,6 +261,8 @@ export async function createModel(
   };
 
   const created = await db.createModel(newModel);
+  // The gateway caches 'not priced' (null) entries; drop them for the new key.
+  await invalidateModelMetaCache(tenantDbName, projectId, [created.key]);
   return created;
 }
 
@@ -708,10 +710,13 @@ function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string)
 /**
  * Drops the `getModelByKey` cache entries for a model so an edit (pricing,
  * routing config, guardrail bindings, provider) or a delete takes effect on
- * the next request instead of up to two minutes later. Best effort: the TTL
+ * the next request instead of up to two minutes later. Also drops the AI App
+ * Gateway price entries (`appgw:price:…`), which mirror gatewayPricingCacheKey()
+ * in the EE overlay's aiAppGateway/pricing.ts (core cannot import it): one for
+ * the project gateway and one for the tenant-wide gateway (projectId ''). Best effort: the TTL
  * still bounds staleness if the cache is unreachable.
  */
-async function invalidateModelMetaCache(
+export async function invalidateModelMetaCache(
   tenantDbName: string,
   projectId: string,
   keys: Array<string | undefined>,
@@ -719,9 +724,11 @@ async function invalidateModelMetaCache(
   try {
     const cache = await getCache();
     await Promise.all(
-      [...new Set(keys.filter((k): k is string => Boolean(k)))].map((key) =>
+      [...new Set(keys.filter((k): k is string => Boolean(k)))].flatMap((key) => [
         cache.del(modelMetaCacheKey(tenantDbName, projectId, key)),
-      ),
+        cache.del(`appgw:price:${tenantDbName}:${projectId}:${key}`),
+        cache.del(`appgw:price:${tenantDbName}::${key}`),
+      ]),
     );
   } catch { /* best effort — the 120s TTL bounds staleness */ }
 }

@@ -45,9 +45,9 @@ describe('alert metric catalog', () => {
     expect(ids.filter((id) => !ALL_METRICS.includes(id))).toEqual([]);
   });
 
-  it('covers the 35 metrics that existed before entity health', () => {
+  it('covers the 37 metrics that existed before entity health', () => {
     const legacy = ALERT_METRIC_CATALOG.filter((d) => d.source === 'legacy');
-    expect(legacy).toHaveLength(35);
+    expect(legacy).toHaveLength(37);
   });
 
   it('gives every metric a label, a module of the union and a valid mode list', () => {
@@ -159,6 +159,6 @@ describe('module to metrics table', () => {
       .map((d) => d.id)
       .sort();
     // the AI App Gateway collector is registered by the enterprise build through the alert-extensions seam
-    expect(unresolved).toEqual(['appgw_block_rate', 'appgw_error_rate', 'appgw_requests', 'appgw_requests_per_user']);
+    expect(unresolved).toEqual(['appgw_block_rate', 'appgw_error_rate', 'appgw_output_limit_rate', 'appgw_output_limit_turns', 'appgw_requests', 'appgw_requests_per_user']);
   });
 });
