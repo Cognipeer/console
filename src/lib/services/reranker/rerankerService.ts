@@ -54,6 +54,18 @@ function generateKey(name: string, existingKey?: string): string {
   );
 }
 
+/** Most output tokens one LLM scoring call may be given (a score or a ranking, never an essay). */
+const MAX_SCORING_TOKENS = 32768;
+
+/** The output limit of one LLM scoring call: a whole number from 1 up to MAX_SCORING_TOKENS, or absent. */
+function validateMaxTokens(config: IRerankerConfig | undefined): void {
+  const maxTokens: unknown = config?.maxTokens;
+  if (maxTokens !== undefined && maxTokens !== null
+    && (typeof maxTokens !== 'number' || !Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > MAX_SCORING_TOKENS)) {
+    throw new Error(`config.maxTokens must be a whole number between 1 and ${MAX_SCORING_TOKENS}.`);
+  }
+}
+
 function validateStrategyConfig(strategy: RerankerStrategy, config: IRerankerConfig): void {
   switch (strategy) {
     case 'dedicated-model':
@@ -69,6 +81,7 @@ function validateStrategyConfig(strategy: RerankerStrategy, config: IRerankerCon
     default:
       throw new Error(`Unknown reranker strategy: ${strategy}`);
   }
+  validateMaxTokens(config);
 }
 
 /* ── CRUD ────────────────────────────────────────────────────────────── */
@@ -110,6 +123,9 @@ export async function updateReranker(
 ): Promise<Reranker | null> {
   if (request.strategy && request.config) {
     validateStrategyConfig(request.strategy, request.config);
+  } else if (request.config) {
+    // The strategy is the stored one here, but the limit does not depend on it.
+    validateMaxTokens(request.config);
   }
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

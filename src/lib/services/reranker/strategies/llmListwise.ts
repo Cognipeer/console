@@ -7,11 +7,18 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { sideCallReasoning, sideCallThinkingUncontrolled } from '@/lib/services/agents/agentReasoning';
+import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { AGENT_REASONING_OVERRIDE } from '@/lib/services/models/reasoning';
 import type { RerankerStrategyImpl } from './index';
+import { RerankerScoringError, isOutputLimitHit, scoringMaxTokens } from './llmJudge';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('reranker:llm-listwise');
+
+/** The whole ranking is one JSON array: raise it in the reranker config (`maxTokens`) for a long list or a model that thinks. */
+const DEFAULT_MAX_TOKENS = 1024;
 
 const DEFAULT_PROMPT_TEMPLATE = `You are a relevance ranker. Given a query and a numbered list of candidate documents, return a JSON array of objects with shape {"index": number, "score": number} where score is between 0 and 1 indicating relevance. Return JSON only.
 
@@ -64,6 +71,12 @@ export const llmListwiseStrategy: RerankerStrategyImpl = {
     const cfg = ctx.reranker.config ?? {};
     const template = cfg.promptTemplate ?? DEFAULT_PROMPT_TEMPLATE;
     const temperature = cfg.temperature ?? 0;
+    const sideOptions = { dynamic: Boolean(getDynamicRoutingConfig(ctx.model)) };
+    // The strategy's small default is only for a model whose thinking can be turned off; one stuck with its thinking
+    // (Vertex Gemini, ...) runs on the model default unless the reranker config sets a limit itself.
+    const maxTokens = scoringMaxTokens(cfg.maxTokens, 0) || (sideCallThinkingUncontrolled(ctx.model, sideOptions) ? undefined : DEFAULT_MAX_TOKENS);
+    // The ranking shares the limit with the thinking: ask for the lowest thinking the model allows.
+    const thinking = sideCallReasoning(ctx.model, sideOptions);
 
     const formatted = documents
       .map((d, i) => `[${i}] ${d.content.slice(0, 800)}`)
@@ -79,12 +92,15 @@ export const llmListwiseStrategy: RerankerStrategyImpl = {
         body: {
           messages: [{ role: 'user', content: prompt }],
           temperature,
-          max_tokens: 1024,
+          ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+          ...(thinking ? { [AGENT_REASONING_OVERRIDE]: thinking } : {}),
         },
       });
-      const text =
-        (response as { choices?: Array<{ message?: { content?: string } }> })?.choices?.[0]?.message?.content
-        ?? '';
+      const choice = (response as {
+        choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
+      })?.choices?.[0];
+      const text = choice?.message?.content ?? '';
+      const cutOff = choice?.finish_reason === 'length';
       const ranking = parseRanking(text);
 
       // Translate local indices (0..N-1 in the prompt) back to caller indices.
@@ -95,18 +111,36 @@ export const llmListwiseStrategy: RerankerStrategyImpl = {
           score: r.score,
         }));
 
-      // Fill any missing documents with score 0 so callers can still sort fully.
+      // Documents the ranking left out get score 0 so callers can still sort fully, unless it left out
+      // most of them: that is no ranking, and ordering on zeros is worse than not reranking.
       const seen = new Set(result.map((r) => r.index));
-      for (const doc of documents) {
-        if (!seen.has(doc.index)) {
-          result.push({ index: doc.index, score: 0 });
-        }
+      const missing = documents.filter((doc) => !seen.has(doc.index));
+      if (missing.length * 2 > documents.length) {
+        throw new RerankerScoringError('llm-listwise', missing.length, documents.length, {
+          reason: cutOff ? 'the ranking was cut off at the output limit' : 'the reply did not rank them',
+          outputLimit: cutOff,
+          maxTokens,
+        });
+      }
+      if (cutOff) {
+        logger.warn('llm-listwise ranking was cut off at the output limit', { maxTokens, missing: missing.length });
+      }
+      for (const doc of missing) {
+        result.push({ index: doc.index, score: 0 });
       }
       return result;
     } catch (err) {
       logger.error('llm-listwise scoring failed', {
         error: err instanceof Error ? err.message : err,
       });
+      // The model's own limit error names the request parameter; here the limit is the reranker config's.
+      if (isOutputLimitHit(err)) {
+        throw new RerankerScoringError('llm-listwise', documents.length, documents.length, {
+          reason: 'the model stopped at its output limit before it answered',
+          outputLimit: true,
+          maxTokens,
+        });
+      }
       throw err;
     }
   },

@@ -138,6 +138,7 @@ export async function replayPerTurn(
   const history: EvalMessage[] = [...system];
   const turns: ReplayTurn[] = [];
   let last: TargetOutput | undefined;
+  let anyTruncated = false;
   /** True while the model's answer stands in for a not-yet-seen recorded one. */
   let answerPending = false;
 
@@ -155,6 +156,7 @@ export async function replayPerTurn(
       input: [...history],
     });
     last = output;
+    if (output.truncated) anyTruncated = true;
     turns.push({
       index: turns.length + 1,
       question: turn.content.slice(0, REPLAY_QUESTION_PREVIEW_CHARS),
@@ -182,6 +184,8 @@ export async function replayPerTurn(
     // so, or `perTurn` looks free next to `single`.
     latencyMs: sumDefined(turns.map((t) => t.latencyMs)),
     usage: sumUsage(turns.map((t) => t.usage)),
+    // Cut off at ANY turn: the later turns were fed a partial answer.
+    ...(anyTruncated ? { truncated: true } : {}),
     turns,
   };
 }

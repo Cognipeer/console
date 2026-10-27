@@ -12,6 +12,10 @@
  * the gpt-5 / o-series) and `extraBody` handling are inherited, not re-done.
  */
 import type { ChatCompletionResponse, UnifiedMessage } from '@cognipeer/agent-sdk';
+import type { IModel } from '@/lib/database';
+import { raisedSideCallLimit, sideCallReasoning } from '@/lib/services/agents/agentReasoning';
+import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
+import { resolveNativeMaxTokens } from './nativeClients';
 import { imageUrlToPart, type ContentPart } from './nativeParts';
 import type { DecisionRequest, DecisionResult, DecisionRuntime } from '../domains/decision';
 import type { ModelProviderRuntime, ModelRuntimeConfig } from '../domains/model';
@@ -49,10 +53,13 @@ export class DecisionBackendError extends Error {
    * still 502 (see the plugin). Transient 429/5xx/network errors are untouched.
    */
   readonly status = 422;
+  /** What the call(s) that produced no usable answer billed, when the provider reported it. */
+  readonly usage?: DecisionResult['usage'];
 
-  constructor(message: string) {
+  constructor(message: string, usage?: DecisionResult['usage']) {
     super(message);
     this.name = 'DecisionBackendError';
+    if (usage) this.usage = usage;
   }
 }
 
@@ -72,6 +79,31 @@ function extractUsage(response: ChatCompletionResponse, driver: string | undefin
     ...(g.cachedWriteTokens ? { cachedWriteTokens: g.cachedWriteTokens } : {}),
     ...(g.reasoningTokens ? { reasoningTokens: g.reasoningTokens } : {}),
   };
+}
+
+/** Two calls' usage added up: a call that was retried billed both. */
+function addUsage(a: DecisionResult['usage'], b: DecisionResult['usage']): DecisionResult['usage'] {
+  if (!a || !b) return a ?? b;
+  const sum = (x?: number, y?: number) => (x ?? 0) + (y ?? 0);
+  const cachedInputTokens = sum(a.cachedInputTokens, b.cachedInputTokens);
+  const cachedWriteTokens = sum(a.cachedWriteTokens, b.cachedWriteTokens);
+  const reasoningTokens = sum(a.reasoningTokens, b.reasoningTokens);
+  return {
+    inputTokens: sum(a.inputTokens, b.inputTokens),
+    outputTokens: sum(a.outputTokens, b.outputTokens),
+    totalTokens: sum(a.totalTokens, b.totalTokens),
+    ...(cachedInputTokens ? { cachedInputTokens } : {}),
+    ...(cachedWriteTokens ? { cachedWriteTokens } : {}),
+    ...(reasoningTokens ? { reasoningTokens } : {}),
+  };
+}
+
+function positiveSetting(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function buildMessages(request: DecisionRequest, includeRationale: boolean): UnifiedMessage[] {
@@ -116,13 +148,55 @@ export function createStructuredDecisionRuntime(
       }
 
       const format = buildDecisionResponseFormat(request.questions, includeRationale);
-      const response = await client.complete({
-        messages: buildMessages(request, includeRationale),
+      const messages = buildMessages(request, includeRationale);
+      // The answer shares the output limit with the thinking: ask for the lowest thinking the model allows.
+      const reasoning = sideCallReasoning({ modelId: config.modelId, providerDriver: provider, settings: config.modelSettings });
+      const complete = (maxTokens?: number) => client.complete({
+        messages,
         responseFormat: { type: 'json_schema', name: format.json_schema.name, schema: format.json_schema.schema as Record<string, unknown> },
+        ...(reasoning ? { reasoning } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(options?.signal ? { signal: options.signal } : {}),
       });
 
-      const usage = extractUsage(response, client.driver);
+      let response = await complete();
+      let usage = extractUsage(response, client.driver);
+
+      if (response.finishReason === 'length') {
+        // A cut-off document is no answer. This call sends no limit of its own, so the one it ran with is what the
+        // client resolved: the model's "Default max tokens", raised for thinking where that applies (an OpenAI
+        // reasoning model at 'minimal' runs at 4096 even when 1000 is configured), or the driver default. The retry
+        // doubles THAT, so it is never below the first call (stopping at the model maximum).
+        const settings = (config.modelSettings ?? {}) as Record<string, unknown>;
+        const modelMax = modelMaxOutputTokens({ modelId: config.modelId, settings } as IModel);
+        const sent = resolveNativeMaxTokens({
+          driver: client.driver ?? provider,
+          modelId: config.modelId,
+          overrides: {
+            maxCompletionTokens: positiveSetting(settings.maxCompletionTokens),
+            maxTokens: positiveSetting(settings.maxTokens),
+            extraBody: { ...asRecord(settings.requestDefaults), ...asRecord(settings.extraBody) },
+          },
+          reasoning: reasoning ?? settings.reasoning,
+          stream: false,
+          modelMax,
+        });
+        const raised = sent !== undefined ? raisedSideCallLimit(sent, modelMax) : undefined;
+        if (raised !== undefined) {
+          response = await complete(raised);
+          usage = addUsage(usage, extractUsage(response, client.driver));
+        }
+        if (response.finishReason === 'length') {
+          const limit = raised ?? sent;
+          throw new DecisionBackendError(
+            `The model reached its output token limit${limit ? ` (${limit} tokens)` : ''} before it finished the decision answer`
+            + `${raised !== undefined ? ', also after one retry with a larger limit' : ''}. `
+            + 'Raise the model\'s "Default max tokens" setting.',
+            usage,
+          );
+        }
+      }
+
       const backend = { kind: 'structured' as const, provider };
 
       const refusal = response.providerFields?.refusal;

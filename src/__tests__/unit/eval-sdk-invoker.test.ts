@@ -219,6 +219,7 @@ describe('resolveSdkProviderConfig — driver mapping table', () => {
       provider: 'openai',
       apiKey: 'sk-test',
       organization: 'org-1',
+      api: 'chat',
     });
   });
 
@@ -252,6 +253,7 @@ describe('resolveSdkProviderConfig — driver mapping table', () => {
       endpoint: 'https://my-res.openai.azure.com',
       deploymentName: 'gpt4o-dep',
       apiVersion: '2024-08-01-preview',
+      api: 'chat',
     });
   });
 
