@@ -2017,7 +2017,7 @@ describe('handleChatCompletion · Dynamic LLM', () => {
     expect(result.routing?.chosenModelKey).toBe('small');
   });
 
-  it('carries what a primary that hit its output limit burned onto the fallback outcome (burnedUsage), not onto its usage', async () => {
+  it('does not fall back from a primary that hit its output limit: the limit error, with what it burned, goes back to the caller', async () => {
     const router = makeRouter({
       strategy: 'rule-based',
       defaultModelKey: 'big',
@@ -2039,22 +2039,27 @@ describe('handleChatCompletion · Dynamic LLM', () => {
         return { runtime: runtimes.get(providerKey) };
       },
     );
-    stubUpstream((call) => call.headers.authorization === 'Bearer p-big'
-      ? json(completion({ content: '', finish: 'length', usage: { prompt_tokens: 40, completion_tokens: 64, total_tokens: 104 } }))
-      : json(completion({ content: 'ok', usage: { prompt_tokens: 40, completion_tokens: 5, total_tokens: 45 } })));
+    const servedBy: unknown[] = [];
+    stubUpstream((call) => {
+      servedBy.push(call.headers.authorization);
+      return call.headers.authorization === 'Bearer p-big'
+        ? json(completion({ content: '', finish: 'length', usage: { prompt_tokens: 40, completion_tokens: 64, total_tokens: 104 } }))
+        : json(completion({ content: 'ok', usage: { prompt_tokens: 40, completion_tokens: 5, total_tokens: 45 } }));
+    });
 
     const { executeModelCall } = await import('@/lib/services/models/inferenceService');
-    const outcome = await executeModelCall({
+    await expect(executeModelCall({
       tenantDbName: BASE_PARAMS.tenantDbName,
       tenantId: BASE_PARAMS.tenantId,
       projectId: BASE_PARAMS.projectId,
       modelKey: 'router',
       request: { messages: [{ role: 'user', content: 'hi' }] },
+    })).rejects.toMatchObject({
+      name: 'OutputTokenLimitError',
+      usage: expect.objectContaining({ inputTokens: 40, outputTokens: 64 }),
     });
-
-    expect(outcome.routing?.decision).toBe('fallback');
-    expect(outcome.usage).toMatchObject({ inputTokens: 40, outputTokens: 5 });
-    expect(outcome.burnedUsage).toMatchObject({ inputTokens: 40, outputTokens: 64 });
+    expect(servedBy.length).toBeGreaterThan(0);
+    expect(servedBy.every((auth) => auth === 'Bearer p-big')).toBe(true);
   });
 
   const priced = (key: string, input: number, output: number, extra: object = {}) =>

@@ -150,14 +150,16 @@ function withoutRouterHandoff(context: GatewayCallContext | undefined): GatewayC
 // ── Fallback ──────────────────────────────────────────────────────────────
 
 /**
- * Whether a primary's failure moves the call to the router's fallback model. Only two things do not: the
- * caller hanging up (nobody is waiting) and a guardrail's verdict (it stands for the whole call). Every other
- * failure falls back, 400 / 401 / 403 / 404 included: the credentials, the deployment and the config are the
- * primary's own, so a second model may well answer.
+ * Whether a primary's failure moves the call to the router's fallback model. Three things do not: the
+ * caller hanging up (nobody is waiting), a guardrail's verdict (it stands for the whole call) and the output
+ * limit (the fallback runs under the same limit, so it would most likely be cut off too, at double the cost;
+ * the limit result goes back to the caller). Every other failure falls back, 400 / 401 / 403 / 404 included:
+ * the credentials, the deployment and the config are the primary's own, so a second model may well answer.
  */
 function shouldFallBack(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return false;
   if (error instanceof GuardrailBlockError) return false;
+  if (error instanceof OutputTokenLimitError) return false;
   return true;
 }
 
@@ -743,12 +745,9 @@ export async function resolveDynamicCompletion(args: {
           buildRouting('child', finalModelKey, finalDecision, finalReason),
           fitted.call,
         );
-        // A primary that hit its output limit was billed (its row is written):
+        // A primary that ended in a malformed finish was billed (its row is written):
         // the run totalling this call must see those tokens next to the answer.
-        if (
-          (primaryError instanceof OutputTokenLimitError || primaryError instanceof UpstreamFinishError)
-          && primaryError.usage
-        ) {
+        if (primaryError instanceof UpstreamFinishError && primaryError.usage) {
           childResult = { ...childResult, burnedUsage: primaryError.usage };
         }
       } catch (fallbackError) {

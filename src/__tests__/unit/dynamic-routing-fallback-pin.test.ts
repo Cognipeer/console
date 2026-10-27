@@ -99,7 +99,6 @@ describe('what the fallback is for (G4-8)', () => {
     ['a 429', failure('slow down', 429)],
     ['a dropped connection', failure('fetch failed')],
     ['an error that carries no status', new Error('something odd')],
-    ['an output limit', new OutputTokenLimitError(100)],
     // The credentials, the deployment and the config are the primary's own: a second model may well answer.
     ['a 400', failure('bad request', 400)],
     ['a 401', failure('bad key', 401)],
@@ -118,6 +117,8 @@ describe('what the fallback is for (G4-8)', () => {
 
   const NO_FALLBACK: Array<[string, Error]> = [
     ['a guardrail block', new GuardrailBlockError('blocked', 'gr-1', 'block')],
+    // The fallback runs under the same limit: it would most likely be cut off too, at double the cost.
+    ['an output limit', new OutputTokenLimitError(100)],
   ];
   it.each(NO_FALLBACK)('does not fall back when the primary fails with %s: the error surfaces and the router logs it', async (_label, error) => {
     execute.mockRejectedValueOnce(error);
@@ -157,11 +158,13 @@ describe('what the fallback is for (G4-8)', () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps counting what a primary that hit its output limit burned', async () => {
+  it('hands a primary\'s output-limit error, with what it burned, back to the caller instead of falling back', async () => {
     const usage = { inputTokens: 40, outputTokens: 64, totalTokens: 104 };
-    execute.mockRejectedValueOnce(new OutputTokenLimitError(64, { usage })).mockResolvedValueOnce(served('small'));
-    const outcome = await call();
-    expect(outcome.burnedUsage).toEqual(usage);
+    const error = new OutputTokenLimitError(64, { usage });
+    execute.mockRejectedValueOnce(error).mockResolvedValueOnce(served('small'));
+    await expect(call()).rejects.toBe(error);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(error.usage).toEqual(usage);
   });
 
   it('keeps counting what a primary that ended in its own error finish burned', async () => {
@@ -242,12 +245,6 @@ describe('the output limit on the fallback\'s leg (G4-8)', () => {
     expect(executed(0).wire).toMatchObject({ max_tokens: 4000 });
   });
 
-  it('the fallback that answers a primary\'s output limit is fitted the same way', async () => {
-    withMaxOnSmall(1000);
-    execute.mockRejectedValueOnce(new OutputTokenLimitError(4000)).mockResolvedValueOnce(served('small'));
-    await call({ wire: bigLimits });
-    expect(executed(1).wire).toMatchObject({ max_tokens: 1000, max_completion_tokens: 1000 });
-  });
 });
 
 describe('a call pinned to the child that ran (G4-9)', () => {
