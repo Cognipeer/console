@@ -164,5 +164,11 @@ describe('LicenseManager.getEffectiveLicenseForTenant', () => {
       expect(license.status).toBe('active');
       expect(license.expiresAt).toBeUndefined();
     });
+
+    it('treats an empty-string expiry as no expiry', () => {
+      const license = LicenseManager.getEffectiveLicenseForTenant(tenant(''));
+      expect(license.status).toBe('active');
+      expect(license.expiresAt).toBeUndefined();
+    });
   });
 });
