@@ -77,15 +77,22 @@ export async function publishRagIngestJob(
   });
 }
 
+/**
+ * Queue handler. Binds the tenant DB for the whole (async) run: a deferred extraction can spend minutes on OCR
+ * between queries, and a `switchToTenant` binding does not survive those awaits, so without a scope every later
+ * query would read whichever tenant another job last bound.
+ */
 export async function runRagIngestJob(
   payload: RagIngestJobPayload,
 ): Promise<void> {
-  await indexPendingRagDocument(
-    payload.tenantDbName,
-    payload.tenantId,
-    payload.projectId,
-    payload.ragModuleKey,
-    payload.documentId,
+  await runWithTenantScope(payload.tenantDbName, () =>
+    indexPendingRagDocument(
+      payload.tenantDbName,
+      payload.tenantId,
+      payload.projectId,
+      payload.ragModuleKey,
+      payload.documentId,
+    ),
   );
 }
 
