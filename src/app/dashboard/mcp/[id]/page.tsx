@@ -2259,7 +2259,7 @@ async with sse_client(
             {form.values.authType === 'token' && (
               <FormRow cols={1}>
                 <FormField label="Bearer token" hint="Keep the masked value to preserve the current token, or type a new one to replace it.">
-                  <PasswordInput {...form.getInputProps('authToken')} />
+                  <PasswordInput autoComplete="off" {...form.getInputProps('authToken')} />
                 </FormField>
               </FormRow>
             )}
@@ -2267,10 +2267,10 @@ async with sse_client(
             {form.values.authType === 'header' && (
               <FormRow cols={2}>
                 <FormField label="Header name">
-                  <TextInput {...form.getInputProps('authHeaderName')} />
+                  <TextInput autoComplete="off" {...form.getInputProps('authHeaderName')} />
                 </FormField>
                 <FormField label="Header value" hint="Keep the masked value to preserve the current value, or type a new one to replace it.">
-                  <PasswordInput {...form.getInputProps('authHeaderValue')} />
+                  <PasswordInput autoComplete="off" {...form.getInputProps('authHeaderValue')} />
                 </FormField>
               </FormRow>
             )}
@@ -2278,10 +2278,10 @@ async with sse_client(
             {form.values.authType === 'basic' && (
               <FormRow cols={2}>
                 <FormField label="Username">
-                  <TextInput {...form.getInputProps('authUsername')} />
+                  <TextInput autoComplete="off" {...form.getInputProps('authUsername')} />
                 </FormField>
                 <FormField label="Password" hint="Keep the masked value to preserve the current password, or type a new one to replace it.">
-                  <PasswordInput {...form.getInputProps('authPassword')} />
+                  <PasswordInput autoComplete="off" {...form.getInputProps('authPassword')} />
                 </FormField>
               </FormRow>
             )}

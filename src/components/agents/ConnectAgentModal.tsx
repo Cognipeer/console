@@ -336,6 +336,7 @@ export default function ConnectAgentModal({
               hint={hasExistingKey ? t('connectModal.apiKeyKeepHint') : t('connectModal.apiKeyHint')}
             >
               <PasswordInput
+                autoComplete="off"
                 placeholder={hasExistingKey ? '••••••••' : t('connectModal.apiKeyPlaceholder')}
                 {...form.getInputProps('apiKey')}
               />
