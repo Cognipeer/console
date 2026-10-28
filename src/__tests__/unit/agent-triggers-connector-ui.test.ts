@@ -34,7 +34,11 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
     useConnectorTriggerCatalog: () => ({
       available: catalog.available, forbidden: catalog.forbidden, loading: catalog.loading, error: null, connectors: catalog.connectors, reload: () => undefined,
     }),
-    ConnectorTriggerPicker: (props: { value: { connectorId: string; trigger: string } | null; onChange: (value: unknown) => void; errors?: Record<string, string> }) => el(
+    ConnectorTriggerPicker: (props: {
+      value: { connectorId: string; trigger: string; scheduleCron: string; scheduleTimezone: string } | null;
+      onChange: (value: unknown) => void;
+      errors?: Record<string, string>;
+    }) => el(
       'div',
       { 'data-testid': 'picker' },
       el('button', {
@@ -43,7 +47,14 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
           connectorId: 'c1', trigger: 'pull_request', params: { repository: 'acme/api' }, events: ['pull_request.opened'], scheduleCron: '', scheduleTimezone: 'UTC',
         }),
       }, 'Pick GitHub pull requests'),
+      // A poll trigger (the schedule field starts on the package's default), and what a person does to that field.
+      el('button', {
+        type: 'button',
+        onClick: () => props.onChange({ connectorId: 'c1', trigger: 'issues', params: {}, events: [], scheduleCron: '*/5 * * * *', scheduleTimezone: 'UTC' }),
+      }, 'Pick Issues (poll)'),
+      el('button', { type: 'button', onClick: () => props.onChange({ ...props.value!, scheduleCron: '0 9 1W * *' }) }, 'Type the schedule 0 9 1W * *'),
       el('span', null, props.value ? `picked:${props.value.connectorId}/${props.value.trigger}` : 'nothing picked'),
+      el('span', null, `schedule:${props.value?.scheduleCron ?? ''} (${props.value?.scheduleTimezone ?? ''})`),
       el('span', null, `errors:${JSON.stringify(props.errors ?? {})}`),
     ),
     ConnectorTriggerStatus: (props: {
@@ -289,6 +300,38 @@ describe('the Connector choice', () => {
     typeInto(document.querySelector<HTMLInputElement>('input[placeholder="Nightly digest"]')!, 'PR review');
     await click(button('Save trigger'));
     expect(text()).toContain('errors:{"connector.params.repository":"is required"}');
+  });
+});
+
+describe('the schedule of a poll connector trigger', () => {
+  const addPoll = async () => {
+    await click(button('Add trigger'));
+    await click(document.querySelector('input[type="radio"][value="connector"]'));
+    await click(button('Pick Issues (poll)'));
+    typeInto(document.querySelector<HTMLInputElement>('input[placeholder="Nightly digest"]')!, 'Daily issues');
+  };
+
+  it('is sent as it is typed, whatever its syntax: the server asks the Connectors module, and the picker shows the sentence it answers with', async () => {
+    const sentence = 'cron uses syntax connector schedules do not support (L, W, # or ?); use numbers, ranges, lists, steps and month or weekday names';
+    routes.push((url, method) => (method === 'POST' && /\/triggers(?:\?|$)/.test(url)
+      ? json({ error: { type: 'invalid_request_error', code: 'invalid_trigger', message: `Invalid trigger - connector.schedule.cron: ${sentence}`, errors: [
+        { field: 'connector.schedule.cron', message: sentence },
+      ] } }, false, 400)
+      : null));
+    mount(panel());
+    await flush();
+    await addPoll();
+    await click(button('Type the schedule 0 9 1W * *'));
+    await click(button('Save trigger'));
+
+    // Core's cron-parser does not read `1W`, the connector grammar does not either; neither is the form's to judge.
+    const post = calls.find((call) => call.method === 'POST');
+    expect(post, 'the form sent the save').toBeDefined();
+    expect(post!.body!.connector).toMatchObject({ schedule: { cron: '0 9 1W * *', timezone: 'UTC' } });
+    expect(text()).toContain(`errors:${JSON.stringify({ 'connector.schedule.cron': sentence })}`);
+    expect(text()).not.toContain(words().previewInvalid);
+    // The refused save leaves what was typed where it was.
+    expect(text()).toContain('schedule:0 9 1W * * (UTC)');
   });
 });
 

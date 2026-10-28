@@ -458,7 +458,8 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
     const errorOf = (field: TriggerFormProblem['field']) => (problem?.field === field ? t(problem.key) : undefined);
     const connectorErrors: Record<string, string> = {
         ...serverErrors,
-        ...(problem?.field === 'connector' ? { [problem.key === 'previewInvalid' ? 'connector.schedule' : 'connector.connector_id']: t(problem.key) } : {}),
+        // The one thing the form refuses on the connector choice is a missing pick; the schedule is judged by the server.
+        ...(problem?.field === 'connector' ? { 'connector.connector_id': t(problem.key) } : {}),
     };
 
     const loadSubscription = useCallback(async () => {

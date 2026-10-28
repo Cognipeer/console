@@ -248,12 +248,27 @@ describe('connector trigger', () => {
     expect(push.ok && 'schedule' in (push.body.connector as object)).toBe(false);
   });
 
-  it('refuses a missing connector or trigger, a bad cron and a half-written filter row before sending', () => {
+  it('refuses a missing connector or trigger and a half-written filter row before sending', () => {
     expect(triggerBodyFromForm({ ...base(), type: 'connector' }, [], null, now)).toEqual({ ok: false, problem: { field: 'connector', key: 'connectorRequired' } });
     expect(triggerBodyFromForm(connectorForm(picked({ trigger: '' })), [], null, now)).toMatchObject({ ok: false, problem: { field: 'connector', key: 'connectorRequired' } });
-    expect(triggerBodyFromForm(connectorForm(picked({ scheduleCron: '0 0 9 * * *' })), [], null, now)).toEqual({ ok: false, problem: { field: 'connector', key: 'previewInvalid' } });
     expect(triggerBodyFromForm({ ...connectorForm(), webhookFilter: [{ path: 'payload.x', op: 'eq', value: '' }] }, [], null, now))
       .toEqual({ ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } });
+  });
+
+  it('leaves the judging of a connector schedule to the Connectors module: whatever is typed goes to the server (trimmed), which answers in the module’s words', () => {
+    // Core's cron-parser is not the connector grammar: it takes `L`, `#` and `?`, which the module refuses, and refuses `W`, a macro,
+    // a seconds field and a number out of range, which the module words itself. The form must neither refuse nor reword any of them.
+    for (const cron of ['0 0 9 * * *', '@daily', '0 9 1W * *', '0 9 L * *', '0 9 * * 5#2', '60 * * * *', '*/0 * * * *', '0 9 * * funday', 'a b c d e']) {
+      const built = triggerBodyFromForm(connectorForm(picked({ scheduleCron: `  ${cron}  `, scheduleTimezone: 'Europe/Istanbul' })), [], null, now);
+      expect(built.ok, cron).toBe(true);
+      expect(built.ok && (built.body.connector as { schedule?: unknown }).schedule, cron).toEqual({ cron, timezone: 'Europe/Istanbul' });
+    }
+  });
+
+  it('a schedule trigger keeps its own check: it still refuses a cron cron-parser cannot read', () => {
+    for (const cron of ['0 0 9 * * *', '@daily', '60 * * * *', '']) {
+      expect(triggerBodyFromForm({ ...base(), cron }, [], null, now), cron).toEqual({ ok: false, problem: { field: 'cron', key: 'previewInvalid' } });
+    }
   });
 
   it('a stored connector trigger opens as a connector form, not as manual, and sends back what it was', () => {

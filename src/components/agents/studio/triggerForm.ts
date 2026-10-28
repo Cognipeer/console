@@ -458,8 +458,9 @@ export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: tru
         case 'connector': {
             const picked = form.connector;
             if (!picked || !picked.connectorId || !picked.trigger) return { ok: false, problem: { field: 'connector', key: 'connectorRequired' } };
+            // The cron is not judged here: the Connectors module reads a connector schedule by its own grammar (not cron-parser's), and
+            // the server answers with its sentence, which the schedule field shows.
             const cron = picked.scheduleCron.trim();
-            if (cron && validateTriggerCron(cron)) return { ok: false, problem: { field: 'connector', key: 'previewInvalid' } };
             const filter = webhookFilterBody(form);
             if (!filter.ok) return { ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } };
             return {
