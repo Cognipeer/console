@@ -549,6 +549,11 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
   /* spacing managed by .ds-page > * + * */
 }
 .ds-page-header .ds-h1 + p { margin-top: 4px; }
+/* The title block takes the free width and wraps its own text, so the actions
+   stay beside it. Without a basis, the line breaks at the title's one-line width
+   (a long subtitle) and the actions drop below although there is room. They now
+   drop below only when the header is narrower than 320px + the actions. */
+.ds-page-header > :first-child { flex: 1 1 320px; min-width: 0; }
 
 /* Cards */
 .ds-card {
