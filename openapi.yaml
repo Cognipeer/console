@@ -3302,7 +3302,7 @@ paths:
         A `connector` trigger rotates the signing secret of its subscription through the Connectors module: a
         manually set up webhook gets a new secret (the old one stays accepted for `grace_seconds`, and
         `previous_valid_until` says until when), an automatically registered one is registered again with the new
-        secret. The answer carries `connector_subscription` (with the new `secret` in manual mode and
+        secret and the old one stops at once, whatever `grace_seconds` says. The answer carries `connector_subscription` (with the new `secret` in manual mode and
         `previous_secret_valid_until`). A poll trigger has no secret (`400 connector_no_secret`); without the module
         it is `409 connector_triggers_unavailable`.
 
@@ -3386,7 +3386,7 @@ paths:
         '404':
           $ref: '#/components/responses/TriggerNotFound'
         '409':
-          description: '`connector_triggers_unavailable`: a connector trigger and no Connectors module. Also a refusal of the module that is a conflict (for example `not_active`).'
+          description: '`connector_triggers_unavailable`: a connector trigger and no Connectors module. Also a refusal of the module that is a conflict: `account_required` or `not_active` when a hook the module registered cannot be taken off the vendor first (the connector has no connected account or is disabled), or `not_active` when the package no longer offers the trigger.'
           content:
             application/json:
               schema:
@@ -3422,8 +3422,8 @@ paths:
 
         While the Connectors licence or switch, or the Agents service, is off the module registers and resumes
         nothing: the call is `402` or `403` with `error.code` `service_unavailable`. A call the module refuses for
-        another reason keeps the status, message and code it gave (a `4xx`, for example `409 account_required` when the
-        connector has no connected account); any other failure of the module is `502 connector_retry_failed`.
+        another reason keeps the status, message and code it gave (a `4xx`, for example `409 not_active` when the trigger
+        has no subscription and its connector is gone); any other failure of the module is `502 connector_retry_failed`.
       operationId: retryAgentTriggerConnector
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
@@ -3466,7 +3466,7 @@ paths:
         '404':
           $ref: '#/components/responses/TriggerNotFound'
         '409':
-          description: '`connector_triggers_unavailable` (no Connectors module), `connector_subscription_missing`, or a refusal of the module that is a conflict (`account_required`: the connector has no connected account; `not_active`: it is disabled or its package is gone).'
+          description: '`connector_triggers_unavailable` (no Connectors module), `connector_subscription_missing`, or `not_active` (the trigger has no subscription yet and its connector, or the trigger of its package, is gone).'
           content:
             application/json:
               schema:
@@ -30318,7 +30318,7 @@ components:
           type: string
           enum: [active, pending, manual, paused, failed]
           description: >-
-            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again. `paused`: the connector is disabled or its account is disconnected (a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`.
+            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again. A hook set up by hand needs no account, so when the connector's account is disconnected it stays `manual` with `reason_code: account` and goes on receiving. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`.
         kind:
           type: string
           enum: [webhook, poll]
@@ -30345,7 +30345,8 @@ components:
         previous_secret_valid_until:
           type: integer
           nullable: true
-          description: Unix seconds until which the secret before the last rotation is still accepted (the `grace_seconds` of that rotation); null when no earlier secret is.
+          description: >-
+            Unix seconds until which the secret before the last rotation is still accepted (the `grace_seconds` of that rotation). Only a hook set up by hand has one. It is null when no earlier secret is accepted, and always null for a hook the module registered at the vendor (its old secret stops at once). Every read of the trigger says it until it passes, not only the answer of the rotation.
         auto_registered:
           type: boolean
         schedule:
