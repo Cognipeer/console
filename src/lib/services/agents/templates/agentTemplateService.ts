@@ -49,6 +49,7 @@ import {
   agentKeyCandidate,
   buildTemplateConfig,
   buildTriggerBody,
+  givenConnectorParams,
 } from './templateConfig';
 import { buildSetupItems } from './templateSetup';
 import type {
@@ -193,6 +194,8 @@ export interface ParsedInstantiateInput {
   publish: boolean;
   connectorId?: string;
   connectorIds: Record<string, string>;
+  /** Parameters per suggested connector trigger, by its name in the template. */
+  connectorParams: Record<string, Record<string, unknown>>;
 }
 
 const invalid = (code: string, message: string) => new AgentTemplateError(400, code, message);
@@ -221,6 +224,19 @@ function readConnectorIds(value: unknown): Record<string, string> {
     out[name] = id.trim();
   }
   return out;
+}
+
+/** `connector_params`: the parameters of each suggested connector trigger, by the trigger's name. */
+function readConnectorParams(value: unknown): Record<string, Record<string, unknown>> {
+  if (value === undefined || value === null) return {};
+  const message = 'connector_params must be an object of trigger names to parameter objects';
+  if (typeof value !== 'object' || Array.isArray(value)) throw invalid('invalid_request', message);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_PICKS) throw invalid('invalid_request', `connector_params can name at most ${MAX_PICKS} triggers`);
+  for (const [, params] of entries) {
+    if (!params || typeof params !== 'object' || Array.isArray(params)) throw invalid('invalid_request', message);
+  }
+  return Object.fromEntries(entries.map(([name, params]) => [name, params as Record<string, unknown>]));
 }
 
 function readOptionalText(value: unknown, field: string): string | undefined {
@@ -256,6 +272,7 @@ export function parseInstantiateInput(raw: unknown): ParsedInstantiateInput {
   const sandboxTemplateKey = readOptionalText(body.sandboxTemplateKey, 'sandboxTemplateKey');
   const connectorId = readOptionalText(body.connector_id, 'connector_id');
   const connectorIds = readConnectorIds(body.connector_ids);
+  const connectorParams = readConnectorParams(body.connector_params);
   return {
     ...(name ? { name } : {}),
     ...(description ? { description } : {}),
@@ -269,6 +286,7 @@ export function parseInstantiateInput(raw: unknown): ParsedInstantiateInput {
     publish: readFlag(body.publish, 'publish', false),
     ...(connectorId ? { connectorId } : {}),
     connectorIds,
+    connectorParams,
   };
 }
 
@@ -395,6 +413,30 @@ function defaultCopy(template: AgentTemplate): { name: string; summary: string }
   return { name: copy?.name ?? template.key, summary: copy?.summary ?? '' };
 }
 
+/** How many field errors a skipped trigger lists. */
+const MAX_SKIP_ERRORS = 10;
+
+/**
+ * Why the Connectors module refused a suggested connector trigger, as a reason to leave it out - or null when the
+ * refusal is about the template itself (its name, prompt, variables, filter), which is a defect to surface, not to hide.
+ *
+ * Only a refusal about the connector (it does not exist, is of another package, has no such trigger) or about what the
+ * user supplies (the parameters, and the events and schedule the package checks) skips the trigger. Without parameters
+ * given, a refusal that is all about parameters is `params_required`.
+ */
+export function connectorRefusal(
+  errors: ReadonlyArray<{ field: string; message: string }>,
+  paramsGiven: boolean,
+): Pick<SkippedTemplateTrigger, 'reason' | 'errors'> | null {
+  const aboutTarget = (field: string) => field === 'type' || field === 'connector.connector_id' || field === 'connector.trigger';
+  const aboutParams = (field: string) => field === 'connector.params' || field.startsWith('connector.params.');
+  const aboutSetup = (field: string) => aboutParams(field) || field.startsWith('connector.events') || field.startsWith('connector.schedule');
+  if (errors.some((issue) => aboutTarget(issue.field))) return { reason: 'connector_required' };
+  if (errors.length === 0 || !errors.every((issue) => aboutSetup(issue.field))) return null;
+  const listed = errors.slice(0, MAX_SKIP_ERRORS).map((issue) => ({ field: issue.field, message: issue.message }));
+  return { reason: !paramsGiven && errors.every((issue) => aboutParams(issue.field)) ? 'params_required' : 'invalid_params', errors: listed };
+}
+
 async function createSuggestedTriggers(
   scope: AgentTemplateScope,
   template: AgentTemplate,
@@ -402,23 +444,33 @@ async function createSuggestedTriggers(
   timezone: string,
   userId: string,
   deps: AgentTemplateWriteDeps,
-  connectors: Pick<ParsedInstantiateInput, 'connectorId' | 'connectorIds'>,
+  connectors: Pick<ParsedInstantiateInput, 'connectorId' | 'connectorIds' | 'connectorParams'>,
 ): Promise<{ created: InstantiatedTemplateTrigger[]; skipped: SkippedTemplateTrigger[] }> {
   const created: InstantiatedTemplateTrigger[] = [];
   const skipped: SkippedTemplateTrigger[] = [];
+  const own = (record: object, key: string) => Object.prototype.hasOwnProperty.call(record, key);
   for (const suggestion of template.triggers ?? []) {
     // A connector trigger needs a connector of its package; without one (or without the module) it is left out.
-    const connectorId = suggestion.type === 'connector' ? connectors.connectorIds[suggestion.name] ?? connectors.connectorId : undefined;
-    const skip = () => skipped.push({ name: suggestion.name, reason: 'connector_required', package: suggestion.connector?.package ?? '' });
+    const connectorId = suggestion.type === 'connector'
+      ? (own(connectors.connectorIds, suggestion.name) ? connectors.connectorIds[suggestion.name] : undefined) ?? connectors.connectorId
+      : undefined;
+    const params = suggestion.type === 'connector' && own(connectors.connectorParams, suggestion.name)
+      ? givenConnectorParams(connectors.connectorParams[suggestion.name])
+      : {};
+    const skip = (refusal: Pick<SkippedTemplateTrigger, 'reason' | 'errors'>) =>
+      skipped.push({ name: suggestion.name, package: suggestion.connector?.package ?? '', ...refusal });
     if (suggestion.type === 'connector' && (!suggestion.connector || !connectorId)) {
-      skip();
+      skip({ reason: 'connector_required' });
       continue;
     }
-    const prepared = await deps.prepareTriggerWrite({ body: buildTriggerBody(suggestion, timezone, connectorId), agent, actorId: userId });
+    const prepared = await deps.prepareTriggerWrite({ body: buildTriggerBody(suggestion, timezone, connectorId, params), agent, actorId: userId });
     if (!prepared.ok && suggestion.type === 'connector') {
-      // The picked connector is not one the trigger can use (another package, deleted) or there is no module.
-      skip();
-      continue;
+      // The module refused the picked connector (another package, deleted, none in this edition) or the parameters it needs.
+      const refusal = connectorRefusal(prepared.errors, Object.keys(params).length > 0);
+      if (refusal) {
+        skip(refusal);
+        continue;
+      }
     }
     if (!prepared.ok) {
       const summary = prepared.errors.slice(0, 3).map((issue) => `${issue.field}: ${issue.message}`).join('; ');

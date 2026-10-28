@@ -599,6 +599,157 @@ describe('POST instantiate: triggers', () => {
     expect((await instantiate('pr-reviewer', pick({ connector_ids: { a: '' } }))).statusCode).toBe(400);
   });
 
+  describe('connector triggers whose package trigger needs parameters (the GitHub ones need a repository)', () => {
+    const PR_TRIGGER = findAgentTemplate('pr-reviewer')!.triggers![0]!.name;
+    const CI_TRIGGER = findAgentTemplate('ci-failure-triage')!.triggers![0]!.name;
+    let fake: ReturnType<typeof createFakeConnectorHost>;
+
+    beforeEach(() => {
+      fake = createFakeConnectorHost();
+      registerConnectorTriggerHost(fake.host);
+    });
+
+    it('creates the trigger on the given repository, with the template\'s events and filter, still disabled', async () => {
+      const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } }));
+      expect(res.statusCode, res.body).toBe(201);
+      const body = json(res);
+      expect(body.skipped_triggers).toEqual([]);
+      expect(body.triggers).toEqual([expect.objectContaining({ type: 'connector', enabled: false, connector: expect.objectContaining({ connectorId: 'conn-gh', trigger: 'pull_request' }) })]);
+      const [row] = await triggersOf(body.agent);
+      if (!row || row.type !== 'connector') throw new Error('expected a connector trigger');
+      expect(row).toMatchObject({
+        enabled: false,
+        connector: {
+          connectorId: 'conn-gh', trigger: 'pull_request', params: { repository: 'acme/api' }, packageId: 'cognipeer.github',
+          events: ['pull_request.opened', 'pull_request.reopened', 'pull_request.synchronize', 'pull_request.ready_for_review'],
+          filter: [
+            { path: 'payload.action', op: 'in', value: ['opened', 'synchronize', 'reopened', 'ready_for_review'] },
+            { path: 'payload.draft', op: 'eq', value: false },
+          ],
+          includePayload: true,
+        },
+      });
+      // Core asked the module once with the parameters in the body, and the hook was registered once.
+      expect(fake.calls.filter((call) => call === 'prepare')).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+    });
+
+    it('leaves the trigger out as params_required when the repository is missing, naming the field; the agent is still made', async () => {
+      const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh' }));
+      expect(res.statusCode, res.body).toBe(201);
+      const body = json(res);
+      expect(body.triggers).toEqual([]);
+      expect(body.skipped_triggers).toEqual([{
+        name: PR_TRIGGER, reason: 'params_required', package: 'cognipeer.github',
+        errors: [{ field: 'connector.params.repository', message: 'repository is required' }],
+      }]);
+      expect(await triggersOf(body.agent)).toEqual([]);
+      // Nothing was registered at the vendor for it.
+      expect(fake.calls.filter((call) => call.startsWith('attach:'))).toEqual([]);
+      expect(fake.subscriptions.size).toBe(0);
+    });
+
+    it('reads blank values as not given', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: '' } } })));
+      expect(res.triggers).toEqual([]);
+      expect(res.skipped_triggers).toEqual([expect.objectContaining({ reason: 'params_required' })]);
+      const nothing = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: {} } })));
+      expect(nothing.skipped_triggers).toEqual([expect.objectContaining({ reason: 'params_required' })]);
+    });
+
+    it('names a parameter the package does not take as invalid_params, with what it said', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({
+        connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api', branch: 'main' } },
+      })));
+      expect(res.triggers).toEqual([]);
+      expect(res.skipped_triggers).toEqual([{
+        name: PR_TRIGGER, reason: 'invalid_params', package: 'cognipeer.github',
+        errors: [{ field: 'connector.params.branch', message: 'branch is not a parameter of this trigger' }],
+      }]);
+      expect(await triggersOf(res.agent)).toEqual([]);
+    });
+
+    it('a missing connector stays connector_required, with no field errors, even when parameters were given', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-missing', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+      expect(fake.calls.filter((call) => call === 'prepare')).toHaveLength(1);
+      // Without a connector at all the module is not even asked.
+      fake.calls.length = 0;
+      const none = json(await instantiate('pr-reviewer', pick({ connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(none.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+      expect(fake.calls).toEqual([]);
+    });
+
+    it('another package\'s connector is connector_required: the trigger does not exist there', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-poll', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+    });
+
+    it('takes parameters per trigger name and creates the others next to a skipped one', async () => {
+      const res = json(await instantiate('ci-failure-triage', pick({
+        connector_ids: { [CI_TRIGGER]: 'conn-gh' }, connector_params: { [CI_TRIGGER]: { repository: 'acme/web' }, 'No such trigger': { repository: 'ignored/repo' } },
+      })));
+      expect(res.skipped_triggers).toEqual([]);
+      expect(res.triggers.map((trigger: Json) => trigger.type)).toEqual(['connector', 'webhook']);
+      const connectorRow = (await triggersOf(res.agent)).find((row) => row.type === 'connector');
+      if (!connectorRow || connectorRow.type !== 'connector') throw new Error('expected a connector trigger');
+      expect(connectorRow.connector).toMatchObject({
+        trigger: 'workflow_run', params: { repository: 'acme/web' }, events: ['workflow_run.completed'],
+        filter: [{ path: 'payload.action', op: 'eq', value: 'completed' }, { path: 'payload.conclusion', op: 'in', value: ['failure', 'timed_out'] }],
+      });
+    });
+
+    it('the generic webhook trigger next to a skipped connector one is still created', async () => {
+      const res = json(await instantiate('ci-failure-triage', pick({ connector_id: 'conn-gh' })));
+      expect(res.skipped_triggers).toEqual([expect.objectContaining({ name: CI_TRIGGER, reason: 'params_required' })]);
+      expect(res.triggers.map((trigger: Json) => trigger.type)).toEqual(['webhook']);
+      expect((await triggersOf(res.agent)).map((row) => row.type)).toEqual(['webhook']);
+    });
+
+    it('a lenient connector (no required parameters) still takes the trigger without any', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-1' })));
+      expect(res.skipped_triggers).toEqual([]);
+      expect(res.triggers).toHaveLength(1);
+    });
+
+    it('the events or schedule the module refuses are invalid_params, and say so', async () => {
+      const wrapped = fake.host.prepare;
+      fake.host.prepare = async (scope, input) => {
+        const asked = await wrapped(scope, input);
+        return asked.ok ? { ok: false, errors: [{ field: 'connector.events', message: 'Not an event of this trigger: pull_request.opened' }] } : asked;
+      };
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.skipped_triggers).toEqual([{
+        name: PR_TRIGGER, reason: 'invalid_params', package: 'cognipeer.github',
+        errors: [{ field: 'connector.events', message: 'Not an event of this trigger: pull_request.opened' }],
+      }]);
+    });
+
+    it('a refusal about the template itself (not the connector or the parameters) fails the create and undoes it', async () => {
+      fake.host.prepare = async () => ({ ok: false, errors: [{ field: 'connector.include_payload', message: 'include_payload must be a boolean' }] });
+      const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } }));
+      expect(res.statusCode).toBe(400);
+      expect(json(res)).toMatchObject({ code: 'invalid_template_trigger', issues: [{ field: 'connector.include_payload' }] });
+      await expectNothingCreated();
+    });
+
+    it('refuses malformed connector_params with a 400 before anything is made', async () => {
+      for (const bad of [['x'], 'x', { [PR_TRIGGER]: 'acme/api' }, { [PR_TRIGGER]: ['acme/api'] }, { [PR_TRIGGER]: null }]) {
+        const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: bad }));
+        expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+        expect(json(res).code, JSON.stringify(bad)).toBe('invalid_request');
+      }
+      await expectNothingCreated();
+    });
+
+    it('createTriggers: false ignores the parameters', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ createTriggers: false, connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.triggers).toEqual([]);
+      expect(res.skipped_triggers).toEqual([]);
+      expect(fake.calls).toEqual([]);
+    });
+  });
+
   it('puts the schedule in the timezone that was sent (UTC when none), still disabled', async () => {
     const istanbul = json(await instantiate('daily-briefing', pick({ timezone: 'Europe/Istanbul' })));
     expect(istanbul.triggers).toEqual([expect.objectContaining({

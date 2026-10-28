@@ -22,6 +22,7 @@ import {
   buildInstantiateBody,
   connectorPackages,
   describeContents,
+  describeSkipped,
   describeTrigger,
   filterTemplates,
   formBlockers,
@@ -255,6 +256,63 @@ describe('connector triggers in the use-template form', () => {
     const body = buildInstantiateBody(ci, formFor(ci), { 'cognipeer.github': ['c1'] });
     expect(body.connector_ids).toEqual({ [connectorTrigger.name]: 'c1' });
     expect(ci.triggers.some((trigger) => trigger.type === 'webhook')).toBe(true);
+  });
+
+  it('sends the parameters filled in for a trigger of the picked connector, by the trigger’s name', () => {
+    const picked = { 'cognipeer.github': ['c1'] };
+    const form = formFor(pr, { connectorParams: { 'Review pull requests': { repository: 'acme/api' } } });
+    const body = buildInstantiateBody(pr, form, picked);
+    expect(body.connector_params).toEqual({ 'Review pull requests': { repository: 'acme/api' } });
+    expect(body.connector_ids).toEqual({ 'Review pull requests': 'c1' });
+    // The form's own state is not what is sent: nothing of it is shared with the body.
+    expect(body.connector_params!['Review pull requests']).not.toBe(form.connectorParams['Review pull requests']);
+  });
+
+  it('leaves out parameters that were never filled in or were emptied again', () => {
+    const picked = { 'cognipeer.github': ['c1'] };
+    expect(buildInstantiateBody(pr, formFor(pr), picked)).not.toHaveProperty('connector_params');
+    const emptied = formFor(pr, { connectorParams: { 'Review pull requests': { repository: '', labels: [], note: null, other: undefined } } });
+    expect(buildInstantiateBody(pr, emptied, picked)).not.toHaveProperty('connector_params');
+    const some = formFor(pr, { connectorParams: { 'Review pull requests': { repository: 'acme/api', note: '', labels: ['bug'] } } });
+    expect(buildInstantiateBody(pr, some, picked).connector_params).toEqual({ 'Review pull requests': { repository: 'acme/api', labels: ['bug'] } });
+  });
+
+  it('sends no parameters for a trigger that has no connector, nor when triggers are switched off', () => {
+    const withParams = formFor(pr, { connectorParams: { 'Review pull requests': { repository: 'acme/api' } } });
+    expect(buildInstantiateBody(pr, withParams, {})).not.toHaveProperty('connector_params');
+    expect(buildInstantiateBody(pr, withParams, { 'cognipeer.github': ['c1', 'c2'] })).not.toHaveProperty('connector_params');
+    expect(buildInstantiateBody({ ...pr }, { ...withParams, createTriggers: false }, { 'cognipeer.github': ['c1'] })).not.toHaveProperty('connector_params');
+  });
+
+  it('ignores parameters named for a trigger that is not a connector trigger of the template', () => {
+    const ci = detailOf('ci-failure-triage');
+    const connectorTrigger = ci.triggers.find((trigger) => trigger.type === 'connector')!;
+    const webhookTrigger = ci.triggers.find((trigger) => trigger.type === 'webhook')!;
+    const form = formFor(ci, { connectorParams: { [webhookTrigger.name]: { repository: 'x/y' }, [connectorTrigger.name]: { repository: 'acme/api' } } });
+    expect(buildInstantiateBody(ci, form, { 'cognipeer.github': ['c1'] }).connector_params).toEqual({ [connectorTrigger.name]: { repository: 'acme/api' } });
+  });
+
+  it('starts with no parameters filled in', () => {
+    expect(initialForm(pr, { models, sandboxTemplates: [] }, 'UTC').connectorParams).toEqual({});
+  });
+
+  it('describes why a trigger was left out: the connector, the parameters it lacks, or what was refused', () => {
+    expect(describeSkipped({ name: 'A', reason: 'connector_required', package: 'cognipeer.github' })).toEqual({ kind: 'connector', params: [], messages: [] });
+    expect(describeSkipped({
+      name: 'A', reason: 'params_required', package: 'cognipeer.github',
+      errors: [{ field: 'connector.params.repository', message: 'repository is required' }, { field: 'connector.params.branch', message: 'branch is required' }],
+    })).toEqual({ kind: 'params', params: ['repository', 'branch'], messages: [] });
+    expect(describeSkipped({
+      name: 'A', reason: 'invalid_params', package: 'cognipeer.github',
+      errors: [
+        { field: 'connector.params.repository', message: 'repository is not a parameter of this trigger' },
+        { field: 'connector.events', message: 'Not an event of this trigger: x' },
+        { field: 'connector.params.repository', message: 'repository is not a parameter of this trigger' },
+      ],
+    })).toEqual({ kind: 'invalid', params: ['repository'], messages: ['repository is not a parameter of this trigger', 'Not an event of this trigger: x'] });
+    // An answer from before the reasons were told apart, or without field errors.
+    expect(describeSkipped({ name: 'A', reason: 'params_required', package: 'p' })).toEqual({ kind: 'params', params: [], messages: [] });
+    expect(describeSkipped({ name: 'A', reason: 'invalid_params', package: 'p' })).toEqual({ kind: 'invalid', params: [], messages: [] });
   });
 
   it('reads the skipped triggers and the manual connector setups from the answer', () => {

@@ -17,6 +17,7 @@ import type {
   InstantiatedTemplateTrigger,
   SkippedTemplateTrigger,
 } from '@/lib/services/agents/templates/types';
+import { givenConnectorParams } from '@/lib/services/agents/templates/templateConfig';
 import { AGENT_TEMPLATE_CATEGORIES } from '@/lib/services/agents/templates/types';
 
 export const AGENT_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -163,6 +164,8 @@ export interface UseTemplateForm {
   createTriggers: boolean;
   /** The connector picked per package (`null` = none on purpose); a package that is absent has not been decided yet. */
   connectors: Record<string, string | null>;
+  /** What each connector trigger's package trigger needs (a repository), by the trigger's name in the template. */
+  connectorParams: Record<string, Record<string, unknown>>;
   timezone: string;
   publish: boolean;
 }
@@ -201,6 +204,7 @@ export function initialForm(
     sandboxTemplateKey: template.requires.sandbox ? sandboxDefault : null,
     createTriggers: template.triggers.length > 0,
     connectors: {},
+    connectorParams: {},
     timezone,
     publish: false,
   };
@@ -222,7 +226,8 @@ export function formBlockers(template: AgentTemplateDetail, form: UseTemplateFor
 
 /**
  * The body of `POST /api/agents/templates/:key/instantiate`. `connectors` lists the connectors the project has per
- * package: the connector triggers get the one selected for their package, and are left to the server to skip without one.
+ * package: the connector triggers get the one selected for their package (and the parameters filled in for them), and
+ * are left to the server to skip without one.
  */
 export function buildInstantiateBody(template: AgentTemplateDetail, form: UseTemplateForm, connectors: ConnectorChoices = {}): InstantiateTemplateInput {
   const name = form.name.trim();
@@ -235,12 +240,17 @@ export function buildInstantiateBody(template: AgentTemplateDetail, form: UseTem
   if (template.triggers.length > 0) body.createTriggers = form.createTriggers;
   if (form.createTriggers) {
     const ids: Record<string, string> = {};
+    const params: Record<string, Record<string, unknown>> = {};
     for (const trigger of template.triggers) {
       if (trigger.type !== 'connector' || !trigger.connector) continue;
       const id = selectedConnector(form, trigger.connector.package, connectors[trigger.connector.package] ?? []);
-      if (id) ids[trigger.name] = id;
+      if (!id) continue;
+      ids[trigger.name] = id;
+      const given = givenConnectorParams(form.connectorParams[trigger.name]);
+      if (Object.keys(given).length > 0) params[trigger.name] = given;
     }
     if (Object.keys(ids).length > 0) body.connector_ids = ids;
+    if (Object.keys(params).length > 0) body.connector_params = params;
   }
   body.timezone = form.timezone || 'UTC';
   body.publish = form.publish;
@@ -279,6 +289,31 @@ export function webhookTriggers(result: Pick<InstantiateTemplateResult, 'trigger
 /** The connector triggers the project could not get: the template asked for a connector that was not given (or the module is absent). */
 export function skippedTriggers(result: Pick<InstantiateTemplateResult, 'skipped_triggers'>): SkippedTemplateTrigger[] {
   return result.skipped_triggers ?? [];
+}
+
+export interface SkippedDescription {
+  /** `connector`: needs a connector; `params`: needs values for its parameters; `invalid`: the package refused what was given. */
+  kind: 'connector' | 'params' | 'invalid';
+  /** The parameters the errors name (`connector.params.repository` is `repository`). */
+  params: string[];
+  /** What the connector module said about the rest (events, schedule, a refused value). */
+  messages: string[];
+}
+
+const PARAM_FIELD = /^connector\.params\.(.+)$/;
+
+/** What to tell the user about a trigger that was left out: the reason, the parameters it is missing and the refusals. */
+export function describeSkipped(item: SkippedTemplateTrigger): SkippedDescription {
+  const errors = item.errors ?? [];
+  const params = [...new Set(errors.flatMap((error) => {
+    const match = PARAM_FIELD.exec(error.field);
+    return match ? [match[1]!] : [];
+  }))];
+  if (item.reason === 'params_required') {
+    return { kind: 'params', params, messages: errors.filter((error) => !PARAM_FIELD.test(error.field)).map((error) => error.message) };
+  }
+  if (item.reason === 'invalid_params') return { kind: 'invalid', params, messages: [...new Set(errors.map((error) => error.message))] };
+  return { kind: 'connector', params: [], messages: [] };
 }
 
 /** The connector triggers set up by hand: the sender still has to be given the callback URL (and, once, the secret). */

@@ -8,7 +8,7 @@
  * to; the page names the triggers that were skipped for want of one.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Alert, Anchor, Button, Checkbox, Code, MultiSelect, Select, Stack, Text, TextInput } from '@mantine/core';
 import { IconAlertTriangle, IconCheck, IconCopy } from '@tabler/icons-react';
@@ -19,7 +19,7 @@ import FormShell, {
   SummaryKV,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
-import { useConnectorTriggerCatalog } from '@/components/enterprise/EnterpriseConnectorTriggerUi';
+import { ConnectorTriggerParamsForm, useConnectorTriggerCatalog } from '@/components/enterprise/EnterpriseConnectorTriggerUi';
 import { useTranslations } from '@/lib/i18n';
 import type { InstantiateTemplateResult } from '@/lib/services/agents/templates/types';
 import styles from './AgentTemplatesPage.module.css';
@@ -29,6 +29,7 @@ import {
   buildInstantiateBody,
   connectorPackages,
   describeContents,
+  describeSkipped,
   describeTrigger,
   formBlockers,
   initialForm,
@@ -249,9 +250,21 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
             {skipped.length > 0 ? (
               <Alert color="yellow" variant="light" title={t('ui.created.skippedTitle')}>
                 <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-                  {skipped.map((item) => <li key={item.name}>{t('ui.created.skipped', { name: item.name, package: packageLabel(item.package) })}</li>)}
+                  {skipped.map((item) => {
+                    const why = describeSkipped(item);
+                    return (
+                      <li key={item.name}>
+                        {why.kind === 'params'
+                          ? t('ui.created.skippedParams', { name: item.name, params: why.params.join(', ') || t('ui.created.skippedParamsSome') })
+                          : why.kind === 'invalid'
+                            ? t('ui.created.skippedInvalid', { name: item.name, details: why.messages.join('; ') || why.params.join(', ') })
+                            : t('ui.created.skipped', { name: item.name, package: packageLabel(item.package) })}
+                      </li>
+                    );
+                  })}
                 </ul>
-                <Text size="xs" mt={6}>{t('ui.created.skippedHint')}</Text>
+                {skipped.some((item) => item.reason === 'connector_required') ? <Text size="xs" mt={6}>{t('ui.created.skippedHint')}</Text> : null}
+                {skipped.some((item) => item.reason !== 'connector_required') ? <Text size="xs" mt={6}>{t('ui.created.skippedHintParams')}</Text> : null}
               </Alert>
             ) : null}
             {result.setup.length > 0 ? (
@@ -481,18 +494,35 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
                 ) : null}
                 {form.createTriggers && catalog.available ? connectorPackages(template).map((pkg) => {
                   const options = connectorOptions[pkg] ?? [];
-                  return options.length === 0 ? (
-                    <Alert key={pkg} color="yellow" variant="light">{t('ui.form.connectorNone', { package: packageLabel(pkg) })}</Alert>
-                  ) : (
-                    <FormField key={pkg} label={t('ui.form.connectorLabel', { package: packageLabel(pkg) })} hint={t('ui.form.connectorHint')}>
-                      <Select
-                        data={options}
-                        value={selectedConnector(form, pkg, options.map((option) => option.value))}
-                        clearable
-                        placeholder={t('ui.form.connectorPlaceholder')}
-                        onChange={(value) => patch({ connectors: { ...form.connectors, [pkg]: value } })}
-                      />
-                    </FormField>
+                  if (options.length === 0) {
+                    return <Alert key={pkg} color="yellow" variant="light">{t('ui.form.connectorNone', { package: packageLabel(pkg) })}</Alert>;
+                  }
+                  const picked = selectedConnector(form, pkg, options.map((option) => option.value));
+                  return (
+                    <Fragment key={pkg}>
+                      <FormField label={t('ui.form.connectorLabel', { package: packageLabel(pkg) })} hint={t('ui.form.connectorHint')}>
+                        <Select
+                          data={options}
+                          value={picked}
+                          clearable
+                          placeholder={t('ui.form.connectorPlaceholder')}
+                          onChange={(value) => patch({ connectors: { ...form.connectors, [pkg]: value } })}
+                        />
+                      </FormField>
+                      {/* What each of the package's triggers needs that no template can know (a repository). */}
+                      {picked ? template.triggers.map((trigger) => (
+                        trigger.type === 'connector' && trigger.connector?.package === pkg ? (
+                          <ConnectorTriggerParamsForm
+                            key={trigger.name}
+                            connectorId={picked}
+                            trigger={trigger.connector.trigger}
+                            label={t('ui.form.connectorParams', { name: trigger.name })}
+                            value={form.connectorParams[trigger.name] ?? {}}
+                            onChange={(params) => patch({ connectorParams: { ...form.connectorParams, [trigger.name]: params } })}
+                          />
+                        ) : null
+                      )) : null}
+                    </Fragment>
                   );
                 }) : null}
                 <FormField label={t('ui.form.timezone')} hint={t('ui.form.timezoneHint')}>

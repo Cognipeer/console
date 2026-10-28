@@ -212,6 +212,12 @@ export interface InstantiateTemplateInput {
   connector_id?: string;
   /** Connector per suggested connector trigger, by the trigger's name in the template. */
   connector_ids?: Record<string, string>;
+  /**
+   * Parameters per suggested connector trigger, by the trigger's name in the template: what the package's trigger needs
+   * that no template can know (the GitHub triggers need a `repository`). They go over the template's own `params` and
+   * are checked by the Connectors module like a hand-made trigger's; a trigger without what it needs is skipped.
+   */
+  connector_params?: Record<string, Record<string, unknown>>;
 }
 
 /** What is left to do after the agent exists. */
@@ -247,13 +253,24 @@ export interface InstantiatedTemplateTrigger {
   connector?: { connectorId: string; trigger: string; subscription: ConnectorSubscriptionWire | null };
 }
 
+/** Why a suggested connector trigger was left out. */
+export const SKIPPED_TRIGGER_REASONS = ['connector_required', 'params_required', 'invalid_params'] as const;
+export type SkippedTriggerReason = typeof SKIPPED_TRIGGER_REASONS[number];
+
 /** A suggested trigger that was not created. */
 export interface SkippedTemplateTrigger {
   name: string;
-  /** `connector_required`: no connector was picked for it (or the Connectors module is not part of this edition). */
-  reason: 'connector_required';
+  /**
+   * - `connector_required`: no usable connector was picked for it (none, another package's, deleted), or the Connectors
+   *   module is not part of this edition.
+   * - `params_required`: a connector was picked but the package's trigger needs parameters (a repository) that were not given.
+   * - `invalid_params`: the parameters, events or schedule were refused by the connector's package; `errors` says which.
+   */
+  reason: SkippedTriggerReason;
   /** The connector package the trigger needs. */
   package: string;
+  /** `params_required` / `invalid_params`: the Connectors module's field errors (`connector.params.repository` ...). */
+  errors?: Array<{ field: string; message: string }>;
 }
 
 export interface InstantiateTemplateResult {

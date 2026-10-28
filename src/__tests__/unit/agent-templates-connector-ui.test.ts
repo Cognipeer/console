@@ -18,11 +18,25 @@ import TemplateDetailDrawer from '@/components/agents/templates/TemplateDetailDr
 import { AGENT_TEMPLATES } from '@/lib/services/agents/templates/catalog';
 
 const catalog = vi.hoisted(() => ({ available: true, connectors: [] as unknown[] }));
+/** The props the fake parameters form of the seam was rendered with, last render per trigger. */
+const paramsForms = vi.hoisted(() => ({ renders: [] as Array<Record<string, unknown>>, hasParams: true }));
 
 vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => ({
   useConnectorTriggerCatalog: () => ({ available: catalog.available, loading: false, error: null, connectors: catalog.connectors, reload: () => undefined }),
   ConnectorTriggerPicker: () => null,
   ConnectorTriggerStatus: () => null,
+  // The enterprise form draws the package's parameter fields; here one input for `repository`.
+  ConnectorTriggerParamsForm: (props: { label?: string; value: Record<string, unknown>; onChange: (params: Record<string, unknown>) => void } & Record<string, unknown>) => {
+    paramsForms.renders.push(props);
+    if (!paramsForms.hasParams) return null;
+    const react = (globalThis as unknown as { React: typeof React }).React;
+    return react.createElement('div', null,
+      react.createElement('span', null, props.label),
+      react.createElement('input', {
+        'aria-label': 'repository', value: String(props.value.repository ?? ''),
+        onChange: (event: { currentTarget: { value: string } }) => props.onChange({ ...props.value, repository: event.currentTarget.value }),
+      }));
+  },
 }));
 
 vi.mock('next/link', () => ({
@@ -79,6 +93,8 @@ beforeEach(() => {
   calls = [];
   catalog.available = true;
   catalog.connectors = [];
+  paramsForms.renders = [];
+  paramsForms.hasParams = true;
   instantiateAnswer = null;
   vi.stubGlobal('fetch', vi.fn((url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET';
@@ -109,6 +125,19 @@ const openForm = async () => {
   });
 };
 const create = async () => { await click(button('Create agent')); return calls.find((call) => call.url.endsWith('/instantiate'))!; };
+const typeInto = (input: HTMLInputElement, value: string) => act(() => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+});
+const repositoryInput = () => document.querySelector<HTMLInputElement>('input[aria-label="repository"]');
+const skippedAnswer = (skipped: unknown[]) => ({
+  agent: { _id: 'a1', key: 'pr-bot', name: 'PR bot' },
+  template: { key: 'pr-reviewer', version: 1, catalogVersion: 1 },
+  triggers: [],
+  skipped_triggers: skipped,
+  setup: [],
+  warnings: [],
+});
 
 describe('Use template with connector triggers', () => {
   it('lists the trigger as a connector event and, with one connector of the package, picks it without being asked', async () => {
@@ -166,6 +195,112 @@ describe('Use template with connector triggers', () => {
     expect(text()).toContain('https://console.example.com/api/public/connector-hooks/t/ch_abc');
     expect(text()).toContain('sek_once');
     expect(text()).toContain('The secret is shown only once');
+  });
+});
+
+describe('Use template: the parameters of the connector triggers', () => {
+  it('asks for the parameters of each connector trigger of the picked connector and sends them by the trigger\'s name', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    await openForm();
+    expect(text()).toContain('Settings for "Review pull requests"');
+    // The seam form is told which connector and which package trigger to draw the fields of.
+    expect(paramsForms.renders.at(-1)).toMatchObject({ connectorId: 'c1', trigger: 'pull_request', value: {} });
+    typeInto(repositoryInput()!, 'acme/api');
+    const post = await create();
+    expect(post.body).toMatchObject({
+      createTriggers: true,
+      connector_ids: { 'Review pull requests': 'c1' },
+      connector_params: { 'Review pull requests': { repository: 'acme/api' } },
+    });
+  });
+
+  it('sends no parameters when none were filled in, or when the field was emptied again', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    await openForm();
+    typeInto(repositoryInput()!, 'acme/api');
+    typeInto(repositoryInput()!, '');
+    const post = await create();
+    expect(post.body).toHaveProperty('connector_ids');
+    expect(post.body).not.toHaveProperty('connector_params');
+  });
+
+  it('asks for nothing until a connector is picked, and drops the parameters of a connector that was cleared', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)'), github('c2', 'GitHub (labs)')];
+    await openForm();
+    expect(paramsForms.renders).toHaveLength(0);
+    expect(repositoryInput()).toBeNull();
+    const post = await create();
+    expect(post.body).not.toHaveProperty('connector_ids');
+    expect(post.body).not.toHaveProperty('connector_params');
+  });
+
+  it('draws nothing of its own when the trigger has no parameters', async () => {
+    paramsForms.hasParams = false;
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    await openForm();
+    expect(text()).not.toContain('Settings for');
+    const post = await create();
+    expect(post.body).toMatchObject({ connector_ids: { 'Review pull requests': 'c1' } });
+    expect(post.body).not.toHaveProperty('connector_params');
+  });
+
+  it('asks for no parameters without the Connectors module or with triggers switched off', async () => {
+    catalog.available = false;
+    await openForm();
+    expect(paramsForms.renders).toHaveLength(0);
+  });
+
+  it('says which parameters a skipped trigger still needs, and that the trigger can be added from the agent', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    instantiateAnswer = skippedAnswer([{
+      name: 'Review pull requests', reason: 'params_required', package: 'cognipeer.github',
+      errors: [{ field: 'connector.params.repository', message: 'repository is required' }],
+    }]);
+    await openForm();
+    await create();
+    expect(text()).toContain('Triggers not created');
+    expect(text()).toContain('Review pull requests needs a value for repository');
+    expect(text()).toContain('Add the trigger from the agent\'s Triggers section and fill in what it needs.');
+    // It is not a missing connector.
+    expect(text()).not.toContain('needs a GitHub connector');
+    expect(text()).not.toContain('Once there is a connector');
+  });
+
+  it('says what the package refused when the parameters were not valid', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    instantiateAnswer = skippedAnswer([{
+      name: 'Review pull requests', reason: 'invalid_params', package: 'cognipeer.github',
+      errors: [
+        { field: 'connector.params.repository', message: 'repository is not a parameter of this trigger' },
+        { field: 'connector.events', message: 'Not an event of this trigger: pull_request.nope' },
+      ],
+    }]);
+    await openForm();
+    await create();
+    expect(text()).toContain('Review pull requests was refused: repository is not a parameter of this trigger; Not an event of this trigger: pull_request.nope');
+    expect(text()).toContain('fill in what it needs');
+  });
+
+  it('keeps the connector wording for a missing connector, and shows both hints when the reasons are mixed', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    instantiateAnswer = skippedAnswer([
+      { name: 'Triage failed builds', reason: 'connector_required', package: 'cognipeer.github' },
+      { name: 'Review pull requests', reason: 'params_required', package: 'cognipeer.github', errors: [{ field: 'connector.params.repository', message: 'repository is required' }] },
+    ]);
+    await openForm();
+    await create();
+    expect(text()).toContain('Triage failed builds needs a GitHub connector');
+    expect(text()).toContain('Review pull requests needs a value for repository');
+    expect(text()).toContain('Once there is a connector');
+    expect(text()).toContain('fill in what it needs');
+  });
+
+  it('copes with a params skip that names no parameter', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)')];
+    instantiateAnswer = skippedAnswer([{ name: 'Review pull requests', reason: 'params_required', package: 'cognipeer.github' }]);
+    await openForm();
+    await create();
+    expect(text()).toContain('Review pull requests needs a value for its connector settings');
   });
 });
 

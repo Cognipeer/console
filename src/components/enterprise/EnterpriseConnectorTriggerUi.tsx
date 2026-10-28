@@ -50,6 +50,30 @@ export function ConnectorTriggerPicker(_props: ConnectorTriggerPickerProps): Rea
   return null;
 }
 
+export interface ConnectorTriggerParamsFormProps {
+  /** The connector the trigger listens to (an id of the catalog). */
+  connectorId: string;
+  /** The package trigger's name, for example `pull_request`. */
+  trigger: string;
+  /** The parameters filled in so far, by the package's parameter keys. */
+  value: Record<string, unknown>;
+  onChange(params: Record<string, unknown>): void;
+  /** Field errors keyed like the API's (`connector.params.<key>`). */
+  errors?: Record<string, string>;
+  /** A heading for the fields; shown only when the trigger has parameters. */
+  label?: string;
+  disabled?: boolean;
+}
+
+/**
+ * Only the parameter fields of a package trigger (a repository, a project), without the connector, events or
+ * schedule choices of the picker: the use-template form asks for them when a template's connector trigger needs
+ * what no template can know. Renders nothing when the trigger has no parameters.
+ */
+export function ConnectorTriggerParamsForm(_props: ConnectorTriggerParamsFormProps): ReactNode {
+  return null;
+}
+
 export interface ConnectorTriggerStatusProps {
   agentId: string;
   triggerId: string;
