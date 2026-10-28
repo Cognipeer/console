@@ -52,6 +52,9 @@ export class RagReextractIncompleteError extends Error {
  * the report's list, for the record of a failed document (callers store it through `recordedWarnings`).
  */
 export class RagOcrIncompleteError extends Error {
+  /** The file is there but no text could be read from it: a problem of this upload, not of the server. */
+  readonly statusCode = 422;
+  readonly code = 'ocr_incomplete';
   constructor(fileName: string, reason: string, readonly warnings: readonly string[]) {
     super(`Failed to convert "${fileName}" to text. OCR could not read it: ${reason}.`);
     this.name = 'RagOcrIncompleteError';

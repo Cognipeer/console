@@ -20,7 +20,7 @@ import {
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
 import { clientGone } from '../clientGone';
-import { RagModuleInactiveError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
+import { RagModuleInactiveError, RagOcrIncompleteError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
@@ -328,6 +328,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
+      }
+      if (error instanceof RagOcrIncompleteError) {
+        return reply.code(error.statusCode).send({ error: error.message, code: error.code });
       }
       const accessRefusal = sendRagAccessError(reply, error);
       if (accessRefusal) return accessRefusal;

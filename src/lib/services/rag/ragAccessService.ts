@@ -1618,6 +1618,22 @@ export function commitRagDocumentPlacement(
   return serializeStructureWrite(ctx, ragModule, () => commitPlacementLocked(db, ctx, ragModule, doc, prepared));
 }
 
+/**
+ * The refusals of a placement on an existing row, made before anything is written: a row owned by a source refuses
+ * changes from anyone else, and a move is for managers. A caller with slow work before its commit (a re-extract)
+ * asks first; the commit asks again.
+ */
+export function assertRagDocumentPlacementAllowed(ragModule: IRagModule, doc: IRagDocument, prepared: PreparedRagPlacement): void {
+  const changesPlacement = prepared.folderId !== undefined || prepared.acl !== undefined;
+  if (doc.aclManaged === 'sync' && prepared.aclManaged !== 'sync' && changesPlacement) {
+    throw new RagAccessError('document_managed_by_source', 'This document mirrors a connected source; its folder and permissions change only there');
+  }
+  // A new row is created in its folder, so only an existing row can differ: that is a move, and moves are for managers.
+  if (prepared.folderId !== undefined && (doc.folderId ? String(doc.folderId) : undefined) !== (prepared.folderId ?? undefined)) {
+    if (ragModule.access?.enabled === true && prepared.mayMove !== true) throw new RagAccessError('access_denied', MOVE_ADMIN_ONLY);
+  }
+}
+
 async function commitPlacementLocked(
   db: Db,
   ctx: RagAccessContext,
@@ -1626,19 +1642,12 @@ async function commitPlacementLocked(
   prepared: PreparedRagPlacement,
 ): Promise<void> {
   const id = String(doc._id);
-  const changesPlacement = prepared.folderId !== undefined || prepared.acl !== undefined;
-  if (doc.aclManaged === 'sync' && prepared.aclManaged !== 'sync' && changesPlacement) {
-    throw new RagAccessError('document_managed_by_source', 'This document mirrors a connected source; its folder and permissions change only there');
-  }
+  assertRagDocumentPlacementAllowed(ragModule, doc, prepared);
   if (prepared.folderId !== undefined) {
     const folderId = prepared.folderId ?? undefined;
     // The folder may have been deleted since the placement was checked (a delete takes this lock too).
     if (folderId) await requireFolder(db, ragModule, folderId);
-    // A new row is created in its folder, so only an existing row can differ: that is a move, and moves are for managers.
-    if ((doc.folderId ? String(doc.folderId) : undefined) !== folderId) {
-      if (ragModule.access?.enabled === true && prepared.mayMove !== true) throw new RagAccessError('access_denied', MOVE_ADMIN_ONLY);
-      await db.updateRagDocument(id, { folderId });
-    }
+    if ((doc.folderId ? String(doc.folderId) : undefined) !== folderId) await db.updateRagDocument(id, { folderId });
   }
   if (prepared.acl) {
     const rows = prepared.acl.entries.map((e) => ({

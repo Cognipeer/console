@@ -130,7 +130,11 @@ A single upload may override the module: send `"extraction": { "ocr": { ... } }`
 
 Reading the pages of a scan can take minutes. With `"async": true` (and a module that keeps files in a bucket) the call returns `202` as soon as the file is stored; the document is `pending` and carries `extraction.stage` (`queued`, then `running` with `extraction.progress`) until its text is there. The text is then chunked and embedded as usual. Without `async` the request waits for the pages to be read.
 
-A document read with OCR carries `extraction` (`sourceType` `converted`, `ocr` or `mixed`, `ocrPages`, `pageCount`, `engine`, `warnings`, ...). If OCR cannot finish in time, or fails, the text layer of the file is kept and a warning code (such as `ocr_timeout`) is recorded; the upload does not fail. An upload is never skipped because the same bytes were seen before.
+A document read with OCR carries `extraction` (`sourceType` `converted`, `ocr` or `mixed`, `ocrPages`, `pageCount`, `engine`, `warnings`, ...). If OCR cannot finish in time, or fails, a file with a text layer keeps that text and a warning code (such as `ocr_timeout`) is recorded. A file without one (a scan, an image) has no text to keep: the upload answers `422` with `code` `ocr_incomplete`, and with `async` the document ends `failed` with the reason.
+
+The bytes of a file are never compared with earlier uploads (their hash is only recorded). A synchronous upload whose text matches an indexed document of the same name returns that document, as any upload does; an `async` upload whose pages are read later is not compared and becomes a new document.
+
+In a knowledge base with access control the folder and permissions of an upload are checked before its pages are read, so a refused placement costs no OCR. A document deleted while its pages are being read is not indexed afterwards.
 
 Re-indexing never runs OCR again: a document that was read with OCR keeps its text. To read the stored original again with the module's current settings, re-ingest the document with `"reextract": true`.
 
@@ -211,5 +215,6 @@ Send `"reextract": true` to read the stored original file again with the module'
 | 401 | Invalid API token |
 | 403 | The change needs Knowledge Engine `admin` (`access_denied`), or it names the vector index or a crawler binding of a knowledge base with access control (`kb_access_controlled`: query the knowledge base instead) |
 | 404 | Module or document not found, or a document the caller may not read |
-| 409 | Module not active, or `reextract` of a document whose original was not kept |
+| 409 | Module not active; `reextract` of a document whose original was not kept, or whose OCR could not finish (the previous text, folder and permissions are kept); a re-ingest of a document read with OCR whose stored text cannot be read |
+| 422 | `ocr_incomplete`: the file has no text layer and OCR could not read it |
 | 429 | Rate limit or quota exceeded |

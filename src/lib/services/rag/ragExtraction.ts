@@ -32,6 +32,8 @@ export interface ConvertFileContext {
   onProgress?: (progress: { completed: number; total: number }) => void;
   /** 'background' (a job) or 'inline' (a request is waiting; the default). */
   budget?: 'background' | 'inline';
+  /** Epoch ms: the caller's own deadline (a connector's sync segment). OCR stops by then. */
+  deadline?: number;
 }
 
 export interface ConvertFileResult {

@@ -300,6 +300,12 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   such, not as an unsupported format, and the cause is kept on a failed document. A re-extract that cannot finish its
   OCR answers 409 and keeps the previous text, and runs with the longer budget of a job. A request-level OCR setting
   is ignored (no pages are read) when the module does not exist or is not active.
+- An upload whose scan or image OCR could not read answers `422` with `code: "ocr_incomplete"` (the async upload's
+  document is `failed` with the reason). An image read with OCR is its text alone, without the size and format lines
+  or an "Extracted Text" heading.
+- A folder or permission entry that is refused fails the upload before any page is read, and a refused re-extract
+  leaves the document's folder and permissions as they were. A document deleted while its pages are read or embedded
+  is not indexed, and what the job had written for it is removed.
 
 ### Agent attachments and crawler
 

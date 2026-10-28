@@ -112,10 +112,17 @@ vi.mock('@/lib/services/rag/ragIngestJob', () => ingestJobs);
 const ocrModels = vi.hoisted(() => ({
   validate: vi.fn(async (_scope: unknown, modelKey: string) =>
     (modelKey.startsWith('missing-') ? `The OCR model "${modelKey}" was not found in this project.` : undefined)),
+  /** Set by a test to answer the extraction itself; otherwise the real engine runs. */
+  extract: undefined as undefined | ((request: unknown) => Promise<unknown>),
 }));
 vi.mock('@/lib/services/extraction', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/extraction')>();
-  return { ...actual, validateOcrModelRef: ocrModels.validate };
+  return {
+    ...actual,
+    validateOcrModelRef: ocrModels.validate,
+    extractDocument: (request: Parameters<typeof actual.extractDocument>[0]) =>
+      (ocrModels.extract ? ocrModels.extract(request) : actual.extractDocument(request)),
+  };
 });
 
 import { reloadConfig } from '@/lib/core/config';
@@ -499,6 +506,23 @@ describe('Knowledge Engine OCR settings (extraction) on the module routes', () =
     const noModel = await post({ ocr: { mode: 'auto', modelKey: 'missing-ocr' } });
     expect(noModel.statusCode).toBe(400);
     expect(parseJsonBody<{ error: string }>(noModel.body).error).toContain('missing-ocr');
+  });
+
+  it('answers 422 with the ocr_incomplete code when OCR could not read a scan', async () => {
+    ocrModels.extract = async () => ({ raw: '', text: '', report: { sourceType: 'converted', warnings: ['ocr_timeout: The document was not read within 120 s'] } });
+    try {
+      const res = await app.inject({
+        method: 'POST', url: `/api/rag/modules/${MODULE_KEY}/documents`, headers: JSON_HEADERS,
+        payload: JSON.stringify({ fileName: 'scan.pdf', data: Buffer.from('%PDF').toString('base64'), extraction: { ocr: { mode: 'auto' } } }),
+      });
+      expect(res.statusCode).toBe(422);
+      expect(parseJsonBody<{ error: string; code: string }>(res.body)).toEqual({
+        error: 'Failed to convert "scan.pdf" to text. OCR could not read it: it ran out of time.',
+        code: 'ocr_incomplete',
+      });
+    } finally {
+      ocrModels.extract = undefined;
+    }
   });
 });
 

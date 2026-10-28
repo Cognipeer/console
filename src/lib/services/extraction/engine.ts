@@ -239,6 +239,19 @@ async function plainResult(
   return { raw, text: extractMarkdownContent(raw) ?? '', report: { sourceType: 'converted', warnings } };
 }
 
+/**
+ * The native text when OCR was asked for and could not run or finish. An image has no text layer: its plain conversion
+ * is only its size and format lines, which are not its text, so it falls back to no text (the warnings say why).
+ */
+async function fallbackResult(
+  req: ExtractionRequest,
+  warnings: string[],
+  guard: DocumentConversionOptions,
+): Promise<ExtractionResult> {
+  const result = await plainResult(req, warnings, guard);
+  return isImageFile(req.fileName, req.contentType) ? { ...result, text: '' } : result;
+}
+
 interface Backend {
   engine: 'model' | 'local';
   modelKey?: string;
@@ -379,17 +392,20 @@ async function ocrResult(
 ): Promise<ExtractionResult> {
   const detailedConvert = getConvertToMarkdownDetailed();
   if (!detailedConvert) {
-    return plainResult(req, ['ocr_unavailable: the installed converter does not support OCR'], guard);
+    return fallbackResult(req, ['ocr_unavailable: the installed converter does not support OCR'], guard);
   }
 
   const defaults = ocrDefaults();
   const budgetMs = req.budget === 'background' ? defaults.documentTimeoutMs : defaults.inlineTimeoutMs;
-  const abortAfter = (controller: AbortController, message: string) =>
+  // A caller with a deadline of its own (a connector's sync segment): every wait and read below ends by then.
+  const allowedMs = () => (req.deadline === undefined ? budgetMs : Math.min(budgetMs, Math.max(0, req.deadline - Date.now())));
+  if (allowedMs() === 0) return fallbackResult(req, ['ocr_timeout: no time was left to read the pages'], guard);
+  const abortAfter = (controller: AbortController, ms: number, message: string) =>
     setTimeout(() => {
       const error = new Error(message);
       error.name = 'AbortError';
       controller.abort(error);
-    }, budgetMs);
+    }, ms);
 
   // The document's clock starts when its reading starts, not while it waits for the node's local OCR slot.
   const deadline = new AbortController();
@@ -397,10 +413,11 @@ async function ocrResult(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const startDeadline = () => {
     if (deadlineAt !== undefined) return;
-    deadlineAt = Date.now() + budgetMs;
-    timer = abortAfter(deadline, `The document was not read within ${Math.round(budgetMs / 1000)} s`);
+    const ms = allowedMs();
+    deadlineAt = Date.now() + ms;
+    timer = abortAfter(deadline, ms, `The document was not read within ${Math.round(ms / 1000)} s`);
   };
-  const remainingMs = () => (deadlineAt === undefined ? budgetMs : Math.max(0, deadlineAt - Date.now()));
+  const remainingMs = () => (deadlineAt === undefined ? allowedMs() : Math.max(0, deadlineAt - Date.now()));
   // Waiting for the slot has a limit of its own, of the same size.
   const slotWait = new AbortController();
   let slotTimer: ReturnType<typeof setTimeout> | undefined;
@@ -435,12 +452,13 @@ async function ocrResult(
       let detailed: DetailedConversion;
       if (backend.engine === 'local') {
         const { withLocalOcrSlot } = await import('./localOcr');
+        const slotMs = allowedMs();
         slotTimer = setTimeout(() => {
           slotTimedOut = true;
-          const error = new Error(`No OCR slot became free within ${Math.round(budgetMs / 1000)} s`);
+          const error = new Error(`No OCR slot became free within ${Math.round(slotMs / 1000)} s`);
           error.name = 'AbortError';
           slotWait.abort(error);
-        }, budgetMs);
+        }, slotMs);
         const waiting = linkSignals(req.signal, slotWait.signal);
         try {
           detailed = await withLocalOcrSlot(waiting.signal, () => {
@@ -486,7 +504,7 @@ async function ocrResult(
     clearTimeout(slotTimer);
     linked.dispose();
   }
-  return plainResult(req, nativeWith ?? [], guard);
+  return fallbackResult(req, nativeWith ?? [], guard);
 }
 
 /**

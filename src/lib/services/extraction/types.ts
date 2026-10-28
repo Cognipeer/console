@@ -61,6 +61,11 @@ export interface ExtractionRequest {
   onProgress?: (p: { completed: number; total: number }) => void;
   /** 'background' (job) or 'inline' (request is waiting) — picks the document deadline. Default 'inline'. */
   budget?: 'background' | 'inline';
+  /**
+   * Epoch ms: the caller's own deadline. The OCR work, waiting for a slot included, is over by then; what it could
+   * not read keeps the native text. It only ever shortens the budget.
+   */
+  deadline?: number;
   /** Test seams (from documentConversion). */
   limits?: ZipLimits;
   workingDirectory?: string;

@@ -248,6 +248,17 @@ describe('with OCR on and the local engine', () => {
     expect(image.report).toMatchObject({ sourceType: 'ocr', engine: 'local', ocrImages: 1 });
   });
 
+  it('gives an image whose OCR could not finish no text: its size and format lines are not its text', async () => {
+    hoisted.convert.mockResolvedValue('ImageSize: 10x10\nFormat: PNG');
+    hoisted.detailed.mockRejectedValue(new Error('PDF OCR failed: boom'));
+
+    const image = await extractDocument(request({ fileName: 'photo.png', data: Buffer.from('png'), ocr: { mode: 'auto' } }));
+
+    expect(hoisted.convert).toHaveBeenCalledTimes(1);
+    expect(image.text).toBe('');
+    expect(image.report.warnings).toEqual(['ocr_failed: PDF OCR failed: boom']);
+  });
+
   it('keeps the native text when the local engine has nothing to read with', async () => {
     hoisted.prepare.mockRejectedValue(new Error('no language data'));
 
@@ -453,6 +464,30 @@ describe('deadline and abort', () => {
     expect(hoisted.convert).not.toHaveBeenCalled();
   });
 
+  it("ends the reading by the caller's own deadline when that comes before the budget", async () => {
+    hoisted.config = { ocr: { documentTimeoutMs: 60_000 } };
+    hangUntilAborted();
+    const started = Date.now();
+
+    const result = await extractDocument(request({ ocr: { mode: 'auto' }, budget: 'background', deadline: Date.now() + 30 }));
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(hoisted.convert).toHaveBeenCalledWith(PDF, { fileName: 'scan.pdf' });
+    expect(result.text).toBe('# native');
+    expect(result.report.warnings).toEqual([expect.stringMatching(/^ocr_timeout:/)]);
+  });
+
+  it("does not start OCR when the caller's deadline has passed: the native text, with the plain call", async () => {
+    const result = await extractDocument(request({ ocr: { mode: 'auto' }, budget: 'background', deadline: Date.now() - 1 }));
+
+    expect(hoisted.prepare).not.toHaveBeenCalled();
+    expect(hoisted.detailed).not.toHaveBeenCalled();
+    expect(hoisted.convert).toHaveBeenCalledTimes(1);
+    expect(hoisted.convert).toHaveBeenCalledWith(PDF, { fileName: 'scan.pdf' });
+    expect(result.text).toBe('# native');
+    expect(result.report.warnings).toEqual(['ocr_timeout: no time was left to read the pages']);
+  });
+
   it('propagates an abort by the caller as an AbortError and does not read the document again', async () => {
     const controller = new AbortController();
     hangUntilAborted();
@@ -492,6 +527,23 @@ describe('the local OCR slot', () => {
     expect(result.report.sourceType).toBe('mixed');
     expect(result.report.warnings).toEqual([]);
     expect(hoisted.convert).not.toHaveBeenCalled();
+  });
+
+  it("waits for a slot no longer than the caller's own deadline", async () => {
+    hoisted.config = { ocr: { inlineTimeoutMs: 60_000 } };
+    hoisted.slot.mockImplementation(
+      (signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const started = Date.now();
+
+    const result = await extractDocument(request({ ocr: { mode: 'auto' }, deadline: Date.now() + 30 }));
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(hoisted.detailed).not.toHaveBeenCalled();
+    expect(result.report.warnings).toEqual(['ocr_busy']);
   });
 
   it('keeps the native text with an ocr_busy warning when no slot becomes free in time', async () => {

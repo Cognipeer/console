@@ -64,6 +64,7 @@ import {
 } from './access';
 import { runRagAclSearch, type RagAclSearchStats } from './ragAclSearch';
 import {
+  assertRagDocumentPlacementAllowed,
   commitRagDocumentPlacement,
   deleteRagDocumentAcl,
   deleteRagModuleAccessData,
@@ -1145,6 +1146,8 @@ export async function ingestDocument(
       await db.updateRagDocument(documentId, {
         status: 'failed',
         errorMessage: error instanceof Error ? error.message : 'Could not store the document permissions',
+        // A queued extraction will not run: the row must not keep saying it waits to be read.
+        ...(request.extraction?.stage ? { extraction: settledExtraction(request.extraction) } : {}),
       });
       throw error;
     }
@@ -1228,10 +1231,12 @@ export async function indexPendingRagDocument(
   // A queued document whose service has been switched off is failed, not
   // retried: the job is acknowledged and re-ingesting is the operator's call
   // once the service is back.
+  // A queued extraction that will not run must not keep saying it waits to be read.
+  const settled = doc.extraction?.stage ? { extraction: settledExtraction(doc.extraction) } : {};
   const off = await serviceOffReason({ tenantDbName, tenantId }, 'rag');
   if (off) {
     const refusal = new ServiceDisabledError(off);
-    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}` });
+    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}`, ...settled });
     logger.warn('Deferred Knowledge Engine ingest refused: service is off', { documentId, ragModuleKey, code: refusal.code });
     return;
   }
@@ -1241,6 +1246,7 @@ export async function indexPendingRagDocument(
     await db.updateRagDocument(documentId, {
       status: 'failed',
       errorMessage: `Knowledge Engine module "${ragModuleKey}" not found`,
+      ...settled,
     });
     return;
   }
@@ -1260,7 +1266,8 @@ export async function indexPendingRagDocument(
     return;
   }
 
-  await db.updateRagDocument(documentId, { status: 'processing' });
+  // Deleted since the job started (its pages can take minutes to read): nothing is indexed for a row that is gone.
+  if (!(await db.updateRagDocument(documentId, { status: 'processing' }))) return;
 
   try {
     const chunkCount = await indexDocumentContent({
@@ -1276,11 +1283,23 @@ export async function indexPendingRagDocument(
       metadata: doc.metadata,
     });
 
-    await db.updateRagDocument(documentId, {
+    const indexed = await db.updateRagDocument(documentId, {
       status: 'indexed',
       chunkCount,
       lastIndexedAt: new Date(),
     });
+    if (!indexed) {
+      // Deleted while it was being indexed: what this run wrote must not outlive the row.
+      await removeVectors(
+        tenantDbName, tenantId, projectId, ragModule,
+        documentVectorIds(ragModuleKey, documentId, chunkCount),
+        `ingest of document ${documentId}, deleted meanwhile`,
+      );
+      await db.deleteRagChunksByDocumentId(documentId).catch((err) => {
+        logger.warn('Failed to delete the chunks of a document deleted during its ingest', { documentId, error: err });
+      });
+      return;
+    }
 
     await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
   } catch (error) {
@@ -1359,6 +1378,7 @@ export async function convertFileToTextDetailed(
     ...(ctx?.signal ? { signal: ctx.signal } : {}),
     ...(ctx?.onProgress ? { onProgress: ctx.onProgress } : {}),
     ...(ctx?.budget ? { budget: ctx.budget } : {}),
+    ...(ctx?.deadline !== undefined ? { deadline: ctx.deadline } : {}),
   });
   const markdown = conversion.text;
   if (!markdown || markdown.trim().length === 0) {
@@ -1448,6 +1468,15 @@ async function extractQueuedDocument(
     closed = true;
     clearInterval(heartbeat);
     await writes;
+
+    // Reading the pages can take minutes: a document deleted in the meantime is not brought back.
+    if (!(await db.findRagDocumentById(documentId))) {
+      logger.info('Deferred extraction finished for a document deleted meanwhile; not indexing it', {
+        documentId,
+        ragModuleKey: ragModule.key,
+      });
+      return undefined;
+    }
 
     const stored = await storeDocumentSource({
       tenantDbName,
@@ -1623,6 +1652,23 @@ export async function ingestFile(
         ragModuleKey: request.ragModuleKey,
         fileName: request.fileName,
       });
+    }
+  }
+
+  // A refused folder or permission entry fails before the pages are read, as on the deferred path (ingestDocument
+  // checks it again; a path's folders already exist by then).
+  if (plan.ocr && hasRagPlacement(request.placement)) {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    if (ragModule) {
+      await prepareRagDocumentPlacement(
+        db,
+        { tenantDbName, tenantId, projectId, actor: request.createdBy },
+        ragModule,
+        request.placement!,
+        request.access ?? request.placement!.scope,
+      );
     }
   }
 
@@ -2527,15 +2573,17 @@ export async function reingestDocument(
   const doc = await db.findRagDocumentById(request.documentId);
   if (!doc) throw new Error('Document not found');
 
-  if (hasRagPlacement(request.placement)) {
-    const placementCtx = { tenantDbName, tenantId, projectId, actor: request.updatedBy };
-    const prepared = await prepareRagDocumentPlacement(
-      db, placementCtx, ragModule, request.placement!, request.placement!.scope,
-    );
-    await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
-  }
+  const placementCtx = { tenantDbName, tenantId, projectId, actor: request.updatedBy };
+  const prepared = hasRagPlacement(request.placement)
+    ? await prepareRagDocumentPlacement(db, placementCtx, ragModule, request.placement!, request.placement!.scope)
+    : undefined;
+  // A placement this caller may not make is refused before the document is read again.
+  if (prepared) assertRagDocumentPlacementAllowed(ragModule, doc, prepared);
 
+  // Read before the placement is written: a re-extract that is refused (409) leaves the folder and permissions as they were.
   const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request, ragModule);
+
+  if (prepared) await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
   const textContent = source.text;
 
   // The re-index job calls this with no metadata at all. Writing
