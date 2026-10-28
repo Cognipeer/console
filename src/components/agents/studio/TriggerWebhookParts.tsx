@@ -140,10 +140,12 @@ export interface WebhookFilterEditorProps {
     form: TriggerForm;
     set: <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => void;
     errorOf: (field: keyof TriggerForm) => string | undefined;
+    /** Rows (by index) to point out as rules that can never match, with the reason shown under their path. */
+    flagged?: { rows: readonly number[]; reason: string };
 }
 
 /** The filter rows: every rule must match the event. Shared by webhook and connector triggers (both match over `payload.`). */
-export function WebhookFilterEditor({ form, set, errorOf }: WebhookFilterEditorProps) {
+export function WebhookFilterEditor({ form, set, errorOf, flagged }: WebhookFilterEditorProps) {
     const t = useTranslations('agents.triggers');
     const ops = WEBHOOK_FILTER_OPS.map((op) => ({ value: op, label: t(`op_${op}`) }));
     const examples = WEBHOOK_FILTER_EXAMPLES[form.webhookPreset];
@@ -161,7 +163,14 @@ export function WebhookFilterEditor({ form, set, errorOf }: WebhookFilterEditorP
             <Text size="xs" c="dimmed">{t('webhookFilterHint')}</Text>
             {form.webhookFilter.map((row, index) => (
                 <Group key={index} gap="xs" wrap="nowrap" align="flex-start">
-                    <TextInput ff="monospace" style={{ flex: 2 }} value={row.path} aria-label={t('webhookFilterPath')} onChange={(event) => setRow(index, { path: event.currentTarget.value })} />
+                    <TextInput
+                        ff="monospace"
+                        style={{ flex: 2 }}
+                        value={row.path}
+                        aria-label={t('webhookFilterPath')}
+                        error={flagged?.rows.includes(index) ? flagged.reason : undefined}
+                        onChange={(event) => setRow(index, { path: event.currentTarget.value })}
+                    />
                     <Select style={{ flex: '0 0 190px' }} comboboxProps={{ width: 'max-content' }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />
                     <TextInput
                         style={{ flex: 2 }}

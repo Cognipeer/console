@@ -314,6 +314,55 @@ describe('a retired vendor webhook trigger', () => {
     expect(patch.body).not.toHaveProperty('webhook');
   });
 
+  it('tells the converting user that the carried-over rules and tags were written for the vendor, and to check them with Preview', async () => {
+    listOf(retiredRow());
+    mount(panel());
+    await flush();
+    await click(button('Convert to connector trigger'));
+    expect(text()).toContain('written for the vendor\'s own webhook and are kept as they were');
+    expect(text()).toContain('payload.draft, payload.number, payload.repository');
+    expect(text()).toContain('use Preview on the Test tab');
+    // A rule on the carried-over payload path is shown as it is, not marked: only headers / preset can never match.
+    expect(text()).not.toContain('no headers or preset: this rule never matches');
+  });
+
+  it('marks the carried-over rules on headers or preset, keeps them, and sends them unchanged when saved', async () => {
+    const row = retiredRow();
+    row.webhook.filter = [
+      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
+      { path: 'payload.sender.type', op: 'eq', value: 'User' },
+    ];
+    listOf(row);
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1$/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
+    mount(panel());
+    await flush();
+    await click(button('Convert to connector trigger'));
+    const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
+    expect(paths.map((input) => input.value)).toEqual(['headers.x-github-event', 'payload.sender.type']);
+    expect(text().match(/A connector event has no headers or preset: this rule never matches\./g)).toHaveLength(1);
+    await click(button('Pick GitHub pull requests'));
+    await click(button('Save trigger'));
+    const patch = calls.find((call) => call.method === 'PATCH')!;
+    expect((patch.body as { connector: { filter: unknown } }).connector.filter).toEqual([
+      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
+      { path: 'payload.sender.type', op: 'eq', value: 'User' },
+    ]);
+  });
+
+  it('shows neither the conversion notice nor a mark in a plain edit of a connector trigger or a new one', async () => {
+    catalog.connectors = [{
+      id: 'c1', key: 'github', name: 'GitHub (acme)', packageId: 'cognipeer.github', packageName: 'GitHub', status: 'active', accountStatus: 'active',
+      triggers: [{ name: 'pull_request', title: 'Pull request', description: '', kind: 'webhook', events: [], params: {}, autoSubscribe: true, sample: { type: 'pull_request.opened', data: {} } }],
+    }];
+    listOf(connectorRow({}, { filter: [{ path: 'headers.x', op: 'eq', value: 'y' }] }));
+    routes.push((url, method) => (method === 'GET' && /\/triggers\/r2$/.test(url) ? json(connectorRow({ connector_subscription: { subscription_id: 'sub1', status: 'active', kind: 'webhook', bindings: 1 } })) : null));
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    expect(text()).not.toContain('written for the vendor\'s own webhook');
+    expect(text()).not.toContain('this rule never matches');
+  });
+
   it('warns that a plain edit re-creates it as a generic webhook, and has no Connect card or Test tab', async () => {
     listOf(retiredRow());
     mount(panel());

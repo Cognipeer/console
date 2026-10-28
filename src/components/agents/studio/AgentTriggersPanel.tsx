@@ -76,6 +76,7 @@ import {
     emptyTriggerForm,
     formFromTrigger,
     isRetiredWebhook,
+    rowsOnWebhookOnlyData,
     triggerBodyFromForm,
     timezoneOptions,
     webhookVariableText,
@@ -549,6 +550,7 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
 
             <FormSection number={2} title={t('sectionType')} description={t('sectionTypeDescription')}>
                 {retired && !convert ? <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('retiredNotice')}</Alert> : null}
+                {convert && form.type === 'connector' ? <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('convertNotice')}</Alert> : null}
                 <SegmentedControl
                     value={form.type}
                     onChange={(value) => set('type', value as TriggerType)}
@@ -646,7 +648,12 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                                     </Alert>
                                 ) : null}
                                 <ConnectorTriggerPicker value={form.connector} onChange={(value) => set('connector', value)} errors={connectorErrors} disabled={saving} />
-                                <WebhookFilterEditor form={form} set={set} errorOf={errorOf} />
+                                <WebhookFilterEditor
+                                    form={form}
+                                    set={set}
+                                    errorOf={errorOf}
+                                    flagged={convert ? { rows: rowsOnWebhookOnlyData(form.webhookFilter), reason: t('convertRowHint') } : undefined}
+                                />
                                 <WebhookIncludePayload form={form} set={set} />
                             </>
                         ) : (

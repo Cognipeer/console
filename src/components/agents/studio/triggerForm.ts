@@ -369,6 +369,15 @@ export function connectorFormFromRetired(trigger: TriggerRow, fallbackTimezone =
     return { ...formFromTrigger(trigger, fallbackTimezone), type: 'connector', connector: null, webhookEvents: [] };
 }
 
+/**
+ * The filter rows that read the vendor's request `headers` or the webhook `preset`. A connector event has neither (its
+ * headers are empty and its preset is always `connector`), so such a rule can never match. A converted retired trigger
+ * keeps its rows as they were (dropping one would change the rule set unseen); these are the ones to point out.
+ */
+export function rowsOnWebhookOnlyData(rows: ReadonlyArray<Pick<WebhookFilterRow, 'path'>>): number[] {
+    return rows.flatMap((row, index) => (/^(headers|preset)(\.|$)/.test(row.path.trim()) ? [index] : []));
+}
+
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
 
 /** The `type` and settings object of the request body, or why they cannot be sent. */

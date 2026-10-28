@@ -23,6 +23,7 @@ import {
   formFromTrigger,
   isRetiredWebhook,
   parseMetadataLines,
+  rowsOnWebhookOnlyData,
   triggerBodyFromForm,
   toLocalInputValue,
   webhookVariableValue,
@@ -287,6 +288,35 @@ describe('connector trigger', () => {
       connector: { connector_id: 'c1', filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false },
     });
     expect(built.ok && 'webhook' in built.body).toBe(false);
+  });
+
+  it('keeps the rows that read the vendor\'s headers or preset as they were, and points them out', () => {
+    const retired = {
+      ...rest, id: 'r1', type: 'webhook',
+      webhook: {
+        url: 'https://console.example.com/api/public/hooks/t/wh_x', preset: 'github', auth: 'github_signature', retired: true, events: ['pull_request'],
+        filter: [
+          { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
+          { path: 'payload.pull_request.draft', op: 'eq', value: false },
+          { path: 'preset', op: 'eq', value: 'github' },
+        ],
+        include_payload: true,
+      },
+    } as unknown as TriggerRow;
+    const form = connectorFormFromRetired(retired, 'UTC');
+    // Nothing is dropped behind the user's back ...
+    expect(form.webhookFilter.map((row) => row.path)).toEqual(['headers.x-github-event', 'payload.pull_request.draft', 'preset']);
+    // ... but the two rules a connector event can never meet are found.
+    expect(rowsOnWebhookOnlyData(form.webhookFilter)).toEqual([0, 2]);
+  });
+
+  it('flags only paths that start at headers or preset', () => {
+    const rows = (...paths: string[]) => paths.map((path) => ({ path, op: 'eq' as const, value: 'x' }));
+    expect(rowsOnWebhookOnlyData(rows('headers', 'headers.x-github-event', 'preset', 'preset.name'))).toEqual([0, 1, 2, 3]);
+    expect(rowsOnWebhookOnlyData(rows('  headers.x-a  ', ' preset '))).toEqual([0, 1]);
+    // Data the connector event does carry, or that only looks alike.
+    expect(rowsOnWebhookOnlyData(rows('payload.headers.x', 'payload.preset', 'event', 'delivery_id', 'headersx', 'presets', 'connector.name', 'trigger.name', 'agent.key', 'payload.'))).toEqual([]);
+    expect(rowsOnWebhookOnlyData([])).toEqual([]);
   });
 
   it('the tags offered are roots the server knows, and a connector event has no headers', () => {
