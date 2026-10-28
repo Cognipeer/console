@@ -491,11 +491,12 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async listRagQueryLogs(
       ragModuleKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean; projectId?: string },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean; projectId?: string; userId?: string },
     ): Promise<IRagQueryLog[]> {
       const db = this.getTenantDb();
       const { clauses, params } = this.buildRagQueryLogFilter(ragModuleKey, options);
       if (options?.zeroOnly) clauses.push('matchCount = 0');
+      if (options?.userId !== undefined) { clauses.push('userId = @userId'); params.userId = options.userId; }
 
       const limit = options?.limit ?? 50;
       const skip = options?.skip ?? 0;
