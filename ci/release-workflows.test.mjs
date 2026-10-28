@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -106,5 +108,35 @@ test('workflow preserves self-hosted runners and gates publishing on identity an
       const syntax = spawnSync('bash', ['-n'], { input: step.run, encoding: 'utf8' });
       assert.equal(syntax.status, 0, syntax.stderr);
     }
+  }
+});
+test('notify-crm reports a failed check although the skipped build left no outputs', () => {
+  const parsed = spawnSync(process.env.YQ_BINARY || 'yq', ['-o=json', '.', join(directory, '../.github/workflows/build-community.yml')], { encoding: 'utf8' });
+  assert.ifError(parsed.error);
+  assert.equal(parsed.status, 0, parsed.stderr);
+  const job = JSON.parse(parsed.stdout).jobs['notify-crm'];
+  assert.equal(job.if, 'always()');
+  const report = job.steps.find((step) => step.run?.includes('ci/notify-release-crm.sh'));
+
+  const repo = mkdtempSync(join(tmpdir(), 'notify-crm-'));
+  try {
+    const git = (...args) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    mkdirSync(join(repo, 'ci'));
+    writeFileSync(join(repo, 'ci/notify-release-crm.sh'), 'echo "$RELEASE_STATUS $COMMIT_SHA"\n');
+    git('add', '.');
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'tag');
+    const head = git('rev-parse', 'HEAD').stdout.trim();
+    const run = (env) => {
+      const result = spawnSync('bash', ['-c', report.run], { cwd: repo, encoding: 'utf8', env: { ...process.env, ...env } });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+
+    assert.equal(run({ BUILD_RESULT: 'skipped', COMPAT_SYNC_RESULT: 'skipped', COMMIT_SHA: '' }), `failed ${head}`);
+    assert.equal(run({ BUILD_RESULT: 'success', COMPAT_SYNC_RESULT: 'success', COMMIT_SHA: sha }), `succeeded ${sha}`);
+    assert.equal(run({ BUILD_RESULT: 'success', COMPAT_SYNC_RESULT: 'failure', COMMIT_SHA: sha }), `failed ${sha}`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
   }
 });
