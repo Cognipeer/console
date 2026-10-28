@@ -30307,6 +30307,8 @@ components:
         schedule:
           type: object
           nullable: true
+          description: >-
+            Poll triggers only. `cron` is a five-field expression (minute, hour, day of month, month, day of week) made of `*`, numbers, ranges, lists, steps and, for the month and the day of week, names; `L`, `W`, `#` and `?` are not accepted, and an expression a connector schedule cannot read is `400` on `connector.schedule.cron`. It must not fire more often than the package allows. `timezone` is an IANA name (default `UTC`).
           properties:
             cron:
               type: string
