@@ -20,6 +20,22 @@ GET /api/client/v1/rag/modules
 GET /api/client/v1/rag/modules/:key
 ```
 
+A module with [access control](/guide/rag#access-control) comes without `totalDocuments` and `totalChunks`, since the
+reads of an API token are checked.
+
+### Update Module
+
+```
+PATCH /api/client/v1/rag/modules/:key
+```
+
+```json
+{ "access": { "enabled": true, "adminBypass": true } }
+```
+
+Changing `access` needs Knowledge Engine `admin`. `adminBypass` (default `true`) lets the administrators of the
+knowledge base read every document in the console; calls of the client API never get that exception.
+
 ### Delete Module
 
 ```
@@ -66,11 +82,36 @@ POST /api/client/v1/rag/modules/:key/ingest
 
 When `data` is provided instead of `content`, the file is converted to Markdown first, then chunked and embedded.
 
+### Folders and permissions on ingest
+
+An ingest, and a re-ingest, can place the document and give it its own permissions:
+
+```json
+{
+  "fileName": "budget-2027.md",
+  "content": "...",
+  "folderPath": "Finance/Budgets",
+  "acl": { "mode": "own", "entries": ["group:65f0c2a1e4b0a1b2c3d4e5f7", "email:ada@example.com"] }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `folderId` | The folder to put the document in; `null` is the top level |
+| `folderPath` | A `/`-separated path whose missing folders are created; ignored when `folderId` is given |
+| `acl` | The document's own permissions: `mode` `own` (with `entries`; an empty list lets nobody read it) or `inherit`. Needs Knowledge Engine `admin` (`403 access_denied`) |
+
+In a knowledge base with access control, a token without Knowledge Engine `admin` places a new document only in a
+folder it can read and creates no folder. See [Access control](/guide/rag#access-control) for what an entry can name.
+
 ## Querying
 
 ```
 POST /api/client/v1/rag/modules/:key/query
 ```
+
+In a knowledge base with access control, matches come only from documents the caller may read: an API token reads
+what is open to everyone and what names the token, and a call that acts for a person reads what that person may read.
 
 ```json
 {
@@ -101,6 +142,9 @@ POST /api/client/v1/rag/modules/:key/query
 ```
 GET /api/client/v1/rag/modules/:key/documents
 ```
+
+In a knowledge base with access control, only the documents the caller may read are listed. Reading, re-ingesting
+or deleting a document the caller may not read answers `404`, like a missing one.
 
 ### Delete Document
 
@@ -133,5 +177,6 @@ Send an empty body to re-ingest with existing content and current chunking setti
 |--------|-------------|
 | 400 | Missing required fields |
 | 401 | Invalid API token |
-| 404 | Module or document not found |
+| 403 | The change needs Knowledge Engine `admin` (`access_denied`), or it names the vector index or a crawler binding of a knowledge base with access control (`kb_access_controlled`: query the knowledge base instead) |
+| 404 | Module or document not found, or a document the caller may not read |
 | 429 | Rate limit or quota exceeded |
