@@ -17,7 +17,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import type { IUser, PiiAction, PiiEngine } from '@/lib/database';
+import type { PiiAction, PiiEngine } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   buildDefaultPolicyCategories,
@@ -73,19 +73,17 @@ function sendError(reply: FastifyReply, error: unknown) {
  * could address any project's policy in the same tenant — reading its
  * configuration, disabling it, or deleting it, and so tampering with another
  * project's data-protection control. Returns null for an out-of-scope id so it
- * is indistinguishable from a missing one. Owners/admins keep tenant-wide reach
- * (resolveProjectContext already grants it), and policies stored without a
+ * is indistinguishable from a missing one. Owners/admins too (the active
+ * project decides; they switch to reach another), and policies stored without a
  * projectId stay tenant-wide.
  */
 async function policyInProjectScope(
   tenantDbName: string,
   id: string,
   projectId: string,
-  user: Pick<IUser, 'role'>,
 ): Promise<PiiServicePolicyView | null> {
   const policy = await getPiiPolicy(tenantDbName, id);
   if (!policy) return null;
-  if (user.role === 'owner' || user.role === 'admin') return policy;
   if (!policy.projectId) return policy;
   return String(policy.projectId) === String(projectId) ? policy : null;
 }
@@ -176,9 +174,9 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Get one ──
   app.get('/pii/policies/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const policy = await policyInProjectScope(session.tenantDbName, id, projectId, user);
+      const policy = await policyInProjectScope(session.tenantDbName, id, projectId);
       if (!policy) return reply.code(404).send({ error: 'PII policy not found' });
       return reply.code(200).send({ policy });
     } catch (error) {
@@ -189,9 +187,9 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Update ──
   app.patch('/pii/policies/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await policyInProjectScope(session.tenantDbName, id, projectId, user))) {
+      if (!(await policyInProjectScope(session.tenantDbName, id, projectId))) {
         return reply.code(404).send({ error: 'PII policy not found' });
       }
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -226,9 +224,9 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Delete ──
   app.delete('/pii/policies/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await policyInProjectScope(session.tenantDbName, id, projectId, user))) {
+      if (!(await policyInProjectScope(session.tenantDbName, id, projectId))) {
         return reply.code(404).send({ error: 'PII policy not found' });
       }
       const deleted = await deletePiiPolicy(session.tenantDbName, id);

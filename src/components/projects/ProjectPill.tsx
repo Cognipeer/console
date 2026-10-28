@@ -1,11 +1,13 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useParams } from 'next/navigation';
 import { Combobox, Group, Loader, Text, UnstyledButton, useCombobox } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useQuery } from '@tanstack/react-query';
 import { IconCheck, IconChevronDown, IconSearch } from '@tabler/icons-react';
 import { includesFolded } from '@/lib/shared/searchFold';
+import { pathAfterProjectSwitch } from './projectSwitchPath';
 
 type Project = {
   _id: string;
@@ -15,6 +17,7 @@ type Project = {
 
 export default function ProjectPill() {
   const [submitting, setSubmitting] = useState(false);
+  const params = useParams();
   const [search, setSearch] = useState('');
   // The search box takes the focus as the list opens, so typing filters at once
   // and Enter switches to the highlighted (first) match.
@@ -78,7 +81,10 @@ export default function ProjectPill() {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error || 'Failed to set active project');
       }
-      window.location.reload();
+      // A record of the project being left goes back to its list; any other page reloads in place.
+      const next = pathAfterProjectSwitch(window.location.pathname, params);
+      if (next) window.location.assign(next);
+      else window.location.reload();
     } catch (error) {
       notifications.show({
         title: 'Project',

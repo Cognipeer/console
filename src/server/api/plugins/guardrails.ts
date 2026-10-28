@@ -134,19 +134,17 @@ type CompileTarget = (typeof COMPILE_TARGETS)[number];
  * (enabled:false / failMode:'open') or delete it — silently removing another
  * team's safety control — and read the flagged text in its evaluation logs.
  * Returns null for an out-of-scope id so it is indistinguishable from a
- * missing one. Owners and admins keep tenant-wide reach, which
- * resolveProjectContext already grants them, and legacy rows stored before
- * guardrails carried a projectId stay reachable.
+ * missing one. Owners and admins too: the active project decides, and they
+ * reach another one by switching to it. Legacy rows stored before guardrails
+ * carried a projectId stay reachable.
  */
 async function guardrailInProjectScope(
   tenantDbName: string,
   id: string,
   projectId: string,
-  user: Pick<IUser, 'role'>,
 ): Promise<GuardrailView | null> {
   const guardrail = await getGuardrail(tenantDbName, id);
   if (!guardrail) return null;
-  if (user.role === 'owner' || user.role === 'admin') return guardrail;
   if (!guardrail.projectId) return guardrail;
   return String(guardrail.projectId) === String(projectId) ? guardrail : null;
 }
@@ -193,11 +191,9 @@ async function wordListInProjectScope(
   tenantDbName: string,
   id: string,
   projectId: string,
-  user: Pick<IUser, 'role'>,
 ): Promise<WordListView | null> {
   const wordList = await getWordList(tenantDbName, id);
   if (!wordList) return null;
-  if (user.role === 'owner' || user.role === 'admin') return wordList;
   if (!wordList.projectId) return wordList;
   return String(wordList.projectId) === String(projectId) ? wordList : null;
 }
@@ -1162,9 +1158,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/guardrails/word-lists/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const wordList = await wordListInProjectScope(session.tenantDbName, id, projectId, user);
+      const wordList = await wordListInProjectScope(session.tenantDbName, id, projectId);
       if (!wordList) {
         return reply.code(404).send({ error: 'Word list not found' });
       }
@@ -1179,9 +1175,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/guardrails/word-lists/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await wordListInProjectScope(session.tenantDbName, id, projectId, user))) {
+      if (!(await wordListInProjectScope(session.tenantDbName, id, projectId))) {
         return reply.code(404).send({ error: 'Word list not found' });
       }
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -1221,9 +1217,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/guardrails/word-lists/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await wordListInProjectScope(session.tenantDbName, id, projectId, user))) {
+      if (!(await wordListInProjectScope(session.tenantDbName, id, projectId))) {
         return reply.code(404).send({ error: 'Word list not found' });
       }
       const deleted = await deleteWordList(session.tenantDbName, id);
@@ -1405,9 +1401,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/guardrails/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId, user);
+      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId);
 
       if (!guardrail) {
         return reply.code(404).send({ error: 'Guardrail not found' });
@@ -1424,9 +1420,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/guardrails/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const existing = await guardrailInProjectScope(session.tenantDbName, id, projectId, user);
+      const existing = await guardrailInProjectScope(session.tenantDbName, id, projectId);
       if (!existing) {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }
@@ -1525,9 +1521,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/guardrails/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await guardrailInProjectScope(session.tenantDbName, id, projectId, user))) {
+      if (!(await guardrailInProjectScope(session.tenantDbName, id, projectId))) {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }
       const deleted = await deleteGuardrail(session.tenantDbName, id);
@@ -1555,9 +1551,9 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
    */
   app.post('/guardrails/:id/redteam', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId, user);
+      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId);
       if (!guardrail) {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }
@@ -1586,14 +1582,14 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/guardrails/:id/evaluations', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as EvaluationsQuery;
 
       const db = await getDatabase();
       await db.switchToTenant(session.tenantDbName);
 
-      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId, user);
+      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId);
       if (!guardrail) {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }

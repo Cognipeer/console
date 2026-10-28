@@ -30,7 +30,7 @@ vi.mock('@cognipeer/to-markdown', () => ({
 const FAKE_PROJECT_ID = 'test-project-1';
 const OTHER_PROJECT_ID = 'test-project-2';
 
-/** Flipped per-test: owner/admin reach across projects, a member does not. */
+/** Flipped per-test: the caller's role (the active project decides for every role). */
 let currentUserRole: 'owner' | 'admin' | 'member' = 'owner';
 
 vi.mock('@/lib/services/projects/projectContext', () => ({
@@ -731,7 +731,7 @@ describe('document routes are project-scoped and never answer with the source te
     expect(res.statusCode).toBe(404);
   });
 
-  it('404s another project\'s document for a member, and still serves it to an owner', async () => {
+  it('404s another project\'s document for everyone, an owner too', async () => {
     currentUserRole = 'member';
     const memberRes = await app.inject({
       method: 'GET',
@@ -740,14 +740,14 @@ describe('document routes are project-scoped and never answer with the source te
     });
     expect(memberRes.statusCode).toBe(404);
 
-    // Owners/admins keep the tenant-wide reach resolveProjectContext grants.
+    // The active project decides for an owner too: they reach another project by switching to it.
     currentUserRole = 'owner';
     const ownerRes = await app.inject({
       method: 'GET',
       url: `/api/rag/modules/${MODULE_KEY}/documents/${otherProjectDocumentId}`,
       headers: REQUEST_HEADERS,
     });
-    expect(ownerRes.statusCode).toBe(200);
+    expect(ownerRes.statusCode).toBe(404);
   });
 
   it('/content returns the whole stored source text', async () => {
