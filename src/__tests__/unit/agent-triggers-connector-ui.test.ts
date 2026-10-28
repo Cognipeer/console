@@ -39,11 +39,23 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
       el('span', null, props.value ? `picked:${props.value.connectorId}/${props.value.trigger}` : 'nothing picked'),
       el('span', null, `errors:${JSON.stringify(props.errors ?? {})}`),
     ),
-    ConnectorTriggerStatus: (props: { subscription: { status: string } | null; onChanged: () => void }) => el(
+    ConnectorTriggerStatus: (props: {
+      subscription: { status: string; subscription_id: string } | null;
+      onChanged: () => void;
+      reveal?: { secret: string | null; previousValidUntil: number | null } | null;
+      onReveal?: (reveal: unknown) => void;
+    }) => el(
       'div',
       null,
       el('span', null, `status:${props.subscription?.status ?? 'none'}`),
+      el('span', null, `secret:${props.reveal?.secret ?? 'none'}`),
+      el('span', null, `until:${props.reveal?.previousValidUntil ?? 'none'}`),
       el('button', { type: 'button', onClick: props.onChanged }, 'Reload status'),
+      // A rotation: the card hands the secret it was shown to the editor.
+      el('button', {
+        type: 'button',
+        onClick: () => props.onReveal?.({ subscriptionId: props.subscription!.subscription_id, secret: 'rotated-secret', previousValidUntil: 1_900_000_000 }),
+      }, 'Rotate secret'),
     ),
   };
 });
@@ -210,6 +222,31 @@ describe('the Connector choice', () => {
     expect(tab('Test')).toBeDefined();
     expect(tab('Deliveries')).toBeDefined();
     expect(calls.filter((call) => call.method === 'GET' && /triggers\/r2(?:\?|$)/.test(call.url))).toHaveLength(0);
+  });
+
+  it('keeps the secret the saved hook showed once, also when the trigger is read again without it', async () => {
+    const secretless = { subscription_id: 'sub1', status: 'manual', kind: 'webhook', bindings: 1 };
+    const saved = connectorRow({ connector_subscription: { ...secretless, secret: 'whsec_created' } });
+    routes.push((url, method) => (method === 'POST' && /\/triggers(?:\?|$)/.test(url) ? json(saved, true, 201) : null));
+    routes.push((url, method) => (method === 'GET' && /\/triggers\/r2(?:\?|$)/.test(url) ? json(connectorRow({ connector_subscription: secretless })) : null));
+    mount(panel());
+    await flush();
+    await click(button('Add trigger'));
+    await click(document.querySelector('input[type="radio"][value="connector"]'));
+    await click(button('Pick GitHub pull requests'));
+    typeInto(document.querySelector<HTMLInputElement>('input[placeholder="Nightly digest"]')!, 'PR review');
+    typeInto(document.querySelector<HTMLTextAreaElement>('textarea')!, 'Review {{payload.number}}');
+    await click(button('Save trigger'));
+    expect(text()).toContain('secret:whsec_created');
+
+    // The editor reads the trigger again: the answer has no secret, the one it was shown is kept.
+    await click(button('Reload status'));
+    expect(text()).toContain('status:manual');
+    expect(text()).toContain('secret:whsec_created');
+    // And across the other tabs.
+    await click(tab('Test'));
+    await click(tab('Settings'));
+    expect(text()).toContain('secret:whsec_created');
   });
 
   it('refuses to save without a pick, saying so on the picker', async () => {
@@ -402,6 +439,42 @@ describe('a saved connector trigger', () => {
     await flush();
     await click(button('Düzenle'));
     expect(calls.find((call) => call.method === 'GET' && /triggers\/r2(?:\?|$)/.test(call.url))!.url).toBe('/api/agents/a1/triggers/r2?locale=tr');
+  });
+
+  it('keeps the secret a rotation showed (and until when the old one works) while the editor shows another tab', async () => {
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    expect(text()).toContain('secret:none');
+    await click(button('Rotate secret'));
+    expect(text()).toContain('secret:rotated-secret');
+    expect(text()).toContain('until:1900000000');
+
+    await click(tab('Test'));
+    expect(text()).not.toContain('secret:');
+    await click(tab('Settings'));
+    expect(text()).toContain('secret:rotated-secret');
+    expect(text()).toContain('until:1900000000');
+    await click(tab('Deliveries'));
+    await click(tab('Settings'));
+    expect(text()).toContain('secret:rotated-secret');
+
+    // The card asks the editor to read the trigger again (after the rotation): the secret stays.
+    await click(button('Reload status'));
+    expect(text()).toContain('secret:rotated-secret');
+  });
+
+  it('forgets the secret when the trigger turns out to hang on another subscription', async () => {
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    await click(button('Rotate secret'));
+    expect(text()).toContain('secret:rotated-secret');
+    routes.unshift((url, method) => (method === 'GET' && /\/triggers\/r2(?:\?|$)/.test(url) ? json(connectorRow({ connector_subscription: { ...subscription, subscription_id: 'sub2' } })) : null));
+    await click(button('Reload status'));
+    expect(text()).toContain('status:active');
+    expect(text()).toContain('secret:none');
+    expect(text()).toContain('until:none');
   });
 
   it('reads the subscription (lists do not carry it) and hands it to the status, which can ask for a reload', async () => {

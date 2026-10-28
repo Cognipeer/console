@@ -66,7 +66,7 @@ import {
 } from '@/components/enterprise/EnterpriseConnectorTriggerUi';
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import type { ConnectorSubscriptionWire } from '@/lib/shared/connectorTriggers';
+import type { ConnectorSecretReveal, ConnectorSubscriptionWire } from '@/lib/shared/connectorTriggers';
 import { upcomingCronFires, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 import {
     CONNECTOR_TEMPLATE_VARIABLES,
@@ -444,6 +444,10 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
     const savedId = trigger?.id;
     /** The subscription of a saved connector trigger. Lists do not carry it; a create / update answer does (with the secret, once). */
     const [subscription, setSubscription] = useState<ConnectorSubscriptionWire | null | undefined>(() => (trigger ? subscriptionOf(trigger) : undefined));
+    /** The signing secret a save or a rotation showed once. Kept here, not in the card: the tabs unmount it. It belongs to one subscription. */
+    const [reveal, setReveal] = useState<ConnectorSecretReveal | null>(null);
+    const subscriptionId = subscription?.subscription_id ?? null;
+    const currentReveal = reveal && reveal.subscriptionId === subscriptionId ? reveal : null;
     const zones = useMemo(() => timezoneOptions(), []);
     const set = <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => {
         setForm((prev) => ({ ...prev, [key]: value }));
@@ -496,7 +500,12 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
             }
             const saved = await res.json() as TriggerRow;
             const keepOpen = saved.type === 'webhook' || saved.type === 'connector';
-            if (saved.type === 'connector') setSubscription(subscriptionOf(saved) ?? null);
+            if (saved.type === 'connector') {
+                const answered = subscriptionOf(saved) ?? null;
+                setSubscription(answered);
+                // The answer that created the hook shows its secret once; a later read of the trigger does not.
+                if (answered?.secret) setReveal({ subscriptionId: answered.subscription_id, secret: answered.secret, previousValidUntil: answered.previous_secret_valid_until ?? null });
+            }
             if (saved.type === 'webhook') {
                 // The answer that created or replaced a generated secret carries it in `webhook.secret` — shown once.
                 const secret = (saved.webhook as { secret?: string }).secret;
@@ -798,6 +807,8 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                                     triggerId={trigger.id}
                                     subscription={subscription ?? null}
                                     onChanged={() => void loadSubscription()}
+                                    reveal={currentReveal}
+                                    onReveal={setReveal}
                                 />
                             ) : null}
                             {settings}

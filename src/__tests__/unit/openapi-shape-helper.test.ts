@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { toSubscriptionWire } from '@/lib/services/agents/agentTriggerConnectorHost';
+import { toSubscriptionWire } from '@/lib/shared/connectorTriggers';
 import type { ConnectorTriggerView } from '@/enterprise/connector-triggers';
 import { componentSchema, shapeProblems } from '../helpers/openapiShape';
 

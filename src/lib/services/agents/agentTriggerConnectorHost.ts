@@ -19,10 +19,12 @@ import {
   type ConnectorTriggerScope,
   type ConnectorTriggerView,
 } from '@/enterprise/connector-triggers';
-import type { ConnectorSubscriptionWire } from '@/lib/shared/connectorTriggers';
+import { ATTACH_FAILED_REASON_CODE, toSubscriptionWire, type ConnectorSubscriptionWire } from '@/lib/shared/connectorTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from './agentTriggerSchedule';
 import { parseFilterRules } from './agentTriggerWebhookView';
 import type { VariableIssue } from './agentVariables';
+
+export { toSubscriptionWire };
 
 const logger = createLogger('agent-trigger-connector');
 
@@ -53,32 +55,6 @@ export function connectorLocale(query: unknown): { locale?: 'tr' | 'en' } {
   return raw === 'tr' || raw === 'en' ? { locale: raw } : {};
 }
 
-const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);
-
-/** The subscription view as `connector_subscription` on a trigger answer (snake_case, dates in epoch seconds). */
-export function toSubscriptionWire(view: ConnectorTriggerView | null | undefined): ConnectorSubscriptionWire | null {
-  if (!view) return null;
-  return {
-    subscription_id: view.subscriptionId,
-    status: view.status,
-    kind: view.kind,
-    reason: view.reason ?? null,
-    reason_code: view.reasonCode ?? null,
-    callback_url: view.callbackUrl ?? null,
-    secret_hint: view.secretHint ?? null,
-    ...(view.secret ? { secret: view.secret } : {}),
-    previous_secret_valid_until: toEpochSeconds(view.previousSecretValidUntil),
-    auto_registered: view.autoRegistered ?? false,
-    schedule: view.schedule ? { cron: view.schedule.cron, timezone: view.schedule.timezone } : null,
-    next_poll_at: toEpochSeconds(view.nextPollAt),
-    last_event_at: toEpochSeconds(view.lastEventAt),
-    last_poll_at: toEpochSeconds(view.lastPollAt),
-    last_error: view.lastError ?? null,
-    setup: view.setup ?? null,
-    bindings: view.bindings,
-  };
-}
-
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** What a failed `attach` leaves the editor with: the trigger is stored, the subscription is not usable yet. */
@@ -88,7 +64,7 @@ function failedView(trigger: IAgentTrigger & { type: 'connector' }): ConnectorTr
     status: 'failed',
     kind: trigger.connector.kind ?? 'webhook',
     reason: 'The connection to the connector could not be set up. Retry.',
-    reasonCode: 'attach_failed',
+    reasonCode: ATTACH_FAILED_REASON_CODE,
     bindings: 0,
   };
 }

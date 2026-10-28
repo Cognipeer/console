@@ -10,6 +10,7 @@
  */
 import type { ReactNode } from 'react';
 import type {
+  ConnectorSecretReveal,
   ConnectorSubscriptionWire,
   ConnectorTriggerCatalogConnector,
   ConnectorTriggerFormValue,
@@ -80,6 +81,13 @@ export interface ConnectorTriggerStatusProps {
   subscription: ConnectorSubscriptionWire | null;
   /** The subscription changed (retried, rotated): reload the trigger. */
   onChanged(): void;
+  /**
+   * The secret a create or a rotation showed once, kept by the editor for as long as it is open (the card is
+   * unmounted when the editor shows another tab). Absent: the card keeps what it shows for as long as it lives.
+   */
+  reveal?: ConnectorSecretReveal | null;
+  /** The card has a secret (or the end of the old one) to keep, or none any more. Given together with `reveal`. */
+  onReveal?(reveal: ConnectorSecretReveal | null): void;
 }
 
 /** The subscription of a saved connector trigger: state, callback URL and secret, setup steps, retry. */
