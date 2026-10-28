@@ -478,6 +478,12 @@ async function createSuggestedTriggers(
       const summary = prepared.errors.slice(0, 3).map((issue) => `${issue.field}: ${issue.message}`).join('; ');
       throw new AgentTemplateError(400, 'invalid_template_trigger', `The suggested trigger "${suggestion.name}" is not valid - ${summary}`, { issues: prepared.errors });
     }
+    // The module takes any connector whose package declares a trigger of that name; the template's trigger is written for the
+    // event data of its own package (its filter and prompt read those fields), so a connector of another package is left out.
+    if (suggestion.type === 'connector' && prepared.write.type === 'connector' && prepared.write.connector.packageId !== suggestion.connector?.package) {
+      skip({ reason: 'connector_required' });
+      continue;
+    }
     const { trigger, connectorView } = await createAgentTriggerHosted(
       scope,
       agent.key,

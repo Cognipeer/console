@@ -702,6 +702,47 @@ describe('POST instantiate: triggers', () => {
       expect(res.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
     });
 
+    describe('a connector whose package declares a trigger of the same name', () => {
+      /** The module answers the check as the connector's package says: every connector below it reports the package it was given. */
+      const reporting = (packageId: string) => {
+        const wrapped = fake.host.prepare;
+        fake.host.prepare = async (scope, input) => {
+          const asked = await wrapped(scope, input);
+          return asked.ok ? { ...asked, settings: { ...asked.settings, packageId } } : asked;
+        };
+      };
+      const given = { connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } };
+
+      it('of another package is connector_required, and nothing is created or registered for it', async () => {
+        reporting('cognipeer.gitlab');
+        const res = await instantiate('pr-reviewer', pick(given));
+        expect(res.statusCode, res.body).toBe(201);
+        const body = json(res);
+        expect(body.triggers).toEqual([]);
+        expect(body.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+        expect(await triggersOf(body.agent)).toEqual([]);
+        expect(fake.calls.filter((call) => call.startsWith('attach:'))).toEqual([]);
+        expect(fake.subscriptions.size).toBe(0);
+      });
+
+      it('of the template\'s own package creates the trigger', async () => {
+        reporting('cognipeer.github');
+        const res = await instantiate('pr-reviewer', pick(given));
+        expect(res.statusCode, res.body).toBe(201);
+        const body = json(res);
+        expect(body.skipped_triggers).toEqual([]);
+        expect(body.triggers).toEqual([expect.objectContaining({ type: 'connector', connector: expect.objectContaining({ connectorId: 'conn-gh', trigger: 'pull_request' }) })]);
+        expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+      });
+
+      it('of another package leaves out only that trigger: the others of the template are still made', async () => {
+        reporting('cognipeer.gitlab');
+        const body = json(await instantiate('ci-failure-triage', pick({ connector_id: 'conn-gh', connector_params: { [CI_TRIGGER]: { repository: 'acme/web' } } })));
+        expect(body.skipped_triggers).toEqual([{ name: CI_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+        expect(body.triggers.map((trigger: Json) => trigger.type)).toEqual(['webhook']);
+      });
+    });
+
     it('takes parameters per trigger name and creates the others next to a skipped one', async () => {
       const res = json(await instantiate('ci-failure-triage', pick({
         connector_ids: { [CI_TRIGGER]: 'conn-gh' }, connector_params: { [CI_TRIGGER]: { repository: 'acme/web' }, 'No such trigger': { repository: 'ignored/repo' } },
