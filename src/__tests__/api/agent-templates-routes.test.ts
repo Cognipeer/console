@@ -735,6 +735,52 @@ describe('POST instantiate: triggers', () => {
         expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
       });
 
+      it.each([
+        ['no package at all', undefined],
+        ['an empty package', ''],
+      ] as Array<[string, string | undefined]>)('is connector_required when the module\'s answer names %s: it cannot be told which package the connector is, so nothing is made', async (_what, packageId) => {
+        const wrapped = fake.host.prepare;
+        fake.host.prepare = async (scope, input) => {
+          const asked = await wrapped(scope, input);
+          if (!asked.ok) return asked;
+          const { packageId: _dropped, ...settings } = asked.settings as unknown as Record<string, unknown>;
+          return { ...asked, settings: { ...settings, ...(packageId === undefined ? {} : { packageId }) } } as typeof asked;
+        };
+        const res = await instantiate('pr-reviewer', pick(given));
+        expect(res.statusCode, res.body).toBe(201);
+        const body = json(res);
+        expect(body.triggers).toEqual([]);
+        expect(body.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+        expect(await triggersOf(body.agent)).toEqual([]);
+        expect(fake.calls.filter((call) => call.startsWith('attach:'))).toEqual([]);
+        expect(fake.subscriptions.size).toBe(0);
+      });
+
+      it('creates only the triggers of the connector\'s own package when a template has connector triggers of two packages and one connector is given', async () => {
+        // A template whose triggers name the same package trigger on two packages (the shared template object, put back after).
+        const template = findAgentTemplate('ci-failure-triage')!;
+        const original = template.triggers!;
+        const github = original[0]!;
+        const GITLAB_TRIGGER = 'Triage failed GitLab pipelines';
+        (template as { triggers: unknown }).triggers = [github, { ...github, name: GITLAB_TRIGGER, connector: { ...github.connector!, package: 'cognipeer.gitlab' } }, original[1]!];
+        try {
+          const res = await instantiate('ci-failure-triage', pick({ connector_id: 'conn-1' }));
+          expect(res.statusCode, res.body).toBe(201);
+          const body = json(res);
+          // conn-1 is a GitHub connector: the GitHub trigger is made, the GitLab one is left out, and the webhook trigger is made next to them.
+          expect(body.skipped_triggers).toEqual([{ name: GITLAB_TRIGGER, reason: 'connector_required', package: 'cognipeer.gitlab' }]);
+          expect(body.triggers.map((trigger: Json) => [trigger.name, trigger.type])).toEqual([[github.name, 'connector'], [original[1]!.name, 'webhook']]);
+          const rows = await triggersOf(body.agent);
+          expect(rows.filter((row) => row.type === 'connector').map((row) => row.name)).toEqual([github.name]);
+          // Only the GitHub trigger was bound: one hook for it, none for the other.
+          expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+          expect(fake.subscriptions.size).toBe(1);
+        } finally {
+          (template as { triggers: unknown }).triggers = original;
+        }
+        expect(findAgentTemplate('ci-failure-triage')!.triggers).toHaveLength(2);
+      });
+
       it('of another package leaves out only that trigger: the others of the template are still made', async () => {
         reporting('cognipeer.gitlab');
         const body = json(await instantiate('ci-failure-triage', pick({ connector_id: 'conn-gh', connector_params: { [CI_TRIGGER]: { repository: 'acme/web' } } })));
