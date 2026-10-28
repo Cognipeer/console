@@ -404,7 +404,10 @@ describe('a retired vendor webhook trigger', () => {
     const row = retiredRow();
     const filter = [
       { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
+      { path: 'headers.x-github-event', op: 'neq', value: 'pull_request' },
+      { path: 'headers.x-github-event', op: 'exists' },
       { path: 'headers.x-github-event', op: 'not_exists' },
+      { path: 'headers.x-github-event', op: 'contains', value: 'pull' },
       { path: 'preset', op: 'eq', value: 'connector' },
       { path: 'preset', op: 'eq', value: 'github' },
       { path: 'preset', op: 'neq', value: 'github' },
@@ -419,8 +422,8 @@ describe('a retired vendor webhook trigger', () => {
     const always = 'A connector event has no headers and its preset is always “connector”: this rule matches every connector event, so it filters nothing.';
     const hintUnder = (input: HTMLInputElement) => input.closest('[class*="InputWrapper-root"]')?.querySelector('[class*="InputWrapper-error"]')?.textContent ?? null;
     const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
-    expect(paths.map(hintUnder)).toEqual([never, always, always, never, always, null]);
-    // Nothing is dropped behind the user's back: all six rows are sent as they were.
+    expect(paths.map(hintUnder)).toEqual([never, never, never, always, never, always, never, always, null]);
+    // Nothing is dropped behind the user's back: all nine rows are sent as they were.
     await click(button('Pick GitHub pull requests'));
     await click(button('Save trigger'));
     const patch = calls.find((call) => call.method === 'PATCH')!;
