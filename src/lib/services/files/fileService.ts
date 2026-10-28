@@ -1089,6 +1089,8 @@ export interface MarkdownConversionOptions {
     /** The tenant database; needed for OCR through a project model (without it OCR is not attempted). */
     tenantDbName?: string;
     userId?: string;
+    /** The project the file is in; preferred over the record's own (a legacy record may carry none). */
+    projectId?: string;
     /** `inline`: a request waits for the answer (the default). `background`: a job. */
     budget?: 'inline' | 'background';
     onProgress?: (progress: { completed: number; total: number }) => void;
@@ -1207,7 +1209,7 @@ export async function applyMarkdownConversion(
             scope: {
                 tenantDbName: options.tenantDbName ?? '',
                 tenantId: bucket.tenantId,
-                ...(record.projectId ? { projectId: record.projectId } : {}),
+                ...((options.projectId ?? record.projectId) ? { projectId: options.projectId ?? record.projectId } : {}),
                 ...(options.userId ? { userId: options.userId } : {}),
             },
             source: 'files',
@@ -1517,7 +1519,13 @@ export async function uploadFile(
         request,
         fileBuffer,
         db,
-        { tenantDbName, userId: request.createdBy, budget: 'inline' },
+        {
+            tenantDbName,
+            projectId,
+            userId: request.createdBy,
+            budget: 'inline',
+            ...(request.signal ? { signal: request.signal } : {}),
+        },
     );
 
     const settled = await db.updateFileRecord(record.id, {
@@ -1554,7 +1562,14 @@ export async function replaceFileContent(
     projectId: string,
     bucketKey: string,
     key: string,
-    input: { data: Buffer; updatedBy: string; /** false = keep the bytes as the only version (no text copy). Default true. */ convertToMarkdown?: boolean },
+    input: {
+        data: Buffer;
+        updatedBy: string;
+        /** false = keep the bytes as the only version (no text copy). Default true. */
+        convertToMarkdown?: boolean;
+        /** Stops an OCR run that is still going when the caller has gone. */
+        signal?: AbortSignal;
+    },
 ): Promise<FileRecordView> {
     const { bucket, runtime, record } = await requireFileRecord(tenantDbName, tenantId, projectId, bucketKey, key, 'write');
     const request: UploadFileRequest = {
@@ -1580,12 +1595,23 @@ export async function replaceFileContent(
     const db = await withTenantDb(tenantDbName);
     const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
         ? { markdownStatus: 'skipped' }
-        : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, { tenantDbName, userId: input.updatedBy, budget: 'inline' });
+        : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, {
+            tenantDbName,
+            projectId,
+            userId: input.updatedBy,
+            budget: 'inline',
+            ...(input.signal ? { signal: input.signal } : {}),
+        });
+    // What the last run found belongs to the old bytes: a run that did not produce a new result leaves none behind.
+    const clearedExtraction = !conversion.markdownExtraction && record.markdownExtraction
+        ? { markdownExtraction: compactExtraction(record.markdownExtraction) ?? null }
+        : {};
     const updated = await db.updateFileRecord(record.id, {
         size: upload.handle.size ?? input.data.length,
         checksum: upload.handle.checksum,
         etag: upload.handle.etag,
         ...conversion,
+        ...clearedExtraction,
         updatedBy: input.updatedBy,
     });
     if (!updated) {

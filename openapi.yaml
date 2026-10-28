@@ -21747,13 +21747,18 @@ components:
           default: false
           description: Convert supported documents to Markdown for the Knowledge Engine pipeline.
         ocr:
-          $ref: "#/components/schemas/OcrSettings"
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/OcrSettings"
+          description: "OCR settings. `null` (or `{ \"mode\": \"off\" }`) means no OCR: the plain conversion."
         images:
           type: string
+          nullable: true
           enum:
             - inline
             - placeholder
             - omit
+            - null
           description: "What becomes of pictures inside Word, HTML and PowerPoint files in the Markdown copy: kept as data URIs (`inline`, the default), replaced by a short name (`placeholder`) or dropped (`omit`). Used with `convertToMarkdown`."
         keyHint:
           type: string

@@ -55,6 +55,15 @@ function fail(reply: FastifyReply, error: unknown, action: string, options: File
   return sendFileError(reply, error, { logger, action, ...options });
 }
 
+/** Aborted when the client goes away before its answer was sent. */
+function clientGone(reply: FastifyReply): AbortSignal {
+  const controller = new AbortController();
+  reply.raw.once('close', () => {
+    if (!reply.raw.writableFinished) controller.abort();
+  });
+  return controller.signal;
+}
+
 export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
   // A file travels base64-encoded in a JSON body, so an upload request is a third larger than the file: the route
   // takes a body up to the configured file limit plus that, and answers a larger one as a file that is too large.
@@ -278,6 +287,8 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         fileName: body.fileName,
         keyHint: destination.keyHint,
         ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
+        // A client that goes away stops the OCR run it was waiting for.
+        ...(extraction.extraction?.ocr ? { signal: clientGone(reply) } : {}),
         metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
       });
 

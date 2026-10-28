@@ -40,7 +40,7 @@ vi.mock('@/lib/services/extraction', async (importOriginal) => {
   return { ...actual, validateOcrModelRef: hoisted.validateModel };
 });
 
-import { uploadFile } from '@/lib/services/files/fileService';
+import { replaceFileContent, uploadFile } from '@/lib/services/files/fileService';
 import { startFilesQueueConsumer } from '@/lib/services/files/jobs/filesConsumer';
 import type { ExtractionRequest, ExtractionResult } from '@/lib/services/extraction/types';
 import { createFilesStack, FILES_DB_NAME, type FilesStack } from '../helpers/filesRealStack';
@@ -57,7 +57,7 @@ function fakeExtract(req: ExtractionRequest): ExtractionResult {
     report: ocrOn
       ? {
           sourceType: 'mixed', engine: req.ocr?.modelKey ? 'model' : 'local', ...(req.ocr?.modelKey ? { modelKey: req.ocr.modelKey } : {}),
-          pageCount: 5, ocrPages: [2, 4], warnings: ['ocr_timeout: page 5'],
+          pageCount: 5, ocrPages: [2, 4], warnings: ['ocr_timeout: page 5 within https://secret.example/x'],
         }
       : { sourceType: 'converted', warnings: [] },
   };
@@ -112,7 +112,7 @@ describe('an upload with OCR settings through the dashboard route', () => {
     expect(typeof request.onProgress).toBe('function');
     expect(done.markdownExtraction).toEqual({
       ocr: { mode: 'auto', languages: ['tr', 'en'], maxPages: 30 },
-      result: { sourceType: 'mixed', engine: 'local', pageCount: 5, ocrPages: 2, warnings: ['ocr_timeout: page 5'] },
+      result: { sourceType: 'mixed', engine: 'local', pageCount: 5, ocrPages: 2, warnings: ['ocr_timeout'] },
     });
   });
 
@@ -249,6 +249,22 @@ describe('POST /files/buckets/:bucketKey/convert with OCR settings', () => {
     await startFilesQueueConsumer();
     await settled('scan.pdf');
     expect(lastRequest()).toMatchObject({ ocr: { mode: 'auto', modelKey: 'm1' } });
+  });
+
+  it('replacing the content drops what the last run found when the new run produces no result, and gives the run the project', async () => {
+    await stack.putFile('work', 'scan.pdf', 'old-bytes', {
+      contentType: 'application/pdf', markdownStatus: 'succeeded',
+      markdownExtraction: { ocr: { mode: 'auto' }, result: { sourceType: 'mixed', engine: 'local', pageCount: 5, ocrPages: 2 } },
+    });
+    hoisted.extract.mockRejectedValueOnce(new Error('converter blew up'));
+
+    const view = await replaceFileContent(FILES_DB_NAME, stack.tenantId, stack.projectId, 'work', 'scan.pdf', {
+      data: Buffer.from('new-bytes'), updatedBy: stack.userId,
+    });
+
+    expect(view.markdownStatus).toBe('failed');
+    expect(lastRequest().scope.projectId).toBe(stack.projectId);
+    expect((await stack.record('work', 'scan.pdf'))!.markdownExtraction).toEqual({ ocr: { mode: 'auto' } });
   });
 
   it('clears the settings when the body says ocr: null, and converts the file plainly', async () => {

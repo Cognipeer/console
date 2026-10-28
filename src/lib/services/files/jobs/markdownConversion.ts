@@ -217,7 +217,7 @@ async function convertWaitingRecord(
       { fileName: record.name },
       original.data,
       db,
-      { tenantDbName, userId: actor, budget: 'background', ...(heartbeat ? { onProgress: heartbeat.beat } : {}) },
+      { tenantDbName, projectId, userId: actor, budget: 'background', ...(heartbeat ? { onProgress: heartbeat.beat } : {}) },
     );
   } finally {
     heartbeat?.stop();

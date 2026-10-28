@@ -37,7 +37,7 @@ describe('extractionWithResult', () => {
   it('adds the result next to the settings: counts instead of lists, no timings', () => {
     expect(extractionWithResult({ ocr: { mode: 'always', modelKey: 'm1' } }, report)).toEqual({
       ocr: { mode: 'always', modelKey: 'm1' },
-      result: { sourceType: 'ocr', engine: 'model', modelKey: 'm1', pageCount: 3, ocrPages: 3, ocrImages: 2, warnings: ['ocr_timeout: slow'] },
+      result: { sourceType: 'ocr', engine: 'model', modelKey: 'm1', pageCount: 3, ocrPages: 3, ocrImages: 2, warnings: ['ocr_timeout'] },
     });
   });
 
@@ -59,8 +59,34 @@ describe('extractionWithResult', () => {
 
     const kept = extractionWithResult({ ocr: { mode: 'auto' } }, { sourceType: 'converted', warnings: many })!.result!.warnings!;
 
-    expect(kept).toHaveLength(20);
-    expect(kept.every((w) => w.length <= 303)).toBe(true);
+    expect(kept).toHaveLength(5);
+    expect(kept.every((w) => w.length <= 120)).toBe(true);
+  });
+
+  it('keeps the code of a warning and never what a provider or a library said about the failure', () => {
+    const warnings = [
+      'ocr_failed: 401 from https://acme.openai.azure.com/openai/deployments/gpt-x (request id abc, key sk-123)',
+      'ocr_timeout: The document was not read within 120 s',
+      'ocr_model_unavailable: An OCR model can only be used inside a project.',
+      'ocr_page_failed: page 3: ENOENT /var/tmp/secret.png',
+      'ocr_page_failed: page 4: boom',
+      'tesseract_lang_missing: tur',
+      'ocr_page_limit: 120 candidate pages, 100 processed',
+      'ocr_language_unavailable: https://evil.example/x',
+      'not a code: at all',
+    ];
+
+    const kept = extractionWithResult({ ocr: { mode: 'auto' } }, { sourceType: 'converted', warnings })!.result!.warnings!;
+
+    expect(kept).toEqual([
+      'ocr_failed',
+      'ocr_timeout',
+      'ocr_model_unavailable',
+      'ocr_page_failed',
+      'tesseract_lang_missing: tur',
+    ]);
+    const all = extractionWithResult({ ocr: { mode: 'auto' } }, { sourceType: 'converted', warnings: warnings.slice(5) })!.result!.warnings!;
+    expect(all).toEqual(['tesseract_lang_missing: tur', 'ocr_page_limit: 120 candidate pages, 100 processed', 'ocr_language_unavailable']);
   });
 });
 

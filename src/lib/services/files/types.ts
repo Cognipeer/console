@@ -160,6 +160,8 @@ export interface UploadFileRequest {
    * plain conversion, exactly as before OCR existed.
    */
   extraction?: FileExtractionRequest;
+  /** Stops a synchronous conversion (OCR can take a while) when the caller has gone. */
+  signal?: AbortSignal;
 }
 
 /** The settings a caller may give for the extraction of one file's Markdown copy. */

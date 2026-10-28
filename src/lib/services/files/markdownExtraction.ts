@@ -14,8 +14,31 @@ import type { FileExtractionRequest } from './types';
 const IMAGE_POLICIES: ReadonlySet<string> = new Set<ImagePolicy>(['inline', 'placeholder', 'omit']);
 
 /** Warnings kept on the record: enough to explain a result, never a log. */
-const MAX_WARNINGS = 20;
-const MAX_WARNING_LENGTH = 300;
+const MAX_WARNINGS = 5;
+const MAX_WARNING_LENGTH = 120;
+
+/** Details that are safe to keep after a code: a language code, or the page counts of a limit. */
+const SAFE_WARNING_DETAILS: Record<string, RegExp> = {
+  ocr_language_unavailable: /^[A-Za-z]{2,12}(?:[+_-][A-Za-z]{2,12})*$/,
+  tesseract_lang_missing: /^[A-Za-z]{2,12}(?:[+_-][A-Za-z]{2,12})*$/,
+  ocr_page_limit: /^\d{1,6} candidate pages, \d{1,6} processed$/,
+  ocr_image_limit: /^\d{1,6}(?: [a-z ]{1,30})?(?:, \d{1,6}(?: [a-z ]{1,30})?)?$/,
+};
+
+/**
+ * A warning as the record keeps it: its stable code, never the text after it. That text is what a provider or a
+ * library said about a failure and can carry a request URL, a deployment name, a request id or a path; the engine
+ * logs it server side.
+ */
+function recordedWarning(warning: string): string | undefined {
+  const colon = warning.indexOf(':');
+  const code = (colon === -1 ? warning : warning.slice(0, colon)).trim();
+  if (!/^[a-z][a-z0-9_]{0,59}$/.test(code)) return undefined;
+  const detail = colon === -1 ? '' : warning.slice(colon + 1).trim();
+  const allowed = SAFE_WARNING_DETAILS[code];
+  const kept = allowed && detail && allowed.test(detail) ? `${code}: ${detail}` : code;
+  return kept.length > MAX_WARNING_LENGTH ? kept.slice(0, MAX_WARNING_LENGTH) : kept;
+}
 
 /** How often a long run touches its record so the screens do not take it for a lost job. */
 export const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -42,7 +65,7 @@ export function extractionWithResult(
   const compact = compactExtraction(settings);
   if (!compact) return undefined;
   if (!compact.ocr) return compact;
-  const warnings = report.warnings.slice(0, MAX_WARNINGS).map((w) => (w.length > MAX_WARNING_LENGTH ? `${w.slice(0, MAX_WARNING_LENGTH)}...` : w));
+  const warnings = [...new Set(report.warnings.map(recordedWarning).filter((w): w is string => !!w))].slice(0, MAX_WARNINGS);
   return {
     ...compact,
     result: {
