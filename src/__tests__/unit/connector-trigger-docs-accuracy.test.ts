@@ -399,6 +399,15 @@ describe('the triggers guide, the schedule of a poll', () => {
     expect(text).toContain('`schedule: null` on a PATCH returns a saved trigger to it, and leaving it out keeps the stored one');
   });
 
+  it('says the timezone picker of Studio is off while the schedule field is empty, because the package\'s schedule runs in UTC', () => {
+    const text = section();
+    expect(text).toContain('While the schedule field is empty, the timezone picker beside it is off, because the package\'s schedule runs in UTC, and a hint says so; type a cron to pick a timezone');
+    // It sits beside what an empty field sends, in the paragraph on editing.
+    const editing = text.slice(text.indexOf('**Editing a poll\'s schedule.**'), text.indexOf('**Switching a poll off and on.**'));
+    expect(editing).toContain('Studio sends `null` when you clear the schedule field of a saved poll trigger');
+    expect(editing).toContain('the timezone picker beside it is off');
+  });
+
   it('says a schedule object on a PATCH replaces the stored schedule as a whole, and a timezone it leaves out is UTC', () => {
     const text = section();
     expect(text).toContain('A `schedule` object replaces the stored schedule as a whole; it is not merged into it');
