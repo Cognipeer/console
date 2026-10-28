@@ -824,6 +824,14 @@ export interface SetRagNodeAclInput {
   managed?: RagAclManagedBy;
 }
 
+/** The same principals with the same labels, in any order. */
+function sameAclEntries(current: Array<{ principal: string; label?: string }>, next: Array<{ principal: string; label?: string }>): boolean {
+  if (current.length !== next.length) return false;
+  const key = (e: { principal: string; label?: string }) => `${e.principal}\u0000${e.label ?? ''}`;
+  const have = new Set(current.map(key));
+  return have.size === current.length && next.every((e) => have.has(key(e)));
+}
+
 function writeNodeAcl(db: Db, ctx: RagAccessContext, ragModule: IRagModule, input: SetRagNodeAclInput): Promise<RagAclNodeRef> {
   return serializeStructureWrite(ctx, ragModule, () => writeNodeAclLocked(db, ctx, ragModule, input));
 }
@@ -839,6 +847,13 @@ async function writeNodeAclLocked(db: Db, ctx: RagAccessContext, ragModule: IRag
   }
   const entries = input.mode === 'own' ? normalizeAclEntries(input.entries) : [];
   await assertPrincipalsExist(db, ctx, entries, { externalOnly: input.managed === 'sync' });
+  // A sync writes the same permissions on every run: a node that already has them is left alone, so the tree's revision
+  // (and every cache keyed on it) does not move.
+  if (input.managed === 'sync' && resolved.managed === 'sync' && resolved.mode === input.mode) {
+    const current = (await db.listRagAclEntries(ragModule.key, { projectId: ragModule.projectId, nodeType: resolved.ref.type, nodeId: resolved.ref.id }))
+      .filter((entry) => sameProject(entry.projectId, ragModule.projectId));
+    if (sameAclEntries(current, entries)) return resolved.ref;
+  }
 
   const rows = entries.map((e) => ({
     tenantId: ctx.tenantId,
@@ -1197,6 +1212,13 @@ function sourceFolderName(raw: unknown, externalId: string): string {
   return `folder-${externalId.replace(/[^A-Za-z0-9_-]+/g, '').slice(0, 24) || 'unnamed'}`;
 }
 
+export interface RagSourcePathInput {
+  ragModuleKey: string;
+  source: RagSourceRef;
+  segments: Array<{ externalId: string; name: string }>;
+  actor: string;
+}
+
 /**
  * Make sure the folders of a source path exist, top level first, and return
  * the last one's id. Folders are matched by the source's own ids, so a rename
@@ -1206,15 +1228,21 @@ export async function ensureRagFolderPath(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
-  input: {
-    ragModuleKey: string;
-    source: RagSourceRef;
-    segments: Array<{ externalId: string; name: string }>;
-    actor: string;
-  },
+  input: RagSourcePathInput,
 ): Promise<string | undefined> {
+  const chain = await ensureRagFolderChain(tenantDbName, tenantId, projectId, input);
+  return chain[chain.length - 1];
+}
+
+/** Like `ensureRagFolderPath`, with the id of every folder of the path, top level first (a sync sets each one's permissions). */
+export async function ensureRagFolderChain(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  input: RagSourcePathInput,
+): Promise<string[]> {
   const ctx: RagAccessContext = { tenantDbName, tenantId, projectId, actor: input.actor };
-  if (!Array.isArray(input.segments) || input.segments.length === 0) return undefined;
+  if (!Array.isArray(input.segments) || input.segments.length === 0) return [];
   if (input.segments.length > MAX_FOLDER_DEPTH) {
     throw new RagAccessError('folder_too_deep', `Folders nest at most ${MAX_FOLDER_DEPTH} levels`);
   }
@@ -1228,8 +1256,8 @@ async function ensureSourcePathLocked(
   db: Db,
   ctx: RagAccessContext,
   ragModule: IRagModule,
-  input: Parameters<typeof ensureRagFolderPath>[3],
-): Promise<string | undefined> {
+  input: RagSourcePathInput,
+): Promise<string[]> {
   const folders = await db.listRagFolders(ragModule.key, { projectId: ragModule.projectId });
   const tree = treeOf(folders);
   const bySourceId = new Map<string, TreeNode>();
@@ -1239,6 +1267,7 @@ async function ensureSourcePathLocked(
   }
   let parentId: string | undefined;
   let changed = false;
+  const chain: string[] = [];
   for (const segment of input.segments) {
     const externalId = typeof segment.externalId === 'string' ? segment.externalId.trim() : '';
     if (!externalId) throw new RagAccessError('folder_name_invalid', 'Every path segment needs the source id of the folder');
@@ -1256,6 +1285,7 @@ async function ensureSourcePathLocked(
         changed = true;
       }
       parentId = id;
+      chain.push(id);
       continue;
     }
     const ancestors = parentId ? [...(ancestorsOf(tree, parentId) ?? []), parentId] : [];
@@ -1274,10 +1304,11 @@ async function ensureSourcePathLocked(
     tree.set(id, node);
     bySourceId.set(externalId, node);
     parentId = id;
+    chain.push(id);
     changed = true;
   }
   if (changed) await treeChanged(db, ctx, ragModule);
-  return parentId;
+  return chain;
 }
 
 /** Set one node's permissions as an integration (the node becomes owned by the source). */
@@ -1291,6 +1322,31 @@ export async function setRagNodeAcl(
   await inTenant(ctx, async (db) => {
     const ragModule = await requireModule(db, ctx, input.ragModuleKey);
     await writeNodeAcl(db, ctx, ragModule, { ...input, managed: input.managed ?? 'sync' });
+  });
+}
+
+/**
+ * Put a document a source mirrors into its folder (`null`: the top level) with its permissions, as the source has
+ * them now; the sync of an item whose content did not change. The document becomes (or stays) owned by the source.
+ */
+export async function placeRagDocumentFromSource(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  input: {
+    ragModuleKey: string;
+    documentId: string;
+    folderId: string | null;
+    acl: { mode: 'own' | 'inherit'; entries?: unknown };
+    actor: string;
+  },
+): Promise<void> {
+  const ctx: RagAccessContext = { tenantDbName, tenantId, projectId, actor: input.actor };
+  await inTenant(ctx, async (db) => {
+    const ragModule = await requireModule(db, ctx, input.ragModuleKey);
+    const doc = await requireDocument(db, ragModule, input.documentId);
+    const prepared = await prepareRagDocumentPlacement(db, ctx, ragModule, { folderId: input.folderId, acl: input.acl, aclManaged: 'sync' });
+    await commitRagDocumentPlacement(db, ctx, ragModule, doc, prepared);
   });
 }
 
