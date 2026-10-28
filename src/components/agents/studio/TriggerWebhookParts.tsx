@@ -140,8 +140,8 @@ export interface WebhookFilterEditorProps {
     form: TriggerForm;
     set: <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => void;
     errorOf: (field: keyof TriggerForm) => string | undefined;
-    /** Rows (by index) to point out as rules that can never match, with the reason shown under their path. */
-    flagged?: { rows: readonly number[]; reason: string };
+    /** Rows (by index) to point out, each group with the reason shown under the path of its rows. */
+    flagged?: ReadonlyArray<{ rows: readonly number[]; reason: string }>;
 }
 
 /** The filter rows: every rule must match the event. Shared by webhook and connector triggers (both match over `payload.`). */
@@ -168,7 +168,7 @@ export function WebhookFilterEditor({ form, set, errorOf, flagged }: WebhookFilt
                         style={{ flex: 2 }}
                         value={row.path}
                         aria-label={t('webhookFilterPath')}
-                        error={flagged?.rows.includes(index) ? flagged.reason : undefined}
+                        error={flagged?.find((group) => group.rows.includes(index))?.reason}
                         onChange={(event) => setRow(index, { path: event.currentTarget.value })}
                     />
                     <Select style={{ flex: '0 0 190px' }} comboboxProps={{ width: 'max-content' }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />

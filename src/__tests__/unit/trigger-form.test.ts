@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { messages } from '@/lib/i18n/messages';
+import type { IAgentTrigger } from '@/lib/database';
 import {
   CONNECTOR_TEMPLATE_VARIABLES,
   TRIGGER_TYPES,
@@ -30,10 +31,13 @@ import {
   webhookVariableValue,
   withTriggerLocale,
   type TriggerRow,
+  type WebhookFilterOp,
+  type WebhookFilterRow,
 } from '@/components/agents/studio/triggerForm';
+import { eventView } from '@/lib/services/agents/agentTriggerEventDispatch';
 import { DEFAULT_WEBHOOK_HEADER_NAME, WEBHOOK_PRESET_AUTH as SERVER_PRESET_AUTH, WEBHOOK_PRESETS as SERVER_PRESETS } from '@/lib/services/agents/agentTriggerWebhookAuth';
 import { RETIRED_WEBHOOK_AUTH, RETIRED_WEBHOOK_PRESETS } from '@/lib/services/agents/agentTriggerWebhookAuth';
-import { WEBHOOK_CONTEXT_ROOTS, boundedView, firstFilterMiss, parseFilterRules, renderWebhookTemplate } from '@/lib/services/agents/agentTriggerWebhookView';
+import { WEBHOOK_CONTEXT_ROOTS, boundedView, filterRuleMatches, firstFilterMiss, parseFilterRules, renderWebhookTemplate } from '@/lib/services/agents/agentTriggerWebhookView';
 
 const now = new Date('2026-10-18T10:00:00Z');
 const base = () => ({ ...emptyTriggerForm('Europe/Istanbul', now), name: 'Digest', prompt: 'Summarise.' });
@@ -309,16 +313,87 @@ describe('connector trigger', () => {
     // Nothing is dropped behind the user's back ...
     expect(form.webhookFilter.map((row) => row.path)).toEqual(['headers.x-github-event', 'payload.pull_request.draft', 'preset']);
     // ... but the two rules a connector event can never meet are found.
-    expect(rowsOnWebhookOnlyData(form.webhookFilter)).toEqual([0, 2]);
+    expect(rowsOnWebhookOnlyData(form.webhookFilter)).toEqual({ never: [0, 2], always: [] });
   });
 
   it('flags only paths that start at headers or preset', () => {
     const rows = (...paths: string[]) => paths.map((path) => ({ path, op: 'eq' as const, value: 'x' }));
-    expect(rowsOnWebhookOnlyData(rows('headers', 'headers.x-github-event', 'preset', 'preset.name'))).toEqual([0, 1, 2, 3]);
-    expect(rowsOnWebhookOnlyData(rows('  headers.x-a  ', ' preset '))).toEqual([0, 1]);
+    expect(rowsOnWebhookOnlyData(rows('headers', 'headers.x-github-event', 'preset', 'preset.name'))).toEqual({ never: [0, 1, 2, 3], always: [] });
+    expect(rowsOnWebhookOnlyData(rows('  headers.x-a  ', ' preset '))).toEqual({ never: [0, 1], always: [] });
     // Data the connector event does carry, or that only looks alike.
-    expect(rowsOnWebhookOnlyData(rows('payload.headers.x', 'payload.preset', 'event', 'delivery_id', 'headersx', 'presets', 'connector.name', 'trigger.name', 'agent.key', 'payload.'))).toEqual([]);
-    expect(rowsOnWebhookOnlyData([])).toEqual([]);
+    expect(rowsOnWebhookOnlyData(rows('payload.headers.x', 'payload.preset', 'event', 'delivery_id', 'headersx', 'presets', 'connector.name', 'trigger.name', 'agent.key', 'payload.'))).toEqual({ never: [], always: [] });
+    expect(rowsOnWebhookOnlyData([])).toEqual({ never: [], always: [] });
+  });
+
+  describe('a row on headers or preset is judged by what it does on a connector event', () => {
+    const row = (path: string, op: WebhookFilterOp, value = ''): WebhookFilterRow => ({ path, op, value });
+
+    it('a rule on a header holds only when it asks for the header to be absent', () => {
+      expect(rowsOnWebhookOnlyData([
+        row('headers.x-github-event', 'eq', 'pull_request'),
+        row('headers.x-github-event', 'neq', 'pull_request'),
+        row('headers.x-github-event', 'exists'),
+        row('headers.x-github-event', 'not_exists'),
+        row('headers.x-github-event', 'contains', 'pull'),
+        row('headers.x-github-event', 'in', 'push, pull_request'),
+        row('headers.x-github-event', 'not_in', 'push, pull_request'),
+        row('headers.x-github-event', 'starts_with', 'pull'),
+        row('headers.x-github-event', 'glob', '*'),
+      ])).toEqual({ never: [0, 1, 2, 4, 5, 6, 7, 8], always: [3] });
+    });
+
+    it('a rule on the preset is judged against the text connector', () => {
+      expect(rowsOnWebhookOnlyData([
+        row('preset', 'eq', 'connector'),
+        row('preset', 'eq', 'github'),
+        row('preset', 'neq', 'github'),
+        row('preset', 'neq', 'connector'),
+        row('preset', 'in', 'github, connector'),
+        row('preset', 'not_in', 'github, gitlab'),
+        row('preset', 'contains', 'nect'),
+        row('preset', 'glob', 'git*'),
+        row('preset', 'exists'),
+        row('preset', 'not_exists'),
+        row('preset.name', 'not_exists'),
+        row('preset.name', 'eq', 'connector'),
+      ])).toEqual({ never: [1, 3, 7, 9, 11], always: [0, 2, 4, 5, 6, 8, 10] });
+    });
+
+    it('does not judge a row that cannot be sent yet (a save refuses it first)', () => {
+      expect(rowsOnWebhookOnlyData([row('headers.x', 'eq', ''), row('preset', 'in', ' , '), row('preset', 'neq', ''), row('headers.x', 'not_exists')]))
+        .toEqual({ never: [], always: [3] });
+    });
+
+    it('judges the row over the very view a connector event has', () => {
+      // The view the server builds for a connector event (the Connectors module hands it no headers).
+      const view = eventView({
+        trigger: { _id: 't1', name: 'Example', agentKey: 'agent' } as unknown as IAgentTrigger,
+        preset: 'connector',
+        payload: { number: 7 },
+        headers: {},
+        identity: { event: 'pull_request.opened', deliveryId: 'delivery-1' },
+        receivedAt: new Date(now),
+        connector: { id: 'c1', key: 'github', name: 'GitHub', packageId: 'cognipeer.github', trigger: 'pull_request' },
+      });
+      const rows: WebhookFilterRow[] = [];
+      for (const path of ['headers', 'headers.x-github-event', 'headers.*', 'preset', 'preset.name', ' preset ']) {
+        for (const op of WEBHOOK_FILTER_OPS) {
+          for (const value of op === 'exists' || op === 'not_exists' ? [''] : ['connector', 'github', 'conn*', 'github, connector']) rows.push(row(path, op, value));
+        }
+      }
+      const ruleOf = (item: WebhookFilterRow) => ({
+        path: item.path.trim(),
+        op: item.op,
+        ...(item.op === 'exists' || item.op === 'not_exists' ? {} : { value: item.op === 'in' || item.op === 'not_in' ? item.value.split(',').map((part) => part.trim()) : item.value }),
+      });
+      const found = rowsOnWebhookOnlyData(rows);
+      const always = rows.flatMap((item, index) => (filterRuleMatches(view, ruleOf(item)) ? [index] : []));
+      expect(found.always).toEqual(always);
+      expect(found.never).toEqual(rows.flatMap((_, index) => (always.includes(index) ? [] : [index])));
+      // Both kinds are there, so the comparison says something.
+      expect(found.always.length).toBeGreaterThan(10);
+      expect(found.never.length).toBeGreaterThan(10);
+    });
   });
 
   it('the tags offered are roots the server knows, and a connector event has no headers', () => {

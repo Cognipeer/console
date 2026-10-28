@@ -541,6 +541,8 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                     : t('typeManual');
     const webhook = form.type === 'webhook';
     const connector = form.type === 'connector';
+    /** A converted trigger's filter rows on data a connector event lacks: the ones that match nothing and the ones that match everything. */
+    const webhookOnlyRows = convert ? rowsOnWebhookOnlyData(form.webhookFilter) : null;
     /** A webhook's and a connector trigger's prompt is a template over the event, and its variables a mapping. */
     const eventDriven = webhook || connector;
     const declared = declaredVariables ?? [];
@@ -663,7 +665,10 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                                     form={form}
                                     set={set}
                                     errorOf={errorOf}
-                                    flagged={convert ? { rows: rowsOnWebhookOnlyData(form.webhookFilter), reason: t('convertRowHint') } : undefined}
+                                    flagged={webhookOnlyRows ? [
+                                        { rows: webhookOnlyRows.never, reason: t('convertRowHint') },
+                                        { rows: webhookOnlyRows.always, reason: t('convertRowAlwaysHint') },
+                                    ] : undefined}
                                 />
                                 <WebhookIncludePayload form={form} set={set} />
                             </>

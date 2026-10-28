@@ -5,10 +5,11 @@
  * without rendering.
  */
 
-import type { IAgentVariable } from '@/lib/database/provider/types.domain';
+import type { AgentTriggerWebhookFilterRule, IAgentVariable } from '@/lib/database/provider/types.domain';
 import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
 import type { ConnectorSubscriptionWire, ConnectorTriggerCatalogConnector, ConnectorTriggerFormValue } from '@/lib/shared/connectorTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
+import { filterRuleMatches } from '@/lib/services/agents/agentTriggerWebhookView';
 
 /** A trigger as the API returns it. */
 export type TriggerRow = ReturnType<typeof serializeAgentTrigger>;
@@ -229,7 +230,7 @@ const listText = (value: unknown) => (Array.isArray(value) ? value.map(String).j
 const splitList = (text: string) => text.split(',').map((item) => item.trim()).filter(Boolean);
 
 /** A filter row → the API rule, or null when its value is missing. */
-function ruleFromRow(row: WebhookFilterRow): Record<string, unknown> | null {
+function ruleFromRow(row: WebhookFilterRow): AgentTriggerWebhookFilterRule | null {
     const path = row.path.trim();
     if (row.op === 'exists' || row.op === 'not_exists') return { path, op: row.op };
     if (row.op === 'in' || row.op === 'not_in') {
@@ -303,8 +304,8 @@ function connectorFormFields(connector: StoredConnector, base: TriggerForm): Par
 }
 
 /** The filter rules a save sends: the rows with a path and a value. */
-export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<Record<string, unknown>> } | { ok: false; index: number } {
-    const rules: Array<Record<string, unknown>> = [];
+export function webhookFilterBody(form: TriggerForm): { ok: true; rules: AgentTriggerWebhookFilterRule[] } | { ok: false; index: number } {
+    const rules: AgentTriggerWebhookFilterRule[] = [];
     for (const [index, row] of form.webhookFilter.entries()) {
         if (!row.path.trim() && !row.value.trim()) continue;
         const rule = ruleFromRow(row);
@@ -369,13 +370,25 @@ export function connectorFormFromRetired(trigger: TriggerRow, fallbackTimezone =
     return { ...formFromTrigger(trigger, fallbackTimezone), type: 'connector', connector: null, webhookEvents: [] };
 }
 
+/** What a connector event is to a filter row on the vendor's webhook data: it has no headers and its preset is always `connector`. */
+const CONNECTOR_EVENT_VIEW = { headers: {}, preset: 'connector' };
+
 /**
- * The filter rows that read the vendor's request `headers` or the webhook `preset`. A connector event has neither (its
- * headers are empty and its preset is always `connector`), so such a rule can never match. A converted retired trigger
- * keeps its rows as they were (dropping one would change the rule set unseen); these are the ones to point out.
+ * The filter rows that read the vendor's request `headers` or the webhook `preset`, by what each does on a connector event.
+ * A connector event has no headers and its preset is always `connector`, so the row is run through the matcher the server
+ * filters with, over that much of the event: `never` rows cannot match (`headers.x eq …`, `preset eq github`), `always`
+ * rows match every connector event and filter nothing (`headers.x not_exists`, `preset eq connector`, `preset neq github`).
+ * A converted retired trigger keeps its rows as they were (dropping one would change the rule set unseen); these are the
+ * ones to point out. A row without its value is not judged yet (a save refuses it).
  */
-export function rowsOnWebhookOnlyData(rows: ReadonlyArray<Pick<WebhookFilterRow, 'path'>>): number[] {
-    return rows.flatMap((row, index) => (/^(headers|preset)(\.|$)/.test(row.path.trim()) ? [index] : []));
+export function rowsOnWebhookOnlyData(rows: ReadonlyArray<WebhookFilterRow>): { never: number[]; always: number[] } {
+    const found = { never: [] as number[], always: [] as number[] };
+    rows.forEach((row, index) => {
+        if (!/^(headers|preset)(\.|$)/.test(row.path.trim())) return;
+        const rule = ruleFromRow(row);
+        if (rule) found[filterRuleMatches(CONNECTOR_EVENT_VIEW, rule) ? 'always' : 'never'].push(index);
+    });
+    return found;
 }
 
 /**

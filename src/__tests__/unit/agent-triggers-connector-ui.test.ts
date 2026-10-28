@@ -400,6 +400,47 @@ describe('a retired vendor webhook trigger', () => {
     ]);
   });
 
+  it('tells a carried-over rule that matches every connector event from one that matches none, under its own row', async () => {
+    const row = retiredRow();
+    const filter = [
+      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
+      { path: 'headers.x-github-event', op: 'not_exists' },
+      { path: 'preset', op: 'eq', value: 'connector' },
+      { path: 'preset', op: 'eq', value: 'github' },
+      { path: 'preset', op: 'neq', value: 'github' },
+      { path: 'payload.sender.type', op: 'eq', value: 'User' },
+    ];
+    listOf({ ...row, webhook: { ...row.webhook, filter } });
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1(?:\?|$)/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
+    mount(panel());
+    await flush();
+    await click(button('Convert to connector trigger'));
+    const never = 'A connector event has no headers or preset: this rule never matches.';
+    const always = 'A connector event has no headers and its preset is always “connector”: this rule matches every connector event, so it filters nothing.';
+    const hintUnder = (input: HTMLInputElement) => input.closest('[class*="InputWrapper-root"]')?.querySelector('[class*="InputWrapper-error"]')?.textContent ?? null;
+    const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
+    expect(paths.map(hintUnder)).toEqual([never, always, always, never, always, null]);
+    // Nothing is dropped behind the user's back: all six rows are sent as they were.
+    await click(button('Pick GitHub pull requests'));
+    await click(button('Save trigger'));
+    const patch = calls.find((call) => call.method === 'PATCH')!;
+    expect((patch.body as { connector: { filter: unknown } }).connector.filter).toEqual(filter);
+  });
+
+  it('follows the rule as it is edited: a preset rule that matched nothing matches every event once it names the connector preset', async () => {
+    const row = retiredRow();
+    row.webhook.filter = [{ path: 'preset', op: 'eq', value: 'github' }];
+    listOf(row);
+    mount(panel());
+    await flush();
+    await click(button('Convert to connector trigger'));
+    expect(text()).toContain('this rule never matches.');
+    expect(text()).not.toContain('so it filters nothing');
+    typeInto(document.querySelector<HTMLInputElement>('input[aria-label="Value"]')!, 'connector');
+    expect(text()).toContain('this rule matches every connector event, so it filters nothing.');
+    expect(text()).not.toContain('this rule never matches.');
+  });
+
   it('shows neither the conversion notice nor a mark in a plain edit of a connector trigger or a new one', async () => {
     catalog.connectors = [{
       id: 'c1', key: 'github', name: 'GitHub (acme)', packageId: 'cognipeer.github', packageName: 'GitHub', status: 'active', accountStatus: 'active',

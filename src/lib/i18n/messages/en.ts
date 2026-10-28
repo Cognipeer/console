@@ -4917,6 +4917,7 @@ export const en = {
       convert: 'Convert to connector trigger',
       convertNotice: 'The filter rows, the prompt and the variables below were written for the vendor\'s own webhook and are kept as they were. A connector event is different: its data is the connector package\'s own (for GitHub payload.draft, payload.number, payload.repository, not payload.pull_request.…), it has no headers, and its event names look like pull_request.opened. A rule on a path the event does not carry matches nothing, so check each one against the connector\'s sample, then save and use Preview on the Test tab.',
       convertRowHint: 'A connector event has no headers or preset: this rule never matches.',
+      convertRowAlwaysHint: 'A connector event has no headers and its preset is always “connector”: this rule matches every connector event, so it filters nothing.',
       kindConnectorWebhook: 'Connector · the service pushes events (webhook)',
       kindConnectorPoll: 'Connector · checked on a schedule (poll)',
       summaryConnector: '{label} · {events}',
