@@ -490,6 +490,8 @@ describe('Knowledge Engine OCR', () => {
 
     beforeEach(() => {
       db.findRagModuleByKey.mockResolvedValue(ocrBucketModule);
+      // The row exists: an update answers it, as both providers do (null means it is gone).
+      db.updateRagDocument.mockImplementation(async (id: string, patch: object) => ({ ...stored, _id: id, ...patch }));
     });
 
     it('keeps the text of a document that was OCR\'d, without touching its original or the engine', async () => {

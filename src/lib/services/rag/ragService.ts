@@ -7,6 +7,7 @@
 
 import { assertServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import {
+  RagDocumentGoneError,
   RagModuleInactiveError,
   RagOcrIncompleteError,
   RagOriginalMissingError,
@@ -2570,8 +2571,8 @@ export async function reingestDocument(
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
   if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
 
-  const doc = await db.findRagDocumentById(request.documentId);
-  if (!doc) throw new Error('Document not found');
+  let doc = await db.findRagDocumentById(request.documentId);
+  if (!doc) throw new RagDocumentGoneError();
 
   const placementCtx = { tenantDbName, tenantId, projectId, actor: request.updatedBy };
   const prepared = hasRagPlacement(request.placement)
@@ -2583,6 +2584,10 @@ export async function reingestDocument(
   // Read before the placement is written: a re-extract that is refused (409) leaves the folder and permissions as they were.
   const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request, ragModule);
 
+  // Reading the pages again can take minutes. From here on the row is the one as it is now (an admin may have moved it
+  // or changed its permissions meanwhile), and a row deleted meanwhile is not written again.
+  doc = await db.findRagDocumentById(request.documentId);
+  if (!doc) throw new RagDocumentGoneError();
   if (prepared) await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
   const textContent = source.text;
 
@@ -2675,7 +2680,9 @@ export async function reingestDocument(
   }
 
   // Mark document as processing
-  await db.updateRagDocument(request.documentId, { status: 'processing', errorMessage: undefined });
+  if (!(await db.updateRagDocument(request.documentId, { status: 'processing', errorMessage: undefined }))) {
+    throw new RagDocumentGoneError();
+  }
 
   try {
     const chunkCount = await indexDocumentContent({
@@ -2698,7 +2705,7 @@ export async function reingestDocument(
     // Already committed above, before the destructive steps.
     const sourceFields = {};
 
-    await db.updateRagDocument(request.documentId, {
+    const indexed = await db.updateRagDocument(request.documentId, {
       status: 'indexed',
       chunkCount,
       lastIndexedAt: now,
@@ -2714,6 +2721,18 @@ export async function reingestDocument(
       ...(requested ? { metadata } : {}),
       ...sourceFields,
     });
+    if (!indexed) {
+      // Deleted while it was being indexed: what this run wrote must not outlive the row.
+      await removeVectors(
+        tenantDbName, tenantId, projectId, ragModule,
+        documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
+        `re-ingest of document ${request.documentId}, deleted meanwhile`,
+      );
+      await db.deleteRagChunksByDocumentId(request.documentId).catch((err) => {
+        logger.warn('Failed to delete the chunks of a document deleted during its re-ingest', { documentId: request.documentId, error: err });
+      });
+      throw new RagDocumentGoneError();
+    }
 
     await db.incrementRagModuleTotals(String(ragModule._id), { chunks: chunkCount - oldChunkCount });
 
@@ -2735,6 +2754,7 @@ export async function reingestDocument(
       ...(request.metadata ? { metadata } : {}),
     });
   } catch (error) {
+    if (error instanceof RagDocumentGoneError) throw error;
     const msg = error instanceof Error ? error.message : 'Re-ingest failed';
     await db.updateRagDocument(request.documentId, {
       status: 'failed',

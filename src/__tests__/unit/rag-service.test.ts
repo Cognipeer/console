@@ -581,7 +581,8 @@ describe('RAG Service', () => {
     beforeEach(() => {
       db.findRagModuleByKey.mockResolvedValue(mockModule);
       db.findRagDocumentById.mockResolvedValue(PENDING);
-      db.updateRagDocument.mockResolvedValue(null);
+      // The row exists: an update answers it, as both providers do (null means it is gone).
+      db.updateRagDocument.mockImplementation(async (id: string, patch: object) => ({ ...PENDING, _id: id, ...patch }));
       db.updateRagModule.mockResolvedValue(null);
       db.bulkInsertRagChunks.mockResolvedValue(undefined);
     });
@@ -1629,7 +1630,8 @@ describe('RAG Service', () => {
 
     beforeEach(() => {
       db.findRagModuleByKey.mockResolvedValue(mockModuleWithBucket);
-      db.updateRagDocument.mockResolvedValue(null);
+      // The row exists: an update answers it, as both providers do (null means it is gone).
+      db.updateRagDocument.mockImplementation(async (id: string, patch: object) => ({ ...mockDocument, _id: id, ...patch }));
       db.updateRagModule.mockResolvedValue(null);
       db.deleteRagChunksByDocumentId.mockResolvedValue(2);
     });

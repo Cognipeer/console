@@ -305,7 +305,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   or an "Extracted Text" heading.
 - A folder or permission entry that is refused fails the upload before any page is read, and a refused re-extract
   leaves the document's folder and permissions as they were. A document deleted while its pages are read or embedded
-  is not indexed, and what the job had written for it is removed.
+  is not indexed, and what the job had written for it is removed; a re-ingest of a document deleted while it runs
+  answers 404, and one whose permissions change meanwhile applies its own to the row as it is then.
 
 ### Agent attachments and crawler
 

@@ -12,6 +12,18 @@ export class RagModuleInactiveError extends Error {
 }
 
 /**
+ * Raised when the document a re-ingest works on is deleted while it runs (reading a scan again takes minutes). Routes
+ * answer it with a 404, as for a document that is not there.
+ */
+export class RagDocumentGoneError extends Error {
+  readonly statusCode = 404;
+  constructor() {
+    super('Document not found');
+    this.name = 'RagDocumentGoneError';
+  }
+}
+
+/**
  * Raised when a re-extract is asked of a document whose original upload was not kept (the module has no file bucket,
  * or the copy could not be stored). Routes answer it with a 409: uploading the file again is the way out.
  */

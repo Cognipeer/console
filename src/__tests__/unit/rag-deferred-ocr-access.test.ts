@@ -1075,6 +1075,87 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
     });
   });
 
+  describe('a re-extract while the document changes', () => {
+    /** An indexed scan in the open folder, its original kept, with its own permissions naming the member. */
+    async function indexedScan(kb: Kb): Promise<string> {
+      const id = String((await upload(kb, { placement: { folderId: kb.open, acl: own(user('member')) } }))._id);
+      await runJob();
+      expect(await rowOf(id)).toMatchObject({ status: 'indexed' });
+      return id;
+    }
+
+    const reextract = async (kb: Kb, id: string) => {
+      const scope = await scopeFor(kb.key, 'admin');
+      return inTenant(() => reingestDocument(tenantDbName, tenantId, projectId, {
+        ragModuleKey: kb.key,
+        documentId: id,
+        reextract: true,
+        placement: { acl: own(user('outsider')), scope },
+        updatedBy: idOf('admin'),
+      }));
+    };
+
+    it('deleted while its pages are read again: 404, and nothing is written for it', async () => {
+      const kb = await makeKb();
+      const id = await indexedScan(kb);
+      let chunksAfterDelete: number | undefined;
+      h.duringOcr = async () => {
+        expect(await inTenant(() => deleteRagDocument(tenantDbName, tenantId, projectId, { ragModuleKey: kb.key, documentId: id }))).toBe(true);
+        chunksAfterDelete = (await moduleOf(kb.key))!.totalChunks;
+      };
+      vi.clearAllMocks();
+
+      await expect(reextract(kb, id)).rejects.toMatchObject({ statusCode: 404, message: 'Document not found' });
+
+      expect(h.extract).toHaveBeenCalledTimes(1);
+      expect(h.upsert).not.toHaveBeenCalled();
+      expect(h.uploadFile).not.toHaveBeenCalled();
+      expect(await rowOf(id)).toBeNull();
+      expect(await chunksOf(id)).toEqual([]);
+      expect(await entriesOf(kb.key, id)).toEqual([]);
+      expect(await inTenant(() => getDb().hasRagAclEntries(kb.key, 'document', id, projectId))).toBe(false);
+      expect((await moduleOf(kb.key))!.totalChunks).toBe(chunksAfterDelete);
+    });
+
+    it('permissions an admin changes while its pages are read again: its own placement is applied to the row as it is then', async () => {
+      const kb = await makeKb();
+      const id = await indexedScan(kb);
+      h.duringOcr = async () => {
+        await asAdmin(() => setRagNodeAclFromConsole(ctx(), { ragModuleKey: kb.key, node: { type: 'document', id }, mode: 'inherit' }));
+        expect((await rowOf(id))!.aclMode ?? null).toBeNull();
+      };
+
+      await reextract(kb, id);
+
+      const row = (await rowOf(id))!;
+      expect(row).toMatchObject({ status: 'indexed', aclMode: 'own' });
+      expect(await entriesOf(kb.key, id)).toEqual([user('outsider')]);
+      expect(await readsOf(kb.key, row)).toMatchObject({ member: false, outsider: true });
+    });
+
+    it('deleted while it is embedded again: 404, its new chunks are removed and the totals do not count them', async () => {
+      const kb = await makeKb();
+      const id = await indexedScan(kb);
+      let chunksAfterDelete: number | undefined;
+      let deleted = false;
+      h.embed.mockImplementation(async (input: { body: { input: string[] } }) => {
+        if (!deleted) {
+          deleted = true;
+          expect(await inTenant(() => deleteRagDocument(tenantDbName, tenantId, projectId, { ragModuleKey: kb.key, documentId: id }))).toBe(true);
+          chunksAfterDelete = (await moduleOf(kb.key))!.totalChunks;
+        }
+        return { response: { data: input.body.input.map(() => ({ embedding: [0.1, 0.2, 0.3] })) } };
+      });
+
+      await expect(reextract(kb, id)).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(deleted).toBe(true);
+      expect(await rowOf(id)).toBeNull();
+      expect(await chunksOf(id)).toEqual([]);
+      expect((await moduleOf(kb.key))!.totalChunks).toBe(chunksAfterDelete);
+    });
+  });
+
   // ── g. access control off ─────────────────────────────────────────────
 
   describe('with access control off', () => {

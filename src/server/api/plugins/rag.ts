@@ -27,7 +27,7 @@ import {
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
 import { clientGone } from '../clientGone';
-import { RagModuleInactiveError, RagOcrIncompleteError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
+import { RagDocumentGoneError, RagModuleInactiveError, RagOcrIncompleteError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import { validateChunkConfig } from '@/lib/services/rag/chunking';
 import {
@@ -1166,6 +1166,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         || error instanceof RagOriginalMissingError
         || error instanceof RagStoredTextUnavailableError
         || error instanceof RagReextractIncompleteError
+        || error instanceof RagDocumentGoneError
       ) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
