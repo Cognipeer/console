@@ -14,6 +14,13 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# onnxruntime-node's install script downloads the CUDA 12 provider binaries
+# (a large nuget.org package) on every linux/x64 `npm ci`. Every model here runs
+# on the CPU provider, which ships inside the npm package, so the download is
+# never used, and a nuget.org timeout used to fail the whole install.
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+
 # Pipeline shape:
 #
 #   lint ─────────┐
