@@ -9,9 +9,15 @@
  * So the examples are run the way the engine runs them (the filter rules through the save validator and the matcher,
  * the prompt tags through the view) over the event data the GitHub package declares (`githubConnectorFixture`), and
  * the roots a page names are compared with `WEBHOOK_CONTEXT_ROOTS`.
+ *
+ * The sentences that say what the API answers (the message of a cron a poll cannot take, a Retry that binds a lost
+ * subscription, a parameter the package reads from the service), what a retired preset leaves behind and what a cleared
+ * schedule field does are pinned here too, and no document may present a retired vendor preset as one a person can
+ * create. The events the guide lists for GitHub, GitLab and Azure DevOps, and the examples of its cron table, are held
+ * to the packages and to the Connectors module in the Enterprise overlay (`connector-trigger-guide-parity.test.ts`).
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
@@ -44,6 +50,14 @@ function connectorSection(): string {
   expect(start).toBeGreaterThan(0);
   const next = guide.indexOf('\n## ', start + 5);
   return guide.slice(start, next < 0 ? undefined : next);
+}
+
+/** The text under `### Vendor presets were retired`, up to the next heading of level 2 or 3. */
+function retiredPresetsSection(): string {
+  const start = guide.indexOf('\n### Vendor presets were retired');
+  expect(start, 'the guide has a section on the retired vendor presets').toBeGreaterThan(0);
+  const next = guide.slice(start + 5).search(/\n#{2,3} /);
+  return guide.slice(start, next < 0 ? undefined : start + 5 + next);
 }
 
 /** The JSON body of the curl example that creates a connector trigger. */
@@ -339,5 +353,276 @@ describe('the OpenAPI document, connector triggers', () => {
     const create = flat(openapi.paths['/agents/{agentKey}/triggers'].post.description);
     expect(create).not.toContain('the subscription reads `failed` until');
     expect(create).toContain('A hook that could not be registered at the vendor reads `manual`');
+  });
+});
+
+describe('the triggers guide, the schedule of a poll', () => {
+  const section = () => flat(connectorSection());
+
+  it('says what the API answers for a cron a poll cannot take: one sentence for each class, from the Connectors module first', () => {
+    const text = section();
+    // The sentences on `connector.schedule.cron`, in the order of the guide's table: not five fields, syntax of another dialect, a value, too often, never due.
+    for (const sentence of [
+      'cron must be a five-field cron expression (minute hour day-of-month month day-of-week)',
+      'cron uses syntax connector schedules do not support (L, W, # or ?); use numbers, ranges, lists, steps and month or weekday names',
+      'cron has a value that is out of range or not a name: minute 0-59, hour 0-23, day 1-31, month 1-12 or jan-dec, weekday 0-7 or sun-sat',
+      'cron runs every N minutes, below the M minutes this trigger allows',
+      'cron cannot be evaluated in this timezone',
+    ]) expect(text, sentence).toContain(`\`${sentence}\``);
+    expect(text).toContain('A cron a connector schedule cannot take is `400` on `connector.schedule.cron`, and nothing is stored');
+    expect(text).toContain('The Connectors module judges it first');
+    // The console's own reader runs last: its words are only for an expression it still refuses after the module took it.
+    expect(text).toContain('reads the cron once more after the module took it');
+    expect(text).toContain('only an expression that reader still refuses is answered in its own words (`invalid cron expression: …`)');
+    // Not the earlier claim that every cron a schedule cannot read gets the syntax sentence.
+    expect(text).not.toContain('and the message says that it uses syntax connector schedules do not support');
+  });
+
+  it('gives examples for each class, and says the Studio field names the same problems', () => {
+    const text = section();
+    for (const example of ['`@daily`', '`0 0 9 * * *`', '`0 9 L * *`', '`0 9 15W * *`', '`0 9 * * 5#2`', '`0 9 ? * 1`', '`60 * * * *`', '`*/0 * * * *`', '`0 9 * * funday`', '`0 0 31 2 *`']) {
+      expect(text, example).toContain(example);
+    }
+    expect(text).toContain('Studio\'s schedule field shows the same problems while you type');
+    expect(text).not.toContain('Studio\'s schedule field checks the same rules');
+  });
+
+  it('says a PATCH without a schedule keeps it, and null returns a poll to the package\'s schedule, in UTC', () => {
+    const text = section();
+    expect(text).toContain('A PATCH that leaves `schedule` out keeps the stored schedule');
+    expect(text).toContain('`schedule: null` returns the poll to the package\'s own schedule, in UTC');
+    expect(text).toContain('Studio sends `null` when you clear the schedule field of a saved poll trigger, and shows the schedule that was stored after each save');
+    expect(text).toContain('`schedule: null` on a PATCH returns a saved trigger to it, and leaving it out keeps the stored one');
+  });
+
+  it('keeps the sentences of the edit, of a poll switched off and of a shared poll', () => {
+    const text = section();
+    // An edit of the schedule alone: the page that was being handed out moves with it.
+    expect(text).toContain('moves with the edit and starts nothing twice');
+    // A poll whose triggers are all off forgets its place at its next scheduled check; a trigger switched on starts from then.
+    expect(text).toContain('the poll forgets its place');
+    expect(text).toContain('taken at the next tick of the poller (a minute by default) and not at the next slot of the `schedule`');
+    expect(text).toContain('keeps the place, and that check reports what happened meanwhile');
+    expect(text).toContain('a `paused` poll keeps its place and catches up when it is back');
+    // A shared poll: the trigger over its limit does not hold the others back, and a trigger that never matches lets the page go.
+    expect(text).toContain('has nothing left on the page (each event ran');
+    expect(text).toContain('has nothing left on the page either, so it lets the page go too');
+  });
+});
+
+describe('the triggers guide, parameters, Retry and the retired presets', () => {
+  it('says what the API checks of a parameter, and that a choice the package reads from the service is checked for its type only', () => {
+    const row = /\| `params` \|([^|]*)\|/.exec(flat(connectorSection()))?.[1] ?? '';
+    expect(row).not.toBe('');
+    expect(row).toContain('a missing required value, a value of the wrong type or format, a parameter the trigger does not declare, or a value outside the package\'s fixed options is `400` on `connector.params.<key>`');
+    expect(row).toContain('A field whose choices the package reads from the service (a repository, a table, a column, a board) is checked for its type only');
+    expect(row).toContain('a choice that does not exist or cannot be used is stored, and the first poll or the registration of the hook fails, so read `last_error`');
+    expect(row).not.toContain('a missing or wrong value is `400`');
+  });
+
+  it('says a Retry that binds a lost subscription shows the secret of a hook set up by hand once, and a Retry of an existing one never does', () => {
+    const text = flat(connectorSection());
+    expect(text).toContain('and in the answer of a **Retry** that binds a trigger whose subscription was gone (`attach_failed`) to a new one, and nowhere else: a Retry of an existing subscription never carries it');
+    expect(text).toContain('the answer carries its `secret` once, and a Retry of an existing subscription never does');
+    // The rest of the Retry row and of the paragraph on failed registrations.
+    expect(text).toContain('Retry changes nothing for those two');
+    expect(text).toContain('Studio offers no Retry for those two');
+    expect(text).toContain('the subscription itself stays as it was');
+  });
+
+  it('names the three packages that replace the presets and the events they do not cover, and what a generic webhook can still receive', () => {
+    const text = flat(retiredPresetsSection());
+    for (const id of ['cognipeer.github', 'cognipeer.gitlab', 'cognipeer.azure-devops']) expect(text, id).toContain(`\`${id}\``);
+    expect(text).toContain('GitHub\'s `pull_request_review`, `check_run` or `release`');
+    expect(text).toContain('has no connector trigger yet');
+    // The generic modes do not read a vendor's own signature or token; a sender that can add a header of its own can still use them.
+    expect(text).toContain('so a delivery that carries only those is not accepted');
+    expect(text).toContain('A sender that can add a header of its own can use `bearer` or `header` mode');
+    expect(text).toContain('the event is then named by the generic rules');
+    expect(text).not.toContain('not a way to receive these vendors');
+  });
+
+  it('sends a reader to the Studio Test tab for the fields of an event, not to a page of the connector that lists them', () => {
+    expect(flat(retiredPresetsSection())).toContain('the Studio **Test** tab of a saved connector trigger shows its sample event');
+    expect(flat(connectorSection())).toContain('The Studio **Test** tab shows the sample event you can write the `filter` and the `prompt` against');
+    expect(flat(guide)).not.toContain('connector page lists');
+  });
+});
+
+describe('the OpenAPI document, the schedule of a poll and the answer of Retry', () => {
+  const schemas = openapi.components.schemas as Record<string, Json>;
+  const patch = () => flat(openapi.paths['/agents/{agentKey}/triggers/{triggerId}'].patch.description);
+  const retry = () => flat(openapi.paths['/agents/{agentKey}/triggers/{triggerId}/connector/retry'].post.description);
+
+  it('describes the schedule of a poll by what the API answers, and what null and a missing schedule do', () => {
+    const schedule = flat(schemas.AgentTriggerConnectorRequest.properties.schedule.description);
+    expect(schedule).toContain('`L`, `W`, `#` and `?`, macros such as `@daily` and a seconds field are not accepted');
+    expect(schedule).toContain('is `400` on `connector.schedule.cron`, with a message that says what is wrong');
+    expect(schedule).toContain('Left out on create, or `null`, the schedule is the package\'s own, in UTC');
+    expect(schedule).toContain('`null` returns the trigger to the package\'s schedule');
+    expect(patch()).toContain('when `connector.schedule` is left out; `connector.schedule: null` returns it to the package\'s own schedule, in UTC');
+  });
+
+  it('says a Retry that binds a lost subscription returns the secret of a hook set up by hand once, and the secret field says so', () => {
+    expect(retry()).toContain('returns the signing secret of a hook set up by hand once, in this answer (`connector_subscription.secret`)');
+    expect(retry()).toContain('a retry of an existing subscription never does, so rotate the secret to get a new one');
+    const secret = flat(schemas.ConnectorSubscription.properties.secret.description);
+    expect(secret).toContain('or a Retry that binds a lost one');
+    expect(secret).toContain('Shown once');
+  });
+
+  it('keeps the sentences of the edit and of the lost connection', () => {
+    expect(patch()).toContain('stays as it was');
+    expect(patch()).toContain('the poll calls nothing and forgets its place');
+    expect(retry()).toContain('is bound to a new one');
+  });
+
+  it('does not send a reader to a connector page for the fields of a trigger', () => {
+    const create = flat(openapi.paths['/agents/{agentKey}/triggers'].post.description);
+    expect(create).not.toContain('the connector page lists');
+    expect(create).toContain('the Studio Test tab of a saved connector trigger shows its sample event');
+  });
+});
+
+/** Paragraphs, list items, table rows and headings of a text, so that a sentence is judged on its own. */
+function units(text: string): string[] {
+  const out: string[] = [];
+  let open = false;
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') {
+      open = false;
+    } else if (!open || /^\s*(?:[-*]\s|\d+\.\s|\||#{1,6}\s)/.test(line)) {
+      out.push(line);
+      open = true;
+    } else {
+      out[out.length - 1] += `\n${line}`;
+    }
+  }
+  return out;
+}
+
+/** What a text says that makes a retired preset read as one a person can create: "Presets for GitHub ...", "the GitLab preset", `preset: github`, `github_signature`. */
+const PRESET_AS_AVAILABLE = [
+  /\bpresets?\b[^.\n|]{0,60}\b(?:github|gitlab|azure[ _]?devops)\b/i,
+  /\b(?:github|gitlab|azure[ _]?devops)\b[`'"*]*\s+(?:webhook\s+)?presets?\b/i,
+  /\bpreset["'`]*\s*[:=]\s*["'`]*(?:github|gitlab|azure_devops)\b/i,
+  /\b(?:github_signature|gitlab_token)\b/,
+];
+/** Words that make such a mention a statement about the past or about the read-only legacy. */
+const RETIRED_WORDS = /\b(?:retire[ds]?|gone|legacy|read-only|earlier releases?|no longer|replac(?:e|es|ed)|refused|410)\b/i;
+
+/** The sentences of a text that present a retired preset as available. A sentence is judged on its own (a long bullet may say "no longer" about something else), and a sentence that wraps is still one. */
+const presentedAsAvailable = (text: string): string[] =>
+  units(text)
+    .flatMap((unit) => flat(unit).split(/(?<=[.!?])\s+(?=[A-Z`*(\[])/))
+    .filter((sentence) => PRESET_AS_AVAILABLE.some((pattern) => pattern.test(sentence)) && !RETIRED_WORDS.test(sentence));
+
+/** Every Markdown file under a folder of the repository (not the images in `public`). */
+function markdownFiles(dir: string): string[] {
+  return readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'public' || entry.name === 'node_modules' ? [] : markdownFiles(file);
+    return entry.name.endsWith('.md') ? [file] : [];
+  });
+}
+
+/** The prose of a parsed document: its descriptions, summaries and messages (not the values of an enum, which may list what a stored record can still hold). */
+function proseIn(value: unknown, out: string[] = []): string[] {
+  if (Array.isArray(value)) for (const item of value) proseIn(item, out);
+  else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof item === 'string' && ['description', 'summary', 'message', 'title'].includes(key)) out.push(item);
+      else proseIn(item, out);
+    }
+  }
+  return out;
+}
+
+describe('no document presents a retired vendor preset as one a person can create', () => {
+  it('is not said by the changelog, the README or a documentation page', () => {
+    const found = ['CHANGELOG.md', 'README.md', ...markdownFiles('docs')]
+      .flatMap((file) => presentedAsAvailable(read(file)).map((sentence) => `${file}: ${sentence.slice(0, 160)}`));
+    expect(found).toEqual([]);
+  });
+
+  it('is not said by a description of the OpenAPI document, and a webhook write names the generic preset and the four generic modes only', () => {
+    expect(proseIn(openapi).flatMap((text) => presentedAsAvailable(text).map((sentence) => sentence.slice(0, 160)))).toEqual([]);
+    const request = (openapi.components.schemas as Record<string, Json>).AgentTriggerWebhookRequest.properties;
+    expect(request.preset.enum).toEqual(['generic']);
+    expect(request.auth.enum).toEqual(['bearer', 'signature', 'header', 'standard_webhooks']);
+    // No request example of a trigger operation names a retired preset or mode.
+    const examples: Json[] = [];
+    for (const [route, methods] of Object.entries(openapi.paths) as Array<[string, Json]>) {
+      if (!route.includes('/triggers')) continue;
+      for (const operation of Object.values(methods) as Json[]) {
+        const content = operation?.requestBody?.content?.['application/json'];
+        if (content?.example !== undefined) examples.push(content.example);
+        for (const item of Object.values(content?.examples ?? {}) as Json[]) examples.push(item.value);
+      }
+    }
+    expect(examples.length).toBeGreaterThan(0);
+    for (const example of examples) {
+      if (example?.webhook?.preset !== undefined) expect(example.webhook.preset).toBe('generic');
+      if (example?.webhook?.auth !== undefined) expect(['bearer', 'signature', 'header', 'standard_webhooks']).toContain(example.webhook.auth);
+    }
+  });
+
+  it('notices the sentences it is there for, and lets the ones about the retirement through', () => {
+    expect(presentedAsAvailable('- Presets for GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list')).toHaveLength(1);
+    // A sentence that wraps is still one sentence (the line of the changelog broke between "Presets for" and "GitHub").
+    expect(presentedAsAvailable('- **Incoming webhooks**: a trigger starts when something posts. Presets for\n  GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list\n  and payload filters.')).toHaveLength(1);
+    expect(presentedAsAvailable('- The presets of GitHub and\n  GitLab are retired.')).toHaveLength(0);
+    // Another sentence of the same bullet that says "no longer" does not excuse it.
+    expect(presentedAsAvailable('- Webhooks have presets for GitHub and GitLab. The variable of a run is no longer empty.')).toHaveLength(1);
+    expect(presentedAsAvailable('Create it with `"preset": "github"` and a secret.')).toHaveLength(1);
+    expect(presentedAsAvailable('The `gitlab` preset checks the token.')).toHaveLength(1);
+    expect(presentedAsAvailable('A webhook with preset: azure_devops and basic credentials.')).toHaveLength(1);
+    expect(presentedAsAvailable('Set `auth` to `github_signature`.')).toHaveLength(1);
+    expect(presentedAsAvailable('The old `github` preset is retired and read-only.')).toHaveLength(0);
+    expect(presentedAsAvailable('They replace the GitHub webhook preset of earlier releases.')).toHaveLength(0);
+    expect(presentedAsAvailable('A hook of a retired vendor preset (`github`, `gitlab`, `azure_devops`) answers 410.')).toHaveLength(0);
+    expect(presentedAsAvailable('Use a connector for a service (GitHub, GitLab, Azure DevOps and others).')).toHaveLength(0);
+  });
+});
+
+/** The id a heading gets as a link target (what the documentation site makes of it). */
+const headingId = (heading: string): string => heading.replace(/`/g, '').trim().toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/\s+/g, '-');
+
+function headingIds(file: string): Set<string> {
+  const ids = new Set<string>();
+  let fenced = false;
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (line.startsWith('```')) fenced = !fenced;
+    const heading = fenced ? null : /^#{1,6}\s+(.*)$/.exec(line);
+    if (heading) ids.add(headingId(heading[1]));
+  }
+  return ids;
+}
+
+/** The links of a Markdown file to a page of the documentation (or a heading of it) that is not there. */
+function brokenLinks(file: string): string[] {
+  const from = path.join(ROOT, file);
+  const broken: string[] = [];
+  for (const match of readFileSync(from, 'utf8').matchAll(/\]\(([^)\s]+)\)/g)) {
+    const target = match[1];
+    if (/^(?:https?:|mailto:)/.test(target)) continue;
+    const [page, anchor] = target.split('#');
+    const resolved = page === '' ? from : page.startsWith('/') ? path.join(ROOT, 'docs', page.endsWith('.md') ? page : `${page}.md`) : path.resolve(path.dirname(from), page);
+    let ids: Set<string>;
+    try {
+      ids = headingIds(resolved);
+    } catch {
+      broken.push(`${target}: no such page`);
+      continue;
+    }
+    if (anchor && !ids.has(anchor)) broken.push(`${target}: no such heading`);
+  }
+  return broken;
+}
+
+describe('links of the changelog and of the triggers guide', () => {
+  it('point at pages and headings that exist', () => {
+    expect(brokenLinks('CHANGELOG.md')).toEqual([]);
+    expect(brokenLinks('docs/guide/agent-triggers.md')).toEqual([]);
   });
 });
