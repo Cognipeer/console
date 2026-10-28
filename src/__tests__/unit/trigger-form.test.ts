@@ -271,6 +271,41 @@ describe('connector trigger', () => {
     }
   });
 
+  describe('clearing the schedule field of a saved poll trigger', () => {
+    const pollRow = () => connectorRow({ kind: 'poll', trigger: 'issues', schedule: { cron: '*/10 * * * *', timezone: 'Europe/Istanbul' } });
+    const scheduleOf = (built: ReturnType<typeof triggerBodyFromForm>) => (built.ok ? (built.body.connector as Record<string, unknown>) : null);
+
+    it('sends schedule: null, which returns it to the package’s own schedule (an omitted one would keep the stored cron)', () => {
+      const row = pollRow();
+      const form = formFromTrigger(row, 'UTC');
+      expect(form.connector).toMatchObject({ trigger: 'issues', scheduleCron: '*/10 * * * *', scheduleTimezone: 'Europe/Istanbul' });
+      // Emptied, or only blanks left in the field.
+      for (const emptied of ['', '   ']) {
+        const connector = scheduleOf(triggerBodyFromForm({ ...form, connector: { ...form.connector!, scheduleCron: emptied } }, [], row, now));
+        expect(connector, JSON.stringify(emptied)).toHaveProperty('schedule', null);
+      }
+      // With a cron in the field, that cron is sent.
+      const kept = scheduleOf(triggerBodyFromForm({ ...form, connector: { ...form.connector!, scheduleCron: ' 0 * * * * ' } }, [], row, now));
+      expect(kept).toHaveProperty('schedule', { cron: '0 * * * *', timezone: 'Europe/Istanbul' });
+    });
+
+    it('sends no schedule where there was none to clear: a new trigger, a webhook one, another trigger or connector picked, a conversion', () => {
+      const row = pollRow();
+      const emptied = (value: Partial<NonNullable<ReturnType<typeof emptyTriggerForm>['connector']>>) => connectorForm(picked({ scheduleCron: '', ...value }));
+      // New: nothing stored. The package's schedule applies.
+      expect(scheduleOf(triggerBodyFromForm(emptied({ trigger: 'issues' }), [], null, now))).not.toHaveProperty('schedule');
+      // A webhook-kind trigger has no schedule.
+      const webhookRow = connectorRow();
+      expect(scheduleOf(triggerBodyFromForm(formFromTrigger(webhookRow, 'UTC'), [], webhookRow, now))).not.toHaveProperty('schedule');
+      // The person moved the trigger to another trigger, or to another connector: nothing of the stored schedule is theirs any more.
+      expect(scheduleOf(triggerBodyFromForm(emptied({ trigger: 'pull_request' }), [], row, now))).not.toHaveProperty('schedule');
+      expect(scheduleOf(triggerBodyFromForm(emptied({ connectorId: 'c2', trigger: 'issues' }), [], row, now))).not.toHaveProperty('schedule');
+      // A retired vendor webhook converted into a connector trigger.
+      const retired = { ...rest, type: 'webhook', webhook: { url: 'https://console.example.com/api/public/hooks/t/wh_x', preset: 'github', auth: 'github_signature', retired: true } } as unknown as TriggerRow;
+      expect(scheduleOf(triggerBodyFromForm({ ...connectorFormFromRetired(retired, 'UTC'), connector: picked({ scheduleCron: '' }) }, [], retired, now))).not.toHaveProperty('schedule');
+    });
+  });
+
   it('a stored connector trigger opens as a connector form, not as manual, and sends back what it was', () => {
     const row = connectorRow({ kind: 'poll', schedule: { cron: '*/10 * * * *', timezone: 'UTC' } });
     const form = formFromTrigger(row, 'Europe/Istanbul');

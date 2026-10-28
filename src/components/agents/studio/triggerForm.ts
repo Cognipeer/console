@@ -418,8 +418,27 @@ export function connectorTriggerLabel(
 
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
 
-/** The `type` and settings object of the request body, or why they cannot be sent. */
-export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
+/**
+ * Does this save empty the schedule of the poll trigger it edits: the same connector and trigger as the stored one, which has a
+ * schedule, and nothing left in the cron field? (A webhook-kind trigger has no schedule, and a trigger moved to another one starts
+ * from that one's own.)
+ */
+function clearsStoredSchedule(picked: ConnectorTriggerFormValue, stored: TriggerRow | null | undefined): boolean {
+    return stored?.type === 'connector'
+        && Boolean(stored.connector.schedule)
+        && stored.connector.connector_id === picked.connectorId
+        && stored.connector.trigger === picked.trigger;
+}
+
+/**
+ * The `type` and settings object of the request body, or why they cannot be sent. `stored` is the trigger being edited, if any: a
+ * saved poll trigger whose schedule field was emptied says so (`schedule: null`).
+ */
+export function typeBodyFromForm(
+    form: TriggerForm,
+    now = new Date(),
+    stored?: TriggerRow | null,
+): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
     switch (form.type) {
         case 'schedule':
             if (validateTriggerCron(form.cron)) return { ok: false, problem: { field: 'cron', key: 'previewInvalid' } };
@@ -472,8 +491,12 @@ export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: tru
                         trigger: picked.trigger,
                         params: picked.params,
                         events: [...picked.events],
-                        // Only a poll trigger has a schedule.
-                        ...(cron ? { schedule: { cron, timezone: picked.scheduleTimezone || form.timezone } } : {}),
+                        // Only a poll trigger has a schedule. A new trigger with an empty field gets the package's own (nothing is sent). A
+                        // saved poll trigger whose field was emptied says `null` for it: an omitted schedule keeps the stored one, and
+                        // `null` returns it to the package's own schedule, in UTC.
+                        ...(cron
+                            ? { schedule: { cron, timezone: picked.scheduleTimezone || form.timezone } }
+                            : clearsStoredSchedule(picked, stored) ? { schedule: null } : {}),
                         filter: filter.rules,
                         include_payload: form.webhookIncludePayload,
                     },
@@ -533,7 +556,7 @@ export function triggerBodyFromForm(
     const unchangedOnce = stored && stored.type === 'once' && form.type === 'once' && form.onceMode === 'at'
         && toLocalInputValue(new Date(String(stored.once.run_at))) === form.runAtLocal;
     if (!unchangedOnce) {
-        const typeBody = typeBodyFromForm(form, now);
+        const typeBody = typeBodyFromForm(form, now, stored);
         if (!typeBody.ok) return typeBody;
         Object.assign(body, typeBody.body);
     }

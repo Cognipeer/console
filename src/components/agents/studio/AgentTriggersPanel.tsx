@@ -503,6 +503,9 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
             const saved = await res.json() as TriggerRow;
             const keepOpen = saved.type === 'webhook' || saved.type === 'connector';
             if (saved.type === 'connector') {
+                // The editor stays open on the saved row, so the form shows what was stored, as the status card does (a schedule field
+                // left empty is the package's own schedule now).
+                setForm(formFromTrigger(saved));
                 const answered = subscriptionOf(saved) ?? null;
                 setSubscription(answered);
                 // The answer that created the hook shows its secret once; a later read of the trigger does not.

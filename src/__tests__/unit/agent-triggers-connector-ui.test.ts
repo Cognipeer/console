@@ -53,6 +53,7 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
         onClick: () => props.onChange({ connectorId: 'c1', trigger: 'issues', params: {}, events: [], scheduleCron: '*/5 * * * *', scheduleTimezone: 'UTC' }),
       }, 'Pick Issues (poll)'),
       el('button', { type: 'button', onClick: () => props.onChange({ ...props.value!, scheduleCron: '0 9 1W * *' }) }, 'Type the schedule 0 9 1W * *'),
+      el('button', { type: 'button', onClick: () => props.onChange({ ...props.value!, scheduleCron: '' }) }, 'Clear the schedule'),
       el('span', null, props.value ? `picked:${props.value.connectorId}/${props.value.trigger}` : 'nothing picked'),
       el('span', null, `schedule:${props.value?.scheduleCron ?? ''} (${props.value?.scheduleTimezone ?? ''})`),
       el('span', null, `errors:${JSON.stringify(props.errors ?? {})}`),
@@ -66,6 +67,7 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
       'div',
       null,
       el('span', null, `status:${props.subscription?.status ?? 'none'}`),
+      el('span', null, `subscription:${props.subscription?.subscription_id ?? 'none'}`),
       el('span', null, `secret:${props.reveal?.secret ?? 'none'}`),
       el('span', null, `until:${props.reveal?.previousValidUntil ?? 'none'}`),
       el('button', { type: 'button', onClick: props.onChanged }, 'Reload status'),
@@ -181,6 +183,8 @@ const retiredRow = () => ({
   },
 });
 const listOf = (...rows: unknown[]) => routes.push((url, method) => (method === 'GET' && /\/triggers(?:\?|$)/.test(url) ? json({ data: rows }) : null));
+/** A subscription as the trigger routes answer it. */
+const subscriptionWire = (id: string, status = 'active', over: Record<string, unknown> = {}) => ({ subscription_id: id, status, kind: 'webhook', bindings: 1, ...over });
 
 /** The sentences of the editor, as the reader's language has them. */
 const words = (locale: 'en' | 'tr' = 'en') => messages[locale].agents.triggers;
@@ -304,6 +308,9 @@ describe('the Connector choice', () => {
 });
 
 describe('the schedule of a poll connector trigger', () => {
+  const pollRow = () => connectorRow({ id: 'r4', name: 'Daily issues' }, { kind: 'poll', trigger: 'issues', events: [], schedule: { cron: '*/10 * * * *', timezone: 'Europe/Istanbul' } });
+  /** What the server stored once the field was empty: the package's own schedule, in UTC. */
+  const packageSchedule = { cron: '*/5 * * * *', timezone: 'UTC' };
   const addPoll = async () => {
     await click(button('Add trigger'));
     await click(document.querySelector('input[type="radio"][value="connector"]'));
@@ -332,6 +339,60 @@ describe('the schedule of a poll connector trigger', () => {
     expect(text()).not.toContain(words().previewInvalid);
     // The refused save leaves what was typed where it was.
     expect(text()).toContain('schedule:0 9 1W * * (UTC)');
+  });
+
+  it('is the package’s own for a new trigger saved with an empty field (nothing is sent), and the editor then shows the schedule that was stored', async () => {
+    routes.push((url, method) => (method === 'POST' && /\/triggers(?:\?|$)/.test(url)
+      ? json({ ...pollRow(), connector: { ...pollRow().connector, schedule: packageSchedule }, connector_subscription: subscriptionWire('sub9', 'active', { kind: 'poll' }) }, true, 201)
+      : null));
+    mount(panel());
+    await flush();
+    await addPoll();
+    await click(button('Clear the schedule'));
+    expect(text()).toContain('schedule: (UTC)');
+    await click(button('Save trigger'));
+
+    const post = calls.find((call) => call.method === 'POST')!;
+    expect(post.body!.connector).not.toHaveProperty('schedule');
+    expect(text()).toContain('schedule:*/5 * * * * (UTC)');
+    expect(text()).toContain('subscription:sub9');
+  });
+
+  it('goes back to the package’s own schedule when the field of a saved trigger is cleared: the save says null, and the editor shows what the server stored', async () => {
+    listOf(pollRow());
+    routes.push((url, method) => (method === 'GET' && /\/triggers\/r4(?:\?|$)/.test(url) ? json({ ...pollRow(), connector_subscription: subscriptionWire('sub9', 'active', { kind: 'poll' }) }) : null));
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r4(?:\?|$)/.test(url)
+      ? json({ ...pollRow(), connector: { ...pollRow().connector, schedule: packageSchedule }, connector_subscription: subscriptionWire('sub9', 'active', { kind: 'poll' }) })
+      : null));
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    expect(text()).toContain('schedule:*/10 * * * * (Europe/Istanbul)');
+    await click(button('Clear the schedule'));
+    expect(text()).toContain('schedule: (Europe/Istanbul)');
+    await click(button('Save trigger'));
+
+    // An omitted schedule would keep the stored cron; null asks for the package's.
+    const patch = calls.find((call) => call.method === 'PATCH')!;
+    expect(patch.body!.connector).toHaveProperty('schedule', null);
+    // The field matches the status card again, in the timezone the server applied.
+    expect(text()).toContain('schedule:*/5 * * * * (UTC)');
+    expect(text()).not.toContain('(Europe/Istanbul)');
+  });
+
+  it('is sent again as typed once the field has a cron in it, also on a saved trigger', async () => {
+    listOf(pollRow());
+    routes.push((url, method) => (method === 'GET' && /\/triggers\/r4(?:\?|$)/.test(url) ? json({ ...pollRow(), connector_subscription: subscriptionWire('sub9', 'active', { kind: 'poll' }) }) : null));
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r4(?:\?|$)/.test(url) ? json(pollRow()) : null));
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    await click(button('Clear the schedule'));
+    await click(button('Type the schedule 0 9 1W * *'));
+    await click(button('Save trigger'));
+    const patch = calls.find((call) => call.method === 'PATCH');
+    expect(patch, 'the form sent the save').toBeDefined();
+    expect(patch!.body!.connector).toMatchObject({ schedule: { cron: '0 9 1W * *', timezone: 'Europe/Istanbul' } });
   });
 });
 
