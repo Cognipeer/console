@@ -123,10 +123,13 @@ export function buildWebhookTurn(input: {
 
 // ── Answers ──────────────────────────────────────────────────────────────
 
-const UNAUTHORIZED_BODY = apiErrorBody('authentication_error', 'The request is not authenticated for this webhook.', 'webhook_unauthorized');
-
+// Built per answer, not at import: the enterprise registry imports this module through the connector intake
+// route, and a test that mocks agentRunService without apiErrorBody would fail to load.
 export function unauthorizedAnswer(): WebhookAnswer {
-  return { status: 401, body: UNAUTHORIZED_BODY };
+  return {
+    status: 401,
+    body: apiErrorBody('authentication_error', 'The request is not authenticated for this webhook.', 'webhook_unauthorized'),
+  };
 }
 
 /** The answer for a webhook stored with a retired vendor preset (`public-hooks.ts` answers it before auth). */
