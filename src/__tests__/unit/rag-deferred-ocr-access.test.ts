@@ -125,6 +125,7 @@ import {
   updateRagModule,
 } from '@/lib/services/rag/ragService';
 import { RagOriginalMissingError } from '@/lib/services/rag/errors';
+import { deleteVectors } from '@/lib/services/vector/vectorService';
 import { describeForEachProvider } from '../integration/db-parity.helper';
 
 type Persona = 'admin' | 'member' | 'outsider';
@@ -1133,7 +1134,7 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       expect(await readsOf(kb.key, row)).toMatchObject({ member: false, outsider: true });
     });
 
-    it('deleted while it is embedded again: 404, its new chunks are removed and the totals do not count them', async () => {
+    it('deleted while it is embedded again: 404, the vectors and chunks it wrote are removed and the totals do not count them', async () => {
       const kb = await makeKb();
       const id = await indexedScan(kb);
       let chunksAfterDelete: number | undefined;
@@ -1143,9 +1144,12 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
           deleted = true;
           expect(await inTenant(() => deleteRagDocument(tenantDbName, tenantId, projectId, { ragModuleKey: kb.key, documentId: id }))).toBe(true);
           chunksAfterDelete = (await moduleOf(kb.key))!.totalChunks;
+          // What the delete and the re-ingest's own first step removed is not this run's clean-up.
+          vi.mocked(deleteVectors).mockClear();
         }
         return { response: { data: input.body.input.map(() => ({ embedding: [0.1, 0.2, 0.3] })) } };
       });
+      h.upsert.mockClear();
 
       await expect(reextract(kb, id)).rejects.toMatchObject({ statusCode: 404 });
 
@@ -1153,6 +1157,11 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       expect(await rowOf(id)).toBeNull();
       expect(await chunksOf(id)).toEqual([]);
       expect((await moduleOf(kb.key))!.totalChunks).toBe(chunksAfterDelete);
+      // The vectors this run wrote, and only those, are deleted again.
+      const written = h.upsert.mock.calls.flatMap((call) => (call[3].vectors as Array<{ id: string }>).map((vector) => vector.id));
+      const removed = vi.mocked(deleteVectors).mock.calls.flatMap((call) => (call[3] as { ids: string[] }).ids);
+      expect(written.length).toBeGreaterThan(0);
+      expect([...removed].sort()).toEqual([...written].sort());
     });
   });
 
