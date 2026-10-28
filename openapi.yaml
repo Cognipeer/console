@@ -2802,7 +2802,9 @@ paths:
         webhook registration or the poll cursor); the answer carries it as `connector_subscription`, with the
         signing secret of a manually set up webhook shown once. A vendor failure never fails the write: the trigger
         is stored. A hook that could not be registered at the vendor reads `manual` with a `reason` (the steps to set
-        it up by hand are in `setup`; `POST …/connector/retry` registers it again), a poll that fails stays `active`
+        it up by hand are in `setup`; `POST …/connector/retry` registers it again, unless the package cannot register hooks
+        (`reason_code: no_subscribe`) or the connector has no connected account (`account`: connecting the account tries
+        again)), a poll that fails stays `active`
         with `last_error` and a back-off, and `failed` is what a rotation leaves when the hook could not be
         registered again with the new secret (or when the Connectors module could not bind the stored trigger).
         The event's `payload` is the data the package shapes, not the vendor's own request body (for the GitHub
@@ -3425,7 +3427,9 @@ paths:
       summary: Retry a connector trigger's subscription
       description: |-
         Tries the subscription of a `connector` trigger again through the Connectors module: a webhook whose vendor
-        registration failed (or was never possible) is registered again, a paused poll is resumed, and a trigger whose
+        registration failed is registered again (a hook the package cannot register at all, `reason_code: no_subscribe`, or
+        one waiting for the connector's account, `reason_code: account`, stays as it is: the call changes nothing there, and
+        connecting the account tries again), a paused poll is resumed, and a trigger whose
         subscription is gone (`reason_code: attach_failed`) is bound to a new one. The answer is the
         trigger with its current `connector_subscription`. Needs the `agents` permission (Write).
 
@@ -30331,7 +30335,7 @@ components:
           type: string
           enum: [active, pending, manual, paused, failed]
           description: >-
-            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again. A hook set up by hand needs no account to receive, so it goes on receiving when the connector's account is disconnected; one that was waiting for the account (`reason_code` `subscribe_failed`, `unreachable` or `rotate_failed`) then reads `manual` with `reason_code: account`, and connecting the account tries the registration again, while a hook the package cannot register (`no_subscribe`) keeps its reason. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`. A rotation that stopped in the middle ends as `failed` too, and the hook is then handled like one set up by hand: its `setup` steps show and rotating it answers with a new secret. A trigger whose subscription is gone reads `failed` with `reason_code: attach_failed`, and retry binds it again.
+            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again, except for `no_subscribe` and `account` (below). A hook set up by hand needs no account to receive, so it goes on receiving when the connector's account is disconnected; one that was waiting for the account (`reason_code` `subscribe_failed`, `unreachable` or `rotate_failed`) then reads `manual` with `reason_code: account`, and connecting the account tries the registration again, while a hook the package cannot register (`no_subscribe`) keeps its reason. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`. A rotation that stopped in the middle ends as `failed` too, and the hook is then handled like one set up by hand: its `setup` steps show and rotating it answers with a new secret. A trigger whose subscription is gone reads `failed` with `reason_code: attach_failed`, and retry binds it again.
         kind:
           type: string
           enum: [webhook, poll]
