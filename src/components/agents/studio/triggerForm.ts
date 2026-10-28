@@ -392,9 +392,9 @@ export function rowsOnWebhookOnlyData(rows: ReadonlyArray<WebhookFilterRow>): { 
 }
 
 /**
- * A trigger API path with the reader's language (`?locale=tr|en`): the Connectors module writes some texts
- * itself (the reason a subscription is not active, the steps to set a webhook up) and writes them in that language.
- * Any other locale leaves the path as it is.
+ * A trigger API path with the reader's language (`?locale=tr|en`): the Connectors module writes the steps to set a
+ * webhook up in that language. (The `reason` of a subscription stays one English sentence; the screen says it from
+ * `reason_code`.) Any other locale leaves the path as it is.
  */
 export function withTriggerLocale(path: string, locale: string): string {
     return locale === 'tr' || locale === 'en' ? `${path}${path.includes('?') ? '&' : '?'}locale=${locale}` : path;
