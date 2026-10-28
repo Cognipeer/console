@@ -83,6 +83,24 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   its scope, so a CI token without the Agents scope now gets `403` (`service: "agents"`, `required: "write"`) on agent
   suites and agent campaigns: add the scope to it. Tests of a model, a Knowledge Engine module or an external endpoint
   are not affected. See [Calls that need a second service](docs/guide/authorization.md#calls-that-need-a-second-service).
+- **The GitHub, GitLab and Azure DevOps webhook presets are retired.** A webhook trigger takes the `generic` preset
+  only, with the authentication modes `bearer`, `header`, `signature` and `standard_webhooks`; a write that names
+  `github`, `gitlab` or `azure_devops`, or the modes `github_signature`, `gitlab_token` or `basic`, is `400`. A trigger
+  saved with one of them stays in the list, read-only (`webhook.retired: true`), and receives nothing: its hook URL,
+  **Run now** and `…/webhook/rotate-secret` answer `410 webhook_preset_retired`. Convert it by changing its type to
+  `connector` (Studio: **Convert to connector trigger**; it needs the Connectors module and a connector of the vendor's
+  package) or to a generic webhook, which gets a new URL and secret. See [Vendor presets were
+  retired](docs/guide/agent-triggers.md#vendor-presets-were-retired).
+- **Agents without an approval setting now ask before a tool that is not read-only.** An agent created through the API
+  without a `humanInTheLoop` setting used to run every tool without asking. Now a tool of any source (MCP server,
+  OpenAPI tool, managed tool such as a connector action, Console's own tool) asks unless it is marked read-only. An
+  attended session run pauses for an approver. A run with nobody to answer (schedules, webhooks and other triggers,
+  channels, API calls without a session, evaluations) refuses the call, and the message names the fix: set the tool to
+  *Never ask*, or send `humanInTheLoop.toolApproval.tools` with `"never"`. Agents whose owner switched approval off
+  (`toolApproval.enabled: false`) keep running tools without asking, read-only tools no longer ask by default (an
+  explicit per-tool *Always ask* still wins), and client tools are unchanged. See [Which tools
+  ask](docs/guide/agent-approvals.md#which-tools-ask) and [Unattended
+  runs](docs/guide/agent-approvals.md#unattended-runs).
 
 ### Agent runs and run classes
 
@@ -223,12 +241,24 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the trigger's last
   updater (its creator until someone changes it); **Run now** counts against the person and API token that pressed it.
 - **Incoming webhooks**: a trigger of type `webhook` starts when something posts to
-  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). Presets for
-  GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
-  event-derived variables, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
-  with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
-  the message, marked as external data, never in the system prompt. The instructions still read the declared defaults and
-  the variables the trigger sets to a fixed value (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
+  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). A generic
+  sender with four ways to prove the secret (`bearer`, `header`, `signature` and `standard_webhooks`), an event
+  allow-list and payload filters, a Mustache prompt template, event-derived variables, de-duplication, a per-trigger run
+  rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation with a grace period, **Run with this payload** (with
+  `dry_run`) and a delivery log. Event text reaches the model only in the message, marked as external data, never in the
+  system prompt. The instructions still read the declared defaults and the variables the trigger sets to a fixed value
+  (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
+- **Connector triggers** (Enterprise Connectors module): a trigger of type `connector` starts an agent when a connector
+  reports an event, such as a pull request opened, an issue changed or a new row in a table. The connector's package
+  declares its triggers. A `webhook` trigger is registered at the service for you (when that cannot be done it shows a
+  callback URL, a secret and the steps to set the hook up by hand), and a `poll` trigger checks the service on a cron
+  `schedule` and reports what is new. Triggers that listen to the same connector, trigger and parameters share one
+  subscription. The event is the package's own flat data (`payload.draft`, not the vendor's request body), and it goes
+  through the same event list, filter, prompt template, de-duplication and run limits as a webhook trigger. New:
+  `type: "connector"` with a `connector` object, `connector_subscription` on the trigger, `POST …/connector/retry`, and
+  the **Connector** option in Studio under Ship → Triggers. The PR Reviewer and CI Failure Triage templates use the
+  GitHub connector. Without the module a stored connector trigger can be read but not created. See [Connector
+  triggers](docs/guide/agent-triggers.md#connector-triggers).
 - Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
   replicas.
 
