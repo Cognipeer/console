@@ -319,11 +319,12 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
 
     async listRagQueryLogs(
       ragModuleKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean; projectId?: string },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; zeroOnly?: boolean; projectId?: string; userId?: string },
     ): Promise<IRagQueryLog[]> {
       const db = this.getTenantDb();
       const query = this.buildRagQueryLogFilter(ragModuleKey, options);
       if (options?.zeroOnly) query.matchCount = 0;
+      if (options?.userId !== undefined) query.userId = options.userId;
       const cursor = db
         .collection<IRagQueryLog>(COLLECTIONS.ragQueryLogs)
         .find(query as Filter<IRagQueryLog>)
