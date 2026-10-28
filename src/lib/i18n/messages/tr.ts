@@ -3430,6 +3430,7 @@ export const tr: typeof en = {
       summaryConnector: '{label} · {events}',
       summaryConnectorAny: '{label} · her olay',
       connectorUnavailable: 'Bağlayıcı tetikleyiciler burada bulunmayan Bağlayıcılar modülünü gerektirir. Bu tetikleyiciyi silin ya da modülü geri getirin.',
+      connectorForbidden: 'Bu projede Bağlayıcılar’a erişiminiz yok; bu tetikleyicinin dinlediği bağlayıcı burada gösterilemez ve değiştirilemez. Bir proje yöneticisinden Bağlayıcılar için okuma erişimi isteyin.',
       connectorUnavailableBadge: 'Bağlayıcılar gerekli',
       connectorCatalogFailed: 'Bağlayıcılar yüklenemedi.',
       connectorRequired: 'Bir bağlayıcı ve onun bir tetikleyicisini seçin',

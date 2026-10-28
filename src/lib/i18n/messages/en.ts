@@ -4923,6 +4923,7 @@ export const en = {
       summaryConnector: '{label} · {events}',
       summaryConnectorAny: '{label} · every event',
       connectorUnavailable: 'Connector triggers need the Connectors module, which is not available here. Remove this trigger or restore the module.',
+      connectorForbidden: 'You do not have access to Connectors in this project, so the connector this trigger listens to cannot be shown or changed here. Ask a project admin for read access to Connectors.',
       connectorUnavailableBadge: 'Needs Connectors',
       connectorCatalogFailed: 'Could not load the connectors.',
       connectorRequired: 'Pick a connector and one of its triggers',

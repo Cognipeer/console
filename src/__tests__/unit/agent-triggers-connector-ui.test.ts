@@ -31,7 +31,9 @@ const catalog = vi.hoisted(() => ({
 vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
   const el = (...args: unknown[]) => (globalThis as unknown as { React: { createElement: (...a: unknown[]) => unknown } }).React.createElement(...args);
   return {
-    useConnectorTriggerCatalog: () => ({ available: catalog.available, loading: false, error: null, connectors: catalog.connectors, reload: () => undefined }),
+    useConnectorTriggerCatalog: () => ({
+      available: catalog.available, forbidden: catalog.forbidden, loading: catalog.loading, error: null, connectors: catalog.connectors, reload: () => undefined,
+    }),
     ConnectorTriggerPicker: (props: { value: { connectorId: string; trigger: string } | null; onChange: (value: unknown) => void; errors?: Record<string, string> }) => el(
       'div',
       { 'data-testid': 'picker' },
@@ -124,6 +126,8 @@ beforeEach(() => {
   calls = [];
   routes = [];
   catalog.available = true;
+  catalog.loading = false;
+  catalog.forbidden = false;
   catalog.connectors = [];
   vi.stubGlobal('fetch', vi.fn((url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET';
@@ -644,5 +648,73 @@ describe('a saved connector trigger', () => {
     expect(text()).toContain('events this trigger received from its connector');
     expect(text()).toContain('pull_request.opened');
     expect(text()).toContain('Accepted');
+  });
+});
+
+describe('a saved connector trigger while the connectors cannot be offered', () => {
+  const edit = async (locale: 'en' | 'tr' = 'en') => {
+    listOf(connectorRow());
+    mount(panel(), locale);
+    await flush();
+    await click(button(locale === 'tr' ? 'Düzenle' : 'Edit'));
+  };
+  const placeholders = () => document.querySelector('[data-testid="connector-catalog-loading"]');
+  const picker = () => document.querySelector('[data-testid="picker"]');
+
+  it('draws placeholders while the first answer is on its way, not “not available”', async () => {
+    catalog.available = false;
+    catalog.loading = true;
+    await edit();
+    expect(placeholders()).not.toBeNull();
+    expect(placeholders()!.getAttribute('aria-busy')).toBe('true');
+    expect(text()).not.toContain(words().connectorUnavailable);
+    expect(text()).not.toContain(words().connectorForbidden);
+    expect(picker()).toBeNull();
+    // The rest of the editor is there.
+    expect(text()).toContain('starts an unattended run');
+  });
+
+  it('shows the picker, not the placeholders, when the connectors are there and a reload runs', async () => {
+    catalog.available = true;
+    catalog.loading = true;
+    await edit();
+    expect(placeholders()).toBeNull();
+    expect(picker()).not.toBeNull();
+  });
+
+  it('says the module is not available when it is off, licensed out or missing', async () => {
+    catalog.available = false;
+    await edit();
+    expect(placeholders()).toBeNull();
+    expect(text()).toContain(words().connectorUnavailable);
+    expect(text()).not.toContain(words().connectorForbidden);
+    expect(picker()).toBeNull();
+  });
+
+  it('says the person has no access to the connectors, apart from the module being off, when the answer was their own 403', async () => {
+    catalog.available = false;
+    catalog.forbidden = true;
+    await edit();
+    expect(placeholders()).toBeNull();
+    expect(text()).toContain(words().connectorForbidden);
+    expect(text()).not.toContain(words().connectorUnavailable);
+    expect(picker()).toBeNull();
+    expect(words().connectorForbidden).toContain('Ask a project admin for read access to Connectors');
+  });
+
+  it('says both in Turkish', async () => {
+    catalog.available = false;
+    catalog.forbidden = true;
+    await edit('tr');
+    expect(text()).toContain(words('tr').connectorForbidden);
+    expect(text()).not.toContain(words('tr').connectorUnavailable);
+    expect(words('tr').connectorForbidden).not.toBe(words('en').connectorForbidden);
+    act(() => root?.unmount());
+    container?.remove();
+    document.body.innerHTML = '';
+    catalog.forbidden = false;
+    await edit('tr');
+    expect(text()).toContain(words('tr').connectorUnavailable);
+    expect(text()).not.toContain(words('tr').connectorForbidden);
   });
 });

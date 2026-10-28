@@ -445,7 +445,7 @@ describe('strings', () => {
       // The names of the retired presets stay: a stored trigger of one is still listed under its name.
       'presetGeneric', 'presetGithub', 'presetGitlab', 'presetAzureDevops',
       ...['kindConnectorWebhook', 'kindConnectorPoll', 'summaryConnector', 'summaryConnectorAny', 'retired', 'retiredHint', 'retiredNotice', 'convert'],
-      ...['connectorUnavailable', 'connectorUnavailableBadge', 'connectorCatalogFailed', 'connectorRequired', 'connectorUnattendedHint', 'deliveriesHintConnector'],
+      ...['connectorUnavailable', 'connectorForbidden', 'connectorUnavailableBadge', 'connectorCatalogFailed', 'connectorRequired', 'connectorUnattendedHint', 'deliveriesHintConnector'],
       ...['connectorTestHint', 'connectorTestEvent', 'connectorTestEventPlaceholder', 'connectorTestEventInvalid', 'connectorTestPayloadHint'],
       ...WEBHOOK_PRESETS.flatMap((preset) => WEBHOOK_FILTER_EXAMPLES[preset].map((example) => example.key)),
     ];
@@ -470,6 +470,14 @@ describe('strings', () => {
       expect(strings.convertRowHint).toContain('“connector”');
       expect(strings.convertRowAlwaysHint).toContain('“connector”');
       expect(strings.convertRowHint).not.toBe(strings.convertRowAlwaysHint);
+    }
+  });
+
+  it('the sentence for a person who may not read the connectors differs from the one for a module that is not there', () => {
+    for (const locale of ['en', 'tr'] as const) {
+      const strings = at(messages[locale], 'agents.triggers');
+      expect(typeof strings.connectorForbidden, locale).toBe('string');
+      expect(strings.connectorForbidden, locale).not.toBe(strings.connectorUnavailable);
     }
   });
 

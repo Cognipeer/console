@@ -672,8 +672,13 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                                 />
                                 <WebhookIncludePayload form={form} set={set} />
                             </>
+                        ) : catalog.loading ? (
+                            // The first answer is on its way: not "unavailable" yet.
+                            <Stack gap="xs" aria-busy="true" data-testid="connector-catalog-loading">{[0, 1].map((i) => <Skeleton key={i} h={36} />)}</Stack>
                         ) : (
-                            <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('connectorUnavailable')}</Alert>
+                            <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>
+                                {catalog.forbidden ? t('connectorForbidden') : t('connectorUnavailable')}
+                            </Alert>
                         )}
                         <Alert color="blue" variant="light" icon={<IconInfoCircle size={14} />}>{t('connectorUnattendedHint')}</Alert>
                     </Stack>

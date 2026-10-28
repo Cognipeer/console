@@ -19,6 +19,11 @@ import type {
 export interface ConnectorTriggerCatalogState {
   /** Connector triggers can be used here (enterprise build, Connectors on, licensed). */
   available: boolean;
+  /**
+   * Why they cannot, when the answer is in and the reason is the caller's: the module is there, but this person may not read the
+   * project's connectors (a 403). Absent when the module is off, not licensed or not part of this build.
+   */
+  forbidden?: boolean;
   loading: boolean;
   error: string | null;
   /** The project's connectors whose packages declare triggers. */
