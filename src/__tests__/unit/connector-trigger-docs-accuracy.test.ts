@@ -11,9 +11,9 @@
  * the roots a page names are compared with `WEBHOOK_CONTEXT_ROOTS`.
  *
  * The sentences that say what the API answers (the message of a cron a poll cannot take, a Retry that binds a lost
- * subscription, a parameter the package reads from the service, a schedule object on a PATCH), what a retired preset
- * leaves behind and what a cleared schedule field does are pinned here too, and no document may present a retired vendor
- * preset as one a person can create. The events the guide lists for GitHub, GitLab and Azure DevOps, and the examples of its cron table, are held
+ * subscription, a parameter the package reads from the service, a schedule object on a PATCH, a webhook trigger saved
+ * while its connector is disabled), what a retired preset leaves behind and what a cleared schedule field does are
+ * pinned here too, and no document may present a retired vendor preset as one a person can create. The events the guide lists for GitHub, GitLab and Azure DevOps, and the examples of its cron table, are held
  * to the packages and to the Connectors module in the Enterprise overlay (`connector-trigger-guide-parity.test.ts`).
  */
 
@@ -485,6 +485,38 @@ describe('the triggers guide, parameters, Retry and the retired presets', () => 
     expect(flat(retiredPresetsSection())).toContain('the Studio **Test** tab of a saved connector trigger shows its sample event');
     expect(flat(connectorSection())).toContain('The Studio **Test** tab shows the sample event you can write the `filter` and the `prompt` against');
     expect(flat(guide)).not.toContain('connector page lists');
+  });
+});
+
+describe('the triggers guide, a webhook trigger saved while its connector is disabled', () => {
+  /** The paragraph under the lead-in `**A connector that is disabled.**`, up to the next blank line. */
+  function disabledParagraph(): string {
+    const section = connectorSection();
+    const start = section.indexOf('\n**A connector that is disabled.**');
+    expect(start, 'the guide has a paragraph on a webhook trigger saved while its connector is disabled').toBeGreaterThan(0);
+    const end = section.indexOf('\n\n', start + 2);
+    return flat(section.slice(start, end < 0 ? undefined : end));
+  }
+
+  it('says it waits, paused, and that a package that can register the hook does so when the connector is enabled, with nothing to set up by hand meanwhile', () => {
+    const text = disabledParagraph();
+    expect(text).toContain('A webhook trigger saved while its connector is disabled waits, `paused` with `reason_code: connector_disabled`');
+    expect(text).toContain('when the package can register the hook at the service and the connector has a working account, the hook is registered when the connector is enabled');
+    expect(text).toContain('until then, the trigger\'s `connector_subscription` carries no `setup` steps and no `secret`, so nobody sets up a second hook by hand');
+  });
+
+  it('says that without a working account, or for a package that cannot register hooks, the hook is set up by hand as usual', () => {
+    expect(disabledParagraph()).toContain('without a working account, or for a package that cannot register hooks, the hook is set up by hand as usual, with its `setup` steps and its `secret`');
+  });
+
+  it('sits between the paragraph on an account that is gone and the one on secrets', () => {
+    const text = connectorSection();
+    const at = (marker: string) => text.indexOf(marker);
+    expect(at('\n**Without an account.**')).toBeGreaterThan(0);
+    expect(at('\n**A connector that is disabled.**')).toBeGreaterThan(at('\n**Without an account.**'));
+    expect(at('\n**Secrets.**')).toBeGreaterThan(at('\n**A connector that is disabled.**'));
+    // What it leans on is still said where the statuses are described.
+    expect(flat(text)).toContain('`paused` (the connector is disabled, or its account is disconnected and the subscription needs it');
   });
 });
 
