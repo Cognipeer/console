@@ -263,6 +263,23 @@ describe('the OpenAPI document, connector triggers', () => {
     expect(flat(guide)).toContain('Add `?locale=tr` or `?locale=en` to a create, update, read, rotate or retry call');
   });
 
+  it('says the same of the language in all three places: it covers the setup steps, and the reason is one English sentence', () => {
+    const parameter = flat(openapi.components.parameters.TriggerLocale.description);
+    const templates = flat(read('docs/guide/agent-templates.md'));
+    expect(parameter).toContain('writes the `setup` steps');
+    expect(parameter).toContain('The `reason` is not translated');
+    expect(parameter).toContain('`reason_code` is the key');
+    expect(flat(schemas.ConnectorSubscription.properties.reason.description)).toContain('one fixed English sentence for every reader');
+    expect(flat(guide)).toContain('`reason` is not translated: it is one fixed English sentence for every reader');
+    expect(templates).toContain('the `reason` of a subscription is one English sentence with a `reason_code`');
+    // None of them promises a translated reason.
+    for (const text of [parameter, flat(guide), templates]) {
+      expect(text).not.toMatch(/its `reason` and its `setup` steps/);
+      expect(text).not.toContain('write the `reason` and the setup steps');
+      expect(text).not.toContain('(its reason and setup steps');
+    }
+  });
+
   it('documents the reason code and the previous secret\'s expiry of a subscription, with the codes the module sends', () => {
     const subscription = schemas.ConnectorSubscription.properties;
     expect(subscription.reason_code).toMatchObject({ type: 'string', nullable: true });

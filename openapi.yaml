@@ -16717,7 +16717,7 @@ components:
       in: query
       required: false
       description: >-
-        The language the Enterprise Connectors module writes in the texts it adds to the subscription of a `connector` trigger (its `reason` and its `setup` steps). The `label` of the trigger is stored in English whatever this says. Any other value, or none, leaves the module's default; nothing else about the answer changes.
+        The language the Enterprise Connectors module writes the `setup` steps of a `connector` trigger's subscription in (and the sentence that says a secret was shown once). The `reason` is not translated: it is one fixed English sentence whatever this says, and `reason_code` is the key to put into the reader's own words. The `label` of the trigger is stored in English whatever this says. Any other value, or none, leaves the module's default; nothing else about the answer changes.
       schema:
         type: string
         enum: [tr, en]
@@ -30326,7 +30326,7 @@ components:
           type: string
           nullable: true
           description: >-
-            Why the subscription is `manual`, `paused` or `failed`, as a fixed English sentence (never vendor data). `reason_code` is the same reason as a stable code.
+            Why the subscription is `manual`, `paused` or `failed`, as one fixed English sentence for every reader (never vendor data; the `locale` query parameter does not change it). `reason_code` is the same reason as a stable code.
         reason_code:
           type: string
           nullable: true
