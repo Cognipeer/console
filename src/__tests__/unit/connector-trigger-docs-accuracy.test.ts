@@ -435,6 +435,21 @@ describe('the triggers guide, parameters, Retry and the retired presets', () => 
     expect(row).not.toContain('a missing or wrong value is `400`');
   });
 
+  it('says the list of a choice the package reads from the service is not read while the connector has no working account, and the field takes a typed value', () => {
+    const row = /\| `params` \|([^|]*)\|/.exec(flat(connectorSection()))?.[1] ?? '';
+    expect(row).toContain('While the connector has no working account (none connected, or one that needs a new sign-in or was revoked), the list is not read');
+    expect(row).toContain('Studio\'s field says *Connect an account to pick from a list, or type the value.* and takes the value as typed, which is checked like any other');
+    // It follows the sentence about the choices the package reads from the service, and does not replace what the save checks.
+    expect(row.indexOf('While the connector has no working account')).toBeGreaterThan(row.indexOf('is checked for its type only'));
+    expect(row).toContain('so read `last_error`');
+  });
+
+  it('says the same where a template asks for the repository of a connector trigger', () => {
+    const templates = flat(read('docs/guide/agent-templates.md'));
+    expect(templates).toContain('(`owner/name`, chosen from the connector\'s repositories)');
+    expect(templates).toContain('While the connector has no working account the list is not read: the field says *Connect an account to pick from a list, or type the value.* and takes `owner/name` as typed.');
+  });
+
   it('says a Retry that binds a lost subscription shows the secret of a hook set up by hand once, and a Retry of an existing one never does', () => {
     const text = flat(connectorSection());
     expect(text).toContain('and in the answer of a **Retry** that binds a trigger whose subscription was gone (`attach_failed`) to a new one, and nowhere else: a Retry of an existing subscription never carries it');
