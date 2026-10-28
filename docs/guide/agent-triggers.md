@@ -189,9 +189,11 @@ There are two kinds, set by the package trigger:
 | Kind | How events arrive | Registration |
 | --- | --- | --- |
 | `webhook` | The service **pushes** the event to the connector's callback URL. | Automatic when the package can register the hook at the service with the connector's account; otherwise **manual**: the trigger shows the callback URL and a secret (once) and the steps to paste them into the service's settings. |
-| `poll` | The connector **checks** the service on a cron `schedule` (default from the package, never more often than the package allows) and reports what is new. | None. The first check only notes where it is; events from before it are not reported. Editing only the schedule of a trigger does not start over: the new schedule goes on from where the check was, so nothing that happened meanwhile is lost. Changing the connector, the trigger or its parameters is another source and takes a new first check. |
+| `poll` | The connector **checks** the service on a cron `schedule` (default from the package, never more often than the package allows) and reports what is new. | None. The first check only notes where it is; events from before it are not reported. Editing only the schedule of a trigger does not start over: the new schedule goes on from where the check was, so nothing that happened meanwhile is lost. Changing the connector, the trigger or its parameters is another source and takes a new first check, and so does switching every trigger on the poll off (see below). |
 
 **Editing a poll's schedule.** The place of the check is carried over in the memory of the node that handles the edit, for two minutes. If the new schedule cannot be set up at once and **Retry** reaches another node, or comes after more than two minutes, the poll takes a new first check instead. One narrow limit remains: an edit that lands while the check of the old schedule is handing out a page of events can run that page's events once more, because a run is de-duplicated per subscription and the new schedule is a new subscription. A page held for a run limit (see *Duplicates and limits* below) moves with the edit and starts nothing twice.
+
+**Switching a poll off and on.** A trigger that is switched off ignores what happens, as a webhook trigger does, and a poll looks only while a trigger on it is switched on. When a scheduled check finds every trigger on the poll switched off, it calls nothing and the poll forgets its place (and a page it was holding for a run limit). A trigger switched on after that starts from then: its first check, taken at the next tick of the poller (a minute by default) and not at the next slot of the `schedule`, only notes where the service is, so nothing from before is reported. A trigger switched off and on again before the next scheduled check keeps the place, and that check reports what happened meanwhile, because it is the check that forgets. A poll that another trigger still has switched on keeps its place whatever the others do, and a `paused` poll keeps its place and catches up when it is back.
 
 A trigger is created with `type: "connector"` and a `connector` object; the connector must be in the same project:
 
@@ -220,7 +222,7 @@ curl -X POST "$BASE/api/client/v1/agents/code-reviewer/triggers" \
 | `connector_id`, `trigger` | The connector (id) and one trigger its package declares. Required. |
 | `params` | The trigger's parameters, as the package declares them (a repository, a project, a board). No secrets. Checked against the package: a missing or wrong value is `400` on `connector.params.<key>`. |
 | `events` | Allow-list of the package's event types; empty = every event. |
-| `schedule` | `{ cron, timezone }`, `poll` triggers only (default: the package's, in UTC). |
+| `schedule` | `{ cron, timezone }`, `poll` triggers only (default: the package's, in UTC) |
 | `filter` | The same rules as a webhook's (up to 20, all must match) over `payload.…` (the event's data), `event`, `delivery_id`, `received_at`, `trigger`, `agent` and `connector` (`headers` is always empty and `preset` is `connector`). |
 | `include_payload` | Append the event data to the message as external data (JSON, at most 32 KiB). Default `true`. |
 
