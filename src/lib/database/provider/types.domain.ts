@@ -3357,7 +3357,7 @@ export type RetiredAgentTriggerWebhookAuth = 'github_signature' | 'gitlab_token'
 
 /** One filter rule over the delivery (all rules must match). */
 export interface AgentTriggerWebhookFilterRule {
-  /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-github-event`, `event`. */
+  /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-cognipeer-event`, `event`. */
   path: string;
   op: 'eq' | 'neq' | 'in' | 'not_in' | 'exists' | 'not_exists' | 'contains' | 'starts_with' | 'glob';
   value?: string | number | boolean | Array<string | number | boolean>;
