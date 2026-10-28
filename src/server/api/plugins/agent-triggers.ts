@@ -775,7 +775,9 @@ async function retryConnectorTrigger(request: FastifyRequest, reply: FastifyRepl
       ?? reply.code(502).send(apiErrorBody('api_error', 'The connector could not be reached; try again.', 'connector_retry_failed'));
   }
   if (!view) return reply.code(409).send(invalidRequestErrorBody('This connector trigger has no subscription to retry', 'connector_subscription_missing'));
-  return reply.code(200).send(triggerAnswer(trigger, undefined, toSubscriptionWire(view)));
+  // A trigger whose subscription was lost is bound to a new one by the retry, and the module stores its id on the trigger.
+  const current = await getAgentTrigger(caller.scope, caller.agent.key, String(trigger._id)) ?? trigger;
+  return reply.code(200).send(triggerAnswer(current, undefined, toSubscriptionWire(view)));
 }
 
 const DELIVERIES_DEFAULT_LIMIT = 20;

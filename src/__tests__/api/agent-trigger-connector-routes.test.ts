@@ -62,6 +62,7 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import type { IAgentTrigger } from '@/lib/database';
 import { __resetConnectorTriggerHostForTests, registerConnectorTriggerHost } from '@/enterprise/connector-triggers';
 import { createAgentTrigger } from '@/lib/services/agents/agentTriggers';
+import { persistConnectorSettings } from '@/lib/services/agents/agentTriggerConnectorHost';
 import { parseWebhookWrite } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { deleteAgentRecord } from '@/lib/services/agents/agentService';
 import { agentTriggersApiPlugin } from '@/server/api/plugins/agent-triggers';
@@ -330,6 +331,48 @@ describe.each([
       expect(down.statusCode).toBe(502);
       expect(json(down).error.code).toBe('connector_retry_failed');
       expect((await call('POST', '/nope/connector/retry')).statusCode).toBe(404);
+    });
+
+    it('retry of a trigger whose subscription is gone: the host binds it again and the answer names the new subscription, the one stored', async () => {
+      const created = json(await call('POST', '', body()));
+      expect(created.connector.subscription_id).toBe('sub_1');
+      // The stand-in binds again like the real module does: a new subscription, its id stored on the trigger.
+      registerConnectorTriggerHost({
+        ...fake.host,
+        retry: async (scope, trigger) => {
+          const attached = await fake.host.attach(scope, trigger);
+          await persistConnectorSettings(DB_NAME, trigger, attached.settings);
+          return attached.view;
+        },
+      });
+      fake.subscriptions.clear();
+      const retried = await call('POST', `/${created.id}/connector/retry`);
+      expect(retried.statusCode, retried.body).toBe(200);
+      expect(json(retried).connector.subscription_id).toBe('sub_2');
+      expect(json(retried).connector_subscription).toMatchObject({ subscription_id: 'sub_2', status: 'active' });
+      expect((await storedConnector(created.id)).subscriptionId).toBe('sub_2');
+      expect(json(await call('GET', `/${created.id}`)).connector.subscription_id).toBe('sub_2');
+    });
+
+    it('a store failure after the old subscription was given up stores nothing: the row keeps its settings and names the lost subscription; the same change sent again binds a new one', async () => {
+      const created = json(await call('POST', '', body()));
+      fake.calls.length = 0;
+      const change = { type: 'connector', connector: { params: { repository: 'acme/web' } } };
+      const spy = vi.spyOn(db, 'updateAgentTrigger').mockRejectedValueOnce(new Error('the store is down'));
+      const failed = await call('PATCH', `/${created.id}`, change);
+      spy.mockRestore();
+      expect(failed.statusCode).toBe(500);
+      // The host gave the old subscription up before the write, and was not asked to bind anything.
+      expect(fake.calls).toEqual(['prepare', `detach:${created.id}`]);
+      expect(fake.subscriptions.size).toBe(0);
+      expect(await storedConnector(created.id)).toMatchObject({ subscriptionId: 'sub_1', params: { repository: 'acme/api' } });
+
+      const again = await call('PATCH', `/${created.id}`, change);
+      expect(again.statusCode, again.body).toBe(200);
+      expect(json(again).connector).toMatchObject({ subscription_id: 'sub_2', params: { repository: 'acme/web' } });
+      expect(json(again).connector_subscription).toMatchObject({ subscription_id: 'sub_2', status: 'active' });
+      expect([...fake.subscriptions.keys()]).toEqual(['sub_2']);
+      expect(await storedConnector(created.id)).toMatchObject({ subscriptionId: 'sub_2', params: { repository: 'acme/web' } });
     });
 
     it('rotate-secret goes through the host: a new secret once; 502 on a host error; a poll has none (400)', async () => {
