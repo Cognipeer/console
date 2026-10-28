@@ -11,18 +11,20 @@
  * the roots a page names are compared with `WEBHOOK_CONTEXT_ROOTS`.
  *
  * The sentences that say what the API answers (the message of a cron a poll cannot take, a Retry that binds a lost
- * subscription, a parameter the package reads from the service), what a retired preset leaves behind and what a cleared
- * schedule field does are pinned here too, and no document may present a retired vendor preset as one a person can
- * create. The events the guide lists for GitHub, GitLab and Azure DevOps, and the examples of its cron table, are held
+ * subscription, a parameter the package reads from the service, a schedule object on a PATCH), what a retired preset
+ * leaves behind and what a cleared schedule field does are pinned here too, and no document may present a retired vendor
+ * preset as one a person can create. The events the guide lists for GitHub, GitLab and Azure DevOps, and the examples of its cron table, are held
  * to the packages and to the Connectors module in the Enterprise overlay (`connector-trigger-guide-parity.test.ts`).
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parse } from 'yaml';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { IAgentTrigger } from '@/lib/database';
+import type { AgentTriggerConnector, IAgentTrigger } from '@/lib/database';
+import { __resetConnectorTriggerHostForTests, registerConnectorTriggerHost } from '@/enterprise/connector-triggers';
+import { parseConnectorWrite } from '@/lib/services/agents/agentTriggerConnectorHost';
 import { eventView } from '@/lib/services/agents/agentTriggerEventDispatch';
 import {
   WEBHOOK_CONTEXT_ROOTS,
@@ -31,6 +33,7 @@ import {
   resolveFilterPath,
   templateProblem,
 } from '@/lib/services/agents/agentTriggerWebhookView';
+import { createFakeConnectorHost } from '../helpers/fakeConnectorHost';
 import { GITHUB_PACKAGE_ID, GITHUB_TRIGGERS } from '../helpers/githubConnectorFixture';
 import { shapeProblems } from '../helpers/openapiShape';
 
@@ -396,6 +399,17 @@ describe('the triggers guide, the schedule of a poll', () => {
     expect(text).toContain('`schedule: null` on a PATCH returns a saved trigger to it, and leaving it out keeps the stored one');
   });
 
+  it('says a schedule object on a PATCH replaces the stored schedule as a whole, and a timezone it leaves out is UTC', () => {
+    const text = section();
+    expect(text).toContain('A `schedule` object replaces the stored schedule as a whole; it is not merged into it');
+    expect(text).toContain('It must carry a `cron` (a `timezone` alone is `400` on `connector.schedule.cron`, *cron is required*)');
+    expect(text).toContain('a `timezone` it leaves out, or sends as `null` or an empty string, is `UTC`, whatever timezone was stored');
+    expect(text).toContain('to change only the cron of a poll that runs in `Europe/Istanbul`, send `"timezone": "Europe/Istanbul"` again');
+    // The field table says it in one clause, beside the default and the null.
+    const row = /\| `schedule` \|([^|]*)\|/.exec(text)?.[1] ?? '';
+    expect(row).toContain('On a PATCH an object replaces the stored schedule as a whole: a `timezone` left out is `UTC`');
+  });
+
   it('keeps the sentences of the edit, of a poll switched off and of a shared poll', () => {
     const text = section();
     // An edit of the schedule alone: the page that was being handed out moves with it.
@@ -464,6 +478,13 @@ describe('the OpenAPI document, the schedule of a poll and the answer of Retry',
     expect(patch()).toContain('when `connector.schedule` is left out; `connector.schedule: null` returns it to the package\'s own schedule, in UTC');
   });
 
+  it('says a schedule object on a PATCH replaces the stored schedule as a whole, and a timezone it leaves out is UTC', () => {
+    const schedule = flat(schemas.AgentTriggerConnectorRequest.properties.schedule.description);
+    expect(schedule).toContain('An object on a PATCH replaces the stored schedule as a whole, it is not merged into it');
+    expect(schedule).toContain('`cron` is required in it, and a `timezone` it leaves out, or sends as `null` or empty, is `UTC`, whatever timezone was stored');
+    expect(patch()).toContain('A `connector.schedule` object replaces the stored schedule as a whole: it must carry a `cron`, and a `timezone` it leaves out, or sends as `null` or empty, is `UTC`, whatever timezone was stored');
+  });
+
   it('says a Retry that binds a lost subscription returns the secret of a hook set up by hand once, and the secret field says so', () => {
     expect(retry()).toContain('returns the signing secret of a hook set up by hand once, in this answer (`connector_subscription.secret`)');
     expect(retry()).toContain('a retry of an existing subscription never does, so rotate the secret to get a new one');
@@ -482,6 +503,46 @@ describe('the OpenAPI document, the schedule of a poll and the answer of Retry',
     const create = flat(openapi.paths['/agents/{agentKey}/triggers'].post.description);
     expect(create).not.toContain('the connector page lists');
     expect(create).toContain('the Studio Test tab of a saved connector trigger shows its sample event');
+  });
+});
+
+describe('a schedule object on a PATCH of a connector poll trigger, as the guide and the OpenAPI document word it', () => {
+  const scope = { tenantId: 't1', tenantDbName: 'tenant_t1', projectId: 'p1', actorId: 'user-1' };
+  const stored: AgentTriggerConnector = {
+    connectorId: 'conn-poll', trigger: 'issue_updated', params: {}, events: [], filter: [], includePayload: true,
+    schedule: { cron: '*/10 * * * *', timezone: 'Europe/Istanbul' }, subscriptionId: 'sub_1',
+  };
+  /** What the PATCH route hands to the one write path: the request's `connector` object and the stored settings. */
+  const patch = (connector: Record<string, unknown>) => parseConnectorWrite(scope, connector, stored);
+  const scheduleOf = async (connector: Record<string, unknown>) => {
+    const written = await patch(connector);
+    expect(written.ok, JSON.stringify(written)).toBe(true);
+    return written.ok ? written.connector.schedule : undefined;
+  };
+
+  beforeEach(() => registerConnectorTriggerHost(createFakeConnectorHost().host));
+  afterEach(() => __resetConnectorTriggerHostForTests());
+
+  it('keeps the stored schedule when the request leaves it out', async () => {
+    expect(await scheduleOf({ events: ['issue.created'] })).toEqual({ cron: '*/10 * * * *', timezone: 'Europe/Istanbul' });
+  });
+
+  it('replaces the stored schedule as a whole: a timezone left out, null or empty is UTC, whatever was stored', async () => {
+    expect(await scheduleOf({ schedule: { cron: '*/20 * * * *' } })).toEqual({ cron: '*/20 * * * *', timezone: 'UTC' });
+    expect(await scheduleOf({ schedule: { cron: '*/20 * * * *', timezone: null } })).toEqual({ cron: '*/20 * * * *', timezone: 'UTC' });
+    expect(await scheduleOf({ schedule: { cron: '*/20 * * * *', timezone: '' } })).toEqual({ cron: '*/20 * * * *', timezone: 'UTC' });
+    // The same cron as the stored one does not keep the stored timezone either.
+    expect(await scheduleOf({ schedule: { cron: '*/10 * * * *' } })).toEqual({ cron: '*/10 * * * *', timezone: 'UTC' });
+  });
+
+  it('keeps a timezone only when it is sent again with the cron', async () => {
+    expect(await scheduleOf({ schedule: { cron: '*/20 * * * *', timezone: 'Europe/Istanbul' } })).toEqual({ cron: '*/20 * * * *', timezone: 'Europe/Istanbul' });
+    expect(await scheduleOf({ schedule: { cron: '  */20   * * * *  ', timezone: 'America/New_York' } })).toEqual({ cron: '*/20 * * * *', timezone: 'America/New_York' });
+  });
+
+  it('does not take a timezone alone: the cron is required', async () => {
+    const written = await patch({ schedule: { timezone: 'Europe/Istanbul' } });
+    expect(written).toEqual({ ok: false, errors: [{ field: 'connector.schedule.cron', message: 'cron is required' }] });
   });
 });
 
