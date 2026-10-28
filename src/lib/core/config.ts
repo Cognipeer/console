@@ -545,6 +545,23 @@ export interface AppConfig {
     logClientMeta: boolean;
     /** Largest serialized `_client.meta` (bytes) kept per request-log row; keys beyond it are dropped. Min 256. */
     logClientMetaMaxBytes: number;
+    /**
+     * Browser origins allowed to call the MCP endpoints, besides the app's own
+     * (`APP_URL`). A request that sends an `Origin` header not on the list is
+     * refused with 403; a request without one (server-side MCP clients) is not
+     * affected. Entries are exact origins or `*.example.com` wildcards.
+     */
+    allowedOrigins: string[];
+    /** `serverInfo.name` the gateway answers `initialize` with. */
+    serverInfoName: string;
+
+    /** Calls to the upstream an OpenAPI or remote MCP server points at. */
+    upstream: {
+      /** Largest response body (bytes) read from an upstream; a bigger one fails the call. Min 64 KiB. */
+      maxResponseBytes: number;
+      /** Longest a whole upstream call may take (ms), headers and body together. Min 1000. */
+      timeoutMs: number;
+    };
 
     /** The SSE transport: `GET .../sse` opens a stream, `POST .../message?sessionId=` feeds it. */
     sse: {
@@ -584,6 +601,8 @@ export interface AppConfig {
       maxInflightPerTenant: number;
       /** Largest request/response payload (bytes) a public call stores in the request log. Min 256. */
       logPayloadLimitBytes: number;
+      /** Longest string (chars) a public tool call may carry in its arguments, at any depth. Min 256. */
+      maxArgumentChars: number;
     };
   };
 }
@@ -1118,6 +1137,12 @@ function buildConfig(source: ConfigSource): AppConfig {
       logUserAgentMaxChars: Math.max(int(source, 'MCP_LOG_USER_AGENT_MAX_CHARS', 300), 16),
       logClientMeta: bool(source, 'MCP_LOG_CLIENT_META', true),
       logClientMetaMaxBytes: Math.max(int(source, 'MCP_LOG_CLIENT_META_MAX_BYTES', 2048), 256),
+      allowedOrigins: list(source, 'MCP_ALLOWED_ORIGINS', []),
+      serverInfoName: str(source, 'MCP_SERVER_INFO_NAME', 'cognipeer-mcp-gateway').trim() || 'cognipeer-mcp-gateway',
+      upstream: {
+        maxResponseBytes: Math.max(int(source, 'MCP_UPSTREAM_MAX_RESPONSE_BYTES', 8 * 1024 * 1024), 64 * 1024),
+        timeoutMs: Math.max(int(source, 'MCP_UPSTREAM_TIMEOUT_MS', 90_000), 1000),
+      },
       sse: {
         maxSessions: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS', 2000), 0),
         maxSessionsPerIp: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS_PER_IP', 50), 0),
@@ -1131,6 +1156,7 @@ function buildConfig(source: ConfigSource): AppConfig {
         bodyLimitBytes: Math.max(int(source, 'MCP_PUBLIC_BODY_LIMIT_BYTES', 1024 * 1024), 1024),
         maxInflightPerTenant: Math.max(int(source, 'MCP_PUBLIC_MAX_INFLIGHT_PER_TENANT', 100), 0),
         logPayloadLimitBytes: Math.max(int(source, 'MCP_PUBLIC_LOG_PAYLOAD_LIMIT_BYTES', 16 * 1024), 256),
+        maxArgumentChars: Math.max(int(source, 'MCP_PUBLIC_MAX_ARGUMENT_CHARS', 32 * 1024), 256),
       },
     },
   };

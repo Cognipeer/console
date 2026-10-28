@@ -50,6 +50,7 @@ import {
   clientAddressBucket,
   type PublicLimitDecision,
 } from '@/lib/services/mcp/publicGuard';
+import { fitPublicToolArguments } from '@/lib/services/mcp/publicArguments';
 import {
   PUBLIC_SSE_PRINCIPAL,
   deliverSseResponse,
@@ -61,6 +62,7 @@ import {
   hasJsonContentType,
   jsonRpcErrorBody as jsonRpcError,
   lookupMessageSession,
+  mcpOriginGuard,
   readJsonRpcRequest,
   sendSessionNotFound,
   startMcpSseResponse,
@@ -74,10 +76,7 @@ const PUBLIC_SLUG_AUTHZ = authz.self(
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
-const SERVER_INFO = {
-  name: 'cognipeer-mcp-gateway',
-  version: '1.0.0',
-};
+const SERVER_VERSION = '1.0.0';
 
 /** Caller-supplied text echoed back in an error is cut to this. */
 const ECHOED_TEXT_MAX_CHARS = 100;
@@ -175,8 +174,11 @@ async function runPublicToolCall(
   // smaller than for a token caller, and says where it came from.
   const logOptions = { payloadLimitBytes: getConfig().mcp.public.logPayloadLimitBytes, client };
   try {
+    // An anonymous caller's arguments are held to the tool's advertised schema.
+    const inputSchema = listMcpToolDescriptors(server).find((tool) => tool.name === toolName)?.inputSchema;
+    const fittedArgs = fitPublicToolArguments(inputSchema, args, getConfig().mcp.public.maxArgumentChars);
     const { result, latencyMs } = await withTenantDb(db, tenant.dbName, () =>
-      executeMcpTool(server, toolName, args));
+      executeMcpTool(server, toolName, fittedArgs));
     void logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
@@ -185,7 +187,7 @@ async function runPublicToolCall(
       toolName,
       status: 'success',
       latencyMs,
-      requestPayload: { tool: toolName, arguments: args },
+      requestPayload: { tool: toolName, arguments: fittedArgs },
       responsePayload: typeof result === 'object' && result !== null
         ? result as Record<string, unknown>
         : { value: result },
@@ -301,7 +303,7 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
     return respond(jsonRpcOk(id, {
       capabilities: { tools: { listChanged: false } },
       protocolVersion: MCP_PROTOCOL_VERSION,
-      serverInfo: SERVER_INFO,
+      serverInfo: { name: getConfig().mcp.serverInfoName, version: SERVER_VERSION },
       ...(instructions ? { instructions } : {}),
     }));
   }
@@ -380,9 +382,12 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
 export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
   const postOptions = { bodyLimit: getConfig().mcp.public.bodyLimitBytes, config: PUBLIC_SLUG_AUTHZ };
 
-  // Before the body is read or the endpoint is looked up: turn away callers
-  // that are over their address-wide rate, and POSTs that are not JSON.
+  // Before the body is read or the endpoint is looked up: turn away pages on
+  // an origin that is not allowed, callers that are over their address-wide
+  // rate, and POSTs that are not JSON.
   app.addHook('onRequest', async (request, reply) => {
+    const refused = await mcpOriginGuard(request, reply);
+    if (refused) return refused;
     const rate = checkPublicAddressRate(getClientIp(request));
     if (!rate.allowed) return sendRateLimited(reply, rate);
     if (request.method === 'POST' && !hasJsonContentType(request)) {

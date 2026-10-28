@@ -73,6 +73,18 @@ describe('buildAgentKnowledgeTools', () => {
     expect(mocks.queryRag.mock.calls[0][3]).toMatchObject({ topK: 5 });
   });
 
+  it('marks a model-supplied filter as untrusted, and leaves a call without one trusted', async () => {
+    mocks.resolve.mockImplementation(async (_db: string, key: string) => ({
+      key, projectId: 'p1', status: 'active', filterableFields: ['source'],
+    }));
+    const built = await buildAgentKnowledgeTools('db', 't', 'p1', { knowledgeEngineKey: 'a' }, guard);
+    mocks.queryRag.mockResolvedValue({ matches: [] });
+    await run(built.tools[0], { query: 'q', filter: { source: 'wiki' } });
+    expect(mocks.queryRag.mock.calls[0][3]).toMatchObject({ filter: { source: 'wiki' }, filterSource: 'untrusted' });
+    await run(built.tools[0], { query: 'q' });
+    expect(mocks.queryRag.mock.calls[1][3]).not.toHaveProperty('filterSource');
+  });
+
   it('gives no knowledge tools for a single knowledge engine that is switched off', async () => {
     const built = await buildAgentKnowledgeTools('db', 't', 'p1', { knowledgeEngineKey: 'off' }, guard);
     expect(built.tools).toEqual([]);

@@ -26,6 +26,7 @@ import {
   queryRag,
 } from '@/lib/services/rag/ragService';
 import { RagModuleInactiveError } from '@/lib/services/rag/errors';
+import { VectorFilterError } from '@/lib/providers';
 import type {
   InternalMcpInstanceOption,
   InternalMcpProvider,
@@ -34,6 +35,9 @@ import type {
 
 /** Longest piece of a caller-supplied id an error repeats back. */
 const ECHOED_ID_MAX_CHARS = 100;
+
+/** Longest search query an MCP caller may send. */
+const QUERY_MAX_CHARS = 4000;
 
 const SEARCH_TOOL_NAME = 'search';
 const READ_TOOL_NAME = 'read_document';
@@ -192,6 +196,9 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
       if (!query) {
         throw new McpToolInputError('"query" is required');
       }
+      if (query.length > QUERY_MAX_CHARS) {
+        throw new McpToolInputError(`"query" must be at most ${QUERY_MAX_CHARS} characters`);
+      }
       const filter =
         args.filter && typeof args.filter === 'object' && !Array.isArray(args.filter)
           ? (args.filter as Record<string, unknown>)
@@ -202,14 +209,32 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
           ragModuleKey: instanceKey,
           query,
           filter,
+          // MCP callers may be anonymous; they may not send provider-native filters.
+          filterSource: 'untrusted',
         }, { signal: currentTurnSignal() });
+        // Internal keys (`_ragModule`, …) are never part of the public shape, and
+        // metadata follows the module's responseDetail like the query endpoints.
+        const includeMetadata = result.responseDetail !== 'text';
         return {
           query: result.query,
-          matches: result.matches,
+          matches: result.matches.map((m) => ({
+            content: m.content,
+            score: m.score,
+            documentId: m.documentId,
+            ...(m.fileName !== undefined ? { fileName: m.fileName } : {}),
+            ...(includeMetadata && m.metadata
+              ? {
+                metadata: Object.fromEntries(
+                  Object.entries(m.metadata).filter(([key]) => !key.startsWith('_')),
+                ),
+              }
+              : {}),
+          })),
         };
       } catch (error) {
         // A switched-off knowledge base is a caller-visible state, not a server fault.
         if (error instanceof RagModuleInactiveError) throw new McpToolInputError(error.message);
+        if (error instanceof VectorFilterError) throw new McpToolInputError(error.message);
         throw error;
       }
     }

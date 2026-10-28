@@ -65,6 +65,7 @@ import { runReranker } from '@/lib/services/reranker';
 import { publishRagIngestJob } from '@/lib/services/rag/ragIngestJob';
 import { deleteFile, downloadFile, uploadFile } from '@/lib/services/files/fileService';
 import type { IRagDocument } from '@/lib/database';
+import { VectorFilterError } from '@/lib/providers';
 
 const DB_NAME = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
@@ -1174,6 +1175,55 @@ describe('RAG Service', () => {
         filter: { source: 'crawler', depth: { $lte: 2 } },
       });
 
+      expect(queryVectorIndex).toHaveBeenCalled();
+    });
+
+    it('rejects a $raw filter when the module lists its filterable fields, trusted or not', async () => {
+      db.findRagModuleByKey.mockResolvedValue({ ...mockModule, filterableFields: ['source'] });
+
+      await expect(
+        queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { $raw: { match_all: {} } } }),
+      ).rejects.toThrow(/"\$raw" filters are not accepted/);
+      await expect(
+        queryRag(DB_NAME, TENANT_ID, PROJECT_ID, {
+          ...queryReq,
+          filter: { $and: [{ source: 'a' }, { $raw: { match_all: {} } }] },
+          filterSource: 'untrusted',
+        }),
+      ).rejects.toThrow(VectorFilterError); // nested $raw is refused by the parser itself
+      expect(queryVectorIndex).not.toHaveBeenCalled();
+    });
+
+    it('still lets a trusted caller send $raw to a module without filterableFields', async () => {
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { $raw: { match_all: {} } } });
+      expect(queryVectorIndex).toHaveBeenCalled();
+    });
+
+    it('rejects an untrusted $raw filter', async () => {
+      await expect(
+        queryRag(DB_NAME, TENANT_ID, PROJECT_ID, {
+          ...queryReq,
+          filter: { $raw: { match_all: {} } },
+          filterSource: 'untrusted',
+        }),
+      ).rejects.toThrow(VectorFilterError);
+      expect(queryVectorIndex).not.toHaveBeenCalled();
+    });
+
+    it('rejects an untrusted filter on a module without filterableFields', async () => {
+      await expect(
+        queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ...queryReq, filter: { a: 1 }, filterSource: 'untrusted' }),
+      ).rejects.toThrow(/does not accept filters/);
+      expect(queryVectorIndex).not.toHaveBeenCalled();
+    });
+
+    it('accepts an untrusted filter within the listed fields', async () => {
+      db.findRagModuleByKey.mockResolvedValue({ ...mockModule, filterableFields: ['source'] });
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, {
+        ...queryReq,
+        filter: { source: 'x' },
+        filterSource: 'untrusted',
+      });
       expect(queryVectorIndex).toHaveBeenCalled();
     });
 

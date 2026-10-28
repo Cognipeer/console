@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
   getSseSessionFor,
@@ -18,6 +19,7 @@ import {
   type McpSseBinding,
   type McpSseSession,
 } from '@/lib/services/mcp/sseSessionManager';
+import { matchesAllowedOrigin } from './cors';
 import { applyStreamHeaders, readJsonBody } from './fastify-utils';
 
 const logger = createLogger('api:mcp-transport');
@@ -54,7 +56,20 @@ export function readJsonRpcRequest(request: FastifyRequest): JsonRpcReadResult {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { ok: false, code: -32600, message: 'Invalid Request' };
   }
+  // The id is echoed back in the response, so only the shapes JSON-RPC allows.
+  if (!isValidJsonRpcId((parsed as { id?: unknown }).id)) {
+    return { ok: false, code: -32600, message: 'Invalid Request: id must be a string, a number or null' };
+  }
   return { ok: true, body: parsed as JsonRpcRequestBody };
+}
+
+/** Longest string id a request may carry. */
+const JSONRPC_ID_MAX_CHARS = 256;
+
+function isValidJsonRpcId(id: unknown): boolean {
+  if (id === undefined || id === null) return true;
+  if (typeof id === 'string') return id.length <= JSONRPC_ID_MAX_CHARS;
+  return typeof id === 'number' && Number.isFinite(id);
 }
 
 /**
@@ -80,6 +95,38 @@ export function hasJsonContentType(request: FastifyRequest): boolean {
   const value = Array.isArray(header) ? header[0] : header;
   const mediaType = (value ?? '').split(';')[0].trim().toLowerCase();
   return mediaType === 'application/json' || /^application\/[\w.+-]+\+json$/.test(mediaType);
+}
+
+// ── Origin ────────────────────────────────────────────────────────────────
+
+/**
+ * Whether a request to an MCP endpoint may go on, judged by its `Origin`
+ * header (MCP Streamable HTTP transport, "Security"). Server-side MCP clients
+ * send none and pass; a browser page passes only from the app's own origin or
+ * one listed in `MCP_ALLOWED_ORIGINS`.
+ */
+export function isMcpOriginAllowed(request: FastifyRequest): boolean {
+  const header = request.headers.origin;
+  if (header === undefined) return true;
+  const origin = Array.isArray(header) ? header[0] : header;
+  const { app, mcp } = getConfig();
+  if (origin && origin.toLowerCase() === originOf(app.url)) return true;
+  return matchesAllowedOrigin(origin ?? '', mcp.allowedOrigins);
+}
+
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** `onRequest` hook for the MCP transport routes: 403 for a page on an origin that is not allowed. */
+export async function mcpOriginGuard(request: FastifyRequest, reply: FastifyReply) {
+  if (isMcpOriginAllowed(request)) return undefined;
+  // A JSON-RPC error without an id, as the transport allows.
+  return reply.code(403).send({ error: { code: -32600, message: 'Origin not allowed' }, jsonrpc: '2.0' });
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────

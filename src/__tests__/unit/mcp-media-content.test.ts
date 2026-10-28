@@ -29,6 +29,8 @@ vi.mock('@/lib/security/outboundFetch', () => ({
     status: 200,
     headers: { 'content-type': 'application/json' },
   })),
+  readResponseText: vi.fn(async (response: Response) => response.text()),
+  ResponseTooLargeError: class ResponseTooLargeError extends Error {},
 }));
 
 const SERVER_JS = `

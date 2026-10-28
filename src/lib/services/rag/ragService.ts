@@ -12,6 +12,7 @@ import { createLogger } from '@/lib/core/logger';
 import {
   VectorFilterError,
   collectFilterFields,
+  collectFilterOperators,
   parseVectorFilter,
 } from '@/lib/providers';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
@@ -383,7 +384,9 @@ function validateFilterDocument(filter: unknown, label: string): void {
 
 /**
  * Reject a query filter that touches a metadata key the module does not
- * expose. Modules that declare no `filterableFields` allow any key.
+ * expose. Modules that declare no `filterableFields` allow any key. A
+ * provider-native `$raw` clause cannot be checked against the list, so a
+ * module that declares one does not accept it.
  */
 function assertFilterFieldsAllowed(
   filter: unknown,
@@ -393,6 +396,12 @@ function assertFilterFieldsAllowed(
   const parsed = parseVectorFilter(filter);
   if (!parsed) return;
 
+  if (collectFilterOperators(parsed).has('$raw')) {
+    throw new VectorFilterError(
+      '"$raw" filters are not accepted by a module that lists its filterable fields.',
+    );
+  }
+
   const allowed = new Set(filterableFields);
   const rejected = [...collectFilterFields(parsed)].filter((field) => !allowed.has(field));
 
@@ -401,6 +410,26 @@ function assertFilterFieldsAllowed(
       `Filtering on ${rejected.join(', ')} is not allowed for this Knowledge Engine module. `
       + `Filterable fields: ${filterableFields.join(', ')}.`,
     );
+  }
+}
+
+/**
+ * Extra limits for filters that did not come from the project itself (MCP
+ * callers, model-filled tool arguments): no provider-native clauses, and no
+ * filtering at all on a module that does not list its filterable fields.
+ */
+function assertUntrustedFilterAllowed(
+  filter: unknown,
+  filterableFields: string[] | undefined,
+): void {
+  const parsed = parseVectorFilter(filter);
+  if (!parsed) return;
+
+  if (!filterableFields || filterableFields.length === 0) {
+    throw new VectorFilterError('This knowledge base does not accept filters.');
+  }
+  if (collectFilterOperators(parsed).has('$raw')) {
+    throw new VectorFilterError('"$raw" filters are not accepted from this caller.');
   }
 }
 
@@ -1344,6 +1373,9 @@ async function runRagQuery(
   //    validating the request filter and checking it only touches fields the
   //    module exposes.
   validateFilterDocument(request.filter, 'Invalid filter');
+  if (request.filterSource === 'untrusted') {
+    assertUntrustedFilterAllowed(request.filter, ragModule.filterableFields);
+  }
   assertFilterFieldsAllowed(request.filter, ragModule.filterableFields);
   const isolated = await resolveModuleIsolation(db, ragModule);
   const filter = mergeFilters(
