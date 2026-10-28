@@ -56,6 +56,7 @@ import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { fireAndForget } from '@/lib/core/asyncTask';
+import { getRagModuleChangeListener, type RagModuleChange } from '@/enterprise/rag-module-changes';
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
 import { publishRagIngestJob } from './ragIngestJob';
 import { metadataWithCrawlerMark, type RagSentByCrawler } from './crawlerMark';
@@ -657,7 +658,26 @@ export async function updateRagModule(
   }
 
   updates.updatedBy = request.updatedBy;
-  return db.updateRagModule(moduleId, updates as Partial<IRagModule>);
+  const updated = await db.updateRagModule(moduleId, updates as Partial<IRagModule>);
+  if (current && updated && (current.access?.enabled === true) !== (updated.access?.enabled === true)) {
+    tellModuleChanged(tenantDbName, current, 'access', request.updatedBy);
+  }
+  return updated;
+}
+
+/** Tells the registered listener (enterprise connectors) that a module's access control changed or the module is gone; in the background. */
+function tellModuleChanged(tenantDbName: string, ragModule: IRagModule, change: RagModuleChange['change'], actorId?: string): void {
+  const listener = getRagModuleChangeListener();
+  if (!listener || !ragModule.tenantId) return;
+  const told: RagModuleChange = {
+    tenantDbName,
+    tenantId: ragModule.tenantId,
+    ...(ragModule.projectId ? { projectId: ragModule.projectId } : {}),
+    ragModuleKey: ragModule.key,
+    change,
+    ...(actorId ? { actorId } : {}),
+  };
+  fireAndForget('rag-module-change', () => listener(told));
 }
 
 /** Documents whose rows are torn down at once, so the rare path cannot flood the DB. */
@@ -759,7 +779,9 @@ export async function deleteRagModule(
     await deleteRagModuleAccessData(db, tenantDbName, ragModule);
   }
 
-  return db.deleteRagModule(moduleId);
+  const deleted = await db.deleteRagModule(moduleId);
+  if (deleted) tellModuleChanged(tenantDbName, { ...ragModule, tenantId: ragModule.tenantId ?? tenantId }, 'deleted');
+  return deleted;
 }
 
 export async function getRagModule(

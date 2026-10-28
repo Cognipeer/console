@@ -66,6 +66,8 @@ import { publishRagIngestJob } from '@/lib/services/rag/ragIngestJob';
 import { deleteFile, downloadFile, uploadFile } from '@/lib/services/files/fileService';
 import type { IRagDocument } from '@/lib/database';
 import { VectorFilterError } from '@/lib/providers';
+import { drainPendingTasks } from '@/lib/core/asyncTask';
+import { __resetRagModuleChangeListenerForTests, registerRagModuleChangeListener } from '@/enterprise/rag-module-changes';
 
 const DB_NAME = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
@@ -252,6 +254,29 @@ describe('RAG Service', () => {
       expect(call.reindexRequired).toBeUndefined();
     });
 
+    it('tells the listener of module changes (enterprise connectors) when access control is switched, and only then', async () => {
+      const told = vi.fn(async () => undefined);
+      registerRagModuleChangeListener(told);
+      try {
+        const turn = async (from: boolean | undefined, to: boolean, request: Parameters<typeof updateRagModule>[2]) => {
+          told.mockClear();
+          db.findRagModuleById.mockResolvedValue({ ...mockModule, ...(from === undefined ? {} : { access: { enabled: from } }) });
+          db.updateRagModule.mockResolvedValue({ ...mockModule, access: { enabled: to } });
+          await updateRagModule(DB_NAME, 'ragmod-1', request);
+          await drainPendingTasks();
+          return told.mock.calls.map(([change]) => change);
+        };
+        const on = { access: { enabled: true }, updatedBy: 'user-1' };
+        expect(await turn(undefined, true, on)).toEqual([{ tenantDbName: DB_NAME, tenantId: TENANT_ID, projectId: PROJECT_ID, ragModuleKey: 'my-rag', change: 'access', actorId: 'user-1' }]);
+        expect(await turn(true, false, { access: { enabled: false }, updatedBy: 'user-1' })).toHaveLength(1);
+        expect(await turn(true, true, on), 'switched on again: nothing changed').toEqual([]);
+        expect(await turn(true, true, { access: { enabled: true, adminBypass: false }, updatedBy: 'user-1' }), 'the admin exception alone').toEqual([]);
+        expect(await turn(false, false, { name: 'Renamed', updatedBy: 'user-1' })).toEqual([]);
+      } finally {
+        __resetRagModuleChangeListenerForTests();
+      }
+    });
+
     it('does not flag a re-index for a parentWindowSize change, which is query-time only', async () => {
       db.findRagModuleById.mockResolvedValue(mockModule);
       db.updateRagModule.mockResolvedValue(mockModule);
@@ -324,6 +349,23 @@ describe('RAG Service', () => {
       const result = await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
       expect(result).toBe(true);
       expect(db.deleteRagModule).toHaveBeenCalledWith('ragmod-1');
+    });
+
+    it('tells the listener of module changes that the module is gone, once it is', async () => {
+      const told = vi.fn(async () => undefined);
+      registerRagModuleChangeListener(told);
+      try {
+        await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+        await drainPendingTasks();
+        expect(told).toHaveBeenCalledWith({ tenantDbName: DB_NAME, tenantId: TENANT_ID, projectId: PROJECT_ID, ragModuleKey: 'my-rag', change: 'deleted' });
+        told.mockClear();
+        db.deleteRagModule.mockResolvedValue(false);
+        await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
+        await drainPendingTasks();
+        expect(told).not.toHaveBeenCalled();
+      } finally {
+        __resetRagModuleChangeListenerForTests();
+      }
     });
 
     it('returns false without touching anything when the module is gone', async () => {
