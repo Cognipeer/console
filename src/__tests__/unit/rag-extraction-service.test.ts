@@ -320,6 +320,19 @@ describe('Knowledge Engine OCR', () => {
       expect(db.createRagDocument.mock.lastCall![0].extraction).not.toHaveProperty('stage');
     });
 
+    it('extracts in the request when the original could not be stored, instead of queueing a row that cannot succeed', async () => {
+      db.findRagModuleByKey.mockResolvedValue(ocrBucketModule);
+      (uploadFile as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+
+      await upload({ deferExtraction: true });
+
+      // The queued attempt wrote no row and queued no job; the request read the pages itself.
+      expect(publishRagIngestJob).not.toHaveBeenCalled();
+      expect(hoisted.extract).toHaveBeenCalledTimes(1);
+      expect(db.createRagDocument).toHaveBeenCalledTimes(1);
+      expect(db.createRagDocument.mock.lastCall![0].extraction).not.toHaveProperty('stage');
+    });
+
     it('extracts in the request when OCR does not apply, even if deferral was asked', async () => {
       db.findRagModuleByKey.mockResolvedValue({ ...baseModule, fileBucketKey: 'kb-bucket' });
       hoisted.extract.mockResolvedValue(plainAnswer('Converted by the library'));
@@ -450,6 +463,29 @@ describe('Knowledge Engine OCR', () => {
       }
       expect(hoisted.extract).not.toHaveBeenCalled();
       expect(db.updateRagDocument.mock.calls.some(([, patch]) => 'extraction' in (patch as object))).toBe(false);
+    });
+
+    it('never falls back to the original without OCR when the kept text cannot be read', async () => {
+      // A text in the bucket that cannot be downloaded (and a failed deferred row, which has no text at all).
+      (downloadFile as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => ({
+        data: Buffer.from('%PDF-1.4 original bytes'), fileName: 'scan.pdf', contentType: 'application/pdf',
+      })).mockRejectedValueOnce(new Error('bucket unavailable'));
+      db.findRagDocumentById.mockResolvedValue({
+        ...stored, sourceText: undefined, sourceTextKey: 'text-1.md', extraction: { sourceType: 'mixed' },
+      });
+
+      await expect(reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, request))
+        .rejects.toThrow('could not be read');
+      expect(hoisted.extract).not.toHaveBeenCalled();
+      expect(db.deleteRagChunksByDocumentId).not.toHaveBeenCalled();
+    });
+
+    it('returns the new extraction record with the document', async () => {
+      db.findRagDocumentById.mockResolvedValue({ ...stored, extraction: { sourceType: 'converted' } });
+
+      const document = await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, { ...request, reextract: true });
+
+      expect(document.extraction).toMatchObject({ sourceType: 'mixed', pageCount: 5 });
     });
 
     it('re-converts the original of any other document with OCR off', async () => {

@@ -22,3 +22,15 @@ export class RagOriginalMissingError extends Error {
     this.name = 'RagOriginalMissingError';
   }
 }
+
+/**
+ * Raised when a re-index of a document whose text came from OCR cannot read that text back (a storage error, or the
+ * extraction never finished). The original is not silently re-converted without OCR; routes answer it with a 409.
+ */
+export class RagStoredTextUnavailableError extends Error {
+  readonly statusCode = 409;
+  constructor() {
+    super('The extracted text of this document could not be read. Try again, or re-extract the document from its original.');
+    this.name = 'RagStoredTextUnavailableError';
+  }
+}

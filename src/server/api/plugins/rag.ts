@@ -24,7 +24,7 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
-import { RagModuleInactiveError, RagOriginalMissingError } from '@/lib/services/rag/errors';
+import { RagModuleInactiveError, RagOriginalMissingError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import { validateChunkConfig } from '@/lib/services/rag/chunking';
 import {
@@ -788,7 +788,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
-      if (error instanceof RagModuleInactiveError || error instanceof RagOriginalMissingError) {
+      if (
+        error instanceof RagModuleInactiveError
+        || error instanceof RagOriginalMissingError
+        || error instanceof RagStoredTextUnavailableError
+      ) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       logger.error('Reingest RAG document error', { error });

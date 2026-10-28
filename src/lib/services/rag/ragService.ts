@@ -6,7 +6,7 @@
  */
 
 import { assertServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
-import { RagModuleInactiveError, RagOriginalMissingError } from './errors';
+import { RagModuleInactiveError, RagOriginalMissingError, RagStoredTextUnavailableError } from './errors';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -983,6 +983,8 @@ export async function ingestDocument(
     fileData: request.fileData,
     createdBy: request.createdBy,
   });
+  // A queued extraction reads the original in the job: without a stored copy there is nothing for the job to read.
+  if (request.extraction?.stage === 'queued' && !source.fileKey) throw new RagOriginalMissingError();
 
   const docRecord = await db.createRagDocument({
     tenantId,
@@ -1393,13 +1395,28 @@ export async function ingestFile(
   // Recorded only: a hash of the bytes never makes an upload return an existing document.
   const fileHash = plan.ocr ? fileHashOf(request.fileData) : undefined;
 
-  let textContent: string;
-  let extraction: IRagDocumentExtraction | undefined;
-  if (plan.deferred) {
-    // The row is created by ingestDocument with an empty text; the ingest job extracts it.
-    textContent = '';
-    extraction = { sourceType: 'ocr', stage: 'queued', fileHash, requested: plan.ocr };
-  } else {
+  const ingest = (
+    content: string,
+    extraction: IRagDocumentExtraction | undefined,
+    deferred: boolean,
+  ) => ingestDocument(tenantDbName, tenantId, projectId, {
+    ragModuleKey: request.ragModuleKey,
+    fileName: request.fileName,
+    content,
+    fileData: request.fileData,
+    contentType: request.contentType,
+    chunkConfig: request.chunkConfig,
+    ...(extraction ? { extraction } : {}),
+    force: request.force,
+    deferIndexing: deferred ? true : request.deferIndexing,
+    metadata: {
+      ...request.metadata,
+      _sourceType: isPlainText ? 'text' : 'converted',
+    },
+    createdBy: request.createdBy,
+  });
+
+  const extractInline = async () => {
     try {
       const converted = await convertFileToTextDetailed(request.fileName, request.fileData, request.contentType, {
         scope: { tenantDbName, tenantId, ...(projectId ? { projectId } : {}), userId: request.createdBy },
@@ -1407,8 +1424,10 @@ export async function ingestFile(
         source: 'knowledge-engine',
         budget: 'inline',
       });
-      textContent = converted.text;
-      if (plan.ocr) extraction = documentExtractionOf(converted.report, { fileHash, requested: plan.ocr });
+      return {
+        text: converted.text,
+        extraction: plan.ocr ? documentExtractionOf(converted.report, { fileHash, requested: plan.ocr }) : undefined,
+      };
     } catch (error) {
       if (error instanceof Error && error.message.includes('Failed to convert')) {
         throw error;
@@ -1417,24 +1436,24 @@ export async function ingestFile(
         `File conversion failed for "${request.fileName}": ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
+  };
+
+  if (plan.deferred) {
+    // The row is created by ingestDocument with an empty text; the ingest job extracts it.
+    try {
+      return await ingest('', { sourceType: 'ocr', stage: 'queued', fileHash, requested: plan.ocr }, true);
+    } catch (error) {
+      // The original could not be stored, so the job would have nothing to read: extract in this request instead.
+      if (!(error instanceof RagOriginalMissingError)) throw error;
+      logger.warn('Original upload was not stored; extracting inline instead of deferring', {
+        ragModuleKey: request.ragModuleKey,
+        fileName: request.fileName,
+      });
+    }
   }
 
-  return ingestDocument(tenantDbName, tenantId, projectId, {
-    ragModuleKey: request.ragModuleKey,
-    fileName: request.fileName,
-    content: textContent,
-    fileData: request.fileData,
-    contentType: request.contentType,
-    chunkConfig: request.chunkConfig,
-    ...(extraction ? { extraction } : {}),
-    force: request.force,
-    deferIndexing: plan.deferred ? true : request.deferIndexing,
-    metadata: {
-      ...request.metadata,
-      _sourceType: isPlainText ? 'text' : 'converted',
-    },
-    createdBy: request.createdBy,
-  });
+  const inline = await extractInline();
+  return ingest(inline.text, inline.extraction, false);
 }
 
 /* ── Query (embed → vector search) ───────────────────────────────────── */
@@ -2036,6 +2055,9 @@ async function resolveReingestSource(
   if (document.extraction?.sourceType === 'ocr' || document.extraction?.sourceType === 'mixed') {
     const kept = await loadSourceText(tenantDbName, tenantId, projectId, document);
     if (kept) return { text: kept, origin: 'stored-text' };
+    // Re-converting the original without OCR would drop the pages OCR read: never silently. A transient storage
+    // error is retried; a document without text (its extraction failed) is read again with `reextract`.
+    throw new RagStoredTextUnavailableError();
   }
 
   // The original upload beats our own extraction: a converter improvement only
@@ -2248,6 +2270,7 @@ export async function reingestDocument(
       chunkCount,
       lastIndexedAt: now,
       fileName: request.fileName ?? doc.fileName,
+      ...(source.extraction ? { extraction: source.extraction } : {}),
       ...(request.metadata ? { metadata } : {}),
     });
   } catch (error) {
