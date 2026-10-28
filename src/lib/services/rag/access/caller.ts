@@ -26,7 +26,7 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 import { isSyntheticActor } from '@/lib/services/agents/syntheticActor';
 
-export type KbAnonymousReason = 'trigger' | 'public' | 'synthetic' | 'unknown';
+export type KbAnonymousReason = 'trigger' | 'public' | 'shared' | 'synthetic' | 'unknown';
 
 export type KbCaller =
   | { kind: 'person'; userId: string; tokenId?: string; delegated?: boolean }
@@ -78,10 +78,11 @@ export function kbCallerFromApiToken(ctx: Pick<ApiTokenContext, 'tokenRecord' | 
  * the trigger.
  */
 export function kbCallerFromRuntime(
-  ctx: Pick<AgentRuntimeContext, 'userId' | 'tokenId' | 'source' | 'via'> | null | undefined,
+  ctx: Pick<AgentRuntimeContext, 'userId' | 'tokenId' | 'source' | 'via' | 'kbReader'> | null | undefined,
 ): KbCaller {
   if (!ctx) return anonymousKbCaller('unknown');
   if (ctx.source === 'trigger') return anonymousKbCaller('trigger');
+  if (ctx.kbReader === 'anonymous') return anonymousKbCaller('shared');
   const userId = realUserId(ctx.userId);
   if (!userId) {
     if (typeof ctx.userId === 'string' && ctx.userId.trim()) return anonymousKbCaller('synthetic');
@@ -98,6 +99,7 @@ export function kbCallerFromRuntime(
 export function kbCallerFromIdentity(caller: ConsoleIdentityCaller | null | undefined): KbCaller {
   if (!caller) return anonymousKbCaller('unknown');
   if (caller.source === 'trigger') return anonymousKbCaller('trigger');
+  if (caller.kbReader === 'anonymous') return anonymousKbCaller('shared');
   const userId = realUserId(caller.userId);
   if (!userId) {
     if (typeof caller.userId === 'string' && caller.userId.trim()) return anonymousKbCaller('synthetic');

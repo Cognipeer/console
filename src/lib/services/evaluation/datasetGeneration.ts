@@ -16,7 +16,6 @@ import { getDatabase } from '@/lib/database';
 import type { IEvaluationDatasetItem } from '@/lib/database';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
-import { kbCallerForActor } from './kbCaller';
 
 const logger = createLogger('eval-dataset-gen');
 
@@ -37,11 +36,7 @@ export interface GenerateDatasetItemsParams {
   count?: number;
   /** Optional natural-language hint, e.g. "Turkish" or "English". */
   language?: string;
-  /**
-   * Who the dataset is generated for. From a knowledge base with access control
-   * only what this person may read is used; with no such person (or an actor that
-   * is not a user), only what is open to everyone.
-   */
+  /** Who asked for the dataset (recorded only: it does not widen what a knowledge base hands over). */
   createdBy?: string;
 }
 
@@ -93,14 +88,15 @@ async function gatherBlocks(params: GenerateDatasetItemsParams): Promise<string[
     projectId: params.projectId,
   });
   if (ragModule.access?.enabled === true) {
-    // A knowledge base with access control: only the documents the dataset's creator may read.
+    // A knowledge base with access control: a dataset is read by everyone who may read the project's
+    // evaluations, so only the documents open to everyone are used, whoever asked for it.
     // Imported here so the access engine loads only when a knowledge base needs it.
-    const { resolveRagAccess } = await import('@/lib/services/rag/access');
+    const { anonymousKbCaller, resolveRagAccess } = await import('@/lib/services/rag/access');
     const scope = await resolveRagAccess({
       tenantDbName: params.tenantDbName,
       tenantId: params.tenantId,
       module: ragModule,
-      caller: kbCallerForActor(params.createdBy),
+      caller: anonymousKbCaller('public'),
     });
     if (scope.enforced) documents = documents.filter((doc) => scope.canReadDocument(doc));
   }

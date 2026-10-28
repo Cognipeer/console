@@ -62,7 +62,7 @@ import { sendProviderConfigError } from '../providerConfigErrors';
 import { isUploadMetadata, sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
 import { ragFileGuard, withoutHiddenFiles } from '../ragOwnedResources';
 import {
-  SESSION_FORBIDDEN_MESSAGE,
+  sessionRefusalMessage,
   refuseSessionLinked,
   sendSessionRefusal,
   sessionActorOf,
@@ -281,7 +281,7 @@ async function sessionRefusedForBucketDeletion(
 
 /** What a batch says about a file of a session the caller may not act on. */
 function denialMessage(denial: SessionDenial): string {
-  return denial.status === 403 ? SESSION_FORBIDDEN_MESSAGE[denial.need] : 'Authorization is temporarily unavailable.';
+  return denial.status === 403 ? sessionRefusalMessage(denial) : 'Authorization is temporarily unavailable.';
 }
 
 export const filesApiPlugin: FastifyPluginAsync = async (app) => {

@@ -113,14 +113,18 @@ describe('who a call reads as', () => {
 
   it.each(cases)('read_document reads as %s', async (_name, identity, caller) => {
     await run('read_document', { documentId: 'doc-1' }, identity);
-    expect(h.resolveRagAccess).toHaveBeenCalledTimes(1);
+    // The caller's scope; then, for the document handed on, whether it is open to everyone (the call is marked if not).
+    expect(h.resolveRagAccess).toHaveBeenCalledTimes(2);
     expect(h.resolveRagAccess.mock.calls[0][0].caller).toEqual(caller);
+    expect(h.resolveRagAccess.mock.calls[1][0]).toMatchObject({ caller: { kind: 'anonymous', reason: 'public' }, manage: false });
   });
 
   it.each(cases)('read_document_lines reads as %s', async (_name, identity, caller) => {
     await run('read_document_lines', { documentId: 'doc-1' }, identity);
-    expect(h.resolveRagAccess).toHaveBeenCalledTimes(1);
+    // The caller's scope; then, for the document handed on, whether it is open to everyone (the call is marked if not).
+    expect(h.resolveRagAccess).toHaveBeenCalledTimes(2);
     expect(h.resolveRagAccess.mock.calls[0][0].caller).toEqual(caller);
+    expect(h.resolveRagAccess.mock.calls[1][0]).toMatchObject({ caller: { kind: 'anonymous', reason: 'public' }, manage: false });
   });
 
   it('looks the module up where the server is published', async () => {
@@ -192,7 +196,7 @@ describe('search in a module with access control', () => {
       'tenant_db',
       'tenant-1',
       'project-a',
-      { ragModuleKey: MODULE_KEY, query: 'q', filter: { lang: 'en' } },
+      expect.objectContaining({ ragModuleKey: MODULE_KEY, query: 'q', filter: { lang: 'en' } }),
       expect.objectContaining({ caller: { kind: 'person', userId: 'u1' } }),
     );
   });

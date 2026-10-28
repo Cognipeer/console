@@ -30,6 +30,7 @@ import {
   publicAgentRunId,
   runWithTenantDb,
   serializeAgentRun,
+  withoutAgentRunContent,
   settleWaitedRunCallback,
   waitForAgentRun,
   type StartAgentRunExecution,
@@ -80,6 +81,7 @@ import {
   sendClientListUnavailable,
   sendClientSessionRefusal,
   sendOpenAiSessionRefusal,
+  runsWithHiddenContent,
   sessionListScope,
   sessionStreamStillAllowed,
   type SessionNeed,
@@ -478,7 +480,9 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         ...(scope.ownOnly ? { userId: scope.ownOnly.userId } : {}),
         limit: limit + 1,
       });
-      const page = rows.slice(0, limit).map(serializeAgentRun);
+      const listed = rows.slice(0, limit);
+      const hidden = await runsWithHiddenContent(request, { tenantDbName: ctx.tenantDbName, userId: String(ctx.tokenRecord.userId ?? '') }, listed);
+      const page = listed.map((run) => (hidden.has(String(run._id)) ? withoutAgentRunContent(serializeAgentRun(run)) : serializeAgentRun(run)));
       return reply.code(200).send({
         object: 'list',
         data: page,

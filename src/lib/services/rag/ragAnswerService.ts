@@ -17,7 +17,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { queryRag } from './ragService';
-import { anonymousKbCaller, resolveRagAccess, type KbCaller, type RagAccessScope } from './access';
+import { anonymousKbCaller, resolveRagAccess, withKnowledgeExposure, type KbCaller, type RagAccessScope } from './access';
 import { RagModuleInactiveError } from './errors';
 import type { RagQueryMatch } from './types';
 import {
@@ -381,6 +381,17 @@ export async function answerWithRag(
   request: RagAnswerRequest,
   /** Who is asking; only knowledge bases with access control look at it (see queryRag). */
   options: { caller?: KbCaller; access?: RagAccessScope } = {},
+): Promise<RagAnswerResult> {
+  // The answer's model calls carry what its queries found: one exposure for both, so their logs are marked.
+  return withKnowledgeExposure(() => answer(tenantDbName, tenantId, projectId, request, options));
+}
+
+async function answer(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  request: RagAnswerRequest,
+  options: { caller?: KbCaller; access?: RagAccessScope },
 ): Promise<RagAnswerResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const startTime = Date.now();

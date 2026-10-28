@@ -494,6 +494,7 @@ export const TENANT_SCHEMA_SQL = `
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
+    kbRestricted TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -1327,6 +1328,7 @@ export const TENANT_SCHEMA_SQL = `
     title TEXT,
     agentKey TEXT,
     ownerId TEXT,
+    kbRestricted TEXT,
     sourceVersion TEXT,
     runId TEXT NOT NULL,
     decisions TEXT NOT NULL DEFAULT '{}',
@@ -1901,7 +1903,8 @@ export const TENANT_SCHEMA_SQL = `
     budget TEXT,
     spentUsd REAL,
     runtimeTurnId TEXT,
-    transcriptHash TEXT
+    transcriptHash TEXT,
+    kbRestricted TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);

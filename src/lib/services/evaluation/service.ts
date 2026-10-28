@@ -27,6 +27,7 @@ import type {
   IAgentRunRevision,
 } from '@/lib/database';
 import { runEvaluation } from './runner';
+import { KnowledgeExposure, runWithKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import { EMBEDDING_SCORERS, JUDGE_SCORERS } from './scorers';
 import { compareEvaluationRuns, type EvalComparison } from './compare';
 import type { DatasetItem, RunItemResult, ScorerConfig } from './types';
@@ -147,6 +148,7 @@ function toRunItem(result: RunItemResult): IEvaluationRunItem {
     latencyMs: result.latencyMs,
     usage: result.usage,
     error: result.error,
+    ...(result.kbRestricted?.length ? { kbRestricted: result.kbRestricted } : {}),
   };
 }
 
@@ -751,6 +753,8 @@ export interface RunSuiteParams {
   tenantId: string;
   projectId?: string;
   createdBy: string;
+  /** The API token a client API call starts the run with: its targets read knowledge bases as the token. */
+  apiTokenId?: string;
   suiteKey: string;
   /**
    * Agent targets: run this revision instead of the target's default
@@ -914,7 +918,13 @@ export async function executeRun(
       ...(started ? { agentRevision: started.revision } : {}),
     });
 
-    const ctx: EvaluationModelContext = { tenantDbName, tenantId, projectId: projectId ?? '', userId: createdBy };
+    const ctx: EvaluationModelContext = {
+      tenantDbName,
+      tenantId,
+      projectId: projectId ?? '',
+      userId: createdBy,
+      ...(params.apiTokenId ? { tokenId: params.apiTokenId } : {}),
+    };
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
     const makeJudge = deps.buildJudgeInvoker ?? buildJudgeInvoker;
     const makeEmbed = deps.buildEmbedInvoker ?? buildEmbedInvoker;
@@ -935,6 +945,13 @@ export async function executeRun(
       invokeJudge: needJudge ? makeJudge(suite.judgeModelKey, ctx) : undefined,
       invokeEmbed: needEmbed ? makeEmbed(suite.embeddingModelKey, ctx) : undefined,
       config: { concurrency: suite.runConfig?.concurrency, turnMode: suite.runConfig?.turnMode },
+      // Each item's work (target and scorers) in its own exposure: its stored copy and its model calls are marked
+      // with what it handed on of documents not open to everyone.
+      scope: async (_item, run) => {
+        const exposure = new KnowledgeExposure({ parent: null });
+        const result = await runWithKnowledgeExposure(exposure, run);
+        return exposure.restricted ? { ...result, kbRestricted: exposure.list() } : result;
+      },
       onItem: (item) => {
         partial.push(item);
         const now = Date.now();

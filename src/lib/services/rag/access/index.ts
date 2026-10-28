@@ -27,3 +27,5 @@ export {
   type ResolveRagAccessInput,
 } from './scope';
 export * from './vectorPlan';
+export * from './exposure';
+export * from './restricted';

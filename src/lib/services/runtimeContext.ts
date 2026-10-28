@@ -37,7 +37,7 @@ export interface AgentRuntimeContext {
   /** Stamped by the server from the authenticated caller — not client-writable. */
   userId?: string;
   tokenId?: string;
-  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal' | 'trigger' | 'reminder' | 'messaging';
+  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal' | 'trigger' | 'reminder' | 'messaging' | 'evaluation' | 'redteam';
   /** Stamped by the server on a run a trigger started: its id and kind (schedule, webhook...). Tagged on the trace. */
   trigger?: { id: string; type: string };
   /**
@@ -45,6 +45,11 @@ export interface AgentRuntimeContext {
    * API token is `tokenId` (the actor), a person a trusted issuer vouched for.
    */
   via?: RequestVia;
+  /**
+   * Stamped by the server, never read from a caller: knowledge bases with access control hand this run only what is open to
+   * everyone, whoever it is for — the answer is read by everyone where it is posted (a shared messaging channel).
+   */
+  kbReader?: 'anonymous';
 }
 
 /** Per-record passthrough policy (stored on the target record). */

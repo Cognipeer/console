@@ -31,6 +31,8 @@ export interface RunEvaluationParams {
   config?: RunConfig;
   /** Progress hook, invoked once per completed item. */
   onItem?: (result: RunItemResult, index: number) => void;
+  /** Runs one item (`run`: its target call and scorers) in a context of the caller's, e.g. to mark what it used. */
+  scope?: (item: DatasetItem, run: () => Promise<RunItemResult>) => Promise<RunItemResult>;
 }
 
 export async function runEvaluation(params: RunEvaluationParams): Promise<RunResult> {
@@ -50,7 +52,8 @@ export async function runEvaluation(params: RunEvaluationParams): Promise<RunRes
       const index = cursor;
       cursor += 1;
       if (index >= items.length) return;
-      const result = await runItem(items[index], scorers, invoke, invokeJudge, invokeEmbed);
+      const run = () => runItem(items[index], scorers, invoke, invokeJudge, invokeEmbed);
+      const result = await (params.scope ? params.scope(items[index], run) : run());
       results[index] = result;
       onItem?.(result, index);
     }

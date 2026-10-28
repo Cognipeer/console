@@ -1635,9 +1635,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   createRerankerRunLog(
     log: Omit<IRerankerRunLog, '_id' | 'createdAt'>,
   ): Promise<IRerankerRunLog>;
+  /** `projectId`: only that project's rows (tenant-wide ones when it is empty). */
   listRerankerRunLogs(
     rerankerKey: string,
-    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date; projectId?: string },
   ): Promise<IRerankerRunLog[]>;
 
   // ── Web Search operations (tenant-specific) ──
@@ -1865,6 +1866,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * writer erase the other's. Never lowers the total.
    */
   addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
+  /**
+   * Atomically adds knowledge base tags to the session's `kbRestricted` (a set: a tag already there is not added
+   * twice). Never removes one and does not touch `updatedAt`.
+   */
+  addAgentConversationRestriction(id: string, tags: string[]): Promise<void>;
+  /**
+   * Of the sessions `ids`, those with knowledge base tags (`kbRestricted` not empty): who started each and its tags,
+   * nothing else. An id that names no session, or one without tags, is left out.
+   */
+  findRestrictedAgentConversations(ids: string[]): Promise<Array<Pick<IAgentConversation, '_id' | 'createdBy' | 'kbRestricted'>>>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   /**

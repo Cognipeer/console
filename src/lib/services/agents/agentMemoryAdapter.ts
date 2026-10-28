@@ -31,6 +31,7 @@ import type { MemoryScope as ConsoleMemoryScope } from '@/lib/database/provider/
 import { addMemory, getMemoryStore, listMemoryItems, searchMemories, updateMemoryItem } from '@/lib/services/memory/memoryService';
 import { normalizeMemoryMounts, type ResolvedMemoryMount } from './agentMemoryMounts';
 import { createLogger } from '@/lib/core/logger';
+import { currentKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 
 const logger = createLogger('agent-memory');
 
@@ -79,6 +80,15 @@ export function toConsoleScope(scope: SdkMemoryScope): ConsoleMemoryScope {
         default:
             return 'global';
     }
+}
+
+/**
+ * Work that handed on passages of knowledge base documents not open to everyone (its conversation is marked) keeps
+ * what it learnt in the session: a fact in a wider scope is recalled for other people, and in other places, than the
+ * marks of the conversation allow.
+ */
+export function memoryWriteWithheld(scope: SdkMemoryScope): boolean {
+    return scope !== 'session' && currentKnowledgeExposure()?.restricted === true;
 }
 
 function toFact(item: { _id?: unknown; content: string; summary?: string; importance: number; tags: string[]; status: string; updatedAt?: Date; metadata: Record<string, unknown> }): MemoryFact {
@@ -138,6 +148,10 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
         },
 
         async upsert(sdkScope, facts) {
+            if (memoryWriteWithheld(sdkScope)) {
+                logger.info('Memory write withheld: the conversation used documents not open to everyone', { storeKey: ctx.storeKey, scope: sdkScope });
+                return;
+            }
             if (!(await storeIsActive(ctx))) return;
             const { scope, scopeId } = where(sdkScope);
             try {

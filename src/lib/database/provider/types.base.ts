@@ -336,6 +336,12 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   totalBytesOut?: number;
   totalRequestBytes?: number;
   totalResponseBytes?: number;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the traced work handed on
+   * (see rag/access/exposure.ts): its content is shown only to `userId` and to those who read all of them through the
+   * admin exception. A session of an agent conversation is also governed by the conversation's own marks.
+   */
+  kbRestricted?: string[];
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -1203,6 +1209,12 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   turnId?: string;
   runId?: string;
   traceSessionId?: string;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the call's work had handed on
+   * when it settled (see rag/access/restricted.ts): its request and response are shown only to `userId` and to those
+   * who read all of them through the admin exception.
+   */
+  kbRestricted?: string[];
   createdAt?: Date;
 }
 

@@ -28,6 +28,7 @@ import {
   sendApiTokenError,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { withoutRestrictedAttempts } from '../restrictedKnowledgeRequest';
 import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
 
 const logger = createLogger('api:client-redteam');
@@ -100,6 +101,7 @@ function toRunView(r: WithId<IRedTeamRun>) {
       reviewed: Boolean(a.review),
       latency_ms: a.latencyMs,
       error: a.error,
+      ...(a.restricted ? { restricted: true } : {}),
     })),
   };
 }
@@ -144,6 +146,7 @@ export const clientRedTeamApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         createdBy: ctx.tokenRecord.userId ?? 'api-token',
+        ...(ctx.tokenRecord._id ? { apiTokenId: String(ctx.tokenRecord._id) } : {}),
         campaignKey: key,
         ...(revision.revision !== undefined ? { options: { agentVersion: revision.revision } } : {}),
         // Asked by the service once it knows the campaign targets an agent, before a run row exists. For a
@@ -186,7 +189,8 @@ export const clientRedTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const run = await getRun(ctx.tenantDbName, id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      return reply.code(200).send({ run: toRunView(run) });
+      const viewer = { tenantDbName: ctx.tenantDbName, viewerUserId: ctx.tokenRecord.userId ?? null };
+      return reply.code(200).send({ run: toRunView(await withoutRestrictedAttempts(request, viewer, run)) });
     } catch (error) {
       return fail(reply, error, 'get run');
     }

@@ -177,11 +177,16 @@ export function RerankerMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
 
     async listRerankerRunLogs(
       rerankerKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; projectId?: string },
     ): Promise<IRerankerRunLog[]> {
       const db = this.getTenantDb();
       const clauses: string[] = ['rerankerKey = @rerankerKey'];
       const params: Record<string, unknown> = { rerankerKey };
+      if (options?.projectId !== undefined) {
+        const scope = this.buildProjectScopeFilter(options.projectId);
+        clauses.push(scope.clause);
+        Object.assign(params, scope.params);
+      }
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
 

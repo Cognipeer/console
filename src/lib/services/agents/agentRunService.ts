@@ -232,6 +232,22 @@ export function serializeAgentRun(run: IAgentRun) {
   };
 }
 
+/**
+ * A run of a session that drew on knowledge base documents the viewer may not read: what it is and how it went,
+ * without its answer or error text (`restricted: true`).
+ */
+export function withoutAgentRunContent(serialized: ReturnType<typeof serializeAgentRun>) {
+  return {
+    ...serialized,
+    result: null,
+    output_text: null,
+    output_parsed: null,
+    output_error: null,
+    error: serialized.error ? { type: serialized.error.type, message: null } : null,
+    restricted: true as const,
+  };
+}
+
 // ── Error envelopes ─────────────────────────────────────────────────────
 
 /** The client API's `{ error: { type, message, code } }` envelope. */

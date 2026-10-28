@@ -4731,3 +4731,108 @@ describe('SQLite migration: RAG access control columns', () => {
     }
   });
 });
+
+describeForEachProvider('Restricted knowledge marks on stored copies', (getDb) => {
+  let tenantId: string;
+  const TAG = 'p1:handbook';
+  const OTHER = 'p1:wiki';
+
+  beforeEach(async () => {
+    const slug = `marks-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const db = getDb();
+    const tenant = await db.createTenant({ companyName: 'Marks Co', slug, dbName: `tenant_${slug}`, licenseType: 'FREE', ownerId: 'pending' });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(`tenant_${slug}`);
+  });
+
+  const conversation = (createdBy: string) => getDb().createAgentConversation({
+    tenantId, projectId: 'p1', agentKey: 'support', title: 't', messages: [], metadata: {}, createdBy,
+  } as never);
+
+  it('adds a session\'s marks once each, and finds only the marked sessions of a list', async () => {
+    const db = getDb();
+    const marked = await conversation('u1');
+    const plain = await conversation('u2');
+    await db.addAgentConversationRestriction(String(marked._id), [TAG]);
+    await db.addAgentConversationRestriction(String(marked._id), [TAG, OTHER]);
+
+    const reloaded = await db.findAgentConversationById(String(marked._id));
+    expect([...(reloaded?.kbRestricted ?? [])].sort()).toEqual([OTHER, TAG].sort());
+
+    const found = await db.findRestrictedAgentConversations([String(marked._id), String(plain._id)]);
+    expect(found).toHaveLength(1);
+    expect(String(found[0]._id)).toBe(String(marked._id));
+    expect(found[0].createdBy).toBe('u1');
+    expect([...(found[0].kbRestricted ?? [])].sort()).toEqual([OTHER, TAG].sort());
+    expect(await db.findRestrictedAgentConversations([])).toEqual([]);
+  });
+
+  it('ignores an id that names no session (never throws for a malformed one)', async () => {
+    const db = getDb();
+    await expect(db.addAgentConversationRestriction('not-an-id', [TAG])).resolves.not.toThrow();
+    expect(await db.findRestrictedAgentConversations(['not-an-id'])).toEqual([]);
+  });
+
+  it('a session page carries the marks (the list redacts by them)', async () => {
+    const db = getDb();
+    const marked = await conversation('u1');
+    await db.addAgentConversationRestriction(String(marked._id), [TAG]);
+    const rows = await db.listAgentConversationPage({ projectId: 'p1', agentKey: 'support', limit: 10 });
+    expect(rows.find((r) => String(r._id) === String(marked._id))?.kbRestricted).toEqual([TAG]);
+  });
+
+  it('a model usage log keeps its marks', async () => {
+    const db = getDb();
+    const base = {
+      tenantId, projectId: 'p1', modelKey: 'gpt', route: 'chat.completions', status: 'success' as const,
+      providerRequest: {}, providerResponse: {}, inputTokens: 1, outputTokens: 1, totalTokens: 2,
+    };
+    await db.createModelUsageLog({ ...base, requestId: 'marked', kbRestricted: [TAG] } as never);
+    await db.createModelUsageLog({ ...base, requestId: 'plain' } as never);
+    const logs = await db.listModelUsageLogs('gpt', { limit: 10 }, 'p1');
+    const byId = Object.fromEntries(logs.map((l) => [l.requestId, l]));
+    expect(byId.marked.kbRestricted).toEqual([TAG]);
+    expect(byId.plain.kbRestricted ?? []).toEqual([]);
+  });
+
+  it('a tracing session keeps its marks through an update and can be stamped later', async () => {
+    const db = getDb();
+    const session = (sessionId: string, over: Record<string, unknown> = {}) => db.createAgentTracingSession({
+      sessionId, tenantId, projectId: 'p1', agentName: 'support', status: 'success', startedAt: new Date(), endedAt: new Date(), totalEvents: 0, ...over,
+    } as never);
+    await session('tr-marked', { kbRestricted: [TAG] });
+    await session('tr-later');
+    await db.updateAgentTracingSession('tr-marked', { status: 'error' } as never, 'p1');
+    await db.updateAgentTracingSession('tr-later', { kbRestricted: [OTHER] } as never, 'p1');
+    expect((await db.findAgentTracingSessionById('tr-marked', 'p1'))?.kbRestricted).toEqual([TAG]);
+    expect((await db.findAgentTracingSessionById('tr-later', 'p1'))?.kbRestricted).toEqual([OTHER]);
+  });
+
+  it('an analysis result keeps its marks across an upsert', async () => {
+    const db = getDb();
+    const result = {
+      tenantId, projectId: 'p1', definitionKey: 'd', sourceKind: 'agent_session' as const, sourceId: 's1', runId: 'r1',
+      decisions: {}, extractedFields: {}, needsReview: false, minConfidence: 1, analyzedAt: new Date(), kbRestricted: [TAG],
+    };
+    const created = await db.upsertAnalysisResult(result as never);
+    expect((await db.findAnalysisResultById(String(created._id)))?.kbRestricted).toEqual([TAG]);
+    await db.upsertAnalysisResult({ ...result, runId: 'r2', kbRestricted: [TAG, OTHER] } as never);
+    const again = await db.findAnalysisResultById(String(created._id));
+    expect([...(again?.kbRestricted ?? [])].sort()).toEqual([OTHER, TAG].sort());
+  });
+
+  it('reranker run logs are read per project and keep their marks in metadata', async () => {
+    const db = getDb();
+    const log = (projectId: string | undefined, query: string, metadata?: Record<string, unknown>) => db.createRerankerRunLog({
+      tenantId, ...(projectId ? { projectId } : {}), rerankerKey: 'rr', strategy: 'heuristic', query, inputCount: 2, outputCount: 1, status: 'success',
+      ...(metadata ? { metadata } : {}),
+    } as never);
+    await log('p1', 'in p1', { kbRestricted: [TAG] });
+    await log('p2', 'in p2');
+    const p1 = await db.listRerankerRunLogs('rr', { limit: 10, projectId: 'p1' });
+    expect(p1.map((l) => l.query)).toEqual(['in p1']);
+    expect(p1[0].metadata?.kbRestricted).toEqual([TAG]);
+    const p2 = await db.listRerankerRunLogs('rr', { limit: 10, projectId: 'p2' });
+    expect(p2.map((l) => l.query)).toEqual(['in p2']);
+  });
+});

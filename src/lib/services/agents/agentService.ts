@@ -61,8 +61,15 @@ import {
 } from '@/lib/services/rag/ragService';
 import {
     anonymousKbCaller,
+    KnowledgeExposure,
+    currentKnowledgeExposure,
+    currentRestrictedKnowledgeTags,
     kbCallerFromIdentity,
     kbCallerFromRuntime,
+    noteRestrictedDocuments,
+    noteRestrictedKnowledge,
+    restrictedKnowledgeTagsOf,
+    runWithKnowledgeExposure,
     resolveRagAccess,
     type KbCaller,
     type RagAccessModule,
@@ -1177,6 +1184,24 @@ export function knowledgeCallerOf(input: {
 }
 
 /**
+ * Ties the turn's knowledge exposure (opened by the turn's entry) to its session: what the session already holds
+ * marks every stored copy of the turn from its first model call, and a new mark is written to the session before
+ * the passage that caused it goes back to the model (see rag/access/exposure.ts).
+ */
+async function bindKnowledgeExposure(
+    db: DatabaseProvider,
+    conversation: Pick<IAgentConversation, '_id' | 'kbRestricted'>,
+): Promise<void> {
+    const exposure = currentKnowledgeExposure();
+    if (!exposure || !conversation._id) return;
+    const conversationId = String(conversation._id);
+    await exposure.bind({
+        seed: conversation.kbRestricted,
+        onRestricted: (added) => db.addAgentConversationRestriction(conversationId, added),
+    });
+}
+
+/**
  * What one build of knowledge tools knows about who it reads for: the caller,
  * and that caller's scope in each knowledge base with access control. A scope
  * is resolved the first time a tool needs it and kept for the tools of the
@@ -1253,7 +1278,8 @@ async function buildKnowledgeTools(
     const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
     const filterableFields = knowledgeModule.filterableFields ?? [];
     const kbAccess = opts.access ?? createKnowledgeAccess(tenantDbName, tenantId);
-    const accessScope = () => kbAccess.scopeOf(knowledgeModule);
+    const boundModule: RagAccessModule = knowledgeModule;
+    const accessScope = () => kbAccess.scopeOf(boundModule);
 
     const searchTool = createTool({
         name: searchName,
@@ -1302,6 +1328,8 @@ async function buildKnowledgeTools(
         // A document the caller may not read is reported like one that does not exist.
         const access = await accessScope();
         if (access?.enforced && !access.canReadDocument(document)) return undefined;
+        // Its text is about to go to the model: the run's stored copies must know what they hold first.
+        await noteRestrictedDocuments({ tenantDbName, tenantId, module: boundModule, documents: [document] });
         return document;
     }
 
@@ -1489,6 +1517,8 @@ async function buildCombinedKnowledgeTools(
         // A document the caller may not read is reported like one that does not exist.
         const access = await kbAccess.scopeOf(owner.ragModule);
         if (access?.enforced && !access.canReadDocument(document)) return { error: 'Document not found in the bound knowledge bases.' };
+        // Its text is about to go to the model: the run's stored copies must know what they hold first.
+        await noteRestrictedDocuments({ tenantDbName, tenantId, module: owner.ragModule, documents: [document] });
         return { document, scope: owner.scope };
     }
 
@@ -2444,7 +2474,9 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    const { result, logSummary } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    // A knowledge base tool that ran on another node marked only its own work: mark the run's here.
+                    await noteRestrictedKnowledge(restrictedKnowledgeTagsOf(logSummary?.restrictedKnowledge));
                     if (isToolOutput(result)) return result;
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
@@ -2991,6 +3023,9 @@ export async function createInternalTracingSink(
                 // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
                 const cancelledByCaller = currentTurnSignal()?.aborted === true
                     && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
+                // What the traced work drew from documents not open to everyone (the sink runs inside the turn's
+                // exposure), with what an earlier part of the session already held.
+                const kbRestricted = restrictedKnowledgeTagsOf([...(existing?.kbRestricted ?? []), ...currentRestrictedKnowledgeTags()]);
 
                 const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
                     && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
@@ -3030,6 +3065,7 @@ export async function createInternalTracingSink(
                     truncatedEvents,
                     totalBytesIn: session.summary?.totalBytesIn ?? undefined,
                     totalBytesOut: session.summary?.totalBytesOut ?? undefined,
+                    ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
                 };
 
                 // The counters above already cover the stored events; what carries over from an earlier
@@ -4668,6 +4704,7 @@ async function buildLocalAgentRun(input: {
                 ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
                 ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
                 ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
+                ...(runtimeContext?.kbReader === 'anonymous' ? { kbReader: 'anonymous' as const } : {}),
                 ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
                 ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
                 ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),
@@ -5426,7 +5463,7 @@ export async function executeAgentChatLocal(
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
+        return await runWithRoutingCaller(routingCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentChatTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -5560,6 +5597,7 @@ async function runAgentChatTurn(
     });
     scope.events = turnEvents;
     noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
+    await bindKnowledgeExposure(db, conversation);
     if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
         await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
@@ -6263,7 +6301,7 @@ export async function executePlaygroundChatLocal(
             ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
             run: {},
         };
-        return await runWithRoutingCaller(caller, () => runPlaygroundChatTurn(request, scope));
+        return await runWithRoutingCaller(caller, () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runPlaygroundChatTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -6364,6 +6402,7 @@ async function runPlaygroundChatTurn(
         : undefined;
     scope.events = turnEvents;
     if (turnEvents && sessionConversation) noteRoutingRun({ conversationId: String(sessionConversation._id), turnId: turnEvents.turnId });
+    if (sessionConversation) await bindKnowledgeExposure(db, sessionConversation);
     if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
         && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
@@ -6987,7 +7026,7 @@ export async function executeAgentResumeLocal(request: AgentResumeRequest): Prom
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runWithRoutingCaller(resumeCallerOf(request), () => runAgentResumeTurn(request, scope));
+        return await runWithRoutingCaller(resumeCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentResumeTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -7148,6 +7187,7 @@ async function runAgentResumeTurn(
         });
         scope.events = turnEvents;
         noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
+        await bindKnowledgeExposure(db, conversation);
         const onTextChunk = request.onTextChunk
             ? (text: string) => {
                 turnEvents.onText(text);

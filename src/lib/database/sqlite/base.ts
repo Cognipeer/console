@@ -1060,6 +1060,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'turnId', 'turnId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'runId', 'runId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'traceSessionId', 'traceSessionId TEXT');
+    // Knowledge bases whose restricted documents the call's work carried (JSON array of tags).
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'kbRestricted', 'kbRestricted TEXT');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'kbRestricted', 'kbRestricted TEXT');
+    this.ensureTableColumn(db, TABLES.analysisResults, 'kbRestricted', 'kbRestricted TEXT');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, TABLES.usageDaily, 'cachedWriteTokens', 'cachedWriteTokens INTEGER NOT NULL DEFAULT 0');
 
@@ -1230,6 +1234,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
     // Digest of the transcript a chat-completions client holds, to match a resent transcript back to its session.
     this.ensureTableColumn(db, TABLES.agentConversations, 'transcriptHash', 'transcriptHash TEXT');
+    // The knowledge bases whose restricted documents the session handed to its model (JSON array of tags).
+    this.ensureTableColumn(db, TABLES.agentConversations, 'kbRestricted', 'kbRestricted TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // A client tool call a host page has to answer: its timeout (JSON).
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');

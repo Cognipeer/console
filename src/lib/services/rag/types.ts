@@ -146,6 +146,11 @@ export interface RagQueryResult {
   latencyMs: number;
   /** The module's configured response shape; applied by the API layer only. */
   responseDetail?: 'full' | 'text';
+  /**
+   * Some match is a passage of a document not open to everyone (access control on, see rag/access/restricted.ts).
+   * The work the query ran in is already marked; internal only, never part of an API response.
+   */
+  restricted?: boolean;
 }
 
 export interface RagDocumentDeleteRequest {

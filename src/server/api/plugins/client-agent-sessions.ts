@@ -64,6 +64,7 @@ import {
   sendClientSessionRefusal,
   sessionListScope,
   sessionStreamStillAllowed,
+  sessionsWithHiddenContent,
   type SessionNeed,
 } from './agent-session-access';
 
@@ -187,14 +188,17 @@ export function listedSpentUsd(conversation: Pick<IAgentConversationListItem, 's
 /**
  * A session in a list: the same fields without `pending_actions` (open one
  * session to see them) and with `message_count` in place of the transcript.
+ * `contentHidden`: it drew on knowledge base documents the caller may not read,
+ * so it is listed as `restricted`, without its title.
  */
-function serializeSessionSummary(conversation: IAgentConversationListItem) {
+function serializeSessionSummary(conversation: IAgentConversationListItem, contentHidden = false) {
   const spent = listedSpentUsd(conversation);
   return {
     id: String(conversation._id),
     object: 'agent.session',
     agent: conversation.agentKey,
-    title: conversation.title ?? null,
+    title: contentHidden ? null : conversation.title ?? null,
+    ...(contentHidden ? { restricted: true } : {}),
     created_at: isoOrNull(conversation.createdAt),
     updated_at: isoOrNull(conversation.updatedAt),
     metadata: clientMetadataOf(conversation),
@@ -320,9 +324,10 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         ...(after ? { after } : {}),
         ...(scope.ownOnly ? { ownOnly: scope.ownOnly } : {}),
       });
+      const hidden = await sessionsWithHiddenContent(request, { tenantDbName: ctx.tenantDbName, userId: String(ctx.tokenRecord.userId ?? '') }, page.sessions);
       return reply.code(200).send({
         object: 'list',
-        data: page.sessions.map(serializeSessionSummary),
+        data: page.sessions.map((entry) => serializeSessionSummary(entry, hidden.has(String(entry._id)))),
         has_more: page.hasMore,
         next_cursor: page.nextCursor ?? null,
       });

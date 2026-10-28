@@ -92,7 +92,7 @@ describe('runDatasetGenerationJob', () => {
     expect(last.items).toHaveLength(2);
   });
 
-  it('generates for the dataset creator, so a knowledge base with access control gives only what they may read', async () => {
+  it('passes the dataset creator on with the source', async () => {
     generateDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1' }] });
 
     await runDatasetGenerationJob({ ...basePayload, source: { type: 'rag', ragModuleKey: 'kb' }, sourceKind: 'rag' });

@@ -544,6 +544,7 @@ const BLOCKED_TEXT: Record<AnswerBlockedReason, string> = {
     approvers_member: 'blockedApproversMember',
     session_owner: 'blockedSessionOwner',
     policy: 'blockedPolicy',
+    restricted: 'blockedRestricted',
     unavailable: 'blockedUnavailable',
 };
 

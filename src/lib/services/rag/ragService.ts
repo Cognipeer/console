@@ -31,8 +31,13 @@ import type { VectorQueryMatch } from '@/lib/providers';
 import {
   anonymousKbCaller,
   isAclPushdownBroken,
+  KnowledgeExposure,
   markAclPushdownBroken,
+  noteRestrictedDocuments,
   resolveRagAccess,
+  restrictedTagOf,
+  runWithKnowledgeExposure,
+  withKnowledgeExposure,
   type KbCaller,
   type RagAccessScope,
 } from './access';
@@ -202,6 +207,19 @@ async function getEmbeddings(
 
 const EMBED_BATCH_SIZE = 32;
 
+interface IndexDocumentContentParams {
+  db: Awaited<ReturnType<typeof getDatabase>>;
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string | undefined;
+  ragModule: IRagModule;
+  chunkConfig: IRagChunkConfig;
+  documentId: string;
+  fileName: string;
+  text: string;
+  metadata?: Record<string, unknown>;
+}
+
 /**
  * The one place a document's text becomes chunks, vectors and rows.
  *
@@ -213,18 +231,21 @@ const EMBED_BATCH_SIZE = 32;
  * could ever delete: deleteRagDocument reconstructs ids from `chunkCount`, and
  * `chunkCount` is only recorded once the whole pipeline has succeeded.
  */
-async function indexDocumentContent(params: {
-  db: Awaited<ReturnType<typeof getDatabase>>;
-  tenantDbName: string;
-  tenantId: string;
-  projectId: string | undefined;
-  ragModule: IRagModule;
-  chunkConfig: IRagChunkConfig;
-  documentId: string;
-  fileName: string;
-  text: string;
-  metadata?: Record<string, unknown>;
-}): Promise<number> {
+async function indexDocumentContent(params: IndexDocumentContentParams): Promise<number> {
+  // A document of a knowledge base with access control that is not open to everyone: the model calls that read its
+  // text (contextual headers, embeddings) log their copies under the module's mark, as a conversation's would.
+  if (params.ragModule.access?.enabled !== true) return indexDocumentText(params);
+  const tag = await restrictedTagOf({
+    tenantDbName: params.tenantDbName,
+    tenantId: params.tenantId,
+    module: params.ragModule,
+    documents: [await params.db.findRagDocumentById(params.documentId)],
+  });
+  if (!tag) return indexDocumentText(params);
+  return runWithKnowledgeExposure(new KnowledgeExposure({ seed: [tag], parent: null }), () => indexDocumentText(params));
+}
+
+async function indexDocumentText(params: IndexDocumentContentParams): Promise<number> {
   const { db, tenantDbName, tenantId, projectId, ragModule, documentId, fileName } = params;
 
   const chunks = await chunkText(
@@ -1534,7 +1555,8 @@ export async function queryRag(
   const startTime = Date.now();
   const state: RagQueryState = { moduleFound: false };
   try {
-    return await runRagQuery(tenantDbName, tenantId, projectId, request, options, state);
+    // In the work it is part of, or in its own: the reranker's model calls must know what passages they carry.
+    return await withKnowledgeExposure(() => runRagQuery(tenantDbName, tenantId, projectId, request, options, state));
   } catch (err) {
     // An unknown module key and a rejected request filter are caller mistakes,
     // not knowledge-base faults: recording them would mint a health row per
@@ -1745,6 +1767,25 @@ async function runRagQuery(
     });
   }
 
+  // 5a. Passages of documents not open to everyone go on from here: the work this query is part of (an agent turn, an
+  //     evaluation item...) is marked before anything below - the reranker's model calls included - can copy them.
+  let restricted = false;
+  if (ragModule.access?.enabled === true) {
+    const handedOn = matches.filter((m) => (m.content ?? '').trim());
+    if (handedOn.length > 0) {
+      const ids = [...new Set(handedOn.map((m) => m.documentId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
+      const rows = ids.length > 0 ? await db.findRagDocumentsByIds(ids) : [];
+      const byId = new Map(rows.map((row) => [String(row._id), row]));
+      restricted = (await noteRestrictedDocuments({
+        tenantDbName,
+        tenantId,
+        module: ragModule,
+        // A passage that names no document cannot be judged: it counts as closed.
+        documents: handedOn.map((m) => (m.documentId ? byId.get(m.documentId) : undefined)),
+      })) !== null;
+    }
+  }
+
   // 5b. Optional reranker pass.
   let rerankLatencyMs: number | undefined;
   if (useReranker && matches.length > 0 && ragModule.rerankerKey) {
@@ -1923,6 +1964,7 @@ async function runRagQuery(
     // (answer service, agents, MCP tool) keep the full match set regardless —
     // they need documentId/fileName for citations and grouping.
     responseDetail: ragModule.responseDetail ?? 'full',
+    ...(restricted ? { restricted: true } : {}),
   };
 }
 
@@ -1932,7 +1974,8 @@ async function runRagQuery(
  * the chunk text; 'full' (default) is the complete match.
  */
 export function shapeRagQueryResponse(result: RagQueryResult): Record<string, unknown> {
-  const { responseDetail, matches, ...rest } = result;
+  // `restricted` is for the server's own stored copies, not part of the response.
+  const { responseDetail, matches, restricted: _restricted, ...rest } = result;
   return {
     ...rest,
     matches: responseDetail === 'text'

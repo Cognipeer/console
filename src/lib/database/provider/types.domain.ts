@@ -1082,6 +1082,10 @@ export interface IEvaluationRunItem {
   latencyMs?: number;
   usage?: IEvaluationUsage;
   error?: string;
+  /** See RunItemResult.kbRestricted (evaluation/types.ts). */
+  kbRestricted?: string[];
+  /** Never stored: set on the view of an item whose output this viewer may not read (it is left out). */
+  restricted?: boolean;
 }
 
 export interface IEvaluationRunAggregate {
@@ -1211,6 +1215,10 @@ export interface IRedTeamAttemptResult {
   latencyMs?: number;
   error?: string;
   review?: IRedTeamReview;
+  /** See AttemptResult.kbRestricted (redteam/types.ts). */
+  kbRestricted?: string[];
+  /** Never stored: set on the view of an attempt whose content this viewer may not read (it is left out). */
+  restricted?: boolean;
 }
 
 export interface IRedTeamCategoryBreakdown {
@@ -1474,6 +1482,8 @@ export interface IAnalysisItemResult {
   reviewReason?: AnalysisReviewReason;
   /** The analysis_results row this item was written to. */
   resultId?: string;
+  /** Its session's knowledge base tags and who started it, when it has any (see IAnalysisResult.kbRestricted). */
+  restriction?: { kbRestricted: string[]; ownerId?: string };
 }
 
 export interface IAnalysisDecisionAggregate {
@@ -1564,6 +1574,11 @@ export interface IAnalysisResult {
   agentKey?: string;
   /** Agent sessions only: who started the session (visibility). */
   ownerId?: string;
+  /**
+   * Agent sessions only: the session's knowledge base tags when it was analyzed (`IAgentConversation.kbRestricted`).
+   * What the result says of it is shown only to `ownerId` and to those who read all of them through the admin exception.
+   */
+  kbRestricted?: string[];
   /** Agent sessions only: what the analysis saw, to tell a changed session. */
   sourceVersion?: { messageCount: number; lastMessageAt?: string };
   runId: string;
@@ -4209,6 +4224,13 @@ export interface IAgentConversation {
    * and no session id is matched back to the session by it (`findAgentConversationsByTranscriptHash`).
    */
   transcriptHash?: string;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags, see `rag/access/restricted.ts`) whose documents not open to
+   * everyone this session has handed to its model. Only grows: its content is shown to the person who started it
+   * and to those who read every one of them through the admin exception. Written by
+   * `addAgentConversationRestriction` alone.
+   */
+  kbRestricted?: string[];
   /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a

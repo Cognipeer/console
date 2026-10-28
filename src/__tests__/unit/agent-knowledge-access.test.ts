@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   getRagDocumentTextLines: vi.fn(),
   resolveModule: vi.fn(),
   resolveRagAccess: vi.fn(),
+  noteRestrictedDocuments: vi.fn(),
 }));
 
 vi.mock('@/lib/services/rag/ragService', async (orig) => ({
@@ -34,6 +35,8 @@ vi.mock('@/lib/services/agents/bindingResolution', async (orig) => ({
 vi.mock('@/lib/services/rag/access', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   resolveRagAccess: mocks.resolveRagAccess,
+  // Whether a document handed on is open to everyone (it marks the run when not): exposure tests cover it.
+  noteRestrictedDocuments: mocks.noteRestrictedDocuments,
 }));
 // A sub-agent build asks whether the agents service is on and which services are off.
 vi.mock('@/lib/services/availability/serviceAvailability', async (orig) => ({
@@ -107,6 +110,7 @@ const person = (userId: string) => ({ kind: 'person', userId });
 
 beforeEach(() => {
   mocks.queryRag.mockReset().mockResolvedValue({ matches: [] });
+  mocks.noteRestrictedDocuments.mockReset().mockResolvedValue(null);
   mocks.getRagDocument.mockReset();
   mocks.getRagDocumentFullText.mockReset().mockResolvedValue({ fileName: 'f.md', text: 'body', truncated: false, totalChars: 4, totalLines: 1 });
   mocks.getRagDocumentTextLines.mockReset().mockResolvedValue({
@@ -279,6 +283,8 @@ describe('reading a document of a knowledge base with access control', () => {
       const { tool } = await open(['d1']);
       expect(String(await run(tool, { documentId: 'd1' }))).toContain('# f.md');
       expect(reader()).toHaveBeenCalledTimes(1);
+      // The document handed on is checked for marks before its text goes back to the model.
+      expect(mocks.noteRestrictedDocuments).toHaveBeenCalledWith(expect.objectContaining({ documents: [expect.objectContaining({ _id: 'd1' })] }));
     });
 
     it('answers a document the caller may not read exactly like a missing one', async () => {

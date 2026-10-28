@@ -261,6 +261,8 @@ function buildPrimers(): Record<string, Mock> {
     getAgentRunByIdempotencyKey: vi.fn().mockResolvedValue(null),
     // Shapes the name-based default would get wrong (a record, not a number / undefined).
     countAgentRunsByStatus: vi.fn().mockResolvedValue({}),
+    // A list, not a lookup: no session drew on restricted knowledge base documents.
+    findRestrictedAgentConversations: vi.fn().mockResolvedValue([]),
     promoteScheduledAgentRun: vi.fn().mockResolvedValue(null),
     markAgentRunDetached: vi.fn().mockResolvedValue(null),
     expireWaitingAgentRun: vi.fn().mockResolvedValue(null),

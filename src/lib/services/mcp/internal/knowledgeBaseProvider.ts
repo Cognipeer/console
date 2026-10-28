@@ -32,7 +32,15 @@ import {
   getRagModule,
   queryRag,
 } from '@/lib/services/rag/ragService';
-import { kbCallerFromIdentity, resolveRagAccess, type KbCaller, type RagAccessScope } from '@/lib/services/rag/access';
+import {
+  kbCallerFromIdentity,
+  noteRestrictedDocuments,
+  resolveRagAccess,
+  restrictedKnowledgeTag,
+  type KbCaller,
+  type RagAccessModule,
+  type RagAccessScope,
+} from '@/lib/services/rag/access';
 import { RagModuleInactiveError } from '@/lib/services/rag/errors';
 import { VectorFilterError } from '@/lib/providers';
 import type {
@@ -147,12 +155,20 @@ function loggedAs<T extends object>(response: T, summary: Record<string, unknown
 async function accessScopeOf(
   ctx: InternalMcpProviderContext,
   instanceKey: string,
-): Promise<{ caller: KbCaller; scope: RagAccessScope } | undefined> {
+): Promise<{ caller: KbCaller; scope: RagAccessScope; module: RagAccessModule } | undefined> {
   const ragModule = await getRagModule(ctx.tenantDbName, instanceKey, ctx.projectId);
   if (ragModule?.access?.enabled !== true) return undefined;
   const caller = kbCallerFromIdentity(ctx.identity);
   const scope = await resolveRagAccess({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, module: ragModule, caller });
-  return { caller, scope };
+  return { caller, scope, module: ragModule };
+}
+
+/**
+ * The summary's mark that the result holds passages of documents not open to everyone. It travels with the outcome
+ * when the call ran on another node, so the agent run that called the tool can mark its stored copies too.
+ */
+function restrictedMark(tag: string | null | undefined): Record<string, unknown> {
+  return tag ? { restrictedKnowledge: [tag] } : {};
 }
 
 export const knowledgeBaseProvider: InternalMcpProvider = {
@@ -268,7 +284,12 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
               : {}),
           })),
         };
-        return access ? loggedAs(response, { matches: result.matches.length }) : response;
+        return access
+          ? loggedAs(response, {
+            matches: result.matches.length,
+            ...restrictedMark(result.restricted ? restrictedKnowledgeTag(access.module) : null),
+          })
+          : response;
       } catch (error) {
         // A switched-off knowledge base is a caller-visible state, not a server fault.
         if (error instanceof RagModuleInactiveError) throw new McpToolInputError(error.message);
@@ -301,6 +322,10 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
           `Document "${documentId.slice(0, ECHOED_ID_MAX_CHARS)}" not found in this knowledge base`,
         );
       }
+      // Its text goes back to the caller next: the work it runs in learns first what it is about to hold.
+      const restrictedTag = access
+        ? await noteRestrictedDocuments({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, module: access.module, documents: [document] })
+        : null;
 
       if (toolName === READ_TOOL_NAME) {
         const result = await getRagDocumentFullText(ctx.tenantDbName, ctx.tenantId, ctx.projectId, document);
@@ -308,7 +333,12 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
           throw new Error('Source text is not available for this document; it may need to be re-ingested');
         }
         return access
-          ? loggedAs(result, { totalChars: result.totalChars, totalLines: result.totalLines, truncated: result.truncated })
+          ? loggedAs(result, {
+            totalChars: result.totalChars,
+            totalLines: result.totalLines,
+            truncated: result.truncated,
+            ...restrictedMark(restrictedTag),
+          })
           : result;
       }
 
@@ -326,6 +356,7 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
           startLine: result.startLine,
           endLine: result.endLine,
           hasMore: result.hasMore,
+          ...restrictedMark(restrictedTag),
         })
         : result;
     }

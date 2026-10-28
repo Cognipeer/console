@@ -281,6 +281,8 @@ export interface ReminderCreator {
   /** The API token the turn came with: revoking it stops the wake turn. */
   tokenId?: string;
   via?: RequestVia;
+  /** The creating turn read knowledge bases as no one in particular (a shared channel): so does the wake turn. */
+  kbReader?: 'anonymous';
   /** The creating run (`run_…`), when the turn runs as one. */
   runId?: string;
   /** The chain of the reminder that woke the creating turn, if one did (the new one is chain + 1). */
@@ -398,6 +400,7 @@ export async function scheduleReminder(input: ScheduleReminderInput): Promise<Sc
         ...(creator.userId ? { userId: creator.userId } : {}),
         ...(creator.tokenId ? { tokenId: creator.tokenId } : {}),
         ...(creator.via ? { via: creator.via } : {}),
+        ...(creator.kbReader ? { kbReader: creator.kbReader } : {}),
       },
       unattended: true,
       runClass: settings.runClass,

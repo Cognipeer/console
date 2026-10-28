@@ -16921,6 +16921,10 @@ components:
         title:
           type: string
           nullable: true
+          description: "`null` when the session has none, or when it is `restricted`."
+        restricted:
+          type: boolean
+          description: "Present (`true`) when the session used knowledge base documents that are not open to everyone and the caller is not the person who started it: the row is listed without its title, and opening it is `403` `session_restricted`."
         created_at:
           type: string
           format: date-time
@@ -30179,7 +30183,7 @@ components:
               value:
                 error: This feature is not available in your license
     SessionForbidden:
-      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`). The same refusal answers a file an agent session holds on the Files API: getting or downloading it needs the first permission, deleting it or uploading to its key the second."
+      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A session that used knowledge base documents not open to everyone is refused to everybody but the person who started it, whatever those permissions say: `error.code` is then `session_restricted`, without a `decision_id`. A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`). The same refusal answers a file an agent session holds on the Files API: getting or downloading it needs the first permission, deleting it or uploading to its key the second."
       content:
         application/json:
           schema:
