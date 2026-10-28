@@ -863,6 +863,43 @@ describe('session files (fileId)', () => {
     expect(textOf(out)).toBe('"scan.tiff" is an image in a format (image/tiff) the model cannot be shown; it has no text to read.');
   });
 
+  describe('a picture OCR read at upload', () => {
+    const ocrRecord = (id: string, name: string, contentType: string) => {
+      sessionFiles.records.set(id, { _id: id, name, contentType, size: 100, markdownStatus: 'succeeded', markdownKey: `${id}.md` });
+    };
+
+    it('is still shown to a model that sees images', async () => {
+      ocrRecord('p1', 'form.png', 'image/png');
+      sessionFiles.texts.set('p1', 'Name: Ada');
+      const out = await build(null, { session: true }).read({ fileId: 'p1' });
+      expect(images(out)).toEqual([{ type: 'image', fileId: 'p1', name: 'form.png', mimeType: 'image/png' }]);
+    });
+
+    it('is read as text by a model that cannot see images', async () => {
+      ocrRecord('p2', 'form.png', 'image/png');
+      sessionFiles.texts.set('p2', 'Name: Ada\nCity: Izmir');
+      const out = await build(null, { session: true, modelTakesImages: false }).read({ fileId: 'p2' });
+      expect(images(out)).toHaveLength(0);
+      expect(textOf(out)).toContain('     2\tCity: Izmir');
+    });
+
+    it('a format no provider takes (tiff) is read as text', async () => {
+      ocrRecord('p3', 'scan.tiff', 'image/tiff');
+      sessionFiles.texts.set('p3', 'Scanned');
+      expect(textOf(await build(null, { session: true }).read({ fileId: 'p3' }))).toContain('Scanned');
+    });
+
+    it('with no text found, keeps saying the picture cannot be seen or read', async () => {
+      ocrRecord('p4', 'blank.png', 'image/png');
+      sessionFiles.texts.set('p4', '  ');
+      const blind = await build(null, { session: true, modelTakesImages: false }).read({ fileId: 'p4' });
+      expect(textOf(blind)).toBe('[blank.png — image image/png, 1 KB] This model cannot view images, and OCR found no text in it.');
+      ocrRecord('p5', 'blank.tiff', 'image/tiff');
+      sessionFiles.texts.set('p5', '');
+      expect(textOf(await build(null, { session: true }).read({ fileId: 'p5' }))).toContain('OCR found no text in it.');
+    });
+  });
+
   it('a document is read as numbered lines, windowed like sandbox text', async () => {
     record('doc1', 'notes.md', 'text/markdown');
     sessionFiles.texts.set('doc1', Array.from({ length: 30 }, (_, i) => `note ${i + 1}`).join('\n'));

@@ -506,15 +506,17 @@ async function readSessionFile(deps: ReadToolDeps, args: ReadArgs): Promise<Tool
         ? 'pages and view (page images) work on sandbox files only; this file is read as text.\n'
         : '';
 
+    // A picture whose text OCR read at upload (a converted copy exists) can be read as text where it cannot be shown.
+    const pictureHasText = record.markdownStatus === 'succeeded' && Boolean(record.markdownKey);
     const imageType = sendableImageType(record.contentType);
-    if (imageType) {
+    if (imageType && !(pictureHasText && !modelTakesImages)) {
         if (!modelTakesImages) return text(`[${record.name} — image ${imageType}, ${size(record.size)}] This model cannot view images.`);
         return toolOutput([
             { type: 'text', text: `[${record.name} — image ${imageType}, ${size(record.size)}]` },
             { type: 'image', fileId: String(record._id), name: record.name, mimeType: imageType },
         ]);
     }
-    if (isImageMime(record.contentType)) {
+    if (!imageType && isImageMime(record.contentType) && !pictureHasText) {
         return text(`"${record.name}" is an image in a format (${record.contentType}) the model cannot be shown; it has no text to read.`);
     }
 
@@ -526,6 +528,12 @@ async function readSessionFile(deps: ReadToolDeps, args: ReadArgs): Promise<Tool
         return fail('The file could not be read right now.');
     }
     if (content === null) return text(`"${record.name}" has no text form (${record.contentType}).`);
+    // OCR found no text in a picture the model cannot be shown: say that, not "empty file".
+    if (isImageMime(record.contentType) && content.trim().length === 0) {
+        return text(imageType
+            ? `[${record.name} — image ${imageType}, ${size(record.size)}] This model cannot view images, and OCR found no text in it.`
+            : `"${record.name}" is an image in a format (${record.contentType}) the model cannot be shown, and OCR found no text in it.`);
+    }
     if (content.length === 0) return text(`[${record.name} — empty file]`);
 
     const lines = toLines(content);

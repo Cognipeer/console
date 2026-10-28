@@ -15,6 +15,7 @@
  */
 
 import { getConfig } from '@/lib/core/config';
+import { normalizeOcrSettings } from '@/lib/services/extraction/settings';
 import { REMINDER_INSTRUCTIONS_MAX_CHARS } from './agentRemindersConfig';
 import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
 import { getCrawler, crawlerHasCredentials, crawlerHasHostScope } from '@/lib/services/crawler';
@@ -312,6 +313,11 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
                 checkNumber(issues, 'attachments.outputs.maxFilesPerTurn', outputs.maxFilesPerTurn, { min: 1, max: SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn, integer: true });
                 checkNumber(issues, 'attachments.outputs.maxFileSizeMb', outputs.maxFileSizeMb, { min: 0, exclusiveMin: true, max: Math.min(SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb, getConfig().limits.fileUploadMaxMb) });
             }
+        }
+        // OCR for uploads: the shape only here (null = none); the model it names is checked against the project below.
+        if (attachments.ocr !== undefined && attachments.ocr !== null) {
+            const ocr = normalizeOcrSettings(attachments.ocr);
+            if (ocr.error) issues.errors.push({ field: 'attachments.ocr', message: ocr.error });
         }
         const folder = normalizeAttachmentsFolder(attachments.folder);
         if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
@@ -618,6 +624,16 @@ export async function validateAgentConfig(input: {
                 message: `${inspection.message.charAt(0).toUpperCase()}${inspection.message.slice(1)}`,
             });
         }
+    }
+
+    // The model OCR reads uploads with must exist in this project and be able to read documents (an OCR model or a
+    // vision model). Only checked when OCR is on: a model left over from switching it off blocks nothing.
+    const ocrModelKey = typeof config.attachments?.ocr?.modelKey === 'string' ? config.attachments.ocr.modelKey.trim() : '';
+    if (ocrModelKey && config.attachments?.ocr?.mode !== 'off' && !issues.errors.some((issue) => issue.field === 'attachments.ocr')) {
+        const { validateOcrModelRef } = await import('@/lib/services/extraction');
+        const problem = await validateOcrModelRef({ tenantDbName: input.tenantDbName, tenantId: input.tenantId ?? '', projectId }, ocrModelKey)
+            .catch((error: unknown) => `The OCR model "${ocrModelKey}" could not be checked: ${error instanceof Error ? error.message : String(error)}`);
+        if (problem) issues.errors.push({ field: 'attachments.ocr.modelKey', message: problem });
     }
 
     const wantsCost = isNumber(config.runtime?.limits?.maxCostUsd) && config.runtime!.limits!.maxCostUsd! > 0;

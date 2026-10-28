@@ -2947,6 +2947,12 @@ export interface IAgentAttachmentsConfig {
    * 0 = never re-attach. Default 2.
    */
   carryRecentImages?: number;
+  /**
+   * Reading the text of scanned documents and (with `images`) of pictures at upload: OCR through a project model or
+   * the built-in CPU engine. Absent / `mode: 'off'` = no OCR, exactly as before. A picture is still shown to a model
+   * that takes images; the OCR text stands in for it when the model does not, or the format cannot be shown.
+   */
+  ocr?: IRagOcrSettings;
 }
 
 /** One extra model an agent offers next to its main one. */

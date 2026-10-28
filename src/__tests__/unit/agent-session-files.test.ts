@@ -69,6 +69,7 @@ import {
   isMimeAllowed,
   pageCount,
   pageText,
+  readFileText,
   readSessionImage,
   resolveAttachmentsConfig,
   resolveSessionFilesBucket,
@@ -81,7 +82,7 @@ import {
   agentTakesAttachments,
   SESSION_FILES_DEFAULTS,
 } from '@/lib/services/agents/sessionFiles';
-import { normalizeAttachmentsFolder } from '@/lib/services/agents/sessionFilesConfig';
+import { fileTooLargeMessage, maxUploadBytes, normalizeAttachmentsFolder } from '@/lib/services/agents/sessionFilesConfig';
 import { sessionFileObjectKey } from '@/lib/services/agents/sessionFilesBucket';
 import { InputContentPartError, extractResponseUserInput, namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { isReadOnlyTool, HITL_READ_ONLY_TOOLS } from '@/lib/services/agents/agentHumanInTheLoop';
@@ -933,5 +934,175 @@ describe('files the agent writes itself', () => {
       expect(hoisted.resource).not.toHaveBeenCalled();
       expect(hoisted.replaceFileContent).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('OCR for uploads (attachments.ocr)', () => {
+  const bucket = { key: 'docs', providerKey: 'disk', status: 'active' };
+  const provider = { key: 'disk', type: 'file', status: 'active' };
+  const allowed = { allowed: true, effectiveLimits: { quotas: {} }, tenantId: 't1' };
+  const actor = { userId: 'u1', licenseType: 'FREE' };
+  const conversation = { _id: 'c1', agentKey: 'agent' };
+  const OCR = { mode: 'auto' as const, languages: ['tr'], maxPages: 10 };
+  const on = (attachments: Record<string, unknown> = {}) => ({ enabled: true, bucketKey: 'docs', ...attachments });
+  const png = Buffer.from('89504e47', 'hex');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    hoisted.downloads.clear();
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([]);
+    hoisted.db.countFileRecords.mockResolvedValue(3);
+    hoisted.db.sumFileRecordBytes.mockResolvedValue(1000);
+    hoisted.db.findFileBucketByKey.mockResolvedValue(bucket);
+    hoisted.db.findProviderByKey.mockResolvedValue(provider);
+    hoisted.perRequest.mockResolvedValue(allowed);
+    hoisted.rate.mockResolvedValue({ allowed: true });
+    hoisted.resource.mockResolvedValue({ allowed: true });
+    hoisted.uploadFile.mockResolvedValue({ record: { id: 'f1', name: 'a.png', contentType: 'image/png', size: 4, markdownStatus: 'succeeded', bucketKey: 'docs', key: 'k' } });
+  });
+
+  const upload = (attachments: Record<string, unknown>, fileName: string, contentType: string, data: Buffer = png) => uploadSessionFile({
+    scope, conversation, agentConfig: { modelKey: 'm', attachments: on(attachments) }, fileName, contentType, data, actor,
+  });
+  const uploaded = () => hoisted.uploadFile.mock.calls.at(-1)![3];
+
+  describe('the settings', () => {
+    it('are carried sanitised by the resolver, and absent when the agent has none', () => {
+      expect(resolveAttachmentsConfig({ enabled: true }).ocr).toBeUndefined();
+      expect(resolveAttachmentsConfig({ ocr: { mode: 'always', modelKey: ' ocr-1 ', languages: ['TR', 'tr', 'x1', 5], maxPages: 3.5, images: true } as never }).ocr)
+        .toEqual({ mode: 'always', modelKey: 'ocr-1', languages: ['tr'], images: true });
+      // A stored value that bypassed the save check is read as "off", never as an error.
+      expect(resolveAttachmentsConfig({ ocr: { mode: 'sometimes' } as never }).ocr).toEqual({ mode: 'off' });
+      expect(resolveAttachmentsConfig({ ocr: 'yes' as never }).ocr).toBeUndefined();
+      expect(resolveAttachmentsConfig({ ocr: [] as never }).ocr).toBeUndefined();
+    });
+
+    it('hold a picture to the document limit only when OCR reads pictures', () => {
+      const small = { maxFileSizeMb: 20, maxBytes: 1_000_000 };
+      expect(maxUploadBytes(resolveAttachmentsConfig(small), 'image/png')).toBe(1_000_000);
+      expect(maxUploadBytes(resolveAttachmentsConfig({ ...small, ocr: { mode: 'auto' } }), 'image/png')).toBe(1_000_000);
+      expect(maxUploadBytes(resolveAttachmentsConfig({ ...small, ocr: { mode: 'off', images: true } }), 'image/png')).toBe(1_000_000);
+      expect(maxUploadBytes(resolveAttachmentsConfig({ ...small, ocr: { mode: 'auto', images: true } }), 'image/png')).toBe(20 * 1024 * 1024);
+      expect(fileTooLargeMessage(resolveAttachmentsConfig({ ...small, ocr: { mode: 'auto', images: true } }), 'image/png')).toBe('File exceeds the 20 MB limit of this agent.');
+      expect(fileTooLargeMessage(resolveAttachmentsConfig(small), 'image/png')).toContain('cannot be shown to the model');
+    });
+  });
+
+  describe('at upload', () => {
+    it('without OCR the request is as before, plus placeholders for pictures inside documents', async () => {
+      await upload({}, 'a.txt', 'text/plain', Buffer.from('a'));
+      expect(uploaded()).toMatchObject({ convertToMarkdown: true, extraction: { images: 'placeholder' } });
+      expect(uploaded().extraction).not.toHaveProperty('ocr');
+    });
+
+    it('with OCR on, a document is converted with the agent’s OCR settings', async () => {
+      await upload({ ocr: OCR }, 'scan.pdf', 'application/pdf', Buffer.from('%PDF'));
+      expect(uploaded()).toMatchObject({ convertToMarkdown: true, extraction: { ocr: OCR, images: 'placeholder' } });
+    });
+
+    it('with OCR switched off the settings are not passed', async () => {
+      await upload({ ocr: { mode: 'off', modelKey: 'ocr-1', images: true } }, 'scan.pdf', 'application/pdf', Buffer.from('%PDF'));
+      expect(uploaded().extraction).toEqual({ images: 'placeholder' });
+    });
+
+    it('a picture is not converted unless OCR is on AND reads pictures', async () => {
+      await upload({}, 'a.png', 'image/png');
+      expect(uploaded().convertToMarkdown).toBe(false);
+      await upload({ ocr: OCR }, 'a.png', 'image/png');
+      expect(uploaded().convertToMarkdown).toBe(false);
+      await upload({ ocr: { mode: 'off', images: true } }, 'a.png', 'image/png');
+      expect(uploaded().convertToMarkdown).toBe(false);
+      await upload({ ocr: { ...OCR, images: true } }, 'a.png', 'image/png');
+      expect(uploaded()).toMatchObject({ convertToMarkdown: true, extraction: { ocr: { ...OCR, images: true } } });
+    });
+
+    it('a picture format OCR cannot read (svg, heic) is never converted', async () => {
+      await upload({ ocr: { ...OCR, images: true } }, 'logo.svg', 'image/svg+xml');
+      expect(uploaded().convertToMarkdown).toBe(false);
+      await upload({ ocr: { ...OCR, images: true } }, 'shot.heic', 'image/heic');
+      expect(uploaded().convertToMarkdown).toBe(false);
+      await upload({ ocr: { ...OCR, images: true } }, 'scan.tiff', 'image/tiff');
+      expect(uploaded().convertToMarkdown).toBe(true);
+    });
+
+    it('a picture past the image size limit is accepted for OCR, and refused without it', async () => {
+      const big = Buffer.alloc(2_000_000, 1);
+      const refused = await upload({ maxBytes: 1_000_000 }, 'big.png', 'image/png', big).catch((e) => e);
+      expect(refused).toBeInstanceOf(AgentAttachmentError);
+      expect(refused.status).toBe(413);
+      await upload({ maxBytes: 1_000_000, ocr: { ...OCR, images: true } }, 'big.png', 'image/png', big);
+      expect(uploaded().convertToMarkdown).toBe(true);
+    });
+  });
+
+  describe('reading a picture back', () => {
+    const picture = (id: string, overrides: Partial<IFileRecord> = {}) => fileRecord(id, {
+      name: `${id}.png`, contentType: 'image/png', markdownStatus: 'succeeded', markdownKey: `${id}.md`, size: 100, ...overrides,
+    });
+    const cfg = resolveAttachmentsConfig({ enabled: true, bucketKey: 'docs', inlineMaxTokens: 1000, ocr: { mode: 'auto', images: true } });
+
+    it('readFileText gives the markdown copy of a picture, and still nothing for one that has none', async () => {
+      hoisted.downloads.set('p:md', '# Invoice 42');
+      expect(await readFileText(scope, picture('p', { key: 'p' }))).toBe('# Invoice 42');
+      expect(await readFileText(scope, picture('q', { key: 'q', markdownStatus: 'skipped', markdownKey: undefined }))).toBeNull();
+      expect(await readFileText(scope, picture('r', { key: 'r', markdownStatus: 'failed', markdownKey: undefined }))).toBeNull();
+    });
+
+    it('a model with vision is shown the picture, with no second copy as text', async () => {
+      hoisted.downloads.set('p:md', '# Invoice 42');
+      const out = await assembleTurnAttachments({ scope, records: [picture('p', { key: 'p' })], cfg, supportsVision: true });
+      expect(out.images.map((image) => image.fileId)).toEqual(['p']);
+      expect(out.block).not.toContain('Invoice 42');
+      expect(out.mode).toBe('none');
+    });
+
+    it('a model without vision gets the text OCR read instead of the "cannot read images" note', async () => {
+      hoisted.downloads.set('p:md', '# Invoice 42');
+      const out = await assembleTurnAttachments({ scope, records: [picture('p', { key: 'p' })], cfg, supportsVision: false });
+      expect(out.images).toEqual([]);
+      expect(out.mode).toBe('inline');
+      expect(out.block).toContain('<document name="p.png" id="p">\n# Invoice 42\n</document>');
+      expect(out.block).not.toContain('cannot read images');
+    });
+
+    it('a model without vision keeps the note when OCR found nothing or is not there', async () => {
+      hoisted.downloads.set('e:md', '  \n');
+      const empty = await assembleTurnAttachments({ scope, records: [picture('e', { key: 'e' })], cfg, supportsVision: false });
+      expect(empty.block).toContain('cannot read images');
+      const none = await assembleTurnAttachments({ scope, records: [picture('n', { key: 'n', markdownStatus: 'skipped', markdownKey: undefined })], cfg, supportsVision: false });
+      expect(none.block).toContain('cannot read images');
+    });
+
+    it('a picture too big for one request is read as text even by a model with vision', async () => {
+      hoisted.downloads.set('p:md', '# Big scan');
+      const big = picture('p', { key: 'p', size: cfg.maxBytes + 1 });
+      const out = await assembleTurnAttachments({ scope, records: [big], cfg, supportsVision: true });
+      expect(out.images).toEqual([]);
+      expect(out.block).toContain('# Big scan');
+      // No text to fall back on: shown as before (the model call turns it into a "too large" placeholder).
+      const bare = await assembleTurnAttachments({ scope, records: [picture('b', { key: 'b', size: cfg.maxBytes + 1, markdownStatus: 'skipped', markdownKey: undefined })], cfg, supportsVision: true });
+      expect(bare.images.map((image) => image.fileId)).toEqual(['b']);
+    });
+
+    it('a format no provider takes (tiff) is read as text when OCR has it, else noted as before', async () => {
+      hoisted.downloads.set('t:md', 'Scanned tiff text');
+      const tiff = fileRecord('t', { key: 't', name: 'scan.tiff', contentType: 'image/tiff', markdownStatus: 'succeeded', markdownKey: 't.md' });
+      const read = await assembleTurnAttachments({ scope, records: [tiff], cfg, supportsVision: true });
+      expect(read.block).toContain('Scanned tiff text');
+      expect(read.block).not.toContain('not supported by the model');
+      const bare = await assembleTurnAttachments({ scope, records: [{ ...tiff, markdownStatus: 'skipped', markdownKey: undefined }], cfg, supportsVision: true });
+      expect(bare.block).toContain('is not supported by the model');
+    });
+
+    it('an unreadable copy never fails the turn', async () => {
+      const out = await assembleTurnAttachments({ scope, records: [picture('gone', { key: 'gone' })], cfg, supportsVision: false });
+      expect(out.warnings).toEqual(['File "gone.png" could not be read.']);
+      expect(out.block).toContain('cannot read images');
+    });
+  });
+
+  it('the availability of an agent carries the resolved OCR settings', () => {
+    const availability = attachmentsAvailability({ modelKey: 'm', attachments: on({ ocr: OCR }) });
+    expect(availability).toMatchObject({ available: true, cfg: { ocr: OCR } });
   });
 });
