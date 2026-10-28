@@ -141,6 +141,7 @@ export async function runDatasetGenerationJob(payload: DatasetGenerationJobPaylo
       source: payload.source,
       count: payload.count,
       language: payload.language,
+      createdBy: payload.createdBy,
     });
 
     await writeStatus(

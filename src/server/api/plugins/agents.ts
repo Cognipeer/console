@@ -75,6 +75,7 @@ import {
   resolveAgentRunLimits,
   runWithTenantDb,
   serializeAgentRun,
+  withoutAgentRunContent,
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -117,6 +118,8 @@ import {
   sendSessionRefusal,
   sessionListScope,
   sessionStreamStillAllowed,
+  runsWithHiddenContent,
+  sessionsWithHiddenContent,
   type SessionNeed,
 } from './agent-session-access';
 import { resolveSessionOwners, type SessionOwner } from '@/lib/services/agents/sessionOwners';
@@ -663,6 +666,8 @@ function summariseConversation(
   owner?: SessionOwner,
   answerability?: { canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null,
   viewerId?: string,
+  // The session drew on knowledge base documents this viewer may not read: the row says so, without its name.
+  contentHidden = false,
 ) {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -702,7 +707,7 @@ function summariseConversation(
 
   return {
     _id: String(conversation._id),
-    title: conversation.title,
+    ...(contentHidden ? { restricted: true } : { title: conversation.title }),
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     messageCount: conversation.messages?.length ?? 0,
@@ -1451,7 +1456,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         limit: Math.min(Number(query.limit) || 100, 500),
       });
       const shown = channels.length > 1 ? runs.filter((run) => run.channel && channels.includes(run.channel)) : runs;
-      return reply.code(200).send({ runs: shown.map(serializeAgentRun) });
+      const hidden = await runsWithHiddenContent(request, { tenantDbName: session.tenantDbName, userId: session.userId }, shown);
+      return reply.code(200).send({
+        runs: shown.map((run) => (hidden.has(String(run._id)) ? withoutAgentRunContent(serializeAgentRun(run)) : serializeAgentRun(run))),
+      });
     } catch (error) {
       return sendRouteError(reply, error, 'List agent runs error', 'Failed to list runs');
     }
@@ -1580,11 +1588,24 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       ]);
       const owners = await resolveSessionOwners(runs.map((run) => run.userId));
       const titles = await sessionTitles(session.tenantDbName, projectId, runs.map((run) => run.conversationId));
+      // A reminder of a session that drew on knowledge base documents the viewer may not read: when and whose, not what.
+      const hidden = await runsWithHiddenContent(request, actor, runs);
       return reply.code(200).send({
         reminders: runs.map((run) => {
           const owner = run.userId ? owners.get(run.userId) : undefined;
+          const reminder = serializeReminder(run);
+          if (hidden.has(String(run._id))) {
+            return {
+              ...reminder,
+              message: null,
+              reason: null,
+              error: reminder.error ? { type: reminder.error.type, message: null } : null,
+              restricted: true,
+              ...(owner ? { owner } : {}),
+            };
+          }
           const title = titles.get(run.conversationId);
-          return { ...serializeReminder(run), ...(owner ? { owner } : {}), ...(title ? { session_title: title } : {}) };
+          return { ...reminder, ...(owner ? { owner } : {}), ...(title ? { session_title: title } : {}) };
         }),
         summary: { active: active.length },
         scope: { viewOthers: !scope.ownOnly },
@@ -1736,6 +1757,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const agents = await agentsOfSessions(session.tenantDbName, projectId, rows);
       rows = rows.filter((entry) => agents.has(entry.agentKey));
       const owners = await resolveSessionOwners(rows.map((entry) => entry.createdBy));
+      const hidden = await sessionsWithHiddenContent(request, actor, rows);
       // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
       const waiting = rows.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
       const answerable = new Map<string, Awaited<ReturnType<typeof answerabilityOfRow>>>();
@@ -1749,7 +1771,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           const run = activeRuns.get(id);
           const due = reminders.get(id);
           return {
-            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId),
+            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId, hidden.has(id)),
             agentId: String(agent._id),
             agentKey: agent.key,
             agentName: agent.name,
@@ -1800,6 +1822,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           .catch(decoration<{ active: number; nextAt: Date }>('reminders')),
       ]);
       const owners = await resolveSessionOwners(sessions.map((entry) => entry.createdBy));
+      const hidden = await sessionsWithHiddenContent(request, { tenantDbName: session.tenantDbName, userId: session.userId }, sessions);
       // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
       const waiting = sessions.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
       const answerable = new Map<string, Awaited<ReturnType<typeof answerabilityOfRow>>>();
@@ -1816,7 +1839,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           const run = activeRuns.get(id);
           const due = reminders.get(id);
           return {
-            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId),
+            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId, hidden.has(id)),
             ...(run ? { activeRun: run } : {}),
             ...(due ? { reminders: { active: due.active, nextAt: due.nextAt.toISOString() } } : {}),
           };

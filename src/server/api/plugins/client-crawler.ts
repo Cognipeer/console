@@ -34,6 +34,7 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { kbBindingRefusal } from '../ragOwnedResources';
 
 const logger = createLogger('api:client-crawler');
 
@@ -113,10 +114,10 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = createCrawlerInputSchema.parse(readJsonBody<unknown>(request));
-      const created = await createCrawler(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) },
-        { ...body, createdBy: actorFromCtx(ctx) },
-      );
+      const where = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      const refusal = await kbBindingRefusal(request, where, body.rag);
+      if (refusal) return reply.code(403).send(refusal);
+      const created = await createCrawler(where, { ...body, createdBy: actorFromCtx(ctx) });
       return reply.code(201).send({ crawler: created });
     } catch (error) {
       logger.error('Client create crawler failed', { error });
@@ -145,11 +146,12 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { idOrKey } = request.params as { idOrKey: string };
       const body = updateCrawlerInputSchema.parse(readJsonBody<unknown>(request));
-      const updated = await updateCrawler(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) },
-        idOrKey,
-        { ...body, updatedBy: actorFromCtx(ctx) },
-      );
+      const where = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      // Its runs send pages in the crawler's own project, which a crawler from before crawlers carried a project lacks.
+      const current = body.rag?.enabled ? await getCrawler(where, idOrKey) : null;
+      const refusal = await kbBindingRefusal(request, current ? { ...where, projectId: current.projectId } : where, body.rag);
+      if (refusal) return reply.code(403).send(refusal);
+      const updated = await updateCrawler(where, idOrKey, { ...body, updatedBy: actorFromCtx(ctx) });
       if (!updated) return reply.code(404).send({ error: 'Crawler not found' });
       return reply.code(200).send({ crawler: updated });
     } catch (error) {
@@ -289,10 +291,10 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = adhocCrawlInputSchema.parse(readJsonBody<unknown>(request));
-      const result = await runAdhocCrawl(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) },
-        { ...body, mode: body.mode ?? 'async', triggerActor: actorFromCtx(ctx) },
-      );
+      const where = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      const refusal = await kbBindingRefusal(request, where, body.rag);
+      if (refusal) return reply.code(403).send(refusal);
+      const result = await runAdhocCrawl(where, { ...body, mode: body.mode ?? 'async', triggerActor: actorFromCtx(ctx) });
       return reply.code(202).send(result);
     } catch (error) {
       logger.error('Client adhoc crawl failed', { error });

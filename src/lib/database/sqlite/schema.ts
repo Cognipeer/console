@@ -494,6 +494,7 @@ export const TENANT_SCHEMA_SQL = `
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
+    kbRestricted TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -1329,6 +1330,7 @@ export const TENANT_SCHEMA_SQL = `
     title TEXT,
     agentKey TEXT,
     ownerId TEXT,
+    kbRestricted TEXT,
     sourceVersion TEXT,
     runId TEXT NOT NULL,
     decisions TEXT NOT NULL DEFAULT '{}',
@@ -1527,6 +1529,8 @@ export const TENANT_SCHEMA_SQL = `
     filterableFields TEXT,
     hybrid TEXT,
     isolateByModule INTEGER,
+    access TEXT,
+    aclRevision INTEGER,
     reindexRequired INTEGER,
     activeReindexRunKey TEXT,
     lastReindexAt TEXT,
@@ -1558,6 +1562,9 @@ export const TENANT_SCHEMA_SQL = `
     chunkCount INTEGER DEFAULT 0,
     errorMessage TEXT,
     lastIndexedAt TEXT,
+    folderId TEXT,
+    aclMode TEXT,
+    aclManaged TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
@@ -1633,6 +1640,99 @@ export const TENANT_SCHEMA_SQL = `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_reindex_runs_key ON rag_reindex_runs(key);
   CREATE INDEX IF NOT EXISTS idx_rag_reindex_runs_module ON rag_reindex_runs(ragModuleKey, createdAt);
   CREATE INDEX IF NOT EXISTS idx_rag_reindex_runs_status ON rag_reindex_runs(status);
+
+  -- Knowledge Engine access control. Folders form a tree per module;
+  -- ancestorIds (JSON array, top level first) makes "everything below X" one
+  -- scan. sourceId / sourceExternalId copy source.sourceId / source.externalId
+  -- so the connector lookup is an indexed equality, not a JSON probe.
+  CREATE TABLE IF NOT EXISTS rag_folders (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    ragModuleKey TEXT NOT NULL,
+    parentId TEXT,
+    name TEXT NOT NULL,
+    ancestorIds TEXT,
+    aclMode TEXT,
+    aclManaged TEXT,
+    source TEXT,
+    sourceId TEXT,
+    sourceExternalId TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_rag_folders_module_parent ON rag_folders(ragModuleKey, parentId);
+  CREATE INDEX IF NOT EXISTS idx_rag_folders_module_source ON rag_folders(ragModuleKey, sourceId, sourceExternalId);
+
+  -- One grant of read access on a node (module root, folder or document).
+  -- nodeId is the module key for the root.
+  CREATE TABLE IF NOT EXISTS rag_acl_entries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    ragModuleKey TEXT NOT NULL,
+    nodeType TEXT NOT NULL,
+    nodeId TEXT NOT NULL,
+    principal TEXT NOT NULL,
+    label TEXT,
+    managed TEXT,
+    createdBy TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_rag_acl_entries_module_principal ON rag_acl_entries(ragModuleKey, principal);
+  CREATE INDEX IF NOT EXISTS idx_rag_acl_entries_module_node ON rag_acl_entries(ragModuleKey, nodeType, nodeId);
+
+  -- External identity directories (an Entra tenant behind a connector, ...).
+  CREATE TABLE IF NOT EXISTS rag_identity_domains (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    source TEXT,
+    userMatch TEXT NOT NULL DEFAULT '[]',
+    matchGroupsByExternalId INTEGER,
+    createdBy TEXT,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_identity_domains_key ON rag_identity_domains(key);
+
+  CREATE TABLE IF NOT EXISTS rag_identity_users (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    extId TEXT NOT NULL,
+    email TEXT,
+    upn TEXT,
+    name TEXT,
+    type TEXT,
+    groups TEXT,
+    attrs TEXT,
+    syncRunId TEXT,
+    syncedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_identity_users_domain_extid ON rag_identity_users(domain, extId);
+  CREATE INDEX IF NOT EXISTS idx_rag_identity_users_domain_email ON rag_identity_users(domain, email);
+  CREATE INDEX IF NOT EXISTS idx_rag_identity_users_domain_upn ON rag_identity_users(domain, upn);
+
+  -- Hand-made links between an external user/group and a console user/group.
+  CREATE TABLE IF NOT EXISTS rag_identity_links (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    externalKind TEXT NOT NULL,
+    externalId TEXT NOT NULL,
+    consoleKind TEXT NOT NULL,
+    consoleId TEXT NOT NULL,
+    createdBy TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_rag_identity_links_console ON rag_identity_links(consoleKind, consoleId);
+  CREATE INDEX IF NOT EXISTS idx_rag_identity_links_external ON rag_identity_links(domain, externalKind, externalId);
 
   -- Rerankers (first-class service backed by configurable strategy + model)
   CREATE TABLE IF NOT EXISTS rerankers (
@@ -1807,7 +1907,8 @@ export const TENANT_SCHEMA_SQL = `
     budget TEXT,
     spentUsd REAL,
     runtimeTurnId TEXT,
-    transcriptHash TEXT
+    transcriptHash TEXT,
+    kbRestricted TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);

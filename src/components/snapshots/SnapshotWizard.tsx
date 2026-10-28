@@ -481,6 +481,12 @@ export default function SnapshotWizard() {
               <Table.Td align="right">{created.skipped.sizeCapped}</Table.Td>
             </Table.Tr>
           ) : null}
+          {created.skipped.restricted ? (
+            <Table.Tr>
+              <Table.Td>{t('skippedRows')} · {t('skippedRestricted')}</Table.Td>
+              <Table.Td align="right">{created.skipped.restricted}</Table.Td>
+            </Table.Tr>
+          ) : null}
           <Table.Tr>
             <Table.Td>{t('piiFindings')}</Table.Td>
             <Table.Td align="right">{created.piiFindings}</Table.Td>
@@ -765,6 +771,11 @@ export default function SnapshotWizard() {
                 {preview.scanCapped ? (
                   <Alert color="orange" variant="light" p="xs" mb={12}>
                     {t('previewScanCapped')}
+                  </Alert>
+                ) : null}
+                {preview.restricted ? (
+                  <Alert color="gray" variant="light" p="xs" mb={12} data-testid="snapshot-preview-restricted">
+                    {t('previewRestricted', { count: preview.restricted })}
                   </Alert>
                 ) : null}
                 {preview.breakdown.length > 0 ? (

@@ -79,6 +79,12 @@ export const TABLES = {
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
   ragReindexRuns: 'rag_reindex_runs',
+  // Knowledge Engine access control (folders, permissions, identity directories)
+  ragFolders: 'rag_folders',
+  ragAclEntries: 'rag_acl_entries',
+  ragIdentityDomains: 'rag_identity_domains',
+  ragIdentityUsers: 'rag_identity_users',
+  ragIdentityLinks: 'rag_identity_links',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
@@ -436,6 +442,24 @@ export class SQLiteProviderBase {
       ['lastReindexAt', 'lastReindexAt TEXT'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.ragModules, column, ddl);
+    }
+    // Knowledge Engine access control. Every column is nullable with no default
+    // and nothing is backfilled: an existing module or document reads NULL,
+    // which the mappers turn into `undefined` = "access control off / inherit",
+    // so a tenant provisioned before this change behaves exactly as it did.
+    // No index here on purpose - these tables already exist and are not reindexed.
+    for (const [column, ddl] of [
+      ['access', 'access TEXT'],
+      ['aclRevision', 'aclRevision INTEGER'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragModules, column, ddl);
+    }
+    for (const [column, ddl] of [
+      ['folderId', 'folderId TEXT'],
+      ['aclMode', 'aclMode TEXT'],
+      ['aclManaged', 'aclManaged TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragDocuments, column, ddl);
     }
     this.ensureTableColumn(
       db,
@@ -1036,6 +1060,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'turnId', 'turnId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'runId', 'runId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'traceSessionId', 'traceSessionId TEXT');
+    // Knowledge bases whose restricted documents the call's work carried (JSON array of tags).
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'kbRestricted', 'kbRestricted TEXT');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'kbRestricted', 'kbRestricted TEXT');
+    this.ensureTableColumn(db, TABLES.analysisResults, 'kbRestricted', 'kbRestricted TEXT');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, TABLES.usageDaily, 'cachedWriteTokens', 'cachedWriteTokens INTEGER NOT NULL DEFAULT 0');
 
@@ -1216,6 +1244,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
     // Digest of the transcript a chat-completions client holds, to match a resent transcript back to its session.
     this.ensureTableColumn(db, TABLES.agentConversations, 'transcriptHash', 'transcriptHash TEXT');
+    // The knowledge bases whose restricted documents the session handed to its model (JSON array of tags).
+    this.ensureTableColumn(db, TABLES.agentConversations, 'kbRestricted', 'kbRestricted TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // A client tool call a host page has to answer: its timeout (JSON).
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');

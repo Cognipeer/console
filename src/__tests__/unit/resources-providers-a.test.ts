@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { agentsExtraResourceTypes } from '@/lib/resources/providers/agentsExtra';
-import { knowledgeResourceTypes } from '@/lib/resources/providers/knowledge';
+import { knowledgeResourceTypes, mapRagModule } from '@/lib/resources/providers/knowledge';
 import type { DatabaseProvider } from '@/lib/database';
 import type { ResourceProviderContext } from '@/lib/resources/types';
 
@@ -109,6 +109,14 @@ describe('providers-A group files', () => {
     expect(await get('crawler')).toMatchObject({ seedCount: 2, scheduled: true, ragModuleKey: 'rag' });
     expect(await get('rag-module')).toMatchObject({ totalDocuments: 2, totalChunks: 9 });
     expect(await get('reranker')).toMatchObject({ strategy: 'llm', modelKey: 'mk' });
+  });
+
+  it('a rag module with access control lists no totals: they count documents not every reader may see', () => {
+    const keys = (access: unknown) => mapRagModule({ ...docs.rag, access }).attributes.map((a) => a.key);
+    expect(keys({ enabled: true })).not.toEqual(expect.arrayContaining(['totalDocuments']));
+    expect(keys({ enabled: true })).not.toEqual(expect.arrayContaining(['totalChunks']));
+    expect(keys({ enabled: false })).toEqual(expect.arrayContaining(['totalDocuments', 'totalChunks']));
+    expect(keys(undefined)).toEqual(expect.arrayContaining(['totalDocuments', 'totalChunks']));
   });
 
   it('skill uses title as name and header as description', async () => {

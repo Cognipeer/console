@@ -1140,7 +1140,7 @@ export default function RagModuleDetailPage() {
           <Tabs.Tab value="documents" leftSection={<IconFileText size={14} />}>
             Documents
             <Badge variant="filled" color="violet" size="xs" ml={6}>
-              {mod.totalDocuments ?? 0}
+              {mod.totalDocuments ?? '—'}
             </Badge>
           </Tabs.Tab>
           <Tabs.Tab value="playground" leftSection={<IconPlayerPlay size={14} />}>Playground</Tabs.Tab>
@@ -1155,13 +1155,13 @@ export default function RagModuleDetailPage() {
             <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
               <KpiCard
                 label="Documents"
-                value={mod.totalDocuments ?? 0}
+                value={mod.totalDocuments ?? '—'}
                 icon={<IconFileText size={24} />}
                 color="cyan"
               />
               <KpiCard
                 label="Chunks"
-                value={mod.totalChunks ?? 0}
+                value={mod.totalChunks ?? '—'}
                 icon={<IconDatabase size={24} />}
                 color="orange"
               />

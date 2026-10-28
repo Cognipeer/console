@@ -54,6 +54,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { withoutRestrictedRunItems } from '../restrictedKnowledgeRequest';
 import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
 import { readClearableText, readRequiredText } from './partial-update';
 
@@ -975,7 +976,10 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 200) : undefined,
         skip: query.skip ? Number.parseInt(query.skip, 10) : undefined,
       });
-      return reply.code(200).send({ runs });
+      const viewer = { tenantDbName: session.tenantDbName, viewerUserId: session.userId };
+      const shown = [];
+      for (const run of runs) shown.push(await withoutRestrictedRunItems(request, viewer, run));
+      return reply.code(200).send({ runs: shown });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -987,7 +991,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const run = await getRun(session.tenantDbName, id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      return reply.code(200).send({ run });
+      return reply.code(200).send({ run: await withoutRestrictedRunItems(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, run) });
     } catch (error) {
       return internalError(reply, error);
     }

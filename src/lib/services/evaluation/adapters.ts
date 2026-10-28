@@ -37,6 +37,7 @@ import { calculateCost } from '@/lib/services/models/usageLogger';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationTarget, IModelPricing } from '@/lib/database';
 import { selectorForStoredDefault, type AgentRunSelector } from '@/lib/services/agents/agentRevision';
+import { kbCallerForActor, runtimeContextForActor } from './kbCaller';
 import type {
   DatasetItem,
   EmbedInvoker,
@@ -52,8 +53,10 @@ export interface EvaluationModelContext {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
-  /** Actor running the suite — required for agent targets. */
+  /** Actor running the suite — required for agent targets; a retrieval target reads a knowledge base as this person. */
   userId?: string;
+  /** The API token a client API call started the work with: knowledge bases are then read as the token. */
+  tokenId?: string;
 }
 
 interface ChatLikeResponse {
@@ -507,6 +510,7 @@ export function buildTargetInvoker(
       // actually runs — not at evaluation-engine import time.
       const { createConversation, executeAgentChat } = await import('@/lib/services/agents/agentService');
       const userId = ctx.userId ?? 'evaluation';
+      const evaluationRuntime = runtimeContextForActor(ctx.userId, ctx.tokenId, 'evaluation');
       // Each item runs in its own fresh conversation so cases never bleed into
       // each other. `executeAgentChat` requires an existing conversation, so we
       // create one first (the id is DB-generated, not synthesised).
@@ -535,6 +539,8 @@ export function buildTargetInvoker(
         // tests the same one. Without that, follow the target's own default:
         // a pinned version, the draft, or whatever is published.
         ...(options.agentRun ?? selectorForStoredDefault(target.agentVersion)),
+        // Its knowledge tools read as the person who started the suite (or the token it was started with).
+        ...(evaluationRuntime ? { runtimeContext: evaluationRuntime } : {}),
       });
       return {
         text: extractAgentText(response),
@@ -553,13 +559,14 @@ export function buildTargetInvoker(
       // (document conversion, vector providers, rerankers) is heavy and should
       // not load just because the evaluation engine was imported.
       const { queryRag } = await import('@/lib/services/rag/ragService');
+      // A knowledge base with access control answers with what the person running the suite may read.
       const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId || undefined, {
         ragModuleKey: target.ragModuleKey,
         query: toUserMessage(item),
         topK: target.retrievalTopK,
         minScore: target.retrievalMinScore,
         includeContent: true,
-      });
+      }, { caller: kbCallerForActor(ctx.userId, ctx.tokenId) });
       const retrieved: RetrievedChunk[] = result.matches.map((match, index) => ({
         id: match.id,
         score: match.score,

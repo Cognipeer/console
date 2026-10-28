@@ -1161,10 +1161,20 @@ export class AgentTracingService {
     projectId: string,
     sessionId: string,
   ): Promise<string | null> {
+    return (await AgentTracingService.getSessionAccessFacts(tenantDbName, projectId, sessionId))?.threadId ?? null;
+  }
+
+  /** What deciding who may read a session takes: its thread, who it was made for and its marks. Null when it is not there. */
+  static async getSessionAccessFacts(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string,
+  ): Promise<{ threadId: string | null; userId: string | null; kbRestricted: string[] } | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
     const session = await db.findAgentTracingSessionById(sessionId, projectId);
-    return session?.threadId ?? null;
+    if (!session) return null;
+    return { threadId: session.threadId ?? null, userId: session.userId ?? null, kbRestricted: session.kbRestricted ?? [] };
   }
 
   /**

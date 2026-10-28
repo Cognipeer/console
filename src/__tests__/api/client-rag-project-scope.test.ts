@@ -57,6 +57,10 @@ vi.mock('@/lib/services/rag/ragService', () => ({
 
 vi.mock('@/server/api/plugins/rag', () => ({
   documentInProjectScope: vi.fn(),
+  // The modules here have no access control: nothing is hidden, no placement is asked for.
+  documentHiddenFor: vi.fn(async () => false),
+  readDocumentPlacement: vi.fn(async () => ({})),
+  refuseAccessChange: vi.fn(async () => false),
   readDocumentChunkConfig: vi.fn().mockReturnValue(undefined),
   readRagModuleCreateFields: vi.fn(),
   readRagModuleUpdateFields: vi.fn(),
@@ -172,7 +176,7 @@ describe('client RAG API — project scope threaded to every service call', () =
     expect(queryRag).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-a', expect.objectContaining({
       ragModuleKey: 'docs-v1',
       query: 'what is our refund policy?',
-    }));
+    }), expect.objectContaining({ caller: expect.objectContaining({ kind: expect.any(String) }) }));
   });
 
   it('DELETE .../documents/:id passes the caller project to deleteRagDocument', async () => {

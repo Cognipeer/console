@@ -8,6 +8,7 @@ import type {
 } from '@/lib/database';
 
 export type { RagChunkStrategy, IRagChunkConfig, RagDocumentStatus };
+import type { RagDocumentPlacementInput } from './ragAccessService';
 
 export type RagModule = IRagModule;
 export type RagDocument = IRagDocument;
@@ -58,6 +59,8 @@ export interface UpdateRagModuleRequest {
   responseDetail?: 'full' | 'text' | null;
   hybrid?: IRagModule['hybrid'] | null;
   isolateByModule?: boolean | null;
+  /** Document-level access control; `null` switches it off (the stored folders and permissions are kept). */
+  access?: IRagModule['access'] | null;
   metadata?: Record<string, unknown>;
   updatedBy: string;
 }
@@ -93,6 +96,11 @@ export interface RagIngestRequest {
    * the job runs, and is not searchable until then.
    */
   deferIndexing?: boolean;
+  /**
+   * Where the document sits and who may read it, for a knowledge base with
+   * access control (ignored by queries of one without). See ragAccessService.
+   */
+  placement?: RagDocumentPlacementInput;
   createdBy: string;
 }
 
@@ -138,6 +146,11 @@ export interface RagQueryResult {
   latencyMs: number;
   /** The module's configured response shape; applied by the API layer only. */
   responseDetail?: 'full' | 'text';
+  /**
+   * Some match is a passage of a document not open to everyone (access control on, see rag/access/restricted.ts).
+   * The work the query ran in is already marked; internal only, never part of an API response.
+   */
+  restricted?: boolean;
 }
 
 export interface RagDocumentDeleteRequest {

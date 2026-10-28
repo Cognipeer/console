@@ -195,7 +195,9 @@ export default function AgentRemindersTable({ agentId, onOpenSession, onActiveCo
                         label: t('message'),
                         render: (reminder) => (
                             <UnstyledButton onClick={() => setSelectedId(reminder.id)} maw={420}>
-                                <Text size="sm" lineClamp={1}>{reminder.message}</Text>
+                                {reminder.restricted
+                                    ? <Text size="sm" c="dimmed" fs="italic" lineClamp={1} data-testid="reminder-restricted">{t('restrictedMessage')}</Text>
+                                    : <Text size="sm" lineClamp={1}>{reminder.message}</Text>}
                             </UnstyledButton>
                         ),
                     },

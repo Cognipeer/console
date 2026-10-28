@@ -21,7 +21,11 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     };
 });
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => ({
+    getDatabase: vi.fn(),
+    // The run lists ask which sessions drew on restricted knowledge base documents: none here.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn({ findRestrictedAgentConversations: async () => [] }),
+}));
 
 vi.mock('@/lib/services/agents', () => ({
     createAgentRecord: vi.fn(),

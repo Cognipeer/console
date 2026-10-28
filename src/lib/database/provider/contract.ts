@@ -103,8 +103,13 @@ import type {
   IProject,
   IProviderRecord,
   IQuotaPolicy,
+  IRagAclEntry,
   IRagChunk,
   IRagDocument,
+  IRagFolder,
+  IRagIdentityDomain,
+  IRagIdentityLink,
+  IRagIdentityUser,
   IRagModule,
   IRagQueryLog,
   IRagReindexRun,
@@ -1387,6 +1392,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     fileName: string,
     projectId?: string,
   ): Promise<IRagDocument | null>;
+  /** Every document of the module with exactly this name, newest first (the project scope of findRagDocumentByFileName). */
+  listRagDocumentsByFileName(
+    ragModuleKey: string,
+    fileName: string,
+    projectId?: string,
+  ): Promise<IRagDocument[]>;
   listRagDocuments(
     ragModuleKey: string,
     filters?: RagDocumentListFilters,
@@ -1394,8 +1405,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   countRagDocuments(
     ragModuleKey: string,
     projectId?: string,
-    filters?: Pick<RagDocumentListFilters, 'status' | 'search'>,
+    filters?: Pick<RagDocumentListFilters, 'status' | 'search' | 'folderId' | 'ids' | 'access' | 'withUnscoped'>,
   ): Promise<number>;
+  /** Ids only, newest first — for access filters that name documents. `limit` is required. */
+  listRagDocumentIds(
+    ragModuleKey: string,
+    filters: RagDocumentListFilters & { limit: number },
+  ): Promise<string[]>;
+  /** Several documents at once, without `sourceText`. Ids that do not exist are skipped. */
+  findRagDocumentsByIds(ids: string[]): Promise<IRagDocument[]>;
 
   // ── RAG Chunk operations (tenant-specific) ──
   bulkInsertRagChunks(
@@ -1498,6 +1516,109 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Give the claim up, only if we still hold it. */
   releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void>;
 
+  // ── Knowledge Engine folders (tenant-specific) ──
+  /** Atomically add one to the module's `aclRevision` (absent counts as 0). */
+  bumpRagModuleAclRevision(ragModuleKey: string, projectId?: string): Promise<void>;
+  createRagFolder(
+    folder: Omit<IRagFolder, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagFolder>;
+  /** `undefined` in `data` for parentId / ancestorIds / aclMode / aclManaged / source clears the field. */
+  updateRagFolder(
+    id: string,
+    data: Partial<Pick<IRagFolder, 'name' | 'parentId' | 'ancestorIds' | 'aclMode' | 'aclManaged' | 'source' | 'updatedBy'>>,
+  ): Promise<IRagFolder | null>;
+  findRagFolderById(id: string): Promise<IRagFolder | null>;
+  findRagFolderBySource(
+    ragModuleKey: string,
+    sourceId: string,
+    externalId: string,
+    projectId?: string,
+  ): Promise<IRagFolder | null>;
+  /**
+   * Folders of a module. `parentId: null` = top-level folders only; `ancestorId`
+   * = every folder below that one (its whole subtree, the folder itself excluded).
+   */
+  listRagFolders(
+    ragModuleKey: string,
+    filters?: { projectId?: string; parentId?: string | null; ancestorId?: string; ids?: string[]; sourceId?: string },
+  ): Promise<IRagFolder[]>;
+  deleteRagFolder(id: string): Promise<boolean>;
+  deleteRagFoldersByModuleKey(ragModuleKey: string, projectId?: string): Promise<number>;
+
+  // ── Knowledge Engine permissions (tenant-specific) ──
+  listRagAclEntries(
+    ragModuleKey: string,
+    filters?: {
+      projectId?: string;
+      nodeType?: IRagAclEntry['nodeType'];
+      nodeId?: string;
+      nodeIds?: string[];
+      principals?: string[];
+    },
+  ): Promise<IRagAclEntry[]>;
+  /** Distinct nodes holding at least one of `principals` (one indexed read per query). */
+  listRagAclNodesForPrincipals(
+    ragModuleKey: string,
+    principals: string[],
+    projectId?: string,
+  ): Promise<Array<{ nodeType: IRagAclEntry['nodeType']; nodeId: string }>>;
+  /** Whether the node has any entry at all. */
+  hasRagAclEntries(
+    ragModuleKey: string,
+    nodeType: IRagAclEntry['nodeType'],
+    nodeId: string,
+    projectId?: string,
+  ): Promise<boolean>;
+  /** Replace every entry of one node with `entries` (an empty list removes them all). */
+  replaceRagAclEntries(
+    ragModuleKey: string,
+    node: { type: IRagAclEntry['nodeType']; id: string },
+    entries: Array<Omit<IRagAclEntry, '_id' | 'ragModuleKey' | 'nodeType' | 'nodeId' | 'createdAt'>>,
+    projectId?: string,
+  ): Promise<void>;
+  deleteRagAclEntriesByModuleKey(ragModuleKey: string, projectId?: string): Promise<number>;
+  /**
+   * Remove every entry of the tenant, whatever its module, project or node, whose principal starts with
+   * `prefix`. The prefix is a literal string: no wildcard, case-sensitive. An empty prefix removes
+   * nothing. Returns how many entries were removed.
+   */
+  deleteRagAclEntriesByPrincipalPrefix(prefix: string): Promise<number>;
+
+  // ── Knowledge Engine identity directories (tenant-specific) ──
+  upsertRagIdentityDomain(
+    domain: Omit<IRagIdentityDomain, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagIdentityDomain>;
+  findRagIdentityDomain(key: string): Promise<IRagIdentityDomain | null>;
+  listRagIdentityDomains(): Promise<IRagIdentityDomain[]>;
+  /** Deletes the domain, its users and its links. */
+  deleteRagIdentityDomain(key: string): Promise<boolean>;
+  /** Insert or replace users by (domain, extId). */
+  upsertRagIdentityUsers(
+    domain: string,
+    users: Array<Omit<IRagIdentityUser, '_id' | 'domain'>>,
+  ): Promise<number>;
+  /** Delete the domain's users whose syncRunId differs from `keepRunId`. */
+  pruneRagIdentityUsers(domain: string, keepRunId: string): Promise<number>;
+  /** Users of a domain whose `field` equals one of `values` (values compared lower-cased, except extId). */
+  findRagIdentityUsers(
+    domain: string,
+    field: 'extId' | 'email' | 'upn' | `attr:${string}`,
+    values: string[],
+  ): Promise<IRagIdentityUser[]>;
+  listRagIdentityUsers(
+    domain: string,
+    options?: { search?: string; limit?: number; offset?: number },
+  ): Promise<{ users: IRagIdentityUser[]; total: number }>;
+  listRagIdentityLinks(filters?: {
+    domain?: string;
+    consoleKind?: IRagIdentityLink['consoleKind'];
+    consoleIds?: string[];
+  }): Promise<IRagIdentityLink[]>;
+  createRagIdentityLink(
+    link: Omit<IRagIdentityLink, '_id' | 'createdAt'>,
+  ): Promise<IRagIdentityLink>;
+  deleteRagIdentityLink(id: string): Promise<boolean>;
+
   // ── Reranker operations (tenant-specific) ──
   createReranker(
     reranker: Omit<IReranker, '_id' | 'createdAt' | 'updatedAt'>,
@@ -1518,9 +1639,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   createRerankerRunLog(
     log: Omit<IRerankerRunLog, '_id' | 'createdAt'>,
   ): Promise<IRerankerRunLog>;
+  /** `projectId`: only that project's rows (tenant-wide ones when it is empty). */
   listRerankerRunLogs(
     rerankerKey: string,
-    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date; projectId?: string },
   ): Promise<IRerankerRunLog[]>;
 
   // ── Web Search operations (tenant-specific) ──
@@ -1759,6 +1881,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * writer erase the other's. Never lowers the total.
    */
   addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
+  /**
+   * Atomically adds knowledge base tags to the session's `kbRestricted` (a set: a tag already there is not added
+   * twice). Never removes one and does not touch `updatedAt`.
+   */
+  addAgentConversationRestriction(id: string, tags: string[]): Promise<void>;
+  /**
+   * Of the sessions `ids`, those with knowledge base tags (`kbRestricted` not empty): who started each and its tags,
+   * nothing else. An id that names no session, or one without tags, is left out.
+   */
+  findRestrictedAgentConversations(ids: string[]): Promise<Array<Pick<IAgentConversation, '_id' | 'createdBy' | 'kbRestricted'>>>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   /**

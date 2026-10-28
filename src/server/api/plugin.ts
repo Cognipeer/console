@@ -104,6 +104,7 @@ import { projectsApiPlugin } from './plugins/projects';
 import { resourcesApiPlugin } from './plugins/resources';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
+import { ragAccessApiPlugin } from './plugins/rag-access';
 import { rerankerApiPlugin } from './plugins/reranker';
 import { specsApiPlugin } from './plugins/specs';
 import { supportApiPlugin } from './plugins/support';
@@ -619,6 +620,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(resourcesApiPlugin);
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
+  await app.register(ragAccessApiPlugin);
   await app.register(rerankerApiPlugin);
   await app.register(specsApiPlugin);
   await app.register(supportApiPlugin);

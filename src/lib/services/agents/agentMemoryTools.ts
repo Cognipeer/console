@@ -26,6 +26,7 @@
 
 import type { MemoryStore, ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
+import { currentKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 
 const logger = createLogger('agent-memory-tools');
@@ -195,6 +196,11 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
                 if (!key || !value) return 'Both key and value are required.';
                 const target = pickWritable(args.store);
                 if (typeof target === 'string') return target;
+                // The store withholds it too (agentMemoryAdapter.memoryWriteWithheld): say so instead of "remembered".
+                if (target.scope !== 'session' && currentKnowledgeExposure()?.restricted === true) {
+                    return 'Not saved: this conversation used knowledge base documents that are not open to everyone, '
+                        + 'and this memory is read beyond it.';
+                }
                 return orFallback('memory_write failed', 'Could not save that to memory.', async () => {
                     await target.store.upsert(target.scope, [{
                         key,

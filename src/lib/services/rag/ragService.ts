@@ -18,20 +18,47 @@ import {
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 
 const logger = createLogger('rag');
-import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument, RagDocumentStatus } from '@/lib/database';
+import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument, RagDocumentAccessFilter, RagDocumentStatus } from '@/lib/database';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   queryVectorIndex,
   upsertVectors,
   deleteVectors,
+  vectorFilterOperatorsOf,
 } from '@/lib/services/vector/vectorService';
+import type { VectorQueryMatch } from '@/lib/providers';
+import {
+  anonymousKbCaller,
+  isAclPushdownBroken,
+  KnowledgeExposure,
+  markAclPushdownBroken,
+  noteRestrictedDocuments,
+  resolveRagAccess,
+  restrictedTagOf,
+  runWithKnowledgeExposure,
+  withKnowledgeExposure,
+  type KbCaller,
+  type RagAccessScope,
+} from './access';
+import { runRagAclSearch, type RagAclSearchStats } from './ragAclSearch';
+import {
+  commitRagDocumentPlacement,
+  deleteRagDocumentAcl,
+  deleteRagModuleAccessData,
+  hasRagPlacement,
+  prepareRagDocumentPlacement,
+  ragPlacementRowFields,
+  type PreparedRagPlacement,
+  type RagDocumentPlacementInput,
+} from './ragAccessService';
 import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
 import { publishRagIngestJob } from './ragIngestJob';
+import { metadataWithCrawlerMark, type RagSentByCrawler } from './crawlerMark';
 import {
   discardDocumentSource,
   hashSourceText,
@@ -180,6 +207,19 @@ async function getEmbeddings(
 
 const EMBED_BATCH_SIZE = 32;
 
+interface IndexDocumentContentParams {
+  db: Awaited<ReturnType<typeof getDatabase>>;
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string | undefined;
+  ragModule: IRagModule;
+  chunkConfig: IRagChunkConfig;
+  documentId: string;
+  fileName: string;
+  text: string;
+  metadata?: Record<string, unknown>;
+}
+
 /**
  * The one place a document's text becomes chunks, vectors and rows.
  *
@@ -191,18 +231,21 @@ const EMBED_BATCH_SIZE = 32;
  * could ever delete: deleteRagDocument reconstructs ids from `chunkCount`, and
  * `chunkCount` is only recorded once the whole pipeline has succeeded.
  */
-async function indexDocumentContent(params: {
-  db: Awaited<ReturnType<typeof getDatabase>>;
-  tenantDbName: string;
-  tenantId: string;
-  projectId: string | undefined;
-  ragModule: IRagModule;
-  chunkConfig: IRagChunkConfig;
-  documentId: string;
-  fileName: string;
-  text: string;
-  metadata?: Record<string, unknown>;
-}): Promise<number> {
+async function indexDocumentContent(params: IndexDocumentContentParams): Promise<number> {
+  // A document of a knowledge base with access control that is not open to everyone: the model calls that read its
+  // text (contextual headers, embeddings) log their copies under the module's mark, as a conversation's would.
+  if (params.ragModule.access?.enabled !== true) return indexDocumentText(params);
+  const tag = await restrictedTagOf({
+    tenantDbName: params.tenantDbName,
+    tenantId: params.tenantId,
+    module: params.ragModule,
+    documents: [await params.db.findRagDocumentById(params.documentId)],
+  });
+  if (!tag) return indexDocumentText(params);
+  return runWithKnowledgeExposure(new KnowledgeExposure({ seed: [tag], parent: null }), () => indexDocumentText(params));
+}
+
+async function indexDocumentText(params: IndexDocumentContentParams): Promise<number> {
   const { db, tenantDbName, tenantId, projectId, ragModule, documentId, fileName } = params;
 
   const chunks = await chunkText(
@@ -589,6 +632,17 @@ export async function updateRagModule(
   if (request.responseDetail !== undefined) updates.responseDetail = request.responseDetail ?? undefined;
   if (request.hybrid !== undefined) updates.hybrid = request.hybrid ?? undefined;
   if (request.isolateByModule !== undefined) updates.isolateByModule = request.isolateByModule ?? undefined;
+  if (request.access === null) {
+    updates.access = undefined;
+  } else if (request.access !== undefined) {
+    // Merged into the stored setting: what the request leaves out stays, so switching access control off and on
+    // again does not give the admin exception back to a module that removed it.
+    const adminBypass = request.access.adminBypass ?? current?.access?.adminBypass;
+    updates.access = {
+      enabled: request.access.enabled === true,
+      ...(adminBypass === false ? { adminBypass: false } : {}),
+    };
+  }
 
   // The stored vectors keep answering queries against the old settings until a
   // re-index run rebuilds them, so the flag is what tells anyone they are stale.
@@ -698,6 +752,13 @@ export async function deleteRagModule(
     }
   }
 
+  // Folders and permissions are keyed by module key and project; a module
+  // without a project that shares its key with another one cannot tell its own
+  // apart, so those are left (they match nothing once the module is gone).
+  if (keyIsUnambiguous || ragModule.projectId) {
+    await deleteRagModuleAccessData(db, tenantDbName, ragModule);
+  }
+
   return db.deleteRagModule(moduleId);
 }
 
@@ -748,7 +809,7 @@ function withoutInlineSource(document: RagDocument): RagDocument {
 export async function listRagDocuments(
   tenantDbName: string,
   ragModuleKey: string,
-  filters?: { projectId?: string; search?: string },
+  filters?: { projectId?: string; search?: string; access?: RagDocumentAccessFilter },
 ): Promise<RagDocument[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -783,7 +844,15 @@ export const RAG_DOCUMENT_PAGE_MAX = 100;
 export async function listRagDocumentsPage(
   tenantDbName: string,
   ragModuleKey: string,
-  filters: { projectId?: string; status?: RagDocumentStatus; search?: string },
+  filters: {
+    projectId?: string;
+    status?: RagDocumentStatus;
+    search?: string;
+    /** Only documents in this folder; null = only the top level. */
+    folderId?: string | null;
+    /** Only the documents an access scope lists (`scope.managementFilter()`). */
+    access?: RagDocumentAccessFilter;
+  },
   page: { limit?: number; offset?: number } = {},
 ): Promise<RagDocumentPage> {
   const limit = Math.min(
@@ -798,6 +867,8 @@ export async function listRagDocumentsPage(
     db.countRagDocuments(ragModuleKey, filters.projectId, {
       status: filters.status,
       search: filters.search,
+      ...(filters.folderId !== undefined ? { folderId: filters.folderId } : {}),
+      ...(filters.access ? { access: filters.access } : {}),
     }),
   ]);
   return {
@@ -908,11 +979,23 @@ export async function getRagDocumentTextLines(
 
 /* ── Ingest (chunk → embed → upsert) ────────────────────────────────── */
 
+/** What an ingest takes: the request, and who is making it. */
+export type RagIngestInput = RagIngestRequest & {
+  /**
+   * The caller's access scope, for a knowledge base with access control. A document the caller may not read is not
+   * handed back to them as the unchanged copy of their upload (see `queryRag`'s `access`). An internal caller
+   * (crawler, connector, import) passes none and is not held to it.
+   */
+  access?: RagAccessScope;
+  /** Set by the crawler's ingest only: the document is marked as its page (see crawlerMark.ts). */
+  sentByCrawler?: RagSentByCrawler;
+};
+
 export async function ingestDocument(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
-  request: RagIngestRequest,
+  request: RagIngestInput,
 ): Promise<RagDocument> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const db = await getDatabase();
@@ -921,6 +1004,16 @@ export async function ingestDocument(
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
   if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
+
+  // Only the crawler's own ingest marks a document as its page; the mark in anyone's metadata is dropped.
+  const metadata = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
+
+  // A bad folder or permission entry fails the ingest before anything is stored.
+  const placementCtx = { tenantDbName, tenantId, projectId, actor: request.createdBy };
+  const callerScope = request.access ?? request.placement?.scope;
+  const placement: PreparedRagPlacement | undefined = hasRagPlacement(request.placement)
+    ? await prepareRagDocumentPlacement(db, placementCtx, ragModule, request.placement!, callerScope)
+    : undefined;
 
   // Uploading the same file twice used to embed it twice, so every query then
   // answered out of two identical copies and paid for both. The crawler already
@@ -932,12 +1025,21 @@ export async function ingestDocument(
       request.fileName,
       projectId,
     );
-    if (existing && existing.status === 'indexed' && existing.sourceHash === sourceHash) {
+    // A document the caller may not read is not theirs to be handed back (or re-placed): theirs is a new one. Nothing
+    // stops a second document of the same name (stored objects and vector ids are per document), and answering
+    // "already there" would tell the caller that a document with this name and text exists.
+    const hiddenFromCaller = Boolean(existing && callerScope?.enforced && !callerScope.manage
+      && !callerScope.canReadDocument(existing));
+    if (existing && !hiddenFromCaller && existing.status === 'indexed' && existing.sourceHash === sourceHash) {
       logger.info('Skipping ingest of unchanged content', {
         ragModuleKey: request.ragModuleKey,
         fileName: request.fileName,
         documentId: String(existing._id),
       });
+      if (placement) {
+        await commitRagDocumentPlacement(db, placementCtx, ragModule, existing, placement);
+        return withoutInlineSource((await db.findRagDocumentById(String(existing._id))) ?? existing);
+      }
       return withoutInlineSource(existing);
     }
   }
@@ -964,12 +1066,25 @@ export async function ingestDocument(
     size: Buffer.byteLength(request.content, 'utf-8'),
     status: request.deferIndexing ? 'pending' : 'processing',
     chunkConfig: request.chunkConfig,
-    metadata: request.metadata,
+    metadata,
     createdBy: request.createdBy,
     ...source,
+    // An own ACL starts closed: nobody reads the row until its entries are written just below.
+    ...(placement ? ragPlacementRowFields(placement) : {}),
   });
 
   const documentId = String(docRecord._id);
+  if (placement) {
+    try {
+      await commitRagDocumentPlacement(db, placementCtx, ragModule, docRecord, placement);
+    } catch (error) {
+      await db.updateRagDocument(documentId, {
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : 'Could not store the document permissions',
+      });
+      throw error;
+    }
+  }
 
   // The source is committed above, so publishing after it means a crash in
   // between costs the indexing (recovered by the boot sweep), never the content.
@@ -995,7 +1110,7 @@ export async function ingestDocument(
       documentId,
       fileName: request.fileName,
       text: request.content,
-      metadata: request.metadata,
+      metadata,
     });
 
     const lastIndexedAt = new Date();
@@ -1177,6 +1292,10 @@ export async function ingestFile(
      * persisted, and the stored text is what the job indexes.
      */
     deferIndexing?: boolean;
+    /** Folder and permissions (see RagIngestRequest.placement). */
+    placement?: RagDocumentPlacementInput;
+    /** The caller's access scope (see RagIngestInput.access). */
+    access?: RagAccessScope;
     createdBy: string;
   },
 ): Promise<RagDocument> {
@@ -1208,6 +1327,8 @@ export async function ingestFile(
       ...request.metadata,
       _sourceType: isPlainText ? 'text' : 'converted',
     },
+    ...(request.placement ? { placement: request.placement } : {}),
+    ...(request.access ? { access: request.access } : {}),
     createdBy: request.createdBy,
   });
 }
@@ -1276,6 +1397,138 @@ async function applyParentWindows(params: {
   });
 }
 
+export interface RagQueryOptions {
+  signal?: AbortSignal;
+  /**
+   * Who is reading. Only knowledge bases with access control look at it; for
+   * those, a query without a caller (and without `access`) sees only what is
+   * open to everyone.
+   */
+  caller?: KbCaller;
+  /** A scope already resolved for this module (the answer service resolves one per request). */
+  access?: RagAccessScope;
+}
+
+/**
+ * The access scope a query runs with, or undefined when the module has no
+ * access control (the query then runs exactly as it always did).
+ */
+async function resolveQueryAccess(
+  tenantDbName: string,
+  tenantId: string,
+  ragModule: IRagModule,
+  options: RagQueryOptions | undefined,
+): Promise<RagAccessScope | undefined> {
+  if (ragModule.access?.enabled !== true) return undefined;
+  const given = options?.access;
+  if (
+    given
+    && given.enabled
+    && given.moduleKey === ragModule.key
+    && (given.projectId ?? '') === (ragModule.projectId ?? '')
+  ) {
+    return given;
+  }
+  return resolveRagAccess({
+    tenantDbName,
+    tenantId,
+    module: ragModule,
+    caller: options?.caller ?? anonymousKbCaller('unknown'),
+  });
+}
+
+/** The driver behind a vector provider key, for planning a filtered search; undefined when it cannot be read. */
+async function vectorDriverOf(
+  db: DatabaseProvider,
+  tenantId: string,
+  providerKey: string,
+  projectId: string | undefined,
+): Promise<string | undefined> {
+  try {
+    const record = await db.findProviderByKey(tenantId, providerKey, projectId || undefined);
+    return record?.driver;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Who stored a match: the module key and project its chunk row carries, or only the key its vector names. */
+interface MatchOwner {
+  key: string;
+  /** '' for a row stored without a project; absent when only the vector's `_ragModule` tells. */
+  projectId?: string;
+}
+
+/**
+ * Takes the matches of OTHER modules with access control out of a search that did not check access (a module without
+ * it, or a caller who skips it). Two modules on one vector index get each other's vectors back when one of them does
+ * not isolate itself, or when a module of another project with the same key keeps its vectors in the same index, and
+ * with them text that the other module's checks guard.
+ *
+ * A match belongs to the module its stored chunk names, in the chunk's project (a project's own module of that key,
+ * else the workspace-wide one); a chunk of this module's key stored in another project is another module's. A chunk
+ * row written before rows carried a project, and a vector without a chunk row (it has only its `_ragModule`), are
+ * judged by key, as such documents are: controlled when any other module of the tenant with that key has access
+ * control on. The modules are looked up only when a match may be another module's (never for a module that has its
+ * index to itself); when they cannot be looked up, those matches are dropped.
+ */
+async function withoutControlledOtherModules(
+  db: DatabaseProvider,
+  ragModule: IRagModule,
+  matches: VectorQueryMatch[],
+  chunks: ReadonlyMap<string, IRagChunk>,
+): Promise<VectorQueryMatch[]> {
+  const ownProject = ragModule.projectId ? String(ragModule.projectId) : '';
+  const owners = new Map<VectorQueryMatch, MatchOwner>();
+  for (const match of matches) {
+    const chunk = chunks.get(match.id);
+    if (typeof chunk?.ragModuleKey === 'string' && chunk.ragModuleKey !== '') {
+      const projectId = chunk.projectId ? String(chunk.projectId) : '';
+      // A workspace-wide module stores its rows in whichever project wrote them; a project's module, in its project.
+      const own = chunk.ragModuleKey === ragModule.key && (ownProject === '' || projectId === ownProject);
+      if (!own) owners.set(match, { key: chunk.ragModuleKey, projectId });
+      continue;
+    }
+    const named = match.metadata?._ragModule;
+    if (typeof named === 'string' && named !== '' && named !== ragModule.key) owners.set(match, { key: named });
+  }
+  if (owners.size === 0) return matches;
+
+  let controlled: (owner: MatchOwner) => boolean;
+  try {
+    const modules = await db.listRagModules();
+    const projectOf = (other: IRagModule) => (other.projectId ? String(other.projectId) : '');
+    const isSelf = (other: IRagModule) => other.key === ragModule.key && projectOf(other) === ownProject;
+    const controlledKeys = new Set(
+      modules.filter((other) => other.access?.enabled === true && !isSelf(other)).map((other) => other.key),
+    );
+    controlled = (owner) => {
+      if (!owner.projectId) return controlledKeys.has(owner.key);
+      const owning = modules.find((other) => other.key === owner.key && projectOf(other) === owner.projectId)
+        ?? modules.find((other) => other.key === owner.key && projectOf(other) === '');
+      return owning ? owning.access?.enabled === true : controlledKeys.has(owner.key);
+    };
+  } catch (error) {
+    logger.warn('Could not tell which modules on this vector index have access control; dropping their matches', {
+      ragModuleKey: ragModule.key,
+      error: error instanceof Error ? error.message : error,
+    });
+    controlled = () => true;
+  }
+
+  const kept = matches.filter((match) => {
+    const owner = owners.get(match);
+    return !owner || !controlled(owner);
+  });
+  if (kept.length < matches.length) {
+    logger.debug('Dropped matches of other modules with access control that share the vector index', {
+      ragModuleKey: ragModule.key,
+      dropped: matches.length - kept.length,
+    });
+  }
+  return kept;
+}
+
 /** What `runRagQuery` learned about the module, for the failure path in `queryRag`. */
 interface RagQueryState {
   moduleFound: boolean;
@@ -1296,13 +1549,14 @@ export async function queryRag(
   tenantId: string,
   projectId: string | undefined,
   request: RagQueryRequest,
-  options?: { signal?: AbortSignal },
+  options?: RagQueryOptions,
 ): Promise<RagQueryResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const startTime = Date.now();
   const state: RagQueryState = { moduleFound: false };
   try {
-    return await runRagQuery(tenantDbName, tenantId, projectId, request, options, state);
+    // In the work it is part of, or in its own: the reranker's model calls must know what passages they carry.
+    return await withKnowledgeExposure(() => runRagQuery(tenantDbName, tenantId, projectId, request, options, state));
   } catch (err) {
     // An unknown module key and a rejected request filter are caller mistakes,
     // not knowledge-base faults: recording them would mint a health row per
@@ -1340,7 +1594,7 @@ async function runRagQuery(
   tenantId: string,
   projectId: string | undefined,
   request: RagQueryRequest,
-  options: { signal?: AbortSignal } | undefined,
+  options: RagQueryOptions | undefined,
   state: RagQueryState,
 ): Promise<RagQueryResult> {
   const signal = options?.signal;
@@ -1357,16 +1611,23 @@ async function runRagQuery(
   state.key = ragModule.key;
   state.projectId = ragModule.projectId;
 
-  // 1. Embed the query
+  // 1. Embed the query — and, when the module has access control, work out
+  //    meanwhile what the caller may read.
   const embeddingStartedAt = Date.now();
-  const [queryEmbedding] = await getEmbeddings(
-    tenantDbName,
-    projectId ?? '',
-    ragModule.embeddingModelKey,
-    [request.query],
-    signal,
-  );
-  const embeddingMs = Date.now() - embeddingStartedAt;
+  let embeddingMs = 0;
+  const [[queryEmbedding], access] = await Promise.all([
+    getEmbeddings(
+      tenantDbName,
+      projectId ?? '',
+      ragModule.embeddingModelKey,
+      [request.query],
+      signal,
+    ).then((embeddings) => {
+      embeddingMs = Date.now() - embeddingStartedAt;
+      return embeddings;
+    }),
+    resolveQueryAccess(tenantDbName, tenantId, ragModule, options),
+  ]);
 
   // 2. Build the metadata filter: the module's standing filter ANDed with the
   //    caller's and, when the module is isolated, with its own key — after
@@ -1393,14 +1654,14 @@ async function runRagQuery(
   const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
   const hybrid = ragModule.hybrid?.enabled === true;
 
-  const vectorStartedAt = Date.now();
-  const vectorResult = await queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
+  const searchStore = (fetch: number, aclFilter?: Record<string, unknown>) => queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
     providerKey: ragModule.vectorProviderKey,
     indexKey: ragModule.vectorIndexKey,
     query: {
       vector: queryEmbedding,
-      topK: fetchTopK,
-      filter,
+      topK: fetch,
+      // The access part is a system guard: ANDed after the caller's filter was checked against filterableFields.
+      filter: aclFilter ? (filter ? { $and: [filter, aclFilter] } : aclFilter) : filter,
       // The keyword half needs the words themselves — an embedding carries no
       // signal for an error code, a SKU or a part number.
       ...(hybrid ? {
@@ -1414,17 +1675,54 @@ async function runRagQuery(
     },
   }, ...(signal ? [{ signal }] as const : []));
 
-  // Time spent in the vector store alone. This used to be measured from the
-  // very start of the request, which hid where the time actually went.
-  const vectorLatencyMs = Date.now() - vectorStartedAt;
-
-  // 4. Hydrate chunk content from MongoDB
-  const hydrateStartedAt = Date.now();
-  const vectorIds = vectorResult.matches.map((m) => m.id).filter(Boolean);
+  const vectorStartedAt = Date.now();
+  let vectorMatches: VectorQueryMatch[];
   // Keyed by vectorId and holding the whole row, because a parent window needs
   // the chunk's charStart/charEnd as well as its text.
   let chunkByVectorId: Map<string, IRagChunk> = new Map();
-  if (vectorIds.length > 0) {
+  let aclStats: RagAclSearchStats | undefined;
+  if (access?.enforced) {
+    // Access control: only documents the caller may read reach anything below
+    // (hydration, the reranker, the threshold, the logs). See ragAclSearch.ts.
+    const driver = await vectorDriverOf(db, tenantId, ragModule.vectorProviderKey, projectId);
+    const acl = await runRagAclSearch({
+      db,
+      scope: access,
+      moduleKey: ragModule.key,
+      moduleProjectId: ragModule.projectId,
+      driver,
+      operators: driver ? vectorFilterOperatorsOf(driver) : [],
+      pushdownBroken: isAclPushdownBroken(tenantDbName, ragModule.vectorProviderKey),
+      fetchTopK,
+      topK,
+      hybrid,
+      search: async (fetch, aclFilter) => searchStore(fetch, aclFilter),
+      onPushdownRefused: (error) => {
+        markAclPushdownBroken(tenantDbName, ragModule.vectorProviderKey);
+        logger.warn('Vector store refused the document-id filter; filtering after the search instead', {
+          ragModuleKey: ragModule.key,
+          driver,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+      signal,
+    });
+    vectorMatches = acl.matches;
+    chunkByVectorId = acl.chunks;
+    aclStats = acl.stats;
+  } else {
+    vectorMatches = (await searchStore(fetchTopK)).matches;
+  }
+
+  // Time spent in the vector store alone (with access control: plus the
+  // document checks around it). This used to be measured from the very start
+  // of the request, which hid where the time actually went.
+  const vectorLatencyMs = Date.now() - vectorStartedAt;
+
+  // 4. Hydrate chunk content from MongoDB (done above, and verified, when access control applied)
+  const hydrateStartedAt = Date.now();
+  const vectorIds = vectorMatches.map((m) => m.id).filter(Boolean);
+  if (!aclStats && vectorIds.length > 0) {
     try {
       const storedChunks = await db.findRagChunksByVectorIds(vectorIds);
       chunkByVectorId = new Map(storedChunks.map((c) => [c.vectorId, c]));
@@ -1434,15 +1732,23 @@ async function runRagQuery(
   }
   const hydrateLatencyMs = Date.now() - hydrateStartedAt;
 
+  // A search that did not check access (the checks above keep to this module's own documents) must not hand on what
+  // another module with access control keeps on the same index. Before anything reads the matches: the reranker, the
+  // parent windows and the response all work from what is left.
+  if (!aclStats) vectorMatches = await withoutControlledOtherModules(db, ragModule, vectorMatches, chunkByVectorId);
+
   // 5. Map results
-  let matches: RagQueryMatch[] = vectorResult.matches.map((m) => ({
+  let matches: RagQueryMatch[] = vectorMatches.map((m) => ({
     id: m.id,
     score: m.score,
     denseScore: m.denseScore,
     lexicalScore: m.lexicalScore,
     content: chunkByVectorId.get(m.id)?.content ?? resolveMetadataContent(m.metadata),
     metadata: m.metadata,
-    documentId: typeof m.metadata?._documentId === 'string' ? m.metadata._documentId : undefined,
+    documentId: typeof m.metadata?._documentId === 'string'
+      ? m.metadata._documentId
+      // with access control every match was verified against its stored chunk, which names the document
+      : (aclStats ? chunkByVectorId.get(m.id)?.documentId : undefined),
     fileName: typeof m.metadata?._fileName === 'string' ? m.metadata._fileName : undefined,
     chunkIndex: typeof m.metadata?._chunkIndex === 'number' ? m.metadata._chunkIndex : undefined,
   }));
@@ -1459,6 +1765,25 @@ async function runRagQuery(
       hint: 'Vectors not ingested through this product must carry their text in vector metadata '
         + `(one of: ${CONTENT_METADATA_KEYS.join(', ')}).`,
     });
+  }
+
+  // 5a. Passages of documents not open to everyone go on from here: the work this query is part of (an agent turn, an
+  //     evaluation item...) is marked before anything below - the reranker's model calls included - can copy them.
+  let restricted = false;
+  if (ragModule.access?.enabled === true) {
+    const handedOn = matches.filter((m) => (m.content ?? '').trim());
+    if (handedOn.length > 0) {
+      const ids = [...new Set(handedOn.map((m) => m.documentId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
+      const rows = ids.length > 0 ? await db.findRagDocumentsByIds(ids) : [];
+      const byId = new Map(rows.map((row) => [String(row._id), row]));
+      restricted = (await noteRestrictedDocuments({
+        tenantDbName,
+        tenantId,
+        module: ragModule,
+        // A passage that names no document cannot be judged: it counts as closed.
+        documents: handedOn.map((m) => (m.documentId ? byId.get(m.documentId) : undefined)),
+      })) !== null;
+    }
   }
 
   // 5b. Optional reranker pass.
@@ -1612,6 +1937,15 @@ async function runRagQuery(
         vectorLatencyMs,
         // an application's token acted for the person in `userId` (the token is `apiTokenId`)
         ...(attribution.via ? { via: attribution.via } : {}),
+        // counts only: which plan ran and how many candidates the checks removed
+        ...(aclStats ? {
+          acl: {
+            mode: aclStats.mode,
+            dropped: aclStats.dropped,
+            ...(aclStats.retried ? { retried: true } : {}),
+            ...(aclStats.fellBack ? { fellBack: true } : {}),
+          },
+        } : {}),
         ...(useReranker ? {
           reranked: true,
           rerankerKey: ragModule.rerankerKey,
@@ -1630,6 +1964,7 @@ async function runRagQuery(
     // (answer service, agents, MCP tool) keep the full match set regardless —
     // they need documentId/fileName for citations and grouping.
     responseDetail: ragModule.responseDetail ?? 'full',
+    ...(restricted ? { restricted: true } : {}),
   };
 }
 
@@ -1639,7 +1974,8 @@ async function runRagQuery(
  * the chunk text; 'full' (default) is the complete match.
  */
 export function shapeRagQueryResponse(result: RagQueryResult): Record<string, unknown> {
-  const { responseDetail, matches, ...rest } = result;
+  // `restricted` is for the server's own stored copies, not part of the response.
+  const { responseDetail, matches, restricted: _restricted, ...rest } = result;
   return {
     ...rest,
     matches: responseDetail === 'text'
@@ -1685,7 +2021,9 @@ export async function deleteRagDocument(
   // Update module stats
   await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
 
-  return db.deleteRagDocument(request.documentId);
+  const deleted = await db.deleteRagDocument(request.documentId);
+  await deleteRagDocumentAcl(db, ragModule, request.documentId);
+  return deleted;
 }
 
 /**
@@ -1798,6 +2136,10 @@ export async function reingestDocument(
     metadata?: Record<string, unknown>;
     /** Re-chunk this document differently from the rest of the module. */
     chunkConfig?: IRagChunkConfig;
+    /** Folder and permissions to apply along with the new content. */
+    placement?: RagDocumentPlacementInput;
+    /** Set by the crawler's ingest only (see RagIngestInput.sentByCrawler). */
+    sentByCrawler?: RagSentByCrawler;
     updatedBy: string;
   },
 ): Promise<RagDocument> {
@@ -1812,6 +2154,14 @@ export async function reingestDocument(
   const doc = await db.findRagDocumentById(request.documentId);
   if (!doc) throw new Error('Document not found');
 
+  if (hasRagPlacement(request.placement)) {
+    const placementCtx = { tenantDbName, tenantId, projectId, actor: request.updatedBy };
+    const prepared = await prepareRagDocumentPlacement(
+      db, placementCtx, ragModule, request.placement!, request.placement!.scope,
+    );
+    await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
+  }
+
   const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request);
   const textContent = source.text;
 
@@ -1821,8 +2171,10 @@ export async function reingestDocument(
   // keys are exactly what defaultFilter/filterableFields filter on, so every
   // filtered query went empty after a re-index. The document's own metadata is
   // the floor; an explicit request only adds to and overrides it.
-  const metadata = request.metadata
-    ? { ...doc.metadata, ...request.metadata }
+  // The crawler mark is the document's: nobody's metadata sets or clears it, only the crawler's own re-ingest.
+  const requested = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
+  const metadata = requested
+    ? { ...doc.metadata, ...requested }
     : doc.metadata;
 
   // A chunk join is a lossy reconstruction — it repeats every overlap region —
@@ -1935,7 +2287,7 @@ export async function reingestDocument(
       // Only when the caller supplied keys: the row and the vectors have to
       // agree on what this document is filterable by, and an untouched row
       // already does.
-      ...(request.metadata ? { metadata } : {}),
+      ...(requested ? { metadata } : {}),
       ...sourceFields,
     });
 

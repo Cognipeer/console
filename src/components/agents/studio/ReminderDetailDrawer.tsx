@@ -61,7 +61,9 @@ export default function ReminderDetailDrawer({ reminder, onClose, onOpenSession,
 
                     <Field label={t('message')}>
                         <Box p="sm" mt={4} style={{ background: 'var(--mantine-color-gray-light)', borderRadius: 'var(--mantine-radius-sm)' }}>
-                            <Text size="sm" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{reminder.message}</Text>
+                            {reminder.restricted
+                                ? <Text size="sm" c="dimmed" fs="italic">{t('restrictedMessage')}</Text>
+                                : <Text size="sm" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{reminder.message}</Text>}
                         </Box>
                         <Text size="xs" c="dimmed" mt={4}>{t('messageCaption')}</Text>
                     </Field>

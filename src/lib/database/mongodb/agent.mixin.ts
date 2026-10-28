@@ -258,6 +258,9 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       const db = this.getTenantDb();
       const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
       delete updateData._id;
+      // Only grows, through addAgentConversationRestriction: a caller writing back a copy it read earlier must not
+      // shrink it.
+      delete updateData.kbRestricted;
       const result = await db
         .collection<IAgentConversation>(COLLECTIONS.agentConversations)
         .findOneAndUpdate(
@@ -311,6 +314,24 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
             },
           },
         }]);
+    }
+
+    async addAgentConversationRestriction(id: string, tags: string[]): Promise<void> {
+      const clean = [...new Set(tags.filter((tag) => typeof tag === 'string' && tag.length > 0))];
+      if (clean.length === 0 || !/^[0-9a-fA-F]{24}$/.test(id)) return;
+      await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .updateOne({ _id: new ObjectId(id) }, { $addToSet: { kbRestricted: { $each: clean } } });
+    }
+
+    async findRestrictedAgentConversations(ids: string[]): Promise<Array<Pick<IAgentConversation, '_id' | 'createdBy' | 'kbRestricted'>>> {
+      const objectIds = [...new Set(ids)].filter((id) => typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id)).map((id) => new ObjectId(id));
+      if (objectIds.length === 0) return [];
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .find({ _id: { $in: objectIds }, 'kbRestricted.0': { $exists: true } }, { projection: { createdBy: 1, kbRestricted: 1 } })
+        .toArray();
+      return docs.map((doc) => ({ _id: String(doc._id), createdBy: doc.createdBy, kbRestricted: doc.kbRestricted as string[] }));
     }
 
     async deleteAgentConversation(id: string): Promise<boolean> {

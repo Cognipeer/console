@@ -6,7 +6,9 @@
  * mutation tools are exposed; this is strictly a reporting surface.
  */
 
+import { runWithTenantScope } from '@/lib/database';
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { restrictedKnowledgeTagsOf } from '@/lib/services/rag/access/exposure';
 import { McpToolInputError } from '../errors';
 import type {
   InternalMcpInstanceOption,
@@ -32,6 +34,31 @@ const READ_ONLY_ANNOTATIONS = {
   idempotentHint: true,
   openWorldHint: false,
 } as const;
+
+/**
+ * Whether the session (or the agent session its thread is) carried passages of knowledge base documents not open to
+ * everyone and the caller is not the person it was made for. A call through this server has no request to put the
+ * admin exception to, so it is not applied here.
+ */
+async function isRestrictedForCaller(
+  tenantDbName: string,
+  projectId: string,
+  sessionId: string,
+  callerUserId: string | undefined,
+): Promise<boolean> {
+  const facts = await AgentTracingService.getSessionAccessFacts(tenantDbName, projectId, sessionId);
+  if (!facts) return false;
+  const askers = new Set<string>(facts.userId ? [facts.userId] : []);
+  let restricted = restrictedKnowledgeTagsOf(facts.kbRestricted).length > 0;
+  if (facts.threadId) {
+    const [conversation] = await runWithTenantScope(tenantDbName, (db) => db.findRestrictedAgentConversations([facts.threadId!]));
+    if (conversation) {
+      restricted = true;
+      if (conversation.createdBy) askers.add(String(conversation.createdBy));
+    }
+  }
+  return restricted && !(callerUserId && askers.has(String(callerUserId)));
+}
 
 const optionalString = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
@@ -167,6 +194,12 @@ export const agentObservabilityProvider: InternalMcpProvider = {
       });
       if (!result) {
         throw new McpToolInputError(`Session ${sessionId.slice(0, ECHOED_ID_MAX_CHARS)} not found`);
+      }
+      if (await isRestrictedForCaller(ctx.tenantDbName, projectId, sessionId, ctx.identity?.userId)) {
+        // Passages of knowledge base documents not open to everyone went through it: its numbers, not its text.
+        const { summary: _summary, metadata: _metadata, errors, ...stats } = result.session;
+        void _summary; void _metadata;
+        return { session: { ...stats, errorCount: errors?.length ?? 0 }, eventCount: result.events.length, restricted: true };
       }
       return { session: result.session, eventCount: result.events.length };
     }

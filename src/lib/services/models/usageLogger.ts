@@ -6,6 +6,7 @@ import {
   IModelUsageRouting,
   ModelUsageStatus,
 } from '@/lib/database';
+import { currentRestrictedKnowledgeTags } from '@/lib/services/rag/access/exposure';
 import type { RoutingRunAttribution } from './routingCallerContext';
 import {
   recordUsageEvent,
@@ -261,6 +262,8 @@ export async function logModelUsage(
   // messages[].content has no distinctive key or known value to match
   // against the way a secret does, so it can only be found by scanning
   // the text itself. See logPiiRedaction.ts.
+  // Read before the awaits below: what the work had handed on when the call settled.
+  const kbRestricted = currentRestrictedKnowledgeTags();
   const [providerRequest, providerResponse, errorMessage] = await Promise.all([
     redactPiiFromLogPayload(redactLogPayload(payload.providerRequest)),
     redactPiiFromLogPayload(redactLogPayload(payload.providerResponse)),
@@ -300,6 +303,7 @@ export async function logModelUsage(
     ...(payload.agentKey ? { agentKey: payload.agentKey } : {}),
     ...(payload.channel ? { channel: payload.channel } : {}),
     ...runColumns(payload.run),
+    ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
   });
 }
 

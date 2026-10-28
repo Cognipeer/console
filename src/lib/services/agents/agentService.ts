@@ -62,6 +62,22 @@ import {
     queryRag,
 } from '@/lib/services/rag/ragService';
 import {
+    anonymousKbCaller,
+    KnowledgeExposure,
+    currentKnowledgeExposure,
+    currentRestrictedKnowledgeTags,
+    kbCallerFromIdentity,
+    kbCallerFromRuntime,
+    noteRestrictedDocuments,
+    noteRestrictedKnowledge,
+    restrictedKnowledgeTagsOf,
+    runWithKnowledgeExposure,
+    resolveRagAccess,
+    type KbCaller,
+    type RagAccessModule,
+    type RagAccessScope,
+} from '@/lib/services/rag/access';
+import {
     GUARDRAIL_CONTRACT_VERSION,
     GuardrailEnforcementError,
     evaluateGuardrail,
@@ -1162,6 +1178,72 @@ function warnUnservableExternalBindings(config: GuardrailBindingSource, agentKey
 }
 
 /**
+ * Who a run's knowledge tools read for: the person a continued pause is for
+ * (not whoever answered it), else the caller its server-stamped runtime context
+ * names. A run without either is an unknown caller, who reads only what a
+ * knowledge base with access control opens to everyone.
+ */
+export function knowledgeCallerOf(input: {
+    identity?: ConsoleIdentityPerson;
+    runtimeContext?: AgentRuntimeContext;
+}): KbCaller {
+    return input.identity ? kbCallerFromIdentity(input.identity) : kbCallerFromRuntime(input.runtimeContext);
+}
+
+/**
+ * Ties the turn's knowledge exposure (opened by the turn's entry) to its session: what the session already holds
+ * marks every stored copy of the turn from its first model call, and a new mark is written to the session before
+ * the passage that caused it goes back to the model (see rag/access/exposure.ts).
+ */
+async function bindKnowledgeExposure(
+    db: DatabaseProvider,
+    conversation: Pick<IAgentConversation, '_id' | 'kbRestricted'>,
+): Promise<void> {
+    const exposure = currentKnowledgeExposure();
+    if (!exposure || !conversation._id) return;
+    const conversationId = String(conversation._id);
+    await exposure.bind({
+        seed: conversation.kbRestricted,
+        onRestricted: (added) => db.addAgentConversationRestriction(conversationId, added),
+    });
+}
+
+/**
+ * What one build of knowledge tools knows about who it reads for: the caller,
+ * and that caller's scope in each knowledge base with access control. A scope
+ * is resolved the first time a tool needs it and kept for the tools of the
+ * build; a knowledge base without access control resolves nothing.
+ */
+interface KnowledgeAccess {
+    readonly caller: KbCaller;
+    /** The caller's scope in `ragModule`; undefined when the knowledge base has no access control. */
+    scopeOf(ragModule: RagAccessModule): Promise<RagAccessScope | undefined>;
+}
+
+function createKnowledgeAccess(tenantDbName: string, tenantId: string, caller?: KbCaller): KnowledgeAccess {
+    const reader = caller ?? anonymousKbCaller('unknown');
+    const scopes = new Map<string, Promise<RagAccessScope>>();
+    return {
+        caller: reader,
+        async scopeOf(ragModule) {
+            if (ragModule.access?.enabled !== true) return undefined;
+            const key = ragModule.key;
+            let pending = scopes.get(key);
+            if (!pending) {
+                const resolving = resolveRagAccess({ tenantDbName, tenantId, module: ragModule, caller: reader });
+                pending = resolving;
+                scopes.set(key, resolving);
+                // A failed lookup is not kept: the next call asks again.
+                resolving.catch(() => {
+                    if (scopes.get(key) === resolving) scopes.delete(key);
+                });
+            }
+            return pending;
+        },
+    };
+}
+
+/**
  * The three Knowledge Engine tools an agent gets when it has a knowledgeEngineKey
  * configured: search, then two ways to read a match's source document further
  * than the matched passage. Shared by the live chat and playground chat paths,
@@ -1202,6 +1284,9 @@ async function buildKnowledgeTools(
     // found in keeps those reads on this same row ('' = tenant-wide only).
     const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
     const filterableFields = knowledgeModule.filterableFields ?? [];
+    const kbAccess = opts.access ?? createKnowledgeAccess(tenantDbName, tenantId);
+    const boundModule: RagAccessModule = knowledgeModule;
+    const accessScope = () => kbAccess.scopeOf(boundModule);
 
     const searchTool = createTool({
         name: searchName,
@@ -1216,6 +1301,7 @@ async function buildKnowledgeTools(
         func: guard.protect(
             { name: agentToolPolicyName('knowledge', 'search'), requestedName: searchName },
             async (args: { query: string; filter?: Record<string, unknown> }) => {
+                const access = await accessScope();
                 const result = await queryRag(tenantDbName, tenantId, moduleScope, {
                     ragModuleKey,
                     query: args.query,
@@ -1225,7 +1311,7 @@ async function buildKnowledgeTools(
                     // The model fills `args.filter`; it may not send provider-native filters.
                     // The binding's own filter alone stays trusted.
                     ...(args.filter && Object.keys(args.filter).length > 0 ? { filterSource: 'untrusted' as const } : {}),
-                }, { signal: currentTurnSignal() });
+                }, { signal: currentTurnSignal(), caller: kbAccess.caller, ...(access ? { access } : {}) });
                 return result.matches
                     .filter((m) => m.content)
                     .map((m) => {
@@ -1246,6 +1332,11 @@ async function buildKnowledgeTools(
         const document = await getRagDocument(tenantDbName, documentId);
         if (!document || document.ragModuleKey !== ragModuleKey) return undefined;
         if (moduleScope && document.projectId && String(document.projectId) !== moduleScope) return undefined;
+        // A document the caller may not read is reported like one that does not exist.
+        const access = await accessScope();
+        if (access?.enforced && !access.canReadDocument(document)) return undefined;
+        // Its text is about to go to the model: the run's stored copies must know what they hold first.
+        await noteRestrictedDocuments({ tenantDbName, tenantId, module: boundModule, documents: [document] });
         return document;
     }
 
@@ -1323,6 +1414,8 @@ interface KnowledgeToolOptions {
     topK?: number;
     minScore?: number;
     filter?: Record<string, unknown>;
+    /** Who the tools read for. Unset = an unknown caller. */
+    access?: KnowledgeAccess;
 }
 
 function withDirective(base: string, description?: string): string {
@@ -1351,13 +1444,16 @@ export async function buildAgentKnowledgeTools(
     projectId: string,
     source: KnowledgeBindingSource,
     guard: AgentToolGuard,
+    /** `caller`: who the tools read for. Unset = an unknown caller. */
+    options: { caller?: KbCaller } = {},
 ): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
     const bindings = normalizeKnowledgeBindings(source);
     if (bindings.length === 0) return { tools: [], toolDefinitions: [] };
+    const access = createKnowledgeAccess(tenantDbName, tenantId, options.caller);
     const plain = bindings[0];
     if (bindings.length === 1 && !plain.description && plain.topK === undefined
         && plain.minScore === undefined && !plain.filter) {
-        return buildKnowledgeTools(tenantDbName, tenantId, projectId, plain.key, guard);
+        return buildKnowledgeTools(tenantDbName, tenantId, projectId, plain.key, guard, { access });
     }
     if (source.knowledgeToolMode === 'separate') {
         const tools: AgentSdkToolInterface[] = [];
@@ -1369,13 +1465,14 @@ export async function buildAgentKnowledgeTools(
                 topK: binding.topK,
                 minScore: binding.minScore,
                 filter: binding.filter,
+                access,
             });
             tools.push(...built.tools);
             toolDefinitions.push(...built.toolDefinitions);
         }
         return { tools, toolDefinitions };
     }
-    return buildCombinedKnowledgeTools(tenantDbName, tenantId, projectId, bindings, guard);
+    return buildCombinedKnowledgeTools(tenantDbName, tenantId, projectId, bindings, guard, { access });
 }
 
 async function buildCombinedKnowledgeTools(
@@ -1384,11 +1481,13 @@ async function buildCombinedKnowledgeTools(
     projectId: string,
     bindings: IAgentKnowledgeBinding[],
     guard: AgentToolGuard,
+    opts: Pick<KnowledgeToolOptions, 'access'> = {},
 ): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
     const { createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
+    const kbAccess = opts.access ?? createKnowledgeAccess(tenantDbName, tenantId);
 
-    const visible: Array<{ binding: IAgentKnowledgeBinding; scope: string }> = [];
+    const visible: Array<{ binding: IAgentKnowledgeBinding; scope: string; ragModule: RagAccessModule }> = [];
     for (const binding of bindings) {
         const mod = await resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId);
         if (!mod) {
@@ -1399,7 +1498,7 @@ async function buildCombinedKnowledgeTools(
             logger.warn('Skipping knowledge engine that is switched off', { key: binding.key, projectId });
             continue;
         }
-        visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '' });
+        visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '', ragModule: mod });
     }
     if (visible.length === 0) return { tools: [], toolDefinitions: [] };
     const byKey = new Map(visible.map((v) => [v.binding.key, v]));
@@ -1422,6 +1521,11 @@ async function buildCombinedKnowledgeTools(
         const owner = candidates.find((c) => c.binding.key === document.ragModuleKey
             && !(c.scope && document.projectId && String(document.projectId) !== c.scope));
         if (!owner) return { error: 'Document not found in the bound knowledge bases.' };
+        // A document the caller may not read is reported like one that does not exist.
+        const access = await kbAccess.scopeOf(owner.ragModule);
+        if (access?.enforced && !access.canReadDocument(document)) return { error: 'Document not found in the bound knowledge bases.' };
+        // Its text is about to go to the model: the run's stored copies must know what they hold first.
+        await noteRestrictedDocuments({ tenantDbName, tenantId, module: owner.ragModule, documents: [document] });
         return { document, scope: owner.scope };
     }
 
@@ -1432,14 +1536,15 @@ async function buildCombinedKnowledgeTools(
         func: guard.protect(
             { name: agentToolPolicyName('knowledge', 'search'), requestedName: 'knowledge_search' },
             async (args: { query: string }) => {
-                const lists = await Promise.all(visible.map(async ({ binding, scope }) => {
+                const lists = await Promise.all(visible.map(async ({ binding, scope, ragModule }) => {
+                    const access = await kbAccess.scopeOf(ragModule);
                     const result = await queryRag(tenantDbName, tenantId, scope, {
                         ragModuleKey: binding.key,
                         query: args.query,
                         topK: binding.topK,
                         ...(binding.minScore !== undefined ? { minScore: binding.minScore } : {}),
                         filter: binding.filter,
-                    }, { signal: currentTurnSignal() });
+                    }, { signal: currentTurnSignal(), caller: kbAccess.caller, ...(access ? { access } : {}) });
                     return result.matches.filter((m) => m.content).map((m): KnowledgeHit => ({
                         kb: binding.key,
                         documentId: m.documentId,
@@ -1912,6 +2017,8 @@ type BuildSubagentsInput = {
     runtimeContext?: AgentRuntimeContext;
     /** Who the run is for (Console identity); a referenced child acts under its own agent key. */
     identity?: ConsoleIdentityCaller;
+    /** Who a child's knowledge tools read for: the parent run's caller (default: from `runtimeContext`). */
+    kbCaller?: KbCaller;
     /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
@@ -2035,6 +2142,8 @@ export async function buildAgentSubagents(
                 input.projectId,
                 knowledgeSource,
                 input.guard,
+                // A child reads for the same caller as the run that delegated to it.
+                { caller: input.kbCaller ?? kbCallerFromRuntime(input.runtimeContext) },
             );
             childTools.push(...knowledge.tools);
         }
@@ -2409,7 +2518,9 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    const { result, logSummary } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    // A knowledge base tool that ran on another node marked only its own work: mark the run's here.
+                    await noteRestrictedKnowledge(restrictedKnowledgeTagsOf(logSummary?.restrictedKnowledge));
                     if (isToolOutput(result)) return result;
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
@@ -2988,6 +3099,9 @@ export async function createInternalTracingSink(
                 // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
                 const cancelledByCaller = currentTurnSignal()?.aborted === true
                     && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
+                // What the traced work drew from documents not open to everyone (the sink runs inside the turn's
+                // exposure), with what an earlier part of the session already held.
+                const kbRestricted = restrictedKnowledgeTagsOf([...(existing?.kbRestricted ?? []), ...currentRestrictedKnowledgeTags()]);
 
                 const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
                     && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
@@ -3027,6 +3141,7 @@ export async function createInternalTracingSink(
                     truncatedEvents,
                     totalBytesIn: session.summary?.totalBytesIn ?? undefined,
                     totalBytesOut: session.summary?.totalBytesOut ?? undefined,
+                    ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
                 };
 
                 // The counters above already cover the stored events; what carries over from an earlier
@@ -4483,6 +4598,8 @@ async function buildLocalAgentRun(input: {
     const identity: ConsoleIdentityCaller = input.identity
         ? { ...input.identity, agentKey, projectId }
         : consoleIdentityCallerOf(runtimeContext, { agentKey, projectId, accountableUserId: input.accountableUserId });
+    // Who the knowledge tools of this run, and of its sub-agents, read for.
+    const kbCaller = knowledgeCallerOf({ identity: input.identity, runtimeContext });
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
     // published snapshot may still carry it).
     // Bindings of a switched-off service (knowledge engine, MCP, tools, browser, web search, memory,
@@ -4574,7 +4691,7 @@ async function buildLocalAgentRun(input: {
     const toolDefinitions: TraceToolDefinition[] = [];
     if (hasKnowledgeConfigured(config)) {
         const knowledgeTools = await buildAgentKnowledgeTools(
-            tenantDbName, tenantId, projectId, config, toolGuard,
+            tenantDbName, tenantId, projectId, config, toolGuard, { caller: kbCaller },
         );
         tools.push(...knowledgeTools.tools);
         toolDefinitions.push(...knowledgeTools.toolDefinitions);
@@ -4789,6 +4906,7 @@ async function buildLocalAgentRun(input: {
                 ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
                 ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
                 ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
+                ...(runtimeContext?.kbReader === 'anonymous' ? { kbReader: 'anonymous' as const } : {}),
                 ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
                 ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
                 ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),
@@ -4896,6 +5014,7 @@ async function buildLocalAgentRun(input: {
         guard: toolGuard,
         runtimeContext,
         identity,
+        kbCaller,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
         toolMedia,
@@ -5554,7 +5673,7 @@ export async function executeAgentChatLocal(
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
+        return await runWithRoutingCaller(routingCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentChatTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -5689,6 +5808,7 @@ async function runAgentChatTurn(
     });
     scope.events = turnEvents;
     noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
+    await bindKnowledgeExposure(db, conversation);
     if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
         await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
@@ -6446,7 +6566,7 @@ export async function executePlaygroundChatLocal(
             ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
             run: {},
         };
-        return await runWithRoutingCaller(caller, () => runPlaygroundChatTurn(request, scope));
+        return await runWithRoutingCaller(caller, () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runPlaygroundChatTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -6548,6 +6668,7 @@ async function runPlaygroundChatTurn(
         : undefined;
     scope.events = turnEvents;
     if (turnEvents && sessionConversation) noteRoutingRun({ conversationId: String(sessionConversation._id), turnId: turnEvents.turnId });
+    if (sessionConversation) await bindKnowledgeExposure(db, sessionConversation);
     if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
         && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
@@ -7210,7 +7331,7 @@ export async function executeAgentResumeLocal(request: AgentResumeRequest): Prom
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runWithRoutingCaller(resumeCallerOf(request), () => runAgentResumeTurn(request, scope));
+        return await runWithRoutingCaller(resumeCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentResumeTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -7371,6 +7492,7 @@ async function runAgentResumeTurn(
         });
         scope.events = turnEvents;
         noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
+        await bindKnowledgeExposure(db, conversation);
         const onTextChunk = request.onTextChunk
             ? (text: string) => {
                 turnEvents.onText(text);

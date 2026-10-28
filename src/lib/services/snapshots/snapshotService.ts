@@ -52,6 +52,7 @@ import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
 import { anonymizeText, type AnonymizeOptions } from '@/lib/services/pii/anonymize';
 import { redactLogPayload } from '@/lib/services/logRedaction';
 import { detectLanguageMix } from '@/lib/services/workload/workloadSignals';
+import { restrictedKnowledgeTagsOf } from '@/lib/services/rag/access/exposure';
 import {
   RESPONSE_FORMAT_SECTION_KIND,
   sectionToWireResponseFormat,
@@ -889,12 +890,20 @@ async function scanGatewayRows(
   return { scanned, scanCapped: false };
 }
 
-/** Enumerate tracing sessions newest-first, bounded by the scan cap. */
+/** A gateway row whose call carried passages of knowledge base documents not open to everyone. */
+function isRestrictedRow(row: Pick<IModelUsageLog, 'kbRestricted'>): boolean {
+  return restrictedKnowledgeTagsOf(row.kbRestricted).length > 0;
+}
+
+/**
+ * Enumerate tracing sessions newest-first, bounded by the scan cap. `restricted`: the session, or the agent session
+ * its thread is, carried passages of knowledge base documents not open to everyone.
+ */
 async function scanTracingSessions(
   db: Db,
   ctx: SnapshotContext,
   filters: SnapshotFilters,
-  onSession: (session: IAgentTracingSession) => boolean | void | Promise<boolean | void>,
+  onSession: (session: IAgentTracingSession, restricted: boolean) => boolean | void | Promise<boolean | void>,
 ): Promise<{ scanned: number; scanCapped: boolean }> {
   let scanned = 0;
   let skip = 0;
@@ -911,9 +920,15 @@ async function scanTracingSessions(
       },
       ctx.projectId,
     );
+    const threadIds = sessions.map((session) => session.threadId).filter((id): id is string => typeof id === 'string' && id.length > 0);
+    const restrictedThreads = new Set(
+      threadIds.length > 0 ? (await db.findRestrictedAgentConversations(threadIds)).map((conversation) => String(conversation._id)) : [],
+    );
     for (const session of sessions) {
       scanned += 1;
-      if ((await onSession(session)) === false) return { scanned, scanCapped: false };
+      const restricted = restrictedKnowledgeTagsOf(session.kbRestricted).length > 0
+        || (typeof session.threadId === 'string' && restrictedThreads.has(session.threadId));
+      if ((await onSession(session, restricted)) === false) return { scanned, scanCapped: false };
       if (scanned >= SNAPSHOT_SCAN_CAP) return { scanned, scanCapped: true };
     }
     if (sessions.length < PAGE_SIZE) break;
@@ -1011,14 +1026,20 @@ export async function previewSnapshot(ctx: SnapshotContext, params: SnapshotPara
     }
   };
 
+  // Left out exactly as the create call leaves them out, so `wouldCreate` stays honest.
+  let restricted = 0;
   let scan: { scanned: number; scanCapped: boolean };
   if (params.source === 'gateway') {
     scan = await scanGatewayRows(db, ctx, filters, (row) => {
-      if (matchesGatewayStatus(row, filters.status)) record(row.modelKey, row.requestId);
+      if (!matchesGatewayStatus(row, filters.status)) return;
+      if (isRestrictedRow(row)) restricted += 1;
+      else record(row.modelKey, row.requestId);
     });
   } else {
-    scan = await scanTracingSessions(db, ctx, filters, (session) => {
-      if (matchesTracingStatus(session, filters.status)) record(session.agentName ?? '', session.sessionId);
+    scan = await scanTracingSessions(db, ctx, filters, (session, isRestricted) => {
+      if (!matchesTracingStatus(session, filters.status)) return;
+      if (isRestricted) restricted += 1;
+      else record(session.agentName ?? '', session.sessionId);
     });
   }
 
@@ -1032,6 +1053,7 @@ export async function previewSnapshot(ctx: SnapshotContext, params: SnapshotPara
     samplePct,
     limit,
     breakdown: [...breakdown.values()].sort((a, b) => b.matching - a.matching),
+    ...(restricted > 0 ? { restricted } : {}),
   };
 }
 
@@ -1090,7 +1112,7 @@ export async function buildSnapshotDataset(
   const limit = normalizeLimit(filters.limit);
 
   const items: SnapshotDatasetItem[] = [];
-  const skipped: SnapshotSkipCounts = { truncatedPayload: 0, missingMessages: 0, unmappable: 0, sizeCapped: 0 };
+  const skipped: SnapshotSkipCounts = { truncatedPayload: 0, missingMessages: 0, unmappable: 0, sizeCapped: 0, restricted: 0 };
   let matching = 0;
   let sampled = 0;
   let piiFindings = 0;
@@ -1113,6 +1135,10 @@ export async function buildSnapshotDataset(
   if (params.source === 'gateway') {
     await scanGatewayRows(db, ctx, filters, (row) => {
       if (!matchesGatewayStatus(row, filters.status)) return;
+      if (isRestrictedRow(row)) {
+        skipped.restricted! += 1;
+        return;
+      }
       matching += 1;
       if (!isSampled(row.requestId, samplePct)) return;
       sampled += 1;
@@ -1126,8 +1152,12 @@ export async function buildSnapshotDataset(
       if (items.length >= limit) return false; // stop scanning
     });
   } else {
-    await scanTracingSessions(db, ctx, filters, async (session) => {
+    await scanTracingSessions(db, ctx, filters, async (session, restricted) => {
       if (!matchesTracingStatus(session, filters.status)) return;
+      if (restricted) {
+        skipped.restricted! += 1;
+        return;
+      }
       matching += 1;
       if (!isSampled(session.sessionId, samplePct)) return;
       sampled += 1;

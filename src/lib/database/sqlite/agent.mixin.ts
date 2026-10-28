@@ -346,6 +346,37 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       ).run({ id, addUsd, atLeastUsd });
     }
 
+    async addAgentConversationRestriction(id: string, tags: string[]): Promise<void> {
+      const clean = [...new Set(tags.filter((tag) => typeof tag === 'string' && tag.length > 0))];
+      if (clean.length === 0) return;
+      // One statement, so two writers that mark at the same time both land.
+      this.getTenantDb().prepare(
+        `UPDATE ${TABLES.agentConversations} SET kbRestricted = (
+           SELECT json_group_array(value) FROM (
+             SELECT value FROM json_each(COALESCE(kbRestricted, '[]'))
+             UNION SELECT value FROM json_each(@tags)
+             ORDER BY value
+           )
+         ) WHERE id = @id`,
+      ).run({ id, tags: JSON.stringify(clean) });
+    }
+
+    async findRestrictedAgentConversations(ids: string[]): Promise<Array<Pick<IAgentConversation, '_id' | 'createdBy' | 'kbRestricted'>>> {
+      const unique = [...new Set(ids)].filter((id) => typeof id === 'string' && id.length > 0);
+      if (unique.length === 0) return [];
+      const params: Record<string, unknown> = {};
+      const names = unique.map((id, i) => { params[`id${i}`] = id; return `@id${i}`; });
+      const rows = this.getTenantDb().prepare(
+        `SELECT id, createdBy, kbRestricted FROM ${TABLES.agentConversations}
+         WHERE id IN (${names.join(', ')}) AND kbRestricted IS NOT NULL AND json_array_length(kbRestricted) > 0`,
+      ).all(params) as SqliteRow[];
+      return rows.map((row) => ({
+        _id: String(row.id),
+        createdBy: row.createdBy as string,
+        kbRestricted: this.parseJson<string[]>(row.kbRestricted, []),
+      }));
+    }
+
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       db.prepare(`DELETE FROM ${TABLES.agentConversationStates} WHERE conversationId = @id`).run({ id });
@@ -497,7 +528,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       // No `messages` column: the transcript is the heavy part, and a list only needs how many there are.
       const rows = db.prepare(`
         SELECT id, tenantId, projectId, agentKey, title, metadata, createdBy, createdAt, updatedAt,
-               runtimeStatus, stopReason, pendingActionIds, lastEventSeq, budget, spentUsd,
+               runtimeStatus, stopReason, pendingActionIds, lastEventSeq, budget, spentUsd, kbRestricted,
                json_array_length(messages) AS messageCount
         FROM ${TABLES.agentConversations}
         WHERE ${conditions.join(' AND ')}
@@ -1121,6 +1152,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.budget ? { budget: this.parseJson<IAgentConversation['budget']>(row.budget, null) } : {}),
         ...(row.spentUsd !== null && row.spentUsd !== undefined ? { spentUsd: Number(row.spentUsd) } : {}),
         ...(row.transcriptHash ? { transcriptHash: String(row.transcriptHash) } : {}),
+        ...(() => {
+          const kbRestricted = row.kbRestricted ? this.parseJson<string[]>(row.kbRestricted, []) : [];
+          return kbRestricted.length > 0 ? { kbRestricted } : {};
+        })(),
         createdBy: String(row.createdBy),
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
         updatedAt: row.updatedAt ? new Date(row.updatedAt as string) : undefined,

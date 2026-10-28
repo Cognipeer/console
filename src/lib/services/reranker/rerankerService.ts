@@ -26,6 +26,7 @@ import type {
 } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { currentRestrictedKnowledgeTags } from '@/lib/services/rag/access/exposure';
 import { getStrategy } from './strategies';
 import type {
   CreateRerankerRequest,
@@ -166,7 +167,7 @@ export async function listRerankers(
 export async function listRerankerRunLogs(
   tenantDbName: string,
   rerankerKey: string,
-  options?: { limit?: number; from?: Date; to?: Date },
+  options?: { limit?: number; from?: Date; to?: Date; projectId?: string },
 ): Promise<IRerankerRunLog[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -184,6 +185,10 @@ export async function runReranker(
 ): Promise<RerankerRunResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'reranker');
   const start = Date.now();
+  // What the work had handed on of documents not open to everyone (a knowledge base query marks it before it
+  // reranks): the run log then shows what was asked only to those who may read it.
+  const kbRestricted = currentRestrictedKnowledgeTags();
+  const logMetadata = kbRestricted.length > 0 ? { metadata: { kbRestricted } } : {};
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -265,6 +270,7 @@ export async function runReranker(
         errorMessage: error instanceof Error ? error.message : String(error),
         source: request.source,
         ragModuleKey: request.ragModuleKey,
+        ...logMetadata,
       });
     });
     throw error;
@@ -332,6 +338,7 @@ export async function runReranker(
         status: 'success',
         source: request.source,
         ragModuleKey: request.ragModuleKey,
+        ...logMetadata,
       });
     } catch (err) {
       logger.warn('Failed to log reranker run', { error: err });
