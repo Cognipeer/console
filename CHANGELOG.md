@@ -242,6 +242,19 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
   breaks).
 
+### Knowledge Engine
+
+- **OCR per knowledge base.** A module gets an optional `extraction.ocr` setting (`mode` `auto` or `always`, an optional
+  OCR or vision `modelKey`, `languages`, `maxPages`, `images`; `null` clears it), and an upload may carry its own
+  `extraction` or switch it off. Scanned PDF pages and images are read by the project's model or by the server's
+  built-in offline engine. With `async: true` (and a module that keeps files in a bucket) the pages are read by the
+  ingest job: the document stays `pending` with `extraction.stage` and `extraction.progress`. A document read with OCR
+  carries `extraction` (`sourceType`, `ocrPages`, `pageCount`, ...). A re-index never reads pages again; re-ingest with
+  `reextract: true` does, with the module's current settings. Without `extraction` nothing changes.
+- Files uploaded to a Knowledge Engine module now go through the same zip-bomb and PowerPoint working-file guard as the
+  Document Store, and pictures in Word and HTML files become short placeholders instead of base64 data URIs in the
+  indexed text.
+
 ### File storage
 
 - **OCR for Markdown copies.** `POST /client/v1/files/buckets/:bucketKey/objects` (and the Document Store's upload and

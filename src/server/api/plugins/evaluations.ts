@@ -453,6 +453,11 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
           body.fileName,
           buffer,
           typeof body.contentType === 'string' ? body.contentType : undefined,
+          // Guarded conversion; no OCR (a dataset source is read as the file's own text).
+          {
+            scope: { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: session.userId },
+            source: 'evaluation',
+          },
         );
         source = { type: 'text', text };
       }

@@ -1640,6 +1640,41 @@ export type RagChunkStrategy =
   /** Cut where the topic shifts, measured by embedding distance between sentences. */
   | 'semantic';
 
+/** OCR setting of a knowledge-base module (the same shape as the extraction engine's `OcrSettings`). */
+export interface IRagOcrSettings {
+  mode: 'off' | 'auto' | 'always';
+  /** Project model (category 'ocr' or a vision LLM). Absent = the local CPU engine. */
+  modelKey?: string;
+  languages?: string[];
+  maxPages?: number;
+  /** Also read the text of images embedded in Word / PowerPoint files and of image files. */
+  images?: boolean;
+}
+
+export interface IRagExtractionConfig {
+  ocr?: IRagOcrSettings;
+}
+
+/** What is known about how a document's text was extracted. */
+export interface IRagDocumentExtraction {
+  /** 'converted' = the text layer / plain conversion; 'ocr' = all text from OCR; 'mixed' = both. */
+  sourceType: 'converted' | 'ocr' | 'mixed';
+  engine?: 'model' | 'local';
+  modelKey?: string;
+  pageCount?: number;
+  /** How many pages were read by OCR. */
+  ocrPages?: number;
+  ocrImages?: number;
+  /** sha256 of the uploaded bytes. Recorded only: it is never used to skip an upload. */
+  fileHash?: string;
+  /** Set while the extraction is still to run (queued) or running in the ingest job. */
+  stage?: 'queued' | 'running';
+  progress?: { completed: number; total: number };
+  /** The OCR setting this document was asked to be extracted with (null = explicitly off). */
+  requested?: IRagOcrSettings | null;
+  warnings?: string[];
+}
+
 export interface IRagChunkConfig {
   strategy: RagChunkStrategy;
   /**
@@ -1754,6 +1789,8 @@ export interface IRagModule {
   fileBucketKey?: string;
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
+  /** How the files uploaded to this module are turned into text (OCR). Absent = converted as before, no OCR. */
+  extraction?: IRagExtractionConfig;
   status: 'active' | 'disabled';
   /** Optional reference to a Reranker service that re-orders vector matches before returning. */
   rerankerKey?: string;
@@ -1840,6 +1877,8 @@ export interface IRagDocument {
    * CSV rarely want the same splitter. Unset means "use the module's".
    */
   chunkConfig?: IRagChunkConfig;
+  /** How the text of this document was extracted and, while a deferred extraction runs, where it stands. */
+  extraction?: IRagDocumentExtraction;
   /**
    * The extracted text this document was last indexed from, so a re-index never
    * has to reconstruct it from overlapping chunks. Stored inline only when it

@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type { IRagChunkConfig } from '@/lib/database';
+import type { OcrSettings } from '@/lib/services/extraction';
 import { createLogger } from '@/lib/core/logger';
 import {
   createRagModule,
@@ -18,7 +19,7 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
-import { RagModuleInactiveError } from '@/lib/services/rag/errors';
+import { RagModuleInactiveError, RagOriginalMissingError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
@@ -35,6 +36,7 @@ import {
   sendInvalidRequest,
   withoutSourceText,
 } from './rag';
+import { ocrModelProblem, readDocumentExtraction } from '../ragExtraction';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-rag');
@@ -76,6 +78,8 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      const modelProblem = await ocrModelProblem(ctx, fields.extraction?.ocr);
+      if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
       const ragModule = await createRagModule(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         ...fields,
@@ -132,6 +136,8 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      const modelProblem = await ocrModelProblem(ctx, fields.extraction?.ocr);
+      if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
       const ragModule = await updateRagModule(ctx.tenantDbName, String(existing._id), {
         ...fields,
@@ -207,8 +213,10 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       let chunkConfig: IRagChunkConfig | undefined;
+      let extraction: { ocr?: OcrSettings | null } | undefined;
       try {
         chunkConfig = readDocumentChunkConfig(body);
+        extraction = readDocumentExtraction(body);
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
@@ -221,8 +229,13 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const statusCode = deferIndexing ? 202 : 201;
 
       if (typeof body.data === 'string') {
+        const modelProblem = await ocrModelProblem(ctx, extraction?.ocr);
+        if (modelProblem) return reply.code(400).send({ error: modelProblem });
+
+        // `async: true` defers the extraction of a scanned file to the ingest queue as well as the indexing.
         const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
           chunkConfig,
+          ...(extraction ? { extraction } : {}),
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
         force: body.force === true,
@@ -402,6 +415,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       const document = await reingestDocument(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         chunkConfig,
+        ...(body.reextract === true ? { reextract: true } : {}),
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
         documentId,
@@ -416,7 +430,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
-      if (error instanceof RagModuleInactiveError) {
+      if (error instanceof RagModuleInactiveError || error instanceof RagOriginalMissingError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       logger.error('Reingest client RAG document error', { error });

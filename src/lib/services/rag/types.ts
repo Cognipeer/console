@@ -5,9 +5,11 @@ import type {
   RagChunkStrategy,
   IRagChunkConfig,
   RagDocumentStatus,
+  IRagExtractionConfig,
+  IRagDocumentExtraction,
 } from '@/lib/database';
 
-export type { RagChunkStrategy, IRagChunkConfig, RagDocumentStatus };
+export type { RagChunkStrategy, IRagChunkConfig, RagDocumentStatus, IRagExtractionConfig, IRagDocumentExtraction };
 
 export type RagModule = IRagModule;
 export type RagDocument = IRagDocument;
@@ -23,6 +25,8 @@ export interface CreateRagModuleRequest {
   fileBucketKey?: string;
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
+  /** OCR settings of the files uploaded to this module. */
+  extraction?: IRagExtractionConfig;
   rerankerKey?: string;
   rerankerOversample?: number;
   defaultTopK?: number;
@@ -48,6 +52,8 @@ export interface UpdateRagModuleRequest {
   vectorProviderKey?: string;
   vectorIndexKey?: string;
   chunkConfig?: IRagChunkConfig;
+  /** `null` clears the module's OCR settings. */
+  extraction?: IRagExtractionConfig | null;
   status?: 'active' | 'disabled';
   rerankerKey?: string | null;
   rerankerOversample?: number | null;
@@ -74,6 +80,11 @@ export interface RagIngestRequest {
    * document so a re-index reproduces the same chunks.
    */
   chunkConfig?: IRagChunkConfig;
+  /**
+   * How the text was extracted (and, for a document whose extraction is still to run, `stage: 'queued'` with an
+   * empty `content`). Stored on the document as given.
+   */
+  extraction?: IRagDocumentExtraction;
   /**
    * The upload the text was extracted from. Stored in the module's bucket so a
    * re-index can re-run the converter instead of re-reading our own output.

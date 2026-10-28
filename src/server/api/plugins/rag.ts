@@ -1,7 +1,9 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IRagChunkConfig, IRagDocument, IRagModule, RagDocumentStatus } from '@/lib/database';
+import type { IRagChunkConfig, IRagDocument, IRagExtractionConfig, IRagModule, RagDocumentStatus } from '@/lib/database';
+import { normalizeOcrSettings, type OcrSettings } from '@/lib/services/extraction';
+import { ocrModelProblem, readDocumentExtraction } from '../ragExtraction';
 import {
   aggregateRagQueryScoreDistribution,
   countRagQueryLogs,
@@ -22,7 +24,7 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
-import { RagModuleInactiveError } from '@/lib/services/rag/errors';
+import { RagModuleInactiveError, RagOriginalMissingError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import { validateChunkConfig } from '@/lib/services/rag/chunking';
 import {
@@ -135,6 +137,22 @@ const asHybrid: FieldReader<NonNullable<IRagModule['hybrid']>> = (value, field) 
   };
 };
 
+/** The OCR setting of a module's `extraction`: validated here, the model it names is checked by `ocrModelProblem`. */
+const asModuleExtraction: FieldReader<IRagExtractionConfig> = (value, field) => {
+  const extraction = asPlainObject(value, field);
+  for (const key of Object.keys(extraction)) {
+    if (key !== 'ocr') throw new Error(`${field}.${key} is not a known setting`);
+  }
+  const result: IRagExtractionConfig = {};
+  // `ocr: null` is the same as leaving it out: this module does not OCR.
+  if (extraction.ocr !== undefined && extraction.ocr !== null) {
+    const { value: ocr, error } = normalizeOcrSettings(extraction.ocr);
+    if (error) throw new Error(`${field}.${error}`);
+    if (ocr) result.ocr = ocr;
+  }
+  return result;
+};
+
 /** Kept verbatim: the client API has answered with this string since launch. */
 const REQUIRED_MODULE_FIELDS_MESSAGE =
   'name, embeddingModelKey, vectorProviderKey, vectorIndexKey, and chunkConfig are required';
@@ -177,6 +195,9 @@ export function readRagModuleCreateFields(
     fileBucketKey: optional(body, 'fileBucketKey', asString),
     fileProviderKey: optional(body, 'fileProviderKey', asString),
     chunkConfig: requiredModuleField(body, 'chunkConfig', asChunkConfig),
+    ...(body.extraction !== undefined && body.extraction !== null
+      ? { extraction: asModuleExtraction(body.extraction, 'extraction') }
+      : {}),
     rerankerKey: optional(body, 'rerankerKey', asString),
     rerankerOversample: optional(body, 'rerankerOversample', asNumber),
     defaultTopK: optional(body, 'defaultTopK', asNumber),
@@ -222,6 +243,7 @@ export function readRagModuleUpdateFields(
     vectorProviderKey: optional(body, 'vectorProviderKey', asString),
     vectorIndexKey: optional(body, 'vectorIndexKey', asString),
     chunkConfig: optional(body, 'chunkConfig', asChunkConfig),
+    ...(body.extraction !== undefined ? { extraction: clearable(body, 'extraction', asModuleExtraction) } : {}),
     status: optional(body, 'status', asStatus),
     rerankerKey: clearable(body, 'rerankerKey', asString),
     rerankerOversample: clearable(body, 'rerankerOversample', asNumber),
@@ -340,6 +362,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      const modelProblem = await ocrModelProblem({ tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, fields.extraction?.ocr);
+      if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
       const ragModule = await createRagModule(session.tenantDbName, session.tenantId, projectId, {
         ...fields,
@@ -397,6 +421,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      const modelProblem = await ocrModelProblem({ tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, fields.extraction?.ocr);
+      if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
       const ragModule = await updateRagModule(session.tenantDbName, String(existing._id), {
         ...fields,
@@ -483,15 +509,23 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       let chunkConfig: IRagChunkConfig | undefined;
+      let extraction: { ocr?: OcrSettings | null } | undefined;
       try {
         chunkConfig = readDocumentChunkConfig(body);
+        extraction = readDocumentExtraction(body);
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
 
       if (typeof body.data === 'string') {
+        const modelProblem = await ocrModelProblem({ tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, extraction?.ocr);
+        if (modelProblem) return reply.code(400).send({ error: modelProblem });
+
         const document = await ingestFile(session.tenantDbName, session.tenantId, projectId, {
           chunkConfig,
+          ...(extraction ? { extraction } : {}),
+          // Reading the pages of a scan can take minutes: the dashboard gets its answer as soon as the file is stored.
+          deferExtraction: true,
           contentType: body.contentType as string | undefined,
           createdBy: session.userId,
           fileData: decodeFileData(body.data),
@@ -738,6 +772,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       const document = await reingestDocument(session.tenantDbName, session.tenantId, projectId, {
         chunkConfig,
+        // Reads the stored original again with the module's current OCR settings (a re-index never does).
+        ...(body.reextract === true ? { reextract: true } : {}),
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
         documentId,
@@ -752,7 +788,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
-      if (error instanceof RagModuleInactiveError) {
+      if (error instanceof RagModuleInactiveError || error instanceof RagOriginalMissingError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       logger.error('Reingest RAG document error', { error });

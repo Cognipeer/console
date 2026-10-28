@@ -40,6 +40,11 @@ function recordedWarning(warning: string): string | undefined {
   return kept.length > MAX_WARNING_LENGTH ? kept.slice(0, MAX_WARNING_LENGTH) : kept;
 }
 
+/** The warnings of a report as a record keeps them: stable codes only, de-duplicated and capped. */
+export function recordedWarnings(warnings: readonly string[]): string[] {
+  return [...new Set(warnings.map(recordedWarning).filter((w): w is string => !!w))].slice(0, MAX_WARNINGS);
+}
+
 /** How often a long run touches its record so the screens do not take it for a lost job. */
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -65,7 +70,7 @@ export function extractionWithResult(
   const compact = compactExtraction(settings);
   if (!compact) return undefined;
   if (!compact.ocr) return compact;
-  const warnings = [...new Set(report.warnings.map(recordedWarning).filter((w): w is string => !!w))].slice(0, MAX_WARNINGS);
+  const warnings = recordedWarnings(report.warnings);
   return {
     ...compact,
     result: {

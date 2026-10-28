@@ -37,6 +37,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
          embeddingModelKey, vectorProviderKey, vectorIndexKey, fileBucketKey, fileProviderKey,
          chunkConfig, status, rerankerKey, rerankerOversample, defaultTopK, defaultMinScore, responseDetail,
          defaultFilter, filterableFields, hybrid, isolateByModule,
+         extraction,
          reindexRequired, activeReindexRunKey, lastReindexAt,
          totalDocuments, totalChunks, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
@@ -44,6 +45,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
          @embeddingModelKey, @vectorProviderKey, @vectorIndexKey, @fileBucketKey, @fileProviderKey,
          @chunkConfig, @status, @rerankerKey, @rerankerOversample, @defaultTopK, @defaultMinScore, @responseDetail,
          @defaultFilter, @filterableFields, @hybrid, @isolateByModule,
+         @extraction,
          @reindexRequired, @activeReindexRunKey, @lastReindexAt,
          @totalDocuments, @totalChunks, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
@@ -70,6 +72,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         filterableFields: ragModule.filterableFields ? this.toJson(ragModule.filterableFields) : null,
         hybrid: ragModule.hybrid ? this.toJson(ragModule.hybrid) : null,
         isolateByModule: ragModule.isolateByModule === undefined ? null : this.toBoolInt(ragModule.isolateByModule),
+        extraction: ragModule.extraction ? this.toJson(ragModule.extraction) : null,
         reindexRequired: ragModule.reindexRequired === undefined ? null : this.toBoolInt(ragModule.reindexRequired),
         activeReindexRunKey: ragModule.activeReindexRunKey ?? null,
         lastReindexAt: ragModule.lastReindexAt ? ragModule.lastReindexAt.toISOString() : null,
@@ -123,6 +126,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         ['filterableFields', () => (data.filterableFields ? this.toJson(data.filterableFields) : null)],
         ['hybrid', () => (data.hybrid ? this.toJson(data.hybrid) : null)],
         ['isolateByModule', () => (data.isolateByModule === undefined ? null : this.toBoolInt(data.isolateByModule))],
+        ['extraction', () => (data.extraction ? this.toJson(data.extraction) : null)],
       ] as const;
       for (const [column, value] of clearable) {
         if (!Object.hasOwn(data, column)) continue;
@@ -223,11 +227,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         INSERT INTO ${TABLES.ragDocuments}
         (id, tenantId, projectId, ragModuleKey, fileKey, fileBucketKey, fileProviderKey,
          fileName, contentType, size, status, chunkCount, errorMessage, lastIndexedAt,
-         chunkConfig, sourceText, sourceTextKey, sourceHash, metadata,
+         chunkConfig, extraction, sourceText, sourceTextKey, sourceHash, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @ragModuleKey, @fileKey, @fileBucketKey, @fileProviderKey,
          @fileName, @contentType, @size, @status, @chunkCount, @errorMessage, @lastIndexedAt,
-         @chunkConfig, @sourceText, @sourceTextKey, @sourceHash, @metadata,
+         @chunkConfig, @extraction, @sourceText, @sourceTextKey, @sourceHash, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -245,6 +249,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         errorMessage: doc.errorMessage ?? null,
         lastIndexedAt: doc.lastIndexedAt ? doc.lastIndexedAt.toISOString() : null,
         chunkConfig: doc.chunkConfig ? this.toJson(doc.chunkConfig) : null,
+        extraction: doc.extraction ? this.toJson(doc.extraction) : null,
         sourceText: doc.sourceText ?? null,
         sourceTextKey: doc.sourceTextKey ?? null,
         sourceHash: doc.sourceHash ?? null,
@@ -285,6 +290,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       // no longer there.
       const clearableDoc = [
         ['chunkConfig', () => (data.chunkConfig ? this.toJson(data.chunkConfig) : null)],
+        ['extraction', () => (data.extraction ? this.toJson(data.extraction) : null)],
         ['sourceText', () => data.sourceText ?? null],
         ['sourceTextKey', () => data.sourceTextKey ?? null],
         ['sourceHash', () => data.sourceHash ?? null],
@@ -662,6 +668,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         filterableFields: r.filterableFields ? this.parseJson(r.filterableFields, undefined) : undefined,
         hybrid: r.hybrid ? this.parseJson(r.hybrid, undefined) : undefined,
         isolateByModule: r.isolateByModule === null || r.isolateByModule === undefined ? undefined : this.fromBoolInt(r.isolateByModule),
+        extraction: r.extraction ? this.parseJson(r.extraction, undefined) : undefined,
         reindexRequired: r.reindexRequired === null || r.reindexRequired === undefined ? undefined : this.fromBoolInt(r.reindexRequired),
         activeReindexRunKey: (r.activeReindexRunKey as string | null | undefined) ?? undefined,
         lastReindexAt: r.lastReindexAt ? this.toDate(r.lastReindexAt) : undefined,
@@ -692,6 +699,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         errorMessage: r.errorMessage as string | undefined,
         lastIndexedAt: r.lastIndexedAt ? this.toDate(r.lastIndexedAt) : undefined,
         chunkConfig: r.chunkConfig ? this.parseJson(r.chunkConfig, undefined) : undefined,
+        extraction: r.extraction ? this.parseJson(r.extraction, undefined) : undefined,
         sourceText: r.sourceText as string | undefined,
         sourceTextKey: r.sourceTextKey as string | undefined,
         sourceHash: r.sourceHash as string | undefined,

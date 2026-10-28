@@ -9776,6 +9776,11 @@ paths:
                   allOf:
                     - $ref: "#/components/schemas/RagChunkConfig"
                   description: Per-document chunking settings to apply to this rebuild.
+                reextract:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Read the stored original file again with the module's current OCR settings and replace the document's text with the result (`409` "The original file is no longer stored; upload it again." if the original was not kept). Without it a re-ingest never runs OCR: a document that was read by OCR keeps its text. A new `data` file is always read with the module's OCR settings.
                 metadata:
                   type: object
                   additionalProperties: true
@@ -9798,6 +9803,15 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The module is not active, or `reextract` was asked of a document whose original file was not kept."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -9919,6 +9933,16 @@ paths:
                     - $ref: "#/components/schemas/RagChunkConfig"
                   description: >-
                     Split this document with its own settings instead of the module's. Stored on the document, so a re-index reproduces the same chunks.
+                extraction:
+                  type: object
+                  additionalProperties: false
+                  description: >-
+                    OCR for this file only (used with `data`). `ocr` replaces the module's OCR settings, `ocr: null` switches OCR off for this file; without `extraction` the module's settings apply. `ocr.modelKey` must be an OCR model or a vision LLM of the project (`400` otherwise).
+                  properties:
+                    ocr:
+                      nullable: true
+                      allOf:
+                        - $ref: "#/components/schemas/OcrSettings"
                 metadata:
                   type: object
                   additionalProperties: true
@@ -9930,7 +9954,7 @@ paths:
                   type: boolean
                   default: false
                   description: >-
-                    Return as soon as the document is stored, leaving chunking and embedding to a background job. The response is `202` and the document is `pending`.
+                    Return as soon as the document is stored, leaving chunking and embedding to a background job. The response is `202` and the document is `pending`. When OCR applies to the file and the module keeps files in a bucket, reading the pages is left to the job too: the document carries `extraction.stage` until the text is there.
       responses:
         "201":
           description: Ingested document, already indexed.
@@ -24459,6 +24483,69 @@ components:
             maxDocumentChars:
               type: integer
               description: How much of the document the model sees as context. Defaults to 8000.
+    RagExtractionConfig:
+      type: object
+      additionalProperties: false
+      description: >-
+        How the files uploaded to a Knowledge Engine module are turned into text. Without it (or with OCR `off`) files are converted exactly as before. OCR only applies to what is uploaded from now on, or re-extracted on request: a re-index never reads pages again.
+      properties:
+        ocr:
+          allOf:
+            - $ref: "#/components/schemas/OcrSettings"
+          description: "OCR for PDFs, images and (with `images`) pictures inside Word and PowerPoint files. `modelKey` must be an OCR model or a vision LLM of the module's project."
+    RagDocumentExtraction:
+      type: object
+      description: How the text of a document was extracted. Present when OCR applied to the upload or a re-extract; absent for documents converted without it.
+      properties:
+        sourceType:
+          type: string
+          enum:
+            - converted
+            - ocr
+            - mixed
+          description: "`converted`: the text layer of the file. `ocr`: all of the text was read by OCR. `mixed`: both."
+        engine:
+          type: string
+          enum:
+            - model
+            - local
+        modelKey:
+          type: string
+        pageCount:
+          type: integer
+        ocrPages:
+          type: integer
+          description: How many pages were read by OCR.
+        ocrImages:
+          type: integer
+          description: How many embedded pictures were read by OCR.
+        fileHash:
+          type: string
+          description: sha256 of the uploaded bytes. Informational; an upload is never skipped because of it.
+        stage:
+          type: string
+          enum:
+            - queued
+            - running
+          description: Present while the extraction of an uploaded file is still to run, or running, in the background. The document is `pending` until it has finished.
+        progress:
+          type: object
+          description: Pages read so far, while `stage` is `running`.
+          properties:
+            completed:
+              type: integer
+            total:
+              type: integer
+        requested:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/OcrSettings"
+          description: The OCR settings this document was extracted with.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Stable codes for what did not go as asked (for example `ocr_timeout`, `ocr_budget_exceeded`); the native text was kept.
     RagHybridConfig:
       type: object
       required:
@@ -24507,6 +24594,8 @@ components:
           description: Key/name of the vector index.
         chunkConfig:
           $ref: "#/components/schemas/RagChunkConfig"
+        extraction:
+          $ref: "#/components/schemas/RagExtractionConfig"
         description:
           type: string
         key:
@@ -24587,6 +24676,8 @@ components:
         chunkCount:
           type: integer
           example: 15
+        extraction:
+          $ref: "#/components/schemas/RagDocumentExtraction"
         errorMessage:
           type: string
         lastIndexedAt:
@@ -24635,6 +24726,8 @@ components:
           type: string
         chunkConfig:
           $ref: "#/components/schemas/RagChunkConfig"
+        extraction:
+          $ref: "#/components/schemas/RagExtractionConfig"
         status:
           type: string
           enum:
@@ -24751,6 +24844,11 @@ components:
           type: string
         chunkConfig:
           $ref: "#/components/schemas/RagChunkConfig"
+        extraction:
+          allOf:
+            - $ref: "#/components/schemas/RagExtractionConfig"
+          nullable: true
+          description: "`null` clears the module's OCR settings. Changing them does not flag a re-index."
         status:
           type: string
           enum:
