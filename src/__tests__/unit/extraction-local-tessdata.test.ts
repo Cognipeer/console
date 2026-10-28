@@ -65,6 +65,23 @@ describe('the bundled language data', () => {
     expect(statSync(path.join(directory, 'tur.traineddata.gz')).mtimeMs).toBe(stamp);
   });
 
+  it('is found from a working directory below the install, and reported missing outside of it', async () => {
+    const root = process.cwd();
+    const cwd = vi.spyOn(process, 'cwd');
+    try {
+      cwd.mockReturnValue(path.join(root, 'src', 'lib'));
+      expect((await ensureLocalTessdata(['tr'])).languages).toEqual(['tur']);
+
+      resetLocalTessdataForTests();
+      cwd.mockReturnValue(dataDir);
+      const outside = await ensureLocalTessdata(['tr']);
+      expect(outside.languages).toEqual([]);
+      expect(outside.warnings).toEqual(expect.arrayContaining(['ocr_language_unavailable: tr']));
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
   it('copies a file again when a clean-up removed it from the target directory', async () => {
     const first = await ensureLocalTessdata(['tr']);
     const file = path.join(first.directory!, 'tur.traineddata.gz');

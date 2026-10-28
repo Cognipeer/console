@@ -5,8 +5,8 @@
  * The engine is a small interface so another CPU engine can take its place later; only Tesseract exists today.
  */
 
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig } from '@/lib/core/config';
@@ -59,13 +59,14 @@ async function fileSize(file: string): Promise<number | undefined> {
 /** The `<lang>.traineddata.gz` the `@tesseract.js-data/<lang>` package ships, when it is installed. */
 function bundledTrainedData(tesseractLang: string): string | undefined {
   if (!/^[a-z_]+$/.test(tesseractLang)) return undefined;
-  try {
-    // Resolved from the working directory: the bundler rewrites a plain `require.resolve`.
-    const req = createRequire(path.join(process.cwd(), 'package.json'));
-    const manifest = req.resolve(`@tesseract.js-data/${tesseractLang}/package.json`);
-    return path.join(path.dirname(manifest), DATA_PACKAGE_VARIANT, `${tesseractLang}.traineddata.gz`);
-  } catch {
-    return undefined;
+  // Looked up the way Node finds a package, from the working directory upwards. Not `require.resolve`, which the
+  // bundler rewrites, and not `createRequire`, whose argument the bundler cannot follow and warns about on every build.
+  for (let dir = process.cwd(); ; dir = path.dirname(dir)) {
+    const pkg = path.join(dir, 'node_modules', '@tesseract.js-data', tesseractLang);
+    if (existsSync(path.join(pkg, 'package.json'))) {
+      return path.join(pkg, DATA_PACKAGE_VARIANT, `${tesseractLang}.traineddata.gz`);
+    }
+    if (path.dirname(dir) === dir) return undefined;
   }
 }
 
