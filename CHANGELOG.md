@@ -101,6 +101,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   explicit per-tool *Always ask* still wins), and client tools are unchanged. See [Which tools
   ask](docs/guide/agent-approvals.md#which-tools-ask) and [Unattended
   runs](docs/guide/agent-approvals.md#unattended-runs).
+- The document metadata key `_crawlerKey` is reserved. A crawler stores its key there on the pages it sends to the
+  Knowledge Engine, and the key is dropped from the metadata of every other ingest.
 
 ### Agent runs and run classes
 
@@ -734,3 +736,69 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   probe stored `null` for every field it left out; now only an explicit `null` clears a field that may be
   empty. A custom-probe PATCH without `detectors` keeps the stored detectors instead of resetting them. Moving a target
   or a campaign to another agent without a version drops its pinned version.
+
+### Knowledge base access control
+
+- A knowledge base can decide who reads each of its documents. **Access control** is off by default and switched on
+  per knowledge base (`access.enabled` on the module; changing `access` needs Knowledge Engine `admin`). A knowledge
+  base that leaves it off, its documents and its API behave as before, and switching it on hides nothing by itself:
+  the top level stays open to everyone until its permissions are changed.
+- Documents can be put in **folders**, with access control on or off: an ingest takes a `folderId`, or a `folderPath`
+  that is created as needed, and dashboard routes create, rename, move and delete folders and move documents. With
+  access control on, only the knowledge base's administrators change folders and move documents.
+- Permissions are set on the knowledge base, a folder or a document, for everyone, people, groups, e-mail addresses,
+  API tokens, and the people and groups of an external directory (`GET` and `PUT /rag/modules/:key/acl`, or `acl` on
+  an ingest, with Knowledge Engine `admin`). A folder's permissions apply to what it holds unless an item sets its own.
+- Reads follow the permissions of the person asking: the query, search and answer endpoints, the client API, agent
+  knowledge tools, the knowledge base MCP tools, and document detail, content, lines and export. A document the caller
+  may not read is left out of lists and answers `404`, like a missing one.
+- A call with no person behind it, such as an API token or a trigger, reads the documents open to everyone and those
+  granted to its token; a delegated call reads what the person it acts for may read. A flow's agent steps, and the
+  tools they call, read as no one in particular; the flow editor's playground reads as the person at the screen.
+- The administrators of a knowledge base read every document, unless the knowledge base turns that off
+  (`access.adminBypass: false`). The management views always show them every document, so they can set permissions.
+  `GET /rag/modules/:key/access/explain` tells them whether a person of the project can read a document, and which
+  permission decides.
+- **External directories** map the people and groups of another system to console people. A person is matched by
+  e-mail address (against the directory's e-mail, then its sign-in name) or by another field, such as the person's
+  external id or a directory attribute; a console group whose external id is a directory group's id stands for that
+  group, and a person can also be linked by hand. Dashboard routes under `/rag/identity` list and edit the
+  directories, their people and the links.
+- What is left behind by work that used documents not open to everyone is shown in full only to the person who asked
+  and the administrators of those knowledge bases: sessions, background runs, reminders, traces, model logs, and
+  evaluation, red-team and analysis results. Others see such a row without its content, opening it answers `403`
+  (`session_restricted`), and only those people answer its pending approvals. With `adminBypass: false` it is the
+  person who asked alone, and an API token never counts as an administrator. Snapshots leave such sessions out, and
+  the EU AI Act compliance report leaves out such red-team attempts.
+- While an agent works with such documents, it writes no memory that other people share.
+- An evaluation run on a RAG target reads as the person who started it. Generating a dataset from a knowledge base
+  uses only documents open to everyone.
+- A module with access control is listed without `totalDocuments` and `totalChunks` for a caller whose reads are
+  checked (an API token always is); the console shows `—` for them.
+- A crawler sends pages into a knowledge base with access control only when one of its administrators sets the crawler
+  up (`403 kb_access_controlled` otherwise). There a page replaces only a page the same crawler sent.
+- The stored files and the vector index of a knowledge base with access control are read through the knowledge base.
+  The file routes serve its files, and the vector routes query and copy its index, only to its administrators while
+  the admin exception is on, and never to an API token; anyone else gets `404` for a file and
+  `403 kb_access_controlled` for the index. Another knowledge base cannot be put on that index.
+
+### Knowledge base access control from connectors (Enterprise)
+
+- A SharePoint source can bring the permissions of its files (**Read permissions**, off by default, on an app-only
+  connection). Its libraries and folders become folders of the knowledge base with their own permissions, and the
+  people and named groups of the directory come along, each source with its own directory, matched to console people
+  by e-mail address or sign-in name. SharePoint's Everyone groups stand for the directory's members, not its guests.
+- A file whose permissions cannot be read is open only to the administrators until a later run reads them. A change
+  of permissions alone is picked up by the full listing that such a source makes once a day. Permissions given to
+  SharePoint site groups are not followed yet.
+- A source that sends the permissions of its files needs no confirmation. One that does not, or that stops sending
+  them, first asks to confirm that everyone with access to the knowledge base will see every document it adds
+  (`aclAcknowledged`, once).
+- A connector with a source that sends permissions into a knowledge base with access control offers agents none of
+  its read actions and not its MCP server, and flows none of its read nodes, since its own account reads every file.
+  Its other actions stay and still ask before they run, and the connector's **Tools** tab says why. A flow that
+  already holds such a read node fails that step with `connector_reads_off`.
+- In Slack and Teams an agent reads only knowledge open to everyone when it answers in a shared channel, what the
+  person may read in a direct message, and as no one with the identity mode **none**.
+- A portal's conversation history lists a conversation that used documents not open to everyone without its title;
+  only the person who started it and the administrators of those knowledge bases can open it.
