@@ -507,7 +507,16 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
                           value={picked}
                           clearable
                           placeholder={t('ui.form.connectorPlaceholder')}
-                          onChange={(value) => patch({ connectors: { ...form.connectors, [pkg]: value } })}
+                          onChange={(value) => {
+                            // Parameters belong to one connector (a repository of its account): another connector, or none, starts them over.
+                            const connectorParams = { ...form.connectorParams };
+                            if (value !== picked) {
+                              for (const trigger of template.triggers) {
+                                if (trigger.type === 'connector' && trigger.connector?.package === pkg) delete connectorParams[trigger.name];
+                              }
+                            }
+                            patch({ connectors: { ...form.connectors, [pkg]: value }, connectorParams });
+                          }}
                         />
                       </FormField>
                       {/* What each of the package's triggers needs that no template can know (a repository). */}
