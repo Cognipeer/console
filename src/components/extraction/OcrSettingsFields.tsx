@@ -75,6 +75,9 @@ export default function OcrSettingsFields({ value, onChange, showImages = false,
         <SegmentedControl
           size="xs"
           fullWidth
+          // A narrow column (the crawler's settings) cannot hold the three labels on one line: they wrap there
+          // instead of pushing the last one out of sight.
+          styles={{ label: { whiteSpace: 'normal' } }}
           aria-labelledby={labelId}
           disabled={disabled}
           value={mode}
