@@ -3021,6 +3021,8 @@ paths:
           nothing that happened meanwhile is lost; another connector, trigger or parameters take a new first check. The
           place is kept in the memory of the node that handles the edit, for two minutes. An edit that lands while the
           check of the old schedule is handing out a page of events can run that page's events once more.
+        - A `connector` poll trigger keeps its stored schedule when `connector.schedule` is left out; `connector.schedule: null`
+          returns it to the package's own schedule, in UTC.
         - A `connector` poll trigger that is switched off (`enabled: false`) ignores what happens, as a webhook trigger
           does. When a scheduled check finds every trigger on the poll switched off, the poll calls nothing and forgets
           its place; the first check after a trigger is switched on again (at the next tick of the poller, not at the next
@@ -30436,7 +30438,7 @@ components:
           type: object
           nullable: true
           description: >-
-            Poll triggers only. `cron` is a five-field expression (minute, hour, day of month, month, day of week) made of `*`, numbers, ranges, lists, steps and, for the month and the day of week, names; `L`, `W`, `#` and `?` are not accepted, and an expression a connector schedule cannot read is `400` on `connector.schedule.cron`. It must not fire more often than the package allows. `timezone` is an IANA name (default `UTC`).
+            Poll triggers only. `cron` is a five-field expression (minute, hour, day of month, month, day of week) made of `*`, numbers, ranges, lists, steps and, for the month and the day of week, names; `L`, `W`, `#` and `?`, macros such as `@daily` and a seconds field are not accepted. An expression a connector schedule cannot take is `400` on `connector.schedule.cron`, with a message that says what is wrong: it is not five fields, it uses syntax of another cron dialect, it has a value that is out of range or not a name, it runs more often than the package allows, or it has no run in the timezone. `timezone` is an IANA name (default `UTC`). Left out on create, or `null`, the schedule is the package's own, in UTC; a PATCH that leaves it out keeps the stored one, and `null` returns the trigger to the package's schedule.
           properties:
             cron:
               type: string
