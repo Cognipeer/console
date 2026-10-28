@@ -20,6 +20,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
+import { connectorLocale } from '@/lib/services/agents/agentTriggerConnectorHost';
 import {
   AgentTemplateError,
   getTemplate,
@@ -48,13 +49,13 @@ function sendTemplateError(reply: FastifyReply, error: unknown, logMessage: stri
 
 type ProjectContext = Awaited<ReturnType<typeof requireProjectContextForRequest>>;
 
-function scopeOf({ projectId, session }: ProjectContext): AgentTemplateScope {
-  return { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+function scopeOf({ projectId, session }: ProjectContext, query?: unknown): AgentTemplateScope {
+  return { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ...connectorLocale(query) };
 }
 
 /** The create's API-layer pieces, bound to this request's caller. */
 function writeDepsFor(request: FastifyRequest, context: ProjectContext): AgentTemplateWriteDeps {
-  const scope = scopeOf(context);
+  const scope = scopeOf(context, request.query);
   return {
     guardrailExists: async (key) => Boolean(await guardrailByKeyInScope(scope.tenantDbName, key, scope.projectId, context.user)),
     prepareAgentConfig: (config) => prepareNewAgentConfig(config, {
@@ -100,7 +101,7 @@ export const agentTemplatesApiPlugin: FastifyPluginAsync = async (app) => {
       } catch {
         throw new AgentTemplateError(400, 'invalid_request', 'The body must be valid JSON');
       }
-      const result = await instantiateTemplate(scopeOf(context), templateKey, body, context.session.userId, writeDepsFor(request, context));
+      const result = await instantiateTemplate(scopeOf(context, request.query), templateKey, body, context.session.userId, writeDepsFor(request, context));
       return reply.code(201).send({ ...result, agent: redactAgent(result.agent) });
     } catch (error) {
       return sendTemplateError(reply, error, 'Create agent from template error', 'Failed to create the agent from the template');

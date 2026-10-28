@@ -2823,6 +2823,7 @@ paths:
       operationId: createAgentTrigger
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerLocale'
       requestBody:
         required: true
         content:
@@ -2969,6 +2970,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
         - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/TriggerLocale'
       responses:
         '200':
           description: The trigger.
@@ -3011,6 +3013,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
         - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/TriggerLocale'
       requestBody:
         required: true
         content:
@@ -3306,6 +3309,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
         - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/TriggerLocale'
       requestBody:
         required: false
         content:
@@ -3394,6 +3398,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
         - $ref: '#/components/parameters/TriggerId'
+        - $ref: '#/components/parameters/TriggerLocale'
       responses:
         '200':
           description: The trigger and its subscription after the retry.
@@ -16656,6 +16661,15 @@ components:
       description: The trigger id (a bare id, no prefix).
       schema:
         type: string
+    TriggerLocale:
+      name: locale
+      in: query
+      required: false
+      description: >-
+        The language the Enterprise Connectors module writes in the texts it adds to a `connector` trigger (the label it stores and the `reason` of a subscription). Any other value, or none, leaves the module's default; nothing else about the answer changes.
+      schema:
+        type: string
+        enum: [tr, en]
   schemas:
     AgentA2aArtifact:
       type: object

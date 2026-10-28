@@ -367,6 +367,32 @@ describe.each([
       expect(json(await call('GET', `/${created.id}`)).connector_subscription.previous_secret_valid_until).toBeNull();
     });
 
+    it('tells the Connectors module the reader\'s language (?locale=tr|en) on every call it makes for the request', async () => {
+      const localesOf = async (run: () => Promise<unknown>) => {
+        fake.scopes.length = 0;
+        await run();
+        return fake.scopes.map((scope) => ('locale' in scope ? scope.locale : '(none)'));
+      };
+      let id = '';
+      expect(await localesOf(async () => { id = json(await call('POST', '?locale=tr', body())).id; })).toEqual(['tr', 'tr']); // prepare, attach
+      expect(await localesOf(() => call('GET', `/${id}?locale=en`))).toEqual(['en']);
+      expect(await localesOf(() => call('PATCH', `/${id}?locale=tr`, { type: 'connector', connector: { params: { repository: 'acme/web' } } }))).toEqual(['tr', 'tr', 'tr']); // prepare, detach, attach
+      expect(await localesOf(() => call('POST', `/${id}/webhook/rotate-secret?locale=en`, {}))).toEqual(['en']);
+      expect(await localesOf(() => call('POST', `/${id}/connector/retry?locale=tr`))).toEqual(['tr']);
+      expect(await localesOf(() => call('POST', `/${id}/run?locale=tr`, { dry_run: true }))).toEqual(['tr']);
+      expect(await localesOf(() => call('DELETE', `/${id}?locale=en`))).toEqual(['en']);
+    });
+
+    it('leaves the language out when the request names none, or one the Connectors module has no texts for', async () => {
+      for (const query of ['', '?locale=de', '?locale=', '?locale=TR', '?locale[]=tr']) {
+        fake.scopes.length = 0;
+        const res = await call('POST', query, body({ name: `Locale ${query}` }, { ...CONNECTOR, params: { repository: `acme/${query.length}` } }));
+        expect(res.statusCode, query).toBe(201);
+        expect(fake.scopes.length, query).toBeGreaterThan(0);
+        for (const scope of fake.scopes) expect(scope, query).not.toHaveProperty('locale');
+      }
+    });
+
     it('a subscription gives the reason as a stable code as well as a sentence; none when nothing is wrong', async () => {
       const ok = json(await call('POST', '', body({ name: 'Fine' })));
       expect(ok.connector_subscription).toMatchObject({ status: 'active', reason: null, reason_code: null });

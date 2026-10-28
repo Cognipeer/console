@@ -30,11 +30,27 @@ const logger = createLogger('agent-trigger-connector');
 export const CONNECTOR_TRIGGERS_UNAVAILABLE_MESSAGE = 'Connector triggers need the enterprise Connectors module.';
 
 export function connectorScope(
-  scope: { tenantId: string; tenantDbName: string; projectId: string },
+  scope: { tenantId: string; tenantDbName: string; projectId: string; locale?: string },
   actorId: string,
   locale?: string,
 ): ConnectorTriggerScope {
-  return { ...scope, actorId, ...(locale ? { locale } : {}) };
+  const language = locale ?? scope.locale;
+  return {
+    tenantId: scope.tenantId,
+    tenantDbName: scope.tenantDbName,
+    projectId: scope.projectId,
+    actorId,
+    ...(language ? { locale: language } : {}),
+  };
+}
+
+/**
+ * The reader's language for the texts the Connectors module writes (a label it stores, a reason it gives): the
+ * `locale` query parameter, `tr` or `en`. Anything else is left out, and the module uses its default.
+ */
+export function connectorLocale(query: unknown): { locale?: 'tr' | 'en' } {
+  const raw = typeof query === 'object' && query !== null ? (query as { locale?: unknown }).locale : undefined;
+  return raw === 'tr' || raw === 'en' ? { locale: raw } : {};
 }
 
 const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);

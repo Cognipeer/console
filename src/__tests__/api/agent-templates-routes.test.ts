@@ -113,9 +113,9 @@ type Json = Record<string, any>;
 const json = (res: { body: string }) => parseJsonBody<Json>(res.body);
 
 const read = (suffix = '') => app.inject({ method: 'GET', url: `/api/agents/templates${suffix}` });
-const instantiate = (templateKey: string, payload?: unknown) => app.inject({
+const instantiate = (templateKey: string, payload?: unknown, query = '') => app.inject({
   method: 'POST',
-  url: `/api/agents/templates/${templateKey}/instantiate`,
+  url: `/api/agents/templates/${templateKey}/instantiate${query}`,
   ...(payload !== undefined ? { payload: payload as never } : {}),
 });
 /** The body every happy path starts from. */
@@ -632,6 +632,23 @@ describe('POST instantiate: triggers', () => {
       // Core asked the module once with the parameters in the body, and the hook was registered once.
       expect(fake.calls.filter((call) => call === 'prepare')).toHaveLength(1);
       expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+    });
+
+    it('tells the Connectors module the reader\'s language (?locale=tr|en) for the check and for the binding', async () => {
+      const params = { [PR_TRIGGER]: { repository: 'acme/api' } };
+      const made = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: params }), '?locale=tr');
+      expect(made.statusCode, made.body).toBe(201);
+      expect(fake.calls.filter((call) => call === 'prepare' || call.startsWith('attach:'))).toHaveLength(2);
+      expect(fake.scopes.map((scope) => scope.locale)).toEqual(['tr', 'tr']);
+
+      // A locale the module has no texts for, or none: the scope carries no language at all.
+      for (const query of ['', '?locale=de']) {
+        fake.scopes.length = 0;
+        const again = await instantiate('pr-reviewer', pick({ name: `PR ${query}`, key: `pr-${query.length}`, connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: `acme/web${query.length}` } } }), query);
+        expect(again.statusCode, again.body).toBe(201);
+        expect(fake.scopes.length).toBeGreaterThan(0);
+        for (const scope of fake.scopes) expect(scope).not.toHaveProperty('locale');
+      }
     });
 
     it('leaves the trigger out as params_required when the repository is missing, naming the field; the agent is still made', async () => {

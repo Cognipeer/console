@@ -83,6 +83,8 @@ export interface AgentTemplateScope {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
+  /** The caller's language (`tr` / `en`), told to the Connectors module for the texts it writes for a connector trigger. */
+  locale?: 'tr' | 'en';
 }
 
 export type PreparedAgentConfig =

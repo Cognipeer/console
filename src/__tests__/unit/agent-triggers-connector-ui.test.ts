@@ -77,13 +77,13 @@ beforeAll(() => {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
-const wrap = (node: ReactNode) => h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) }));
+const wrap = (node: ReactNode, locale: 'en' | 'tr' = 'en') => h(MantineProvider, null, h(I18nProvider, { locale, children: h(ConfirmProvider, null, node) }));
 
-function mount(node: ReactNode) {
+function mount(node: ReactNode, locale: 'en' | 'tr' = 'en') {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  act(() => root!.render(wrap(node)));
+  act(() => root!.render(wrap(node, locale)));
 }
 
 const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); }); };
@@ -148,7 +148,7 @@ const retiredRow = () => ({
     filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false,
   },
 });
-const listOf = (...rows: unknown[]) => routes.push((url, method) => (method === 'GET' && /\/triggers$/.test(url) ? json({ data: rows }) : null));
+const listOf = (...rows: unknown[]) => routes.push((url, method) => (method === 'GET' && /\/triggers(?:\?|$)/.test(url) ? json({ data: rows }) : null));
 
 const panel = () => h(AgentTriggersPanel, {
   agentId: 'a1', agentName: 'Support', versions: [], declaredVariables: [{ name: 'region', type: 'string' }], onShowRuns: () => undefined,
@@ -181,7 +181,7 @@ describe('the Connector choice', () => {
 
   it('sends the picker’s value in the API’s spelling and stays open on the saved row with its status', async () => {
     const saved = connectorRow({ connector_subscription: { subscription_id: 'sub1', status: 'manual', kind: 'webhook', bindings: 1 } });
-    routes.push((url, method) => (method === 'POST' && /\/triggers$/.test(url) ? json(saved, true, 201) : null));
+    routes.push((url, method) => (method === 'POST' && /\/triggers(?:\?|$)/.test(url) ? json(saved, true, 201) : null));
     mount(panel());
     await flush();
     await click(button('Add trigger'));
@@ -195,7 +195,7 @@ describe('the Connector choice', () => {
     await click(button('Save trigger'));
 
     const post = calls.find((call) => call.method === 'POST')!;
-    expect(post.url).toBe('/api/agents/a1/triggers');
+    expect(post.url).toBe('/api/agents/a1/triggers?locale=en');
     expect(post.body).toMatchObject({
       name: 'PR review', type: 'connector', prompt: 'Review {{payload.number}}', enabled: true,
       connector: {
@@ -209,7 +209,7 @@ describe('the Connector choice', () => {
     expect(text()).toContain('status:manual');
     expect(tab('Test')).toBeDefined();
     expect(tab('Deliveries')).toBeDefined();
-    expect(calls.filter((call) => call.method === 'GET' && /triggers\/r2$/.test(call.url))).toHaveLength(0);
+    expect(calls.filter((call) => call.method === 'GET' && /triggers\/r2(?:\?|$)/.test(call.url))).toHaveLength(0);
   });
 
   it('refuses to save without a pick, saying so on the picker', async () => {
@@ -224,7 +224,7 @@ describe('the Connector choice', () => {
   });
 
   it('hands the server’s field errors to the picker', async () => {
-    routes.push((url, method) => (method === 'POST' && /\/triggers$/.test(url)
+    routes.push((url, method) => (method === 'POST' && /\/triggers(?:\?|$)/.test(url)
       ? json({ error: { type: 'invalid_request_error', code: 'invalid_trigger', message: 'Invalid trigger - connector.params.repository: is required', errors: [
         { field: 'connector.params.repository', message: 'is required' }, { field: 'prompt', message: 'ignored here' },
       ] } }, false, 400)
@@ -288,7 +288,7 @@ describe('a retired vendor webhook trigger', () => {
 
   it('converts into the editor as a connector trigger carrying prompt, variables, filter and payload choice, and saves over the same row', async () => {
     listOf(retiredRow());
-    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1$/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1(?:\?|$)/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
     mount(panel());
     await flush();
     await click(button('Convert to connector trigger'));
@@ -306,7 +306,7 @@ describe('a retired vendor webhook trigger', () => {
     await click(button('Save trigger'));
 
     const patch = calls.find((call) => call.method === 'PATCH')!;
-    expect(patch.url).toBe('/api/agents/a1/triggers/r1');
+    expect(patch.url).toBe('/api/agents/a1/triggers/r1?locale=en');
     expect(patch.body).toMatchObject({
       type: 'connector', prompt: 'Review {{payload.number}}', variables: { region: 'eu' },
       connector: { connector_id: 'c1', filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false },
@@ -333,7 +333,7 @@ describe('a retired vendor webhook trigger', () => {
       { path: 'payload.sender.type', op: 'eq', value: 'User' },
     ];
     listOf(row);
-    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1$/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1(?:\?|$)/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
     mount(panel());
     await flush();
     await click(button('Convert to connector trigger'));
@@ -355,7 +355,7 @@ describe('a retired vendor webhook trigger', () => {
       triggers: [{ name: 'pull_request', title: 'Pull request', description: '', kind: 'webhook', events: [], params: {}, autoSubscribe: true, sample: { type: 'pull_request.opened', data: {} } }],
     }];
     listOf(connectorRow({}, { filter: [{ path: 'headers.x', op: 'eq', value: 'y' }] }));
-    routes.push((url, method) => (method === 'GET' && /\/triggers\/r2$/.test(url) ? json(connectorRow({ connector_subscription: { subscription_id: 'sub1', status: 'active', kind: 'webhook', bindings: 1 } })) : null));
+    routes.push((url, method) => (method === 'GET' && /\/triggers\/r2(?:\?|$)/.test(url) ? json(connectorRow({ connector_subscription: { subscription_id: 'sub1', status: 'active', kind: 'webhook', bindings: 1 } })) : null));
     mount(panel());
     await flush();
     await click(button('Edit'));
@@ -384,17 +384,34 @@ describe('a saved connector trigger', () => {
       triggers: [{ name: 'pull_request', title: 'Pull request', description: '', kind: 'webhook', events: [], params: {}, autoSubscribe: true, sample }],
     }];
     listOf(connectorRow());
-    routes.push((url, method) => (method === 'GET' && /\/triggers\/r2$/.test(url) ? json(connectorRow({ connector_subscription: subscription })) : null));
+    routes.push((url, method) => (method === 'GET' && /\/triggers\/r2(?:\?|$)/.test(url) ? json(connectorRow({ connector_subscription: subscription })) : null));
+  });
+
+  it('asks for the subscription in the reader\'s language, English or Turkish, so the module can write its reason in it', async () => {
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    const read = calls.find((call) => call.method === 'GET' && /triggers\/r2(?:\?|$)/.test(call.url))!;
+    expect(read.url).toBe('/api/agents/a1/triggers/r2?locale=en');
+    act(() => root?.unmount());
+    container?.remove();
+    document.body.innerHTML = '';
+    calls.length = 0;
+
+    mount(panel(), 'tr');
+    await flush();
+    await click(button('Düzenle'));
+    expect(calls.find((call) => call.method === 'GET' && /triggers\/r2(?:\?|$)/.test(call.url))!.url).toBe('/api/agents/a1/triggers/r2?locale=tr');
   });
 
   it('reads the subscription (lists do not carry it) and hands it to the status, which can ask for a reload', async () => {
     mount(panel());
     await flush();
     await click(button('Edit'));
-    expect(calls.filter((call) => call.method === 'GET' && /triggers\/r2$/.test(call.url))).toHaveLength(1);
+    expect(calls.filter((call) => call.method === 'GET' && /triggers\/r2(?:\?|$)/.test(call.url))).toHaveLength(1);
     expect(text()).toContain('status:active');
     expect(tab('Settings')).toBeDefined();
-    routes.unshift((url, method) => (method === 'GET' && /\/triggers\/r2$/.test(url) ? json(connectorRow({ connector_subscription: { ...subscription, status: 'failed' } })) : null));
+    routes.unshift((url, method) => (method === 'GET' && /\/triggers\/r2(?:\?|$)/.test(url) ? json(connectorRow({ connector_subscription: { ...subscription, status: 'failed' } })) : null));
     await click(button('Reload status'));
     expect(text()).toContain('status:failed');
   });

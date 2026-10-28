@@ -209,6 +209,35 @@ describe('the OpenAPI document, connector triggers', () => {
     expect(parseFilterRules([{ path: 'event_id', op: 'exists' }]).ok).toBe(false);
   });
 
+  it('documents the locale query parameter on every call that reaches the Connectors module in words', () => {
+    const parameter = openapi.components.parameters.TriggerLocale;
+    expect(parameter).toMatchObject({ name: 'locale', in: 'query', required: false, schema: { type: 'string', enum: ['tr', 'en'] } });
+    const operations = ['createAgentTrigger', 'getAgentTrigger', 'updateAgentTrigger', 'rotateAgentTriggerWebhookSecret', 'retryAgentTriggerConnector'];
+    const found = new Map<string, string[]>();
+    for (const methods of Object.values(openapi.paths) as Json[]) {
+      for (const operation of Object.values(methods) as Json[]) {
+        if (operation && typeof operation === 'object' && operations.includes(operation.operationId)) {
+          found.set(operation.operationId, (operation.parameters ?? []).map((item: Json) => item.$ref));
+        }
+      }
+    }
+    expect([...found.keys()].sort()).toEqual([...operations].sort());
+    for (const [id, refs] of found) expect(refs, id).toContain('#/components/parameters/TriggerLocale');
+    expect(flat(guide)).toContain('Add `?locale=tr` or `?locale=en` to a create, update, read, rotate or retry call');
+  });
+
+  it('documents the reason code and the previous secret\'s expiry of a subscription, with the codes the module sends', () => {
+    const subscription = schemas.ConnectorSubscription.properties;
+    expect(subscription.reason_code).toMatchObject({ type: 'string', nullable: true });
+    expect(subscription.previous_secret_valid_until).toMatchObject({ type: 'integer', nullable: true });
+    for (const code of ['no_subscribe', 'subscribe_failed', 'rotate_failed', 'account', 'connector_disabled', 'package_missing', 'unreachable', 'attach_failed']) {
+      expect(flat(subscription.reason_code.description), code).toContain(`\`${code}\``);
+      expect(flat(connectorSection()), code).toContain(`\`${code}\``);
+    }
+    expect(connectorSection()).toContain('"previous_secret_valid_until": null');
+    expect(Object.keys(schemas.AgentTriggerWebhookSecret.properties)).toEqual(expect.arrayContaining(['connector_subscription', 'previous_valid_until']));
+  });
+
   it('describes the subscription statuses the way the service uses them', () => {
     const status = flat(schemas.ConnectorSubscription.properties.status.description);
     expect(status).not.toContain('registration or polling failed');

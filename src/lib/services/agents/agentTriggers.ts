@@ -379,6 +379,8 @@ export interface TriggerScope {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
+  /** The caller's language (`tr` / `en`), told to the Connectors module for the texts it writes; absent = its default. */
+  locale?: 'tr' | 'en';
 }
 
 export function listAgentTriggers(scope: TriggerScope, agentKey?: string): Promise<IAgentTrigger[]> {

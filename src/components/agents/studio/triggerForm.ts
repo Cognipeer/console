@@ -378,6 +378,15 @@ export function rowsOnWebhookOnlyData(rows: ReadonlyArray<Pick<WebhookFilterRow,
     return rows.flatMap((row, index) => (/^(headers|preset)(\.|$)/.test(row.path.trim()) ? [index] : []));
 }
 
+/**
+ * A trigger API path with the reader's language (`?locale=tr|en`): the Connectors module writes some texts
+ * itself (a trigger's label, the reason a subscription is not active) and writes them in that language. Any other
+ * locale leaves the path as it is.
+ */
+export function withTriggerLocale(path: string, locale: string): string {
+    return locale === 'tr' || locale === 'en' ? `${path}${path.includes('?') ? '&' : '?'}locale=${locale}` : path;
+}
+
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
 
 /** The `type` and settings object of the request body, or why they cannot be sent. */

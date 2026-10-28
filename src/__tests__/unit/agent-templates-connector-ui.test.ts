@@ -99,7 +99,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn((url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET';
     calls.push({ url, method, body: init?.body ? JSON.parse(init.body) as Record<string, unknown> : null });
-    if (/\/api\/agents\/templates\/pr-reviewer\/instantiate$/.test(url)) return json(instantiateAnswer, true, 201);
+    if (/\/api\/agents\/templates\/pr-reviewer\/instantiate(?:\?|$)/.test(url)) return json(instantiateAnswer, true, 201);
     if (/\/api\/agents\/templates\/pr-reviewer$/.test(url)) return json({ template: template() });
     if (url.startsWith('/api/models')) return json({ models: [{ key: 'gpt-main', name: 'GPT', modelId: 'gpt' }] });
     return json({});
@@ -124,7 +124,7 @@ const openForm = async () => {
     name.dispatchEvent(new Event('input', { bubbles: true }));
   });
 };
-const create = async () => { await click(button('Create agent')); return calls.find((call) => call.url.endsWith('/instantiate'))!; };
+const create = async () => { await click(button('Create agent')); return calls.find((call) => /\/instantiate(?:\?|$)/.test(call.url))!; };
 const typeInto = (input: HTMLInputElement, value: string) => act(() => {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
   input.dispatchEvent(new Event('input', { bubbles: true }));

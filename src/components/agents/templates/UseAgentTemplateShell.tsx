@@ -20,7 +20,7 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { ConnectorTriggerParamsForm, useConnectorTriggerCatalog } from '@/components/enterprise/EnterpriseConnectorTriggerUi';
-import { useTranslations } from '@/lib/i18n';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import type { InstantiateTemplateResult } from '@/lib/services/agents/templates/types';
 import styles from './AgentTemplatesPage.module.css';
 import { TemplateIcon } from './templateIcons';
@@ -114,6 +114,7 @@ export interface UseAgentTemplateShellProps {
 
 export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgent }: UseAgentTemplateShellProps) {
   const t = useTranslations('agentTemplates');
+  const locale = useLocale();
   const { template, loading: detailLoading } = useTemplateDetail(templateKey);
   const [facts, setFacts] = useState<ProjectFacts>(NO_FACTS);
   const [form, setForm] = useState<UseTemplateForm | null>(null);
@@ -182,7 +183,7 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
     setSubmitting(true);
     setError(null);
     try {
-      setResult(await instantiateTemplateRequest(template.key, buildInstantiateBody(template, submitForm, connectorChoices)));
+      setResult(await instantiateTemplateRequest(template.key, buildInstantiateBody(template, submitForm, connectorChoices), fetch, locale));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('ui.form.createFailed'));
     } finally {

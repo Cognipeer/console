@@ -81,6 +81,7 @@ import {
     timezoneOptions,
     webhookVariableText,
     webhookVariableValue,
+    withTriggerLocale,
     type ConnectorTriggerRow,
     type TriggerForm,
     type TriggerFormProblem,
@@ -458,13 +459,13 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
     const loadSubscription = useCallback(async () => {
         if (!savedId) return;
         try {
-            const res = await fetch(`/api/agents/${agentId}/triggers/${savedId}`, { cache: 'no-store' });
+            const res = await fetch(withTriggerLocale(`/api/agents/${agentId}/triggers/${savedId}`, locale), { cache: 'no-store' });
             if (!res.ok) return;
             setSubscription(subscriptionOf(await res.json() as TriggerRow) ?? null);
         } catch {
             // The status stays as it was; the next open or retry reads it again.
         }
-    }, [agentId, savedId]);
+    }, [agentId, savedId, locale]);
 
     const needsSubscription = Boolean(savedConnector) && subscription === undefined;
     useEffect(() => { if (needsSubscription) void loadSubscription(); }, [needsSubscription, loadSubscription]);
@@ -482,7 +483,7 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
         }
         setSaving(true);
         try {
-            const res = await fetch(trigger ? `/api/agents/${agentId}/triggers/${trigger.id}` : `/api/agents/${agentId}/triggers`, {
+            const res = await fetch(withTriggerLocale(trigger ? `/api/agents/${agentId}/triggers/${trigger.id}` : `/api/agents/${agentId}/triggers`, locale), {
                 method: trigger ? 'PATCH' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(built.body),

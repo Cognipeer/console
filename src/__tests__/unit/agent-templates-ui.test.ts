@@ -359,6 +359,18 @@ describe('creating the agent', () => {
     expect(hooks[0].webhook).toMatchObject({ url: 'https://c.example/hooks/x', secret: 'whsec_once' });
   });
 
+  it('names the reader\'s language on the route (tr / en); any other leaves the path as it is', async () => {
+    const urlFor = async (locale?: string) => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify(created), { status: 201 }));
+      await instantiateTemplateRequest('pr-reviewer', { name: 'x', modelKey: 'm' }, fetchMock as unknown as typeof fetch, locale);
+      return (fetchMock.mock.calls[0] as unknown as [string])[0];
+    };
+    expect(await urlFor('tr')).toBe('/api/agents/templates/pr-reviewer/instantiate?locale=tr');
+    expect(await urlFor('en')).toBe('/api/agents/templates/pr-reviewer/instantiate?locale=en');
+    expect(await urlFor('de')).toBe('/api/agents/templates/pr-reviewer/instantiate');
+    expect(await urlFor()).toBe('/api/agents/templates/pr-reviewer/instantiate');
+  });
+
   it('throws the server\'s own message and code when it refuses', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: 'The key is taken', code: 'key_taken' }), { status: 409 }));
     const failure = await instantiateTemplateRequest('pr-reviewer', { name: 'x', modelKey: 'm' }, fetchMock as unknown as typeof fetch).catch((error) => error);

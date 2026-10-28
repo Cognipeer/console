@@ -64,6 +64,7 @@ import { resolveAgentConfig } from '@/lib/services/agents/agentService';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 import {
   CONNECTOR_TRIGGERS_UNAVAILABLE_MESSAGE,
+  connectorLocale,
   connectorScope,
   parseConnectorWrite,
   sampleConnectorTrigger,
@@ -794,7 +795,7 @@ export const agentTriggersApiPlugin: FastifyPluginAsync = async (app) => {
         tokenId: ctx.tokenRecord._id?.toString(),
       };
       return await handler(request, reply, {
-        scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ...connectorLocale(request.query) },
         tenant: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, licenseType: ctx.tenant.licenseType },
         agent,
         userId: String(ctx.tokenRecord.userId ?? ''),
@@ -824,7 +825,7 @@ export const agentTriggersApiPlugin: FastifyPluginAsync = async (app) => {
         userId: session.userId,
       };
       return await handler(request, reply, {
-        scope: { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        scope: { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ...connectorLocale(request.query) },
         tenant: { tenantDbName: session.tenantDbName, tenantId: session.tenantId, licenseType: session.licenseType },
         agent,
         userId: String(session.userId),

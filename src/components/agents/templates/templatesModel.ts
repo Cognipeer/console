@@ -263,13 +263,18 @@ export class InstantiateRequestError extends Error {
   }
 }
 
-/** Creates the agent. Throws `InstantiateRequestError` with the server's own message when it refuses. */
+/**
+ * Creates the agent. Throws `InstantiateRequestError` with the server's own message when it refuses. `locale` is the
+ * reader's language: the Connectors module writes the texts of a connector trigger it creates in it.
+ */
 export async function instantiateTemplateRequest(
   templateKey: string,
   body: InstantiateTemplateInput,
   fetchImpl: typeof fetch = fetch,
+  locale?: string,
 ): Promise<InstantiateTemplateResult> {
-  const res = await fetchImpl(`/api/agents/templates/${encodeURIComponent(templateKey)}/instantiate`, {
+  const path = `/api/agents/templates/${encodeURIComponent(templateKey)}/instantiate`;
+  const res = await fetchImpl(locale === 'tr' || locale === 'en' ? `${path}?locale=${locale}` : path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

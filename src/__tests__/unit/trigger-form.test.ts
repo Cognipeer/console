@@ -27,6 +27,7 @@ import {
   triggerBodyFromForm,
   toLocalInputValue,
   webhookVariableValue,
+  withTriggerLocale,
   type TriggerRow,
 } from '@/components/agents/studio/triggerForm';
 import { DEFAULT_WEBHOOK_HEADER_NAME, WEBHOOK_PRESET_AUTH as SERVER_PRESET_AUTH, WEBHOOK_PRESETS as SERVER_PRESETS } from '@/lib/services/agents/agentTriggerWebhookAuth';
@@ -414,5 +415,18 @@ describe('the Test tab samples and the variables offered', () => {
       const filter = built.ok ? (built.body.webhook as { filter?: Parameters<typeof firstFilterMiss>[1] }).filter : undefined;
       expect(firstFilterMiss(view(preset), filter), preset).toBeNull();
     }
+  });
+});
+
+describe('withTriggerLocale', () => {
+  it('names tr and en on the path; another locale leaves it as it is', () => {
+    expect(withTriggerLocale('/api/agents/a1/triggers', 'tr')).toBe('/api/agents/a1/triggers?locale=tr');
+    expect(withTriggerLocale('/api/agents/a1/triggers/t1', 'en')).toBe('/api/agents/a1/triggers/t1?locale=en');
+    expect(withTriggerLocale('/api/agents/a1/triggers/t1', 'de')).toBe('/api/agents/a1/triggers/t1');
+    expect(withTriggerLocale('/api/agents/a1/triggers/t1', '')).toBe('/api/agents/a1/triggers/t1');
+  });
+
+  it('adds to a query string that is already there', () => {
+    expect(withTriggerLocale('/api/agents/a1/triggers?limit=5', 'tr')).toBe('/api/agents/a1/triggers?limit=5&locale=tr');
   });
 });
