@@ -31,6 +31,8 @@ type OcrJson = {
 Rules:
 - Put the whole page in "text" as Markdown, in natural reading order: headings as "#" headings, lists as lists, tables as GitHub-flavoured Markdown tables.
 - Transcribe exactly what is printed. Do not translate, summarize, correct or explain.
+- Write a checkbox or radio button as "☒" when it is marked and "☐" when it is not, in front of its label.
+- A value written one character per box (an ID number, an account number, a date) is one value: write it without spaces between the characters.
 - Do not add commentary, and do not describe pictures.
 - If the page has no text, return {"text": ""}.
 
