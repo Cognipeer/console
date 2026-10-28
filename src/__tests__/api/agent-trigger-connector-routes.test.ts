@@ -224,13 +224,122 @@ describe.each([
       expect(await storedTriggers()).toEqual([]);
     });
 
-    it('a poll trigger takes a schedule; the cron is checked by core', async () => {
+    describe('the schedule of a poll trigger', () => {
       const poll = { connector_id: 'conn-poll', trigger: 'issue_updated', params: {}, schedule: { cron: '*/15 * * * *', timezone: 'Europe/Istanbul' } };
-      const res = await call('POST', '', body({}, poll));
-      expect(res.statusCode, res.body).toBe(201);
-      expect(json(res).connector).toMatchObject({ kind: 'poll', schedule: { cron: '*/15 * * * *', timezone: 'Europe/Istanbul' } });
-      const bad = await call('POST', '', body({}, { ...poll, schedule: { cron: '0 0 9 * * *' } }));
-      expect(json(bad).error.errors[0].field).toBe('connector.schedule.cron');
+      const withCron = (cron: unknown, extra: Record<string, unknown> = {}) => body({}, { ...poll, schedule: { ...poll.schedule, cron, ...extra } });
+      const errorsOf = (res: { body: string }) => json(res).error.errors as Array<{ field: string; message: string }>;
+      // A grammar of its own, as the real module has: it refuses these with a sentence of its own, before core's cron-parser is asked.
+      const MODULE_SENTENCE: Record<string, string> = {
+        '0 9 1W * *': 'cron uses syntax connector schedules do not support (L, W, # or ?)',
+        '@daily': 'cron must be a five-field cron expression',
+        '0 0 9 * * *': 'cron must be a five-field cron expression',
+        '60 * * * *': 'cron has a value that is out of range or not a name',
+      };
+
+      it('is stored as sent when the host takes it', async () => {
+        const res = await call('POST', '', body({}, poll));
+        expect(res.statusCode, res.body).toBe(201);
+        expect(json(res).connector).toMatchObject({ kind: 'poll', schedule: { cron: '*/15 * * * *', timezone: 'Europe/Istanbul' } });
+        expect(fake.calls).toEqual(['prepare', `attach:${json(res).id}`]);
+      });
+
+      it('is judged by the host first: its sentence is the answer for a W, a macro, a seconds field and a number out of range', async () => {
+        fake.judgeCron = (cron) => MODULE_SENTENCE[cron] ?? null;
+        for (const cron of Object.keys(MODULE_SENTENCE)) {
+          fake.calls.length = 0;
+          const res = await call('POST', '', withCron(cron));
+          expect(res.statusCode, cron).toBe(400);
+          expect(json(res).error.code, cron).toBe('invalid_trigger');
+          // The host's sentence, on the field of the cron, and nothing of core's cron-parser text.
+          expect(errorsOf(res), cron).toEqual([{ field: 'connector.schedule.cron', message: MODULE_SENTENCE[cron] }]);
+          expect(res.body, cron).not.toContain('invalid cron expression');
+          expect(fake.calls, `${cron}: the host was asked`).toEqual(['prepare']);
+        }
+        expect(await storedTriggers()).toEqual([]);
+        expect(fake.subscriptions.size).toBe(0);
+      });
+
+      it('is judged by core only when the host takes it: its cron-parser text, nothing stored and nothing attached', async () => {
+        // The host takes anything (no sentence of its own for any cron).
+        const cases: Array<[string, string]> = [
+          ['0 9 1W * *', 'invalid cron expression: '],
+          ['0 0 9 * * *', 'cron must have 5 fields (minute hour day-of-month month day-of-week)'],
+          ['@daily', 'cron must have 5 fields (minute hour day-of-month month day-of-week)'],
+          ['60 * * * *', 'invalid cron expression: '],
+        ];
+        for (const [cron, message] of cases) {
+          fake.calls.length = 0;
+          const res = await call('POST', '', withCron(cron));
+          expect(res.statusCode, cron).toBe(400);
+          const [only, ...rest] = errorsOf(res);
+          expect(rest, cron).toEqual([]);
+          expect(only!.field, cron).toBe('connector.schedule.cron');
+          expect(only!.message, cron).toContain(message);
+          expect(fake.calls, `${cron}: the host judged it first, and nothing was attached`).toEqual(['prepare']);
+        }
+        expect(await storedTriggers()).toEqual([]);
+        expect(fake.subscriptions.size).toBe(0);
+      });
+
+      it('is checked by core on the schedule the host prepared, not on the one that was asked', async () => {
+        // A host that rewrites the schedule it was given: what is stored is what it handed back, so that is the one cron-parser must read.
+        fake.rewriteCron = () => '0 9 1W * *';
+        const bad = await call('POST', '', body({}, poll));
+        expect(bad.statusCode, bad.body).toBe(400);
+        expect(errorsOf(bad)).toEqual([{ field: 'connector.schedule.cron', message: expect.stringContaining('invalid cron expression: ') }]);
+        expect(fake.calls).toEqual(['prepare']);
+        expect(await storedTriggers()).toEqual([]);
+
+        fake.calls.length = 0;
+        fake.rewriteCron = (cron) => cron.replace('*/15', '0,15,30,45');
+        const good = await call('POST', '', body({}, poll));
+        expect(good.statusCode, good.body).toBe(201);
+        expect(json(good).connector.schedule).toEqual({ cron: '0,15,30,45 * * * *', timezone: 'Europe/Istanbul' });
+        expect((await storedConnector(json(good).id)).schedule).toEqual({ cron: '0,15,30,45 * * * *', timezone: 'Europe/Istanbul' });
+      });
+
+      it('needs a cron that is a non-empty string: core says so without asking the host', async () => {
+        for (const cron of [undefined, null, '', '   ', 7, ['*/5 * * * *']]) {
+          fake.calls.length = 0;
+          const res = await call('POST', '', withCron(cron));
+          expect(res.statusCode, JSON.stringify(cron)).toBe(400);
+          expect(errorsOf(res), JSON.stringify(cron)).toEqual([{ field: 'connector.schedule.cron', message: 'cron is required' }]);
+          expect(fake.calls, JSON.stringify(cron)).toEqual([]);
+        }
+        expect(await storedTriggers()).toEqual([]);
+      });
+
+      it('has a timezone that is checked by core without asking the host', async () => {
+        const res = await call('POST', '', withCron('*/15 * * * *', { timezone: 'Mars/Base' }));
+        expect(res.statusCode).toBe(400);
+        expect(errorsOf(res)).toEqual([{ field: 'connector.schedule.timezone', message: expect.stringContaining('IANA') }]);
+        expect(fake.calls).toEqual([]);
+        expect(await storedTriggers()).toEqual([]);
+      });
+
+      it('is the same when a saved trigger is edited: the host\'s sentence, and the stored schedule and subscription stay', async () => {
+        const created = json(await call('POST', '', body({}, poll)));
+        const before = await storedConnector(created.id);
+        fake.judgeCron = (cron) => MODULE_SENTENCE[cron] ?? null;
+        for (const cron of ['0 9 1W * *', '@daily', '60 * * * *']) {
+          fake.calls.length = 0;
+          const res = await call('PATCH', `/${created.id}`, { type: 'connector', connector: { schedule: { cron } } });
+          expect(res.statusCode, cron).toBe(400);
+          expect(errorsOf(res), cron).toEqual([{ field: 'connector.schedule.cron', message: MODULE_SENTENCE[cron] }]);
+          expect(fake.calls, `${cron}: asked the host, detached and attached nothing`).toEqual(['prepare']);
+        }
+        expect(await storedConnector(created.id)).toEqual(before);
+        expect(fake.boundTo(before.subscriptionId!)).toEqual([created.id]);
+
+        // Core's own text, for a host that takes it.
+        fake.judgeCron = null;
+        fake.calls.length = 0;
+        const core = await call('PATCH', `/${created.id}`, { type: 'connector', connector: { schedule: { cron: '0 9 1W * *' } } });
+        expect(core.statusCode).toBe(400);
+        expect(errorsOf(core)).toEqual([{ field: 'connector.schedule.cron', message: expect.stringContaining('invalid cron expression: ') }]);
+        expect(fake.calls).toEqual(['prepare']);
+        expect(await storedConnector(created.id)).toEqual(before);
+      });
     });
 
     it('an attach failure never fails the write: the trigger is stored and reads as a failed subscription', async () => {

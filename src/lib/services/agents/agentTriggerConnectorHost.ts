@@ -208,11 +208,15 @@ export type ConnectorWrite =
  * The `connector` settings from a create / PATCH body's `connector` object
  * (`connector_id`, `trigger`, `params`, `schedule`, `events`, `filter`,
  * `include_payload`): the shape is checked here, the content (the connector,
- * the package's trigger, parameter values, the schedule's interval) by the
- * Connectors module. `existing` is the stored `connector` when the trigger
- * already is a connector one: absent fields keep its values, unless the write
- * points at another connector or trigger (then only what the body gives
- * carries). Without a Connectors module this is a field error on `type`.
+ * the package's trigger, parameter values, the schedule's cron and interval)
+ * by the Connectors module, which has a cron grammar of its own and says which
+ * part of an expression it cannot take. Core reads the cron only as the last
+ * gate, on the schedule the module hands back: the scheduler reads it with
+ * cron-parser, so whatever that cannot read is refused in its words.
+ * `existing` is the stored `connector` when the trigger already is a
+ * connector one: absent fields keep its values, unless the write points at
+ * another connector or trigger (then only what the body gives carries).
+ * Without a Connectors module this is a field error on `type`.
  */
 export async function parseConnectorWrite(
   scope: ConnectorTriggerScope,
@@ -250,13 +254,14 @@ export async function parseConnectorWrite(
   else if (value.schedule !== undefined) {
     if (!isPlainObject(value.schedule)) issue('schedule', 'schedule must be an object { cron, timezone? }');
     else {
-      const cronError = validateTriggerCron(value.schedule.cron);
+      // Only whether there is a cron to hand over: what is wrong with it is the module's to say (its grammar is not cron-parser's).
+      const cron = value.schedule.cron;
       const timezone = value.schedule.timezone === undefined || value.schedule.timezone === null || value.schedule.timezone === ''
         ? DEFAULT_TRIGGER_TIMEZONE
         : value.schedule.timezone;
-      if (cronError) issue('schedule.cron', cronError);
+      if (typeof cron !== 'string' || cron.trim() === '') issue('schedule.cron', 'cron is required');
       else if (!isValidTriggerTimezone(timezone)) issue('schedule.timezone', 'timezone must be an IANA timezone name, like "Europe/Istanbul"');
-      else schedule = { cron: String(value.schedule.cron).trim().split(/\s+/).join(' '), timezone: timezone as string };
+      else schedule = { cron: cron.trim().split(/\s+/).join(' '), timezone: timezone as string };
     }
   }
 
@@ -296,6 +301,12 @@ export async function parseConnectorWrite(
   const prepared = await host.prepare(scope, { settings: candidate, previous: prev });
   if (!prepared.ok) {
     return { ok: false, errors: prepared.errors.map((item) => ({ field: item.field.startsWith('connector') ? item.field : `connector.${item.field}`, message: item.message })) };
+  }
+  // The last gate: the scheduler reads the cron with cron-parser, so a schedule the module took that cron-parser cannot read is refused
+  // here, in its words. A module that judges the cron itself has refused what it cannot run before this, in the editor's own words.
+  if (prepared.settings.schedule) {
+    const cronError = validateTriggerCron(prepared.settings.schedule.cron);
+    if (cronError) return { ok: false, errors: [{ field: 'connector.schedule.cron', message: cronError }] };
   }
   // The host normalizes the parameters, events and schedule and fills the package, kind and label; the target, the filter and
   // the payload choice stay what the request said, and the binding only carries over to the same subscription.

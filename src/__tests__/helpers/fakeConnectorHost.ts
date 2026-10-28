@@ -79,6 +79,13 @@ export interface FakeConnectorHost {
   attachStatus: ConnectorTriggerView['status'];
   /** What `sample` answers; null = none. */
   sampleEvent: { eventType: string; data: unknown } | null;
+  /**
+   * What `prepare` says of the cron of a poll's schedule, the way the real module does with its own grammar: a sentence refuses it (on
+   * `connector.schedule.cron`), null takes it. Absent: any cron is taken, so core's own cron-parser check is the one that can refuse.
+   */
+  judgeCron: ((cron: string) => string | null) | null;
+  /** The cron `prepare` hands back in place of the one it was given (a host that normalizes the schedule): core checks the prepared one. */
+  rewriteCron: ((cron: string) => string) | null;
   /** The triggers (by id) bound to a subscription, from the host's own table. */
   boundTo: (subscriptionId: string) => string[];
 }
@@ -101,6 +108,8 @@ export function createFakeConnectorHost(): FakeConnectorHost {
     attachStatus: 'active',
     // The package's own flat event data (see githubConnectorFixture), with the repository and number the tests read.
     sampleEvent: { eventType: GITHUB_TRIGGERS.pull_request.sample.type, data: { ...GITHUB_TRIGGERS.pull_request.sample.data, repository: 'acme/api', number: 42 } },
+    judgeCron: null,
+    rewriteCron: null,
     boundTo: (subscriptionId) => [...(subscriptions.get(subscriptionId)?.bound ?? [])],
   };
 
@@ -149,11 +158,14 @@ export function createFakeConnectorHost(): FakeConnectorHost {
       const unknownEvents = trigger.events ? (settings.events ?? []).filter((event) => !trigger.events!.includes(event)) : [];
       if (unknownEvents.length > 0) return { ok: false, errors: [{ field: 'connector.events', message: `Not an event of this trigger: ${unknownEvents.join(', ')}` }] };
       if (trigger.kind === 'poll' && !settings.schedule) return { ok: false, errors: [{ field: 'connector.schedule', message: 'A poll trigger needs a schedule' }] };
+      const cronSentence = trigger.kind === 'poll' && settings.schedule ? state.judgeCron?.(settings.schedule.cron) ?? null : null;
+      if (cronSentence) return { ok: false, errors: [{ field: 'connector.schedule.cron', message: cronSentence }] };
+      const prepared = trigger.kind === 'poll' ? settings.schedule ?? null : null;
       return {
         ok: true,
         settings: {
           ...settings,
-          schedule: trigger.kind === 'poll' ? settings.schedule ?? null : null,
+          schedule: prepared && state.rewriteCron ? { ...prepared, cron: state.rewriteCron(prepared.cron) } : prepared,
           packageId: trigger.packageId,
           kind: trigger.kind,
           label: trigger.label,
