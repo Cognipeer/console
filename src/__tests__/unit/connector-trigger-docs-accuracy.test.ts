@@ -361,12 +361,13 @@ describe('the triggers guide, the schedule of a poll', () => {
 
   it('says what the API answers for a cron a poll cannot take: one sentence for each class, from the Connectors module first', () => {
     const text = section();
-    // The sentences on `connector.schedule.cron`, in the order of the guide's table: not five fields, syntax of another dialect, a value, too often, never due.
+    // The sentences on `connector.schedule.cron`, in the order of the guide's table: not five fields, syntax of another dialect, a value, too often (a gap of N minutes, then of one), never due.
     for (const sentence of [
       'cron must be a five-field cron expression (minute hour day-of-month month day-of-week)',
       'cron uses syntax connector schedules do not support (L, W, # or ?); use numbers, ranges, lists, steps and month or weekday names',
       'cron has a value that is out of range or not a name: minute 0-59, hour 0-23, day 1-31, month 1-12 or jan-dec, weekday 0-7 or sun-sat',
       'cron runs every N minutes, below the M minutes this trigger allows',
+      'cron runs every minute, below the M minutes this trigger allows',
       'cron cannot be evaluated in this timezone',
     ]) expect(text, sentence).toContain(`\`${sentence}\``);
     expect(text).toContain('A cron a connector schedule cannot take is `400` on `connector.schedule.cron`, and nothing is stored');
