@@ -796,7 +796,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - A source that sends the permissions of its files into a knowledge base with access control needs no confirmation. One
   that sends none, that stops sending them, or whose knowledge base has access control off (which keeps the permissions
   without applying them) first asks to confirm that everyone with access to the knowledge base will see every document
-  it adds (`aclAcknowledged`, once); the sources list marks a source whose permissions are not applied.
+  it adds (`aclAcknowledged`, once); the sources list marks a source whose permissions are not applied. Switching a
+  knowledge base's access control off later asks nothing: its sources go on adding documents, with their permissions
+  kept and not applied until it is switched back on, and the sources list marks them.
 - A connector with a source that sends permissions into a knowledge base with access control offers agents none of its
   read actions and not its MCP server, and flows none of its read nodes, since its own account reads every file. Its
   other actions stay and still ask before they run, and the connector's **Tools** tab says why. A flow that already
