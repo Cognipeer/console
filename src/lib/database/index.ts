@@ -232,6 +232,7 @@ export type {
   IVectorQueryStats,
   IFileBucketRecord,
   IFileRecord,
+  IFileMarkdownExtraction,
   FileRecordPatch,
   IFileEntriesPage,
   IFileBucketStats,

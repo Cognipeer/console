@@ -6427,7 +6427,7 @@ paths:
       tags:
         - Files
       summary: Upload file
-      description: "Upload a file to a bucket. The request is JSON and the file travels base64-encoded in `data` (a data URL is accepted too), so the request body is about a third larger than the file. A file larger than the upload limit (`FILE_UPLOAD_MAX_MB`, 50 MB by default) is refused with `413` `file_too_large`; a body too big to hold such a file is refused the same way before it is read. A switched-off bucket takes no upload (`409` `bucket_inactive`) and nothing is counted against the quotas then. With `convertToMarkdown` a Markdown copy for the Knowledge Engine pipeline is made before the response, so it can be downloaded right away. The upload succeeds even when the conversion does not: read `markdownStatus` of the returned file. Ask for a copy only of PDF, Word, PowerPoint, Excel, EPUB, Outlook message, HTML, XML, plain text, CSV, JSON, YAML and Jupyter notebook files; the converter reads any other kind of file as text."
+      description: "Upload a file to a bucket. The request is JSON and the file travels base64-encoded in `data` (a data URL is accepted too), so the request body is about a third larger than the file. A file larger than the upload limit (`FILE_UPLOAD_MAX_MB`, 50 MB by default) is refused with `413` `file_too_large`; a body too big to hold such a file is refused the same way before it is read. A switched-off bucket takes no upload (`409` `bucket_inactive`) and nothing is counted against the quotas then. With `convertToMarkdown` a Markdown copy for the Knowledge Engine pipeline is made before the response, so it can be downloaded right away. The upload succeeds even when the conversion does not: read `markdownStatus` of the returned file. Ask for a copy only of PDF, Word, PowerPoint, Excel, EPUB, Outlook message, HTML, XML, plain text, CSV, JSON, YAML and Jupyter notebook files; the converter reads any other kind of file as text. Add `ocr` to read the text of scanned pages and images too (see `FileUploadRequest`); a conversion that waits for OCR can take up to two minutes, after which the text layer alone is returned with a warning in `markdownExtraction.result`."
       operationId: uploadFile
       parameters:
         - name: bucketKey
@@ -6456,7 +6456,7 @@ paths:
                     type: string
                     example: File uploaded successfully
         "400":
-          description: "Bad request - `fileName` or `data` is missing, `keyHint` is not a valid key (`.` or `..` segments, control characters, unpaired surrogates, more than 512 characters), `contentType` is not a content type (`invalid_content_type`), or the request is refused as `invalid_request`: the body is not a JSON object, or the store cannot hold the key (a name over its limit, say)."
+          description: "Bad request - `fileName` or `data` is missing, `keyHint` is not a valid key (`.` or `..` segments, control characters, unpaired surrogates, more than 512 characters), `contentType` is not a content type (`invalid_content_type`), or the request is refused as `invalid_request`: the body is not a JSON object, or the store cannot hold the key (a name over its limit, say). Also `400` for `ocr` / `images` that are malformed, or for an `ocr.modelKey` that is not an OCR model or vision model of the project."
           content:
             application/json:
               schema:
@@ -21531,6 +21531,53 @@ components:
         markdownError:
           type: string
           description: Why the conversion failed or was skipped.
+        markdownExtraction:
+          type: object
+          description: "How the Markdown copy is extracted and what the latest run found. Present only when the file was uploaded (or converted again) with `ocr` or a `images` policy; absent for a plain conversion."
+          properties:
+            ocr:
+              $ref: "#/components/schemas/OcrSettings"
+            images:
+              type: string
+              enum:
+                - inline
+                - placeholder
+                - omit
+              description: "What became of pictures inside Word, HTML and PowerPoint files. Absent = kept inline (the default)."
+            result:
+              type: object
+              description: "What the latest conversion with OCR on found. Absent until one has finished."
+              properties:
+                sourceType:
+                  type: string
+                  enum:
+                    - converted
+                    - ocr
+                    - mixed
+                  description: "`converted`: the text came from the file's own text layer. `ocr`: all of it was read by OCR. `mixed`: both."
+                engine:
+                  type: string
+                  enum:
+                    - model
+                    - local
+                  description: "`model`: a project OCR model or vision model. `local`: the server's built-in CPU engine. Absent when no OCR was needed."
+                modelKey:
+                  type: string
+                  description: The model that read the document (with `engine` = `model`).
+                pageCount:
+                  type: integer
+                  description: Pages of the document, when it has pages.
+                ocrPages:
+                  type: integer
+                  description: How many pages were read by OCR.
+                ocrImages:
+                  type: integer
+                  description: How many pictures inside the document were read by OCR.
+                warnings:
+                  type: array
+                  items:
+                    type: string
+                  description: "Notes of the run, such as `ocr_timeout: ...` (the OCR did not finish in time, the text layer was kept) or `ocr_failed: ...`. OCR never fails an upload or a conversion."
         purpose:
           type: string
           enum:
@@ -21646,6 +21693,37 @@ components:
         updatedAt:
           type: string
           format: date-time
+    OcrSettings:
+      type: object
+      description: "OCR for the Markdown copy of a file: text is read from scanned PDF pages and from images. Used with `convertToMarkdown`; without `ocr` (or with `mode` `off`) the conversion is the plain one. Unknown properties are refused."
+      required:
+        - mode
+      properties:
+        mode:
+          type: string
+          enum:
+            - "off"
+            - auto
+            - always
+          description: "`off`: no OCR. `auto`: only pages without a text layer (and images) are read. `always`: every page is read."
+        modelKey:
+          type: string
+          maxLength: 120
+          description: "An OCR model, or a vision LLM (a `llm` model that takes images), of the project. Absent = the server's built-in CPU engine (Tesseract, offline)."
+        languages:
+          type: array
+          maxItems: 8
+          items:
+            type: string
+          description: "Language hints as ISO 639-1 codes (`tr`, `en`); Tesseract codes (`tur`, `eng`) are accepted and normalized. Default `tr`, `en`."
+          example: [tr, en]
+        maxPages:
+          type: integer
+          minimum: 1
+          description: "Read at most this many pages per document. Default 100; the server's hard cap applies (500)."
+        images:
+          type: boolean
+          description: "Also read text in pictures embedded in Word and PowerPoint files."
     FileUploadRequest:
       type: object
       description: JSON payload to upload a file. The content travels base64-encoded in `data`.
@@ -21668,6 +21746,15 @@ components:
           type: boolean
           default: false
           description: Convert supported documents to Markdown for the Knowledge Engine pipeline.
+        ocr:
+          $ref: "#/components/schemas/OcrSettings"
+        images:
+          type: string
+          enum:
+            - inline
+            - placeholder
+            - omit
+          description: "What becomes of pictures inside Word, HTML and PowerPoint files in the Markdown copy: kept as data URIs (`inline`, the default), replaced by a short name (`placeholder`) or dropped (`omit`). Used with `convertToMarkdown`."
         keyHint:
           type: string
           description: "Optional key for the stored object. Without it the key is generated from the file name. A value ending in `/` names a folder and the file is stored in it under a generated name. At most 512 characters, no `.` or `..` segments, no control characters and no unpaired surrogates. A value that is the whole key of a file an agent session holds needs the permission to change that session (`403` `session_forbidden`)."

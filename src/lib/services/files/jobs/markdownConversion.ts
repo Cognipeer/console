@@ -30,6 +30,7 @@ import {
   serializeFileRecord,
 } from '../fileService';
 import { bucketClosedError } from '../bucketRules';
+import { compactExtraction, startHeartbeat } from '../markdownExtraction';
 import { describeFailure, FileServiceError } from '../errors';
 import {
   assertMarkdownConvertible,
@@ -37,7 +38,7 @@ import {
   isMarkdownConvertible,
   markdownConversionTooLarge,
 } from '../markdownSupport';
-import type { FileRecordView, UpdateFileConversionPayload } from '../types';
+import type { FileExtractionRequest, FileRecordView, UpdateFileConversionPayload } from '../types';
 import { publishConvertMarkdownJob, type ConvertMarkdownJobPayload } from './filesQueue';
 
 const logger = createLogger('files:markdown-job');
@@ -56,6 +57,7 @@ function conversionPatch(conversion: UpdateFileConversionPayload, actor: string)
     ...(conversion.markdownKey !== undefined ? { markdownKey: conversion.markdownKey } : {}),
     ...(conversion.markdownSize !== undefined ? { markdownSize: conversion.markdownSize } : {}),
     ...(conversion.markdownContentType !== undefined ? { markdownContentType: conversion.markdownContentType } : {}),
+    ...(conversion.markdownExtraction !== undefined ? { markdownExtraction: conversion.markdownExtraction } : {}),
     updatedBy: actor,
   };
 }
@@ -72,12 +74,18 @@ export async function queueMarkdownConversion(input: {
   bucketKey: string;
   key: string;
   actor: string;
+  /**
+   * OCR / picture settings for this conversion. They replace the ones the file has (`{}` = none: the plain
+   * conversion); left out, the file keeps its own.
+   */
+  extraction?: FileExtractionRequest;
 }): Promise<FileRecordView> {
   const bucket = await requireBucketRecord(input.tenantDbName, input.tenantId, input.projectId, input.bucketKey);
   ensureFileBucketActive(bucket);
 
   const record = await findFileRecord(input.tenantDbName, input.projectId, bucket, input.key);
-  assertMarkdownConvertible(record.name);
+  const settings = input.extraction !== undefined ? compactExtraction(input.extraction) : compactExtraction(record.markdownExtraction);
+  assertMarkdownConvertible(record.name, { ocr: settings?.ocr });
   assertMarkdownSize(record.size);
 
   const recordId = record._id?.toString();
@@ -85,9 +93,12 @@ export async function queueMarkdownConversion(input: {
 
   // The status moves first: the answer shows the file as waiting, and the job only runs a record that is.
   const db = await tenantDb(input.tenantDbName);
+  // The settings the run will use are on the record before the job is queued; what an earlier run found is not true any more.
+  const hadExtraction = Boolean(record.markdownExtraction);
   const pending = await db.updateFileRecord(recordId, {
     markdownStatus: 'pending',
     markdownError: null,
+    ...(settings ? { markdownExtraction: settings } : hadExtraction ? { markdownExtraction: null } : {}),
     updatedBy: input.actor,
   });
   if (!pending) throw new FileServiceError('file_not_found', 404, 'File record not found.');
@@ -172,7 +183,7 @@ async function convertWaitingRecord(
   const { tenantDbName, tenantId, projectId, bucketKey, key, actor } = payload;
   const settle = (conversion: UpdateFileConversionPayload) => db.updateFileRecord(recordId, conversionPatch(conversion, actor));
 
-  if (!isMarkdownConvertible(record.name)) {
+  if (!isMarkdownConvertible(record.name, { ocr: compactExtraction(record.markdownExtraction)?.ocr })) {
     await settle({ markdownStatus: 'skipped' });
     return;
   }
@@ -193,7 +204,24 @@ async function convertWaitingRecord(
     return;
   }
 
-  const conversion = await applyMarkdownConversion(runtime, bucket, record, { fileName: record.name }, original.data, db);
+  // A long OCR run touches the record, so the screens do not take it for a lost job (they wait five quiet minutes).
+  const heartbeat = compactExtraction(record.markdownExtraction)?.ocr
+    ? startHeartbeat(() => db.updateFileRecord(recordId, {}))
+    : undefined;
+  let conversion: UpdateFileConversionPayload;
+  try {
+    conversion = await applyMarkdownConversion(
+      runtime,
+      bucket,
+      record,
+      { fileName: record.name },
+      original.data,
+      db,
+      { tenantDbName, userId: actor, budget: 'background', ...(heartbeat ? { onProgress: heartbeat.beat } : {}) },
+    );
+  } finally {
+    heartbeat?.stop();
+  }
   // The copy this run wrote, unless it is the one the record carries: the copy of a file that is converted again
   // takes the place of the first, and that object is the record's.
   const discardCopy = async (carried?: string | null) => {

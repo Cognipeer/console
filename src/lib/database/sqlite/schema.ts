@@ -900,6 +900,7 @@ export const TENANT_SCHEMA_SQL = `
     markdownError TEXT,
     markdownSize INTEGER,
     markdownContentType TEXT,
+    markdownExtraction TEXT,
     purpose TEXT,
     conversationId TEXT,
     agentKey TEXT,

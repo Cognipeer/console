@@ -235,6 +235,7 @@ A file has a **record** in the console's database and an **object** in the provi
 | `markdownStatus` | `pending`, `succeeded`, `failed` or `skipped`. See [Markdown copies](#markdown-copies). |
 | `markdownKey`, `markdownSize`, `markdownContentType` | The Markdown copy the file has, if any, whatever the status of its latest conversion. A copy made earlier stays while a new conversion is `pending` and when that one ends `failed` or `skipped`, and `variant=markdown` still downloads it. Uploading to the same key again removes it. |
 | `markdownError` | Why a conversion failed or was skipped. |
+| `markdownExtraction` | Present only when the file was uploaded (or converted again) with `ocr` or an `images` policy: the settings used and, once a run has finished, its `result` (`sourceType`, `engine`, `modelKey`, `pageCount`, `ocrPages`, `ocrImages`, `warnings`). See [Reading scanned documents (OCR)](#reading-scanned-documents-ocr). |
 | `origin` | `import` for an object that was already in the provider and was registered in the console, `agent_output` for a file an agent wrote; absent for an upload. |
 | `purpose`, `conversationId`, `agentKey`, `expiresAt`, `uploadedBy` | Set on a file that belongs to an agent session. See [Session files](#session-files). |
 | `createdBy`, `updatedBy`, `createdAt`, `updatedAt` | Who and when. `createdBy` is `api` when the call ran without a user. |
@@ -291,6 +292,8 @@ The request is JSON, not multipart. The file travels base64-encoded in `data`, s
 | `contentType` | No | The MIME type, such as `application/pdf`. A value that is not of the form `type/subtype` is refused (`invalid_content_type`). Required when the deployment limits the upload types (`FILE_UPLOAD_ALLOWED_MIME_TYPES`). |
 | `keyHint` | No | The key to store the file under. See [Keys](#keys). |
 | `convertToMarkdown` | No | `true` makes a Markdown copy before the call returns. Default `false`. See [Markdown copies](#markdown-copies). |
+| `ocr` | No | OCR for the Markdown copy, used with `convertToMarkdown`. See [Reading scanned documents (OCR)](#reading-scanned-documents-ocr). |
+| `images` | No | What becomes of pictures inside Word, HTML and PowerPoint files in the copy: `inline` (data URIs, the default), `placeholder` (a short name) or `omit`. |
 | `metadata` | No | An object of your own; a text or a list is refused with `400`. Values may be any text, in any language. |
 
 ```bash
@@ -413,6 +416,28 @@ A disabled bucket keeps its files (`409 bucket_inactive`).
 - The upload itself succeeds even when the conversion does not. Read `file.markdownStatus`: `succeeded`, `failed` (with `markdownError`) or `skipped`.
 - Ask for a copy only of the formats the converter has a reader for: `.pdf`, `.doc`, `.docx`, `.pptx`, `.xlsx`, `.xls`, `.epub`, `.msg`, `.html`, `.htm`, `.xml`, `.rss`, `.atom`, `.txt`, `.csv`, `.json`, `.yaml`, `.yml` and `.ipynb`. For any other file the copy is of no use: an image yields only its size and format, an archive is unpacked in memory, and a binary file is read as text.
 - A document that unpacks to more than 100 MB, or is made of more than 5000 parts, is not opened and ends as `failed`.
+
+### Reading scanned documents (OCR)
+
+A scanned PDF or a photographed page has no text for the converter to read. With `ocr` the copy is made from what OCR reads on those pages, and from images:
+
+```json
+{ "fileName": "invoice-scan.pdf", "data": "...", "convertToMarkdown": true, "ocr": { "mode": "auto", "languages": ["tr", "en"] } }
+```
+
+| `ocr` field | Description |
+|-------------|-------------|
+| `mode` | Required. `off` (no OCR, the plain conversion), `auto` (only pages without a text layer, and images) or `always` (every page). |
+| `modelKey` | An OCR model, or a vision LLM (an `llm` model that takes images), of the project. Without it the server's built-in CPU engine (Tesseract, offline) reads the pages. |
+| `languages` | Up to 8 language hints as ISO 639-1 codes (`tr`, `en`); Tesseract codes (`tur`, `eng`) are accepted. Default `tr`, `en`. |
+| `maxPages` | Read at most this many pages per document. Default 100, at most 500. |
+| `images` | `true` also reads text in pictures embedded in Word and PowerPoint files. |
+
+- OCR is off unless you ask for it. A request without `ocr` (or with `mode` `off`) is converted exactly as before, and the record has no `markdownExtraction`.
+- With `ocr` on, image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif`, `.tiff`) get a copy too.
+- OCR never fails an upload or a conversion. If a page cannot be read, the model is unavailable, the budget is spent or the time runs out (about two minutes when the call waits, 15 minutes in the background), the text layer of the document is kept and the reason is a warning in `file.markdownExtraction.result.warnings`.
+- `file.markdownExtraction.result` tells what happened: `sourceType` (`converted`, `ocr` or `mixed`), the `engine` (`model` or `local`), `modelKey`, `pageCount`, how many pages (`ocrPages`) and pictures (`ocrImages`) were read.
+- The settings are kept on the file. In the console, converting a file again reuses them unless new ones are given.
 
 ## Session files
 

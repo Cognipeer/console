@@ -38,6 +38,23 @@ describe('isMarkdownConvertible', () => {
     expect(isMarkdownConvertible(name)).toBe(false);
   });
 
+  it('converts an image only when OCR is on', () => {
+    for (const name of ['scan.png', 'scan.JPG', 'scan.jpeg', 'scan.gif', 'scan.webp', 'scan.bmp', 'scan.tif', 'scan.tiff']) {
+      expect(isMarkdownConvertible(name)).toBe(false);
+      expect(isMarkdownConvertible(name, {})).toBe(false);
+      expect(isMarkdownConvertible(name, { ocr: null })).toBe(false);
+      expect(isMarkdownConvertible(name, { ocr: { mode: 'off' } })).toBe(false);
+      expect(isMarkdownConvertible(name, { ocr: { mode: 'auto' } })).toBe(true);
+      expect(isMarkdownConvertible(name, { ocr: { mode: 'always', modelKey: 'm' } })).toBe(true);
+    }
+  });
+
+  it('does not widen anything else when OCR is on', () => {
+    expect(isMarkdownConvertible('song.mp3', { ocr: { mode: 'always' } })).toBe(false);
+    expect(isMarkdownConvertible('bundle.zip', { ocr: { mode: 'always' } })).toBe(false);
+    expect(isMarkdownConvertible('report.pdf', { ocr: { mode: 'always' } })).toBe(true);
+  });
+
   it('knows no name for nothing', () => {
     expect(isMarkdownConvertible(undefined)).toBe(false);
     expect(isMarkdownConvertible(null)).toBe(false);

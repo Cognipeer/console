@@ -244,6 +244,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ### File storage
 
+- **OCR for Markdown copies.** `POST /client/v1/files/buckets/:bucketKey/objects` (and the Document Store's upload and
+  Convert action) accept an optional `ocr` setting (`mode` `auto` or `always`, an optional OCR or vision `modelKey`,
+  `languages`, `maxPages`, `images`) and an `images` policy (`inline`, `placeholder`, `omit`). Scanned PDF pages and
+  images are read by the project's model or by the server's built-in offline engine; the file record gains an optional
+  `markdownExtraction` with the settings and the result. Without `ocr` nothing changes.
 - **S3-compatible storage and Azure Blob Storage** are new file providers. `s3-compatible-files` serves MinIO, Ceph RGW,
   SeaweedFS, Garage, Cloudflare R2, Backblaze B2, Wasabi and other stores with an S3 API at their own endpoint:
   path-style addressing is on by default, the region is optional, request checksums are sent only where an operation
