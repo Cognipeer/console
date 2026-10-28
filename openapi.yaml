@@ -30450,6 +30450,8 @@ components:
               type: string
             timezone:
               type: string
+              nullable: true
+              description: An IANA name; `UTC` when it is left out, `null` or empty.
           required: [cron]
         events:
           type: array
