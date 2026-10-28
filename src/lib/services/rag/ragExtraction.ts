@@ -8,6 +8,7 @@
 import { createHash } from 'node:crypto';
 import type { IRagDocumentExtraction, IRagModule } from '@/lib/database';
 import { recordedWarnings } from '@/lib/services/files/markdownExtraction';
+import { RagOcrIncompleteError } from './errors';
 import type {
   ExtractionReport,
   ExtractionScope,
@@ -77,3 +78,40 @@ export function settledExtraction(
 
 /** The message of a document whose original was not kept (no bucket, or the upload failed). */
 export const ORIGINAL_MISSING_MESSAGE = 'The original file is no longer stored; upload it again.';
+
+/** The report warnings that mean OCR was asked for and did not run to the end, and what to tell people. */
+const OCR_FALLBACK_REASONS: Readonly<Record<string, string>> = {
+  ocr_timeout: 'it ran out of time',
+  ocr_busy: 'no OCR capacity became free in time',
+  ocr_budget_exceeded: 'the OCR budget is used up',
+  ocr_model_unavailable: 'the OCR model is not available',
+  ocr_unavailable: 'OCR is not available on this server',
+  ocr_failed: 'OCR failed',
+};
+
+/** The first warning of a report that says OCR fell back to the native text, as a sentence fragment. */
+export function ocrFallbackReason(warnings: readonly string[]): string | undefined {
+  for (const warning of warnings) {
+    const code = warning.split(':', 1)[0].trim();
+    const reason = OCR_FALLBACK_REASONS[code];
+    if (reason) return reason;
+  }
+  return undefined;
+}
+
+/** The extraction record of a document whose run failed: no run markers, and the reason when OCR could not finish. */
+export function failedExtraction(
+  extraction: IRagDocumentExtraction | undefined,
+  error: unknown,
+): IRagDocumentExtraction | undefined {
+  const settled = settledExtraction(extraction);
+  if (!settled || !(error instanceof RagOcrIncompleteError)) return settled;
+  const warnings = recordedWarnings(error.warnings);
+  return warnings.length > 0 ? { ...settled, warnings } : settled;
+}
+
+/**
+ * How often a running extraction touches its document even when no page finished, so that the boot sweep of another
+ * node can tell a live run from an abandoned one (`resumePendingRagIngests`).
+ */
+export const EXTRACTION_HEARTBEAT_MS = 30_000;

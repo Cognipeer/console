@@ -24,7 +24,8 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
-import { RagModuleInactiveError, RagOriginalMissingError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
+import { clientGone } from '../clientGone';
+import { RagModuleInactiveError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import { validateChunkConfig } from '@/lib/services/rag/chunking';
 import {
@@ -526,6 +527,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
           ...(extraction ? { extraction } : {}),
           // Reading the pages of a scan can take minutes: the dashboard gets its answer as soon as the file is stored.
           deferExtraction: true,
+          signal: clientGone(reply),
           contentType: body.contentType as string | undefined,
           createdBy: session.userId,
           fileData: decodeFileData(body.data),
@@ -792,6 +794,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         error instanceof RagModuleInactiveError
         || error instanceof RagOriginalMissingError
         || error instanceof RagStoredTextUnavailableError
+        || error instanceof RagReextractIncompleteError
       ) {
         return reply.code(error.statusCode).send({ error: error.message });
       }

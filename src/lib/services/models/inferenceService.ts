@@ -1440,6 +1440,14 @@ export async function handleOcrRequest(params: {
   resilience?: { timeoutMs?: number; retry?: Partial<RetryConfig> };
   /** Log a failed call as an error usage row (the HTTP route logs its own). */
   logErrors?: boolean;
+  /** Stops the call, and any retry of it, when the caller gives up. */
+  signal?: AbortSignal;
+  /**
+   * Keep the start of the recognised text in the usage row (default). Callers that read documents on behalf of
+   * someone else (the extraction engine) turn this off: the text of a page must not land in a log that people
+   * without access to the document can read.
+   */
+  logContent?: boolean;
 }) {
   const { tenantDbName, modelKey, projectId, input } = params;
   const requestId = params.requestId || crypto.randomUUID();
@@ -1505,10 +1513,11 @@ export async function handleOcrRequest(params: {
         key: `ocr:${model.providerKey}`,
         ...(params.resilience?.timeoutMs !== undefined ? { timeoutMs: params.resilience.timeoutMs } : {}),
         ...(params.resilience?.retry ? { retry: params.resilience.retry } : {}),
+        ...(params.signal ? { signal: params.signal } : {}),
       },
     );
   } catch (error) {
-    if (params.logErrors) {
+    if (params.logErrors && !params.signal?.aborted) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       try {
         await logModelUsage(tenantDbName, model, {
@@ -1571,7 +1580,7 @@ export async function handleOcrRequest(params: {
         features: input.features,
       }),
       providerResponse: sanitizeForLogging({
-        text: result.text.slice(0, 500),
+        ...(params.logContent === false ? {} : { text: result.text.slice(0, 500) }),
         pageCount: result.pages?.length,
         tableCount: result.tables?.length,
         invokedVia: result.invokedVia,

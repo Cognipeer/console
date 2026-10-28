@@ -264,6 +264,20 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Files uploaded to a Knowledge Engine module now go through the same zip-bomb and PowerPoint working-file guard as the
   Document Store, and pictures in Word and HTML files become short placeholders instead of base64 data URIs in the
   indexed text.
+- A scanned file whose OCR could not run or finish (budget used up, model removed, out of time) is now reported as
+  such, not as an unsupported format, and the cause is kept on a failed document. A re-extract that cannot finish its
+  OCR answers 409 and keeps the previous text, and runs with the longer budget of a job. A request-level OCR setting
+  is ignored (no pages are read) when the module does not exist or is not active.
+
+### Agent attachments and crawler
+
+- **Agent attachments**: the Markdown copy of an attachment now always turns pictures inside documents into
+  placeholders (it used to carry them as inline base64 images), and every attachment record may carry a
+  `markdownExtraction` value. Pictures are read as text by OCR only when the agent turns that on.
+- **Crawler**: a crawler with OCR on reads its file attachments through the shared extraction engine (the bundled
+  offline engine, or the project's OCR model when one is set) instead of the CDN-loaded Tesseract, and the zip-bomb
+  guard now applies to its attachments too. With a converter library older than 3.6 the crawler keeps its previous
+  direct OCR call.
 
 ### File storage
 

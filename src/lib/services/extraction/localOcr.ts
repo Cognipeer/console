@@ -75,7 +75,13 @@ const copies = new Map<string, Promise<boolean>>();
 async function copyOnce(source: string, directory: string, tesseractLang: string): Promise<boolean> {
   const key = `${directory}\u0000${tesseractLang}`;
   const known = copies.get(key);
-  if (known) return known;
+  if (known) {
+    // The target directory may be cleaned (a temp-directory sweep): a copy that is gone is made again.
+    if (!(await known.catch(() => false))) return known;
+    if ((await fileSize(path.join(directory, `${tesseractLang}.traineddata.gz`))) !== undefined) return known;
+    if (copies.get(key) === known) copies.delete(key);
+    return copyOnce(source, directory, tesseractLang);
+  }
   const work = (async () => {
     const target = path.join(directory, `${tesseractLang}.traineddata.gz`);
     const wanted = await fileSize(source);

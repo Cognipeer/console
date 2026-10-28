@@ -78,7 +78,7 @@ export interface ReadToolDeps {
         resolvePath(path: string): string;
         scrub(text: string): string;
     };
-    session?: { scope: SessionFileScope; conversationId: string; readPageChars: number };
+    session?: { scope: SessionFileScope; conversationId: string; readPageChars: number; /** Largest picture one model request carries. */ maxImageBytes?: number };
     media?: { store: ToolMediaStore };
     modelTakesImages: boolean;
 }
@@ -509,7 +509,11 @@ async function readSessionFile(deps: ReadToolDeps, args: ReadArgs): Promise<Tool
     // A picture whose text OCR read at upload (a converted copy exists) can be read as text where it cannot be shown.
     const pictureHasText = record.markdownStatus === 'succeeded' && Boolean(record.markdownKey);
     const imageType = sendableImageType(record.contentType);
-    if (imageType && !(pictureHasText && !modelTakesImages)) {
+    // With OCR on, pictures past the model request limit are accepted at upload; they are read as text, never shown.
+    const tooBigToShow = typeof session.maxImageBytes === 'number' && typeof record.size === 'number' && record.size > session.maxImageBytes;
+    const cannotShow = !modelTakesImages || tooBigToShow;
+    if (imageType && !(pictureHasText && cannotShow)) {
+        if (tooBigToShow) return text(`[${record.name} — image ${imageType}, ${size(record.size)}] This picture is too large to show to the model, and it has no text to read.`);
         if (!modelTakesImages) return text(`[${record.name} — image ${imageType}, ${size(record.size)}] This model cannot view images.`);
         return toolOutput([
             { type: 'text', text: `[${record.name} — image ${imageType}, ${size(record.size)}]` },
@@ -531,7 +535,7 @@ async function readSessionFile(deps: ReadToolDeps, args: ReadArgs): Promise<Tool
     // OCR found no text in a picture the model cannot be shown: say that, not "empty file".
     if (isImageMime(record.contentType) && content.trim().length === 0) {
         return text(imageType
-            ? `[${record.name} — image ${imageType}, ${size(record.size)}] This model cannot view images, and OCR found no text in it.`
+            ? `[${record.name} — image ${imageType}, ${size(record.size)}] ${tooBigToShow ? 'It is too large to show to the model' : 'This model cannot view images'}, and OCR found no text in it.`
             : `"${record.name}" is an image in a format (${record.contentType}) the model cannot be shown, and OCR found no text in it.`);
     }
     if (content.length === 0) return text(`[${record.name} — empty file]`);

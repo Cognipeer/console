@@ -13,6 +13,7 @@ const hoisted = vi.hoisted(() => ({
   checkBudget: vi.fn(),
   settleUsageBudget: vi.fn(),
   prepare: vi.fn(),
+  slot: vi.fn(),
   config: {} as Record<string, unknown>,
 }));
 
@@ -38,7 +39,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 }));
 vi.mock('@/lib/services/extraction/localOcr', () => ({
   getLocalOcrEngine: () => ({ id: 'tesseract', prepare: hoisted.prepare }),
-  withLocalOcrSlot: (_signal: unknown, work: () => Promise<unknown>) => work(),
+  withLocalOcrSlot: (signal: unknown, work: () => Promise<unknown>) => hoisted.slot(signal, work),
 }));
 
 import { extractDocument } from '@/lib/services/extraction/engine';
@@ -98,6 +99,7 @@ beforeEach(() => {
   hoisted.getModelByKey.mockReset().mockResolvedValue(makeModel());
   hoisted.checkBudget.mockReset().mockResolvedValue({ allowed: true });
   hoisted.settleUsageBudget.mockReset().mockResolvedValue(undefined);
+  hoisted.slot.mockReset().mockImplementation((_signal: unknown, work: () => Promise<unknown>) => work());
   hoisted.prepare.mockReset().mockResolvedValue({
     options: { provider: 'tesseract', lang: 'tur+eng', tesseract: { langPath: '/tess', offline: true } },
     languages: ['tr', 'en'],
@@ -312,6 +314,9 @@ describe('with OCR on and a project model', () => {
       attribution: { userId: 'user-1', projectId: 'proj-1' },
       resilience: { timeoutMs: 180_000, retry: { maxAttempts: 2 } },
       logErrors: true,
+      // The text of a page never goes to the usage log; the call stops with the document.
+      logContent: false,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -468,3 +473,84 @@ describe('deadline and abort', () => {
     expect(hoisted.detailed).not.toHaveBeenCalled();
   });
 });
+
+describe('the local OCR slot', () => {
+  it('starts the document clock when the slot is granted, not while the document waits for it', async () => {
+    hoisted.config = { ocr: { inlineTimeoutMs: 120 } };
+    hoisted.slot.mockImplementation(async (_signal: unknown, work: () => Promise<unknown>) => {
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      return work();
+    });
+    hoisted.detailed.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      return detailedResult();
+    });
+
+    const result = await extractDocument(request({ ocr: { mode: 'auto' } }));
+
+    expect(result.report.sourceType).toBe('mixed');
+    expect(result.report.warnings).toEqual([]);
+    expect(hoisted.convert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the native text with an ocr_busy warning when no slot becomes free in time', async () => {
+    hoisted.config = { ocr: { inlineTimeoutMs: 20 } };
+    hoisted.slot.mockImplementation(
+      (signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+
+    const result = await extractDocument(request({ ocr: { mode: 'auto' } }));
+
+    expect(hoisted.detailed).not.toHaveBeenCalled();
+    expect(hoisted.convert).toHaveBeenCalledTimes(1);
+    expect(result.report.warnings).toEqual(['ocr_busy']);
+  });
+});
+
+describe('model calls and the end of a document', () => {
+  const ocr: OcrSettings = { mode: 'auto', modelKey: 'mistral' };
+
+  it('stops a call in flight when the library aborts it, without a retry or a booked cost', async () => {
+    await extractDocument(request({ ocr }));
+    hoisted.handleOcrRequest.mockImplementation(
+      (params: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          params.signal.addEventListener('abort', () => reject(params.signal.reason), { once: true });
+        }),
+    );
+    const controller = new AbortController();
+
+    const call = (optionsOf().ocr!.handler as OcrHandler)(Buffer.from('x'), { signal: controller.signal });
+    controller.abort();
+
+    await expect(call).rejects.toBeDefined();
+    expect(hoisted.handleOcrRequest).toHaveBeenCalledTimes(1);
+    expect(hoisted.settleUsageBudget).not.toHaveBeenCalled();
+  });
+
+  it('stops reading pages when the budget runs out during the document, and says so', async () => {
+    hoisted.checkBudget.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValue({ allowed: false, reason: 'daily cap' });
+    let failures = 0;
+    hoisted.detailed.mockImplementation(async (_buffer: Buffer, options: DetailedConversionOptions) => {
+      for (let page = 1; page <= 8; page += 1) {
+        try {
+          await (options.ocr!.handler as OcrHandler)(Buffer.from('x'), { page });
+        } catch {
+          failures += 1;
+        }
+      }
+      return detailedResult();
+    });
+
+    const result = await extractDocument(request({ ocr }));
+
+    // The budget is read again after every fifth call; the pages after that are not sent.
+    expect(hoisted.handleOcrRequest).toHaveBeenCalledTimes(5);
+    expect(failures).toBe(3);
+    expect(result.report.warnings).toContain('ocr_budget_exceeded: daily cap');
+  });
+});
+

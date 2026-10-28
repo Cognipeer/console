@@ -23,6 +23,7 @@ import { isServiceEnabled } from '@/lib/services/availability/serviceAvailabilit
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
+import { EXTRACTION_HEARTBEAT_MS } from './ragExtraction';
 import { indexPendingRagDocument } from './ragService';
 
 const logger = createLogger('rag-ingest-job');
@@ -49,6 +50,15 @@ const BOOT_RESUME_MAX = Math.max(
   1,
   Number(process.env.RAG_INGEST_BOOT_RESUME_MAX ?? 500) || 500,
 );
+
+/**
+ * A deferred extraction whose document was touched this recently is being read by a node that is still alive (it
+ * writes a heartbeat every `EXTRACTION_HEARTBEAT_MS`). A boot sweep on a multi-node deployment leaves it alone: a
+ * second job would read, and pay for, the same pages again.
+ */
+const LIVE_EXTRACTION_MS = EXTRACTION_HEARTBEAT_MS * 4;
+
+let recheckScheduled = false;
 
 export async function publishRagIngestJob(
   payload: RagIngestJobPayload,
@@ -79,6 +89,12 @@ export async function runRagIngestJob(
   );
 }
 
+function isLiveExtraction(doc: { extraction?: { stage?: string }; updatedAt?: Date | string }): boolean {
+  if (doc.extraction?.stage !== 'running' || !doc.updatedAt) return false;
+  const touched = new Date(doc.updatedAt).getTime();
+  return Number.isFinite(touched) && Date.now() - touched < LIVE_EXTRACTION_MS;
+}
+
 /**
  * Re-publish documents left `pending` by a restart.
  *
@@ -90,6 +106,9 @@ export async function resumePendingRagIngests(): Promise<number> {
   const mainDb = await getDatabase();
   const tenants = await mainDb.listTenants();
   let resumed = 0;
+  let skippedLive = 0;
+  // With a single node (the memory queue) nobody else can be reading a document: a `running` stage is a lost run.
+  const othersRunExtraction = (await getQueue()).name !== 'memory';
 
   for (const tenant of tenants) {
     if (!tenant.dbName) continue;
@@ -104,6 +123,10 @@ export async function resumePendingRagIngests(): Promise<number> {
         for (const ragModule of modules) {
           const stuck = await db.listRagDocuments(ragModule.key, { status: 'pending' });
           for (const doc of stuck) {
+            if (othersRunExtraction && isLiveExtraction(doc)) {
+              skippedLive += 1;
+              continue;
+            }
             documents.push({
               tenantId: doc.tenantId,
               projectId: doc.projectId,
@@ -129,5 +152,14 @@ export async function resumePendingRagIngests(): Promise<number> {
   }
 
   if (resumed > 0) logger.info('Resumed pending Knowledge Engine ingests', { resumed });
+  if (skippedLive > 0 && !recheckScheduled) {
+    // What was left alone may be abandoned after all (its node went down too): look again once it would show.
+    recheckScheduled = true;
+    const timer = setTimeout(() => {
+      recheckScheduled = false;
+      void resumePendingRagIngests().catch(() => undefined);
+    }, LIVE_EXTRACTION_MS + 5_000);
+    timer.unref?.();
+  }
   return resumed;
 }

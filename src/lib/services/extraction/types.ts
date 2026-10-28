@@ -6,6 +6,7 @@
 
 import type { convertToMarkdown } from '@cognipeer/to-markdown';
 import type { ZipLimits } from '@/lib/services/files/zipGuard';
+import type { LicenseType } from '@/lib/license/license-manager';
 
 export type { ZipLimits };
 
@@ -35,6 +36,9 @@ export interface ExtractionScope {
   tenantId: string;
   projectId?: string;
   userId?: string;
+  /** The API token the work is done for, when there is one: token-scoped quota policies apply to the OCR spend. */
+  tokenId?: string;
+  licenseType?: LicenseType;
 }
 
 export type ExtractionSource =

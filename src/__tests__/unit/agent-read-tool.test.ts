@@ -206,7 +206,7 @@ function fakeSandbox(options: FakeOptions = {}) {
 
 type Fake = ReturnType<typeof fakeSandbox>;
 
-function build(fake: Fake | null, extra: { session?: boolean; modelTakesImages?: boolean; media?: ReturnType<typeof createToolMediaStore> | false } = {}) {
+function build(fake: Fake | null, extra: { session?: boolean; maxImageBytes?: number; modelTakesImages?: boolean; media?: ReturnType<typeof createToolMediaStore> | false } = {}) {
   const store = extra.media || createToolMediaStore();
   const tool = buildReadTool({
     createToolFn: createTool,
@@ -223,7 +223,7 @@ function build(fake: Fake | null, extra: { session?: boolean; modelTakesImages?:
         },
       }
       : {}),
-    ...(extra.session ? { session: { scope: { tenantDbName: 't', tenantId: 't', projectId: 'p' }, conversationId: 'conv-1', readPageChars: 20000 } } : {}),
+    ...(extra.session ? { session: { scope: { tenantDbName: 't', tenantId: 't', projectId: 'p' }, conversationId: 'conv-1', readPageChars: 20000, ...(extra.maxImageBytes !== undefined ? { maxImageBytes: extra.maxImageBytes } : {}) } } : {}),
     ...(extra.media === false ? {} : { media: { store } }),
     modelTakesImages: extra.modelTakesImages ?? true,
   });
@@ -887,6 +887,21 @@ describe('session files (fileId)', () => {
       ocrRecord('p3', 'scan.tiff', 'image/tiff');
       sessionFiles.texts.set('p3', 'Scanned');
       expect(textOf(await build(null, { session: true }).read({ fileId: 'p3' }))).toContain('Scanned');
+    });
+
+    it('past the size a model request carries is read as text, never shown', async () => {
+      ocrRecord('big', 'poster.png', 'image/png');
+      sessionFiles.records.get('big')!.size = 5_000;
+      sessionFiles.texts.set('big', 'Headline');
+      const out = await build(null, { session: true, maxImageBytes: 1_000 }).read({ fileId: 'big' });
+      expect(images(out)).toHaveLength(0);
+      expect(textOf(out)).toContain('Headline');
+
+      // Without text there is nothing to fall back to: say so instead of sending the picture.
+      sessionFiles.records.set('bare', { _id: 'bare', name: 'photo.png', contentType: 'image/png', size: 5_000 });
+      const bare = await build(null, { session: true, maxImageBytes: 1_000 }).read({ fileId: 'bare' });
+      expect(images(bare)).toHaveLength(0);
+      expect(textOf(bare)).toContain('too large to show');
     });
 
     it('with no text found, keeps saying the picture cannot be seen or read', async () => {

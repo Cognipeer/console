@@ -25,6 +25,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getRequestContext, runWithRequestContext } from '@/lib/core/requestContext';
 import { inspectZip, startsLikeZip, type ZipVerdict } from '@/lib/services/files/zipGuard';
 import { extractMarkdownContent } from './content';
+import { linkSignals } from './signals';
 import {
   isImageFile,
   isOcrCandidate,
@@ -191,28 +192,6 @@ export function convertGuarded(
 
 /* ── OCR ─────────────────────────────────────────────────────────────────── */
 
-interface LinkedSignal {
-  signal: AbortSignal;
-  dispose(): void;
-}
-
-/** One signal that aborts when any of `signals` does (AbortSignal.any is newer than the Node versions we run on). */
-function linkSignals(...signals: Array<AbortSignal | undefined>): LinkedSignal {
-  const controller = new AbortController();
-  const listeners: Array<() => void> = [];
-  for (const source of signals) {
-    if (!source) continue;
-    if (source.aborted) {
-      controller.abort(source.reason);
-      break;
-    }
-    const onAbort = () => controller.abort(source.reason);
-    source.addEventListener('abort', onAbort, { once: true });
-    listeners.push(() => source.removeEventListener('abort', onAbort));
-  }
-  return { signal: controller.signal, dispose: () => listeners.forEach((remove) => remove()) };
-}
-
 function isAbortError(error: unknown): boolean {
   return Boolean(error) && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError';
 }
@@ -266,7 +245,7 @@ interface Backend {
   options: OcrOptions;
   warnings: string[];
   /** Calls made to the OCR model so far (filled in while the document is read). */
-  stats?: { calls: number };
+  stats?: { calls: number; budgetDenied?: string };
 }
 
 function reportOf(
@@ -334,7 +313,7 @@ async function chooseBackend(
   req: ExtractionRequest,
   ocr: OcrSettings,
   signal: AbortSignal,
-  documentBudgetMs: number,
+  remainingMs: () => number,
 ): Promise<Backend | { fallback: string }> {
   const languages = ocrLanguages(ocr);
 
@@ -349,14 +328,14 @@ async function chooseBackend(
     if (denied) return { fallback: `ocr_budget_exceeded: ${denied}` };
 
     const current = getRequestContext();
-    const stats = { calls: 0 };
+    const stats: { calls: number; budgetDenied?: string } = { calls: 0 };
     const handlers = createModelOcrHandlers({
       scope: req.scope,
       modelKey: ocr.modelKey,
       resolved,
       languages,
       fileName: req.fileName,
-      documentBudgetMs,
+      remainingMs,
       signal,
       quota,
       stats,
@@ -405,19 +384,35 @@ async function ocrResult(
 
   const defaults = ocrDefaults();
   const budgetMs = req.budget === 'background' ? defaults.documentTimeoutMs : defaults.inlineTimeoutMs;
+  const abortAfter = (controller: AbortController, message: string) =>
+    setTimeout(() => {
+      const error = new Error(message);
+      error.name = 'AbortError';
+      controller.abort(error);
+    }, budgetMs);
+
+  // The document's clock starts when its reading starts, not while it waits for the node's local OCR slot.
   const deadline = new AbortController();
-  const timer = setTimeout(() => {
-    const error = new Error(`The document was not read within ${Math.round(budgetMs / 1000)} s`);
-    error.name = 'AbortError';
-    deadline.abort(error);
-  }, budgetMs);
+  let deadlineAt: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const startDeadline = () => {
+    if (deadlineAt !== undefined) return;
+    deadlineAt = Date.now() + budgetMs;
+    timer = abortAfter(deadline, `The document was not read within ${Math.round(budgetMs / 1000)} s`);
+  };
+  const remainingMs = () => (deadlineAt === undefined ? budgetMs : Math.max(0, deadlineAt - Date.now()));
+  // Waiting for the slot has a limit of its own, of the same size.
+  const slotWait = new AbortController();
+  let slotTimer: ReturnType<typeof setTimeout> | undefined;
+  let slotTimedOut = false;
+
   const linked = linkSignals(req.signal, deadline.signal);
   const warnings: string[] = [];
   // Set when the native text is to be returned instead; the plain conversion then runs once, after the OCR work is over.
   let nativeWith: string[] | undefined;
 
   try {
-    const backend = await chooseBackend(req, ocr, linked.signal, budgetMs);
+    const backend = await chooseBackend(req, ocr, linked.signal, remainingMs);
     if ('fallback' in backend) {
       nativeWith = [backend.fallback];
     } else {
@@ -429,16 +424,33 @@ async function ocrResult(
         ocr: backend.options,
       };
       // A library that has `convertToMarkdownDetailed` reads a presentation from memory: no working file to take turns for.
-      const run = () =>
-        runGuardedConversion(req.data, req.fileName, guard, () => detailedConvert(req.data, options), { powerPointTurn: false });
+      const run = () => {
+        startDeadline();
+        return runGuardedConversion(req.data, req.fileName, guard, () => detailedConvert(req.data, options), { powerPointTurn: false });
+      };
 
       let detailed: DetailedConversion;
       if (backend.engine === 'local') {
         const { withLocalOcrSlot } = await import('./localOcr');
-        detailed = await withLocalOcrSlot(linked.signal, run);
+        slotTimer = setTimeout(() => {
+          slotTimedOut = true;
+          const error = new Error(`No OCR slot became free within ${Math.round(budgetMs / 1000)} s`);
+          error.name = 'AbortError';
+          slotWait.abort(error);
+        }, budgetMs);
+        const waiting = linkSignals(req.signal, slotWait.signal);
+        try {
+          detailed = await withLocalOcrSlot(waiting.signal, () => {
+            clearTimeout(slotTimer);
+            return run();
+          });
+        } finally {
+          waiting.dispose();
+        }
       } else {
         detailed = await run();
       }
+      if (backend.stats?.budgetDenied) warnings.push(`ocr_budget_exceeded: ${backend.stats.budgetDenied}`);
       const raw: ConvertedDocument = detailed.markdown;
       return { raw, text: extractMarkdownContent(raw) ?? '', report: reportOf(detailed, req, backend, warnings) };
     }
@@ -448,14 +460,27 @@ async function ocrResult(
     if (error instanceof DocumentConversionRefused) throw error;
 
     const timedOut = deadline.signal.aborted || isAbortError(error);
-    logger.warn(timedOut ? 'Document OCR ran out of time; keeping the native text' : 'Document OCR failed; keeping the native text', {
-      source: req.source,
-      extension: path.extname(req.fileName).toLowerCase(),
-      error: messageOf(error),
-    });
-    nativeWith = [...warnings, timedOut ? `ocr_timeout: ${messageOf(error)}` : `ocr_failed: ${messageOf(error)}`];
+    logger.warn(
+      slotTimedOut
+        ? 'Document OCR found no free slot; keeping the native text'
+        : timedOut
+          ? 'Document OCR ran out of time; keeping the native text'
+          : 'Document OCR failed; keeping the native text',
+      {
+        source: req.source,
+        extension: path.extname(req.fileName).toLowerCase(),
+        error: messageOf(error),
+      },
+    );
+    // `report.warnings` carries the provider's own wording: a consumer that stores or shows it goes through the
+    // consumers' `recordedWarnings`, which keeps the stable code only.
+    nativeWith = [
+      ...warnings,
+      slotTimedOut ? 'ocr_busy' : timedOut ? `ocr_timeout: ${messageOf(error)}` : `ocr_failed: ${messageOf(error)}`,
+    ];
   } finally {
     clearTimeout(timer);
+    clearTimeout(slotTimer);
     linked.dispose();
   }
   return plainResult(req, nativeWith ?? [], guard);

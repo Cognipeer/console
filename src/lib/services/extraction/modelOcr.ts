@@ -11,6 +11,7 @@ import { checkBudget, settleUsageBudget, type QuotaContext } from '@/lib/quota/q
 import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
 import type { OcrDocumentHandler, OcrHandler } from './toMarkdownApi';
 import type { ResolvedOcrModel } from './ocrModels';
+import { linkSignals } from './signals';
 import { ocrDefaults } from './settings';
 import type { ExtractionScope } from './types';
 
@@ -42,13 +43,16 @@ export interface ModelOcrContext {
   /** ISO 639-1 languages; the first one is sent as the language hint. */
   languages: string[];
   fileName?: string;
-  /** Milliseconds a whole-document call may take (the document budget that is left). */
-  documentBudgetMs?: number;
+  /** Milliseconds of the document's budget that are left; a whole-document call may take no longer than that. */
+  remainingMs?: () => number;
   signal?: AbortSignal;
   quota?: QuotaContext;
   attribution?: Partial<UsageAttribution>;
-  /** Filled in as calls complete. */
-  stats?: { calls: number };
+  /**
+   * Filled in as calls complete. `budgetDenied` is set when a re-check of the budget during the run refused further
+   * spend: the pages that are left are not read.
+   */
+  stats?: { calls: number; budgetDenied?: string };
 }
 
 export interface ModelOcrHandlers {
@@ -65,6 +69,11 @@ export function ocrQuotaContext(scope: ExtractionScope, modelKey: string): Quota
     tenantId: scope.tenantId,
     projectId: scope.projectId,
     userId: scope.userId,
+    // Set for token-authenticated callers, so token-scoped policies can apply.
+    ...(scope.tokenId ? { tokenId: scope.tokenId } : {}),
+    ...(scope.licenseType ? { licenseType: scope.licenseType } : {}),
+    // Every OCR read is metered under `ocr`, a vision model included: the spend of reading documents is one
+    // budget, whichever model reads them.
     domain: 'ocr',
     resourceKey: modelKey,
   };
@@ -83,12 +92,38 @@ export async function checkOcrBudget(quota: QuotaContext | undefined): Promise<s
   }
 }
 
-function settle(ctx: ModelOcrContext, model: ResolvedOcrModel['model'], usage: Parameters<typeof calculateCost>[1]): void {
+/** The budget is read again after this many calls, so a long document cannot run far past a hard cap. */
+const BUDGET_RECHECK_EVERY = 5;
+
+async function settle(ctx: ModelOcrContext, model: ResolvedOcrModel['model'], usage: Parameters<typeof calculateCost>[1]): Promise<void> {
   if (!ctx.quota) return;
   try {
-    void settleUsageBudget(ctx.quota, calculateCost(model.pricing, usage));
+    await settleUsageBudget(ctx.quota, calculateCost(model.pricing, usage));
   } catch (error) {
     logger.warn('The OCR spend could not be settled', { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/** Counts the call, books its spend and (every few calls) asks the budget whether the document may go on. */
+async function afterCall(
+  ctx: ModelOcrContext,
+  model: ResolvedOcrModel['model'],
+  usage: Parameters<typeof calculateCost>[1],
+): Promise<void> {
+  if (ctx.stats) ctx.stats.calls += 1;
+  await settle(ctx, model, usage);
+  if (ctx.stats && !ctx.stats.budgetDenied && ctx.stats.calls % BUDGET_RECHECK_EVERY === 0) {
+    const denied = await checkOcrBudget(ctx.quota);
+    if (denied) ctx.stats.budgetDenied = denied;
+  }
+}
+
+function ensureBudget(ctx: ModelOcrContext): void {
+  const denied = ctx.stats?.budgetDenied;
+  if (denied) {
+    const error = new Error(`ocr_budget_exceeded: ${denied}`);
+    error.name = 'OcrBudgetExceeded';
+    throw error;
   }
 }
 
@@ -113,67 +148,82 @@ export function createModelOcrHandlers(ctx: ModelOcrContext): ModelOcrHandlers {
 
   const handler: OcrHandler = async (buffer, context) => {
     if (ctx.signal?.aborted) throw abortError(ctx.signal);
-    const result = await handleOcrRequest({
-      tenantDbName: ctx.scope.tenantDbName,
-      modelKey: ctx.modelKey,
-      projectId,
-      input: {
-        document: {
-          kind: 'bytes',
-          data: buffer,
-          contentType: context.mimeType ?? 'image/png',
-          fileName: context.fileName ?? ctx.fileName,
+    ensureBudget(ctx);
+    // The document's own signal and the library's per-call one: either stops the request and its retry.
+    const linked = linkSignals(ctx.signal, context.signal);
+    try {
+      const result = await handleOcrRequest({
+        tenantDbName: ctx.scope.tenantDbName,
+        modelKey: ctx.modelKey,
+        projectId,
+        input: {
+          document: {
+            kind: 'bytes',
+            data: buffer,
+            contentType: context.mimeType ?? 'image/png',
+            fileName: context.fileName ?? ctx.fileName,
+          },
+          ...(language ? { language } : {}),
+          ...(prompt ? { prompt } : {}),
         },
-        ...(language ? { language } : {}),
-        ...(prompt ? { prompt } : {}),
-      },
-      allowVisionLlm: true,
-      ...(ctx.attribution ? { attribution: ctx.attribution } : {}),
-      resilience: { timeoutMs: defaults.callTimeoutMs, retry: { maxAttempts: 2 } },
-      logErrors: true,
-    });
-    if (ctx.stats) ctx.stats.calls += 1;
-    settle(ctx, result.model, result.usage);
-    return { text: textOf(result.response as { text?: string; markdown?: unknown }) };
+        allowVisionLlm: true,
+        ...(ctx.attribution ? { attribution: ctx.attribution } : {}),
+        resilience: { timeoutMs: defaults.callTimeoutMs, retry: { maxAttempts: 2 } },
+        logErrors: true,
+        logContent: false,
+        signal: linked.signal,
+      });
+      await afterCall(ctx, result.model, result.usage);
+      return { text: textOf(result.response as { text?: string; markdown?: unknown }) };
+    } finally {
+      linked.dispose();
+    }
   };
 
   if (!resolved.documentLevel) return { handler };
 
   const documentHandler: OcrDocumentHandler = async (pdf, context) => {
     if (ctx.signal?.aborted) throw abortError(ctx.signal);
+    ensureBudget(ctx);
     const timeoutMs = Math.max(
       1_000,
-      Math.min(defaults.documentTimeoutMs, ctx.documentBudgetMs ?? defaults.documentTimeoutMs),
+      Math.min(defaults.documentTimeoutMs, ctx.remainingMs ? ctx.remainingMs() : defaults.documentTimeoutMs),
     );
-    const result = await handleOcrRequest({
-      tenantDbName: ctx.scope.tenantDbName,
-      modelKey: ctx.modelKey,
-      projectId,
-      input: {
-        document: { kind: 'bytes', data: pdf, contentType: 'application/pdf', fileName: context.fileName ?? ctx.fileName },
-        pages: context.pages,
-        ...(language ? { language } : {}),
-      },
-      allowVisionLlm: true,
-      ...(ctx.attribution ? { attribution: ctx.attribution } : {}),
-      // One long call: a retry would pay for the whole document twice.
-      resilience: { timeoutMs, retry: { enabled: false } },
-      logErrors: true,
-    });
-    if (ctx.stats) ctx.stats.calls += 1;
-    settle(ctx, result.model, result.usage);
+    const linked = linkSignals(ctx.signal, context.signal);
+    try {
+      const result = await handleOcrRequest({
+        tenantDbName: ctx.scope.tenantDbName,
+        modelKey: ctx.modelKey,
+        projectId,
+        input: {
+          document: { kind: 'bytes', data: pdf, contentType: 'application/pdf', fileName: context.fileName ?? ctx.fileName },
+          pages: context.pages,
+          ...(language ? { language } : {}),
+        },
+        allowVisionLlm: true,
+        ...(ctx.attribution ? { attribution: ctx.attribution } : {}),
+        // One long call: a retry would pay for the whole document twice.
+        resilience: { timeoutMs, retry: { enabled: false } },
+        logErrors: true,
+        logContent: false,
+        signal: linked.signal,
+      });
+      await afterCall(ctx, result.model, result.usage);
 
-    const pages = result.response.pages ?? [];
-    const requested = context.pages;
-    const mapped = pages.map((page, index) => ({
-      // Pages come back with their own number; when they do not, they are in the order that was asked for.
-      page: typeof page.pageNumber === 'number' ? page.pageNumber : (requested[index] ?? index + 1),
-      text: page.text ?? '',
-    }));
-    if (mapped.length > 0) return mapped;
-    // A driver that answered with the document's text only: it is the text of the single page asked for.
-    if (requested.length === 1 && result.response.text) return [{ page: requested[0], text: result.response.text }];
-    return [];
+      const pages = result.response.pages ?? [];
+      const requested = context.pages;
+      const mapped = pages.map((page, index) => ({
+        // Pages come back with their own number; when they do not, they are in the order that was asked for.
+        page: typeof page.pageNumber === 'number' ? page.pageNumber : (requested[index] ?? index + 1),
+        text: page.text ?? '',
+      }));
+      if (mapped.length > 0) return mapped;
+      // A driver that answered with the document's text only: it is the text of the single page asked for.
+      if (requested.length === 1 && result.response.text) return [{ page: requested[0], text: result.response.text }];
+      return [];
+    } finally {
+      linked.dispose();
+    }
   };
 
   return { handler, documentHandler };

@@ -6,10 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { axiosFetch, extractDocument, validateOcrModelRef } = vi.hoisted(() => ({
+const { axiosFetch, extractDocument, validateOcrModelRef, detailedSupport } = vi.hoisted(() => ({
   axiosFetch: vi.fn(),
   extractDocument: vi.fn(),
   validateOcrModelRef: vi.fn(),
+  // The installed converter library: does it have the extraction API (3.6)?
+  detailedSupport: { present: true },
+}));
+
+vi.mock('@/lib/services/extraction/toMarkdownApi', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/extraction/toMarkdownApi')>()),
+  getConvertToMarkdownDetailed: () => (detailedSupport.present ? async () => ({ markdown: '' }) : undefined),
 }));
 
 vi.mock('@/lib/services/crawler/engine/axiosFetcher', async (importOriginal) => ({
@@ -178,6 +185,21 @@ describe('crawlerExtractionDeps', () => {
   it('adds nothing for a plan without OCR', () => {
     expect(crawlerExtractionDeps(ctx, undefined, 'background')).toEqual({});
     expect(crawlerExtractionDeps(ctx, { ocr: { enabled: false } }, 'background')).toEqual({});
+  });
+
+  it('keeps the crawler on its direct OCR call when the converter library is too old for the engine', () => {
+    detailedSupport.present = false;
+    try {
+      expect(crawlerExtractionDeps(ctx, { ocr: { enabled: true } }, 'background')).toEqual({});
+    } finally {
+      detailedSupport.present = true;
+    }
+  });
+
+  it('cuts a crawler\'s language list to the limit of the shared settings', () => {
+    const many = Array.from({ length: 30 }, (_, index) => `x${String.fromCharCode(97 + (index % 26))}${index < 26 ? '' : 'y'}`);
+    const settings = crawlerOcrToSettings({ enabled: true, languages: many });
+    expect(settings?.languages).toHaveLength(8);
   });
 
   it('binds the extraction engine to the crawler scope, with the budget of the caller', async () => {

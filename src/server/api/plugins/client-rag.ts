@@ -19,7 +19,8 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
-import { RagModuleInactiveError, RagOriginalMissingError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
+import { clientGone } from '../clientGone';
+import { RagModuleInactiveError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
@@ -236,6 +237,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
           chunkConfig,
           ...(extraction ? { extraction } : {}),
+          signal: clientGone(reply),
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
         force: body.force === true,
@@ -434,6 +436,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         error instanceof RagModuleInactiveError
         || error instanceof RagOriginalMissingError
         || error instanceof RagStoredTextUnavailableError
+        || error instanceof RagReextractIncompleteError
       ) {
         return reply.code(error.statusCode).send({ error: error.message });
       }

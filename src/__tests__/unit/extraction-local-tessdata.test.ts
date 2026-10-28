@@ -65,6 +65,17 @@ describe('the bundled language data', () => {
     expect(statSync(path.join(directory, 'tur.traineddata.gz')).mtimeMs).toBe(stamp);
   });
 
+  it('copies a file again when a clean-up removed it from the target directory', async () => {
+    const first = await ensureLocalTessdata(['tr']);
+    const file = path.join(first.directory!, 'tur.traineddata.gz');
+    rmSync(file);
+
+    const again = await ensureLocalTessdata(['tr']);
+
+    expect(again.directory).toBe(first.directory);
+    expect(statSync(file).size).toBe(statSync(bundled('tur')).size);
+  });
+
   it('leaves no partial file behind and survives two requests at once', async () => {
     const [a, b] = await Promise.all([ensureLocalTessdata(['tr']), ensureLocalTessdata(['tr', 'en'])]);
 

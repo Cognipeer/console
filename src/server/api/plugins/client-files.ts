@@ -23,6 +23,7 @@ import {
 } from '@/lib/quota/quotaGuard';
 import { bucketInactiveError, isFileServiceError } from '@/lib/services/files/errors';
 import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
+import { clientGone } from '../clientGone';
 import { parseExtractionBody } from '@/lib/services/files/markdownExtraction';
 import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
@@ -53,15 +54,6 @@ const FILE_METADATA_HEADER_MAX_CHARS = 8 * 1024;
 /** A failed call, answered the way the Document Store answers it (status, code and a safe message). */
 function fail(reply: FastifyReply, error: unknown, action: string, options: FileErrorOptions = {}) {
   return sendFileError(reply, error, { logger, action, ...options });
-}
-
-/** Aborted when the client goes away before its answer was sent. */
-function clientGone(reply: FastifyReply): AbortSignal {
-  const controller = new AbortController();
-  reply.raw.once('close', () => {
-    if (!reply.raw.writableFinished) controller.abort();
-  });
-  return controller.signal;
 }
 
 export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {

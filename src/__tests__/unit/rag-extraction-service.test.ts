@@ -209,6 +209,15 @@ describe('Knowledge Engine OCR', () => {
       hoisted.extract.mockResolvedValue(plainAnswer('   '));
       await expect(convertFileToText('blank.pdf', PDF)).rejects.toThrow(/Failed to convert "blank.pdf"/);
     });
+
+    it('names the cause when a scan gave no text because its OCR could not finish', async () => {
+      hoisted.extract.mockResolvedValue({
+        raw: '', text: '', report: { sourceType: 'converted', warnings: ['ocr_timeout: The document was not read within 120 s'] },
+      });
+      await expect(convertFileToText('scan.pdf', PDF)).rejects.toThrow(
+        'Failed to convert "scan.pdf" to text. OCR could not read it: it ran out of time.',
+      );
+    });
   });
 
   describe('ingestFile', () => {
@@ -250,6 +259,17 @@ describe('Knowledge Engine OCR', () => {
       await upload({ extraction: { ocr: null } });
       expect(lastRequest()).not.toHaveProperty('ocr');
       expect(db.createRagDocument.mock.lastCall![0]).not.toHaveProperty('extraction');
+    });
+
+    it('spends no OCR on a module that does not exist or is not active', async () => {
+      db.findRagModuleByKey.mockResolvedValue(null);
+      await expect(upload({ extraction: { ocr: { mode: 'always' } } })).rejects.toThrow('not found');
+      expect(lastRequest()).not.toHaveProperty('ocr');
+
+      hoisted.extract.mockClear();
+      db.findRagModuleByKey.mockResolvedValue({ ...ocrModule, status: 'disabled' as const });
+      await expect(upload()).rejects.toThrow('not active');
+      expect(lastRequest()).not.toHaveProperty('ocr');
     });
 
     it('leaves a module without OCR exactly as it was: no extraction record', async () => {
@@ -435,6 +455,20 @@ describe('Knowledge Engine OCR', () => {
       expect((patch as unknown as { extraction: Record<string, unknown> }).extraction).toEqual({ sourceType: 'ocr', fileHash: 'abc', requested: OCR });
     });
 
+    it('fails a scan whose OCR could not run with the cause, and keeps the warning code on the row', async () => {
+      hoisted.extract.mockResolvedValue({
+        raw: '', text: '', report: { sourceType: 'converted', warnings: ['ocr_model_unavailable: The OCR model "x" was not found at https://secret.example'] },
+      });
+
+      await expect(indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1')).rejects.toThrow('the OCR model is not available');
+
+      const [, patch] = db.updateRagDocument.mock.lastCall!;
+      expect(patch).toMatchObject({ status: 'failed', errorMessage: expect.stringContaining('OCR could not read it') });
+      expect((patch as unknown as { extraction: Record<string, unknown> }).extraction).toEqual({
+        sourceType: 'ocr', fileHash: 'abc', requested: OCR, warnings: ['ocr_model_unavailable'],
+      });
+    });
+
     it('resumes an extraction a crash left running', async () => {
       db.findRagDocumentById.mockResolvedValue({ ...QUEUED, extraction: { ...QUEUED.extraction, stage: 'running' } });
       await indexPendingRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, 'my-rag', 'ragdoc-1');
@@ -488,6 +522,20 @@ describe('Knowledge Engine OCR', () => {
       expect(document.extraction).toMatchObject({ sourceType: 'mixed', pageCount: 5 });
     });
 
+    it('keeps the previous text when a re-extract could not finish its OCR, and gives it the budget of a job', async () => {
+      db.findRagDocumentById.mockResolvedValue({ ...stored, extraction: { sourceType: 'ocr' } });
+      hoisted.extract.mockResolvedValue({
+        raw: 'Worse', text: 'Worse native text', report: { sourceType: 'converted', warnings: ['ocr_budget_exceeded: daily cap'] },
+      });
+
+      await expect(reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, { ...request, reextract: true }))
+        .rejects.toMatchObject({ name: 'RagReextractIncompleteError', statusCode: 409 });
+
+      expect(lastRequest()).toMatchObject({ budget: 'background' });
+      expect(db.updateRagDocument).not.toHaveBeenCalledWith('ragdoc-1', expect.objectContaining({ sourceText: 'Worse native text' }));
+      expect(db.deleteRagChunksByDocumentId).not.toHaveBeenCalled();
+    });
+
     it('re-converts the original of any other document with OCR off', async () => {
       hoisted.extract.mockResolvedValue(plainAnswer('Native text'));
       db.findRagDocumentById.mockResolvedValue({ ...stored, extraction: { sourceType: 'converted' } });
@@ -503,7 +551,7 @@ describe('Knowledge Engine OCR', () => {
 
       await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, { ...request, reextract: true });
 
-      expect(lastRequest()).toMatchObject({ ocr: OCR, budget: 'inline', images: 'placeholder' });
+      expect(lastRequest()).toMatchObject({ ocr: OCR, budget: 'background', images: 'placeholder' });
       expect(db.updateRagDocument).toHaveBeenCalledWith('ragdoc-1', {
         extraction: expect.objectContaining({ sourceType: 'mixed', pageCount: 5, ocrPages: 2, requested: OCR }),
       });

@@ -339,6 +339,8 @@ export interface UploadSessionFileInput {
     /** The file's bytes, or the same as base64 / a `data:` URL. */
     data: Buffer | string;
     actor: SessionFileActor;
+    /** Stops an OCR run that is still going when the caller has gone. */
+    signal?: AbortSignal;
 }
 
 /**
@@ -392,6 +394,7 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
         contentType: mimeType,
         data: buffer,
         createdBy: actor.userId,
+        ...(input.signal ? { signal: input.signal } : {}),
         // An image has no text to convert; the model reads the original. With OCR on pictures it is also read as
         // text (a model without vision, or a format no provider takes, then has something to work from).
         convertToMarkdown: !isImageMime(mimeType) || (attachmentsOcrReadsImages(cfg) && isImageFile(input.fileName, mimeType)),

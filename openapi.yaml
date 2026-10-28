@@ -21621,7 +21621,7 @@ components:
                   type: array
                   items:
                     type: string
-                  description: "Notes of the run, such as `ocr_timeout: ...` (the OCR did not finish in time, the text layer was kept) or `ocr_failed: ...`. OCR never fails an upload or a conversion."
+                  description: "Notes of the run as stable codes only, never a provider's wording, for example `ocr_timeout` (the OCR did not finish in time, the text layer was kept), `ocr_failed`, `ocr_busy` or `ocr_budget_exceeded`. OCR never fails an upload or a conversion."
         purpose:
           type: string
           enum:

@@ -2790,6 +2790,38 @@ describe('handleOcrRequest: options for callers outside a request (document extr
     });
   });
 
+  it('keeps the recognised text out of the usage row when the caller turns logContent off, and keeps it otherwise', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockResolvedValue({ text: 'Secret contract text', pages: [{ pageNumber: 1, text: 'x' }] })),
+    );
+
+    await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model', logContent: false });
+    await flush();
+    const quiet = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2];
+    expect(quiet.providerResponse).toMatchObject({ pageCount: 1 });
+    expect(JSON.stringify(quiet.providerResponse)).not.toContain('Secret contract text');
+
+    await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model' });
+    await flush();
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].providerResponse).toMatchObject({ text: 'Secret contract text' });
+  });
+
+  it('stops at once, and logs no error row, when the caller\'s signal aborts', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockImplementation(() => new Promise(() => undefined))),
+    );
+    const controller = new AbortController();
+
+    const call = handleOcrRequest({ ...baseParams, modelKey: 'ocr-model', signal: controller.signal, logErrors: true });
+    await flush();
+    controller.abort();
+
+    await expect(call).rejects.toBeDefined();
+    expect(logModelUsage).not.toHaveBeenCalled();
+  });
+
   it('still refuses an LLM that does not take images, and any other category, with allowVisionLlm set', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'text-only', category: 'llm' }));
     await expect(handleOcrRequest({ ...baseParams, modelKey: 'text-only', allowVisionLlm: true })).rejects.toThrow(

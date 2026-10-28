@@ -5,6 +5,7 @@
  * never touches it.
  */
 
+import { getConvertToMarkdownDetailed } from '@/lib/services/extraction/toMarkdownApi';
 import { isOcrActive, normalizeOcrSettings, ocrDefaults, toIsoLanguage } from '@/lib/services/extraction/settings';
 import type { OcrSettings } from '@/lib/services/extraction/types';
 import type { CrawlEngineDeps, CrawlFileExtraction, CrawlMarkdownOptions } from './engine';
@@ -13,6 +14,9 @@ import type { CrawlerContext } from './types';
 type CrawlerOcr = NonNullable<CrawlMarkdownOptions['ocr']>;
 
 const LANGUAGE_PATTERN = /^[a-z]{2,3}(_[a-z]+)?$/i;
+
+/** The same limit the shared OCR settings have: a crawler's list of free-text codes is cut here. */
+const MAX_LANGUAGES = 8;
 
 /** Longest a crawler waits beyond the engine's own deadline: room for the native-text fallback after a timeout. */
 const FALLBACK_GRACE_MS = 30_000;
@@ -28,10 +32,11 @@ export function crawlerOcrToSettings(ocr: CrawlerOcr | undefined): OcrSettings |
     .map((language) => (typeof language === 'string' ? language.trim() : ''))
     .filter((language) => LANGUAGE_PATTERN.test(language))
     .map(toIsoLanguage);
+  const distinct = [...new Set(languages)].slice(0, MAX_LANGUAGES);
   const settings: OcrSettings = {
     mode: ocr.mode === 'always' ? 'always' : 'auto',
     ...(ocr.modelKey?.trim() ? { modelKey: ocr.modelKey.trim() } : {}),
-    ...(languages.length > 0 ? { languages: [...new Set(languages)] } : {}),
+    ...(distinct.length > 0 ? { languages: distinct } : {}),
     ...(typeof ocr.maxPages === 'number' ? { maxPages: ocr.maxPages } : {}),
     ...(ocr.images ? { images: true } : {}),
   };
@@ -48,6 +53,9 @@ export function crawlerExtractionDeps(
   budget: 'background' | 'inline',
 ): Pick<CrawlEngineDeps, 'extractFile' | 'ocrConversionTimeoutMs'> {
   if (!markdownOptions?.ocr?.enabled) return {};
+  // A converter library without the extraction API (older than 3.6) cannot be driven by the engine: the crawler then
+  // keeps calling the library directly with its OCR options, as it always did, instead of losing OCR.
+  if (!getConvertToMarkdownDetailed()) return {};
   const defaults = ocrDefaults();
   const deadline = budget === 'background' ? defaults.documentTimeoutMs : defaults.inlineTimeoutMs;
   return {

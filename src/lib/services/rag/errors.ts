@@ -34,3 +34,26 @@ export class RagStoredTextUnavailableError extends Error {
     this.name = 'RagStoredTextUnavailableError';
   }
 }
+
+/**
+ * Raised when an explicit re-extract could not finish its OCR (budget, model, time): the document keeps the text it
+ * has instead of being replaced by a worse one. Routes answer it with a 409.
+ */
+export class RagReextractIncompleteError extends Error {
+  readonly statusCode = 409;
+  constructor(reason: string) {
+    super(`The document was not re-extracted: OCR could not finish (${reason}). The previous text was kept.`);
+    this.name = 'RagReextractIncompleteError';
+  }
+}
+
+/**
+ * Raised when a file yielded no text because the OCR that should have read it could not run or finish. `warnings` is
+ * the report's list, for the record of a failed document (callers store it through `recordedWarnings`).
+ */
+export class RagOcrIncompleteError extends Error {
+  constructor(fileName: string, reason: string, readonly warnings: readonly string[]) {
+    super(`Failed to convert "${fileName}" to text. OCR could not read it: ${reason}.`);
+    this.name = 'RagOcrIncompleteError';
+  }
+}
