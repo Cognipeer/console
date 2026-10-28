@@ -56,57 +56,58 @@ function matchesType(value: unknown, type: string): boolean {
   }
 }
 
-/** The property names an object schema declares, through `$ref` and `allOf`. */
-function declaredProperties(schema: Schema): Set<string> {
-  const resolved = resolve(schema);
-  const names = new Set<string>(Object.keys(resolved.properties ?? {}));
-  for (const part of resolved.allOf ?? []) for (const name of declaredProperties(part)) names.add(name);
-  return names;
-}
-
-/** Whether any part of the schema (through `allOf`) closes the object to declared keys only, or opens it. */
-function extraKeysAllowed(schema: Schema): Schema | boolean | undefined {
-  const resolved = resolve(schema);
-  if (resolved.additionalProperties !== undefined) return resolved.additionalProperties;
-  for (const part of resolved.allOf ?? []) {
-    const nested = extraKeysAllowed(part);
-    if (nested !== undefined) return nested;
-  }
-  return undefined;
-}
-
-/** `extraKeys`: whether this level may flag keys the schema does not declare (off for one part of an `allOf`). */
-function check(value: unknown, input: Schema, at: string, strict: boolean, extraKeys = true): string[] {
+/**
+ * A schema with its `$ref` followed and its `allOf` parts folded into one: the properties of all parts (a property
+ * several parts describe must meet each description), the union of `required`, `nullable` if any part says so (the
+ * OpenAPI 3.0 way to make a `$ref` nullable is `allOf: [ref]` + `nullable: true`). Other keywords come from the
+ * first part that has them.
+ */
+function folded(input: Schema): Schema {
   const schema = resolve(input);
+  if (!Array.isArray(schema.allOf)) return schema;
+  const { allOf, ...own } = schema;
+  const parts: Schema[] = [own, ...(allOf as Schema[]).map(folded)];
+  const properties: Record<string, Schema> = {};
+  const required = new Set<string>();
+  const out: Schema = {};
+  for (const part of parts) {
+    for (const [key, child] of Object.entries<Schema>(part.properties ?? {})) properties[key] = key in properties ? { allOf: [properties[key], child] } : child;
+    for (const key of part.required ?? []) required.add(key);
+    for (const keyword of ['type', 'enum', 'items', 'oneOf', 'anyOf', 'additionalProperties']) {
+      if (out[keyword] === undefined && part[keyword] !== undefined) out[keyword] = part[keyword];
+    }
+    if (part.nullable === true) out.nullable = true;
+  }
+  if (Object.keys(properties).length > 0) out.properties = properties;
+  if (required.size > 0) out.required = [...required];
+  return out;
+}
+
+function check(value: unknown, input: Schema, at: string, strict: boolean): string[] {
+  const schema = folded(input);
   if (value === null) {
     return schema.nullable === true || (schema.enum && schema.enum.includes(null)) ? [] : [`${at}: null, but the schema does not allow null`];
   }
   const branches: Schema[] | undefined = schema.oneOf ?? schema.anyOf;
   if (branches) {
-    const results = branches.map((branch) => check(value, branch, at, strict, extraKeys));
+    const results = branches.map((branch) => check(value, branch, at, strict));
     return results.some((problems) => problems.length === 0) ? [] : results[0];
   }
+  if (schema.type && !matchesType(value, schema.type)) return [`${at}: expected ${schema.type}, got ${typeOf(value)}`];
   const problems: string[] = [];
-  if (schema.type && !matchesType(value, schema.type)) {
-    return [`${at}: expected ${schema.type}, got ${typeOf(value)}`];
-  }
   if (schema.enum && !schema.enum.includes(value)) problems.push(`${at}: ${JSON.stringify(value)} is not one of ${JSON.stringify(schema.enum)}`);
-  for (const part of schema.allOf ?? []) {
-    // A part of an allOf sees the keys of the other parts too, so the extra-key check runs once, on the union.
-    problems.push(...check(value, part, at, strict, false));
-  }
-  if (matchesType(value, 'object') && (schema.properties || schema.allOf || schema.required)) {
+  if (matchesType(value, 'object') && (schema.properties || schema.required)) {
     const record = value as Record<string, unknown>;
-    const declared = declaredProperties(schema);
+    const declared = schema.properties ?? {};
     for (const key of schema.required ?? []) if (!(key in record)) problems.push(`${at}.${key}: required, but missing`);
-    for (const [key, child] of Object.entries(schema.properties ?? {})) {
-      if (key in record) problems.push(...check(record[key], child as Schema, `${at}.${key}`, strict));
+    for (const [key, child] of Object.entries<Schema>(declared)) {
+      if (key in record) problems.push(...check(record[key], child, `${at}.${key}`, strict));
     }
-    const extra = extraKeysAllowed(schema);
+    const extra: Schema | boolean | undefined = schema.additionalProperties;
     for (const key of Object.keys(record)) {
-      if (declared.has(key)) continue;
+      if (key in declared) continue;
       if (extra && typeof extra === 'object') problems.push(...check(record[key], extra, `${at}.${key}`, strict));
-      else if (strict && extraKeys && extra !== true && declared.size > 0) problems.push(`${at}.${key}: not declared by the schema`);
+      else if (strict && extra !== true && Object.keys(declared).length > 0) problems.push(`${at}.${key}: not declared by the schema`);
     }
   }
   if (Array.isArray(value) && schema.items) {

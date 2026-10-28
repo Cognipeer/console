@@ -26,6 +26,7 @@ import {
   templateProblem,
 } from '@/lib/services/agents/agentTriggerWebhookView';
 import { GITHUB_PACKAGE_ID, GITHUB_TRIGGERS } from '../helpers/githubConnectorFixture';
+import { shapeProblems } from '../helpers/openapiShape';
 
 const ROOT = path.resolve(__dirname, '../../..');
 const read = (file: string): string => readFileSync(path.join(ROOT, file), 'utf8');
@@ -207,6 +208,42 @@ describe('the OpenAPI document, connector triggers', () => {
       expect(parseFilterRules([{ path: `${root}.x`, op: 'exists' }]).ok, root).toBe(true);
     }
     expect(parseFilterRules([{ path: 'event_id', op: 'exists' }]).ok).toBe(false);
+  });
+
+  it('shows only examples that fit the schema they are shown for (request and answer bodies of the trigger operations)', () => {
+    const checked: string[] = [];
+    const problems: string[] = [];
+    for (const [route, methods] of Object.entries(openapi.paths) as Array<[string, Json]>) {
+      if (!route.includes('/triggers')) continue;
+      for (const operation of Object.values(methods) as Json[]) {
+        if (!operation || typeof operation !== 'object' || !operation.operationId) continue;
+        const bodies: Array<[string, Json]> = [];
+        const request = operation.requestBody?.content?.['application/json'];
+        if (request) bodies.push(['request', request]);
+        for (const [status, response] of Object.entries(operation.responses ?? {}) as Array<[string, Json]>) {
+          const content = response?.content?.['application/json'];
+          if (content) bodies.push([`response ${status}`, content]);
+        }
+        for (const [where, content] of bodies) {
+          const name = typeof content.schema?.$ref === 'string' ? content.schema.$ref.split('/').pop() : undefined;
+          if (!name) continue;
+          const examples: Array<[string, unknown]> = [
+            ...(content.example !== undefined ? [['example', content.example] as [string, unknown]] : []),
+            ...Object.entries(content.examples ?? {}).map(([key, example]) => [key, (example as Json).value] as [string, unknown]),
+          ];
+          for (const [label, value] of examples) {
+            checked.push(`${operation.operationId} ${where} ${label}`);
+            for (const problem of shapeProblems(value, name)) problems.push(`${operation.operationId} ${where} ${label} (${name}): ${problem}`);
+          }
+        }
+      }
+    }
+    // The connector examples are among them: the rotate answers and the create answer of a connector trigger.
+    expect(checked).toEqual(expect.arrayContaining([
+      'rotateAgentTriggerWebhookSecret response 200 webhook',
+      'rotateAgentTriggerWebhookSecret response 200 connector',
+    ]));
+    expect(problems).toEqual([]);
   });
 
   it('documents the locale query parameter on every call that reaches the Connectors module in words', () => {
