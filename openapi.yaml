@@ -20717,6 +20717,26 @@ components:
               type: array
               items:
                 type: string
+            modelKey:
+              type: string
+              minLength: 1
+              maxLength: 120
+              description: >-
+                Project OCR model (category `ocr`) or vision LLM that reads scanned pages and images. Absent = the
+                built-in local engine (Tesseract).
+            mode:
+              type: string
+              enum:
+                - auto
+                - always
+              description: "`auto` (default) reads only pages without a text layer; `always` reads every page."
+            maxPages:
+              type: integer
+              minimum: 1
+              description: OCR at most this many pages per file.
+            images:
+              type: boolean
+              description: Also read text in pictures embedded in Word and PowerPoint files.
         outputFormat:
           type: string
           enum:

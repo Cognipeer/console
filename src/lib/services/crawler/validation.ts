@@ -63,6 +63,10 @@ const markdownOptionsSchema = z.object({
   ocr: z.object({
     enabled: z.boolean(),
     languages: z.array(z.string()).optional(),
+    modelKey: z.string().trim().min(1).max(120).optional(),
+    mode: z.enum(['auto', 'always']).optional(),
+    maxPages: z.number().int().min(1).max(10_000).optional(),
+    images: z.boolean().optional(),
   }).optional(),
   outputFormat: z.enum(['markdown', 'text']).optional(),
   cleanup: z.boolean().optional(),

@@ -4726,7 +4726,15 @@ export interface ICrawlerHttpConfig {
 
 /** Markdown extraction options forwarded to the crawler engine. */
 export interface ICrawlerMarkdownOptions {
-  ocr?: { enabled: boolean; languages?: string[] };
+  /** OCR for downloaded files; see the engine's `CrawlMarkdownOptions.ocr`. */
+  ocr?: {
+    enabled: boolean;
+    languages?: string[];
+    modelKey?: string;
+    mode?: 'auto' | 'always';
+    maxPages?: number;
+    images?: boolean;
+  };
   /** Stored body shape: 'markdown' (default) or flattened plain 'text'. */
   outputFormat?: 'markdown' | 'text';
   /** Run the markdown cleanup pass (entities, dead links, blank lines). Default true. */

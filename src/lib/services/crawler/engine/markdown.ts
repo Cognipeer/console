@@ -9,7 +9,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
 import { createLogger } from '@/lib/core/logger';
-import type { CrawlMarkdownOptions } from './types';
+import type { CrawlFileExtraction, CrawlMarkdownOptions } from './types';
 
 const logger = createLogger('crawler:markdown');
 
@@ -246,6 +246,14 @@ export interface FileMarkdownInput {
   buffer: Buffer;
   fileName: string;
   options?: CrawlMarkdownOptions;
+  contentType?: string;
+  /**
+   * Host-provided reader used instead of the direct conversion when `options.ocr` is enabled (see
+   * `CrawlEngineDeps.extractFile`). Absent = the direct conversion, OCR flag and all.
+   */
+  extractFile?: (input: CrawlFileExtraction) => Promise<string | undefined>;
+  /** Passed to `extractFile` so a cancelled crawl or a timeout stops the work. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -256,6 +264,22 @@ export interface FileMarkdownInput {
  */
 export async function fileToMarkdown(input: FileMarkdownInput): Promise<string | undefined> {
   const { buffer, fileName, options } = input;
+  // OCR on and a host reader injected: the shared extraction engine reads the file (project OCR model or the local
+  // engine). Everything else is the direct conversion below, unchanged.
+  if (options?.ocr?.enabled && input.extractFile) {
+    try {
+      const text = await input.extractFile({
+        buffer,
+        fileName,
+        ocr: options.ocr,
+        ...(input.contentType ? { contentType: input.contentType } : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      return text ? finalizeBody(text, options) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   try {
     const result = await convertToMarkdown(buffer, {
       fileName,
