@@ -3012,7 +3012,9 @@ paths:
         - A `connector` trigger saved with the binding it has (the same connector, trigger, parameters and schedule) keeps
           its subscription: a new name, prompt, events or `enabled` is accepted even while the Connectors licence or switch,
           or the Agents service, is off, and `connector_subscription` is the subscription as it is stored. A changed binding
-          is `400 invalid_trigger` on `connector.connector_id` then.
+          is `400 invalid_trigger` on `connector.connector_id` then. A subscription that is `paused` or being removed
+          cannot be kept then (waking it would be a change): that save is stored too, its `connector_subscription` reads
+          `failed` with `reason_code: attach_failed`, and the subscription itself stays as it was.
         - A `connector` poll trigger whose only change is its `connector.schedule` goes on from where the check was, so
           nothing that happened meanwhile is lost; another connector, trigger or parameters take a new first check. The
           place is kept in the memory of the node that handles the edit, for two minutes. An edit that lands while the
