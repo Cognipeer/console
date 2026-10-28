@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({ safeFetch: vi.fn() }));
-vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: hoisted.safeFetch }));
+vi.mock('@/lib/security/outboundFetch', () => ({
+  safeFetch: hoisted.safeFetch,
+  readResponseText: vi.fn(async (response: { text: () => Promise<string> }) => response.text()),
+  ResponseTooLargeError: class ResponseTooLargeError extends Error {},
+}));
 
 import type { ITool } from '@/lib/database';
 import { executeToolAction } from '@/lib/services/tools/toolService';
@@ -14,12 +18,16 @@ const tool = {
   actions: [{ key: 'do', name: 'do', executionType: 'mcp_call', mcpToolName: 'do' }],
 } as unknown as ITool;
 
-const reply = (result: unknown) => ({
-  ok: true,
-  status: 200,
-  headers: new Headers({ 'content-type': 'application/json' }),
-  json: async () => ({ jsonrpc: '2.0', id: 1, result }),
-});
+const reply = (result: unknown) => {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, result });
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'content-type': 'application/json' }),
+    json: async () => JSON.parse(body),
+    text: async () => body,
+  };
+};
 
 beforeEach(() => vi.clearAllMocks());
 
