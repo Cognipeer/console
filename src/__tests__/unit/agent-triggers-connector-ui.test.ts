@@ -16,9 +16,14 @@ import { MantineProvider } from '@mantine/core';
 import { I18nProvider } from '@/lib/i18n';
 import { ConfirmProvider } from '@/components/common/confirm';
 import AgentTriggersPanel from '@/components/agents/studio/AgentTriggersPanel';
+import { messages } from '@/lib/i18n/messages';
 
 const catalog = vi.hoisted(() => ({
   available: true,
+  /** The first answer of the catalog is on its way. */
+  loading: false,
+  /** Not available because this person may not read the project's connectors (a 403), not because the module is off. */
+  forbidden: false,
   connectors: [] as unknown[],
 }));
 
@@ -161,6 +166,12 @@ const retiredRow = () => ({
   },
 });
 const listOf = (...rows: unknown[]) => routes.push((url, method) => (method === 'GET' && /\/triggers(?:\?|$)/.test(url) ? json({ data: rows }) : null));
+
+/** The sentences of the editor, as the reader's language has them. */
+const words = (locale: 'en' | 'tr' = 'en') => messages[locale].agents.triggers;
+const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+/** The line under a filter row's path field: where the conversion marks a rule that matches nothing or everything. */
+const hintUnder = (input: HTMLInputElement) => input.closest('[class*="InputWrapper-root"]')?.querySelector('[class*="InputWrapper-error"]')?.textContent ?? null;
 
 const panel = () => h(AgentTriggersPanel, {
   agentId: 'a1', agentName: 'Support', versions: [], declaredVariables: [{ name: 'region', type: 'string' }], onShowRuns: () => undefined,
@@ -374,7 +385,8 @@ describe('a retired vendor webhook trigger', () => {
     expect(text()).toContain('payload.draft, payload.number, payload.repository');
     expect(text()).toContain('use Preview on the Test tab');
     // A rule on the carried-over payload path is shown as it is, not marked: only headers / preset can never match.
-    expect(text()).not.toContain('no headers or preset: this rule never matches');
+    expect(text()).not.toContain(words().convertRowHint);
+    expect(text()).not.toContain(words().convertRowAlwaysHint);
   });
 
   it('marks the carried-over rules on headers or preset, keeps them, and sends them unchanged when saved', async () => {
@@ -390,7 +402,7 @@ describe('a retired vendor webhook trigger', () => {
     await click(button('Convert to connector trigger'));
     const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
     expect(paths.map((input) => input.value)).toEqual(['headers.x-github-event', 'payload.sender.type']);
-    expect(text().match(/A connector event has no headers or preset: this rule never matches\./g)).toHaveLength(1);
+    expect(occurrences(text(), words().convertRowHint)).toBe(1);
     await click(button('Pick GitHub pull requests'));
     await click(button('Save trigger'));
     const patch = calls.find((call) => call.method === 'PATCH')!;
@@ -418,9 +430,9 @@ describe('a retired vendor webhook trigger', () => {
     mount(panel());
     await flush();
     await click(button('Convert to connector trigger'));
-    const never = 'A connector event has no headers or preset: this rule never matches.';
-    const always = 'A connector event has no headers and its preset is always “connector”: this rule matches every connector event, so it filters nothing.';
-    const hintUnder = (input: HTMLInputElement) => input.closest('[class*="InputWrapper-root"]')?.querySelector('[class*="InputWrapper-error"]')?.textContent ?? null;
+    const never = words().convertRowHint;
+    const always = words().convertRowAlwaysHint;
+    expect(never).not.toBe(always);
     const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
     expect(paths.map(hintUnder)).toEqual([never, never, never, always, never, always, never, always, null]);
     // Nothing is dropped behind the user's back: all nine rows are sent as they were.
@@ -442,6 +454,37 @@ describe('a retired vendor webhook trigger', () => {
     typeInto(document.querySelector<HTMLInputElement>('input[aria-label="Value"]')!, 'connector');
     expect(text()).toContain('this rule matches every connector event, so it filters nothing.');
     expect(text()).not.toContain('this rule never matches.');
+  });
+
+  it('says of a rule on the preset what a connector event does have: no headers, and the preset “connector”, so the rule never matches', async () => {
+    const row = retiredRow();
+    row.webhook.filter = [
+      { path: 'preset', op: 'eq', value: 'github' },
+      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
+    ];
+    listOf(row);
+    mount(panel());
+    await flush();
+    await click(button('Convert to connector trigger'));
+    const hints = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')].map(hintUnder);
+    // One sentence for both: the event has no headers and its preset is “connector”. It does not claim there is no preset.
+    const never = 'A connector event has no headers and its preset is always “connector”: this rule never matches.';
+    expect(hints).toEqual([never, never]);
+    expect(hints[0]).not.toMatch(/no headers or preset/);
+    expect(words().convertRowHint).toBe(never);
+  });
+
+  it('says it in Turkish too: the preset is “connector”, it is not missing', async () => {
+    const row = retiredRow();
+    row.webhook.filter = [{ path: 'preset', op: 'eq', value: 'github' }];
+    listOf(row);
+    mount(panel(), 'tr');
+    await flush();
+    await click(button('Bağlayıcı tetikleyiciye dönüştür'));
+    const never = 'Bağlayıcı olayında başlık (header) yoktur ve hazır ayarı (preset) her zaman “connector”dır: bu kural hiçbir zaman eşleşmez.';
+    expect([...document.querySelectorAll<HTMLInputElement>(`input[aria-label="${words('tr').webhookFilterPath}"]`)].map(hintUnder)).toEqual([never]);
+    expect(words('tr').convertRowHint).toBe(never);
+    expect(never).not.toContain('hazır ayar yoktur');
   });
 
   it('shows neither the conversion notice nor a mark in a plain edit of a connector trigger or a new one', async () => {

@@ -3423,7 +3423,7 @@ export const tr: typeof en = {
       retiredNotice: 'Bu webhook, kaldırılmış bir servis hazır ayarını kullandığı için artık olay almıyor. Burada kaydetmek onu yeni bir URL ve gizli anahtarla genel bir webhook olarak yeniden oluşturur. Servisi korumak için listeden bağlayıcı tetikleyiciye dönüştürün.',
       convert: 'Bağlayıcı tetikleyiciye dönüştür',
       convertNotice: 'Aşağıdaki filtre satırları, istem ve değişkenler servisin kendi webhook\'u için yazılmıştı ve olduğu gibi korundu. Bağlayıcı olayı farklıdır: verisi bağlayıcı paketinin kendi verisidir (GitHub için payload.draft, payload.number, payload.repository; payload.pull_request.… değil), başlık (header) içermez ve olay adları pull_request.opened gibidir. Olayda bulunmayan bir yola bakan kural hiçbir şeyle eşleşmez; bu yüzden her birini bağlayıcının örneğiyle karşılaştırın, sonra kaydedip Test sekmesinde Önizleme\'yi kullanın.',
-      convertRowHint: 'Bağlayıcı olayında başlık (header) ve hazır ayar yoktur: bu kural hiçbir zaman eşleşmez.',
+      convertRowHint: 'Bağlayıcı olayında başlık (header) yoktur ve hazır ayarı (preset) her zaman “connector”dır: bu kural hiçbir zaman eşleşmez.',
       convertRowAlwaysHint: 'Bağlayıcı olayında başlık (header) yoktur ve hazır ayarı (preset) her zaman “connector”dır: bu kural her bağlayıcı olayıyla eşleşir, bu yüzden hiçbir şeyi filtrelemez.',
       kindConnectorWebhook: 'Bağlayıcı · servis olayları iletir (webhook)',
       kindConnectorPoll: 'Bağlayıcı · zamanlamayla yoklanır (poll)',

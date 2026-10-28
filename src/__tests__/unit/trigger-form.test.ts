@@ -456,6 +456,23 @@ describe('strings', () => {
     }
   });
 
+  it('the hint under a rule that never matches names what a connector event does carry, in both languages: no headers, and the preset “connector”', () => {
+    // `preset eq github` is in the group of rules that match nothing: a connector event has a preset, and it is not github.
+    expect(rowsOnWebhookOnlyData([{ path: 'preset', op: 'eq', value: 'github' }])).toEqual({ never: [0], always: [] });
+    const en = at(messages.en, 'agents.triggers');
+    const tr = at(messages.tr, 'agents.triggers');
+    expect(en.convertRowHint).toBe('A connector event has no headers and its preset is always “connector”: this rule never matches.');
+    expect(tr.convertRowHint).toBe('Bağlayıcı olayında başlık (header) yoktur ve hazır ayarı (preset) her zaman “connector”dır: bu kural hiçbir zaman eşleşmez.');
+    // It does not say the event has no preset (it has one), nor does its twin for the rules that match everything.
+    expect(en.convertRowHint).not.toMatch(/no headers or preset/);
+    expect(tr.convertRowHint).not.toMatch(/ve hazır ayar yoktur/);
+    for (const strings of [en, tr]) {
+      expect(strings.convertRowHint).toContain('“connector”');
+      expect(strings.convertRowAlwaysHint).toContain('“connector”');
+      expect(strings.convertRowHint).not.toBe(strings.convertRowAlwaysHint);
+    }
+  });
+
   it('the editor’s strings no longer carry the vendor presets, except the names a retired trigger is listed under', () => {
     for (const locale of ['en', 'tr'] as const) {
       const vendor = Object.keys(at(messages[locale], 'agents.triggers')).filter((key) => /github|gitlab|azure|ado/i.test(key));
