@@ -164,6 +164,7 @@ describe('with OCR on and the local engine', () => {
     const options = optionsOf();
     expect(options.fileName).toBe('scan.pdf');
     expect(options).not.toHaveProperty('images');
+    expect(options).toMatchObject({ imageMetadata: false, imageTextHeading: false });
     expect(options.ocr).toMatchObject({
       provider: 'tesseract',
       lang: 'tur+eng',

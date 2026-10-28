@@ -92,6 +92,10 @@ export interface OcrOptions {
 export interface DetailedConversionOptions {
   fileName?: string;
   images?: 'inline' | 'placeholder' | 'omit';
+  /** Image files: the `ImageSize:` / `Format:` lines (default true). */
+  imageMetadata?: boolean;
+  /** Image files: the `## Extracted Text` heading over the OCR text (default true). */
+  imageTextHeading?: boolean;
   ocr?: OcrOptions;
 }
 

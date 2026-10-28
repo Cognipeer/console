@@ -421,6 +421,9 @@ async function ocrResult(
       const options: DetailedConversionOptions = {
         fileName: req.fileName,
         ...(req.images && req.images !== 'inline' ? { images: req.images } : {}),
+        // An image read with OCR is its text: no size and format lines, no heading in front of it.
+        imageMetadata: false,
+        imageTextHeading: false,
         ocr: backend.options,
       };
       // A library that has `convertToMarkdownDetailed` reads a presentation from memory: no working file to take turns for.
