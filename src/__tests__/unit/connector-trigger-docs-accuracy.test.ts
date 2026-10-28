@@ -292,6 +292,44 @@ describe('the OpenAPI document, connector triggers', () => {
     expect(Object.keys(schemas.AgentTriggerWebhookSecret.properties)).toEqual(expect.arrayContaining(['connector_subscription', 'previous_valid_until']));
   });
 
+  it('states what a hook set up by hand, a shared poll, an edit and a lost connection do, in the guide and in the schema', () => {
+    const subscription = schemas.ConnectorSubscription.properties;
+    const patch = flat(openapi.paths['/agents/{agentKey}/triggers/{triggerId}'].patch.description);
+    const rotate = flat(openapi.paths['/agents/{agentKey}/triggers/{triggerId}/webhook/rotate-secret'].post.description);
+    const retry = flat(openapi.paths['/agents/{agentKey}/triggers/{triggerId}/connector/retry'].post.description);
+    const status = flat(subscription.status.description);
+    const section = flat(connectorSection());
+
+    // An account that is gone: a hook set up by hand goes on receiving; one that waited for the account reads `account`.
+    for (const text of [section, status]) {
+      expect(text).not.toContain('it stays `manual` with `reason_code: account` and goes on receiving');
+      expect(text).toContain('`manual` with `reason_code: account`');
+      expect(text).toContain('`no_subscribe`');
+    }
+    expect(section).toContain('goes on receiving when the connector\'s account is disconnected');
+    expect(section).toContain('A hook the package cannot register at all keeps `no_subscribe`');
+    expect(status).toContain('goes on receiving when the connector\'s account is disconnected');
+    expect(status).toContain('keeps its reason');
+    // Several triggers on one poll: the one over a limit misses events, and the last error names it.
+    expect(section).toContain('does not hold the others back');
+    expect(section).toContain('and how many events they missed');
+    expect(flat(subscription.last_error.description)).toContain('"and N more"');
+    // An edit of a poll's schedule: where it can fail, and the page that can run twice.
+    expect(section).toContain('reaches another node, or comes after more than two minutes');
+    for (const text of [section, patch]) expect(text).toContain('can run that page\'s events once more');
+    // A save that keeps the binding while the module is off.
+    expect(section).toContain('the answer\'s `connector_subscription` is the subscription as it is stored');
+    expect(patch).toContain('is accepted even while the Connectors licence or switch');
+    // A rotation that stopped half way, the earlier secret of a hook that gets registered, a trigger whose connection is gone.
+    expect(section).toContain('rotating it answers with a new secret to paste');
+    expect(rotate).toContain('the answer carries the new secret');
+    expect(section).toContain('the earlier secret stops at once and `previous_secret_valid_until` reads `null`');
+    expect(flat(subscription.previous_secret_valid_until.description)).toContain('the earlier secret stops at once');
+    expect(section).toContain('reads `failed` with `reason_code: attach_failed`');
+    expect(status).toContain('reads `failed` with `reason_code: attach_failed`');
+    expect(retry).toContain('is bound to a new one');
+  });
+
   it('describes the subscription statuses the way the service uses them', () => {
     const status = flat(schemas.ConnectorSubscription.properties.status.description);
     expect(status).not.toContain('registration or polling failed');

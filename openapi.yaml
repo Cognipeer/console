@@ -3009,6 +3009,14 @@ paths:
         - `callback.secret` is write-only: absent (or the mask `"••••••"`) keeps the stored secret, `""` removes it, a new
           value replaces it; `callback: null` or an empty `callback.url` removes the callback.
         - The prompt, `variables`, `version` and type are checked together again whenever one of them changes.
+        - A `connector` trigger saved with the binding it has (the same connector, trigger, parameters and schedule) keeps
+          its subscription: a new name, prompt, events or `enabled` is accepted even while the Connectors licence or switch,
+          or the Agents service, is off, and `connector_subscription` is the subscription as it is stored. A changed binding
+          is `400 invalid_trigger` on `connector.connector_id` then.
+        - A `connector` poll trigger whose only change is its `connector.schedule` goes on from where the check was, so
+          nothing that happened meanwhile is lost; another connector, trigger or parameters take a new first check. The
+          place is kept in the memory of the node that handles the edit, for two minutes. An edit that lands while the
+          check of the old schedule is handing out a page of events can run that page's events once more.
       operationId: updateAgentTrigger
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
@@ -3302,7 +3310,9 @@ paths:
         A `connector` trigger rotates the signing secret of its subscription through the Connectors module: a
         manually set up webhook gets a new secret (the old one stays accepted for `grace_seconds`, and
         `previous_valid_until` says until when), an automatically registered one is registered again with the new
-        secret and the old one stops at once, whatever `grace_seconds` says. The answer carries `connector_subscription` (with the new `secret` in manual mode and
+        secret and the old one stops at once, whatever `grace_seconds` says (the earlier secret of a hand-set hook stops at once too when the
+        module registers that hook at the vendor later). A hook whose earlier rotation stopped in the middle is handled like a manual one:
+        the answer carries the new secret. The answer carries `connector_subscription` (with the new `secret` in manual mode and
         `previous_secret_valid_until`). A poll trigger has no secret (`400 connector_no_secret`); without the module
         it is `409 connector_triggers_unavailable`.
 
@@ -3413,7 +3423,8 @@ paths:
       summary: Retry a connector trigger's subscription
       description: |-
         Tries the subscription of a `connector` trigger again through the Connectors module: a webhook whose vendor
-        registration failed (or was never possible) is registered again, a paused poll is resumed. The answer is the
+        registration failed (or was never possible) is registered again, a paused poll is resumed, and a trigger whose
+        subscription is gone (`reason_code: attach_failed`) is bound to a new one. The answer is the
         trigger with its current `connector_subscription`. Needs the `agents` permission (Write).
 
         A trigger of another type is `400 trigger_not_connector`. Without the Enterprise Connectors module it is
@@ -30318,7 +30329,7 @@ components:
           type: string
           enum: [active, pending, manual, paused, failed]
           description: >-
-            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again. A hook set up by hand needs no account, so when the connector's account is disconnected it stays `manual` with `reason_code: account` and goes on receiving. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`.
+            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again. A hook set up by hand needs no account to receive, so it goes on receiving when the connector's account is disconnected; one that was waiting for the account (`reason_code` `subscribe_failed`, `unreachable` or `rotate_failed`) then reads `manual` with `reason_code: account`, and connecting the account tries the registration again, while a hook the package cannot register (`no_subscribe`) keeps its reason. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`. A rotation that stopped in the middle ends as `failed` too, and the hook is then handled like one set up by hand: its `setup` steps show and rotating it answers with a new secret. A trigger whose subscription is gone reads `failed` with `reason_code: attach_failed`, and retry binds it again.
         kind:
           type: string
           enum: [webhook, poll]
@@ -30331,7 +30342,7 @@ components:
           type: string
           nullable: true
           description: >-
-            A stable code for `reason` (for example `no_subscribe`, `subscribe_failed`, `rotate_failed`, `account`, `connector_disabled`, `package_missing`, `unreachable`, `attach_failed`), so a client can show it in its own language. Null when the subscription has no reason or the Connectors module sent none.
+            A stable code for `reason` (for example `no_subscribe`, `subscribe_failed`, `rotate_failed`, `account`, `connector_disabled`, `package_missing`, `unreachable`, `attach_failed`), so a client can show it in its own language. `account`: the connector has no connected account (a hook set up by hand goes on receiving). `attach_failed`: the trigger could not be bound to a subscription, or its subscription is gone. Null when the subscription has no reason or the Connectors module sent none.
         callback_url:
           type: string
           nullable: true
@@ -30346,7 +30357,7 @@ components:
           type: integer
           nullable: true
           description: >-
-            Unix seconds until which the secret before the last rotation is still accepted (the `grace_seconds` of that rotation). Only a hook set up by hand has one. It is null when no earlier secret is accepted, and always null for a hook the module registered at the vendor (its old secret stops at once). Every read of the trigger says it until it passes, not only the answer of the rotation.
+            Unix seconds until which the secret before the last rotation is still accepted (the `grace_seconds` of that rotation). Only a hook set up by hand has one. It is null when no earlier secret is accepted, and always null for a hook the module registered at the vendor (its old secret stops at once). When the module registers a hook that was set up by hand at the vendor later (retry, or connecting the account), the earlier secret stops at once and this is null. Every read of the trigger says it until it passes, not only the answer of the rotation.
         auto_registered:
           type: boolean
         schedule:
@@ -30369,6 +30380,8 @@ components:
         last_error:
           type: string
           nullable: true
+          description: >-
+            The last error of the subscription: a poll that failed, a registration that failed or, on a poll that several triggers share, the agent triggers (up to three, then "and N more") that were over a run limit and missed events because the check moved on without them, with how many events.
         setup:
           type: string
           nullable: true
