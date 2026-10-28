@@ -419,11 +419,11 @@ export function connectorTriggerLabel(
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
 
 /**
- * Does this save empty the schedule of the poll trigger it edits: the same connector and trigger as the stored one, which has a
- * schedule, and nothing left in the cron field? (A webhook-kind trigger has no schedule, and a trigger moved to another one starts
- * from that one's own.)
+ * Is the form still on the poll trigger that is stored: the same connector and trigger, and the stored one has a schedule? An empty
+ * cron field there has to be said (`schedule: null`), since an omitted schedule keeps the stored one. (A webhook-kind trigger has no
+ * schedule, and a trigger moved to another one starts from that one's own.)
  */
-function clearsStoredSchedule(picked: ConnectorTriggerFormValue, stored: TriggerRow | null | undefined): boolean {
+function isStoredPoll(picked: ConnectorTriggerFormValue, stored: TriggerRow | null | undefined): boolean {
     return stored?.type === 'connector'
         && Boolean(stored.connector.schedule)
         && stored.connector.connector_id === picked.connectorId
@@ -496,7 +496,7 @@ export function typeBodyFromForm(
                         // `null` returns it to the package's own schedule, in UTC.
                         ...(cron
                             ? { schedule: { cron, timezone: picked.scheduleTimezone || form.timezone } }
-                            : clearsStoredSchedule(picked, stored) ? { schedule: null } : {}),
+                            : isStoredPoll(picked, stored) ? { schedule: null } : {}),
                         filter: filter.rules,
                         include_payload: form.webhookIncludePayload,
                     },
