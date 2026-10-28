@@ -1,13 +1,15 @@
 /**
  * The crawl job runner and the single-page fetch hand the crawl engine the extraction bridge, only for a plan whose
- * OCR is on.
+ * OCR is on and only when the installed converter has the extraction API (3.6): an older one keeps the crawler's own
+ * OCR path.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { crawlMock, findCrawlerByKey } = vi.hoisted(() => ({
+const { crawlMock, findCrawlerByKey, detailedApi } = vi.hoisted(() => ({
   crawlMock: vi.fn(),
   findCrawlerByKey: vi.fn(),
+  detailedApi: vi.fn(),
 }));
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
@@ -19,6 +21,10 @@ vi.mock('@/lib/services/crawler/crawlerWebhook', () => ({ sendCrawlerWebhook: vi
 vi.mock('@/lib/services/crawler/crawlerRagBridge', () => ({ ingestCrawlPage: vi.fn() }));
 vi.mock('@/lib/core/cluster', () => ({ routeInstanceCall: vi.fn(), queueNameFor: vi.fn() }));
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn() }));
+vi.mock('@/lib/services/extraction/toMarkdownApi', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/extraction/toMarkdownApi')>()),
+  getConvertToMarkdownDetailed: detailedApi,
+}));
 vi.mock('@/lib/services/crawler/engine', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/crawler/engine')>()),
   crawl: crawlMock,
@@ -46,6 +52,7 @@ describe('crawl job runner — OCR bridge', () => {
     db.updateCrawlJob.mockResolvedValue(null);
     db.finalizeCrawlJob.mockResolvedValue({} as never);
     crawlMock.mockReset();
+    detailedApi.mockReset().mockReturnValue(vi.fn());
     noPages();
   });
 
@@ -75,6 +82,16 @@ describe('crawl job runner — OCR bridge', () => {
     expect(deps.ocrConversionTimeoutMs).toBeGreaterThan(60_000);
   });
 
+  it('keeps the crawler\'s own OCR path when the installed converter predates the extraction API', async () => {
+    detailedApi.mockReturnValue(undefined);
+    db.claimCrawlJob.mockResolvedValue(job({ ocr: { enabled: true, modelKey: 'ocr-1' } }) as never);
+    await runCrawlJobLocal(ctx, 'job-1');
+
+    const [receivedPlan, deps] = crawlMock.mock.calls[0];
+    expect(receivedPlan.markdownOptions.ocr).toEqual({ enabled: true, modelKey: 'ocr-1' });
+    expect(Object.keys(deps).sort()).toEqual(['logger', 'signal']);
+  });
+
   it.each([
     ['no markdown options', undefined],
     ['OCR switched off', { ocr: { enabled: false, modelKey: 'ocr-1' } }],
@@ -91,6 +108,7 @@ describe('crawl job runner — OCR bridge', () => {
 describe('fetchPageWithCrawler — OCR bridge', () => {
   beforeEach(() => {
     crawlMock.mockReset();
+    detailedApi.mockReset().mockReturnValue(vi.fn());
     noPages();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue({
       switchToTenant: vi.fn().mockResolvedValue(undefined),
