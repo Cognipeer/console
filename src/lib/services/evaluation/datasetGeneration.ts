@@ -16,6 +16,7 @@ import { getDatabase } from '@/lib/database';
 import type { IEvaluationDatasetItem } from '@/lib/database';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
+import { kbCallerForActor } from './kbCaller';
 
 const logger = createLogger('eval-dataset-gen');
 
@@ -36,6 +37,12 @@ export interface GenerateDatasetItemsParams {
   count?: number;
   /** Optional natural-language hint, e.g. "Turkish" or "English". */
   language?: string;
+  /**
+   * Who the dataset is generated for. From a knowledge base with access control
+   * only what this person may read is used; with no such person (or an actor that
+   * is not a user), only what is open to everyone.
+   */
+  createdBy?: string;
 }
 
 export interface GenerateDatasetItemsResult {
@@ -82,9 +89,21 @@ async function gatherBlocks(params: GenerateDatasetItemsParams): Promise<string[
   const ragModule = await db.findRagModuleByKey(source.ragModuleKey, params.projectId);
   if (!ragModule) throw new Error(`RAG module "${source.ragModuleKey}" not found`);
 
-  const documents = await db.listRagDocuments(source.ragModuleKey, {
+  let documents = await db.listRagDocuments(source.ragModuleKey, {
     projectId: params.projectId,
   });
+  if (ragModule.access?.enabled === true) {
+    // A knowledge base with access control: only the documents the dataset's creator may read.
+    // Imported here so the access engine loads only when a knowledge base needs it.
+    const { resolveRagAccess } = await import('@/lib/services/rag/access');
+    const scope = await resolveRagAccess({
+      tenantDbName: params.tenantDbName,
+      tenantId: params.tenantId,
+      module: ragModule,
+      caller: kbCallerForActor(params.createdBy),
+    });
+    if (scope.enforced) documents = documents.filter((doc) => scope.canReadDocument(doc));
+  }
   const blocks: string[] = [];
   for (const doc of documents) {
     const docId = String(doc._id);

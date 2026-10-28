@@ -37,6 +37,7 @@ import { calculateCost } from '@/lib/services/models/usageLogger';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationTarget, IModelPricing } from '@/lib/database';
 import { selectorForStoredDefault, type AgentRunSelector } from '@/lib/services/agents/agentRevision';
+import { kbCallerForActor } from './kbCaller';
 import type {
   DatasetItem,
   EmbedInvoker,
@@ -52,7 +53,7 @@ export interface EvaluationModelContext {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
-  /** Actor running the suite — required for agent targets. */
+  /** Actor running the suite — required for agent targets; a retrieval target reads a knowledge base as this person. */
   userId?: string;
 }
 
@@ -553,13 +554,14 @@ export function buildTargetInvoker(
       // (document conversion, vector providers, rerankers) is heavy and should
       // not load just because the evaluation engine was imported.
       const { queryRag } = await import('@/lib/services/rag/ragService');
+      // A knowledge base with access control answers with what the person running the suite may read.
       const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId || undefined, {
         ragModuleKey: target.ragModuleKey,
         query: toUserMessage(item),
         topK: target.retrievalTopK,
         minScore: target.retrievalMinScore,
         includeContent: true,
-      });
+      }, { caller: kbCallerForActor(ctx.userId) });
       const retrieved: RetrievedChunk[] = result.matches.map((match, index) => ({
         id: match.id,
         score: match.score,

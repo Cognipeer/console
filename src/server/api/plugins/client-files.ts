@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
@@ -34,6 +34,7 @@ import {
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import { isUploadMetadata, sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
+import { ragFileGuard, withoutHiddenFiles } from '../ragOwnedResources';
 import { refuseSessionLinked, sendClientListUnavailable, sendClientSessionRefusal, type SessionActor } from './agent-session-access';
 import { listVisibleFiles, sessionOfFile, sessionRefusedForUpload } from './session-linked-files';
 
@@ -45,6 +46,13 @@ const actorOf = (ctx: { tenantDbName: string; projectId: string; tokenRecord: { 
 });
 
 const logger = createLogger('api:client-files');
+
+/**
+ * The objects of a knowledge base with access control are read through the knowledge base: an API token never
+ * administers one, so for a client those objects are not there. See `ragOwnedResources`.
+ */
+const kbFilesOf = (request: FastifyRequest, ctx: { tenantDbName: string; tenantId: string; projectId: string }) =>
+  ragFileGuard(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId });
 
 /** The most the `X-File-Metadata` header carries: clients read at most 16 KB of response headers, all of them together. */
 const FILE_METADATA_HEADER_MAX_CHARS = 8 * 1024;
@@ -147,20 +155,21 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
       // The files a session holds are the session's: those of somebody else's session the token's owner may not
       // view are left out, and the page is filled from the following reads rather than cut short (a caller who
-      // may view every session costs one plain read and no lookup).
+      // may view every session costs one plain read and no lookup). The objects of a knowledge base with access
+      // control are left out the same way.
       const limit = query.limit ? Number.parseInt(query.limit, 10) : 50;
       const visible = await listVisibleFiles(request, {
         cursor: query.cursor || undefined,
         limit: Number.isInteger(limit) && limit > 0 ? limit : 50,
         actor: actorOf(ctx),
-        read: (cursor, size) => listFiles(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+        read: withoutHiddenFiles(kbFilesOf(request, ctx), (cursor, size) => listFiles(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
           bucketKey,
           cursor,
           limit: size,
           search: query.search,
           ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
           ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
-        }),
+        })),
       });
       return reply.code(200).send({
         count: visible.items.length,
@@ -294,6 +303,8 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       if (!file) {
         return reply.code(404).send({ error: 'File not found' });
       }
+      // A file of a knowledge base with access control is not there for a client: it is read through the knowledge base.
+      await kbFilesOf(request, ctx).assertVisible(file);
       // A file a session holds is read as the session it belongs to.
       const refusal = await refuseSessionLinked(request, sessionOfFile(file), 'view', { actor: actorOf(ctx) });
       if (refusal) return sendClientSessionRefusal(reply, request, refusal);
@@ -343,8 +354,10 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid variant. Must be "original" or "markdown"' });
       }
 
-      // A file a session holds is read as the session it belongs to.
+      // A file a session holds is read as the session it belongs to, and a file of a knowledge base with access
+      // control is not there for a client.
       const wanted = await getFileRecord(ctx.tenantDbName, ctx.tenantId, ctx.projectId, bucketKey, objectKey);
+      await kbFilesOf(request, ctx).assertVisible(wanted);
       const refusal = await refuseSessionLinked(request, sessionOfFile(wanted), 'view', { actor: actorOf(ctx) });
       if (refusal) return sendClientSessionRefusal(reply, request, refusal);
 

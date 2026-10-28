@@ -9,6 +9,7 @@ import type {
   IRagDocument,
   IRagChunk,
   IRagQueryLog,
+  RagDocumentAccessFilter,
   RagDocumentListFilters,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
@@ -19,6 +20,28 @@ const SCORE_BUCKET_LABELS = Array.from({ length: 11 }, (_, i) => (i / 10).toFixe
 
 /** Exclusive upper bound, so an exact 1.0 still lands in the last bucket. */
 const SCORE_BUCKET_UPPER = 1.0001;
+
+/**
+ * Every `rag_documents` column except `sourceText`, for the reads that must not
+ * pull a document's full text off disk (SQLite leaves a column it is not asked
+ * for in its overflow pages). Keep in step with the table in `schema.ts`.
+ */
+const RAG_DOCUMENT_COLUMNS_WITHOUT_TEXT = [
+  'id', 'tenantId', 'projectId', 'ragModuleKey', 'fileKey', 'fileBucketKey', 'fileProviderKey',
+  'chunkConfig', 'sourceTextKey', 'sourceHash', 'fileName', 'contentType', 'size', 'status',
+  'chunkCount', 'errorMessage', 'lastIndexedAt', 'folderId', 'aclMode', 'aclManaged',
+  'metadata', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
+].join(', ');
+
+/** The distinct, non-empty strings of `values`. */
+function distinctStrings(values: readonly unknown[]): string[] {
+  return [...new Set(values.filter((v): v is string => typeof v === 'string' && v.length > 0))];
+}
+
+/** A list handed to SQL as one JSON array: no bound variable per element, so no variable limit. */
+function jsonList(values: readonly string[]): string {
+  return JSON.stringify(values);
+}
 
 export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class RagOps extends Base {
@@ -36,14 +59,14 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         (id, tenantId, projectId, key, name, description,
          embeddingModelKey, vectorProviderKey, vectorIndexKey, fileBucketKey, fileProviderKey,
          chunkConfig, status, rerankerKey, rerankerOversample, defaultTopK, defaultMinScore, responseDetail,
-         defaultFilter, filterableFields, hybrid, isolateByModule,
+         defaultFilter, filterableFields, hybrid, isolateByModule, access, aclRevision,
          reindexRequired, activeReindexRunKey, lastReindexAt,
          totalDocuments, totalChunks, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description,
          @embeddingModelKey, @vectorProviderKey, @vectorIndexKey, @fileBucketKey, @fileProviderKey,
          @chunkConfig, @status, @rerankerKey, @rerankerOversample, @defaultTopK, @defaultMinScore, @responseDetail,
-         @defaultFilter, @filterableFields, @hybrid, @isolateByModule,
+         @defaultFilter, @filterableFields, @hybrid, @isolateByModule, @access, @aclRevision,
          @reindexRequired, @activeReindexRunKey, @lastReindexAt,
          @totalDocuments, @totalChunks, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
@@ -70,6 +93,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         filterableFields: ragModule.filterableFields ? this.toJson(ragModule.filterableFields) : null,
         hybrid: ragModule.hybrid ? this.toJson(ragModule.hybrid) : null,
         isolateByModule: ragModule.isolateByModule === undefined ? null : this.toBoolInt(ragModule.isolateByModule),
+        access: ragModule.access ? this.toJson(ragModule.access) : null,
+        aclRevision: typeof ragModule.aclRevision === 'number' ? ragModule.aclRevision : null,
         reindexRequired: ragModule.reindexRequired === undefined ? null : this.toBoolInt(ragModule.reindexRequired),
         activeReindexRunKey: ragModule.activeReindexRunKey ?? null,
         lastReindexAt: ragModule.lastReindexAt ? ragModule.lastReindexAt.toISOString() : null,
@@ -123,6 +148,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         ['filterableFields', () => (data.filterableFields ? this.toJson(data.filterableFields) : null)],
         ['hybrid', () => (data.hybrid ? this.toJson(data.hybrid) : null)],
         ['isolateByModule', () => (data.isolateByModule === undefined ? null : this.toBoolInt(data.isolateByModule))],
+        // Document-level access control: clearing it turns the feature off again.
+        // (`aclRevision` is deliberately not here: only bumpRagModuleAclRevision
+        // moves it, so a write-back of a stale module row cannot lose a bump.)
+        ['access', () => (data.access ? this.toJson(data.access) : null)],
       ] as const;
       for (const [column, value] of clearable) {
         if (!Object.hasOwn(data, column)) continue;
@@ -160,6 +189,21 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
     async deleteRagModule(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       return db.prepare(`DELETE FROM ${TABLES.ragModules} WHERE id = @id`).run({ id }).changes > 0;
+    }
+
+    /** One statement, so two replicas bumping at once both count (SQLite serialises writers). */
+    async bumpRagModuleAclRevision(ragModuleKey: string, projectId?: string): Promise<void> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['key = @key'];
+      const params: Record<string, unknown> = { key: ragModuleKey };
+      if (projectId !== undefined) {
+        const scopeFilter = this.buildProjectScopeFilter(projectId);
+        clauses.push(scopeFilter.clause);
+        Object.assign(params, scopeFilter.params);
+      }
+      db.prepare(
+        `UPDATE ${TABLES.ragModules} SET aclRevision = COALESCE(aclRevision, 0) + 1 WHERE ${clauses.join(' AND ')}`,
+      ).run(params);
     }
 
     async findRagModuleById(id: string): Promise<IRagModule | null> {
@@ -223,11 +267,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         INSERT INTO ${TABLES.ragDocuments}
         (id, tenantId, projectId, ragModuleKey, fileKey, fileBucketKey, fileProviderKey,
          fileName, contentType, size, status, chunkCount, errorMessage, lastIndexedAt,
-         chunkConfig, sourceText, sourceTextKey, sourceHash, metadata,
+         chunkConfig, sourceText, sourceTextKey, sourceHash, folderId, aclMode, aclManaged, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @ragModuleKey, @fileKey, @fileBucketKey, @fileProviderKey,
          @fileName, @contentType, @size, @status, @chunkCount, @errorMessage, @lastIndexedAt,
-         @chunkConfig, @sourceText, @sourceTextKey, @sourceHash, @metadata,
+         @chunkConfig, @sourceText, @sourceTextKey, @sourceHash, @folderId, @aclMode, @aclManaged, @metadata,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -248,6 +292,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         sourceText: doc.sourceText ?? null,
         sourceTextKey: doc.sourceTextKey ?? null,
         sourceHash: doc.sourceHash ?? null,
+        folderId: doc.folderId ?? null,
+        aclMode: doc.aclMode ?? null,
+        aclManaged: doc.aclManaged ?? null,
         metadata: this.toJson(doc.metadata ?? {}),
         createdBy: doc.createdBy,
         updatedBy: doc.updatedBy ?? null,
@@ -288,6 +335,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         ['sourceText', () => data.sourceText ?? null],
         ['sourceTextKey', () => data.sourceTextKey ?? null],
         ['sourceHash', () => data.sourceHash ?? null],
+        // Moving a document back to the top level, or back to "inherit", is an
+        // explicit `undefined` too.
+        ['folderId', () => data.folderId ?? null],
+        ['aclMode', () => data.aclMode ?? null],
+        ['aclManaged', () => data.aclManaged ?? null],
       ] as const;
       for (const [column, value] of clearableDoc) {
         if (!Object.hasOwn(data, column)) continue;
@@ -303,7 +355,17 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async deleteRagDocument(id: string): Promise<boolean> {
       const db = this.getTenantDb();
-      return db.prepare(`DELETE FROM ${TABLES.ragDocuments} WHERE id = @id`).run({ id }).changes > 0;
+      const remove = db.transaction((documentId: string) => {
+        // The permission entries that sat on this document go with it (the
+        // module key narrows the delete to the entries index).
+        db.prepare(
+          `DELETE FROM ${TABLES.ragAclEntries}
+           WHERE nodeType = 'document' AND nodeId = @id
+             AND ragModuleKey IN (SELECT ragModuleKey FROM ${TABLES.ragDocuments} WHERE id = @id)`,
+        ).run({ id: documentId });
+        return db.prepare(`DELETE FROM ${TABLES.ragDocuments} WHERE id = @id`).run({ id: documentId }).changes > 0;
+      });
+      return remove(id);
     }
 
     async findRagDocumentById(id: string): Promise<IRagDocument | null> {
@@ -333,21 +395,33 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       return row ? this.mapDocRow(row) : null;
     }
 
+    async listRagDocumentsByFileName(
+      ragModuleKey: string,
+      fileName: string,
+      projectId?: string,
+    ): Promise<IRagDocument[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['ragModuleKey = @ragModuleKey', 'fileName = @fileName'];
+      const params: Record<string, unknown> = { ragModuleKey, fileName };
+
+      if (projectId !== undefined) {
+        const scopeFilter = this.buildProjectScopeFilter(projectId);
+        clauses.push(scopeFilter.clause);
+        Object.assign(params, scopeFilter.params);
+      }
+
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC, rowid DESC`,
+      ).all(params) as SqliteRow[];
+      return rows.map((row) => this.mapDocRow(row));
+    }
+
     async listRagDocuments(
       ragModuleKey: string,
       filters?: RagDocumentListFilters,
     ): Promise<IRagDocument[]> {
       const db = this.getTenantDb();
-      const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
-      const params: Record<string, unknown> = { ragModuleKey };
-
-      if (filters?.projectId !== undefined) {
-        const scopeFilter = this.buildProjectScopeFilter(filters.projectId);
-        clauses.push(scopeFilter.clause);
-        Object.assign(params, scopeFilter.params);
-      }
-      if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
-      if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
+      const { clauses, params } = this.buildRagDocumentListWhere(ragModuleKey, filters);
 
       // rowid breaks createdAt ties so a page boundary never repeats or drops a row.
       let paging = '';
@@ -365,15 +439,16 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
     async countRagDocuments(
       ragModuleKey: string,
       projectId?: string,
-      filters?: Pick<RagDocumentListFilters, 'status' | 'search'>,
+      filters?: Pick<RagDocumentListFilters, 'status' | 'search' | 'folderId' | 'ids' | 'access' | 'withUnscoped'>,
     ): Promise<number> {
       const db = this.getTenantDb();
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
       const params: Record<string, unknown> = { ragModuleKey };
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
+      this.appendRagDocumentSelectionClauses(clauses, params, filters);
       if (projectId) {
-        const scopeFilter = this.buildProjectScopeFilter(projectId);
+        const scopeFilter = this.buildRagDocumentProjectScope(projectId, filters?.withUnscoped === true);
         clauses.push(scopeFilter.clause);
         Object.assign(params, scopeFilter.params);
       }
@@ -381,6 +456,130 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         `SELECT COUNT(*) as cnt FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow;
       return (row.cnt as number) || 0;
+    }
+
+    /** Same filters and order as `listRagDocuments`, ids only. `limit` is required. */
+    async listRagDocumentIds(
+      ragModuleKey: string,
+      filters: RagDocumentListFilters & { limit: number },
+    ): Promise<string[]> {
+      // LIMIT 0 returns nothing here and "no limit" on MongoDB: make both nothing.
+      if (!(filters.limit > 0)) return [];
+      const db = this.getTenantDb();
+      const { clauses, params } = this.buildRagDocumentListWhere(ragModuleKey, filters);
+      params.limit = Math.floor(filters.limit);
+      params.offset = Math.max(0, Math.floor(filters.offset ?? 0));
+      const rows = db.prepare(
+        `SELECT id FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC, rowid DESC LIMIT @limit OFFSET @offset`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => String(r.id));
+    }
+
+    /**
+     * The documents with these ids, without `sourceText` (the column is not even
+     * read). Ids that do not exist are skipped; the rest come back in the order
+     * the ids were given, each once.
+     */
+    async findRagDocumentsByIds(ids: string[]): Promise<IRagDocument[]> {
+      const wanted = distinctStrings(ids);
+      if (wanted.length === 0) return [];
+      const db = this.getTenantDb();
+      const rows = db.prepare(
+        `SELECT ${RAG_DOCUMENT_COLUMNS_WITHOUT_TEXT} FROM ${TABLES.ragDocuments} WHERE id IN (SELECT value FROM json_each(@ids))`,
+      ).all({ ids: jsonList(wanted) }) as SqliteRow[];
+      const byId = new Map(rows.map((r) => [String(r.id), this.mapDocRow(r)] as const));
+      return wanted.flatMap((id) => {
+        const doc = byId.get(id);
+        return doc ? [doc] : [];
+      });
+    }
+
+    /** The WHERE of `listRagDocuments` / `listRagDocumentIds`: module, project scope, status, search, folder, ids, access. */
+    private buildRagDocumentListWhere(
+      ragModuleKey: string,
+      filters?: RagDocumentListFilters,
+    ): { clauses: string[]; params: Record<string, unknown> } {
+      const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
+      const params: Record<string, unknown> = { ragModuleKey };
+
+      if (filters?.projectId !== undefined) {
+        const scopeFilter = this.buildRagDocumentProjectScope(filters.projectId, filters.withUnscoped === true);
+        clauses.push(scopeFilter.clause);
+        Object.assign(params, scopeFilter.params);
+      }
+      if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
+      if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
+      this.appendRagDocumentSelectionClauses(clauses, params, filters);
+      return { clauses, params };
+    }
+
+    /** A project's rows; with `withUnscoped` also the rows that carry no project. */
+    private buildRagDocumentProjectScope(projectId: string, withUnscoped: boolean): { clause: string; params: Record<string, unknown> } {
+      const scoped = this.buildProjectScopeFilter(projectId);
+      if (!withUnscoped || !projectId.trim()) return scoped;
+      const unscoped = this.buildProjectScopeFilter(undefined);
+      return { clause: `(${scoped.clause} OR ${unscoped.clause})`, params: { ...scoped.params, ...unscoped.params } };
+    }
+
+    /**
+     * Which documents: a folder (or the top level), a set of ids, and/or what an
+     * access scope may read. Lists travel as ONE JSON parameter each
+     * (`json_each(@x)`), so a scope carrying thousands of ids never meets the
+     * bound-variable limit; an empty list matches nothing.
+     */
+    private appendRagDocumentSelectionClauses(
+      clauses: string[],
+      params: Record<string, unknown>,
+      filters?: Pick<RagDocumentListFilters, 'folderId' | 'ids' | 'access'>,
+    ): void {
+      if (!filters) return;
+      if (filters.folderId === null || filters.folderId === '') {
+        clauses.push("(folderId IS NULL OR folderId = '')");
+      } else if (typeof filters.folderId === 'string') {
+        clauses.push('folderId = @folderId');
+        params.folderId = filters.folderId;
+      }
+      if (filters.ids !== undefined) {
+        clauses.push('id IN (SELECT value FROM json_each(@idsJson))');
+        params.idsJson = jsonList(distinctStrings(filters.ids));
+      }
+      if (filters.access) {
+        const clause = this.buildRagAccessClause(filters.access, params);
+        if (clause) clauses.push(clause);
+      }
+    }
+
+    /**
+     * `RagDocumentAccessFilter` as SQL. A document matches when it has its own
+     * ACL and its id is allowed, or it inherits and its folder is allowed, or it
+     * inherits from the top level and the top level is allowed. `negate` inverts
+     * the whole test. Every term is 0/1, never NULL (a NULL aclMode / folderId is
+     * "inherit" / "no folder"), so NOT never drops a row it should keep.
+     * Returns null when there is nothing to add (a negated match-nothing).
+     */
+    private buildRagAccessClause(
+      access: RagDocumentAccessFilter,
+      params: Record<string, unknown>,
+    ): string | null {
+      const terms: string[] = [];
+      const own = distinctStrings(access.ownAllowedIds);
+      if (own.length > 0) {
+        terms.push("(aclMode IS 'own' AND id IN (SELECT value FROM json_each(@accOwnIds)))");
+        params.accOwnIds = jsonList(own);
+      }
+      const folders = distinctStrings(access.inheritFolderIds);
+      if (folders.length > 0) {
+        terms.push(
+          "(aclMode IS NOT 'own' AND folderId IS NOT NULL AND folderId <> '' AND folderId IN (SELECT value FROM json_each(@accFolderIds)))",
+        );
+        params.accFolderIds = jsonList(folders);
+      }
+      if (access.includeTopLevel) {
+        terms.push("(aclMode IS NOT 'own' AND (folderId IS NULL OR folderId = ''))");
+      }
+      if (terms.length === 0) return access.negate ? null : '0';
+      const match = `(${terms.join(' OR ')})`;
+      return access.negate ? `NOT ${match}` : match;
     }
 
     // ── RAG Chunk operations ─────────────────────────────────────────
@@ -662,6 +861,8 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         filterableFields: r.filterableFields ? this.parseJson(r.filterableFields, undefined) : undefined,
         hybrid: r.hybrid ? this.parseJson(r.hybrid, undefined) : undefined,
         isolateByModule: r.isolateByModule === null || r.isolateByModule === undefined ? undefined : this.fromBoolInt(r.isolateByModule),
+        access: r.access ? (this.parseJson<IRagModule['access'] | null>(r.access, null) ?? undefined) : undefined,
+        aclRevision: typeof r.aclRevision === 'number' ? r.aclRevision : undefined,
         reindexRequired: r.reindexRequired === null || r.reindexRequired === undefined ? undefined : this.fromBoolInt(r.reindexRequired),
         activeReindexRunKey: (r.activeReindexRunKey as string | null | undefined) ?? undefined,
         lastReindexAt: r.lastReindexAt ? this.toDate(r.lastReindexAt) : undefined,
@@ -695,6 +896,9 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         sourceText: r.sourceText as string | undefined,
         sourceTextKey: r.sourceTextKey as string | undefined,
         sourceHash: r.sourceHash as string | undefined,
+        folderId: r.folderId ? String(r.folderId) : undefined,
+        aclMode: r.aclMode === 'own' ? 'own' : undefined,
+        aclManaged: r.aclManaged === 'sync' ? 'sync' : undefined,
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,

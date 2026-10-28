@@ -92,6 +92,17 @@ describe('runDatasetGenerationJob', () => {
     expect(last.items).toHaveLength(2);
   });
 
+  it('generates for the dataset creator, so a knowledge base with access control gives only what they may read', async () => {
+    generateDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1' }] });
+
+    await runDatasetGenerationJob({ ...basePayload, source: { type: 'rag', ragModuleKey: 'kb' }, sourceKind: 'rag' });
+
+    expect(generateDatasetItems).toHaveBeenCalledWith(expect.objectContaining({
+      createdBy: 'u1',
+      source: { type: 'rag', ragModuleKey: 'kb' },
+    }));
+  });
+
   it('marks failed and rethrows on generation error', async () => {
     generateDatasetItems.mockRejectedValue(new Error('model down'));
 

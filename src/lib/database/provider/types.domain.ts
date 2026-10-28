@@ -1692,6 +1692,31 @@ export interface RagDocumentListFilters {
   search?: string;
   limit?: number;
   offset?: number;
+  /** Only documents in this folder; `null` = only documents at the top level (no folder). */
+  folderId?: string | null;
+  /** Only these document ids. */
+  ids?: string[];
+  /** Only the documents an access scope may read (or, with `negate`, may not read). */
+  access?: RagDocumentAccessFilter;
+  /**
+   * With a `projectId`: also the module's rows written before documents carried
+   * a project (no project). Lets one query count what a module owns.
+   */
+  withUnscoped?: boolean;
+}
+
+/**
+ * Which documents an access scope may read, in a form both database providers
+ * can evaluate. A document matches when it carries its own ACL and its id is in
+ * `ownAllowedIds`, or it inherits and its folder is in `inheritFolderIds`, or it
+ * inherits, has no folder, and `includeTopLevel` is set. `negate` inverts the
+ * whole test (the documents the scope may NOT read).
+ */
+export interface RagDocumentAccessFilter {
+  ownAllowedIds: string[];
+  inheritFolderIds: string[];
+  includeTopLevel: boolean;
+  negate?: boolean;
 }
 
 /**
@@ -1802,6 +1827,18 @@ export interface IRagModule {
    */
   isolateByModule?: boolean;
   /**
+   * Document-level access control. Absent (or `enabled: false`) means everyone
+   * who can read the module reads every document — the behaviour before access
+   * control existed, and the default.
+   */
+  access?: IRagModuleAccess;
+  /**
+   * Bumped whenever the folder tree or the module root's permissions change.
+   * Access scopes reuse a cached folder tree only while it carries the same
+   * number, so a change is seen by every replica on its next query.
+   */
+  aclRevision?: number;
+  /**
    * Set when chunkConfig or the embedding model changed and the stored vectors
    * no longer match it. Queries keep working against the old vectors until the
    * re-index run finishes.
@@ -1850,6 +1887,12 @@ export interface IRagDocument {
   sourceTextKey?: string;
   /** sha256 of the extracted text — lets a re-ingest skip unchanged content. */
   sourceHash?: string;
+  /** Folder the document sits in; absent = the top level of the module. */
+  folderId?: string;
+  /** 'own': the document carries its own ACL; absent: it inherits from its folder (or the module). */
+  aclMode?: 'own';
+  /** Set when a connector source owns the document's permissions; they are then read-only here. */
+  aclManaged?: RagAclManagedBy;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -1949,6 +1992,144 @@ export interface IRagReindexRun {
   createdBy: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+// ── Knowledge Engine access control ─────────────────────────────────────
+
+/** Document-level access control of one knowledge base. */
+export interface IRagModuleAccess {
+  /** Off by default: everyone who can read the module reads every document. */
+  enabled: boolean;
+  /**
+   * Whether the people who administer the knowledge base read every document in
+   * search, answers, agent tools and document reads. Default true. They always
+   * see every document in the management views, so they can set permissions.
+   */
+  adminBypass?: boolean;
+}
+
+/** Who wrote a folder or permission: absent = people in the console; 'sync' = a connector source. */
+export type RagAclManagedBy = 'sync';
+
+export type RagAclNodeType = 'module' | 'folder' | 'document';
+
+/** The connector source a folder mirrors. */
+export interface IRagFolderSource {
+  kind: 'connector';
+  connectorId: string;
+  sourceId: string;
+  /** The folder's id in the source system. */
+  externalId: string;
+}
+
+/** A folder of a knowledge base. Folders form a tree per module. */
+export interface IRagFolder {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  /** Absent = a top-level folder. */
+  parentId?: string;
+  name: string;
+  /** Ids of the ancestors, top level first. Maintained on create and move. */
+  ancestorIds?: string[];
+  /** 'own': the folder carries its own ACL; absent: it inherits from its parent (or the module). */
+  aclMode?: 'own';
+  aclManaged?: RagAclManagedBy;
+  /** Set when a connector source owns the folder; it is then renamed and moved only by that source. */
+  source?: IRagFolderSource;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/**
+ * One grant of read access on a node (the module root, a folder or a document).
+ * `principal` is a canonical key (see services/rag/access/principals.ts):
+ * `everyone`, `user:<id>`, `group:<id>`, `token:<id>`, `email:<address>`,
+ * `x:<domain>:u:<id>`, `x:<domain>:g:<id>`, `x:<domain>:all`.
+ */
+export interface IRagAclEntry {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  nodeType: RagAclNodeType;
+  /** The module key for the root, else the folder or document id. */
+  nodeId: string;
+  principal: string;
+  /** Display only (a name or an address); never used to decide. */
+  label?: string;
+  managed?: RagAclManagedBy;
+  createdBy?: string;
+  createdAt?: Date;
+}
+
+export type RagIdentityDomainKind = 'entra' | 'qdms' | 'generic';
+
+/**
+ * How a console person is matched to a user of an external directory: the
+ * person's `console` value is compared with the directory user's `external`
+ * value. `attr:<name>` compares with one of the directory user's attributes.
+ */
+export interface IRagIdentityUserMatchRule {
+  console: 'email' | 'externalId';
+  external: 'email' | 'upn' | 'id' | `attr:${string}`;
+}
+
+/** An external identity directory whose users and groups can be granted access (e.g. the Entra tenant behind a SharePoint connector). */
+export interface IRagIdentityDomain {
+  _id?: ObjectId | string;
+  tenantId: string;
+  /** Unique per workspace; appears inside principal keys (`x:<key>:…`). */
+  key: string;
+  kind: RagIdentityDomainKind;
+  label: string;
+  /** Set when a connector maintains the domain; it is then edited only through that connector. */
+  source?: { kind: 'connector'; connectorId: string };
+  /** Ordered; the first rules that find directory users decide. */
+  userMatch: IRagIdentityUserMatchRule[];
+  /** A console group whose externalId equals an external group id stands for that group. Default true. */
+  matchGroupsByExternalId?: boolean;
+  createdBy?: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** One user of an external directory, as an integration last reported it. */
+export interface IRagIdentityUser {
+  _id?: ObjectId | string;
+  tenantId: string;
+  domain: string;
+  /** The user's stable id in the directory. */
+  extId: string;
+  /** Lower-cased. */
+  email?: string;
+  /** Lower-cased. */
+  upn?: string;
+  name?: string;
+  type?: 'member' | 'guest';
+  /** Ids of the external groups the user belongs to, nested ones included. */
+  groups?: string[];
+  /** Extra attributes for `attr:<name>` matching; values lower-cased. At most 16. */
+  attrs?: Record<string, string>;
+  syncRunId?: string;
+  syncedAt?: Date;
+}
+
+/** A hand-made link between an external user or group and a console user or group. */
+export interface IRagIdentityLink {
+  _id?: ObjectId | string;
+  tenantId: string;
+  domain: string;
+  externalKind: 'user' | 'group';
+  externalId: string;
+  consoleKind: 'user' | 'group';
+  consoleId: string;
+  createdBy?: string;
+  createdAt?: Date;
 }
 
 // ── Reranker types ──────────────────────────────────────────────────────

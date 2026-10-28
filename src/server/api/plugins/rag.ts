@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IRagChunkConfig, IRagDocument, IRagModule, RagDocumentStatus } from '@/lib/database';
+import type { IRagChunkConfig, IRagDocument, IRagModule, IUser, RagDocumentStatus } from '@/lib/database';
+import type { IRagReindexRun } from '@/lib/database/provider/types.domain';
 import {
   aggregateRagQueryScoreDistribution,
   countRagQueryLogs,
@@ -14,6 +15,7 @@ import {
   getRagModule,
   ingestDocument,
   ingestFile,
+  listRagDocuments,
   listRagDocumentsPage,
   listRagModules,
   listRagQueryLogs,
@@ -32,8 +34,18 @@ import {
   startRagReindex,
 } from '@/lib/services/rag/ragReindexService';
 import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnswerService';
-import { exportRagModule, importRagModuleJsonl } from '@/lib/services/rag/ragTransfer';
 import {
+  RAG_EXPORT_FORMAT,
+  RAG_EXPORT_VERSION,
+  exportRagModule,
+  importRagModuleJsonl,
+  type RagExportDocumentLine,
+  type RagExportHeader,
+  type RagExportResult,
+} from '@/lib/services/rag/ragTransfer';
+import { loadSourceText } from '@/lib/services/rag/ragSource';
+import {
+  authorizeServiceForRequest,
   readJsonBody,
   requireProjectContextForRequest,
   safeReadJsonBody,
@@ -41,6 +53,10 @@ import {
   serviceActionAllowedForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
+import { canAdministerRagAccess, ragAccessForRequest, sendRagAccessError } from '../ragAccessRequest';
+import { kbIndexShareRefusal } from '../ragOwnedResources';
+import type { RagDocumentPlacementInput } from '@/lib/services/rag/ragAccessService';
+import type { RagAccessScope } from '@/lib/services/rag/access';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:rag');
@@ -132,6 +148,14 @@ const asHybrid: FieldReader<NonNullable<IRagModule['hybrid']>> = (value, field) 
     mode: hybrid.mode === undefined ? undefined : asHybridMode(hybrid.mode, `${field}.mode`),
     alpha,
     k,
+  };
+};
+
+const asAccess: FieldReader<NonNullable<IRagModule['access']>> = (value, field) => {
+  const access = asPlainObject(value, field);
+  return {
+    enabled: asBoolean(access.enabled, `${field}.enabled`),
+    ...(access.adminBypass === undefined ? {} : { adminBypass: asBoolean(access.adminBypass, `${field}.adminBypass`) }),
   };
 };
 
@@ -232,8 +256,102 @@ export function readRagModuleUpdateFields(
     responseDetail: clearable(body, 'responseDetail', asResponseDetail),
     hybrid: clearable(body, 'hybrid', asHybrid),
     isolateByModule: clearable(body, 'isolateByModule', asBoolean),
+    access: clearable(body, 'access', asAccess),
     metadata: optional(body, 'metadata', asPlainObject),
   };
+}
+
+/**
+ * Switching access control (or its admin exception) is for Knowledge Engine
+ * admins only. True when refused (the 403 is sent). A boolean, not the reply:
+ * a reply is thenable, so an async function returning it resolves to undefined.
+ */
+export async function refuseAccessChange(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
+  const decision = await authorizeServiceForRequest(request, 'rag', { level: 'admin' });
+  if (decision.allowed) return false;
+  reply.code(403).send({
+    error: 'Switching access control of a knowledge base needs Knowledge Engine admin',
+    code: 'access_denied',
+  });
+  return true;
+}
+
+/**
+ * Folder and permissions an ingest asks for (`folderId`, `folderPath`, `acl`).
+ * Setting permissions needs Knowledge Engine admin. With access control on, so
+ * does creating folders (by path) and changing the folder of a document that
+ * exists; anyone else places NEW documents only in folders they can read. An
+ * API token never holds `scope.manage`, so what the admin check answered for it
+ * travels with the placement (`admin`).
+ */
+export async function readDocumentPlacement(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  body: Record<string, unknown>,
+  scope: RagAccessScope | undefined,
+): Promise<{ placement?: RagDocumentPlacementInput; refused?: FastifyReply }> {
+  const placement: RagDocumentPlacementInput = {};
+  if (body.folderId !== undefined) {
+    if (body.folderId !== null && typeof body.folderId !== 'string') {
+      return { refused: reply.code(400).send({ error: 'folderId must be a folder id or null' }) };
+    }
+    placement.folderId = body.folderId as string | null;
+  } else if (body.folderPath !== undefined) {
+    if (typeof body.folderPath !== 'string') return { refused: reply.code(400).send({ error: 'folderPath must be a string' }) };
+    placement.folderPath = body.folderPath;
+  }
+  let admin = false;
+  if (body.acl !== undefined && body.acl !== null) {
+    const decision = await authorizeServiceForRequest(request, 'rag', { level: 'admin' });
+    if (!decision.allowed) {
+      return {
+        refused: reply.code(403).send({ error: 'Setting document permissions needs Knowledge Engine admin', code: 'access_denied' }),
+      };
+    }
+    admin = true;
+    placement.acl = body.acl;
+  } else if ((placement.folderId !== undefined || placement.folderPath !== undefined) && scope?.enabled && !scope.manage) {
+    // Asked quietly: a "no" only narrows what the caller may do with folders, it is not a refusal.
+    admin = await canAdministerRagAccess(request, { projectId: scope.projectId });
+  }
+  if (placement.folderId === undefined && placement.folderPath === undefined && placement.acl === undefined) return {};
+  return { placement: { ...placement, ...(scope ? { scope } : {}), ...(admin ? { admin } : {}) } };
+}
+
+/** Whether any module of the tenant with this key has access control on. */
+async function keyHasAccessControl(tenantDbName: string, ragModuleKey: string): Promise<boolean> {
+  const modules = await listRagModules(tenantDbName);
+  return modules.some((candidate) => candidate.key === ragModuleKey && candidate.access?.enabled === true);
+}
+
+/**
+ * With access control on, a document the caller may not read is answered as
+ * if it did not exist. `retrieve` (text reads) lets the admin exception through;
+ * `manage` (metadata, delete, re-ingest) lets every manager through.
+ *
+ * The module that decides is the one that owns the document: the module of its
+ * key in the project the row names, not the request project's (an owner or
+ * admin reaches the documents of other projects, and the request project may
+ * have no such module, or one without access control). A row that names no
+ * project (written before rows carried one) is the request project's; when that
+ * project has no module of the key, the row is hidden if any module of the
+ * tenant with that key has access control.
+ */
+export async function documentHiddenFor(
+  request: FastifyRequest,
+  scopeInput: { tenantDbName: string; tenantId: string; projectId?: string; ragModuleKey: string },
+  document: IRagDocument,
+  purpose: 'retrieve' | 'manage',
+): Promise<boolean> {
+  const ownerProjectId = document.projectId ? String(document.projectId) : scopeInput.projectId;
+  const { module: ownerModule, scope } = await ragAccessForRequest(request, { ...scopeInput, projectId: ownerProjectId });
+  if (!ownerModule) {
+    if (document.projectId) return false;
+    return keyHasAccessControl(scopeInput.tenantDbName, scopeInput.ragModuleKey);
+  }
+  if (!scope?.enabled) return false;
+  if (purpose === 'manage') return !scope.manage && !scope.canReadDocument(document);
+  return scope.enforced && !scope.canReadDocument(document);
 }
 
 /** Per-document chunk override, held to exactly the module's rules. */
@@ -305,6 +423,135 @@ async function queryLogScope(
   return everyone ? { scope: 'all' } : { scope: 'own', userId };
 }
 
+/**
+ * A module as the caller may see it. Its totals count every document, readable
+ * or not, so a caller whose reads are checked (access control on, no admin
+ * exception for them) gets the module without them. A module without access
+ * control comes back as it is, with no further read.
+ */
+export async function moduleAsCallerSees(
+  request: FastifyRequest,
+  where: { tenantDbName: string; tenantId: string; projectId?: string },
+  ragModule: IRagModule,
+): Promise<IRagModule> {
+  if (ragModule.access?.enabled !== true) return ragModule;
+  const { scope } = await ragAccessForRequest(request, { ...where, ragModuleKey: ragModule.key });
+  if (scope && !scope.enforced) return ragModule;
+  const { totalDocuments: _documents, totalChunks: _chunks, ...rest } = ragModule;
+  return rest;
+}
+
+/** What a re-index run needs to know of whoever reads it. */
+type RunReader = Pick<RagAccessScope, 'enabled' | 'manage' | 'enforced'>;
+
+/** A reader of a knowledge base with access control whose scope is not known: sees the least. */
+const UNKNOWN_RUN_READER: RunReader = { enabled: true, manage: false, enforced: true };
+
+/** Who reads the runs of this module: undefined when it has no access control (nothing is left out). */
+async function runReaderOf(
+  request: FastifyRequest,
+  where: { tenantDbName: string; tenantId: string; projectId?: string },
+  ragModule: IRagModule,
+): Promise<RunReader | undefined> {
+  if (ragModule.access?.enabled !== true) return undefined;
+  const { scope } = await ragAccessForRequest(request, { ...where, ragModuleKey: ragModule.key });
+  return scope ?? UNKNOWN_RUN_READER;
+}
+
+/**
+ * A re-index run as its reader may see it. A run counts the documents of the
+ * module and keeps the names of the ones that failed, readable or not. A reader
+ * whose reads are checked gets no total; one who does not manage the knowledge
+ * base gets no per-document detail either (counts, failures, the cursor).
+ */
+function reindexRunForCaller(reader: RunReader | undefined, run: IRagReindexRun): IRagReindexRun {
+  if (!reader?.enabled) return run;
+  if (reader.manage && !reader.enforced) return run;
+
+  const { totalDocuments: _total, ...rest } = run;
+  const view: Partial<IRagReindexRun> = rest;
+  if (!reader.manage) {
+    delete view.processedDocuments;
+    delete view.failedDocuments;
+    delete view.errorMessage;
+    if (view.progress) {
+      const { lastDocumentId: _lastDocumentId, ...progress } = view.progress;
+      view.progress = progress;
+    }
+    if (view.metadata) {
+      const { failures: _failures, ...metadata } = view.metadata;
+      view.metadata = metadata;
+    }
+  }
+  return view as IRagReindexRun;
+}
+
+/**
+ * `exportRagModule` for a caller whose reads are checked (a manager while the
+ * module keeps the admin exception off): the file holds the documents the scope
+ * reads and nothing says how many were left out. Same file as the export of a
+ * module without access control.
+ */
+async function exportReadableDocuments(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  ragModuleKey: string,
+  scope: RagAccessScope,
+): Promise<RagExportResult | undefined> {
+  const ragModule = await getRagModule(tenantDbName, ragModuleKey, projectId);
+  if (!ragModule) return undefined;
+
+  const access = scope.documentFilter();
+  const listed = await listRagDocuments(tenantDbName, ragModuleKey, {
+    projectId,
+    ...(access ? { access } : {}),
+  });
+  const lines: string[] = [];
+  let skippedDocuments = 0;
+
+  for (const row of listed) {
+    if (!scope.canReadDocument(row)) continue;
+    // The list drops the inline source text, and a short document keeps its text nowhere else.
+    const document = (await getRagDocument(tenantDbName, String(row._id))) ?? row;
+    const content = await loadSourceText(tenantDbName, tenantId, projectId, document);
+    if (!content) {
+      skippedDocuments += 1;
+      continue;
+    }
+    const line: RagExportDocumentLine = {
+      type: 'document',
+      fileName: document.fileName,
+      contentType: document.contentType,
+      metadata: document.metadata,
+      chunkConfig: document.chunkConfig,
+      content,
+    };
+    lines.push(JSON.stringify(line));
+  }
+
+  const header: RagExportHeader = {
+    format: RAG_EXPORT_FORMAT,
+    version: RAG_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    module: {
+      key: ragModule.key,
+      name: ragModule.name,
+      description: ragModule.description,
+    },
+    documentCount: lines.length,
+    skippedDocuments,
+  };
+
+  const safeKey = ragModule.key.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return {
+    fileName: `${safeKey}.rag.jsonl`,
+    body: [JSON.stringify(header), ...lines].join('\n') + '\n',
+    documentCount: lines.length,
+    skippedDocuments,
+  };
+}
+
 export const ragApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/rag/modules', withApiRequestContext(async (request, reply) => {
     try {
@@ -318,8 +565,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         search: query.search,
         status: query.status,
       });
+      const where = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
 
-      return reply.code(200).send({ modules });
+      return reply.code(200).send({
+        modules: await Promise.all(modules.map((ragModule) => moduleAsCallerSees(request, where, ragModule))),
+      });
     } catch (error) {
       logger.error('List RAG modules error', { error });
       return sendProjectContextError(reply, error)
@@ -340,6 +590,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      // A knowledge base on the index of one with access control would read its vectors unchecked.
+      const refusal = await kbIndexShareRefusal(
+        request,
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        { providerKey: fields.vectorProviderKey, indexKey: fields.vectorIndexKey },
+      );
+      if (refusal) return reply.code(403).send(refusal);
 
       const ragModule = await createRagModule(session.tenantDbName, session.tenantId, projectId, {
         ...fields,
@@ -369,7 +626,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
 
-      return reply.code(200).send({ module: ragModule });
+      return reply.code(200).send({
+        module: await moduleAsCallerSees(
+          request,
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+          ragModule,
+        ),
+      });
     } catch (error) {
       logger.error('Get RAG module error', { error });
       return sendProjectContextError(reply, error)
@@ -397,13 +660,28 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      if (fields.access !== undefined) {
+        if (await refuseAccessChange(request, reply)) return reply;
+      }
+      // Moving the module onto an index of a knowledge base with access control is refused; leaving it where it is is not.
+      const where = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const refusal = await kbIndexShareRefusal(
+        request,
+        where,
+        {
+          providerKey: fields.vectorProviderKey ?? existing.vectorProviderKey,
+          indexKey: fields.vectorIndexKey ?? existing.vectorIndexKey,
+        },
+        { providerKey: existing.vectorProviderKey, indexKey: existing.vectorIndexKey },
+      );
+      if (refusal) return reply.code(403).send(refusal);
 
       const ragModule = await updateRagModule(session.tenantDbName, String(existing._id), {
         ...fields,
         updatedBy: session.userId,
       });
 
-      return reply.code(200).send({ module: ragModule });
+      return reply.code(200).send({ module: ragModule ? await moduleAsCallerSees(request, where, ragModule) : ragModule });
     } catch (error) {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
@@ -446,16 +724,33 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         status?: string;
         limit?: string;
         offset?: string;
+        folderId?: string;
       };
       const status = DOCUMENT_STATUSES.includes(query.status as RagDocumentStatus)
         ? (query.status as RagDocumentStatus)
         : undefined;
       const limit = Number.parseInt(query.limit ?? '', 10);
       const offset = Number.parseInt(query.offset ?? '', 10);
+      // With access control on, people who do not manage the knowledge base list only what they may read.
+      const { scope } = await ragAccessForRequest(request, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        ragModuleKey: key,
+      });
+      const accessFilter = scope?.managementFilter();
+      // `folderId=root` lists the top level; any other value one folder.
+      const folderId = query.folderId === 'root' ? null : (query.folderId?.trim() || undefined);
       const page = await listRagDocumentsPage(
         session.tenantDbName,
         key,
-        { projectId, search: query.search?.trim() || undefined, status },
+        {
+          projectId,
+          search: query.search?.trim() || undefined,
+          status,
+          ...(folderId !== undefined ? { folderId } : {}),
+          ...(accessFilter ? { access: accessFilter } : {}),
+        },
         {
           limit: Number.isFinite(limit) ? limit : undefined,
           offset: Number.isFinite(offset) ? offset : undefined,
@@ -489,6 +784,15 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return sendInvalidRequest(reply, error);
       }
 
+      const { scope } = await ragAccessForRequest(request, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        ragModuleKey: key,
+      });
+      const { placement, refused } = await readDocumentPlacement(request, reply, body, scope);
+      if (refused) return refused;
+
       if (typeof body.data === 'string') {
         const document = await ingestFile(session.tenantDbName, session.tenantId, projectId, {
           chunkConfig,
@@ -499,6 +803,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
           fileName: body.fileName,
           metadata: body.metadata as Record<string, unknown> | undefined,
           ragModuleKey: key,
+          ...(scope ? { access: scope } : {}),
+          ...(placement ? { placement } : {}),
         });
 
         return reply.code(201).send({ document: withoutSourceText(document) });
@@ -519,6 +825,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         fileName: body.fileName,
         metadata: body.metadata as Record<string, unknown> | undefined,
         ragModuleKey: key,
+        ...(scope ? { access: scope } : {}),
+        ...(placement ? { placement } : {}),
       });
 
       return reply.code(201).send({ document: withoutSourceText(document) });
@@ -526,6 +834,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      const accessRefusal = sendRagAccessError(reply, error);
+      if (accessRefusal) return accessRefusal;
       logger.error('Ingest RAG document error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -538,7 +848,23 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const result = await exportRagModule(session.tenantDbName, session.tenantId, projectId, key);
+      const { scope } = await ragAccessForRequest(request, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        ragModuleKey: key,
+      });
+      // An export carries every document's text: with access control on, only managers take one.
+      if (scope?.enabled && !scope.manage) {
+        return reply.code(403).send({
+          error: 'Exporting a knowledge base with access control needs Knowledge Engine admin',
+          code: 'access_denied',
+        });
+      }
+      // A manager whose own reads are checked (admin exception off) exports what the checks let them read.
+      const result = scope?.enforced
+        ? await exportReadableDocuments(session.tenantDbName, session.tenantId, projectId, key, scope)
+        : await exportRagModule(session.tenantDbName, session.tenantId, projectId, key);
 
       if (!result) {
         return reply.code(404).send({ error: 'Knowledge Engine module not found' });
@@ -566,6 +892,18 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (typeof body.data !== 'string' || body.data.trim() === '') {
         return reply.code(400).send({ error: '"data" must be a non-empty JSONL string' });
+      }
+      const { scope } = await ragAccessForRequest(request, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        ragModuleKey: key,
+      });
+      if (scope?.enabled && !scope.manage) {
+        return reply.code(403).send({
+          error: 'Importing into a knowledge base with access control needs Knowledge Engine admin',
+          code: 'access_denied',
+        });
       }
 
       const result = await importRagModuleJsonl(
@@ -604,6 +942,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (!document) {
         return reply.code(404).send({ error: 'Document not found' });
       }
+      if (await documentHiddenFor(request, {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      }, document, 'manage')) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
@@ -627,6 +970,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       );
 
       if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+      if (await documentHiddenFor(request, {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      }, document, 'retrieve')) {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
@@ -657,6 +1005,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       );
 
       if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+      if (await documentHiddenFor(request, {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      }, document, 'retrieve')) {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
@@ -693,6 +1046,11 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (!document) {
         return reply.code(404).send({ error: 'Document not found' });
       }
+      if (await documentHiddenFor(request, {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      }, document, 'manage')) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
 
       await deleteRagDocument(session.tenantDbName, session.tenantId, projectId, {
         documentId,
@@ -723,8 +1081,17 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (!existing) {
         return reply.code(404).send({ error: 'Document not found' });
       }
+      const accessInput = {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      };
+      if (await documentHiddenFor(request, accessInput, existing, 'manage')) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+      const { scope } = await ragAccessForRequest(request, accessInput);
 
       const body = readJsonBody<Record<string, unknown>>(request);
+      const { placement, refused } = await readDocumentPlacement(request, reply, body, scope);
+      if (refused) return refused;
       const encodedData = typeof body.data === 'string'
         ? body.data
         : (typeof body.base64 === 'string' ? body.base64 : undefined);
@@ -747,6 +1114,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
           ? body.metadata as Record<string, unknown>
           : undefined,
         ragModuleKey: key,
+        ...(placement ? { placement } : {}),
         updatedBy: session.userId,
       });
 
@@ -755,6 +1123,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      const accessRefusal = sendRagAccessError(reply, error);
+      if (accessRefusal) return accessRefusal;
       logger.error('Reingest RAG document error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -773,13 +1143,16 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'query is required' });
       }
 
+      const { scope, caller } = await ragAccessForRequest(request, {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      });
       const result = await queryRag(session.tenantDbName, session.tenantId, projectId, {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
         ragModuleKey: key,
         topK: body.topK as number | undefined,
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
-      });
+      }, { caller, ...(scope ? { access: scope } : {}) });
 
       return reply.code(200).send({ result: shapeRagQueryResponse(result) });
     } catch (error) {
@@ -811,6 +1184,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'answerModelKey is required' });
       }
 
+      const { scope, caller } = await ragAccessForRequest(request, {
+        tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
+      });
       const result = await answerWithRag(session.tenantDbName, session.tenantId, projectId, {
         ragModuleKey: key,
         question: body.question,
@@ -819,7 +1195,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         topK: body.topK as number | undefined,
         retrieval: body.retrieval as RagAnswerRequest['retrieval'],
         generation: body.generation as RagAnswerRequest['generation'],
-      });
+      }, { caller, ...(scope ? { access: scope } : {}) });
 
       return reply.code(200).send({ result });
     } catch (error) {
@@ -977,13 +1353,18 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const reader = await runReaderOf(
+        request,
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        ragModule,
+      );
       const run = await startRagReindex(session.tenantDbName, session.tenantId, projectId, {
         ragModuleKey: key,
         reason: reason ?? 'manual',
         createdBy: session.userId,
       });
 
-      return reply.code(201).send({ run });
+      return reply.code(201).send({ run: reindexRunForCaller(reader, run) });
     } catch (error) {
       if (error instanceof Error && error.message.includes('already running')) {
         return reply.code(409).send({ error: error.message });
@@ -1012,7 +1393,12 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       // Module keys are unique per project, not per tenant, so the run list
       // has to be narrowed by project as well as by key.
       const runs = await listRagReindexRuns(session.tenantDbName, key, { projectId });
-      return reply.code(200).send({ runs });
+      const reader = await runReaderOf(
+        request,
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        ragModule,
+      );
+      return reply.code(200).send({ runs: runs.map((run) => reindexRunForCaller(reader, run)) });
     } catch (error) {
       logger.error('List RAG re-index runs error', { error });
       return sendProjectContextError(reply, error)
@@ -1043,8 +1429,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Re-index run not found' });
       }
 
+      const reader = await runReaderOf(
+        request,
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        ragModule,
+      );
       const run = await cancelRagReindex(session.tenantDbName, runKey);
-      return reply.code(200).send({ run });
+      return reply.code(200).send({ run: reindexRunForCaller(reader, run) });
     } catch (error) {
       if (error instanceof Error && error.message.includes('not running')) {
         return reply.code(409).send({ error: error.message });

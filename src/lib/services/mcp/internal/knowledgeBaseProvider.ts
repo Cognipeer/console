@@ -13,10 +13,17 @@
  * document in one call, or a paged line range for documents too large for
  * that. Both are scoped to documents that belong to this instance's RAG
  * module, the same way `search` is scoped to it.
+ *
+ * A module with access control answers with what the caller of the tool call
+ * may read (`ctx.identity`; a public endpoint passes none, so it gets what is
+ * open to everyone). A document the caller may not read is reported exactly like
+ * an unknown id, and such a module's responses are logged as a summary (see
+ * `../responseLog`).
  */
 
 import { currentTurnSignal } from '@/lib/core/turnSignal';
 import { McpToolInputError } from '../errors';
+import { setResponseLogSummary } from '../responseLog';
 import {
   listRagModules,
   getRagDocument,
@@ -25,6 +32,7 @@ import {
   getRagModule,
   queryRag,
 } from '@/lib/services/rag/ragService';
+import { kbCallerFromIdentity, resolveRagAccess, type KbCaller, type RagAccessScope } from '@/lib/services/rag/access';
 import { RagModuleInactiveError } from '@/lib/services/rag/errors';
 import { VectorFilterError } from '@/lib/providers';
 import type {
@@ -122,6 +130,31 @@ const READ_LINES_INPUT_SCHEMA: Record<string, unknown> = {
   additionalProperties: false,
 };
 
+/**
+ * `response` marked so the request log keeps `summary` (counts only) of it
+ * instead. The mark goes on a copy: it belongs to this response alone, whatever
+ * object the service handed back.
+ */
+function loggedAs<T extends object>(response: T, summary: Record<string, unknown>): T {
+  return setResponseLogSummary({ ...response }, { omitted: true, reason: 'access_controlled', ...summary });
+}
+
+/**
+ * The caller's scope in the instance's module, when the module has access
+ * control; undefined for any other module (and for one that does not exist,
+ * which the calls below report as they always did).
+ */
+async function accessScopeOf(
+  ctx: InternalMcpProviderContext,
+  instanceKey: string,
+): Promise<{ caller: KbCaller; scope: RagAccessScope } | undefined> {
+  const ragModule = await getRagModule(ctx.tenantDbName, instanceKey, ctx.projectId);
+  if (ragModule?.access?.enabled !== true) return undefined;
+  const caller = kbCallerFromIdentity(ctx.identity);
+  const scope = await resolveRagAccess({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, module: ragModule, caller });
+  return { caller, scope };
+}
+
 export const knowledgeBaseProvider: InternalMcpProvider = {
   id: 'knowledge-base',
   label: 'Knowledge Base',
@@ -203,6 +236,7 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
         args.filter && typeof args.filter === 'object' && !Array.isArray(args.filter)
           ? (args.filter as Record<string, unknown>)
           : undefined;
+      const access = await accessScopeOf(ctx, instanceKey);
       // topK is intentionally omitted — queryRag falls back to the module's default.
       try {
         const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
@@ -211,11 +245,14 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
           filter,
           // MCP callers may be anonymous; they may not send provider-native filters.
           filterSource: 'untrusted',
-        }, { signal: currentTurnSignal() });
+        }, {
+          signal: currentTurnSignal(),
+          ...(access ? { caller: access.caller, access: access.scope } : {}),
+        });
         // Internal keys (`_ragModule`, …) are never part of the public shape, and
         // metadata follows the module's responseDetail like the query endpoints.
         const includeMetadata = result.responseDetail !== 'text';
-        return {
+        const response = {
           query: result.query,
           matches: result.matches.map((m) => ({
             content: m.content,
@@ -231,6 +268,7 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
               : {}),
           })),
         };
+        return access ? loggedAs(response, { matches: result.matches.length }) : response;
       } catch (error) {
         // A switched-off knowledge base is a caller-visible state, not a server fault.
         if (error instanceof RagModuleInactiveError) throw new McpToolInputError(error.message);
@@ -250,12 +288,15 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
       // document stamped with another project is reported exactly like an
       // unknown id. (A document with no project stamp — rows from before
       // stamping, ingests through a tenant-wide token — stays readable, as it
-      // does through the Knowledge Engine's own routes.)
+      // does through the Knowledge Engine's own routes.) In a module with access
+      // control, a document the caller may not read is reported the same way.
+      const access = await accessScopeOf(ctx, instanceKey);
       const document = await getRagDocument(ctx.tenantDbName, documentId);
       const inThisProject = !ctx.projectId
         || !document?.projectId
         || String(document.projectId) === String(ctx.projectId);
-      if (!document || document.ragModuleKey !== instanceKey || !inThisProject) {
+      const hidden = access !== undefined && access.scope.enforced && !!document && !access.scope.canReadDocument(document);
+      if (!document || document.ragModuleKey !== instanceKey || !inThisProject || hidden) {
         throw new McpToolInputError(
           `Document "${documentId.slice(0, ECHOED_ID_MAX_CHARS)}" not found in this knowledge base`,
         );
@@ -266,7 +307,9 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
         if (!result) {
           throw new Error('Source text is not available for this document; it may need to be re-ingested');
         }
-        return result;
+        return access
+          ? loggedAs(result, { totalChars: result.totalChars, totalLines: result.totalLines, truncated: result.truncated })
+          : result;
       }
 
       const offset = typeof args.offset === 'number' ? args.offset : undefined;
@@ -277,7 +320,14 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
       if (!result) {
         throw new Error('Source text is not available for this document; it may need to be re-ingested');
       }
-      return result;
+      return access
+        ? loggedAs(result, {
+          totalLines: result.totalLines,
+          startLine: result.startLine,
+          endLine: result.endLine,
+          hasMore: result.hasMore,
+        })
+        : result;
     }
 
     throw new Error(`Unknown tool "${toolName}" on Knowledge Base provider`);

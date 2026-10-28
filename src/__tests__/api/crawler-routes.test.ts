@@ -487,6 +487,180 @@ describe('POST /api/crawler/jobs/:jobId/sync-to-rag', () => {
   });
 });
 
+describe('a crawler that sends its pages into a knowledge base with access control', () => {
+  const GUARDED = 'kb-acl-routes-test';
+  let writerHeaders: Record<string, string>;
+
+  beforeAll(async () => {
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+    await db.createRagModule({
+      tenantId: TENANT_ID,
+      projectId: FAKE_PROJECT_ID,
+      key: GUARDED,
+      name: 'Guarded',
+      embeddingModelKey: 'embed',
+      vectorProviderKey: 'vec',
+      vectorIndexKey: 'idx',
+      chunkConfig: { strategy: 'recursive_character', chunkSize: 800, chunkOverlap: 100 },
+      status: 'active',
+      createdBy: 'seed',
+      access: { enabled: true },
+    } as never);
+    // Works with crawlers and writes to the Knowledge Engine, but does not administer it.
+    const writer = await db.createUser({
+      tenantId: TENANT_ID,
+      email: 'writer@example.com',
+      name: 'Writer',
+      password: '$2b$10$x',
+      role: 'user',
+      licenseId: 'FREE',
+      features: [],
+      servicePermissions: { crawler: 'write', rag: 'write' },
+    } as never);
+    writerHeaders = {
+      ...REQUEST_HEADERS,
+      'x-user-id': String(writer._id),
+      'x-user-email': 'writer@example.com',
+      'x-user-role': 'user',
+      'content-type': 'application/json',
+    };
+  });
+
+  const crawlerBody = (rag?: { ragModuleKey: string; enabled: boolean }) => JSON.stringify({
+    name: `Guarded crawler ${Math.random().toString(36).slice(2, 8)}`,
+    engine: 'axios',
+    maxDepth: 0,
+    maxPages: 1,
+    autoCrawl: false,
+    http: { allowPrivateNetwork: true },
+    ...(rag ? { rag } : {}),
+  });
+
+  it('is set up by an administrator of the knowledge base, not by someone who only writes to it', async () => {
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: writerHeaders,
+      payload: crawlerBody({ ragModuleKey: GUARDED, enabled: true }),
+    });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(parseJsonBody<{ code: string }>(refused.body).code).toBe('kb_access_controlled');
+
+    // A binding that sends nothing, and a crawler without one, are theirs to make.
+    const parked = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: writerHeaders,
+      payload: crawlerBody({ ragModuleKey: GUARDED, enabled: false }),
+    });
+    expect(parked.statusCode, parked.body).toBe(201);
+    const { crawler } = parseJsonBody<{ crawler: { key: string } }>(parked.body);
+    // Turning it on is setting it up.
+    const enabled = await app.inject({
+      method: 'PATCH',
+      url: `/api/crawler/crawlers/${crawler.key}`,
+      headers: writerHeaders,
+      payload: JSON.stringify({ rag: { ragModuleKey: GUARDED, enabled: true } }),
+    });
+    expect(enabled.statusCode, enabled.body).toBe(403);
+
+    const ad = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/run',
+      headers: writerHeaders,
+      payload: JSON.stringify({ seeds: [originUrl], rag: { ragModuleKey: GUARDED, enabled: true }, mode: 'async' }),
+    });
+    expect(ad.statusCode, ad.body).toBe(403);
+
+    const byOwner = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: crawlerBody({ ragModuleKey: GUARDED, enabled: true }),
+    });
+    expect(byOwner.statusCode, byOwner.body).toBe(201);
+  });
+
+  it('syncs a job into it only for an administrator, whether the module is named or comes from the run', async () => {
+    ragIngestCalls.length = 0;
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: crawlerBody(),
+    });
+    const { crawler } = parseJsonBody<{ crawler: { key: string } }>(created.body);
+    const crawled = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/crawlers/${crawler.key}/crawl`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+    });
+    const { jobId } = parseJsonBody<{ jobId: string }>(crawled.body);
+
+    const refused = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/jobs/${jobId}/sync-to-rag`,
+      headers: writerHeaders,
+      payload: JSON.stringify({ ragModuleKey: GUARDED }),
+    });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(parseJsonBody<{ code: string }>(refused.body).code).toBe('kb_access_controlled');
+    expect(ragIngestCalls).toEqual([]);
+
+    const synced = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/jobs/${jobId}/sync-to-rag`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ ragModuleKey: GUARDED }),
+    });
+    expect(synced.statusCode, synced.body).toBe(200);
+    expect(ragIngestCalls).toEqual([{ ragModuleKey: GUARDED }]);
+  }, 30_000);
+
+  it('looks the module up where the sync writes: in the job\'s own project, which an old job does not have', async () => {
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+    // Only another project has a module of that key, and it has access control.
+    await db.createRagModule({
+      tenantId: TENANT_ID,
+      projectId: 'another-project',
+      key: 'kb-acl-legacy-target',
+      name: 'Elsewhere',
+      embeddingModelKey: 'embed',
+      vectorProviderKey: 'vec',
+      vectorIndexKey: 'idx-elsewhere',
+      chunkConfig: { strategy: 'recursive_character', chunkSize: 800, chunkOverlap: 100 },
+      status: 'active',
+      createdBy: 'seed',
+      access: { enabled: true },
+    } as never);
+    // A job from before jobs carried a project: visible from every project, and its ingest looks the module up in all.
+    const legacy = await db.createCrawlJob({
+      tenantId: TENANT_ID,
+      trigger: 'manual',
+      triggerActor: 'seed',
+      planSnapshot: { rag: { ragModuleKey: 'kb-acl-legacy-target', enabled: true } },
+      status: 'completed',
+      pagesDiscovered: 0,
+      pagesProcessed: 0,
+      filesProcessed: 0,
+      errorsCount: 0,
+      createdBy: 'seed',
+    } as never);
+
+    const refused = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/jobs/${String(legacy._id)}/sync-to-rag`,
+      headers: writerHeaders,
+      payload: '{}',
+    });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(parseJsonBody<{ code: string }>(refused.body).code).toBe('kb_access_controlled');
+  });
+});
+
 describe('GET /api/crawler/jobs/:jobId/results pages, filters and searches server-side', () => {
   type Page = {
     results: Array<{ id: string; url: string; type: string; bodyMarkdown?: string }>;

@@ -177,6 +177,40 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { ragModuleKey: 1, createdAt: -1 }, options: { name: 'idx_module_createdAt' } },
     { key: { status: 1 }, options: { name: 'idx_status' } },
   ],
+  // Knowledge Engine access control. Only these NEW collections get indexes: the
+  // existing rag_* collections keep theirs (a folder listing filters rag_documents
+  // by module and folder, which the module index already narrows).
+  // The five collections are created by their first write, after the tenant pass
+  // skipped them, so the access mixin also ensures each one before that write
+  // (ensureTenantCollectionIndexes, from these same entries): the unique keys
+  // must hold from the first insert, not from the next restart.
+  // The folder tree of a module, and a connector's folder looked up by its id in the source.
+  rag_folders: [
+    { key: { ragModuleKey: 1, parentId: 1 }, options: { name: 'idx_module_parent' } },
+    { key: { ragModuleKey: 1, 'source.sourceId': 1, 'source.externalId': 1 }, options: { name: 'idx_module_source' } },
+  ],
+  // Every query reads "which nodes hold one of my principals" (module + principal),
+  // and every editor reads one node's entries (module + node).
+  rag_acl_entries: [
+    { key: { ragModuleKey: 1, principal: 1 }, options: { name: 'idx_module_principal' } },
+    { key: { ragModuleKey: 1, nodeType: 1, nodeId: 1 }, options: { name: 'idx_module_node' } },
+  ],
+  rag_identity_domains: [{ key: { key: 1 }, options: { name: 'idx_key', unique: true } }],
+  // Directory users: matched by e-mail / UPN / external id within one domain.
+  rag_identity_users: [
+    { key: { domain: 1, extId: 1 }, options: { name: 'idx_domain_extId', unique: true } },
+    { key: { domain: 1, email: 1 }, options: { name: 'idx_domain_email' } },
+    { key: { domain: 1, upn: 1 }, options: { name: 'idx_domain_upn' } },
+  ],
+  rag_identity_links: [
+    { key: { consoleKind: 1, consoleId: 1 }, options: { name: 'idx_console' } },
+    { key: { domain: 1, externalKind: 1, externalId: 1 }, options: { name: 'idx_domain_external' } },
+    // One row per pair: a twin would outlive the unlinking of the other one.
+    {
+      key: { domain: 1, externalKind: 1, externalId: 1, consoleKind: 1, consoleId: 1 },
+      options: { name: 'idx_link_pair', unique: true },
+    },
+  ],
   vector_indexes: [
     { key: { providerKey: 1, key: 1, projectId: 1 }, options: { name: 'idx_provider_key_project' } },
     { key: { providerKey: 1, externalId: 1, projectId: 1 }, options: { name: 'idx_provider_external_project' } },
@@ -460,4 +494,32 @@ export function ensureMainDbIndexes(db: Db, dbName: string): Promise<void> {
 /** Ensure tenant indexes once per tenant DB per process. Fire-and-forget from the tenant-bind path. */
 export function ensureTenantDbIndexes(db: Db, dbName: string): Promise<void> {
   return ensureOnce(`tenant:${dbName}`, () => applyIndexes(db, TENANT_DB_INDEXES, true));
+}
+
+/**
+ * Ensure the manifest's indexes of ONE tenant collection, once per tenant DB per
+ * process, for a collection that its first write creates. The tenant pass above
+ * skips a collection that does not exist yet and is then memoised, so without
+ * this the first write would leave the collection bare (its unique indexes
+ * included) until a restart. Call it before that write: the indexes come from
+ * the manifest itself, so the two paths can never disagree.
+ *
+ * Best-effort like the tenant pass: the returned promise never rejects, a
+ * failure is logged, and nothing is memoised, so the next write tries again.
+ */
+export function ensureTenantCollectionIndexes(db: Db, collection: string): Promise<void> {
+  const defs = TENANT_DB_INDEXES[collection];
+  if (!defs || defs.length === 0) return Promise.resolve();
+  return ensureOnce(`tenant-collection:${db.databaseName}:${collection}`, async () => {
+    const failed: string[] = [];
+    for (const def of defs) {
+      try {
+        await db.collection(collection).createIndex(def.key, def.options);
+      } catch (error) {
+        failed.push(`${def.options.name ?? 'unnamed'}: ${String(error)}`);
+      }
+    }
+    // Rejecting keeps the collection un-memoised (ensureOnce logs it once).
+    if (failed.length > 0) throw new Error(`createIndex failed on ${collection}: ${failed.join('; ')}`);
+  });
 }

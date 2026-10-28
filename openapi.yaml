@@ -5533,7 +5533,7 @@ paths:
       tags:
         - Crawler
       summary: Create crawler
-      description: Creates a saved crawler profile holding crawl configuration (engine, depth/page limits, scope filters, HTTP options, Knowledge Engine binding, webhook, schedule).
+      description: Creates a saved crawler profile holding crawl configuration (engine, depth/page limits, scope filters, HTTP options, Knowledge Engine binding, webhook, schedule). A Knowledge Engine binding that sends pages into a knowledge base with access control needs Knowledge Engine `admin` (403 `kb_access_controlled` otherwise).
       operationId: createCrawler
       parameters: []
       requestBody:
@@ -5558,6 +5558,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
   /crawler/crawlers/{idOrKey}:
@@ -5596,7 +5598,7 @@ paths:
       tags:
         - Crawler
       summary: Update crawler
-      description: Partial update of a crawler. Accepts the same fields as create plus status. Set rag, webhook, or schedule to null to clear them.
+      description: Partial update of a crawler. Accepts the same fields as create plus status. Set rag, webhook, or schedule to null to clear them. A Knowledge Engine binding that sends pages into a knowledge base with access control needs Knowledge Engine `admin` (403 `kb_access_controlled` otherwise).
       operationId: updateCrawler
       parameters:
         - name: idOrKey
@@ -5627,6 +5629,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -6071,7 +6075,7 @@ paths:
       tags:
         - Crawler
       summary: Ad-hoc crawl
-      description: Starts a one-off crawl without saving a crawler. The resulting job has no crawlerKey. Always enqueues (202); pass mode=sync to request a blocking run.
+      description: Starts a one-off crawl without saving a crawler. The resulting job has no crawlerKey. Always enqueues (202); pass mode=sync to request a blocking run. A Knowledge Engine binding that sends pages into a knowledge base with access control needs Knowledge Engine `admin` (403 `kb_access_controlled` otherwise).
       operationId: runAdhocCrawl
       parameters: []
       requestBody:
@@ -6091,6 +6095,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
   /embeddings:
@@ -9551,7 +9557,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Create a RAG module
-      description: Create a Knowledge Engine (RAG) module wiring an embedding model, vector store and chunking config. Requires an API token with `write` permission for this service. `chunkConfig` is validated on write — an overlap at or above the chunk size, an unknown strategy, or a parent window smaller than the chunk is rejected with 400.
+      description: Create a Knowledge Engine (RAG) module wiring an embedding model, vector store and chunking config. Requires an API token with `write` permission for this service. `chunkConfig` is validated on write — an overlap at or above the chunk size, an unknown strategy, or a parent window smaller than the chunk is rejected with 400. A vector index that a knowledge base with access control keeps its vectors in is refused with 403 `kb_access_controlled`, since another knowledge base on it would read those vectors without the checks.
       operationId: createRagModule
       requestBody:
         required: true
@@ -9581,7 +9587,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: List Knowledge Engine modules
-      description: Returns all Knowledge Engine (RAG) modules available to the token's tenant.
+      description: Returns all Knowledge Engine (RAG) modules available to the token's tenant. A module with access control comes without `totalDocuments` and `totalChunks` for a caller whose reads are checked (an API token always is).
       operationId: listRagModules
       responses:
         "200":
@@ -9604,7 +9610,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Update a RAG module
-      description: Partially update a RAG module resolved by key within the token's project. Requires an API token with `write` permission for this service. Only the documented properties are applied; `chunkConfig` is validated exactly as on create.
+      description: Partially update a RAG module resolved by key within the token's project. Requires an API token with `write` permission for this service; changing `access` requires `admin`. Only the documented properties are applied; `chunkConfig` is validated exactly as on create. Moving the module onto a vector index that a knowledge base with access control keeps its vectors in is refused with 403 `kb_access_controlled`; an edit that keeps the index is not.
       operationId: updateRagModule
       parameters:
         - name: key
@@ -9643,7 +9649,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Get a Knowledge Engine module
-      description: Returns a single Knowledge Engine module by its key.
+      description: Returns a single Knowledge Engine module by its key. A module with access control comes without `totalDocuments` and `totalChunks` for a caller whose reads are checked (an API token always is).
       operationId: getRagModule
       parameters:
         - name: key
@@ -9703,7 +9709,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: List Knowledge Engine documents
-      description: Returns the documents ingested into a Knowledge Engine module.
+      description: Returns the documents ingested into a Knowledge Engine module. In a knowledge base with access control, only the documents the caller may read are listed.
       operationId: listRagDocuments
       parameters:
         - name: key
@@ -9735,7 +9741,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Re-ingest a Knowledge Engine document
-      description: Re-chunks and re-embeds an existing document. Optionally provide updated `content`, a new `data`/`base64` file, `contentType`, `fileName`, `metadata`, or a `chunkConfig` that replaces this document's own splitting settings. Send an empty body to re-ingest with the existing content and current chunking settings.
+      description: Re-chunks and re-embeds an existing document. In a knowledge base with access control, a document the caller may not read is answered with 404, like a missing one. Optionally provide updated `content`, a new `data`/`base64` file, `contentType`, `fileName`, `metadata`, or a `chunkConfig` that replaces this document's own splitting settings. Send an empty body to re-ingest with the existing content and current chunking settings.
       operationId: reingestRagDocument
       parameters:
         - name: key
@@ -9782,6 +9788,19 @@ paths:
                   description: Updated metadata for the document.
                   example:
                     version: "3.0"
+                folderId:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Folder of the module to place the document in (`null`: the top level). In a knowledge base with access control, a caller who does not administer it places documents only in folders they can read.
+                folderPath:
+                  type: string
+                  description: A `/`-separated folder path, created as needed. Ignored when `folderId` is given.
+                  example: Finance/Budgets
+                acl:
+                  allOf:
+                    - $ref: "#/components/schemas/RagDocumentAclInput"
+                  description: The document's own permissions. Needs Knowledge Engine `admin` (403 `access_denied` otherwise).
       responses:
         "200":
           description: Re-ingested document.
@@ -9796,8 +9815,12 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -9806,7 +9829,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Delete a Knowledge Engine document
-      description: Deletes a document record and all of its associated vectors from the vector store.
+      description: Deletes a document record and all of its associated vectors from the vector store. In a knowledge base with access control, a document the caller may not read is answered with 404, like a missing one.
       operationId: deleteRagDocument
       parameters:
         - name: key
@@ -9842,7 +9865,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Get a RAG document
-      description: Fetch a single ingested document from a Knowledge Engine (RAG) module by its document id.
+      description: Fetch a single ingested document from a Knowledge Engine (RAG) module by its document id. In a knowledge base with access control, a document the caller may not read is answered with 404, like a missing one.
       operationId: getRagDocument
       parameters:
         - name: key
@@ -9931,6 +9954,19 @@ paths:
                   default: false
                   description: >-
                     Return as soon as the document is stored, leaving chunking and embedding to a background job. The response is `202` and the document is `pending`.
+                folderId:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Folder of the module to place the document in (`null`: the top level). In a knowledge base with access control, a caller who does not administer it places documents only in folders they can read.
+                folderPath:
+                  type: string
+                  description: A `/`-separated folder path, created as needed. Ignored when `folderId` is given.
+                  example: Finance/Budgets
+                acl:
+                  allOf:
+                    - $ref: "#/components/schemas/RagDocumentAclInput"
+                  description: The document's own permissions. Needs Knowledge Engine `admin` (403 `access_denied` otherwise).
       responses:
         "201":
           description: Ingested document, already indexed.
@@ -9954,8 +9990,12 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -9965,7 +10005,7 @@ paths:
       tags:
         - Knowledge Engine
       summary: Query a Knowledge Engine module
-      description: Runs a semantic retrieval query against a Knowledge Engine module and returns the most relevant chunk matches.
+      description: Runs a semantic retrieval query against a Knowledge Engine module and returns the most relevant chunk matches. In a knowledge base with access control, matches come only from documents the caller may read; an API token reads what is open to everyone and what names the token, a delegated call what the person it acts for may read.
       operationId: queryRagModule
       parameters:
         - name: key
@@ -14593,7 +14633,7 @@ paths:
       tags:
         - Vector
       summary: Query vectors
-      description: Search for the most similar vectors in the index using a query vector, optional `topK` and provider-specific `filter`.
+      description: Search for the most similar vectors in the index using a query vector, optional `topK` and provider-specific `filter`. An index that a knowledge base with access control keeps its vectors in is refused with 403 `kb_access_controlled`; query the knowledge base instead, where every document is checked.
       operationId: queryVectors
       parameters:
         - name: providerKey
@@ -14636,6 +14676,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -24500,6 +24542,19 @@ components:
         lastIndexedAt:
           type: string
           format: date-time
+        folderId:
+          type: string
+          description: The folder the document is in; absent at the top level.
+        aclMode:
+          type: string
+          enum:
+            - own
+          description: Present when the document has its own permissions instead of inheriting its folder's.
+        aclManaged:
+          type: string
+          enum:
+            - sync
+          description: The folder and permissions mirror a connected source and change only there.
         metadata:
           type: object
           additionalProperties: true
@@ -24513,6 +24568,36 @@ components:
         updatedAt:
           type: string
           format: date-time
+    RagDocumentAclInput:
+      type: object
+      description: >-
+        A document's own permissions. `own` replaces what the document inherits with `entries` (an empty list: nobody may read it); `inherit` goes back to its folder's, or the module's.
+      required:
+        - mode
+      properties:
+        mode:
+          type: string
+          enum:
+            - own
+            - inherit
+        entries:
+          type: array
+          maxItems: 1000
+          description: >-
+            Who may read: `everyone`, `user:<id>`, `group:<id>`, `token:<id>`, `email:<address>`, or an identity of a directory: `x:<directory>:u:<id>`, `x:<directory>:g:<id>`, `x:<directory>:all`.
+          items:
+            oneOf:
+              - type: string
+                example: group:65f0c2a1e4b0a1b2c3d4e5f6
+              - type: object
+                required:
+                  - principal
+                properties:
+                  principal:
+                    type: string
+                  label:
+                    type: string
+                    maxLength: 200
     RagModule:
       type: object
       description: A Knowledge Engine (RAG) module.
@@ -24577,6 +24662,8 @@ components:
         isolateByModule:
           type: boolean
           description: Whether queries are constrained to this module's own vectors.
+        access:
+          $ref: "#/components/schemas/RagModuleAccess"
         reindexRequired:
           type: boolean
           description: >-
@@ -24604,6 +24691,20 @@ components:
         updatedAt:
           type: string
           format: date-time
+    RagModuleAccess:
+      type: object
+      description: >-
+        Document-level access control of a knowledge base. Off by default: everyone who can read the module reads every document. When on, a document is read only by the people, groups, tokens and directory identities its permissions name (its own, else its nearest folder's, else the module's); the others never see it in searches, answers or listings, and reading it answers 404.
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+        adminBypass:
+          type: boolean
+          default: true
+          description: >-
+            Whether Knowledge Engine admins read every document in searches, answers and document reads. Calls of the client API never get this exception.
     RagQueryMatch:
       type: object
       description: A single chunk match returned by a Knowledge Engine query.
@@ -24711,6 +24812,13 @@ components:
           nullable: true
           description: >-
             AND `_ragModule` into every query so a vector index shared by several modules cannot leak between them. Turn it off for an index populated by an external pipeline, whose vectors carry no `_ragModule`.
+        access:
+          allOf:
+            - $ref: "#/components/schemas/RagModuleAccess"
+          nullable: true
+          type: object
+          description: >-
+            Turn document-level access control on or off (`null`: off). Needs Knowledge Engine `admin` (403 `access_denied` otherwise).
     RealtimeModel:
       type: object
       description: A realtime model preset (snake_case client view) — a named session config bundling a response generator (chat model or agent) with STT, TTS, voice, and turn-detection settings.
