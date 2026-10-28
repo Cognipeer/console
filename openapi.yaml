@@ -30481,7 +30481,7 @@ components:
           type: string
           enum: [active, pending, manual, paused, failed]
           description: >-
-            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again, except for `no_subscribe` and `account` (below). A hook set up by hand needs no account to receive, so it goes on receiving when the connector's account is disconnected; one that was waiting for the account (`reason_code` `subscribe_failed`, `unreachable` or `rotate_failed`) then reads `manual` with `reason_code: account`, and connecting the account tries the registration again, while a hook the package cannot register (`no_subscribe`) keeps its reason. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`. A rotation that stopped in the middle ends as `failed` too, and the hook is then handled like one set up by hand: its `setup` steps show and rotating it answers with a new secret. A trigger whose subscription is gone reads `failed` with `reason_code: attach_failed`, and retry binds it again.
+            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again, except for `no_subscribe` and `account` (below). A hook set up by hand needs no account to receive, so it goes on receiving when the connector's account is disconnected; one that was waiting for the account (`reason_code` `subscribe_failed`, `unreachable` or `rotate_failed`) then reads `manual` with `reason_code: account`, and connecting the account tries the registration again, while a hook the package cannot register (`no_subscribe`) keeps its reason. `paused`: the connector is disabled, or its account is disconnected and the subscription needs it (a poll and a hook the module registered at the vendor do; a poll the vendor rejected the credentials of pauses too); it resumes with the connector. A webhook saved while its connector is disabled is `paused` with `reason_code: connector_disabled`; when its package can register the hook, the connector has a working account and this Console can be reached from the internet (its `APP_URL` is not a local address such as `http://localhost:3000`), the module registers it when the connector is enabled, and until then it has no `callback_url`, `secret_hint`, `secret` or `setup` (nobody sets it up by hand); otherwise it is set up by hand as usual. `failed`: a rotation could not register the hook again with the new secret, a registration stayed `pending` for five minutes, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`. A rotation that stopped in the middle ends as `failed` too, and the hook is then handled like one set up by hand: its `setup` steps show and rotating it answers with a new secret. A trigger whose subscription is gone reads `failed` with `reason_code: attach_failed`, and retry binds it again.
         kind:
           type: string
           enum: [webhook, poll]
@@ -30498,13 +30498,16 @@ components:
         callback_url:
           type: string
           nullable: true
+          description: >-
+            The address the service posts a webhook's deliveries to. Null for a poll, for a trigger whose subscription is gone (`attach_failed`) and for a webhook that waits, `paused`, for its connector to be enabled so that the module registers it (see `status`): it has no address until then.
         secret_hint:
           type: string
           nullable: true
         secret:
           type: string
           nullable: true
-          description: Shown once, in the answer that creates the signing secret of a manually set up webhook (a create, an update that binds a new subscription, or a Retry that binds a lost one) or rotates it.
+          description: >-
+            Shown once, in the answer that creates the signing secret of a manually set up webhook (a create, an update that binds a new subscription, or a Retry that binds a lost one) or rotates it. Absent for a webhook that waits, `paused`, for its connector to be enabled so that the module registers it (see `status`), also after a rotation.
         previous_secret_valid_until:
           type: integer
           nullable: true
@@ -30537,7 +30540,8 @@ components:
         setup:
           type: string
           nullable: true
-          description: Markdown steps for a manual setup, with the callback URL filled in.
+          description: >-
+            Markdown steps for a manual setup, with the callback URL filled in. Null for a webhook that waits, `paused`, for its connector to be enabled so that the module registers it (see `status`): there is nothing to set up by hand.
         bindings:
           type: integer
           description: How many triggers share this subscription.

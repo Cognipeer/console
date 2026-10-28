@@ -489,24 +489,38 @@ describe('the triggers guide, parameters, Retry and the retired presets', () => 
 });
 
 describe('the triggers guide, a webhook trigger saved while its connector is disabled', () => {
-  /** The paragraph under the lead-in `**A connector that is disabled.**`, up to the next blank line. */
-  function disabledParagraph(): string {
+  /** The paragraph under the lead-in `**<lead>**`, up to the next blank line. */
+  function paragraph(lead: string): string {
     const section = connectorSection();
-    const start = section.indexOf('\n**A connector that is disabled.**');
-    expect(start, 'the guide has a paragraph on a webhook trigger saved while its connector is disabled').toBeGreaterThan(0);
+    const start = section.indexOf(`\n**${lead}**`);
+    expect(start, `the guide has a paragraph that starts with **${lead}**`).toBeGreaterThan(0);
     const end = section.indexOf('\n\n', start + 2);
+    return flat(section.slice(start, end < 0 ? undefined : end));
+  }
+  const disabledParagraph = () => paragraph('A connector that is disabled.');
+  const secretsParagraph = () => paragraph('Secrets.');
+  /** The row of the table *Operating it* for rotate-secret, up to the end of the line. */
+  function rotateRow(): string {
+    const section = connectorSection();
+    const start = section.indexOf('\n| `POST …/triggers/{id}/webhook/rotate-secret` |');
+    expect(start, 'the guide has a rotate-secret row under the connector triggers').toBeGreaterThan(0);
+    const end = section.indexOf('\n', start + 2);
     return flat(section.slice(start, end < 0 ? undefined : end));
   }
 
   it('says it waits, paused, and that a package that can register the hook does so when the connector is enabled, with nothing to set up by hand meanwhile', () => {
     const text = disabledParagraph();
     expect(text).toContain('A webhook trigger saved while its connector is disabled waits, `paused` with `reason_code: connector_disabled`');
-    expect(text).toContain('when the package can register the hook at the service and the connector has a working account, the hook is registered when the connector is enabled');
-    expect(text).toContain('until then, the trigger\'s `connector_subscription` carries no `setup` steps and no `secret`, so nobody sets up a second hook by hand');
+    expect(text).toContain('when the package can register the hook at the service, the connector has a working account and this Console can be reached from the internet');
+    expect(text).toContain('the hook is registered when the connector is enabled and, until then, the trigger\'s `connector_subscription` carries no `setup` steps, no `secret` (also after a rotation), no `secret_hint` and no `callback_url`, so nobody sets up a second hook by hand');
   });
 
-  it('says that without a working account, or for a package that cannot register hooks, the hook is set up by hand as usual', () => {
-    expect(disabledParagraph()).toContain('without a working account, or for a package that cannot register hooks, the hook is set up by hand as usual, with its `setup` steps and its `secret`');
+  it('says which Console the service cannot reach: one whose APP_URL is a local address, such as the default', () => {
+    expect(disabledParagraph()).toContain('can be reached from the internet (its `APP_URL` is not a local address such as the default `http://localhost:3000`)');
+  });
+
+  it('says that without a working account, for a Console the service cannot reach, or for a package that cannot register hooks, the hook is set up by hand as usual', () => {
+    expect(disabledParagraph()).toContain('without a working account, for a Console the service cannot reach, or for a package that cannot register hooks, the hook is set up by hand as usual, with its `callback_url`, its `setup` steps and its `secret`');
   });
 
   it('sits between the paragraph on an account that is gone and the one on secrets', () => {
@@ -517,6 +531,58 @@ describe('the triggers guide, a webhook trigger saved while its connector is dis
     expect(at('\n**Secrets.**')).toBeGreaterThan(at('\n**A connector that is disabled.**'));
     // What it leans on is still said where the statuses are described.
     expect(flat(text)).toContain('`paused` (the connector is disabled, or its account is disconnected and the subscription needs it');
+  });
+
+  it('says in the paragraph on secrets that such a hook shows none, also after a rotation, and no callback URL until the connector is enabled', () => {
+    const text = secretsParagraph();
+    expect(text).toContain('A hook that waits for its connector to be enabled, and that the module then registers itself (see **A connector that is disabled.**), shows no `secret`, also after a rotation (the module registers the hook with the new one), and no `callback_url` until the connector is enabled');
+    // It is the exception to the rule of the manual mode, which stays as it was.
+    expect(text).toContain('In manual mode the full `secret` is in the answer that created or rotated it');
+    expect(text.indexOf('A hook that waits for its connector to be enabled')).toBeGreaterThan(text.indexOf('In manual mode the full `secret`'));
+    expect(text).toContain('Rotating a hook set up by hand with `grace_seconds` keeps the old secret accepted until `previous_valid_until`');
+  });
+
+  it('says it in the rotate-secret row too', () => {
+    const row = rotateRow();
+    expect(row).toContain('a new secret (shown once in manual mode; an automatically registered hook is registered again with it; a hook that waits for its connector to be enabled, and that the module then registers itself, shows none and is registered with the new one)');
+    expect(row).toContain('`400 connector_no_secret` when there is none');
+  });
+});
+
+describe('the OpenAPI document, a webhook trigger saved while its connector is disabled', () => {
+  const properties = () => (openapi.components.schemas as Record<string, Json>).ConnectorSubscription.properties as Record<string, Json>;
+  /** The words every description of the subscription uses for the hook that waits for its connector. */
+  const WAITS = 'a webhook that waits, `paused`, for its connector to be enabled so that the module registers it';
+
+  it('says in the status what such a hook is, when the module registers it and what it carries until then', () => {
+    const status = flat(properties().status.description);
+    expect(status).toContain('A webhook saved while its connector is disabled is `paused` with `reason_code: connector_disabled`');
+    expect(status).toContain('when its package can register the hook, the connector has a working account and this Console can be reached from the internet (its `APP_URL` is not a local address such as `http://localhost:3000`), the module registers it when the connector is enabled');
+    expect(status).toContain('and until then it has no `callback_url`, `secret_hint`, `secret` or `setup` (nobody sets it up by hand)');
+    expect(status).toContain('otherwise it is set up by hand as usual');
+    // What the paused status said before is still there.
+    expect(status).toContain('`paused`: the connector is disabled, or its account is disconnected and the subscription needs it');
+  });
+
+  it('says the secret is absent for such a hook, also after a rotation, and keeps what it said of the secret of a hook set up by hand', () => {
+    const secret = flat(properties().secret.description);
+    expect(secret).toContain(`Absent for ${WAITS} (see \`status\`), also after a rotation`);
+    expect(secret).toContain('Shown once, in the answer that creates the signing secret of a manually set up webhook');
+    expect(secret).toContain('or a Retry that binds a lost one');
+  });
+
+  it('says the steps are null for such a hook, because there is nothing to set up by hand', () => {
+    const setup = flat(properties().setup.description);
+    expect(setup).toContain('Markdown steps for a manual setup, with the callback URL filled in');
+    expect(setup).toContain(`Null for ${WAITS} (see \`status\`): there is nothing to set up by hand`);
+  });
+
+  it('describes the callback URL, and says it is null until the connector is enabled for such a hook', () => {
+    const callback = properties().callback_url;
+    expect(callback).toMatchObject({ type: 'string', nullable: true });
+    const text = flat(callback.description ?? '');
+    expect(text).toContain('The address the service posts a webhook\'s deliveries to');
+    expect(text).toContain('Null for a poll, for a trigger whose subscription is gone (`attach_failed`) and for ' + WAITS + ' (see `status`): it has no address until then');
   });
 });
 
