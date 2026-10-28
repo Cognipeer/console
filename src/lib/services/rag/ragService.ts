@@ -20,6 +20,7 @@ import { getDatabase, type DatabaseProvider } from '@/lib/database';
 const logger = createLogger('rag');
 import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument, RagDocumentStatus } from '@/lib/database';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
+import { extractMarkdownContent } from '@/lib/services/extraction/content';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   queryVectorIndex,
@@ -1111,18 +1112,6 @@ export async function indexPendingRagDocument(
 }
 
 /* ── File-based ingestion (file → markdown → chunk → embed → upsert) ── */
-
-function extractMarkdownContent(conversion: unknown): string | undefined {
-  if (!conversion) return undefined;
-  if (typeof conversion === 'string') return conversion;
-  if (typeof conversion === 'object') {
-    const candidate = conversion as Record<string, unknown>;
-    if (typeof candidate.markdown === 'string') return candidate.markdown;
-    if (typeof candidate.content === 'string') return candidate.content;
-    if (typeof candidate.result === 'string') return candidate.result;
-  }
-  return undefined;
-}
 
 /** Formats we read as UTF-8 rather than handing to the markdown converter. */
 function isPlainTextFile(fileName: string, contentType?: string): boolean {

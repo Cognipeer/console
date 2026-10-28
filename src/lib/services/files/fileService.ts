@@ -41,6 +41,7 @@ import {
 } from './bucketRules';
 import { bucketDeletingError, bucketInactiveError, describeFailure, FileServiceError, hasObjectMissingCode } from './errors';
 import { convertDocumentToMarkdown, DocumentConversionRefused } from './documentConversion';
+import { extractMarkdownContent } from '../extraction/content';
 import { publishConvertMarkdownJob, type ConvertMarkdownJobPayload } from './jobs/filesQueue';
 import { isMarkdownConvertible } from './markdownSupport';
 import { base64TextOf } from './payloadSize';
@@ -678,31 +679,6 @@ function deriveMarkdownKey(originalKey: string): string {
         }
     }
     return `${originalKey}.md`;
-}
-
-function extractMarkdownContent(conversion: unknown): string | undefined {
-    if (!conversion) {
-        return undefined;
-    }
-
-    if (typeof conversion === 'string') {
-        return conversion;
-    }
-
-    if (typeof conversion === 'object') {
-        const candidate = conversion as Record<string, unknown>;
-        if (typeof candidate.markdown === 'string') {
-            return candidate.markdown;
-        }
-        if (typeof candidate.content === 'string') {
-            return candidate.content;
-        }
-        if (typeof candidate.result === 'string') {
-            return candidate.result;
-        }
-    }
-
-    return undefined;
 }
 
 function truncateError(error: unknown): string {
