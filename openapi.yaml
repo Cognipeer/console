@@ -2801,8 +2801,14 @@ paths:
         trigger's parameters, `events` and `schedule`, and binds the trigger to a shared subscription (the vendor
         webhook registration or the poll cursor); the answer carries it as `connector_subscription`, with the
         signing secret of a manually set up webhook shown once. A vendor failure never fails the write: the trigger
-        is stored and the subscription reads `failed` until `POST …/connector/retry`. Without the module a
-        connector trigger is `400 invalid_trigger` (field `type`).
+        is stored. A hook that could not be registered at the vendor reads `manual` with a `reason` (the steps to set
+        it up by hand are in `setup`; `POST …/connector/retry` registers it again), a poll that fails stays `active`
+        with `last_error` and a back-off, and `failed` is what a rotation leaves when the hook could not be
+        registered again with the new secret (or when the Connectors module could not bind the stored trigger).
+        The event's `payload` is the data the package shapes, not the vendor's own request body (for the GitHub
+        package `payload.repository` is the text `owner/name`, `payload.draft`, `payload.number`,
+        `payload.baseBranch` ...); the connector page lists each trigger's fields and a sample.
+        Without the module a connector trigger is `400 invalid_trigger` (field `type`).
 
         A webhook trigger answers `201` with the generated secret in `webhook.secret`: it is shown only in this
         answer (never again, only its last four characters as `webhook.secret_hint`). With `auth: standard_webhooks`
@@ -2867,9 +2873,10 @@ paths:
                     params: {repository: acme/api}
                     events: [pull_request.opened, pull_request.reopened]
                     filter:
-                      - {path: payload.pull_request.base.ref, op: eq, value: main}
+                      - {path: payload.baseBranch, op: eq, value: main}
+                      - {path: payload.draft, op: eq, value: false}
                     include_payload: true
-                  prompt: 'Review pull request #{{payload.number}} in {{payload.repository.full_name}}.'
+                  prompt: 'Review pull request #{{payload.number}} in {{payload.repository}}.'
       responses:
         '201':
           description: >-
@@ -3160,7 +3167,9 @@ paths:
                   payload:
                     action: opened
                     number: 412
-                    repository: {full_name: acme/api}
+                    repository: acme/api
+                    draft: false
+                    baseBranch: main
                   dry_run: true
       responses:
         '200':
@@ -3179,7 +3188,7 @@ paths:
                   - $ref: '#/components/schemas/AgentTriggerDryRun'
               examples:
                 dry_run:
-                  summary: Dry run of a webhook trigger
+                  summary: Dry run of a connector trigger
                   value:
                     object: agent.trigger.dry_run
                     matched: true
@@ -3193,7 +3202,7 @@ paths:
 
                       Connector event (JSON):
                       ```json
-                      {"action":"opened","number":412,"repository":{"full_name":"acme/api"}}
+                      {"action":"opened","number":412,"repository":"acme/api","draft":false,"baseBranch":"main"}
                       ```
                     variables: null
                     errors: []
@@ -30146,7 +30155,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AgentTriggerWebhookFilterRule'
-          description: All rules must match; paths start at `payload`, `event`, `event_id`, `connector`, `trigger`, `received_at` or `agent`.
+          description: >-
+            All rules must match. Paths start at `payload` (the event's data as the package shapes it, for example
+            `payload.draft` or `payload.repository`), `event`, `delivery_id`, `received_at`, `trigger`, `agent` or
+            `connector` (`headers` is always empty and `preset` is always `connector` for a connector event). An
+            absent path matches only `not_exists`.
         include_payload:
           type: boolean
         subscription_id:
@@ -30169,7 +30182,7 @@ components:
     AgentTriggerConnectorRequest:
       type: object
       description: >-
-        The `connector` of a create / PATCH body with `type: connector`. The Connectors module checks the connector, the trigger name, `params`, `events` and `schedule` (a poll trigger takes a cron with its package's minimum interval) and answers `400 invalid_trigger` with field errors. Absent fields keep their stored values on PATCH. The trigger's `prompt` is a Mustache template over the event (roots `payload`, `event`, `event_id`, `connector`, `trigger`, `received_at`, `agent`), as for webhook triggers. Without the module the whole type is `400 invalid_trigger` (field `type`).
+        The `connector` of a create / PATCH body with `type: connector`. The Connectors module checks the connector, the trigger name, `params`, `events` and `schedule` (a poll trigger takes a cron with its package's minimum interval) and answers `400 invalid_trigger` with field errors. Absent fields keep their stored values on PATCH. The trigger's `prompt` is a Mustache template over the event (roots `payload`, `event`, `delivery_id`, `received_at`, `trigger`, `agent`, `connector`), as for webhook triggers; `payload` is the data the package shapes (for the GitHub package a flat `repository`, `number`, `draft`, `headBranch` ...), not the vendor's own body. Without the module the whole type is `400 invalid_trigger` (field `type`).
       properties:
         connector_id:
           type: string
@@ -30215,7 +30228,8 @@ components:
         status:
           type: string
           enum: [active, pending, manual, paused, failed]
-          description: '`manual`: the vendor webhook has to be set up by hand (see `setup`). `failed`: registration or polling failed (see `reason` / `last_error`); retry with `POST …/connector/retry`.'
+          description: >-
+            `active`: events are accepted (a poll that fails stays `active`; see `last_error`). `pending`: the hook is being registered at the vendor (no events are accepted yet). `manual`: the vendor webhook has to be set up by hand (see `setup`; `reason` says why it was not registered automatically); `POST …/connector/retry` registers it again. `paused`: the connector is disabled or its account is disconnected (a poll the vendor rejected the credentials of pauses too); it resumes with the connector. `failed`: a rotation could not register the hook again with the new secret, or the Connectors module could not bind the stored trigger (see `reason` / `last_error`); retry with `POST …/connector/retry`.
         kind:
           type: string
           enum: [webhook, poll]
@@ -30265,11 +30279,11 @@ components:
     AgentTriggerWebhookFilterRule:
       type: object
       description: >-
-        One condition over the delivery. `path` starts at `payload`, `headers` (webhook triggers only; the allow-list: `x-cognipeer-event`, `x-cognipeer-event-id`, `webhook-id`...), `event`, `delivery_id`, `preset`, `received_at`, `trigger` or `agent` (webhook triggers), or `event`, `event_id`, `connector`, `trigger`, `received_at` or `agent` (connector triggers), with dot-separated segments (at most 16, 256 characters) and `*` for every element of a list (`payload.pull_request.labels.*.name`). Values are compared as text; `neq` / `not_in` hold when no element matches; an absent path matches only `not_exists`.
+        One condition over the delivery. `path` starts at `payload`, `headers` (the allow-list: `x-cognipeer-event`, `x-cognipeer-event-id`, `webhook-id`...), `event`, `delivery_id`, `preset`, `received_at`, `trigger` or `agent` (webhook triggers), or `payload`, `event`, `delivery_id`, `received_at`, `trigger`, `agent` or `connector` (connector triggers: `headers` is always empty and `preset` is always `connector`; `payload` is the data the package shapes, for example `payload.draft` of the GitHub package, not the vendor's own request body), with dot-separated segments (at most 16, 256 characters) and `*` for every element of a list (`payload.labels.*.name`, or `payload.labels.*` for a list of texts). Values are compared as text; `neq` / `not_in` hold when no element matches; an absent path matches only `not_exists`.
       properties:
         path:
           type: string
-          example: payload.pull_request.base.ref
+          example: payload.action
         op:
           type: string
           enum: [eq, neq, in, not_in, exists, not_exists, contains, starts_with, glob]

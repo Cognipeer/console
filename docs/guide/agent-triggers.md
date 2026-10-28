@@ -167,7 +167,7 @@ A trigger saved with one of the old presets stays in the list, read-only, so not
 
 - It is marked `webhook.retired: true` (Studio shows a **Retired** badge) and receives nothing: its URL answers `410` `{ "error": { "type": "gone", "code": "webhook_preset_retired", … } }` before authentication, and **Run now** and **rotate-secret** answer `410` too.
 - A write that names a retired `preset` or `auth` (`github_signature`, `gitlab_token`, `basic`) is `400`.
-- **Migrate it** by changing its type: PATCH it to `type: "connector"` with the `connector` object (keep `prompt`, `variables`, `filter` and `include_payload`: they carry over as they are, but check the filter paths and the template tags against the connector's events, which are named differently from the vendor's own headers). Studio does this with **Convert to connector trigger**, which opens the editor with those fields filled in. Or PATCH it to `type: "webhook"` with `webhook: { "preset": "generic", … }` to turn it into a generic webhook with a new URL and secret (the old URL stops existing).
+- **Migrate it** by changing its type: PATCH it to `type: "connector"` with the `connector` object (keep `prompt`, `variables`, `filter` and `include_payload`: they carry over as they are, but rewrite the filter paths and the template tags for the connector's event: its `payload` is the package's flat data (`payload.draft`, not the vendor's `payload.pull_request.draft`) and a connector event has no vendor `headers` or `preset`). Studio does this with **Convert to connector trigger**, which opens the editor with those fields filled in. Or PATCH it to `type: "webhook"` with `webhook: { "preset": "generic", … }` to turn it into a generic webhook with a new URL and secret (the old URL stops existing).
 - Delete it when it is no longer wanted.
 
 ## Connector triggers
@@ -194,12 +194,14 @@ curl -X POST "$BASE/api/client/v1/agents/code-reviewer/triggers" \
       "trigger": "pull_request",
       "params": { "repository": "acme/api" },
       "events": ["pull_request.opened", "pull_request.synchronize"],
-      "filter": [{ "path": "payload.pull_request.draft", "op": "eq", "value": false }],
+      "filter": [{ "path": "payload.draft", "op": "eq", "value": false }],
       "include_payload": true
     },
-    "prompt": "Review pull request {{payload.pull_request.number}} in {{payload.repository.full_name}}."
+    "prompt": "Review pull request {{payload.number}} in {{payload.repository}}."
   }'
 ```
+
+**The event's data is the package's, not the vendor's.** A package shapes what it reports: the GitHub package's `pull_request` event is the flat `{ action, repository, number, title, body, draft, url, author, baseBranch, headBranch, headSha, labels … }` (`repository` is the text `owner/name`), its `workflow_run` event is `{ action, repository, runId, name, conclusion, branch, headSha, url … }`; it is not GitHub's own request body, so `payload.pull_request.draft` or `payload.repository.full_name` do not exist. The connector page lists the fields of each trigger, and the Studio **Test** tab shows the sample event you can write the `filter` and the `prompt` against. A path the event does not carry is absent, and an absent path matches only `not_exists`: a filter on a wrong name lets no event through.
 
 | `connector` field | |
 | --- | --- |
@@ -207,7 +209,7 @@ curl -X POST "$BASE/api/client/v1/agents/code-reviewer/triggers" \
 | `params` | The trigger's parameters, as the package declares them (a repository, a project, a board). No secrets. Checked against the package: a missing or wrong value is `400` on `connector.params.<key>`. |
 | `events` | Allow-list of the package's event types; empty = every event. |
 | `schedule` | `{ cron, timezone }`, `poll` triggers only (default: the package's, in UTC). |
-| `filter` | The same rules as a webhook's (up to 20, all must match) over `payload.…` (the event's data) and `event`. |
+| `filter` | The same rules as a webhook's (up to 20, all must match) over `payload.…` (the event's data), `event`, `delivery_id`, `received_at`, `trigger`, `agent` and `connector` (`headers` is always empty and `preset` is `connector`). |
 | `include_payload` | Append the event data to the message as external data (JSON, at most 32 KiB). Default `true`. |
 
 The answer carries the same object plus what the connector filled in (`subscription_id`, `package_id`, `kind`, `label` such as *GitHub · Pull request*), `connector_available` (false when the Connectors module is not there) and, on read, create, update, retry and rotate, `connector_subscription`:
@@ -221,7 +223,7 @@ The answer carries the same object plus what the connector filled in (`subscript
 }
 ```
 
-Triggers that listen to the same connector, package trigger and parameters **share one subscription**, so one vendor hook (or one poll) serves them all; `bindings` counts them. `status` is `active`, `pending`, `manual` (set up by hand), `paused` (the connector is disabled or its account disconnected; it resumes when the connector does) or `failed` (`last_error` says why; **Retry** tries again). In manual mode the full `secret` is in the answer that created or rotated it and nowhere else. A failure to register never blocks saving: the trigger is stored and shows `failed`.
+Triggers that listen to the same connector, package trigger and parameters **share one subscription**, so one vendor hook (or one poll) serves them all; `bindings` counts them. `status` is `active`, `pending` (the hook is being registered), `manual` (set up by hand; `reason` says why it was not registered automatically), `paused` (the connector is disabled or its account disconnected; it resumes when the connector does) or `failed` (a rotation could not register the hook again, or the module could not bind the stored trigger; `last_error` says why; **Retry** tries again). In manual mode the full `secret` is in the answer that created or rotated it and nowhere else. A failure to register never blocks saving: the trigger is stored and reads `manual` with the reason and the steps to set the hook up by hand (**Retry** registers it again). A poll that fails stays `active` with `last_error` and a back-off, so check `last_error` and `last_poll_at` as well as the status.
 
 **The turn.** Like a webhook trigger's: the `prompt` is a template over the event (<span v-pre>`{{payload.…}}`</span>, <span v-pre>`{{event}}`</span>, <span v-pre>`{{delivery_id}}`</span>, <span v-pre>`{{connector.name}}`</span>, <span v-pre>`{{connector.trigger}}`</span>, <span v-pre>`{{trigger.name}}`</span>, <span v-pre>`{{agent.key}}`</span>; a connector event has no headers), `variables` map event values to the agent's declared variables, and everything taken from the event reaches the model as external data. The message begins with a notice that the run was started by a connector trigger and names the package, the trigger and the event. Runs get `trigger: "connector"` and the metadata `connector_id`, `connector_trigger`, `event_type` and `event_id`; with `include_payload` the event is kept on the run.
 
