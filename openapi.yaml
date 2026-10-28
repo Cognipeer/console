@@ -3441,6 +3441,10 @@ paths:
         subscription is gone (`reason_code: attach_failed`) is bound to a new one. The answer is the
         trigger with its current `connector_subscription`. Needs the `agents` permission (Write).
 
+        A retry that binds a trigger whose subscription was gone (`attach_failed`) to a new one returns the signing
+        secret of a hook set up by hand once, in this answer (`connector_subscription.secret`); a retry of an existing
+        subscription never does, so rotate the secret to get a new one.
+
         A trigger of another type is `400 trigger_not_connector`. Without the Enterprise Connectors module it is
         `409 connector_triggers_unavailable`; a trigger without a subscription is
         `409 connector_subscription_missing`.
@@ -30496,7 +30500,7 @@ components:
         secret:
           type: string
           nullable: true
-          description: Shown once, in the answer that creates or rotates the signing secret of a manually set up webhook.
+          description: Shown once, in the answer that creates the signing secret of a manually set up webhook (a create, an update that binds a new subscription, or a Retry that binds a lost one) or rotates it.
         previous_secret_valid_until:
           type: integer
           nullable: true
