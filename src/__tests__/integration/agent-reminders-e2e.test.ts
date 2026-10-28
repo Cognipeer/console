@@ -52,6 +52,9 @@ import { executeAgentChatLocal } from '@/lib/services/agents/agentService';
 import { destroyCache } from '@/lib/core/cache';
 import { createTool } from '@cognipeer/agent-sdk';
 import { z } from 'zod';
+import { decryptObject } from '@/lib/utils/crypto';
+import { kbCallerFromRuntime } from '@/lib/services/rag/access/caller';
+import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 const DB_NAME = 'tenant_reminders';
 const PROJECT_ID = 'proj-1';
@@ -118,6 +121,11 @@ const chat = (conversationId: string, userMessage: string, extra: Record<string,
 });
 
 const remindersOf = (conversationId: string) => db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId, channel: 'reminder' });
+/** The runtime context a reminder's wake starts with (kept sealed on the run). */
+const wakeContextOf = (run: { runtimeContext?: unknown }): AgentRuntimeContext | undefined => {
+  const sealed = (run.runtimeContext as { sealed?: string } | null | undefined)?.sealed;
+  return sealed ? decryptObject<AgentRuntimeContext>(sealed) : undefined;
+};
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -183,6 +191,36 @@ describe('agent reminders end to end', () => {
     const fireAt = new Date(reminder.notBefore!).getTime();
     expect(fireAt).toBeGreaterThanOrEqual(started + 600_000 - 1_000);
     expect(fireAt).toBeLessThanOrEqual(Date.now() + 600_000);
+    // This turn names no caller (no runtime context, which a route always stamps), so it read as no one, and so does the wake.
+    expect(wakeContextOf(reminder)).toEqual({ source: 'reminder', userId: OWNER, kbReader: 'anonymous' });
+  });
+
+  describe('the wake reads no more than the turn that set it', () => {
+    const setOne = async (runtimeContext: AgentRuntimeContext) => {
+      await createAgent({ reminders: { enabled: true } });
+      scriptModel((n) => (n === 0 ? calls(['reminder_set', { delay_seconds: 600, message: 'Check again.' }]) : answer('Later.')));
+      const conversation = await newConversation();
+      await chat(String(conversation._id), 'Keep an eye on it.', { runtimeContext });
+      const [reminder] = await remindersOf(String(conversation._id));
+      expect(reminder, 'a reminder was set').toBeTruthy();
+      return wakeContextOf(reminder);
+    };
+
+    it('an agent step of a flow, which runs as the flow\'s owner and reads as no one', async () => {
+      const wake = await setOne({ userId: OWNER, source: 'flow' });
+      expect(wake).toEqual({ source: 'reminder', userId: OWNER, kbReader: 'anonymous' });
+      expect(kbCallerFromRuntime(wake)).toEqual({ kind: 'anonymous', reason: 'shared' });
+    });
+
+    it('a turn in a shared channel', async () => {
+      expect(await setOne({ userId: OWNER, source: 'messaging', kbReader: 'anonymous' })).toMatchObject({ userId: OWNER, kbReader: 'anonymous' });
+    });
+
+    it('a person\'s own turn: as that person', async () => {
+      const wake = await setOne({ userId: OWNER, source: 'portal' });
+      expect(wake).toEqual({ source: 'reminder', userId: OWNER });
+      expect(kbCallerFromRuntime(wake)).toEqual({ kind: 'person', userId: OWNER });
+    });
   });
 
   it('after another tool returned, a new reminder is refused when the agent says deny', async () => {

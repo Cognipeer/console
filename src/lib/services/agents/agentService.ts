@@ -68,6 +68,7 @@ import {
     currentRestrictedKnowledgeTags,
     kbCallerFromIdentity,
     kbCallerFromRuntime,
+    kbReaderOfFollowUp,
     noteRestrictedDocuments,
     noteRestrictedKnowledge,
     restrictedKnowledgeTagsOf,
@@ -4892,6 +4893,8 @@ async function buildLocalAgentRun(input: {
     const remindersOn = resolveRemindersConfig(config.reminders, getConfig().agent.reminders);
     // A wake turn runs as a person (the owner checks need one): never offered to a run without one.
     if (input.conversation && remindersOn.available && input.userId) {
+        // The wake reads no more than this turn: as no one, unless its own context reads as this turn's caller.
+        const wakeReader = kbReaderOfFollowUp(kbCaller, { userId: input.userId, tokenId: runtimeContext?.tokenId, via: runtimeContext?.via });
         reminderTools = buildReminderTools({
             createToolFn: createTool,
             zod: z,
@@ -4906,7 +4909,7 @@ async function buildLocalAgentRun(input: {
                 ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
                 ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
                 ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
-                ...(runtimeContext?.kbReader === 'anonymous' ? { kbReader: 'anonymous' as const } : {}),
+                ...(wakeReader ? { kbReader: wakeReader } : {}),
                 ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
                 ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
                 ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),

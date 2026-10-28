@@ -113,6 +113,31 @@ export function kbCallerFromIdentity(caller: ConsoleIdentityCaller | null | unde
   return { kind: 'person', userId, ...(tokenId ? { tokenId } : {}), ...(caller.delegated ? { delegated: true } : {}) };
 }
 
+/** Whether two callers read the same: the same person (with the same token, delegated or not), the same token, or no one. */
+function readsAlike(a: KbCaller, b: KbCaller): boolean {
+  switch (a.kind) {
+    case 'person':
+      return b.kind === 'person' && a.userId === b.userId && a.tokenId === b.tokenId && Boolean(a.delegated) === Boolean(b.delegated);
+    case 'token':
+      return b.kind === 'token' && a.tokenId === b.tokenId;
+    default:
+      return a.kind === b.kind;
+  }
+}
+
+/**
+ * What a run that this run starts for later (the wake of a reminder it sets) is told to read as. That run gets a
+ * runtime context of its own (`next`): unless the context already reads as this run's caller, the later run reads as
+ * no one (`anonymous`), so it never reads more than the run that started it. Such a run is a flow's agent step, a
+ * shared channel's turn, or a continued pause, which reads for the person it paused for, whoever answered it.
+ */
+export function kbReaderOfFollowUp(
+  caller: KbCaller,
+  next: Parameters<typeof kbCallerFromRuntime>[0],
+): 'anonymous' | undefined {
+  return readsAlike(kbCallerFromRuntime(next), caller) ? undefined : 'anonymous';
+}
+
 /** A short, secret-free description for logs. */
 export function describeKbCaller(caller: KbCaller): string {
   switch (caller.kind) {

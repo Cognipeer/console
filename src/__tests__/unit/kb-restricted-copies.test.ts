@@ -52,7 +52,7 @@ import {
   withKnowledgeExposure,
 } from '@/lib/services/rag/access/exposure';
 import { noteRestrictedDocuments, restrictedTagOf } from '@/lib/services/rag/access/restricted';
-import { kbCallerFromIdentity, kbCallerFromRuntime } from '@/lib/services/rag/access/caller';
+import { kbCallerFromIdentity, kbCallerFromRuntime, kbReaderOfFollowUp } from '@/lib/services/rag/access/caller';
 import { consoleIdentityCallerOf, consoleIdentityPersonOf } from '@/lib/iam/consoleIdentity';
 import { createConsoleMemoryStore, memoryWriteWithheld } from '@/lib/services/agents/agentMemoryAdapter';
 import { buildMemoryTools } from '@/lib/services/agents/agentMemoryTools';
@@ -216,6 +216,38 @@ describe('an agent step of a flow', () => {
     expect(kbCallerFromIdentity(caller)).toEqual({ kind: 'anonymous', reason: 'shared' });
     // the editor's playground runs the same agent for the person at the screen
     expect(kbCallerFromRuntime({ userId: 'u1', source: 'playground' })).toEqual({ kind: 'person', userId: 'u1' });
+  });
+});
+
+describe('a run started later for a run (the wake of a reminder it sets)', () => {
+  const wake = (userId: string, o: { tokenId?: string; delegated?: boolean } = {}) => ({
+    userId, ...(o.tokenId ? { tokenId: o.tokenId } : {}), ...(o.delegated ? { via: { kind: 'delegated' as const, issuer: 'https://idp.example.com' } } : {}),
+  });
+
+  it('reads as the run that set it when its own context reads the same', () => {
+    expect(kbReaderOfFollowUp({ kind: 'person', userId: 'u1' }, wake('u1'))).toBeUndefined();
+    expect(kbReaderOfFollowUp({ kind: 'token', tokenId: 't1', ownerUserId: 'u1' }, wake('u1', { tokenId: 't1' }))).toBeUndefined();
+    expect(kbReaderOfFollowUp({ kind: 'person', userId: 'u1', tokenId: 't1', delegated: true }, wake('u1', { tokenId: 't1', delegated: true }))).toBeUndefined();
+    // A trigger's run: both read as no one.
+    expect(kbReaderOfFollowUp(kbCallerFromRuntime({ userId: 'system:trigger:t1', source: 'trigger' }), wake('system:trigger:t1'))).toBeUndefined();
+  });
+
+  it('reads as no one when the run that set it did, or read for someone else', () => {
+    // A flow's agent step and a shared channel's turn run for a person but read as no one.
+    expect(kbReaderOfFollowUp(kbCallerFromRuntime({ userId: 'owner-1', source: 'flow' }), wake('owner-1'))).toBe('anonymous');
+    expect(kbReaderOfFollowUp(kbCallerFromRuntime({ userId: 'u1', source: 'messaging', kbReader: 'anonymous' }), wake('u1'))).toBe('anonymous');
+    // A continued pause reads for the person it paused for; the wake would run as whoever answered it.
+    expect(kbReaderOfFollowUp(kbCallerFromIdentity({ userId: 'u1' }), wake('approver-1'))).toBe('anonymous');
+    expect(kbReaderOfFollowUp(kbCallerFromIdentity({ userId: 'u1', kbReader: 'anonymous' }), wake('u1'))).toBe('anonymous');
+    // Another token, or the same person without the delegation, is not the same reader either.
+    expect(kbReaderOfFollowUp({ kind: 'token', tokenId: 't1' }, wake('u1', { tokenId: 't2' }))).toBe('anonymous');
+    expect(kbReaderOfFollowUp({ kind: 'person', userId: 'u1', tokenId: 't1', delegated: true }, wake('u1'))).toBe('anonymous');
+    expect(kbReaderOfFollowUp({ kind: 'system' }, wake('u1'))).toBe('anonymous');
+  });
+
+  it('then reads as no one when it runs', () => {
+    expect(kbCallerFromRuntime({ ...wake('owner-1'), source: 'reminder', kbReader: kbReaderOfFollowUp(kbCallerFromRuntime({ userId: 'owner-1', source: 'flow' }), wake('owner-1')) }))
+      .toEqual({ kind: 'anonymous', reason: 'shared' });
   });
 });
 
