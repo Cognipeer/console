@@ -122,17 +122,17 @@ Skip anything a formatter or linter enforces. Phrase each comment as problem, im
         events: ['pull_request.opened', 'pull_request.reopened', 'pull_request.synchronize', 'pull_request.ready_for_review'],
         filter: [
           { path: 'payload.action', op: 'in', value: ['opened', 'synchronize', 'reopened', 'ready_for_review'] },
-          { path: 'payload.pull_request.draft', op: 'eq', value: false },
+          { path: 'payload.draft', op: 'eq', value: false },
         ],
         includePayload: true,
       },
+      // The names are the GitHub package's own flat event data (not GitHub's raw webhook body): `repository` is "owner/name".
       prompt:
-        'Review pull request {{payload.pull_request.number}} in {{payload.repository.full_name}}: {{payload.pull_request.title}}. ' +
-        'Author: {{payload.pull_request.user.login}}. Merging {{payload.pull_request.head.ref}} into {{payload.pull_request.base.ref}}. ' +
-        'Size: {{payload.pull_request.changed_files}} files, +{{payload.pull_request.additions}} -{{payload.pull_request.deletions}}. ' +
-        'URL: {{payload.pull_request.html_url}}. Description: {{payload.pull_request.body}}. ' +
-        'The event does not include the diff; if no tool can fetch it, say what you need.',
-      variables: { repository: '{{payload.repository.full_name}}' },
+        'Review pull request {{payload.number}} in {{payload.repository}}: {{payload.title}}. ' +
+        'Author: {{payload.author}}. Merging {{payload.headBranch}} into {{payload.baseBranch}}. ' +
+        'URL: {{payload.url}}. Description: {{payload.body}}. ' +
+        'The event does not include the diff or the size of the change; if no tool can fetch them, say what you need.',
+      variables: { repository: '{{payload.repository}}' },
     },
   ],
   tryIt: {

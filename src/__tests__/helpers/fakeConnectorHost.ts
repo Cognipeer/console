@@ -3,11 +3,14 @@
  * seam over an in-memory subscription table, with a call log so tests can
  * assert the order in which core calls it, and switches to make a step fail.
  *
- * Two connectors exist: `conn-1` (package `cognipeer.github`, triggers
- * `pull_request` and `workflow_run`, both webhooks) and `conn-poll` (package
- * `cognipeer.jira`, trigger `issue_updated`, a poll). Anything else is unknown.
- * Subscriptions are shared by (connector, trigger, params, schedule) like the
- * real module's; `bindings` counts the triggers bound to one.
+ * Three connectors exist: `conn-1` (package `cognipeer.github`, triggers
+ * `pull_request` and `workflow_run`, both webhooks; takes any parameters and
+ * events), `conn-gh` (the same package, but checked like the real module:
+ * `repository` is a required parameter and the events are the manifest's) and
+ * `conn-poll` (package `cognipeer.jira`, trigger `issue_updated`, a poll).
+ * Anything else is unknown. Subscriptions are shared by (connector, trigger,
+ * params, schedule) like the real module's; `bindings` counts the triggers
+ * bound to one.
  */
 
 import type { AgentTriggerConnector, IAgentTrigger } from '@/lib/database';
@@ -16,6 +19,7 @@ import type {
   ConnectorTriggerScope,
   ConnectorTriggerView,
 } from '@/enterprise/connector-triggers';
+import { GITHUB_PACKAGE_ID, GITHUB_TRIGGERS } from './githubConnectorFixture';
 
 interface Subscription {
   id: string;
@@ -26,11 +30,33 @@ interface Subscription {
   bound: Set<string>;
 }
 
-const TRIGGERS: Record<string, Record<string, { packageId: string; kind: 'webhook' | 'poll'; label: string }>> = {
+interface FakeTrigger {
+  packageId: string;
+  kind: 'webhook' | 'poll';
+  label: string;
+  /** Given: the only parameters the trigger takes (others are refused), and the required ones among them. */
+  params?: { accepted: string[]; required: string[] };
+  /** Given: the only event types the trigger reports (others are refused). */
+  events?: string[];
+}
+
+const TRIGGERS: Record<string, Record<string, FakeTrigger>> = {
   'conn-1': {
     pull_request: { packageId: 'cognipeer.github', kind: 'webhook', label: 'GitHub - Pull request' },
     workflow_run: { packageId: 'cognipeer.github', kind: 'webhook', label: 'GitHub - Workflow run' },
   },
+  'conn-gh': Object.fromEntries(
+    (['pull_request', 'workflow_run'] as const).map((name) => [name, {
+      packageId: GITHUB_PACKAGE_ID,
+      kind: 'webhook' as const,
+      label: name === 'pull_request' ? 'GitHub - Pull request' : 'GitHub - Workflow run',
+      params: {
+        accepted: Object.keys(GITHUB_TRIGGERS[name].params),
+        required: Object.entries(GITHUB_TRIGGERS[name].params).filter(([, param]) => param.required).map(([key]) => key),
+      },
+      events: GITHUB_TRIGGERS[name].events,
+    }]),
+  ),
   'conn-poll': {
     issue_updated: { packageId: 'cognipeer.jira', kind: 'poll', label: 'Jira - Issue updated' },
   },
@@ -67,7 +93,8 @@ export function createFakeConnectorHost(): FakeConnectorHost {
     subscriptions,
     failing,
     attachStatus: 'active',
-    sampleEvent: { eventType: 'pull_request.opened', data: { action: 'opened', number: 42, repository: { full_name: 'acme/api' } } },
+    // The package's own flat event data (see githubConnectorFixture), with the repository and number the tests read.
+    sampleEvent: { eventType: GITHUB_TRIGGERS.pull_request.sample.type, data: { ...GITHUB_TRIGGERS.pull_request.sample.data, repository: 'acme/api', number: 42 } },
     boundTo: (subscriptionId) => [...(subscriptions.get(subscriptionId)?.bound ?? [])],
   };
 
@@ -97,6 +124,20 @@ export function createFakeConnectorHost(): FakeConnectorHost {
       const trigger = catalog[settings.trigger];
       if (!trigger) return { ok: false, errors: [{ field: 'connector.trigger', message: 'The connector\'s package has no such trigger' }] };
       if (settings.params && 'bad' in settings.params) return { ok: false, errors: [{ field: 'connector.params.bad', message: 'Not a parameter of this trigger' }] };
+      if (trigger.params) {
+        // Like the real module: an unknown parameter and a missing required one are refused, each on its own field.
+        const errors: Array<{ field: string; message: string }> = [];
+        for (const key of Object.keys(settings.params ?? {})) {
+          if (!trigger.params.accepted.includes(key)) errors.push({ field: `connector.params.${key}`, message: `${key} is not a parameter of this trigger` });
+        }
+        for (const key of trigger.params.required) {
+          const value = settings.params?.[key];
+          if (value === undefined || value === null || value === '') errors.push({ field: `connector.params.${key}`, message: `${key} is required` });
+        }
+        if (errors.length > 0) return { ok: false, errors };
+      }
+      const unknownEvents = trigger.events ? (settings.events ?? []).filter((event) => !trigger.events!.includes(event)) : [];
+      if (unknownEvents.length > 0) return { ok: false, errors: [{ field: 'connector.events', message: `Not an event of this trigger: ${unknownEvents.join(', ')}` }] };
       if (trigger.kind === 'poll' && !settings.schedule) return { ok: false, errors: [{ field: 'connector.schedule', message: 'A poll trigger needs a schedule' }] };
       return {
         ok: true,
