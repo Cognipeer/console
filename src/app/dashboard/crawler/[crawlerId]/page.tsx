@@ -1130,10 +1130,10 @@ Content-Type: application/json
                   <NumberInput label="Max concurrency" min={1} max={16} {...httpForm.getInputProps('maxConcurrency')} />
                 </Group>
                 <Divider my={2} label="Auth" />
-                <PasswordInput label="Bearer token" {...httpForm.getInputProps('bearerToken')} />
+                <PasswordInput label="Bearer token" autoComplete="off" {...httpForm.getInputProps('bearerToken')} />
                 <Group grow>
-                  <TextInput label="Basic auth username" {...httpForm.getInputProps('basicUsername')} />
-                  <PasswordInput label="Basic auth password" {...httpForm.getInputProps('basicPassword')} />
+                  <TextInput label="Basic auth username" autoComplete="off" {...httpForm.getInputProps('basicUsername')} />
+                  <PasswordInput label="Basic auth password" autoComplete="off" {...httpForm.getInputProps('basicPassword')} />
                 </Group>
                 <Divider my={2} label="Headers & cookies" />
                 <Textarea
