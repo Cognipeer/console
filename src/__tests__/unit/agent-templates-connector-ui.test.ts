@@ -130,6 +130,11 @@ const typeInto = (input: HTMLInputElement, value: string) => act(() => {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 });
 const repositoryInput = () => document.querySelector<HTMLInputElement>('input[aria-label="repository"]');
+/** Opens the connector picker and picks the option with this name (picking the chosen one again clears it). */
+const pickConnector = async (name: string) => {
+  await click(document.querySelector('input[placeholder="Pick a connector"]'));
+  await click([...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.trim() === name));
+};
 const skippedAnswer = (skipped: unknown[]) => ({
   agent: { _id: 'a1', key: 'pr-bot', name: 'PR bot' },
   template: { key: 'pr-reviewer', version: 1, catalogVersion: 1 },
@@ -232,6 +237,39 @@ describe('Use template: the parameters of the connector triggers', () => {
     const post = await create();
     expect(post.body).not.toHaveProperty('connector_ids');
     expect(post.body).not.toHaveProperty('connector_params');
+  });
+
+  it('starts the parameters over when another connector is picked: those typed for the first are not shown for, or sent with, the second', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)'), github('c2', 'GitHub (labs)')];
+    await openForm();
+    await pickConnector('GitHub (acme)');
+    typeInto(repositoryInput()!, 'acme/api');
+    expect(paramsForms.renders.at(-1)).toMatchObject({ connectorId: 'c1', value: { repository: 'acme/api' } });
+
+    await pickConnector('GitHub (labs)');
+    expect(paramsForms.renders.at(-1)).toMatchObject({ connectorId: 'c2', value: {} });
+    expect(repositoryInput()!.value).toBe('');
+    const post = await create();
+    expect(post.body).toMatchObject({ connector_ids: { 'Review pull requests': 'c2' } });
+    expect(post.body).not.toHaveProperty('connector_params');
+  });
+
+  it('starts them over too when the connector is cleared and another one is picked', async () => {
+    catalog.connectors = [github('c1', 'GitHub (acme)'), github('c2', 'GitHub (labs)')];
+    await openForm();
+    await pickConnector('GitHub (acme)');
+    typeInto(repositoryInput()!, 'acme/api');
+    // Picking the chosen connector again clears it: nothing is asked any more.
+    await pickConnector('GitHub (acme)');
+    expect(repositoryInput()).toBeNull();
+    await pickConnector('GitHub (labs)');
+    expect(paramsForms.renders.at(-1)).toMatchObject({ connectorId: 'c2', value: {} });
+    typeInto(repositoryInput()!, 'labs/web');
+    const post = await create();
+    expect(post.body).toMatchObject({
+      connector_ids: { 'Review pull requests': 'c2' },
+      connector_params: { 'Review pull requests': { repository: 'labs/web' } },
+    });
   });
 
   it('draws nothing of its own when the trigger has no parameters', async () => {
