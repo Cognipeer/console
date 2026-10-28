@@ -32,6 +32,7 @@ import { IMPORT_DEFAULT_LIMIT, IMPORT_MAX_LIMIT, importFromStorage } from '@/lib
 import { startBucketDeletion } from '@/lib/services/files/jobs/bucketDeletion';
 import { bucketHoldsSourcesBody, findModulesKeepingSourcesIn } from '@/lib/services/files/knowledgeSources';
 import { queueMarkdownConversion } from '@/lib/services/files/jobs/markdownConversion';
+import { parseExtractionBody } from '@/lib/services/files/markdownExtraction';
 import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import { assertPreviewSize, planPreview } from '@/lib/services/files/preview';
 import type { FileRecordView } from '@/lib/services/files/types';
@@ -689,6 +690,9 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       // `folder` (alias `prefix`) = upload into that folder; `keyHint` is then the file's name in it.
       const destination = composeUploadKeyHint({ folder: body.folder ?? body.prefix, keyHint: body.keyHint });
       if ('error' in destination) return reply.code(400).send({ error: destination.error });
+      // Optional OCR settings for the Markdown copy (`ocr`, `images`): checked here, kept on the file's record.
+      const extraction = await parseExtractionBody(body, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId });
+      if ('error' in extraction) return reply.code(400).send({ error: extraction.error });
 
       // The bucket first: the quotas below are those of its provider, and a bucket that is missing or switched
       // off is refused before any of them is spent.
@@ -773,6 +777,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         data: body.data as string,
         fileName: body.fileName as string,
         ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
+        ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
         metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
         providerKey: (body.providerKey as string | undefined) ?? undefined,
       });
@@ -789,7 +794,11 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { bucketKey } = request.params as { bucketKey: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const key = readObjectKey(readJsonObjectBody(request).key, 'key');
+      const body = readJsonObjectBody(request);
+      const key = readObjectKey(body.key, 'key');
+      // Optional `ocr` / `images`: when the body names either, they replace the settings the file has (none = the plain conversion).
+      const extraction = await parseExtractionBody(body, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId });
+      if ('error' in extraction) return reply.code(400).send({ error: extraction.error });
 
       // Converting a file a session holds changes that session's file: its owner always may, anybody else needs
       // `agent.session_manage_others`. The answer is the file's record, so a file of a knowledge base the caller
@@ -806,6 +815,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         bucketKey,
         key,
         actor: session.userId,
+        ...(extraction.present ? { extraction: extraction.extraction ?? {} } : {}),
       });
       const [withAgent] = await withAgentIds(session.tenantDbName, projectId, [record]);
       const [named] = await withUploaderNames(session.tenantDbName, [withAgent]);

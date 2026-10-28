@@ -4848,7 +4848,7 @@ async function buildLocalAgentRun(input: {
     cleanupTasks.push(sandboxTools.cleanup);
     // `read`: one tool for the sandbox's files and the conversation's (images, PDFs, video included).
     const readSession = input.conversation && sessionFacts.any
-        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars }
+        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars, maxImageBytes: filesCfg.maxBytes }
         : undefined;
     const readTool = buildReadTool({
         createToolFn: createTool,

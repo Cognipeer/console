@@ -26,6 +26,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import { ACTIVE_PROJECT_CHANGED_EVENT } from '@/components/layout/useEffectivePermissions';
+import type { OcrSettings } from '@/lib/services/extraction/types';
 import type { FileBucketView, FileRecordView } from '@/lib/services/files';
 import {
   archiveFileName,
@@ -597,12 +598,19 @@ export function useBatchDeleteObjects(): UseMutationResult<
   });
 }
 
+/** `ocr` replaces the file's own OCR settings for this run (null = the plain conversion); left out, the file keeps its own. */
+export interface ConvertObjectVariables {
+  bucketKey: string;
+  key: string;
+  ocr?: OcrSettings | null;
+}
+
 /** (Re)starts a Markdown conversion; the record comes back `pending` and the screens poll it from there. */
-export function useConvertObject(): UseMutationResult<FileRecordView, FilesApiError, { bucketKey: string; key: string }> {
+export function useConvertObject(): UseMutationResult<FileRecordView, FilesApiError, ConvertObjectVariables> {
   const queryClient = useQueryClient();
   const project = useFilesProject();
-  return useMutation<FileRecordView, FilesApiError, { bucketKey: string; key: string }>({
-    mutationFn: ({ bucketKey, key }) => convertObject(bucketKey, key),
+  return useMutation<FileRecordView, FilesApiError, ConvertObjectVariables>({
+    mutationFn: ({ bucketKey, key, ocr }) => convertObject(bucketKey, key, ocr !== undefined ? { ocr } : {}),
     onSuccess: (record, { bucketKey, key }) => {
       queryClient.setQueryData(filesKeys.object(project, bucketKey, key), record);
       return invalidateObject(queryClient, project, bucketKey, key);

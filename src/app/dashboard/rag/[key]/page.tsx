@@ -48,6 +48,7 @@ import {
   IconFilter,
   IconPlayerPlay,
   IconRefresh,
+  IconScan,
   IconSearch,
   IconSearchOff,
   IconTrash,
@@ -70,12 +71,19 @@ import {
   chunkFieldErrors,
   chunkFormValues,
   hasChunkFieldErrors,
+  documentExtractionNote,
   type ChunkFormValues,
 } from '@/components/rag/ragModuleForm';
+import { englishOcrText } from '@/components/extraction/ocrEnglish';
+import { describeOcr, ocrIsOn, type OcrSettings } from '@/components/extraction/ocrForm';
 import type { IRagChunkConfig, RagChunkStrategy } from '@/lib/database';
 
 /** How often a document still being ingested is re-read. */
 const DOC_POLL_INTERVAL_MS = 2500;
+
+/** What the file picker offers; pictures and scans are readable only while the module's OCR is on. */
+const DOCUMENT_ACCEPT = '.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.htm,.xlsx,.xls,.pptx,.ppt,.rtf,.odt';
+const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff';
 /** Documents per import request; keeps each body well under the server's body limit. */
 const IMPORT_BATCH_SIZE = 1000;
 const IMPORT_FORMAT_NAME = 'cognipeer.rag-module';
@@ -96,6 +104,7 @@ interface RagModuleView {
   fileBucketKey?: string;
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
+  extraction?: { ocr?: OcrSettings | null } | null;
   status: string;
   hybrid?: { enabled: boolean; mode?: 'rrf' | 'weighted'; alpha?: number; k?: number } | null;
   isolateByModule?: boolean | null;
@@ -124,7 +133,20 @@ interface RagDocumentView {
   errorMessage?: string;
   lastIndexedAt?: string;
   createdAt?: string;
+  /** How the text was read (OCR pages) and, while the file is still being read, where that stands. */
+  extraction?: {
+    sourceType?: string;
+    pageCount?: number;
+    ocrPages?: number;
+    ocrImages?: number;
+    stage?: 'queued' | 'running';
+    progress?: { completed: number; total: number };
+    warnings?: string[];
+  };
 }
+
+/** What the Status column says about the OCR of a document: the finished run, or the one in flight. */
+const extractionNote = (doc: RagDocumentView): string | undefined => documentExtractionNote(doc.extraction);
 
 /**
  * A match as the query endpoint returns it — not as the service produced it.
@@ -552,7 +574,7 @@ export default function RagModuleDetailPage() {
   // it. Without this the row stayed at its initial status until the user
   // happened to press Refresh, which read as an ingest that had hung.
   const documentsSettling = documents.some(
-    (doc) => doc.status === 'pending' || doc.status === 'processing',
+    (doc) => doc.status === 'pending' || doc.status === 'processing' || Boolean(doc.extraction?.stage),
   );
   useEffect(() => {
     if (!documentsSettling) return undefined;
@@ -873,7 +895,20 @@ export default function RagModuleDetailPage() {
       label: 'Status',
       render: (doc) => (
         <>
-          <Badge variant="light" color={statusColor(doc.status)} size="sm">{doc.status}</Badge>
+          <Group gap={6} wrap="nowrap">
+            <Badge variant="light" color={statusColor(doc.status)} size="sm">{doc.status}</Badge>
+            {!doc.extraction?.stage && extractionNote(doc) ? (
+              <Badge
+                variant="outline"
+                color="grape"
+                size="sm"
+                title={doc.extraction?.warnings?.length ? doc.extraction.warnings.join(', ') : undefined}
+              >
+                {extractionNote(doc)}
+              </Badge>
+            ) : null}
+          </Group>
+          {doc.extraction?.stage ? <Text size="xs" c="dimmed" mt={2}>{extractionNote(doc)}</Text> : null}
           {doc.errorMessage && <Text size="xs" c="red" mt={2}>{doc.errorMessage}</Text>}
         </>
       ),
@@ -906,6 +941,35 @@ export default function RagModuleDetailPage() {
     });
     if (!ok) return;
     await reindex.start();
+  };
+
+  /** Reads the stored original of a document again with the module's current OCR setting (a re-index never does). */
+  const handleReextractDocument = async (doc: RagDocumentView) => {
+    const ok = await confirm({
+      title: 'Re-extract this document?',
+      message: `“${doc.fileName}” is read again from its stored original with the module’s current text extraction setting, then indexed again. Scanned pages are read with OCR when it is on, which can take a while and uses the OCR model.`,
+      confirmLabel: 'Re-extract',
+      tone: 'warning',
+    });
+    if (!ok) return;
+    setReingestingDocId(doc._id);
+    try {
+      const res = await fetch(
+        `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reextract: true }) },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(err.error ?? 'Re-extract failed');
+      }
+      notifications.show({ color: 'green', title: 'Re-extract complete', message: `${doc.fileName} was read again.` });
+      await loadDocuments();
+      await loadModule('refresh');
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Re-extract failed', message: String(error) });
+    } finally {
+      setReingestingDocId(null);
+    }
   };
 
   const handleReingestDocument = async (doc: RagDocumentView) => {
@@ -1335,6 +1399,14 @@ export default function RagModuleDetailPage() {
                   )}
                 </Stack>
                 <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Text Extraction (OCR)</Text>
+                  {ocrIsOn(mod.extraction?.ocr) ? (
+                    <Text size="sm">{describeOcr(englishOcrText, mod.extraction?.ocr)}</Text>
+                  ) : (
+                    <Text size="sm" c="dimmed">Off</Text>
+                  )}
+                </Stack>
+                <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Hybrid Retrieval</Text>
                   {mod.hybrid?.enabled ? (
                     <Text size="sm">
@@ -1425,7 +1497,7 @@ export default function RagModuleDetailPage() {
                     <FileInput
                       label="Select File"
                       placeholder="Click to select a file (PDF, DOCX, TXT, MD, etc.)"
-                      accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.htm,.xlsx,.xls,.pptx,.ppt,.rtf,.odt"
+                      accept={ocrIsOn(mod.extraction?.ocr) ? `${DOCUMENT_ACCEPT},${IMAGE_ACCEPT}` : DOCUMENT_ACCEPT}
                       value={ingestFile}
                       onChange={setIngestFile}
                       clearable
@@ -1613,6 +1685,15 @@ export default function RagModuleDetailPage() {
                       disabled: reingestingDocId === doc._id,
                       onClick: () => void handleReingestDocument(doc),
                     },
+                    ...(doc.fileKey
+                      ? [{
+                        id: 'reextract',
+                        label: 'Re-extract',
+                        icon: <IconScan size={14} />,
+                        disabled: reingestingDocId === doc._id || Boolean(doc.extraction?.stage),
+                        onClick: () => void handleReextractDocument(doc),
+                      }]
+                      : []),
                     {
                       id: 'delete',
                       label: 'Delete',

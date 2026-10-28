@@ -247,6 +247,33 @@ export interface AppConfig {
     fileUploadAllowedMimeTypes: string[];
   };
 
+  /**
+   * Document text extraction (OCR): the tunables of `services/extraction`. Read through `ocrDefaults()` there, which
+   * falls back to the same defaults when a hand-built config (a test's partial mock) has no such block.
+   */
+  ocr: {
+    /** ISO 639-1 languages tried when a setting names none. */
+    defaultLanguages: string[];
+    /** Pages OCR'd per document when a setting names no limit. */
+    maxPages: number;
+    /** The largest `maxPages` a setting may ask for. */
+    maxPagesLimit: number;
+    /** Concurrent calls to an OCR / vision model inside one document. */
+    modelConcurrency: number;
+    /** Pages recognised in parallel inside one document by the local engine. */
+    localConcurrency: number;
+    /** Documents the local engine reads at once per node. */
+    localMaxDocs: number;
+    /** One OCR call (a page, an image, a whole-document request). */
+    callTimeoutMs: number;
+    /** A whole document when nobody waits for the answer (a job). */
+    documentTimeoutMs: number;
+    /** A whole document when the request is waiting for the answer. */
+    inlineTimeoutMs: number;
+    /** Directory that holds `<lang>.traineddata.gz`; empty = the bundled data copied under the data dir. */
+    tessdataDir: string;
+  };
+
   app: {
     /**
      * Canonical external URL for server-generated links. Resolved from APP_URL
@@ -1027,6 +1054,19 @@ function buildConfig(source: ConfigSource): AppConfig {
       // Empty list disables the allowlist (any MIME accepted). When non-empty,
       // only listed types are accepted. Wildcards like "image/*" are honored.
       fileUploadAllowedMimeTypes: list(source, 'FILE_UPLOAD_ALLOWED_MIME_TYPES', []),
+    },
+
+    ocr: {
+      defaultLanguages: list(source, 'OCR_DEFAULT_LANGUAGES', ['tr', 'en']),
+      maxPages: positiveInt(source, 'OCR_MAX_PAGES', 100),
+      maxPagesLimit: positiveInt(source, 'OCR_MAX_PAGES_LIMIT', 500),
+      modelConcurrency: positiveInt(source, 'OCR_MODEL_CONCURRENCY', 4),
+      localConcurrency: positiveInt(source, 'OCR_LOCAL_CONCURRENCY', 1),
+      localMaxDocs: positiveInt(source, 'OCR_LOCAL_MAX_DOCS', 1),
+      callTimeoutMs: positiveInt(source, 'OCR_CALL_TIMEOUT_MS', 180_000),
+      documentTimeoutMs: positiveInt(source, 'OCR_DOCUMENT_TIMEOUT_MS', 900_000),
+      inlineTimeoutMs: positiveInt(source, 'OCR_INLINE_TIMEOUT_MS', 120_000),
+      tessdataDir: str(source, 'OCR_TESSDATA_DIR', '').trim(),
     },
 
     app: {

@@ -23,6 +23,8 @@ import {
 } from '@/lib/quota/quotaGuard';
 import { bucketInactiveError, isFileServiceError } from '@/lib/services/files/errors';
 import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
+import { clientGone } from '../clientGone';
+import { parseExtractionBody } from '@/lib/services/files/markdownExtraction';
 import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
 import { toHeaderSafeJson } from '@/lib/utils/headerSafeJson';
@@ -205,6 +207,9 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       // The same destination rules as the Document Store: no "." / ".." segments, no control characters.
       const destination = composeUploadKeyHint({ keyHint: body.keyHint });
       if ('error' in destination) return reply.code(400).send({ error: destination.error });
+      // Optional OCR settings for the Markdown copy (`ocr`, `images`; used with `convertToMarkdown: true`).
+      const extraction = await parseExtractionBody(body, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId });
+      if ('error' in extraction) return reply.code(400).send({ error: extraction.error });
 
       // The bucket first: the quotas below are those of its provider, and a bucket that is missing or switched
       // off is refused before any of them is spent.
@@ -282,6 +287,9 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         data: body.data,
         fileName: body.fileName,
         keyHint: destination.keyHint,
+        ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
+        // A client that goes away stops the OCR run it was waiting for.
+        ...(extraction.extraction?.ocr ? { signal: clientGone(reply) } : {}),
         metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
       });
 

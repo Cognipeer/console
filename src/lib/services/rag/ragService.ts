@@ -6,7 +6,13 @@
  */
 
 import { assertServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
-import { RagModuleInactiveError } from './errors';
+import {
+  RagModuleInactiveError,
+  RagOcrIncompleteError,
+  RagOriginalMissingError,
+  RagReextractIncompleteError,
+  RagStoredTextUnavailableError,
+} from './errors';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -18,8 +24,23 @@ import {
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 
 const logger = createLogger('rag');
-import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument, RagDocumentAccessFilter, RagDocumentStatus } from '@/lib/database';
-import { convertToMarkdown } from '@cognipeer/to-markdown';
+import type {
+  IRagModule,
+  IRagQueryLog,
+  IRagChunk,
+  IRagChunkConfig,
+  IRagDocument,
+  IRagDocumentExtraction,
+  RagDocumentAccessFilter,
+  RagDocumentStatus,
+} from '@/lib/database';
+import {
+  effectiveOcr,
+  extractDocument,
+  isOcrActive,
+  isOcrCandidate,
+  type OcrSettings,
+} from '@/lib/services/extraction';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   queryVectorIndex,
@@ -60,6 +81,17 @@ import { getRagModuleChangeListener, type RagModuleChange } from '@/enterprise/r
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
 import { publishRagIngestJob } from './ragIngestJob';
 import { metadataWithCrawlerMark, type RagSentByCrawler } from './crawlerMark';
+import {
+  documentExtractionOf,
+  EXTRACTION_HEARTBEAT_MS,
+  failedExtraction,
+  fileHashOf,
+  ocrFallbackReason,
+  ORIGINAL_MISSING_MESSAGE,
+  settledExtraction,
+  type ConvertFileContext,
+  type ConvertFileResult,
+} from './ragExtraction';
 import {
   discardDocumentSource,
   hashSourceText,
@@ -583,6 +615,7 @@ export async function createRagModule(
     fileBucketKey: request.fileBucketKey,
     fileProviderKey: request.fileProviderKey,
     chunkConfig: request.chunkConfig,
+    ...(request.extraction ? { extraction: request.extraction } : {}),
     status: 'active',
     rerankerKey: request.rerankerKey,
     rerankerOversample: request.rerankerOversample,
@@ -617,6 +650,9 @@ export async function updateRagModule(
   if (request.vectorProviderKey !== undefined) updates.vectorProviderKey = request.vectorProviderKey;
   if (request.vectorIndexKey !== undefined) updates.vectorIndexKey = request.vectorIndexKey;
   if (request.chunkConfig !== undefined) updates.chunkConfig = request.chunkConfig;
+  // `null` clears. Changing the OCR settings never flags a re-index: they only apply to what is uploaded or
+  // re-extracted from now on, and a re-index does not OCR.
+  if (request.extraction !== undefined) updates.extraction = request.extraction ?? undefined;
   if (request.status !== undefined) updates.status = request.status;
   if (request.metadata !== undefined) updates.metadata = request.metadata;
   if (request.rerankerKey !== undefined) updates.rerankerKey = request.rerankerKey ?? undefined;
@@ -1026,6 +1062,8 @@ export async function ingestDocument(
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
   if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
+  // A document whose extraction is still to run is persisted by the deferred path whatever the caller asked for.
+  if (request.extraction?.stage === 'queued' && !request.deferIndexing) request = { ...request, deferIndexing: true };
 
   // Only the crawler's own ingest marks a document as its page; the mark in anyone's metadata is dropped.
   const metadata = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
@@ -1041,7 +1079,8 @@ export async function ingestDocument(
   // answered out of two identical copies and paid for both. The crawler already
   // de-dupes by URL; this covers every other way content arrives.
   const sourceHash = hashSourceText(request.content);
-  if (!request.force) {
+  // (A queued extraction has an empty placeholder as content: its hash says nothing.)
+  if (!request.force && request.extraction?.stage !== 'queued') {
     const existing = await db.findRagDocumentByFileName(
       request.ragModuleKey,
       request.fileName,
@@ -1078,6 +1117,8 @@ export async function ingestDocument(
     fileData: request.fileData,
     createdBy: request.createdBy,
   });
+  // A queued extraction reads the original in the job: without a stored copy there is nothing for the job to read.
+  if (request.extraction?.stage === 'queued' && !source.fileKey) throw new RagOriginalMissingError();
 
   const docRecord = await db.createRagDocument({
     tenantId,
@@ -1088,6 +1129,7 @@ export async function ingestDocument(
     size: Buffer.byteLength(request.content, 'utf-8'),
     status: request.deferIndexing ? 'pending' : 'processing',
     chunkConfig: request.chunkConfig,
+    ...(request.extraction ? { extraction: request.extraction } : {}),
     metadata,
     createdBy: request.createdBy,
     ...source,
@@ -1203,7 +1245,13 @@ export async function indexPendingRagDocument(
     return;
   }
 
-  const text = await loadSourceText(tenantDbName, tenantId, projectId, doc);
+  // A document stored before its text exists (a scanned file whose OCR runs here, not in the upload request).
+  const extractionPending = doc.extraction?.stage === 'queued' || doc.extraction?.stage === 'running';
+  const text = extractionPending
+    ? await extractQueuedDocument(db, tenantDbName, tenantId, projectId, ragModule, doc)
+    : await loadSourceText(tenantDbName, tenantId, projectId, doc);
+  // Nothing more to do for a queued extraction that failed: its row says why.
+  if (extractionPending && text === undefined) return;
   if (!text) {
     await db.updateRagDocument(documentId, {
       status: 'failed',
@@ -1249,18 +1297,6 @@ export async function indexPendingRagDocument(
 
 /* ── File-based ingestion (file → markdown → chunk → embed → upsert) ── */
 
-function extractMarkdownContent(conversion: unknown): string | undefined {
-  if (!conversion) return undefined;
-  if (typeof conversion === 'string') return conversion;
-  if (typeof conversion === 'object') {
-    const candidate = conversion as Record<string, unknown>;
-    if (typeof candidate.markdown === 'string') return candidate.markdown;
-    if (typeof candidate.content === 'string') return candidate.content;
-    if (typeof candidate.result === 'string') return candidate.result;
-  }
-  return undefined;
-}
-
 /** Formats we read as UTF-8 rather than handing to the markdown converter. */
 function isPlainTextFile(fileName: string, contentType?: string): boolean {
   return Boolean(
@@ -1272,22 +1308,210 @@ function isPlainTextFile(fileName: string, contentType?: string): boolean {
 /**
  * Convert an uploaded file buffer to plain text/markdown without ingesting it.
  * Shares the same conversion rules as `ingestFile` so callers that only need
- * the extracted text (e.g. dataset generation) don't have to re-implement it.
+ * the extracted text (e.g. dataset generation, connectors) don't have to
+ * re-implement it.
+ *
+ * Without a context the file is converted as before: no OCR, and pictures in
+ * Word / HTML files become short placeholders instead of base64 data URIs (the
+ * text goes to a model or an index, not to a page).
  */
 export async function convertFileToText(
   fileName: string,
   fileData: Buffer,
   contentType?: string,
+  ctx?: ConvertFileContext,
 ): Promise<string> {
-  if (isPlainTextFile(fileName, contentType)) return fileData.toString('utf-8');
-  const conversion = await convertToMarkdown(fileData, { fileName });
-  const markdown = extractMarkdownContent(conversion);
+  return (await convertFileToTextDetailed(fileName, fileData, contentType, ctx)).text;
+}
+
+/** `convertFileToText`, with the report of the extraction (pages read by OCR, engine, warnings). */
+export async function convertFileToTextDetailed(
+  fileName: string,
+  fileData: Buffer,
+  contentType?: string,
+  ctx?: ConvertFileContext,
+): Promise<ConvertFileResult> {
+  if (isPlainTextFile(fileName, contentType)) {
+    return { text: fileData.toString('utf-8'), report: { sourceType: 'converted', warnings: [] } };
+  }
+
+  const scope = ctx?.scope;
+  // OCR needs a scope to run in; the module's own setting applies unless the caller named one (`null` = off).
+  let ocr: OcrSettings | null | undefined = ctx?.ocr;
+  if (ocr === undefined && scope) {
+    let ragModule = ctx?.ragModule;
+    if (!ragModule && ctx?.ragModuleKey) {
+      const db = await getDatabase();
+      await db.switchToTenant(scope.tenantDbName);
+      ragModule = (await db.findRagModuleByKey(ctx.ragModuleKey, scope.projectId)) ?? undefined;
+    }
+    ocr = ragModule?.extraction?.ocr;
+  }
+
+  const conversion = await extractDocument({
+    scope: scope ?? { tenantDbName: '', tenantId: '' },
+    source: ctx?.source ?? 'knowledge-engine',
+    fileName,
+    data: fileData,
+    ...(contentType ? { contentType } : {}),
+    ...(scope && isOcrActive(ocr) ? { ocr } : {}),
+    images: 'placeholder',
+    ...(ctx?.signal ? { signal: ctx.signal } : {}),
+    ...(ctx?.onProgress ? { onProgress: ctx.onProgress } : {}),
+    ...(ctx?.budget ? { budget: ctx.budget } : {}),
+  });
+  const markdown = conversion.text;
   if (!markdown || markdown.trim().length === 0) {
+    // A scan whose OCR could not run or finish has no native text: say why, not "format not supported".
+    const reason = ocrFallbackReason(conversion.report.warnings);
+    if (reason) throw new RagOcrIncompleteError(fileName, reason, conversion.report.warnings);
     throw new Error(
       `Failed to convert "${fileName}" to text. The file format may not be supported.`,
     );
   }
-  return markdown;
+  return { text: markdown, report: conversion.report };
+}
+
+/** How often the progress of a running extraction is written to its document. */
+const EXTRACTION_PROGRESS_INTERVAL_MS = 5_000;
+
+/**
+ * The deferred half of an upload whose OCR is slow: reads the stored original, extracts its text and stores it on the
+ * EXISTING row (a narrow patch of the source, size and extraction fields; the row itself, its folder and its access
+ * stay as `ingestDocument` made them). Returns the text, or `undefined` when the document has been marked failed.
+ */
+async function extractQueuedDocument(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  ragModule: IRagModule,
+  doc: IRagDocument,
+): Promise<string | undefined> {
+  const documentId = String(doc._id);
+  const base: IRagDocumentExtraction = doc.extraction ?? { sourceType: 'ocr' };
+
+  const original = await loadOriginalFile(tenantDbName, tenantId, projectId, doc);
+  if (!original) {
+    await db.updateRagDocument(documentId, {
+      status: 'failed',
+      errorMessage: ORIGINAL_MISSING_MESSAGE,
+      extraction: settledExtraction(base),
+    });
+    logger.warn('Deferred extraction found no stored original', { documentId, ragModuleKey: ragModule.key });
+    return undefined;
+  }
+
+  await db.updateRagDocument(documentId, { extraction: { ...base, stage: 'running' } });
+
+  // Progress is written at most every few seconds, one write at a time, and never after the run is over.
+  let closed = false;
+  let lastWrite = 0;
+  let latest: { completed: number; total: number } | undefined;
+  let writes: Promise<unknown> = Promise.resolve();
+  const onProgress = (progress: { completed: number; total: number }) => {
+    latest = progress;
+    const now = Date.now();
+    if (closed || now - lastWrite < EXTRACTION_PROGRESS_INTERVAL_MS) return;
+    lastWrite = now;
+    writes = writes
+      .then(() => (closed
+        ? undefined
+        : db.updateRagDocument(documentId, { extraction: { ...base, stage: 'running', progress } })))
+      .catch(() => undefined);
+  };
+
+  const heartbeat = setInterval(() => {
+    writes = writes
+      .then(() => (closed
+        ? undefined
+        : db.updateRagDocument(documentId, { extraction: { ...base, stage: 'running', ...(latest ? { progress: latest } : {}) } })))
+      .catch(() => undefined);
+  }, EXTRACTION_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
+  try {
+    const ocr = base.requested !== undefined ? base.requested : ragModule.extraction?.ocr;
+    const converted = await convertFileToTextDetailed(
+      original.fileName,
+      original.data,
+      original.contentType ?? doc.contentType,
+      {
+        scope: { tenantDbName, tenantId, ...(projectId ? { projectId } : {}), userId: doc.createdBy },
+        ragModule,
+        ocr: isOcrActive(ocr) ? ocr : null,
+        source: 'knowledge-engine',
+        budget: 'background',
+        onProgress,
+      },
+    );
+    closed = true;
+    clearInterval(heartbeat);
+    await writes;
+
+    const stored = await storeDocumentSource({
+      tenantDbName,
+      tenantId,
+      projectId,
+      ragModule,
+      fileName: doc.fileName,
+      contentType: doc.contentType,
+      text: converted.text,
+      createdBy: doc.createdBy,
+    });
+    await db.updateRagDocument(documentId, {
+      ...sourceRowFields(stored, doc, true),
+      size: Buffer.byteLength(converted.text, 'utf-8'),
+      extraction: documentExtractionOf(converted.report, { fileHash: base.fileHash, requested: base.requested }),
+    });
+    return converted.text;
+  } catch (error) {
+    closed = true;
+    clearInterval(heartbeat);
+    await writes;
+    const msg = error instanceof Error ? error.message : 'Extraction failed';
+    await db.updateRagDocument(documentId, {
+      status: 'failed',
+      errorMessage: msg,
+      extraction: failedExtraction(base, error),
+    });
+    logger.error('Deferred Knowledge Engine extraction failed', { documentId, ragModuleKey: ragModule.key, error: msg });
+    throw error;
+  }
+}
+
+/**
+ * Decides whether (and how) OCR applies to an uploaded file: the request's setting beats the module's, and a file
+ * OCR cannot add anything to never costs a module lookup. `deferred` = the extraction runs in the ingest job.
+ */
+async function planFileExtraction(
+  tenantDbName: string,
+  projectId: string | undefined,
+  request: {
+    ragModuleKey: string;
+    fileName: string;
+    contentType?: string;
+    extraction?: { ocr?: OcrSettings | null };
+    deferIndexing?: boolean;
+    deferExtraction?: boolean;
+  },
+): Promise<{ ocr?: OcrSettings; deferred: boolean }> {
+  const override = request.extraction?.ocr;
+  if (override === null || isPlainTextFile(request.fileName, request.contentType)) return { deferred: false };
+  // The widest setting there is: is this the kind of file OCR can ever apply to?
+  if (!isOcrCandidate(request.fileName, request.contentType, { mode: 'always', images: true })) return { deferred: false };
+
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+  // No OCR is spent for a module that is missing or off: `ingestDocument` answers that with its own error.
+  if (!ragModule || ragModule.status !== 'active') return { deferred: false };
+  const ocr = effectiveOcr(override, ragModule.extraction?.ocr);
+  if (!isOcrActive(ocr) || !isOcrCandidate(request.fileName, request.contentType, ocr)) return { deferred: false };
+
+  // The pending row needs the original to be kept: that is the module's bucket.
+  const deferred = Boolean(ragModule.fileBucketKey && (request.deferIndexing || request.deferExtraction));
+  return { ocr, deferred };
 }
 
 /**
@@ -1307,44 +1531,55 @@ export async function ingestFile(
     contentType?: string;
     metadata?: Record<string, unknown>;
     chunkConfig?: IRagChunkConfig;
+    /**
+     * OCR for this file only: a setting replaces the module's, `null` switches it off. Absent = the module's
+     * `extraction.ocr`. Without any OCR the file is converted as it always was.
+     */
+    extraction?: { ocr?: OcrSettings | null };
     force?: boolean;
     /**
      * Defer chunking + embedding to the ingest queue. File→text conversion
-     * still runs here: the bytes have to become text before the document can be
-     * persisted, and the stored text is what the job indexes.
+     * still runs here, unless OCR applies and `deferExtraction`/`deferIndexing`
+     * hands that to the queue too (the module needs a file bucket for the
+     * original): the bytes have to become text before the document can be
+     * indexed, and the stored text is what the job indexes.
      */
     deferIndexing?: boolean;
     /** Folder and permissions (see RagIngestRequest.placement). */
     placement?: RagDocumentPlacementInput;
     /** The caller's access scope (see RagIngestInput.access). */
     access?: RagAccessScope;
+    /**
+     * When OCR applies, store the upload and extract its text in the ingest job, so the request does not wait for
+     * the pages to be read. The returned document is `pending`.
+     */
+    deferExtraction?: boolean;
+    /** Stops the OCR run of an inline extraction when the caller has gone. */
+    signal?: AbortSignal;
     createdBy: string;
   },
 ): Promise<RagDocument> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const isPlainText = isPlainTextFile(request.fileName, request.contentType);
 
-  let textContent: string;
-  try {
-    textContent = await convertFileToText(request.fileName, request.fileData, request.contentType);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('Failed to convert')) {
-      throw error;
-    }
-    throw new Error(
-      `File conversion failed for "${request.fileName}": ${error instanceof Error ? error.message : 'Unknown error'}`,
-    );
-  }
+  const plan = await planFileExtraction(tenantDbName, projectId, request);
+  // Recorded only: a hash of the bytes never makes an upload return an existing document.
+  const fileHash = plan.ocr ? fileHashOf(request.fileData) : undefined;
 
-  return ingestDocument(tenantDbName, tenantId, projectId, {
+  const ingest = (
+    content: string,
+    extraction: IRagDocumentExtraction | undefined,
+    deferred: boolean,
+  ) => ingestDocument(tenantDbName, tenantId, projectId, {
     ragModuleKey: request.ragModuleKey,
     fileName: request.fileName,
-    content: textContent,
+    content,
     fileData: request.fileData,
     contentType: request.contentType,
     chunkConfig: request.chunkConfig,
+    ...(extraction ? { extraction } : {}),
     force: request.force,
-    deferIndexing: request.deferIndexing,
+    deferIndexing: deferred ? true : request.deferIndexing,
     metadata: {
       ...request.metadata,
       _sourceType: isPlainText ? 'text' : 'converted',
@@ -1353,6 +1588,46 @@ export async function ingestFile(
     ...(request.access ? { access: request.access } : {}),
     createdBy: request.createdBy,
   });
+
+  const extractInline = async () => {
+    try {
+      const converted = await convertFileToTextDetailed(request.fileName, request.fileData, request.contentType, {
+        scope: { tenantDbName, tenantId, ...(projectId ? { projectId } : {}), userId: request.createdBy },
+        ocr: plan.ocr ?? null,
+        source: 'knowledge-engine',
+        budget: 'inline',
+        ...(request.signal ? { signal: request.signal } : {}),
+      });
+      return {
+        text: converted.text,
+        extraction: plan.ocr ? documentExtractionOf(converted.report, { fileHash, requested: plan.ocr }) : undefined,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Failed to convert')) {
+        throw error;
+      }
+      throw new Error(
+        `File conversion failed for "${request.fileName}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+  };
+
+  if (plan.deferred) {
+    // The row is created by ingestDocument with an empty text; the ingest job extracts it.
+    try {
+      return await ingest('', { sourceType: 'ocr', stage: 'queued', fileHash, requested: plan.ocr }, true);
+    } catch (error) {
+      // The original could not be stored, so the job would have nothing to read: extract in this request instead.
+      if (!(error instanceof RagOriginalMissingError)) throw error;
+      logger.warn('Original upload was not stored; extracting inline instead of deferring', {
+        ragModuleKey: request.ragModuleKey,
+        fileName: request.fileName,
+      });
+    }
+  }
+
+  const inline = await extractInline();
+  return ingest(inline.text, inline.extraction, false);
 }
 
 /* ── Query (embed → vector search) ───────────────────────────────────── */
@@ -2089,6 +2364,44 @@ interface ReingestSource {
   origin: ReingestOrigin;
   /** Bytes that still need storing — only set when they came in with the request. */
   fileData?: Buffer;
+  /** How the text was extracted, when this run extracted it (a new upload or an explicit re-extract). */
+  extraction?: IRagDocumentExtraction;
+}
+
+/**
+ * Converts bytes with the module's CURRENT OCR settings (a new upload, or an explicit re-extract) and describes how.
+ * The document keeps a record of it when OCR applied, or when it had one that this run replaces.
+ */
+async function extractWithModuleOcr(
+  scope: { tenantDbName: string; tenantId: string; projectId?: string; userId?: string },
+  ragModule: IRagModule,
+  document: IRagDocument,
+  file: { fileName: string; data: Buffer; contentType?: string },
+  explicit = false,
+): Promise<{ text: string; extraction?: IRagDocumentExtraction }> {
+  const ocr = ragModule.extraction?.ocr;
+  const converted = await convertFileToTextDetailed(file.fileName, file.data, file.contentType, {
+    scope,
+    ragModule,
+    ocr: ocr ?? null,
+    source: 'knowledge-engine',
+    // An explicit re-extract has no queue to move to, so a scan gets the long budget of a job.
+    budget: explicit ? 'background' : 'inline',
+  });
+  const applied = isOcrActive(ocr) && isOcrCandidate(file.fileName, file.contentType, ocr);
+  if (explicit && applied) {
+    // Worse native text must not replace the text a good OCR run gave the document. (A run that read some pages and
+    // lost the rest is `mixed`: that is a result, with its warnings, not a fallback.)
+    const reason = converted.report.sourceType === 'converted' ? ocrFallbackReason(converted.report.warnings) : undefined;
+    if (reason) throw new RagReextractIncompleteError(reason);
+  }
+  const extraction = applied || document.extraction
+    ? documentExtractionOf(converted.report, {
+      fileHash: fileHashOf(file.data),
+      ...(applied ? { requested: ocr } : {}),
+    })
+    : undefined;
+  return { text: converted.text, ...(extraction ? { extraction } : {}) };
 }
 
 async function resolveReingestSource(
@@ -2097,14 +2410,31 @@ async function resolveReingestSource(
   tenantId: string,
   projectId: string | undefined,
   document: IRagDocument,
-  request: { documentId: string; content?: string; fileData?: Buffer; fileName?: string; contentType?: string },
+  request: {
+    documentId: string;
+    content?: string;
+    fileData?: Buffer;
+    fileName?: string;
+    contentType?: string;
+    reextract?: boolean;
+    updatedBy?: string;
+  },
+  ragModule?: IRagModule,
 ): Promise<ReingestSource> {
   if (request.content) {
     return { text: request.content, origin: 'request-content' };
   }
 
+  const scope = { tenantDbName, tenantId, ...(projectId ? { projectId } : {}), ...(request.updatedBy ? { userId: request.updatedBy } : {}) };
   const fileName = request.fileName ?? document.fileName;
   if (request.fileData) {
+    // A new upload is read with the module's OCR settings, like any upload.
+    if (ragModule) {
+      const extracted = await extractWithModuleOcr(scope, ragModule, document, {
+        fileName, data: request.fileData, contentType: request.contentType,
+      });
+      return { ...extracted, origin: 'request-file', fileData: request.fileData };
+    }
     return {
       text: await convertFileToText(fileName, request.fileData, request.contentType),
       origin: 'request-file',
@@ -2112,12 +2442,28 @@ async function resolveReingestSource(
     };
   }
 
+  const original = await loadOriginalFile(tenantDbName, tenantId, projectId, document);
+
+  // Only an explicit re-extract reads the original with OCR again; a re-index (chunking, embedding model) must not
+  // pay for the pages a second time, so a document that was OCR'd keeps the text it has.
+  if (request.reextract) {
+    if (!original || !ragModule) throw new RagOriginalMissingError();
+    const extracted = await extractWithModuleOcr(scope, ragModule, document, original, true);
+    return { ...extracted, origin: 'stored-file' };
+  }
+  if (document.extraction?.sourceType === 'ocr' || document.extraction?.sourceType === 'mixed') {
+    const kept = await loadSourceText(tenantDbName, tenantId, projectId, document);
+    if (kept) return { text: kept, origin: 'stored-text' };
+    // Re-converting the original without OCR would drop the pages OCR read: never silently. A transient storage
+    // error is retried; a document without text (its extraction failed) is read again with `reextract`.
+    throw new RagStoredTextUnavailableError();
+  }
+
   // The original upload beats our own extraction: a converter improvement only
   // reaches an already-ingested document if the bytes are re-run through it.
-  const original = await loadOriginalFile(tenantDbName, tenantId, projectId, document);
   if (original) {
     return {
-      text: await convertFileToText(original.fileName, original.data, original.contentType),
+      text: await convertFileToText(original.fileName, original.data, original.contentType, { scope, ocr: null }),
       origin: 'stored-file',
     };
   }
@@ -2162,6 +2508,11 @@ export async function reingestDocument(
     placement?: RagDocumentPlacementInput;
     /** Set by the crawler's ingest only (see RagIngestInput.sentByCrawler). */
     sentByCrawler?: RagSentByCrawler;
+    /**
+     * Read the stored original again with the module's current OCR settings. Without it a re-ingest never runs OCR:
+     * a document that was OCR'd keeps its text, and any other is re-converted without OCR.
+     */
+    reextract?: boolean;
     updatedBy: string;
   },
 ): Promise<RagDocument> {
@@ -2184,7 +2535,7 @@ export async function reingestDocument(
     await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
   }
 
-  const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request);
+  const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request, ragModule);
   const textContent = source.text;
 
   // The re-index job calls this with no metadata at all. Writing
@@ -2256,6 +2607,9 @@ export async function reingestDocument(
       }, request.updatedBy);
     }
   }
+
+  // This run extracted the text (a new upload with OCR, or a re-extract): the document records how.
+  if (source.extraction) await db.updateRagDocument(request.documentId, { extraction: source.extraction });
 
   // 1. Delete old vectors
   const oldChunkCount = doc.chunkCount ?? 0;
@@ -2329,6 +2683,7 @@ export async function reingestDocument(
       chunkCount,
       lastIndexedAt: now,
       fileName: request.fileName ?? doc.fileName,
+      ...(source.extraction ? { extraction: source.extraction } : {}),
       ...(request.metadata ? { metadata } : {}),
     });
   } catch (error) {

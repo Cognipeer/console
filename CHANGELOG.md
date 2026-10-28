@@ -274,8 +274,50 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
   breaks).
 
+### Text recognition (OCR) screens
+
+- The OCR settings have screens: a shared form (off, scanned pages only, or every page; the project's OCR or vision
+  model or the local engine; languages; page cap; also read images) in the Document Store upload and the Markdown tab
+  of a file ("Convert again with text recognition"), the Knowledge Engine create and edit screens (an Extraction
+  section after Chunking), the agent's Files settings (Text extraction (OCR)) and the crawler's Content extraction.
+  A converted file shows how many pages were read ("OCR · 3/5 pages"), a Knowledge Engine document shows the progress
+  of a file that is still being read, and a document with a stored original has a Re-extract action.
+- Saving a crawler's HTTP settings no longer drops an OCR option that was set through the API.
+
+### Knowledge Engine
+
+- **OCR per knowledge base.** A module gets an optional `extraction.ocr` setting (`mode` `auto` or `always`, an optional
+  OCR or vision `modelKey`, `languages`, `maxPages`, `images`; `null` clears it), and an upload may carry its own
+  `extraction` or switch it off. Scanned PDF pages and images are read by the project's model or by the server's
+  built-in offline engine. With `async: true` (and a module that keeps files in a bucket) the pages are read by the
+  ingest job: the document stays `pending` with `extraction.stage` and `extraction.progress`. A document read with OCR
+  carries `extraction` (`sourceType`, `ocrPages`, `pageCount`, ...). A re-index never reads pages again; re-ingest with
+  `reextract: true` does, with the module's current settings. Without `extraction` nothing changes.
+- Files uploaded to a Knowledge Engine module now go through the same zip-bomb and PowerPoint working-file guard as the
+  Document Store, and pictures in Word and HTML files become short placeholders instead of base64 data URIs in the
+  indexed text.
+- A scanned file whose OCR could not run or finish (budget used up, model removed, out of time) is now reported as
+  such, not as an unsupported format, and the cause is kept on a failed document. A re-extract that cannot finish its
+  OCR answers 409 and keeps the previous text, and runs with the longer budget of a job. A request-level OCR setting
+  is ignored (no pages are read) when the module does not exist or is not active.
+
+### Agent attachments and crawler
+
+- **Agent attachments**: the Markdown copy of an attachment now always turns pictures inside documents into
+  placeholders (it used to carry them as inline base64 images), and every attachment record may carry a
+  `markdownExtraction` value. Pictures are read as text by OCR only when the agent turns that on.
+- **Crawler**: a crawler with OCR on reads its file attachments through the shared extraction engine (the bundled
+  offline engine, or the project's OCR model when one is set) instead of the CDN-loaded Tesseract, and the zip-bomb
+  guard now applies to its attachments too. With a converter library older than 3.6 the crawler keeps its previous
+  direct OCR call.
+
 ### File storage
 
+- **OCR for Markdown copies.** `POST /client/v1/files/buckets/:bucketKey/objects` (and the Document Store's upload and
+  Convert action) accept an optional `ocr` setting (`mode` `auto` or `always`, an optional OCR or vision `modelKey`,
+  `languages`, `maxPages`, `images`) and an `images` policy (`inline`, `placeholder`, `omit`). Scanned PDF pages and
+  images are read by the project's model or by the server's built-in offline engine; the file record gains an optional
+  `markdownExtraction` with the settings and the result. Without `ocr` nothing changes.
 - **S3-compatible storage and Azure Blob Storage** are new file providers. `s3-compatible-files` serves MinIO, Ceph RGW,
   SeaweedFS, Garage, Cloudflare R2, Backblaze B2, Wasabi and other stores with an S3 API at their own endpoint:
   path-style addressing is on by default, the region is optional, request checksums are sent only where an operation

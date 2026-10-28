@@ -23,15 +23,18 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import ChunkConfigFields from './ChunkConfigFields';
+import ExtractionFields from './ExtractionFields';
 import RetrievalFields from './RetrievalFields';
 import {
   CHUNK_STRATEGIES,
   buildChunkConfig,
+  buildExtraction,
   buildRetrievalUpdate,
   chunkConfigRequiresReindex,
   chunkFieldErrors,
   chunkFormValues,
   clearedValue,
+  extractionFormValue,
   hasChunkFieldErrors,
   providerSupportsHybrid,
   reindexReasonFor,
@@ -41,6 +44,8 @@ import {
   type RagReindexReason,
   type RetrievalFormValues,
 } from './ragModuleForm';
+import { englishOcrText } from '@/components/extraction/ocrEnglish';
+import { describeOcr, type OcrSettings } from '@/components/extraction/ocrForm';
 import type { IRagChunkConfig } from '@/lib/database';
 
 const MODE = 'update';
@@ -71,6 +76,7 @@ interface RagModuleData {
   vectorProviderKey: string;
   vectorIndexKey: string;
   chunkConfig: IRagChunkConfig;
+  extraction?: { ocr?: OcrSettings | null } | null;
   hybrid?: { enabled: boolean; mode?: HybridMode; alpha?: number; k?: number } | null;
   isolateByModule?: boolean | null;
   rerankerKey?: string | null;
@@ -101,6 +107,7 @@ interface FormValues {
   vectorProviderKey: string;
   vectorIndexKey: string;
   chunk: ChunkFormValues;
+  ocr: OcrSettings | undefined;
   retrieval: RetrievalFormValues;
   rerankerKey: string;
   rerankerOversample: number | '';
@@ -151,6 +158,7 @@ function formValuesFromModule(module: RagModuleData): FormValues {
     vectorProviderKey: module.vectorProviderKey,
     vectorIndexKey: module.vectorIndexKey,
     chunk: chunkFormValues(module.chunkConfig),
+    ocr: extractionFormValue(module.extraction),
     retrieval: retrievalFormValues(module),
     rerankerKey: module.rerankerKey ?? '',
     rerankerOversample: module.rerankerOversample ?? '',
@@ -333,6 +341,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
           chunkConfig: buildChunkConfig(values.chunk),
+          ...buildExtraction(values.ocr, MODE, module.extraction != null),
           ...buildRetrievalUpdate(values.retrieval, { known: capabilitiesKnown, hybridSupported }),
           rerankerKey: values.rerankerKey || clearedValue(MODE),
           rerankerOversample:
@@ -437,6 +446,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
             : v.retrieval.isolateByModule ? 'on' : 'off'
         }
       />
+      <SummaryKV label="OCR" value={describeOcr(englishOcrText, v.ocr)} />
       <SummaryKV label="Reranker" value={v.rerankerKey || 'none'} />
       <SummaryKV label="Default Top K" value={v.defaultTopK || '—'} mono />
       <SummaryKV label="Default min score" value={v.defaultMinScore.toFixed(2)} mono />
@@ -519,7 +529,11 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         />
       </FormSection>
 
-      <FormSection number={4} title="Retrieval" description="How a query reaches the stored vectors.">
+      <FormSection number={4} title="Extraction" description="How text is read out of uploaded files, including scanned pages.">
+        <ExtractionFields value={v.ocr} onChange={(next) => form.setFieldValue('ocr', next)} />
+      </FormSection>
+
+      <FormSection number={5} title="Retrieval" description="How a query reaches the stored vectors.">
         <RetrievalFields
           values={v.retrieval}
           onChange={patchRetrieval}
@@ -528,7 +542,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         />
       </FormSection>
 
-      <FormSection number={5} title="Reranking">
+      <FormSection number={6} title="Reranking">
         <FormRow cols={2}>
           <FormField label="Reranker" hint="Optional. Re-orders vector matches before returning.">
             <Select
@@ -545,7 +559,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         </FormRow>
       </FormSection>
 
-      <FormSection number={6} title="Query defaults" description="Applied whenever a query doesn't explicitly override these.">
+      <FormSection number={7} title="Query defaults" description="Applied whenever a query doesn't explicitly override these.">
         <FormRow cols={2}>
           <FormField label="Top K" required hint="How many chunks a query returns by default.">
             <NumberInput min={1} max={100} step={1} {...form.getInputProps('defaultTopK')} />

@@ -857,7 +857,10 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     code === 'bucket_required' ? t('attachments.bucketRequired')
       : code === 'invalid_chars' ? t('attachments.folderInvalidChars')
         : code === 'dot_dot' ? t('attachments.folderDotDot')
-          : t('attachments.folderTooLong', { max: MAX_FOLDER_LENGTH });
+          : code === 'ocr_model' ? t('attachments.ocrModelInvalid')
+            : code === 'ocr_languages' ? t('attachments.ocrLanguagesInvalid')
+              : code === 'ocr_pages' ? t('attachments.ocrPagesInvalid')
+                : t('attachments.folderTooLong', { max: MAX_FOLDER_LENGTH });
 
   /** An edit in Files. Once the problem that refused the last save is fixed, its message goes away with it. */
   const handleFilesChange = (next: AttachmentsSettings | undefined) => {

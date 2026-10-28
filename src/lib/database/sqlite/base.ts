@@ -385,6 +385,7 @@ export class SQLiteProviderBase {
       ['fileBucketKey', 'fileBucketKey TEXT'],
       ['fileProviderKey', 'fileProviderKey TEXT'],
       ['chunkConfig', 'chunkConfig TEXT'],
+      ['extraction', 'extraction TEXT'],
       ['sourceText', 'sourceText TEXT'],
       ['sourceTextKey', 'sourceTextKey TEXT'],
       ['sourceHash', 'sourceHash TEXT'],
@@ -437,6 +438,7 @@ export class SQLiteProviderBase {
       ['filterableFields', 'filterableFields TEXT'],
       ['hybrid', 'hybrid TEXT'],
       ['isolateByModule', 'isolateByModule INTEGER'],
+      ['extraction', 'extraction TEXT'],
       ['reindexRequired', 'reindexRequired INTEGER'],
       ['activeReindexRunKey', 'activeReindexRunKey TEXT'],
       ['lastReindexAt', 'lastReindexAt TEXT'],
@@ -1227,6 +1229,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.files, 'expiresAt', 'expiresAt TEXT');
     this.ensureTableColumn(db, TABLES.files, 'uploadedBy', 'uploadedBy TEXT');
     this.ensureTableColumn(db, TABLES.files, 'origin', 'origin TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'markdownExtraction', 'markdownExtraction TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_purpose_expiresAt ON ${TABLES.files}(purpose, expiresAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_conversationId ON ${TABLES.files}(conversationId)`);
     // A bucket's objects by key: the lookup of one object, the prefix / folder

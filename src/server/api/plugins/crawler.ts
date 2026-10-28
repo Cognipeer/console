@@ -45,11 +45,15 @@ function sendError(
   fallback: string,
 ) {
   const message = error instanceof Error ? error.message : fallback;
-  const status = /not found/i.test(message)
-    ? 404
-    : /already exists|not active|invalid/i.test(message)
-      ? 400
-      : 500;
+  // An error that says it is a bad input is a 400 whatever its wording ("model not found" included).
+  const badInput = (error as { statusCode?: unknown } | null)?.statusCode === 400;
+  const status = badInput
+    ? 400
+    : /not found/i.test(message)
+      ? 404
+      : /already exists|not active|invalid/i.test(message)
+        ? 400
+        : 500;
   return reply.code(status).send({ error: message });
 }
 

@@ -15,6 +15,7 @@ import { filesCreateEn } from './filesCreate.en';
 import { filesDetailEn } from './filesDetail.en';
 import { filesListEn } from './filesList.en';
 import { filesUploadEn } from './filesUpload.en';
+import { ocrSettingsEn } from './ocrSettings.en';
 import { healthDigestEn } from './healthDigest.en';
 import { consoleIdentityEn } from './consoleIdentity.en';
 import { iamDirectoryEn } from './iamDirectory.en';
@@ -27,6 +28,8 @@ import { projectsAccessEn } from './projectsAccess.en';
 export const en = {
   // Projects list / create / detail / limits / settings (projectsAccess.en.ts).
   ...projectsAccessEn,
+  // The OCR settings fields shared by Files, agents, knowledge bases and crawlers (ocrSettings.en.ts).
+  ocrSettings: ocrSettingsEn,
   auth: {
     eyebrow: 'Console access',
   },
@@ -5095,6 +5098,12 @@ export const en = {
       cfgReadPageDescription: 'How much of a file the agent gets per read when it reads page by page.',
       cfgAttachNew: 'Send new uploads with the next message',
       cfgAttachNewDescription: 'A file uploaded to a session that no message has carried yet goes along with the next message. Off: only the files a message names are sent.',
+      ocrTitle: 'Text extraction (OCR)',
+      ocrDescription: 'Read the text of scanned PDFs and, when “Also read images” is on, of pictures, when a file is uploaded. The text is kept next to the file and the agent reads it like any document.',
+      ocrImagesNote: 'A picture is still shown to a model that takes images. The recognised text stands in for it when the model cannot take images, or for a format no model accepts.',
+      ocrModelInvalid: 'Text extraction: the model name is not valid. Choose a model or the local engine.',
+      ocrLanguagesInvalid: 'Text extraction: use language codes such as tr, en or de.',
+      ocrPagesInvalid: 'Text extraction: the maximum number of pages must be a whole number of at least 1.',
       imagesTitle: 'Images',
       cfgMaxImages: 'Images per model request',
       cfgMaxImagesDescription: 'Images go to the model as references and are read from the bucket when the model is called. Past this number the oldest become a note naming the file, which the agent can look at again.',

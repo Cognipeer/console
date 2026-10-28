@@ -56,6 +56,7 @@ import {
 import { requireScopedAgent, requireScopedSession } from './agents';
 import { createGatewayRequest } from '../http';
 import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
+import { clientGone } from '../clientGone';
 import { loadSessionForPrincipal, sendClientSessionRefusal, type SessionNeed } from './agent-session-access';
 import { FILES_READ_REQUIRED_MESSAGE, requestBucketOptions, requestHasFilesRead } from './files-permission';
 
@@ -287,6 +288,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
         conversation: scoped.conversation,
         agentConfig: scoped.agent.config,
         ...payload,
+        signal: clientGone(reply),
         actor: { userId: scoped.session.userId, licenseType: scoped.session.licenseType },
       });
       return reply.code(201).send({ file: dashboardFile(file) });
@@ -406,6 +408,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
         conversation,
         agentConfig: agent.config,
         ...payload,
+        signal: clientGone(reply),
         actor: {
           userId: ctx.tokenRecord.userId,
           licenseType: ctx.tenant.licenseType,

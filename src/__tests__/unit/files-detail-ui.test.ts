@@ -430,6 +430,86 @@ describe('Markdown tab', () => {
     });
   });
 
+  describe('text recognition (OCR)', () => {
+    const copy = { markdownKey: 'q3.md', markdownSize: 3 * KB, markdownStatus: 'succeeded' };
+    const modeLabel = (label: string) => qa('label').find((l) => l.textContent?.trim() === label);
+
+    it('says how many pages the last run read, and how many of the file', async () => {
+      await open({ record: { ...copy, markdownExtraction: { ocr: { mode: 'auto' }, result: { sourceType: 'mixed', engine: 'local', pageCount: 5, ocrPages: 3 } } } });
+      await tab('Markdown');
+      expect(panel().querySelector('[role="status"]')!.textContent).toContain('OCR · 3/5 pages');
+      await mounted!.unmount();
+
+      await open({ record: { ...copy, markdownExtraction: { ocr: { mode: 'always' }, result: { sourceType: 'ocr', pageCount: 1, ocrPages: 1 } } } });
+      await tab('Markdown');
+      expect(panel().querySelector('[role="status"]')!.textContent).toContain('OCR · 1 page');
+      await mounted!.unmount();
+
+      await open({ record: { ...copy, markdownExtraction: { ocr: { mode: 'auto', images: true }, result: { sourceType: 'ocr', ocrImages: 2 } } } });
+      await tab('Markdown');
+      expect(panel().querySelector('[role="status"]')!.textContent).toContain('OCR · images');
+    });
+
+    it('shows no OCR badge for a plain conversion, or a run that found nothing to read', async () => {
+      await open({ record: { ...copy } });
+      await tab('Markdown');
+      expect(panel().querySelector('[role="status"]')!.textContent).not.toContain('OCR');
+      await mounted!.unmount();
+
+      await open({ record: { ...copy, markdownExtraction: { ocr: { mode: 'auto' }, result: { sourceType: 'converted', pageCount: 4 } } } });
+      await tab('Markdown');
+      expect(panel().querySelector('[role="status"]')!.textContent).not.toContain('OCR');
+    });
+
+    it('keeps asking the server for the file’s own settings until the options are opened', async () => {
+      await open({ record: { markdownStatus: 'skipped' } });
+      await tab('Markdown');
+      expect(panel().textContent).not.toContain('Read scanned pages (OCR)');
+      await click(buttonByText('Convert to Markdown'));
+      await until(() => api.to('POST', '/api/files/buckets/docs/convert').length === 1, 'the request');
+      expect(api.to('POST', '/api/files/buckets/docs/convert')[0]!.body).toEqual({ key: fileRecord().key });
+    });
+
+    it('converts with the options that were opened, starting from what the file was last converted with', async () => {
+      await open({ record: { markdownStatus: 'skipped', markdownExtraction: { ocr: { mode: 'auto', languages: ['de'] } } } });
+      await tab('Markdown');
+      await click(buttonByText('Text recognition options'));
+      expect(panel().textContent).toContain('Read scanned pages (OCR)');
+      // Auto is chosen already; the file’s own languages are shown.
+      expect(panel().textContent).toContain('de');
+      await click(modeLabel('Every page'));
+      await click(buttonByText('Convert to Markdown'));
+      await until(() => api.to('POST', '/api/files/buckets/docs/convert').length === 1, 'the request');
+      expect(api.to('POST', '/api/files/buckets/docs/convert')[0]!.body).toEqual({ key: fileRecord().key, ocr: { mode: 'always', languages: ['de'] } });
+    });
+
+    it('sends null when the options are opened and turned off: the plain conversion', async () => {
+      await open({ record: { markdownStatus: 'failed', markdownError: 'Broken.', markdownExtraction: { ocr: { mode: 'auto' } } } });
+      await tab('Markdown');
+      await click(buttonByText('Text recognition options'));
+      await click(modeLabel('Off'));
+      await click(buttonByText('Retry conversion'));
+      await until(() => api.to('POST', '/api/files/buckets/docs/convert').length === 1, 'the request');
+      expect(api.to('POST', '/api/files/buckets/docs/convert')[0]!.body).toEqual({ key: fileRecord().key, ocr: null });
+    });
+
+    it('offers to read a current copy again with OCR, and only to someone who may change files', async () => {
+      await open({ record: { ...copy } });
+      await tab('Markdown');
+      expect(buttonByText('Convert again')).toBeUndefined();
+      await click(buttonByText('Convert again with text recognition…'));
+      await click(modeLabel('Auto (scanned pages only)'));
+      await click(buttonByText('Convert again'));
+      await until(() => api.to('POST', '/api/files/buckets/docs/convert').length === 1, 'the request');
+      expect(api.to('POST', '/api/files/buckets/docs/convert')[0]!.body).toEqual({ key: fileRecord().key, ocr: { mode: 'auto' } });
+      await mounted!.unmount();
+
+      await open({ record: { ...copy }, level: 'read' });
+      await tab('Markdown');
+      expect(buttonByText('Convert again with text recognition…')).toBeUndefined();
+    });
+  });
+
   it('tells why a conversion failed and starts it again on Retry conversion', async () => {
     let state: Record<string, unknown> = { markdownStatus: 'failed', markdownError: 'The file is password protected.' };
     await open({

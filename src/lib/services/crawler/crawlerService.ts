@@ -32,6 +32,12 @@ import {
   sealHttpConfig,
 } from './httpConfigSecrets';
 import { matchesProjectScope } from './internals';
+import { crawlerOcrProblem } from './ocrExtractor';
+
+/** An error the API answers with 400 whatever its wording (a model "not found" is a bad input here, not a 404). */
+function invalidInput(message: string): Error {
+  return Object.assign(new Error(message), { statusCode: 400 });
+}
 import { computeNextRun, validateSchedule } from './schedulePlanner';
 import type {
   AdhocCrawlInput,
@@ -132,6 +138,9 @@ export async function createCrawler(
   const existing = await db.findCrawlerByKey(ctx.tenantId, key, ctx.projectId);
   if (existing) throw new Error(`Crawler key "${key}" already exists`);
 
+  const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
+  if (ocrProblem) throw invalidInput(ocrProblem);
+
   if (input.schedule) {
     const scheduleError = validateSchedule(input.schedule);
     if (scheduleError) throw new Error(`Invalid schedule: ${scheduleError}`);
@@ -175,6 +184,11 @@ export async function updateCrawler(
   const db = await withTenantDb(ctx.tenantDbName);
   const existing = await loadCrawler(db, ctx, idOrKey);
   if (!existing) return null;
+
+  if (input.markdownOptions !== undefined) {
+    const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
+    if (ocrProblem) throw invalidInput(ocrProblem);
+  }
 
   const patch: Partial<ICrawler> = {
     updatedBy: input.updatedBy,
@@ -422,6 +436,8 @@ export async function runAdhocCrawl(
   input: AdhocCrawlInput,
 ): Promise<CrawlRunSummary> {
   await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
+  const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
+  if (ocrProblem) throw invalidInput(ocrProblem);
   const db = await withTenantDb(ctx.tenantDbName);
   const plan: ICrawlPlanSnapshot = {
     seeds: input.seeds,

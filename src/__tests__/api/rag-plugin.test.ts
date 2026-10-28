@@ -105,6 +105,19 @@ vi.mock('@/lib/services/rag/ragReindexService', () => ({
 const ingestJobs = vi.hoisted(() => ({ publishRagIngestJob: vi.fn(async () => undefined) }));
 vi.mock('@/lib/services/rag/ragIngestJob', () => ingestJobs);
 
+/**
+ * An OCR model reference is checked against the project's models at save time. The check itself is covered with the
+ * engine's own tests; here a key is usable unless it starts with `missing-`.
+ */
+const ocrModels = vi.hoisted(() => ({
+  validate: vi.fn(async (_scope: unknown, modelKey: string) =>
+    (modelKey.startsWith('missing-') ? `The OCR model "${modelKey}" was not found in this project.` : undefined)),
+}));
+vi.mock('@/lib/services/extraction', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/services/extraction')>();
+  return { ...actual, validateOcrModelRef: ocrModels.validate };
+});
+
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
 import { RAG_IMPORT_MAX_DOCUMENTS } from '@/lib/services/rag/ragTransfer';
@@ -391,6 +404,101 @@ describe('PATCH /api/rag/modules/{key} whitelists the body', () => {
 
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: string }>(res.body).error).toContain('responseDetail');
+  });
+});
+
+describe('Knowledge Engine OCR settings (extraction) on the module routes', () => {
+  const patchModule = (payload: Record<string, unknown>) => app.inject({
+    method: 'PATCH', url: `/api/rag/modules/${MODULE_KEY}`, headers: JSON_HEADERS, payload: JSON.stringify(payload),
+  });
+  const extractionOf = (body: string) => parseJsonBody<{ module: { extraction?: unknown } }>(body).module.extraction;
+
+  it('stores a validated, compact setting, and PATCH null clears it', async () => {
+    const saved = await patchModule({ extraction: { ocr: { mode: 'auto', languages: ['TUR', 'en', 'tr'], maxPages: 50, modelKey: 'mistral-ocr' } } });
+    expect(saved.statusCode).toBe(200);
+    expect(extractionOf(saved.body)).toEqual({ ocr: { mode: 'auto', modelKey: 'mistral-ocr', languages: ['tr', 'en'], maxPages: 50 } });
+    expect(ocrModels.validate).toHaveBeenCalledWith(expect.objectContaining({ tenantDbName: TENANT_DB_NAME }), 'mistral-ocr');
+
+    // It survives an unrelated edit...
+    const renamed = await patchModule({ description: 'with OCR' });
+    expect(extractionOf(renamed.body)).toMatchObject({ ocr: { mode: 'auto' } });
+
+    // ...and `null` clears it (a missing or null value reads as no OCR).
+    const cleared = await patchModule({ extraction: null });
+    expect(cleared.statusCode).toBe(200);
+    expect(extractionOf(cleared.body) ?? null).toBeNull();
+    const reread = await app.inject({ method: 'GET', url: `/api/rag/modules/${MODULE_KEY}`, headers: REQUEST_HEADERS });
+    expect(parseJsonBody<{ module: { extraction?: unknown } }>(reread.body).module.extraction ?? null).toBeNull();
+  });
+
+  it('does not flag a re-index: OCR only applies to what is uploaded from now on', async () => {
+    const res = await patchModule({ extraction: { ocr: { mode: 'always' } } });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ module: { reindexRequired?: boolean } }>(res.body).module.reindexRequired).not.toBe(true);
+    await patchModule({ extraction: null });
+  });
+
+  it.each([
+    [{ extraction: { ocr: { mode: 'sometimes' } } }, 'ocr.mode'],
+    [{ extraction: { ocr: { mode: 'auto', maxPages: 0 } } }, 'maxPages'],
+    [{ extraction: { ocr: { mode: 'auto', languages: ['not a language'] } } }, 'languages'],
+    [{ extraction: { ocr: { mode: 'auto', tesseract: true } } }, 'ocr.tesseract'],
+    [{ extraction: { engine: 'x' } }, 'extraction.engine'],
+    [{ extraction: 'on' }, 'extraction must be an object'],
+  ])('rejects %j with a 400 naming the problem', async (payload, expected) => {
+    const res = await patchModule(payload);
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(res.body).error).toContain(expected);
+  });
+
+  it('rejects a model the project does not have, on update and on create', async () => {
+    const patched = await patchModule({ extraction: { ocr: { mode: 'auto', modelKey: 'missing-ocr' } } });
+    expect(patched.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(patched.body).error).toContain('missing-ocr');
+
+    const created = await app.inject({
+      method: 'POST', url: '/api/rag/modules', headers: JSON_HEADERS,
+      payload: createModulePayload({ key: 'ocr-create-module', extraction: { ocr: { mode: 'auto', modelKey: 'missing-ocr' } } }),
+    });
+    expect(created.statusCode).toBe(400);
+    const gone = await app.inject({ method: 'GET', url: '/api/rag/modules/ocr-create-module', headers: REQUEST_HEADERS });
+    expect(gone.statusCode).toBe(404);
+  });
+
+  it('does not check a model for a setting that is off', async () => {
+    ocrModels.validate.mockClear();
+    const res = await patchModule({ extraction: { ocr: { mode: 'off', modelKey: 'missing-ocr' } } });
+    expect(res.statusCode).toBe(200);
+    expect(ocrModels.validate).not.toHaveBeenCalled();
+    await patchModule({ extraction: null });
+  });
+
+  it('creates a module with extraction', async () => {
+    const created = await app.inject({
+      method: 'POST', url: '/api/rag/modules', headers: JSON_HEADERS,
+      payload: createModulePayload({ key: 'ocr-created-module', extraction: { ocr: { mode: 'auto', images: true } } }),
+    });
+    expect(created.statusCode).toBe(201);
+    expect(parseJsonBody<{ module: { extraction: unknown } }>(created.body).module.extraction).toEqual({ ocr: { mode: 'auto', images: true } });
+  });
+
+  it('rejects a bad per-upload extraction before any ingest work happens, and an unusable model', async () => {
+    const post = (extraction: unknown, extra: Record<string, unknown> = {}) => app.inject({
+      method: 'POST', url: `/api/rag/modules/${MODULE_KEY}/documents`, headers: JSON_HEADERS,
+      payload: JSON.stringify({ fileName: 'scan.pdf', data: Buffer.from('%PDF').toString('base64'), extraction, ...extra }),
+    });
+
+    const badMode = await post({ ocr: { mode: 'x' } });
+    expect(badMode.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(badMode.body).error).toContain('extraction.ocr.mode');
+
+    const unknownKey = await post({ ocrr: {} });
+    expect(unknownKey.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(unknownKey.body).error).toContain('extraction.ocrr');
+
+    const noModel = await post({ ocr: { mode: 'auto', modelKey: 'missing-ocr' } });
+    expect(noModel.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(noModel.body).error).toContain('missing-ocr');
   });
 });
 

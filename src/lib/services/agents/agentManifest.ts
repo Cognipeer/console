@@ -112,6 +112,9 @@ export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDe
     for (const [index, extra] of (spec.additionalModels ?? []).entries()) {
         if (extra?.modelKey) out.push({ type: 'model', key: extra.modelKey, usedBy: `spec.additionalModels[${index}]` });
     }
+    // The model that reads uploaded files with OCR: a project model like the main one, so a missing one is reported.
+    const ocrModelKey = typeof spec.attachments?.ocr?.modelKey === 'string' ? spec.attachments.ocr.modelKey.trim() : '';
+    if (ocrModelKey) out.push({ type: 'model', key: ocrModelKey, usedBy: 'spec.attachments.ocr.modelKey' });
     if (spec.promptKey) out.push({ type: 'prompt', key: spec.promptKey, usedBy: 'spec.promptKey' });
     for (const skill of spec.skills ?? []) out.push({ type: 'skill', key: skill, usedBy: 'spec.skills' });
     if (spec.knowledgeEngineKey) {

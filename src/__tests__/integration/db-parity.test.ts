@@ -2867,6 +2867,70 @@ describeForEachProvider('RAG module clearable fields', (getDb) => {
     expect(cleared?.isolateByModule).toBe(true);
     expect(cleared?.name).toBe('Clearable');
   });
+
+  it('round-trips the OCR settings of a module and clears them on an explicit undefined', async () => {
+    const db = getDb();
+    const ocr = { mode: 'auto' as const, modelKey: 'mistral-ocr', languages: ['tr', 'en'], maxPages: 40, images: true };
+    const base = {
+      tenantId, projectId: 'proj-1', name: 'OCR module', embeddingModelKey: 'emb', vectorProviderKey: 'vec',
+      vectorIndexKey: 'idx', chunkConfig: { strategy: 'recursive_character' as const, chunkSize: 400, chunkOverlap: 40 },
+      status: 'active' as const, createdBy: 'tester',
+    };
+    const withOcr = await db.createRagModule({ ...base, key: 'km-ocr', extraction: { ocr } });
+    const without = await db.createRagModule({ ...base, key: 'km-no-ocr' });
+
+    expect((await db.findRagModuleById(String(withOcr._id)))?.extraction).toEqual({ ocr });
+    // A module created without settings reads back without them (SQLite NULL, Mongo missing or null).
+    expect((await db.findRagModuleById(String(without._id)))?.extraction ?? null).toBeNull();
+
+    await db.updateRagModule(String(without._id), { extraction: { ocr: { mode: 'always' } } });
+    expect((await db.findRagModuleById(String(without._id)))?.extraction).toEqual({ ocr: { mode: 'always' } });
+
+    // The service turns the API's `null` into an explicit undefined.
+    await db.updateRagModule(String(withOcr._id), { extraction: undefined });
+    const cleared = await db.findRagModuleById(String(withOcr._id));
+    expect(cleared?.extraction ?? null).toBeNull();
+    expect(cleared?.name).toBe('OCR module');
+
+    // An unrelated update must leave the setting alone.
+    await db.updateRagModule(String(without._id), { name: 'Renamed' });
+    expect((await db.findRagModuleById(String(without._id)))?.extraction).toEqual({ ocr: { mode: 'always' } });
+  });
+
+  it('round-trips how a document was extracted, replaces it whole, and clears it', async () => {
+    const db = getDb();
+    const queued = {
+      sourceType: 'ocr' as const, stage: 'queued' as const, fileHash: 'a'.repeat(64),
+      requested: { mode: 'auto' as const, languages: ['tr'] },
+    };
+    const created = await db.createRagDocument({
+      tenantId, projectId: 'proj-1', ragModuleKey: 'km-ocr', fileName: 'scan.pdf', status: 'pending',
+      sourceText: '', extraction: queued, createdBy: 'tester',
+    });
+    const id = String(created._id);
+    expect((await db.findRagDocumentById(id))?.extraction).toEqual(queued);
+
+    await db.updateRagDocument(id, { extraction: { ...queued, stage: 'running', progress: { completed: 2, total: 9 } } });
+    expect((await db.findRagDocumentById(id))?.extraction?.progress).toEqual({ completed: 2, total: 9 });
+
+    // The finished record has no stage and no progress: replacing the object whole is what drops them.
+    const settled = { sourceType: 'mixed' as const, engine: 'local' as const, pageCount: 9, ocrPages: 4, fileHash: queued.fileHash, warnings: ['ocr_timeout'] };
+    await db.updateRagDocument(id, { extraction: settled, status: 'indexed' });
+    const done = await db.findRagDocumentById(id);
+    expect(done?.extraction).toEqual(settled);
+    expect(done?.status).toBe('indexed');
+
+    // A row written without it reads back without it, and an unrelated update does not touch it.
+    const plain = await db.createRagDocument({
+      tenantId, projectId: 'proj-1', ragModuleKey: 'km-ocr', fileName: 'notes.txt', status: 'indexed', createdBy: 'tester',
+    });
+    expect((await db.findRagDocumentById(String(plain._id)))?.extraction ?? null).toBeNull();
+    await db.updateRagDocument(id, { chunkCount: 3 });
+    expect((await db.findRagDocumentById(id))?.extraction).toEqual(settled);
+
+    await db.updateRagDocument(id, { extraction: undefined });
+    expect((await db.findRagDocumentById(id))?.extraction ?? null).toBeNull();
+  });
 });
 
 describeForEachProvider('RAG re-index runs', (getDb) => {

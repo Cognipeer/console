@@ -244,6 +244,17 @@ describe('runRagReindexJob', () => {
     });
   });
 
+  it('never asks for a re-extract: a re-index does not read the pages with OCR again', async () => {
+    await runRagReindexJob(payload);
+
+    expect(reingestDocument).toHaveBeenCalled();
+    for (const call of reingestDocument.mock.calls) {
+      expect(call[3]).not.toHaveProperty('reextract');
+      expect(call[3]).not.toHaveProperty('fileData');
+      expect(call[3]).not.toHaveProperty('content');
+    }
+  });
+
   it('walks documents in id order whatever order the DB returned them', async () => {
     documents = [documents[2], documents[0], documents[1]];
 

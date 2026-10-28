@@ -8,7 +8,7 @@
 
 import { getDatabase, type IAgentConfig } from '@/lib/database';
 import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
-import { attachmentsAvailability, FILE_OUTPUT_EXTENSIONS, outputsAvailability, resolveOutputsConfig } from './sessionFilesConfig';
+import { attachmentsAvailability, attachmentsOcrActive, FILE_OUTPUT_EXTENSIONS, outputsAvailability, resolveOutputsConfig } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 
 export interface AgentAttachmentInfo {
@@ -19,6 +19,11 @@ export interface AgentAttachmentInfo {
     allowedMimeTypes: string[];
     /** Uploads are on (`enabled`) and the agent's model reads images (an image sent to it is seen, not replaced by a note). */
     acceptsImages: boolean;
+    /**
+     * Only for an agent that has OCR settings: whether uploads are read with OCR (scanned documents, and pictures when
+     * the agent reads them), which needs files to be on too. Absent = no OCR configured.
+     */
+    ocr?: { enabled: boolean };
     /** Files the agent can write for the person (`session_files_create`), independent of uploads (on by default only together with them). */
     outputs: {
         /** Writes files now: switched on (by default with uploads), a bucket named, and that bucket can take a file. */
@@ -62,6 +67,7 @@ export async function describeAgentAttachments(input: {
         maxFileSizeMb: limits?.maxFileSizeMb ?? 0,
         allowedMimeTypes: limits?.allowedMimeTypes ?? [],
         acceptsImages,
+        ...(availability.available && availability.cfg.ocr ? { ocr: { enabled: enabled && attachmentsOcrActive(availability.cfg) } } : {}),
         outputs: {
             enabled: outputsOn.available ? await bucketUsable(outputsOn.cfg.bucketKey) : false,
             maxFilesPerTurn: outputs.maxFilesPerTurn,
