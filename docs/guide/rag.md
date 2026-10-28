@@ -209,7 +209,10 @@ Authorization: Bearer <token>
 ```
 
 Changing `access` needs Knowledge Engine `admin`. Switching access control on hides nothing by itself: the top level
-of the knowledge base stays open to everyone until its permissions are changed.
+of the knowledge base stays open to everyone until its permissions are changed. Switching it off again keeps every
+permission and applies none until it is switched back on. A source of the Connectors module (Enterprise) that sends
+the permissions of its files goes on adding documents, with their permissions kept and not applied, and the
+connector's list of sources marks it **Permissions not applied: access control is off**.
 
 ### How permissions apply
 
