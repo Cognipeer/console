@@ -726,7 +726,8 @@ async function rotateConnectorSecret(reply: FastifyReply, caller: TriggerCaller,
     object: 'agent.trigger.webhook_secret' as const,
     ...(view.secret ? { secret: view.secret } : {}),
     secret_hint: view.secretHint ?? null,
-    previous_valid_until: null,
+    // A manually set up webhook keeps the previous secret for the grace period the caller asked for.
+    previous_valid_until: wire?.previous_secret_valid_until ?? null,
     connector_subscription: wire,
   });
 }

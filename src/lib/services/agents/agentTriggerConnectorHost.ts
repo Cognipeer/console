@@ -47,9 +47,11 @@ export function toSubscriptionWire(view: ConnectorTriggerView | null | undefined
     status: view.status,
     kind: view.kind,
     reason: view.reason ?? null,
+    reason_code: view.reasonCode ?? null,
     callback_url: view.callbackUrl ?? null,
     secret_hint: view.secretHint ?? null,
     ...(view.secret ? { secret: view.secret } : {}),
+    previous_secret_valid_until: toEpochSeconds(view.previousSecretValidUntil),
     auto_registered: view.autoRegistered ?? false,
     schedule: view.schedule ? { cron: view.schedule.cron, timezone: view.schedule.timezone } : null,
     next_poll_at: toEpochSeconds(view.nextPollAt),
@@ -70,6 +72,7 @@ function failedView(trigger: IAgentTrigger & { type: 'connector' }): ConnectorTr
     status: 'failed',
     kind: trigger.connector.kind ?? 'webhook',
     reason: 'The connection to the connector could not be set up. Retry.',
+    reasonCode: 'attach_failed',
     bindings: 0,
   };
 }

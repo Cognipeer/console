@@ -67,6 +67,7 @@ import { deleteAgentRecord } from '@/lib/services/agents/agentService';
 import { agentTriggersApiPlugin } from '@/server/api/plugins/agent-triggers';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 import { createFakeConnectorHost, type FakeConnectorHost } from '../helpers/fakeConnectorHost';
+import { shapeProblems } from '../helpers/openapiShape';
 
 const DB_NAME = 'tenant_connector_routes';
 const PROJECT_ID = 'proj-1';
@@ -346,6 +347,75 @@ describe.each([
       const none = await call('POST', `/${poll.id}/webhook/rotate-secret`, {});
       expect(none.statusCode).toBe(200);
       expect(json(none)).not.toHaveProperty('secret');
+    });
+
+    it('rotate-secret says when the previous secret stops working, on the answer and on the subscription', async () => {
+      const created = json(await call('POST', '', body()));
+      const before = Math.floor(Date.now() / 1000);
+      const graced = json(await call('POST', `/${created.id}/webhook/rotate-secret`, { grace_seconds: 3600 }));
+      expect(graced.previous_valid_until).toBeGreaterThanOrEqual(before + 3600);
+      expect(graced.previous_valid_until).toBeLessThanOrEqual(before + 3600 + 10);
+      expect(graced.connector_subscription.previous_secret_valid_until).toBe(graced.previous_valid_until);
+      // A read of the trigger shows the same expiry, and no secret.
+      const read = json(await call('GET', `/${created.id}`));
+      expect(read.connector_subscription.previous_secret_valid_until).toBe(graced.previous_valid_until);
+      expect(read.connector_subscription.secret ?? null).toBeNull();
+      // Without a grace period the old secret stops at once: nothing to wait for.
+      const now = json(await call('POST', `/${created.id}/webhook/rotate-secret`, {}));
+      expect(now.previous_valid_until).toBeNull();
+      expect(now.connector_subscription.previous_secret_valid_until).toBeNull();
+      expect(json(await call('GET', `/${created.id}`)).connector_subscription.previous_secret_valid_until).toBeNull();
+    });
+
+    it('a subscription gives the reason as a stable code as well as a sentence; none when nothing is wrong', async () => {
+      const ok = json(await call('POST', '', body({ name: 'Fine' })));
+      expect(ok.connector_subscription).toMatchObject({ status: 'active', reason: null, reason_code: null });
+
+      // The host answers a failed view of its own.
+      fake.attachStatus = 'failed';
+      const refused = json(await call('POST', '', body({ name: 'Refused' }, { ...CONNECTOR, params: { repository: 'acme/web' } })));
+      expect(refused.connector_subscription).toMatchObject({ status: 'failed', reason: 'The vendor refused the registration.', reason_code: 'subscribe_failed' });
+      fake.attachStatus = 'active';
+
+      // The host itself fails: core stores the trigger and reports the failure with its own code.
+      fake.failing.add('attach');
+      const down = json(await call('POST', '', body({ name: 'Down' }, { ...CONNECTOR, params: { repository: 'acme/db' } })));
+      expect(down.connector_subscription).toMatchObject({
+        status: 'failed', reason: 'The connection to the connector could not be set up. Retry.', reason_code: 'attach_failed',
+      });
+    });
+
+    it('the answers fit the schemas openapi.yaml documents: no undeclared field, no null where none is allowed', async () => {
+      const created = json(await call('POST', '', body()));
+      expect(shapeProblems(created, 'AgentTrigger')).toEqual([]);
+      expect(shapeProblems(json(await call('GET', `/${created.id}`)), 'AgentTrigger')).toEqual([]);
+      const list = json<{ data: unknown[] }>(await call('GET'));
+      for (const item of list.data) expect(shapeProblems(item, 'AgentTrigger')).toEqual([]);
+
+      const patched = json(await call('PATCH', `/${created.id}`, { name: 'Renamed', type: 'connector', connector: { events: ['pull_request.opened'] } }));
+      expect(shapeProblems(patched, 'AgentTrigger')).toEqual([]);
+
+      // Every state of a subscription the API can answer.
+      for (const rotation of [{}, { grace_seconds: 600 }]) {
+        const rotated = json(await call('POST', `/${created.id}/webhook/rotate-secret`, rotation));
+        expect(shapeProblems(rotated, 'AgentTriggerWebhookSecret')).toEqual([]);
+        expect(shapeProblems(rotated.connector_subscription, 'ConnectorSubscription')).toEqual([]);
+      }
+      fake.attachStatus = 'failed';
+      const failed = json(await call('POST', '', body({ name: 'Refused' }, { ...CONNECTOR, params: { repository: 'acme/web' } })));
+      expect(shapeProblems(failed, 'AgentTrigger')).toEqual([]);
+      fake.attachStatus = 'active';
+      const retried = json(await call('POST', `/${failed.id}/connector/retry`));
+      expect(shapeProblems(retried, 'AgentTrigger')).toEqual([]);
+
+      fake.failing.add('attach');
+      const down = json(await call('POST', '', body({ name: 'Down' }, { ...CONNECTOR, params: { repository: 'acme/db' } })));
+      expect(shapeProblems(down, 'AgentTrigger')).toEqual([]);
+      fake.failing.clear();
+
+      const poll = json(await call('POST', '', body({ name: 'Poll' }, { connector_id: 'conn-poll', trigger: 'issue_updated', params: {}, schedule: { cron: '*/15 * * * *' } })));
+      expect(shapeProblems(poll, 'AgentTrigger')).toEqual([]);
+      expect(shapeProblems(json(await call('POST', `/${poll.id}/webhook/rotate-secret`, {})), 'AgentTriggerWebhookSecret')).toEqual([]);
     });
 
     it('Run now uses the package\'s sample without a payload, and the given payload and event with one; dry_run fires nothing', async () => {

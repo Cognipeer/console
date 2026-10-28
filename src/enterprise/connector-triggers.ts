@@ -45,14 +45,22 @@ export interface ConnectorTriggerView {
   subscriptionId: string;
   status: ConnectorSubscriptionStatus;
   kind: 'webhook' | 'poll';
-  /** Why it is paused, failed or waiting for manual setup (fixed text, never vendor data). */
+  /** Why it is paused, failed or waiting for manual setup (fixed English text, never vendor data). */
   reason?: string | null;
+  /**
+   * A stable code for `reason` (`no_subscribe`, `subscribe_failed`, `attach_failed` ...), so a screen can say it in
+   * the reader's own language. `reason` stays the fixed sentence for API readers. Optional: a host without codes
+   * leaves it out and screens show `reason`.
+   */
+  reasonCode?: string | null;
   /** Webhook: the public URL the vendor posts to. */
   callbackUrl?: string | null;
   /** Webhook: the signing secret's last 4 characters. */
   secretHint?: string | null;
   /** Webhook, manual setup: the whole secret, only in the attach/rotate answer that created it. */
   secret?: string | null;
+  /** Webhook, manual setup: until when the secret before the last rotation is still accepted (its grace period); null/absent when none is. */
+  previousSecretValidUntil?: Date | null;
   /** Webhook: registered at the vendor by the package. */
   autoRegistered?: boolean;
   schedule?: { cron: string; timezone: string } | null;

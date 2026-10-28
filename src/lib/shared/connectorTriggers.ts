@@ -75,11 +75,16 @@ export interface ConnectorSubscriptionWire {
   subscription_id: string;
   status: ConnectorSubscriptionStatus;
   kind: 'webhook' | 'poll';
+  /** Why it is paused, failed or waiting for manual setup: a fixed English sentence. */
   reason?: string | null;
+  /** A stable code for `reason` (`no_subscribe`, `subscribe_failed`, `attach_failed` ...); screens say it in the reader's language. */
+  reason_code?: string | null;
   callback_url?: string | null;
   secret_hint?: string | null;
   /** Present once: in the response that created or rotated the secret of a manual-mode webhook. */
   secret?: string | null;
+  /** Epoch seconds until which the secret before the last rotation is still accepted (its grace period); null when none is. */
+  previous_secret_valid_until?: number | null;
   auto_registered?: boolean;
   schedule?: { cron: string; timezone: string } | null;
   next_poll_at?: number | null;

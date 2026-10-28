@@ -27,6 +27,8 @@ interface Subscription {
   kind: 'webhook' | 'poll';
   status: ConnectorTriggerView['status'];
   secret: string | null;
+  /** Until when the secret before the last rotation is still accepted (a rotation with a grace period). */
+  previousValidUntil: Date | null;
   bound: Set<string>;
 }
 
@@ -107,9 +109,12 @@ export function createFakeConnectorHost(): FakeConnectorHost {
     status: subscription.status,
     kind: subscription.kind,
     reason: subscription.status === 'failed' ? 'The vendor refused the registration.' : null,
+    reasonCode: subscription.status === 'failed' ? 'subscribe_failed' : null,
     callbackUrl: subscription.kind === 'webhook' ? `https://console.example/api/public/connectors/${subscription.id}` : null,
     secretHint: subscription.secret ? subscription.secret.slice(-4) : null,
     secret: secret ?? null,
+    // Like the real module: the previous secret is reported only while its grace period runs.
+    previousSecretValidUntil: subscription.previousValidUntil && subscription.previousValidUntil.getTime() > Date.now() ? subscription.previousValidUntil : null,
     autoRegistered: subscription.status === 'active',
     bindings: subscription.bound.size,
   });
@@ -168,6 +173,7 @@ export function createFakeConnectorHost(): FakeConnectorHost {
           kind: trigger.connector.kind ?? 'webhook',
           status: state.attachStatus,
           secret,
+          previousValidUntil: null,
           bound: new Set(),
         };
         subscriptions.set(subscription.id, subscription);
@@ -203,7 +209,7 @@ export function createFakeConnectorHost(): FakeConnectorHost {
       return state.sampleEvent;
     },
 
-    async rotate(scope, trigger) {
+    async rotate(scope, trigger, options) {
       calls.push(`rotate:${String(trigger._id)}`);
       scopes.push(scope);
       fail('rotate');
@@ -212,6 +218,8 @@ export function createFakeConnectorHost(): FakeConnectorHost {
       if (!subscription) return null;
       if (subscription.kind === 'poll') return viewOf(subscription);
       subscription.secret = `whsec_rotated_${'y'.repeat(14)}`;
+      // The old secret stays accepted for the grace period the caller asked for (none: it stops at once).
+      subscription.previousValidUntil = options.graceSeconds > 0 ? new Date(Date.now() + options.graceSeconds * 1000) : null;
       return viewOf(subscription, subscription.secret);
     },
 
