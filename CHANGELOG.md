@@ -753,8 +753,10 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   knowledge tools, the knowledge base MCP tools, and document detail, content, lines and export. A document the caller
   may not read is left out of lists and answers `404`, like a missing one.
 - A call with no person behind it, such as an API token or a trigger, reads the documents open to everyone and those
-  granted to its token; a delegated call reads what the person it acts for may read. A flow's agent steps, and the
-  tools they call, read as no one in particular; the flow editor's playground reads as the person at the screen.
+  granted to its token; a delegated call reads what the person it acts for may read. A flow's agent steps, and the tools
+  they call, read as no one in particular; the flow editor's playground reads as the person at the screen. A reminder
+  that an agent sets wakes reading no more than the turn that set it: one set by a flow's agent step, in a shared
+  channel, or in a turn that someone else continued reads as no one.
 - The administrators of a knowledge base read every document, unless the knowledge base turns that off
   (`access.adminBypass: false`). The management views always show them every document, so they can set permissions.
   `GET /rag/modules/:key/access/explain` tells them whether a person of the project can read a document, and which
@@ -791,13 +793,15 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - A file whose permissions cannot be read is open only to the administrators until a later run reads them. A change
   of permissions alone is picked up by the full listing that such a source makes once a day. Permissions given to
   SharePoint site groups are not followed yet.
-- A source that sends the permissions of its files needs no confirmation. One that does not, or that stops sending
-  them, first asks to confirm that everyone with access to the knowledge base will see every document it adds
-  (`aclAcknowledged`, once).
-- A connector with a source that sends permissions into a knowledge base with access control offers agents none of
-  its read actions and not its MCP server, and flows none of its read nodes, since its own account reads every file.
-  Its other actions stay and still ask before they run, and the connector's **Tools** tab says why. A flow that
-  already holds such a read node fails that step with `connector_reads_off`.
+- A source that sends the permissions of its files into a knowledge base with access control needs no confirmation. One
+  that sends none, that stops sending them, or whose knowledge base has access control off (which keeps the permissions
+  without applying them) first asks to confirm that everyone with access to the knowledge base will see every document
+  it adds (`aclAcknowledged`, once); the sources list marks a source whose permissions are not applied.
+- A connector with a source that sends permissions into a knowledge base with access control offers agents none of its
+  read actions and not its MCP server, and flows none of its read nodes, since its own account reads every file. Its
+  other actions stay and still ask before they run, and the connector's **Tools** tab says why. A flow that already
+  holds such a read node fails that step with `connector_reads_off`. Its tools follow when that knowledge base's access
+  control is switched on or off, or the knowledge base is deleted.
 - In Slack and Teams an agent reads only knowledge open to everyone when it answers in a shared channel, what the
   person may read in a direct message, and as no one with the identity mode **none**.
 - A portal's conversation history lists a conversation that used documents not open to everyone without its title;
