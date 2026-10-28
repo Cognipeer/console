@@ -384,6 +384,7 @@ export default function CreateToolModal({
           <FormRow cols={1}>
             <FormField label="Bearer token" required>
               <PasswordInput
+                autoComplete="off"
                 placeholder="sk-..."
                 {...form.getInputProps('authToken')}
               />
@@ -395,12 +396,14 @@ export default function CreateToolModal({
           <FormRow cols={2}>
             <FormField label="Header name" required>
               <TextInput
+                autoComplete="off"
                 placeholder="X-API-Key"
                 {...form.getInputProps('authHeaderName')}
               />
             </FormField>
             <FormField label="Header value" required>
               <PasswordInput
+                autoComplete="off"
                 placeholder="secret-value"
                 {...form.getInputProps('authHeaderValue')}
               />
@@ -411,10 +414,10 @@ export default function CreateToolModal({
         {formValues.authType === 'basic' && (
           <FormRow cols={2}>
             <FormField label="Username" required>
-              <TextInput {...form.getInputProps('authUsername')} />
+              <TextInput autoComplete="off" {...form.getInputProps('authUsername')} />
             </FormField>
             <FormField label="Password" required>
-              <PasswordInput {...form.getInputProps('authPassword')} />
+              <PasswordInput autoComplete="off" {...form.getInputProps('authPassword')} />
             </FormField>
           </FormRow>
         )}

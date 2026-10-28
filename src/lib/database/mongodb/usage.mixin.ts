@@ -17,6 +17,7 @@ const COUNTER_FIELDS = [
   'inputTokens',
   'outputTokens',
   'cachedInputTokens',
+  'cachedWriteTokens',
   'reasoningTokens',
   'totalTokens',
   'costUsd',

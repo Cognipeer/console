@@ -67,6 +67,14 @@ interface ModelPricing {
   inputTokenPer1M: number;
   outputTokenPer1M: number;
   cachedTokenPer1M?: number;
+  cacheWriteTokenPer1M?: number;
+  // Per-second / character / page / image prices: not editable here, but sent
+  // back unchanged because a save replaces the whole pricing object.
+  inputSecondPer1K?: number;
+  outputSecondPer1K?: number;
+  inputCharacterPer1M?: number;
+  pagePer1K?: number;
+  imagePer1K?: number;
 }
 
 interface SemanticCacheConfig {
@@ -142,7 +150,8 @@ interface FormValues {
     currency: string;
     inputTokenPer1M: number;
     outputTokenPer1M: number;
-    cachedTokenPer1M: number;
+    cachedTokenPer1M: number | '';
+    cacheWriteTokenPer1M: number | '';
   };
   settings: Record<string, unknown>;
   isMultimodal: boolean;
@@ -219,7 +228,8 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
         currency: 'USD',
         inputTokenPer1M: 0,
         outputTokenPer1M: 0,
-        cachedTokenPer1M: 0,
+        cachedTokenPer1M: '',
+        cacheWriteTokenPer1M: '',
       },
       settings: {},
       isMultimodal: false,
@@ -365,7 +375,9 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           currency: nextModel.pricing.currency || 'USD',
           inputTokenPer1M: nextModel.pricing.inputTokenPer1M,
           outputTokenPer1M: nextModel.pricing.outputTokenPer1M,
-          cachedTokenPer1M: nextModel.pricing.cachedTokenPer1M || 0,
+          // A stored 0 means "not entered" (billed at the input price): show it blank.
+          cachedTokenPer1M: nextModel.pricing.cachedTokenPer1M || '',
+          cacheWriteTokenPer1M: nextModel.pricing.cacheWriteTokenPer1M || '',
         },
         settings,
         isMultimodal: Boolean(nextModel.isMultimodal),
@@ -537,7 +549,16 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           key: values.key,
           providerKey: values.providerKey || undefined,
           modelId: values.modelId,
-          pricing: values.pricing,
+          pricing: {
+            ...model.pricing,
+            currency: values.pricing.currency,
+            inputTokenPer1M: values.pricing.inputTokenPer1M,
+            outputTokenPer1M: values.pricing.outputTokenPer1M,
+            // Blank cache prices are omitted (not sent as 0): billed at the input price.
+            cachedTokenPer1M: values.pricing.cachedTokenPer1M === '' ? undefined : values.pricing.cachedTokenPer1M,
+            cacheWriteTokenPer1M:
+              values.pricing.cacheWriteTokenPer1M === '' ? undefined : values.pricing.cacheWriteTokenPer1M,
+          },
           settings: {
             ...values.settings,
             // `null` clears the key server-side, so emptying the editor removes
@@ -625,6 +646,9 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     return () => ++n;
   })();
   const setPrice = (path: string) => (value: string | number) => form.setFieldValue(path, Number(value) || 0);
+  // Optional prices: a cleared NumberInput ('') stays blank instead of becoming 0.
+  const setOptionalPrice = (path: string) => (value: string | number) =>
+    form.setFieldValue(path, value === '' || value === undefined || Number.isNaN(Number(value)) ? '' : Number(value));
   const patchSettings = (patch: Record<string, unknown>) =>
     form.setFieldValue('settings', { ...form.values.settings, ...patch });
 
@@ -752,11 +776,17 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           }}
           inputProps={{ value: form.values.pricing.inputTokenPer1M, onChange: setPrice('pricing.inputTokenPer1M') }}
           outputProps={{ value: form.values.pricing.outputTokenPer1M, onChange: setPrice('pricing.outputTokenPer1M') }}
-          cachedProps={{ value: form.values.pricing.cachedTokenPer1M, onChange: setPrice('pricing.cachedTokenPer1M') }}
+          cachedProps={{ value: form.values.pricing.cachedTokenPer1M, onChange: setOptionalPrice('pricing.cachedTokenPer1M') }}
+          cacheWriteProps={{
+            value: form.values.pricing.cacheWriteTokenPer1M,
+            onChange: setOptionalPrice('pricing.cacheWriteTokenPer1M'),
+          }}
           onApplyCatalog={(pricing) => {
             form.setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
             form.setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
-            form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
+            // 0 = the catalog has no such price; keep the field blank.
+            form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M || '');
+            form.setFieldValue('pricing.cacheWriteTokenPer1M', pricing.cacheWriteTokenPer1M || '');
           }}
         />
 

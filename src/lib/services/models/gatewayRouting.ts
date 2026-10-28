@@ -21,6 +21,7 @@ import type { ParsedDecisionRequest } from '@/lib/providers/contracts/decisionHe
 import { mergeRoutingCaller } from './routingCallerContext';
 import { getModelByKey } from './modelService';
 import { logModelUsage, type TokenUsage } from './usageLogger';
+import { OutputTokenLimitError } from './openaiErrors';
 import { describeRequestContract, sanitizeForLogging } from './gatewayRequest';
 import { openAiMessagesToNative, type OpenAIMessage } from './openaiAdapter';
 import type { ModelCallInput, ModelCallOutcome } from './gatewayTypes';
@@ -633,6 +634,11 @@ export async function resolveDynamicCompletion(args: {
           finalModelKey,
           buildRouting('child', finalModelKey, finalDecision, finalReason),
         );
+        // A primary that hit its output limit was billed (its row is written):
+        // the run totalling this call must see those tokens next to the answer.
+        if (primaryError instanceof OutputTokenLimitError && primaryError.usage) {
+          childResult = { ...childResult, burnedUsage: primaryError.usage };
+        }
       } catch (fallbackError) {
         logDecision(
           buildRouting('router', finalModelKey, finalDecision, finalReason),

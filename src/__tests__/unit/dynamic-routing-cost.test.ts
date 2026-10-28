@@ -143,6 +143,13 @@ describe('estimateRequestCostUsd', () => {
     expect(estimateRequestCostUsd(pricing, 1_000_000, 0, 0.5)).toBeCloseTo(5.5);
   });
 
+  it('bills the cached share at the input rate when the cache-read price is blank or 0', () => {
+    const blank = { inputTokenPer1M: 10, outputTokenPer1M: 30 };
+    const zero = { inputTokenPer1M: 10, outputTokenPer1M: 30, cachedTokenPer1M: 0 };
+    expect(estimateRequestCostUsd(blank, 1_000_000, 0, 1)).toBeCloseTo(10);
+    expect(estimateRequestCostUsd(zero, 1_000_000, 0, 0.5)).toBeCloseTo(10);
+  });
+
   it('adds expected output', () => {
     expect(estimateRequestCostUsd(pricing, 0, 1_000_000)).toBeCloseTo(30);
   });

@@ -3646,7 +3646,17 @@ export interface IAgentMessageVersion {
   content: string;
   timestamp: Date;
   stopReason?: 'limit' | 'cancelled' | 'paused' | 'error';
-  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    /** Subsets of `inputTokens` (never added on top of it), each billed at its own rate. */
+    cachedInputTokens?: number;
+    cachedWriteTokens?: number;
+    /** A subset of `outputTokens`. */
+    reasoningTokens?: number;
+    totalTokens?: number;
+    costUsd?: number;
+  };
 }
 
 export interface IAgentConversationMessage {
@@ -3677,10 +3687,17 @@ export interface IAgentConversationMessage {
   /** Why the structured contract failed, when it did. */
   outputError?: string;
   usage?: {
+    /** The whole prompt: uncached + cache-read + cache-write tokens. */
     inputTokens?: number;
+    /** The whole completion, reasoning tokens included. */
     outputTokens?: number;
-    /** A discounted slice of `inputTokens`, not an addition to it. */
+    /** A discounted slice of `inputTokens` (cache reads), not an addition to it. */
     cachedInputTokens?: number;
+    /** A slice of `inputTokens` written to the provider's prompt cache, billed at the cache-write rate. Absent when 0. */
+    cachedWriteTokens?: number;
+    /** A slice of `outputTokens` spent on reasoning / thinking. Absent when 0. */
+    reasoningTokens?: number;
+    /** `inputTokens` + `outputTokens` (the cache and reasoning slices are never added on top). */
     totalTokens?: number;
     /** Priced from the model's own `pricing` at the time of the run — see `calculateCost`. */
     costUsd?: number;

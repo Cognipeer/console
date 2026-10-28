@@ -37,6 +37,7 @@
  */
 
 import { createProvider } from '@cognipeer/agent-sdk';
+import { toGatewayUsage } from '@/lib/services/models/gatewayUsage';
 import type {
   ChatCompletionRequest,
   ProviderConfig,
@@ -80,7 +81,10 @@ export interface SdkInvokeContext {
 export interface SdkUsageSnapshot {
   inputTokens?: number;
   outputTokens?: number;
+  totalTokens?: number;
   cachedInputTokens?: number;
+  cachedWriteTokens?: number;
+  reasoningTokens?: number;
 }
 
 export interface SdkChatResult {
@@ -308,13 +312,24 @@ function parseToolArguments(raw: unknown): Record<string, unknown> {
   }
 }
 
-/** Map the SDK's TokenUsage onto the adapter's pricing-input shape. */
-export function toUsageSnapshot(usage: SdkTokenUsage | undefined): SdkUsageSnapshot | undefined {
+/**
+ * Map the SDK's native TokenUsage onto the adapter's pricing-input shape,
+ * converted to canonical gateway usage (input includes cache read/write, output
+ * includes reasoning) with the provider driver, so the price math is the gateway's.
+ */
+export function toUsageSnapshot(
+  usage: SdkTokenUsage | undefined,
+  driver: string | undefined,
+): SdkUsageSnapshot | undefined {
   if (!usage) return undefined;
+  const u = toGatewayUsage(driver, usage);
   return {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    cachedInputTokens: usage.cachedInputTokens,
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    totalTokens: u.totalTokens,
+    cachedInputTokens: u.cachedInputTokens,
+    cachedWriteTokens: u.cachedWriteTokens,
+    reasoningTokens: u.reasoningTokens,
   };
 }
 
@@ -376,7 +391,7 @@ export async function invokeChatViaSdk(
   return {
     text: response.content ?? '',
     toolCalls: normalizeSdkToolCalls(response.toolCalls),
-    usage: toUsageSnapshot(response.usage),
+    usage: toUsageSnapshot(response.usage, config.provider),
     latencyMs,
     raw: response.raw,
   };

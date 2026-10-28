@@ -47,12 +47,17 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkBudget: vi.fn().mockResolvedValue({ allowed: true }),
   checkPerRequestLimits: vi.fn().mockResolvedValue({ allowed: true }),
   checkRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
+  settleUsageBudget: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import { getDatabase } from '@/lib/database';
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { getModelByKey } from '@/lib/services/models/modelService';
+import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { logModelUsage } from '@/lib/services/models/usageLogger';
+import { checkBudget, settleUsageBudget } from '@/lib/quota/quotaGuard';
 import { clientInferenceApiPlugin } from '@/server/api/plugins/client-inference';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -125,6 +130,44 @@ describe('POST /api/client/v1/messages', () => {
     expect(body.error.type).toBe('invalid_request_error');
     expect(body.error.message).toMatch(/role/);
     expect(handleChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('settles the budget through the core hook (streams and limit hits included), not from the returned usage', async () => {
+    let settle: ((cost: { currency: string; totalCost: number }) => void) | undefined;
+    mockFn(handleChatCompletion).mockImplementation(async (input: { onUsageSettled?: typeof settle }) => {
+      settle = input.onUsageSettled;
+      return {
+        requestId: 'req-1',
+        response: { id: 'c1', model: 'test-model', choices: [{ finish_reason: 'stop', message: { content: 'Hi' } }] },
+        usage: { inputTokens: 3, outputTokens: 2 },
+      };
+    });
+
+    const res = await post(VALID);
+    expect(res.statusCode).toBe(200);
+    expect(typeof settle).toBe('function');
+    // The pre-flight check is the only budget call the route makes itself.
+    expect(checkBudget).toHaveBeenCalledTimes(1);
+    expect(checkBudget).toHaveBeenCalledWith(expect.anything());
+
+    const cost = { currency: 'USD', totalCost: 0.25 };
+    settle!(cost);
+    expect(settleUsageBudget).toHaveBeenCalledWith(expect.anything(), cost);
+  });
+
+  it('writes no second row for a limit hit the core already billed; other failures are logged', async () => {
+    mockFn(getModelByKey).mockResolvedValue({ key: 'test-model', pricing: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 1 } });
+    mockFn(handleChatCompletion).mockRejectedValueOnce(
+      new OutputTokenLimitError(64, { usage: { inputTokens: 10, outputTokens: 64, totalTokens: 74 }, usageBooked: true }),
+    );
+    const limited = await post(VALID);
+    expect(limited.statusCode).toBe(422);
+    expect(logModelUsage).not.toHaveBeenCalled();
+
+    mockFn(handleChatCompletion).mockRejectedValueOnce(new Error('upstream exploded'));
+    await post(VALID);
+    expect(logModelUsage).toHaveBeenCalledTimes(1);
+    expect(mockFn(logModelUsage).mock.calls[0][2]).toMatchObject({ route: 'messages', status: 'error', usage: {} });
   });
 
   it('answers in the Messages envelope while shutting down', async () => {

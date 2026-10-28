@@ -476,6 +476,9 @@ export interface IAgentTracingEvent {
   outputTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `inputTokens` written to the provider's prompt cache; never added
+   *  on top of `inputTokens`, priced at the cache-write rate. */
+  cachedWriteTokens?: number;
   /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
    *  never added into `totalTokens` or any cost arithmetic. */
   reasoningTokens?: number;
@@ -511,7 +514,12 @@ export interface IModelPricing {
   currency?: string;
   inputTokenPer1M: number;
   outputTokenPer1M: number;
+  /** Cache-READ price per 1M tokens. Blank, 0 or null = not entered: cache reads
+   *  bill at the input rate (`resolveTokenRates`). */
   cachedTokenPer1M?: number;
+  /** Cache-WRITE price per 1M tokens (Anthropic / Bedrock Claude 5-minute writes
+   *  are 1.25x input). Blank, 0 or null = not entered: writes bill at the input rate. */
+  cacheWriteTokenPer1M?: number;
   // STT pricing: cost per 1,000 input seconds of audio
   inputSecondPer1K?: number;
   // TTS streaming pricing: cost per 1,000 output seconds of audio (optional)
@@ -1134,7 +1142,11 @@ export interface IModelUsageCostSnapshot {
   inputCost?: number;
   outputCost?: number;
   cachedCost?: number;
+  /** The cache-write slice; included in `totalCost`. Absent on rows written before it existed. */
+  cacheWriteCost?: number;
   totalCost?: number;
+  /** Cache tokens priced at the input rate because the model had no price entered for them. */
+  assumedRates?: Array<'cacheRead' | 'cacheWrite'>;
 }
 
 /**
@@ -1164,6 +1176,9 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens?: number;
+  /** Subset of `inputTokens` written to the provider's prompt cache; never added
+   *  on top of `inputTokens`, priced at the cache-write rate. */
+  cachedWriteTokens?: number;
   totalTokens: number;
   /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
    *  never added into `totalTokens` or any cost arithmetic. */
@@ -1202,6 +1217,7 @@ export interface IAgentTurnUsageSummary {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cachedWriteTokens?: number;
   reasoningTokens: number;
   totalTokens: number;
   costUsd: number;
@@ -1252,6 +1268,9 @@ export interface IUsageDaily {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  /** Subset of `inputTokens` written to the provider's prompt cache; never added
+   *  on top of `inputTokens`. Absent on rows written before it existed. */
+  cachedWriteTokens?: number;
   /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
    *  never added into `totalTokens` or any cost arithmetic. */
   reasoningTokens: number;
@@ -1286,6 +1305,8 @@ export interface IUsageDailyIncrement {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  /** Subset of `inputTokens`. Mirrors `IUsageDaily.cachedWriteTokens`. */
+  cachedWriteTokens?: number;
   /** Subset of `outputTokens`; never added into `totalTokens` or any cost
    *  arithmetic. Mirrors `IUsageDaily.reasoningTokens`. */
   reasoningTokens?: number;
@@ -1377,6 +1398,7 @@ export interface IModelUsageAggregate {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCachedInputTokens: number;
+  totalCachedWriteTokens?: number;
   totalTokens: number;
   totalToolCalls: number;
   cacheHits: number;
@@ -1389,6 +1411,7 @@ export interface IModelUsageAggregate {
     inputTokens: number;
     outputTokens: number;
     cachedInputTokens: number;
+    cachedWriteTokens?: number;
     totalTokens: number;
     totalCost?: number;
     cacheHits?: number;

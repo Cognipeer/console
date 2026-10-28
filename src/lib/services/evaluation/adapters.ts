@@ -120,9 +120,18 @@ function parseToolArguments(raw: unknown): Record<string, unknown> {
   }
 }
 
+/** Canonical gateway usage (input includes cache read/write; those are subsets). */
+interface EvalCanonicalUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  cachedWriteTokens?: number;
+  reasoningTokens?: number;
+}
+
 /** Map the inference layer's TokenUsage onto the engine's EvalUsage. */
 function toEvalUsage(
-  usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number } | undefined,
+  usage: EvalCanonicalUsage | undefined,
   pricing: IModelPricing | null,
 ): EvalUsage | undefined {
   if (!usage) return undefined;
@@ -130,12 +139,17 @@ function toEvalUsage(
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     cachedInputTokens: usage.cachedInputTokens,
+    // Optional keys only when present: Mongo stores `undefined` as null.
+    ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+    ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
   };
   if (pricing) {
     evalUsage.costUsd = calculateCost(pricing, {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cachedInputTokens: usage.cachedInputTokens,
+      cachedWriteTokens: usage.cachedWriteTokens,
+      reasoningTokens: usage.reasoningTokens,
     }).totalCost;
   }
   return evalUsage;
@@ -247,7 +261,7 @@ async function invokeModel(
   text: string;
   latencyMs?: number;
   raw: unknown;
-  usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number };
+  usage?: EvalCanonicalUsage;
 }> {
   const result = (await handleChatCompletion({
     tenantDbName: ctx.tenantDbName,
@@ -258,7 +272,7 @@ async function invokeModel(
   })) as {
     response?: unknown;
     latencyMs?: number;
-    usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number };
+    usage?: EvalCanonicalUsage;
   };
   return {
     text: extractAssistantText(result.response),

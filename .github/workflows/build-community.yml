@@ -19,6 +19,13 @@ concurrency:
   group: console-community-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
+# onnxruntime-node's install script downloads the CUDA 12 provider binaries
+# (a large nuget.org package) on every linux/x64 `npm ci`. Every model here runs
+# on the CPU provider, which ships inside the npm package, so the download is
+# never used, and a nuget.org timeout used to fail the whole install.
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+
 jobs:
   # Checks moved over from ci.yml. They run in parallel, the same way as there
   # (see the comments in that file for the matrix details); `validate` is the

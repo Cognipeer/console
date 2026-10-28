@@ -57,6 +57,7 @@ import {
   SdkProviderMappingError,
   toSdkTools,
   toUnifiedMessages,
+  toUsageSnapshot,
 } from '@/lib/services/evaluation/sdkInvoker';
 import { buildJudgeInvoker, buildTargetInvoker } from '@/lib/services/evaluation/adapters';
 import type { EvaluationModelContext } from '@/lib/services/evaluation/adapters';
@@ -298,6 +299,29 @@ describe('resolveSdkProviderConfig — driver mapping table', () => {
   });
 });
 
+describe('toUsageSnapshot — canonical conversion by driver', () => {
+  const native = { ...SDK_USAGE, inputTokens: 10, outputTokens: 5, cachedInputTokens: 50, cachedWriteTokens: 5, reasoningTokens: 3 };
+
+  it('folds bedrock cache read/write into the input and keeps both subsets', () => {
+    expect(toUsageSnapshot(native, 'bedrock')).toMatchObject({
+      inputTokens: 65, outputTokens: 5, totalTokens: 70, cachedInputTokens: 50, cachedWriteTokens: 5, reasoningTokens: 3,
+    });
+  });
+
+  it('folds vertex thinking tokens into the output', () => {
+    expect(toUsageSnapshot({ ...SDK_USAGE, outputTokens: 5, reasoningTokens: 7, cachedInputTokens: 0 }, 'vertex'))
+      .toMatchObject({ inputTokens: 10, outputTokens: 12, totalTokens: 22, reasoningTokens: 7 });
+  });
+
+  it('leaves inclusive drivers (openai) unchanged', () => {
+    expect(toUsageSnapshot(native, 'openai')).toMatchObject({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 50 });
+  });
+
+  it('returns undefined without usage', () => {
+    expect(toUsageSnapshot(undefined, 'openai')).toBeUndefined();
+  });
+});
+
 describe('invokeChatViaSdk', () => {
   it('completes with model id, converted messages/tools, and maps usage + toolCalls', async () => {
     h.complete.mockResolvedValue(
@@ -328,7 +352,7 @@ describe('invokeChatViaSdk', () => {
     });
     expect(result.text).toBe('');
     expect(result.toolCalls).toEqual([{ name: 'get_weather', args: { city: 'Ankara' } }]);
-    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 2 });
+    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15, cachedInputTokens: 2 });
     expect(result.raw).toEqual({ provider: 'raw-payload' });
     expect(typeof result.latencyMs).toBe('number');
   });

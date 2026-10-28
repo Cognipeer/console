@@ -315,34 +315,62 @@ function getConventionModel(attrs: OtlpKeyValue[] | undefined, fromCognipeerSdk 
     : ['cognipeer.model', 'llm.model_name', 'gen_ai.response.model', 'gen_ai.request.model']);
 }
 
-/** Token counts across all three conventions. */
+/**
+ * Token counts across all three conventions.
+ *
+ * The SDK's `gen_ai.usage.*` input/output are always INCLUSIVE (input includes cache read/write, output includes
+ * reasoning), while its `cognipeer.tokens.*` carry the provider's native counts (anthropic/bedrock input excludes
+ * cache, vertex output excludes reasoning) with no basis flag. A span carrying BOTH conventions therefore takes
+ * the `gen_ai` pair; a span with only one convention is read as is.
+ */
 function getConventionTokens(attrs: OtlpKeyValue[] | undefined) {
-  return {
-    inputTokens: firstIntAttr(attrs, [
+  const cognipeerInput = getIntAttr(attrs, 'cognipeer.tokens.input');
+  const cognipeerOutput = getIntAttr(attrs, 'cognipeer.tokens.output');
+  const genAiInput = firstIntAttr(attrs, ['gen_ai.usage.input_tokens', 'gen_ai.usage.prompt_tokens']);
+  const genAiOutput = firstIntAttr(attrs, ['gen_ai.usage.output_tokens', 'gen_ai.usage.completion_tokens']);
+  const preferGenAiInput = cognipeerInput !== undefined && genAiInput !== undefined;
+  const preferGenAiOutput = cognipeerOutput !== undefined && genAiOutput !== undefined;
+  const preferredGenAi = preferGenAiInput || preferGenAiOutput;
+  const inputTokens = preferGenAiInput
+    ? genAiInput
+    : firstIntAttr(attrs, [
       'cognipeer.tokens.input',
       'llm.token_count.prompt',
       'gen_ai.usage.input_tokens',
       'gen_ai.usage.prompt_tokens',
-    ]),
-    outputTokens: firstIntAttr(attrs, [
+    ]);
+  const outputTokens = preferGenAiOutput
+    ? genAiOutput
+    : firstIntAttr(attrs, [
       'cognipeer.tokens.output',
       'llm.token_count.completion',
       'gen_ai.usage.output_tokens',
       'gen_ai.usage.completion_tokens',
-    ]),
-    totalTokens: firstIntAttr(attrs, [
-      'cognipeer.tokens.total',
-      'llm.token_count.total',
-      'gen_ai.usage.total_tokens',
-    ]),
-    // Deliberately excludes cache *write* / *creation* counts: those are a
-    // different, separately-priced number, and the Console treats
-    // cachedInputTokens as a subset of inputTokens.
+    ]);
+  return {
+    inputTokens,
+    outputTokens,
+    // A total written next to native counts is native too: once the inclusive pair wins, derive it.
+    totalTokens: preferredGenAi && inputTokens !== undefined && outputTokens !== undefined
+      ? inputTokens + outputTokens
+      : firstIntAttr(attrs, [
+        'cognipeer.tokens.total',
+        'llm.token_count.total',
+        'gen_ai.usage.total_tokens',
+      ]),
     cachedInputTokens: firstIntAttr(attrs, [
       'cognipeer.tokens.cached_input',
       'llm.token_count.prompt_details.cache_read',
       'gen_ai.usage.cache_read.input_tokens',
       'gen_ai.usage.cache_read_input_tokens',
+    ]),
+    // Cache WRITE / creation is its own separately-priced subset of inputTokens (never merged into cachedInputTokens).
+    cachedWriteTokens: firstIntAttr(attrs, [
+      'cognipeer.tokens.cache_write',
+      'llm.token_count.prompt_details.cache_write',
+      'gen_ai.usage.cache_write.input_tokens',
+      'gen_ai.usage.cache_creation.input_tokens',
+      'gen_ai.usage.cache_creation_input_tokens',
     ]),
     // Subset of outputTokens — excluded from cost/total arithmetic the same
     // way cachedInputTokens is a subset of inputTokens, never added on top.
@@ -801,6 +829,7 @@ export function mapOtlpToInternalModels(
         outputTokens,
         totalTokens,
         cachedInputTokens,
+        cachedWriteTokens,
         reasoningTokens,
       } = getConventionTokens(span.attributes);
       const finishReason = getConventionFinishReason(span.attributes);
@@ -911,6 +940,7 @@ export function mapOtlpToInternalModels(
         outputTokens,
         totalTokens,
         cachedInputTokens,
+        cachedWriteTokens,
         reasoningTokens,
         finishReason,
         requestBytes,

@@ -80,6 +80,7 @@ export interface TraceEntityEventLike extends TraceEventLike {
   inputTokens?: unknown;
   outputTokens?: unknown;
   cachedInputTokens?: unknown;
+  cachedWriteTokens?: unknown;
   metadata?: Record<string, unknown>;
 }
 
@@ -356,6 +357,7 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
         inputTokens: num(event.inputTokens),
         outputTokens: num(event.outputTokens),
         cachedInputTokens: num(event.cachedInputTokens),
+        cachedWriteTokens: num(event.cachedWriteTokens),
       };
       const priced = pricer?.price(modelName, tokens);
       const failed = isErrorTraceEvent(event);
@@ -527,6 +529,7 @@ async function priceSessionEvents(
         inputTokens: num(event.inputTokens),
         outputTokens: num(event.outputTokens),
         cachedInputTokens: num(event.cachedInputTokens),
+        cachedWriteTokens: num(event.cachedWriteTokens),
       }).costUsd;
     }
     return cost;

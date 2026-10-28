@@ -14,7 +14,7 @@ import type { LicenseType } from '@/lib/license/license-manager';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { GuardrailBlockError, handleChatCompletion, type ChatCompletionOutcome } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
-import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { isUsageBookedError, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkBudget, checkPerRequestLimits, checkRateLimit, settleUsageBudget } from '@/lib/quota/quotaGuard';
 
@@ -226,7 +226,8 @@ export async function modelChatFailure(
   const normalizedError = normalizeInferenceError(error);
 
   try {
-    const model = call.modelKey
+    // A limit hit the core billed already has its row (real tokens, status error).
+    const model = call.modelKey && !isUsageBookedError(error)
       ? await getModelByKey(auth.tenantDbName, call.modelKey, auth.projectId)
       : null;
     if (model) {

@@ -134,6 +134,7 @@ interface Bucket {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cachedWriteTokens: number;
 }
 
 async function main(): Promise<number> {
@@ -207,6 +208,7 @@ async function main(): Promise<number> {
               inputTokens: row.inputTokens ?? 0,
               outputTokens: row.outputTokens ?? 0,
               cachedInputTokens: row.cachedInputTokens ?? 0,
+              cachedWriteTokens: row.cachedWriteTokens ?? 0,
             }).totalCost;
             const delta = newCost - (row.costUsd ?? 0);
             if (Math.abs(delta) < 1e-9) continue;
@@ -272,6 +274,7 @@ async function main(): Promise<number> {
           inputTokens: number;
           outputTokens: number;
           cachedInputTokens: number;
+          cachedWriteTokens?: number;
         }) => {
           if (fromDay && params.day < fromDay) return;
           if (params.day > toDay) return;
@@ -293,6 +296,7 @@ async function main(): Promise<number> {
               inputTokens: 0,
               outputTokens: 0,
               cachedInputTokens: 0,
+              cachedWriteTokens: 0,
             };
             buckets.set(id, bucket);
           }
@@ -300,6 +304,7 @@ async function main(): Promise<number> {
           bucket.inputTokens += params.inputTokens;
           bucket.outputTokens += params.outputTokens;
           bucket.cachedInputTokens += params.cachedInputTokens;
+          bucket.cachedWriteTokens += params.cachedWriteTokens ?? 0;
         };
 
         // Slow path: multi-model sessions need per-event attribution.
@@ -319,6 +324,7 @@ async function main(): Promise<number> {
                 inputTokens: 1,
                 outputTokens: 1,
                 cachedInputTokens: 1,
+                cachedWriteTokens: 1,
                 timestamp: 1,
                 metadata: 1,
               },
@@ -342,6 +348,8 @@ async function main(): Promise<number> {
               outputTokens: typeof event.outputTokens === 'number' ? event.outputTokens : 0,
               cachedInputTokens:
                 typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0,
+              cachedWriteTokens:
+                typeof event.cachedWriteTokens === 'number' ? event.cachedWriteTokens : 0,
             });
           }
         };
@@ -378,9 +386,9 @@ async function main(): Promise<number> {
               (name) => typeof name === 'string' && name.length > 0,
             );
             const totalTokens =
+              // inputTokens already includes the cached slice; never add it on top.
               (session.totalInputTokens ?? 0)
-              + (session.totalOutputTokens ?? 0)
-              + (session.totalCachedInputTokens ?? 0);
+              + (session.totalOutputTokens ?? 0);
             if (models.length === 1 && totalTokens > 0) {
               fastPathSessions += 1;
               addToBucket({
@@ -431,6 +439,7 @@ async function main(): Promise<number> {
                 inputTokens: bucket.inputTokens,
                 outputTokens: bucket.outputTokens,
                 cachedInputTokens: bucket.cachedInputTokens,
+                cachedWriteTokens: bucket.cachedWriteTokens,
               }).totalCost
             : 0;
           return {
@@ -448,7 +457,11 @@ async function main(): Promise<number> {
             inputTokens: bucket.inputTokens,
             outputTokens: bucket.outputTokens,
             cachedInputTokens: bucket.cachedInputTokens,
-            totalTokens: bucket.inputTokens + bucket.outputTokens + bucket.cachedInputTokens,
+            cachedWriteTokens: bucket.cachedWriteTokens,
+            // inputTokens already includes the cache read/write slices. NOTE: events
+            // do not store the provider's usage basis, so legacy rows ingested with a
+            // native exclusive input (anthropic/bedrock) are treated as inclusive here.
+            totalTokens: bucket.inputTokens + bucket.outputTokens,
             costUsd,
             units: { modelCalls: bucket.calls },
           };

@@ -115,6 +115,12 @@ describe('getDashboardServices with the engine\'s answer for the active project'
     expect(ids(getDashboardServices({ role: 'owner', isTenantAdmin: true, effectivePermissions: granted, isOnPrem: false }))).not.toContain(onPrem.id as string);
     expect(ids(getDashboardServices({ role: 'owner', isTenantAdmin: true, effectivePermissions: granted, isOnPrem: true }))).toContain(onPrem.id as string);
   });
+
+  it('hides cluster administration on SaaS, like LDAP', () => {
+    const owner = { role: 'owner' as const, isTenantAdmin: true, effectivePermissions: { cluster: 'admin' as const } };
+    expect(ids(getDashboardServices({ ...owner, isOnPrem: false }))).not.toContain('cluster');
+    expect(ids(getDashboardServices({ ...owner, isOnPrem: true }))).toContain('cluster');
+  });
 });
 
 describe('parseEffectivePermissions', () => {

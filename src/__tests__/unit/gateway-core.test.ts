@@ -214,6 +214,8 @@ describe('native events of a streamed call', () => {
     });
     expect(done.usage).toMatchObject({ inputTokens: 10, outputTokens: 6, totalTokens: 16, reasoningTokens: 2, toolCalls: 1 });
     expect(done.wireFinishReason).toBe('tool_calls');
+    // The provider reported usage, so nothing here is an estimate.
+    expect(done.usageEstimated).toBeUndefined();
     // The terminal step carries the finish reason and nothing else.
     const terminal = events.filter((e) => e.type === 'delta').at(-1) as Extract<ModelStreamEvent, { type: 'delta' }>;
     expect(terminal.finishReason).toBe('tool_calls');
@@ -314,7 +316,13 @@ describe('cancellation', () => {
     const controller = new AbortController();
     const onUsageSettled = vi.fn();
 
-    const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true, context: { signal: controller.signal, onUsageSettled } });
+    const outcome = await executeModelCall({
+      ...BASE,
+      request: ASK,
+      wire: { messages: [{ role: 'user', content: 'twelve chars' }] },
+      stream: true,
+      context: { signal: controller.signal, onUsageSettled },
+    });
     const seen: string[] = [];
     for await (const event of outcome.stream!) {
       seen.push(event.type);
@@ -325,8 +333,69 @@ describe('cancellation', () => {
     expect(seen).toEqual(['start', 'delta', 'cancelled']);
     expect(rows().at(-1)).toMatchObject({ status: 'cancelled', route: 'chat.completions' });
     expect(rows().at(-1).usage.outputTokens).toBe(Math.ceil('a partial answer'.length / 4));
-    expect(rows().at(-1).providerResponse).toMatchObject({ output_tokens_estimated: true });
+    // The prompt was billed too: the request we sent is estimated, not booked as free.
+    expect(rows().at(-1).usage.inputTokens).toBe(Math.ceil('twelve chars'.length / 4));
+    expect(rows().at(-1).providerResponse).toMatchObject({ output_tokens_estimated: true, usage_estimated: true });
     expect(onUsageSettled).toHaveBeenCalledTimes(1);
+    expect(onUsageSettled.mock.calls[0][1]).toMatchObject({ inputTokens: Math.ceil('twelve chars'.length / 4) });
+  });
+
+  it('estimates the output of a cancelled stream from its tool-call arguments and reasoning too', async () => {
+    stubModel(model());
+    stubUpstream((call) => {
+      const live = controlledStream(call.signal);
+      live.send(chunk.reasoning('some thinking'));
+      live.send(chunk.tool(0, { id: 'c1', name: 'lookup', arguments: '{"q":"abcdefgh"}' }));
+      return live.response;
+    });
+    const controller = new AbortController();
+
+    const outcome = await executeModelCall({
+      ...BASE,
+      request: ASK,
+      wire: { messages: [{ role: 'user', content: 'hello' }] },
+      stream: true,
+      context: { signal: controller.signal },
+    });
+    let deltas = 0;
+    for await (const event of outcome.stream!) {
+      if (event.type === 'delta' && ++deltas === 2) controller.abort();
+    }
+    await flush();
+
+    expect(rows().at(-1)).toMatchObject({ status: 'cancelled' });
+    expect(rows().at(-1).usage.outputTokens).toBe(Math.ceil(('some thinking' + '{"q":"abcdefgh"}').length / 4));
+  });
+
+  it('settles a stream whose upstream never sent usage on an estimate and flags it, without a usage frame', async () => {
+    stubModel(model());
+    stubUpstream(() => sse([chunk.text('Hello there'), chunk.finish('stop')]));
+    const onUsageSettled = vi.fn();
+
+    const outcome = await executeModelCall({
+      ...BASE,
+      request: ASK,
+      wire: { messages: [{ role: 'user', content: 'twelve chars' }], stream_options: { include_usage: true } },
+      stream: true,
+      context: { onUsageSettled },
+    });
+    const events = await collect(outcome.stream!);
+    await flush();
+
+    expect(events.some((e) => e.type === 'usage')).toBe(false);
+    const done = events.at(-1) as Extract<ModelStreamEvent, { type: 'done' }>;
+    expect(done.usageEstimated).toBe(true);
+    expect(done.usage).toMatchObject({
+      inputTokens: Math.ceil('twelve chars'.length / 4),
+      outputTokens: Math.ceil('Hello there'.length / 4),
+    });
+    expect(done.nativeUsage).toBeUndefined();
+    expect(rows().at(-1)).toMatchObject({
+      status: 'success',
+      providerResponse: expect.objectContaining({ usage_estimated: true }),
+    });
+    expect(onUsageSettled).toHaveBeenCalledTimes(1);
+    expect(onUsageSettled.mock.calls[0][1]).toEqual(done.usage);
   });
 
   it('is cancelled before the provider is touched when the signal is already aborted', async () => {

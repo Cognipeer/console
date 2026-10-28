@@ -389,15 +389,15 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                                             </FormField>
                                             {choice.authType === 'token' ? (
                                                 <FormField label="Token">
-                                                    <PasswordInput size="xs" value={choice.token ?? ''} onChange={(event) => set({ token: event.currentTarget.value })} />
+                                                    <PasswordInput size="xs" autoComplete="off" value={choice.token ?? ''} onChange={(event) => set({ token: event.currentTarget.value })} />
                                                 </FormField>
                                             ) : choice.authType === 'header' ? (
                                                 <>
                                                     <FormField label="Header">
-                                                        <TextInput size="xs" placeholder="X-API-Key" value={choice.headerName ?? ''} onChange={(event) => set({ headerName: event.currentTarget.value })} />
+                                                        <TextInput size="xs" autoComplete="off" placeholder="X-API-Key" value={choice.headerName ?? ''} onChange={(event) => set({ headerName: event.currentTarget.value })} />
                                                     </FormField>
                                                     <FormField label="Value">
-                                                        <PasswordInput size="xs" value={choice.headerValue ?? ''} onChange={(event) => set({ headerValue: event.currentTarget.value })} />
+                                                        <PasswordInput size="xs" autoComplete="off" value={choice.headerValue ?? ''} onChange={(event) => set({ headerValue: event.currentTarget.value })} />
                                                     </FormField>
                                                 </>
                                             ) : (
@@ -505,24 +505,24 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                                         <FormRow cols={2}>
                                             {row.auth.type === 'token' ? (
                                                 <FormField label="Bearer token">
-                                                    <PasswordInput size="xs" value={choice.token ?? ''} onChange={(event) => set({ token: event.currentTarget.value })} />
+                                                    <PasswordInput size="xs" autoComplete="off" value={choice.token ?? ''} onChange={(event) => set({ token: event.currentTarget.value })} />
                                                 </FormField>
                                             ) : row.auth.type === 'header' ? (
                                                 <>
                                                     <FormField label="Header">
-                                                        <TextInput size="xs" value={choice.headerName ?? ''} onChange={(event) => set({ headerName: event.currentTarget.value })} />
+                                                        <TextInput size="xs" autoComplete="off" value={choice.headerName ?? ''} onChange={(event) => set({ headerName: event.currentTarget.value })} />
                                                     </FormField>
                                                     <FormField label="Value">
-                                                        <PasswordInput size="xs" value={choice.headerValue ?? ''} onChange={(event) => set({ headerValue: event.currentTarget.value })} />
+                                                        <PasswordInput size="xs" autoComplete="off" value={choice.headerValue ?? ''} onChange={(event) => set({ headerValue: event.currentTarget.value })} />
                                                     </FormField>
                                                 </>
                                             ) : (
                                                 <>
                                                     <FormField label="Username">
-                                                        <TextInput size="xs" value={choice.username ?? ''} onChange={(event) => set({ username: event.currentTarget.value })} />
+                                                        <TextInput size="xs" autoComplete="off" value={choice.username ?? ''} onChange={(event) => set({ username: event.currentTarget.value })} />
                                                     </FormField>
                                                     <FormField label="Password">
-                                                        <PasswordInput size="xs" value={choice.password ?? ''} onChange={(event) => set({ password: event.currentTarget.value })} />
+                                                        <PasswordInput size="xs" autoComplete="off" value={choice.password ?? ''} onChange={(event) => set({ password: event.currentTarget.value })} />
                                                     </FormField>
                                                 </>
                                             )}

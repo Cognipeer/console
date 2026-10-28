@@ -34,6 +34,15 @@ describe('runEvaluation', () => {
     expect(result.items).toHaveLength(4);
   });
 
+  it('totals tokens as input + output: cached tokens are a subset, never added', async () => {
+    const invokeTarget: TargetInvoker = async () => ({
+      text: 'ok',
+      usage: { inputTokens: 100, outputTokens: 20, cachedInputTokens: 60, costUsd: 0.01 },
+    });
+    const result = await runEvaluation({ items: items(2), scorers: ASSERTION, invokeTarget });
+    expect(result.aggregate.totalTokens).toBe(240);
+  });
+
   it('records target failures without aborting the run', async () => {
     const invokeTarget: TargetInvoker = async (item) => {
       if (item.id === 'i2') throw new Error('boom');

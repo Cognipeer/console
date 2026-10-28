@@ -27471,6 +27471,22 @@ components:
         cachedInputTokens:
           type: integer
           nullable: true
+          description: Cache-read tokens. A subset of inputTokens.
+        cacheWriteTokens:
+          type: integer
+          nullable: true
+          description: Cache-write (cache-creation) tokens. A subset of inputTokens, priced at the cache-write rate; stored by the console as cachedWriteTokens.
+        usageBasis:
+          type: object
+          nullable: true
+          description: Declares where this event's native token counts differ from the inclusive basis (inputTokens = all prompt tokens, outputTokens = all generated tokens). The console folds the flagged parts in at ingest. Omit when the counts are already inclusive.
+          properties:
+            inputExcludesCache:
+              type: boolean
+              description: inputTokens excludes cache-read and cache-write tokens (Anthropic, Bedrock); they are added to it on ingest.
+            outputExcludesReasoning:
+              type: boolean
+              description: outputTokens excludes reasoningTokens (Vertex); they are added to it on ingest.
         totalTokens:
           type: integer
           nullable: true

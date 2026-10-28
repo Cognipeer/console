@@ -1420,6 +1420,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       zeroOnly?: boolean;
       /** Scope to one project; module keys are unique only within a project. */
       projectId?: string;
+      /** Only the queries this person made (the log a non-administrator may read). */
+      userId?: string;
     },
   ): Promise<IRagQueryLog[]>;
   countRagQueryLogs(

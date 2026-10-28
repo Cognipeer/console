@@ -1269,26 +1269,26 @@ export default function ToolDetailPage() {
 
           {form.values.authType === 'token' && (
             <FormField label="Bearer Token">
-              <PasswordInput {...form.getInputProps('authToken')} />
+              <PasswordInput autoComplete="off" {...form.getInputProps('authToken')} />
             </FormField>
           )}
           {form.values.authType === 'header' && (
             <>
               <FormField label="Header Name">
-                <TextInput {...form.getInputProps('authHeaderName')} />
+                <TextInput autoComplete="off" {...form.getInputProps('authHeaderName')} />
               </FormField>
               <FormField label="Header Value">
-                <PasswordInput {...form.getInputProps('authHeaderValue')} />
+                <PasswordInput autoComplete="off" {...form.getInputProps('authHeaderValue')} />
               </FormField>
             </>
           )}
           {form.values.authType === 'basic' && (
             <>
               <FormField label="Username">
-                <TextInput {...form.getInputProps('authUsername')} />
+                <TextInput autoComplete="off" {...form.getInputProps('authUsername')} />
               </FormField>
               <FormField label="Password">
-                <PasswordInput {...form.getInputProps('authPassword')} />
+                <PasswordInput autoComplete="off" {...form.getInputProps('authPassword')} />
               </FormField>
             </>
           )}

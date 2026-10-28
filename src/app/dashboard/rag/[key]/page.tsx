@@ -350,10 +350,14 @@ export default function RagModuleDetailPage() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageTotals, setUsageTotals] = useState<UsageTotals | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
+  /** 'own' when the caller does not administer the module: the logs are only their queries (the counters are not). */
+  const [queryLogScope, setQueryLogScope] = useState<'all' | 'own'>('all');
 
   /* insight panels */
   const [scoreBuckets, setScoreBuckets] = useState<ScoreBucket[]>([]);
   const [zeroQueries, setZeroQueries] = useState<RagQueryLogView[]>([]);
+  /** The zero-result feed's own answer: it is fetched apart from the history and may come back on its own. */
+  const [zeroQueriesScope, setZeroQueriesScope] = useState<'all' | 'own'>('all');
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsError, setInsightsError] = useState<string | null>(null);
 
@@ -474,6 +478,7 @@ export default function RagModuleDetailPage() {
       }
       const data = await res.json();
       setQueryLogs(data.logs ?? []);
+      setQueryLogScope(data.scope === 'own' ? 'own' : 'all');
       setUsageTotals(
         typeof data.total === 'number' && typeof data.avgLatencyMs === 'number'
           ? {
@@ -509,6 +514,7 @@ export default function RagModuleDetailPage() {
       const [distributionData, zeroData] = await Promise.all([distributionRes.json(), zeroRes.json()]);
       setScoreBuckets(distributionData.buckets ?? []);
       setZeroQueries(zeroData.logs ?? []);
+      setZeroQueriesScope(zeroData.scope === 'own' ? 'own' : 'all');
       setInsightsError(null);
     } catch (e) {
       console.error('[rag insights]', e);
@@ -1226,6 +1232,11 @@ export default function RagModuleDetailPage() {
                     Every one of these is a question this module has no answer for — either the content is
                     missing or the minimum score is set too high.
                   </Text>
+                  {zeroQueriesScope === 'own' && (
+                    <Text size="sm" c="dimmed">
+                      Only your own queries are listed. Knowledge base administrators see everyone&apos;s.
+                    </Text>
+                  )}
                 </div>
                 <Button
                   variant="light"
@@ -1246,7 +1257,11 @@ export default function RagModuleDetailPage() {
                   rowKey={(log) => log._id}
                   columns={zeroQueryColumns}
                   loading={insightsLoading}
-                  empty={{ title: 'No zero-result queries logged. Every query found something.' }}
+                  empty={{
+                    title: zeroQueriesScope === 'own'
+                      ? 'None of your queries came back empty.'
+                      : 'No zero-result queries logged. Every query found something.',
+                  }}
                 />
               )}
             </Paper>
@@ -1807,7 +1822,11 @@ export default function RagModuleDetailPage() {
               <Group justify="space-between" mb="md">
                 <div>
                   <Text fw={600} size="lg">Query History</Text>
-                  <Text size="sm" c="dimmed">Recent queries against this module (last 50)</Text>
+                  <Text size="sm" c="dimmed">
+                    {queryLogScope === 'own'
+                      ? 'Your recent queries against this module (last 50). Knowledge base administrators see everyone\'s.'
+                      : 'Recent queries against this module (last 50)'}
+                  </Text>
                 </div>
                 <Button
                   variant="light"
@@ -1830,7 +1849,9 @@ export default function RagModuleDetailPage() {
                   loading={usageLoading}
                   empty={{
                     icon: <IconActivity size={32} />,
-                    title: 'No queries logged yet. Use the Playground or SDK to run queries.',
+                    title: queryLogScope === 'own'
+                      ? 'You have not queried this module yet.'
+                      : 'No queries logged yet. Use the Playground or SDK to run queries.',
                   }}
                 />
               )}

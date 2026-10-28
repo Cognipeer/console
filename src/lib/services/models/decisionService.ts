@@ -32,7 +32,7 @@ import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
 import { enforceModelGuardrailChain } from './inferenceService';
-import { calculateCost, logModelUsage, type UsageCostResult } from './usageLogger';
+import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
 
 const logger = createLogger('decision');
 
@@ -40,7 +40,8 @@ export interface DecisionOutcome {
   result: DecisionResult;
   model: IModel;
   cost: UsageCostResult;
-  usage: { inputTokens: number; outputTokens: number };
+  /** Canonical gateway usage; cache / reasoning counts are subsets, totalTokens = input + output. */
+  usage: TokenUsage & { inputTokens: number; outputTokens: number };
   latencyMs: number;
   requestId: string;
 }
@@ -252,9 +253,15 @@ export async function handleDecisionRequest(params: {
   );
 
   const latencyMs = Date.now() - start;
-  const usage = {
-    inputTokens: result.usage?.inputTokens ?? 0,
-    outputTokens: result.usage?.outputTokens ?? 0,
+  const inputTokens = result.usage?.inputTokens ?? 0;
+  const outputTokens = result.usage?.outputTokens ?? 0;
+  const usage: DecisionOutcome['usage'] = {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    ...(result.usage?.cachedInputTokens ? { cachedInputTokens: result.usage.cachedInputTokens } : {}),
+    ...(result.usage?.cachedWriteTokens ? { cachedWriteTokens: result.usage.cachedWriteTokens } : {}),
+    ...(result.usage?.reasoningTokens ? { reasoningTokens: result.usage.reasoningTokens } : {}),
   };
   const cost = calculateCost(model.pricing, usage);
 
@@ -267,10 +274,7 @@ export async function handleDecisionRequest(params: {
       providerRequest: loggableRequest(request),
       providerResponse: { answers: result.answers, backend: result.backend, ...(result.upstream ? { upstream: result.upstream } : {}) },
       latencyMs,
-      usage: {
-        ...usage,
-        totalTokens: usage.inputTokens + usage.outputTokens,
-      },
+      usage,
     }),
   );
 

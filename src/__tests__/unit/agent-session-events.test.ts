@@ -383,6 +383,25 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
   });
 });
 
+describe('session turn recorder (cache split)', () => {
+  it('reports the cache write of the ledger, and no key when the turn wrote none', async () => {
+    const base = { calls: 1, errorCalls: 0, inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, reasoningTokens: 0, totalTokens: 555, costUsd: 0.01 };
+    let ledger = { ...base, cachedWriteTokens: 30 };
+    const db = Object.assign(fakeDb(), { summarizeModelUsageForTurn: vi.fn(async () => ledger) });
+    const { bus } = recordingBus();
+    const first = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await first.finish({ stopReason: 'cancelled', content: 'partial' });
+    expect(db.rows.find((r) => r.type === 'session.status_idle')?.data).toMatchObject({ usage: { cachedInputTokens: 500, cachedWriteTokens: 30, source: 'ledger' } });
+
+    db.rows.length = 0;
+    ledger = { ...base, cachedWriteTokens: 0 };
+    const second = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await second.finish({ stopReason: 'cancelled', content: 'partial' });
+    const usage = (db.rows.find((r) => r.type === 'session.status_idle')?.data as { usage: Record<string, unknown> }).usage;
+    expect(usage).not.toHaveProperty('cachedWriteTokens');
+  });
+});
+
 describe('session turn recorder', () => {
   it('a turn that throws, or ends without a usage of its own, reports what its ledger says it spent', async () => {
     const ledger = { calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 0, reasoningTokens: 0, totalTokens: 170, costUsd: 0.3 };

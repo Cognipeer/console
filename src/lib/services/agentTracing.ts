@@ -71,6 +71,8 @@ export interface TraceUsageEventLike {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  /** Cache-WRITE subset of `inputTokens`. */
+  cachedWriteTokens?: number;
   /** Subset of `outputTokens` (e.g. OpenAI `completion_tokens_details.reasoning_tokens`);
    *  never added into `totalTokens` or any cost arithmetic. */
   reasoningTokens?: number;
@@ -84,6 +86,7 @@ interface ModelTokenTotals {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cachedWriteTokens: number;
   reasoningTokens: number;
   calls: number;
   /** Sum of durationMs over the calls that reported one. */
@@ -119,13 +122,16 @@ function sumTokensByModel(events: TraceUsageEventLike[]): Map<string, ModelToken
     const outputTokens = typeof event.outputTokens === 'number' ? event.outputTokens : 0;
     const cachedInputTokens =
       typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0;
+    const cachedWriteTokens =
+      typeof event.cachedWriteTokens === 'number' ? event.cachedWriteTokens : 0;
     const reasoningTokens =
       typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
-    if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0) continue;
+    if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0 && cachedWriteTokens === 0) continue;
     const totals = byModel.get(model) ?? {
       inputTokens: 0,
       outputTokens: 0,
       cachedInputTokens: 0,
+      cachedWriteTokens: 0,
       reasoningTokens: 0,
       calls: 0,
       durationMsSum: 0,
@@ -134,6 +140,7 @@ function sumTokensByModel(events: TraceUsageEventLike[]): Map<string, ModelToken
     totals.inputTokens += inputTokens;
     totals.outputTokens += outputTokens;
     totals.cachedInputTokens += cachedInputTokens;
+    totals.cachedWriteTokens += cachedWriteTokens;
     totals.reasoningTokens += reasoningTokens;
     totals.calls += 1;
     if (typeof event.durationMs === 'number' && event.durationMs > 0) {
@@ -149,6 +156,8 @@ export interface TraceModelTokens {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  /** Cache-WRITE subset of `inputTokens`; priced at the cache-write rate. */
+  cachedWriteTokens?: number;
 }
 
 /**
@@ -252,6 +261,10 @@ export async function recordTraceModelUsage(params: {
         0,
         totals.cachedInputTokens - (prior?.cachedInputTokens ?? 0),
       );
+      const cachedWriteTokens = Math.max(
+        0,
+        totals.cachedWriteTokens - (prior?.cachedWriteTokens ?? 0),
+      );
       const reasoningTokens = Math.max(
         0,
         totals.reasoningTokens - (prior?.reasoningTokens ?? 0),
@@ -259,9 +272,14 @@ export async function recordTraceModelUsage(params: {
       const calls = Math.max(0, totals.calls - (prior?.calls ?? 0));
       const durationMsSum = Math.max(0, totals.durationMsSum - (prior?.durationMsSum ?? 0));
       const durationSamples = Math.max(0, totals.durationSamples - (prior?.durationSamples ?? 0));
-      if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0) continue;
+      if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0 && cachedWriteTokens === 0) continue;
 
-      const { refKey, costUsd } = pricer.price(modelName, { inputTokens, outputTokens, cachedInputTokens });
+      const { refKey, costUsd } = pricer.price(modelName, {
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        cachedWriteTokens,
+      });
 
       recordUsageEvent({
         tenantDbName: params.tenantDbName,
@@ -276,10 +294,13 @@ export async function recordTraceModelUsage(params: {
         inputTokens,
         outputTokens,
         cachedInputTokens,
+        cachedWriteTokens,
         // reasoningTokens is a SUBSET of outputTokens — never add it into
         // totalTokens or cost arithmetic (mirrors cachedInputTokens handling).
         reasoningTokens,
-        totalTokens: inputTokens + outputTokens + cachedInputTokens,
+        // Events arrive inclusive (normalized at ingest): cached read/write are
+        // subsets of inputTokens, never added on top.
+        totalTokens: inputTokens + outputTokens,
         costUsd,
         // Latency: aggregate model-call durations, weighted by sample count —
         // the on-prem optimization objective needs latency on tracing rows.

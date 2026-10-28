@@ -1,11 +1,12 @@
 /**
  * Token usage at the gateway boundary: one rule for every provider family
- * (prompt includes the cached part, completion includes the reasoning, both are
- * subsets that never add on top), and the OpenAI `usage` object that rule feeds.
+ * (prompt includes the cache-read and cache-write parts, completion includes the
+ * reasoning, all subsets that never add on top), and the OpenAI `usage` object that
+ * rule feeds.
  */
 
 import { describe, expect, it } from 'vitest';
-import { estimateTokensFromText, fromWireUsage, toGatewayUsage, toWireUsage } from '@/lib/services/models/gatewayUsage';
+import { estimateInputTokens, estimateTokensFromText, fromWireUsage, toGatewayUsage, toWireUsage } from '@/lib/services/models/gatewayUsage';
 import { wireFinishReason } from '@/lib/services/models/gatewayStream';
 import { calculateCost } from '@/lib/services/models/usageLogger';
 
@@ -26,11 +27,16 @@ describe('toGatewayUsage', () => {
     expect(toGatewayUsage('openai', native({ inputTokens: 5, outputTokens: 7 }))).toMatchObject({ totalTokens: 12 });
   });
 
-  it('Anthropic / Bedrock: the uncached prompt is topped up with the cache reads and writes', () => {
+  it('Anthropic / Bedrock: the uncached prompt is topped up with the cache reads and writes, which stay subsets', () => {
     for (const driver of ['anthropic', 'bedrock']) {
       expect(toGatewayUsage(driver, native({ inputTokens: 20, outputTokens: 5, totalTokens: 25, cachedInputTokens: 500, cachedWriteTokens: 30 })))
-        .toEqual({ inputTokens: 550, outputTokens: 5, totalTokens: 555, cachedInputTokens: 500 });
+        .toEqual({ inputTokens: 550, outputTokens: 5, totalTokens: 555, cachedInputTokens: 500, cachedWriteTokens: 30 });
     }
+  });
+
+  it('OpenAI family: a cache write a proxy reports (OpenRouter, LiteLLM) passes through as a subset of the prompt', () => {
+    expect(toGatewayUsage('openai-compatible', native({ inputTokens: 1000, outputTokens: 10, totalTokens: 1010, cachedInputTokens: 200, cachedWriteTokens: 700 })))
+      .toEqual({ inputTokens: 1000, outputTokens: 10, totalTokens: 1010, cachedInputTokens: 200, cachedWriteTokens: 700 });
   });
 
   it('Vertex Gemini: thinking tokens are billed as output, so they are in the completion and stay the reasoning subset', () => {
@@ -41,6 +47,7 @@ describe('toGatewayUsage', () => {
   it('omits the cached and reasoning keys when they are zero, and survives a missing usage', () => {
     const usage = toGatewayUsage('openai', native({ inputTokens: 1, outputTokens: 1, totalTokens: 2 }));
     expect(usage).not.toHaveProperty('cachedInputTokens');
+    expect(usage).not.toHaveProperty('cachedWriteTokens');
     expect(usage).not.toHaveProperty('reasoningTokens');
     expect(toGatewayUsage('openai', undefined)).toEqual({});
   });
@@ -60,6 +67,15 @@ describe('toGatewayUsage', () => {
     expect(cost.inputCost).toBeCloseTo(100 * 3 / 1e6, 10);
     expect(cost.cachedCost).toBeCloseTo(10_000 * 0.3 / 1e6, 10);
   });
+
+  it('an Anthropic cache write is billed once, at the cache-write rate', () => {
+    const pricing = { inputTokenPer1M: 2, outputTokenPer1M: 10, cachedTokenPer1M: 0.1, cacheWriteTokenPer1M: 2.5 };
+    const cost = calculateCost(pricing, toGatewayUsage('anthropic', native({ inputTokens: 1000, outputTokens: 100, cachedInputTokens: 400_000, cachedWriteTokens: 60_000 })));
+    expect(cost.inputCost).toBeCloseTo(1000 * 2 / 1e6, 12);
+    expect(cost.cachedCost).toBeCloseTo(400_000 * 0.1 / 1e6, 12);
+    expect(cost.cacheWriteCost).toBeCloseTo(60_000 * 2.5 / 1e6, 12);
+    expect(cost.totalCost).toBeCloseTo((1000 * 2 + 400_000 * 0.1 + 60_000 * 2.5 + 100 * 10) / 1e6, 12);
+  });
 });
 
 describe('the OpenAI usage object', () => {
@@ -78,6 +94,33 @@ describe('the OpenAI usage object', () => {
     const usage = { inputTokens: 100, outputTokens: 40, totalTokens: 140, cachedInputTokens: 60, reasoningTokens: 12 };
     expect(fromWireUsage(toWireUsage(usage))).toEqual(usage);
     expect(fromWireUsage(undefined)).toEqual({});
+  });
+
+  it('carries a cache write in prompt_tokens_details.cache_write_tokens, round trip included', () => {
+    const usage = { inputTokens: 1000, outputTokens: 10, totalTokens: 1010, cachedInputTokens: 200, cachedWriteTokens: 700 };
+    expect(toWireUsage(usage)).toMatchObject({
+      prompt_tokens: 1000,
+      cached_tokens: 200,
+      prompt_tokens_details: { cached_tokens: 200, cache_write_tokens: 700 },
+    });
+    expect(toWireUsage({ inputTokens: 5, outputTokens: 1, cachedWriteTokens: 3 })).toMatchObject({
+      prompt_tokens_details: { cache_write_tokens: 3 },
+    });
+    expect(fromWireUsage(toWireUsage(usage))).toEqual(usage);
+  });
+
+  it('estimates a prompt at chars/4 over its text, tool-call arguments and tool definitions', () => {
+    const tools = [{ type: 'function', function: { name: 'f', parameters: {} } }];
+    const messages = [
+      { role: 'system', content: 'abcd' },
+      { role: 'user', content: [{ type: 'text', text: 'efgh' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'ab', arguments: '{"x":1}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: 'ijkl' },
+    ];
+    const chars = 4 + 4 + 2 + '{"x":1}'.length + 4 + JSON.stringify(tools).length;
+    expect(estimateInputTokens(messages, tools)).toBe(Math.ceil(chars / 4));
+    expect(estimateInputTokens(undefined)).toBe(0);
+    expect(estimateInputTokens([])).toBe(0);
   });
 
   it('estimates output at chars/4, the quota pre-flight rule', () => {

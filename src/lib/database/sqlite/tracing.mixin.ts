@@ -820,11 +820,11 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         INSERT INTO ${TABLES.agentTracingEvents}
         (id, sessionId, traceId, spanId, parentSpanId, tenantId, projectId, eventId, type, label, sequence, timestamp, status,
          actor, metadata, sections, modelNames, model, error, durationMs, actorName, actorRole,
-         toolName, toolExecutionId, inputTokens, outputTokens, totalTokens, cachedInputTokens, finishReason, reasoningTokens,
+         toolName, toolExecutionId, inputTokens, outputTokens, totalTokens, cachedInputTokens, cachedWriteTokens, finishReason, reasoningTokens,
          bytesIn, bytesOut, requestBytes, responseBytes, createdAt)
         VALUES (@id, @sessionId, @traceId, @spanId, @parentSpanId, @tenantId, @projectId, @eventId, @type, @label, @sequence, @timestamp, @status,
          @actor, @metadata, @sections, @modelNames, @model, @error, @durationMs, @actorName, @actorRole,
-         @toolName, @toolExecutionId, @inputTokens, @outputTokens, @totalTokens, @cachedInputTokens, @finishReason, @reasoningTokens,
+         @toolName, @toolExecutionId, @inputTokens, @outputTokens, @totalTokens, @cachedInputTokens, @cachedWriteTokens, @finishReason, @reasoningTokens,
          @bytesIn, @bytesOut, @requestBytes, @responseBytes, @createdAt)
       `).run({
         id,
@@ -855,6 +855,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         outputTokens: event.outputTokens ?? 0,
         totalTokens: event.totalTokens ?? 0,
         cachedInputTokens: event.cachedInputTokens ?? 0,
+        cachedWriteTokens: event.cachedWriteTokens ?? 0,
         finishReason: event.finishReason ?? null,
         reasoningTokens: event.reasoningTokens ?? null,
         bytesIn: event.bytesIn ?? 0,
@@ -1054,6 +1055,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         outputTokens: (r.outputTokens as number) ?? 0,
         totalTokens: (r.totalTokens as number) ?? 0,
         cachedInputTokens: (r.cachedInputTokens as number) ?? 0,
+        cachedWriteTokens: r.cachedWriteTokens == null ? undefined : Number(r.cachedWriteTokens),
         finishReason: (r.finishReason as string | null) ?? undefined,
         reasoningTokens: r.reasoningTokens == null ? undefined : Number(r.reasoningTokens),
         bytesIn: (r.bytesIn as number) ?? 0,

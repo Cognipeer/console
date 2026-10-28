@@ -629,6 +629,43 @@ describe('playground usage', () => {
             .toEqual({ inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, totalTokens: 10 });
     });
 
+    it('takes the cache write and the reasoning count from the per-request entries, which the totals have no slot for', () => {
+        // agent-sdk 0.20 keeps a cache write only in the message usage (`raw`); reasoning sits in
+        // completion_tokens_details. Both are subsets of the (inclusive) input / output totals.
+        const normalized = normalizePlaygroundUsage({
+            perRequest: [
+                { id: 'r1', modelName: 'claude', usage: { prompt_tokens: 550, completion_tokens: 40, raw: { prompt_tokens_details: { cached_tokens: 500, cache_write_tokens: 30 } }, completion_tokens_details: { reasoning_tokens: 12 } } },
+                { id: 'r2', modelName: 'claude', usage: { prompt_tokens: 600, completion_tokens: 10, raw: { cache_write_tokens: 20 } } },
+                { id: 'r3', modelName: 'claude', usage: {} },
+            ],
+            totals: { claude: { input: 1150, output: 50, total: 1200, cachedInput: 900 } },
+        });
+        expect(normalized?.usage).toEqual({
+            inputTokens: 1150,
+            outputTokens: 50,
+            cachedInputTokens: 900,
+            cachedWriteTokens: 50,
+            reasoningTokens: 12,
+            totalTokens: 1200,
+        });
+    });
+
+    it('also reads a sub-agent usage ({ perRequest, totals }) the same way', () => {
+        const normalized = normalizePlaygroundUsage({
+            perRequest: [{ usage: { raw: { prompt_tokens_details: { cache_write_tokens: 8 } } } }],
+            totals: { child: { input: 100, output: 10, total: 110, cachedInput: 0 } },
+        });
+        expect(normalized?.usage).toMatchObject({ inputTokens: 100, cachedWriteTokens: 8 });
+        expect(normalized?.usage).not.toHaveProperty('reasoningTokens');
+    });
+
+    it('reads the cache write and reasoning of a flat usage object, and omits them when 0', () => {
+        expect(normalizePlaygroundUsage({ input_tokens: 10, output_tokens: 4, cache_creation_input_tokens: 3, reasoning_tokens: 2 })?.usage)
+            .toEqual({ inputTokens: 10, outputTokens: 4, cachedInputTokens: undefined, cachedWriteTokens: 3, reasoningTokens: 2, totalTokens: 14 });
+        expect(normalizePlaygroundUsage({ input_tokens: 10, output_tokens: 4, cache_creation_input_tokens: 0 })?.usage)
+            .not.toHaveProperty('cachedWriteTokens');
+    });
+
     it('reports nothing rather than zeros when a run recorded no usage', () => {
         expect(normalizePlaygroundUsage(undefined)).toBeUndefined();
         expect(normalizePlaygroundUsage({})).toBeUndefined();

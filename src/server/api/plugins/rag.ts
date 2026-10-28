@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IRagChunkConfig, IRagDocument, IRagModule, IUser, RagDocumentStatus } from '@/lib/database';
+import type { IRagChunkConfig, IRagDocument, IRagModule, RagDocumentStatus } from '@/lib/database';
 import {
   aggregateRagQueryScoreDistribution,
   countRagQueryLogs,
@@ -38,6 +38,7 @@ import {
   requireProjectContextForRequest,
   safeReadJsonBody,
   sendProjectContextError,
+  serviceActionAllowedForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
 import { VectorFilterError } from '@/lib/providers';
@@ -259,28 +260,20 @@ export function sendInvalidRequest(reply: FastifyReply, error: unknown) {
  * projectId — legacy rows predating project stamping, plus everything the
  * client API ingests — stay reachable.
  *
- * `allowTenantWide` is the reach resolveProjectContext already grants an
- * owner/admin on the dashboard. An API token never gets it: its project is
- * fixed by the token, not by whoever is holding it.
+ * Owners and admins too: the active project decides, as it does for an API
+ * token, whose project is fixed by the token.
  */
 export async function documentInProjectScope(
   tenantDbName: string,
   documentId: string,
   ragModuleKey: string,
   projectId: string,
-  options?: { allowTenantWide?: boolean },
 ): Promise<IRagDocument | null> {
   const document = await getRagDocument(tenantDbName, documentId);
   if (!document) return null;
   if (document.ragModuleKey !== ragModuleKey) return null;
-  if (options?.allowTenantWide) return document;
   if (!document.projectId) return document;
   return String(document.projectId) === String(projectId) ? document : null;
-}
-
-/** The two roles resolveProjectContext lets act across every project. */
-function hasTenantWideReach(user: Pick<IUser, 'role'>): boolean {
-  return user.role === 'owner' || user.role === 'admin';
 }
 
 /**
@@ -295,6 +288,21 @@ function hasTenantWideReach(user: Pick<IUser, 'role'>): boolean {
 export function withoutSourceText(document: IRagDocument): Omit<IRagDocument, 'sourceText'> {
   const { sourceText: _sourceText, ...rest } = document;
   return rest;
+}
+
+/**
+ * Whose queries a module's query log shows this request. The log keeps what
+ * people asked word for word, so all of it is for those who administer the
+ * module (`rag` admin in its project); everyone else reads only the queries
+ * they made, while the counters beside them still count every query.
+ */
+async function queryLogScope(
+  request: FastifyRequest,
+  ragModule: Pick<IRagModule, 'projectId'>,
+  userId: string,
+): Promise<{ scope: 'all' | 'own'; userId?: string }> {
+  const everyone = await serviceActionAllowedForRequest(request, 'rag', 'admin', { projectId: ragModule.projectId ?? null });
+  return everyone ? { scope: 'all' } : { scope: 'own', userId };
 }
 
 export const ragApiPlugin: FastifyPluginAsync = async (app) => {
@@ -585,13 +593,12 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/rag/modules/:key/documents/:documentId', withApiRequestContext(async (request, reply) => {
     try {
       const { documentId, key } = request.params as { documentId: string; key: string };
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const document = await documentInProjectScope(
         session.tenantDbName,
         documentId,
         key,
         projectId,
-        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!document) {
@@ -611,13 +618,12 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/rag/modules/:key/documents/:documentId/content', withApiRequestContext(async (request, reply) => {
     try {
       const { documentId, key } = request.params as { documentId: string; key: string };
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const document = await documentInProjectScope(
         session.tenantDbName,
         documentId,
         key,
         projectId,
-        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!document) {
@@ -642,13 +648,12 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/rag/modules/:key/documents/:documentId/lines', withApiRequestContext(async (request, reply) => {
     try {
       const { documentId, key } = request.params as { documentId: string; key: string };
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const document = await documentInProjectScope(
         session.tenantDbName,
         documentId,
         key,
         projectId,
-        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!document) {
@@ -676,14 +681,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/rag/modules/:key/documents/:documentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { documentId, key } = request.params as { documentId: string; key: string };
       const document = await documentInProjectScope(
         session.tenantDbName,
         documentId,
         key,
         projectId,
-        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!document) {
@@ -707,14 +711,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/rag/modules/:key/documents/:documentId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { documentId, key } = request.params as { documentId: string; key: string };
       const existing = await documentInProjectScope(
         session.tenantDbName,
         documentId,
         key,
         projectId,
-        { allowTenantWide: hasTenantWideReach(user) },
       );
 
       if (!existing) {
@@ -844,6 +847,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { from?: string; limit?: string; to?: string };
       const from = query.from ? new Date(query.from) : undefined;
       const to = query.to ? new Date(query.to) : undefined;
+      const reader = await queryLogScope(request, ragModule, session.userId);
 
       // `logs` is a page (default 50, newest-first) for the History table;
       // the counters are true aggregates over the full matched set — the
@@ -858,6 +862,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
           limit: query.limit ? Number(query.limit) : 50,
           projectId,
           to,
+          ...(reader.userId !== undefined ? { userId: reader.userId } : {}),
         }),
         countRagQueryLogs(session.tenantDbName, key, { from, projectId, to }),
       ]);
@@ -866,6 +871,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         avgLatencyMs: totals.avgLatencyMs,
         logs,
         minScoreFilteredCount: totals.minScoreFilteredCount,
+        scope: reader.scope,
         total: totals.total,
         zeroMatchCount: totals.zeroMatchCount,
       });
@@ -903,6 +909,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       // Project-scoped for the same reason as /usage: this feed shows the
       // verbatim query text, and the key alone does not identify one module.
+      const reader = await queryLogScope(request, ragModule, session.userId);
       const logs = await listRagQueryLogs(session.tenantDbName, key, {
         from: query.from ? new Date(query.from) : undefined,
         limit: query.limit ? Number(query.limit) : 50,
@@ -910,9 +917,10 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         skip: query.skip ? Number(query.skip) : undefined,
         to: query.to ? new Date(query.to) : undefined,
         zeroOnly: query.zeroOnly === 'true',
+        ...(reader.userId !== undefined ? { userId: reader.userId } : {}),
       });
 
-      return reply.code(200).send({ logs });
+      return reply.code(200).send({ logs, scope: reader.scope });
     } catch (error) {
       logger.error('List RAG query feed error', { error });
       return sendProjectContextError(reply, error)

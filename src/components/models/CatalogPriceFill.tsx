@@ -20,6 +20,8 @@ export interface CatalogPricingFill {
   inputTokenPer1M: number;
   outputTokenPer1M: number;
   cachedTokenPer1M: number;
+  /** 0 = the catalog has no cache-write price (leave the field blank). */
+  cacheWriteTokenPer1M: number;
 }
 
 interface CatalogPriceFillProps {
@@ -64,6 +66,7 @@ export default function CatalogPriceFill({ modelId, onApply, size = 'compact-xs'
           inputTokenPer1M: Number(match.pricing?.inputTokenPer1M) || 0,
           outputTokenPer1M: Number(match.pricing?.outputTokenPer1M) || 0,
           cachedTokenPer1M: Number(match.pricing?.cachedTokenPer1M) || 0,
+          cacheWriteTokenPer1M: Number(match.pricing?.cacheWriteTokenPer1M) || 0,
         },
         { catalogKey: match.catalogKey, confidence: match.confidence },
       );

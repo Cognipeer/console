@@ -56,6 +56,37 @@ describe('VLM OCR on the native client', () => {
     expect(result.text).toBe('just some text');
   });
 
+  it('folds anthropic cache read/write into the input and carries both subsets', async () => {
+    const complete = vi.fn().mockResolvedValue({
+      id: 'r', model: 'm', content: 'text', toolCalls: [], finishReason: 'stop', raw: {},
+      usage: { ...usage(10, 4), cachedInputTokens: 90, cachedWriteTokens: 5 },
+    });
+    const runtime: ModelProviderRuntime = {
+      createNativeChatClient: vi.fn().mockResolvedValue({ complete, driver: 'anthropic' }),
+    };
+    const result = await createVlmOcrRuntime(runtime, config).extract({
+      document: { kind: 'bytes', data: Buffer.from('AAAA'), contentType: 'image/png' },
+    } as never);
+    expect(result.usage).toMatchObject({
+      inputTokens: 105, outputTokens: 4, totalTokens: 109, cachedInputTokens: 90, cachedWriteTokens: 5,
+    });
+  });
+
+  it('folds vertex thinking tokens into the output and keeps the reasoning subset', async () => {
+    const complete = vi.fn().mockResolvedValue({
+      id: 'r', model: 'm', content: 'text', toolCalls: [], finishReason: 'stop', raw: {},
+      usage: { ...usage(20, 5), reasoningTokens: 7 },
+    });
+    const runtime: ModelProviderRuntime = {
+      createNativeChatClient: vi.fn().mockResolvedValue({ complete, driver: 'vertex' }),
+    };
+    const result = await createVlmOcrRuntime(runtime, config).extract({
+      document: { kind: 'bytes', data: Buffer.from('AAAA'), contentType: 'image/png' },
+    } as never);
+    expect(result.usage).toMatchObject({ inputTokens: 20, outputTokens: 12, totalTokens: 32, reasoningTokens: 7 });
+    expect(result.usage).not.toHaveProperty('cachedInputTokens');
+  });
+
   it('refuses a provider without a native chat client', () => {
     expect(() => createVlmOcrRuntime({}, config)).toThrow(/createNativeChatClient/);
   });

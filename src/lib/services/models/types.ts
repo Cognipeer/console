@@ -81,6 +81,7 @@ export interface ModelInvocationResult {
     inputTokens?: number;
     outputTokens?: number;
     cachedInputTokens?: number;
+    cachedWriteTokens?: number;
     totalTokens?: number;
   };
   latencyMs?: number;

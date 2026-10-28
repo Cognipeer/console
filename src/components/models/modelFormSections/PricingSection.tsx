@@ -13,7 +13,13 @@ interface PricingSectionProps {
   inputProps: FieldProps;
   outputProps: FieldProps;
   cachedProps: FieldProps;
-  onApplyCatalog: (pricing: { inputTokenPer1M: number; outputTokenPer1M: number; cachedTokenPer1M: number }) => void;
+  cacheWriteProps: FieldProps;
+  onApplyCatalog: (pricing: {
+    inputTokenPer1M: number;
+    outputTokenPer1M: number;
+    cachedTokenPer1M: number;
+    cacheWriteTokenPer1M: number;
+  }) => void;
   /** Category-specific price fields (per second / character / page / image). */
   children?: ReactNode;
 }
@@ -28,6 +34,7 @@ export default function PricingSection({
   inputProps,
   outputProps,
   cachedProps,
+  cacheWriteProps,
   onApplyCatalog,
   children,
 }: PricingSectionProps) {
@@ -48,8 +55,13 @@ export default function PricingSection({
         <FormField label="Output · per 1M tokens">
           <NumberInput min={0} decimalScale={4} {...outputProps} />
         </FormField>
-        <FormField label="Cached · per 1M tokens" optional>
+        <FormField label="Cache read · per 1M tokens" optional hint="Blank = billed at the input price">
           <NumberInput min={0} decimalScale={4} {...cachedProps} />
+        </FormField>
+      </FormRow>
+      <FormRow cols={2}>
+        <FormField label="Cache write · per 1M tokens" optional hint="Blank = billed at the input price">
+          <NumberInput min={0} decimalScale={4} {...cacheWriteProps} />
         </FormField>
       </FormRow>
       {children}

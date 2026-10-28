@@ -2,6 +2,8 @@
 FROM node:22 AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# CPU provider only: skip onnxruntime-node's CUDA download (see ci.yml).
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
 RUN npm ci --no-audit --no-fund
 
@@ -9,6 +11,8 @@ RUN npm ci --no-audit --no-fund
 FROM node:22 AS production-deps
 WORKDIR /app
 ENV NODE_ENV=production
+# CPU provider only: skip onnxruntime-node's CUDA download (see ci.yml).
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund
 

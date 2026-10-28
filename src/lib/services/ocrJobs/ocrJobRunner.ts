@@ -18,6 +18,7 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { calculateCost, type TokenUsage } from '@/lib/services/models/usageLogger';
+import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
 import { downloadFile } from '@/lib/services/files/fileService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import type { OcrDocumentSource, OcrFeature } from '@/lib/providers';
@@ -144,6 +145,16 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
 
   await db.updateOcrJobItem(itemId, { status: 'running', startedAt: new Date() });
   const startedAt = Date.now();
+  // Hoisted so a failure after OCR (or a first LLM step) still rolls the tokens,
+  // pages and cost already billed into the item and the job aggregates.
+  const totals: ProcessedTotals = {
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, pages: 0,
+    ocrTokens: 0, llmTokens: 0, costOcr: 0, costLlm: 0, cost: 0,
+  };
+  let llmPricing: Parameters<typeof calculateCost>[0] | undefined;
+  // Set once the success aggregates hold this item's tokens and cost: a later
+  // failure (callback status, completion check) must not add them a second time.
+  let aggregated = false;
 
   try {
     // Inside the try so a switched-off service fails this item (recorded,
@@ -174,14 +185,13 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     result.pages = ocrUsage.pages;
 
     // ── Cost: OCR ──
-    const totals: ProcessedTotals = {
-      inputTokens: 0, outputTokens: 0, totalTokens: 0, pages: 0,
-      ocrTokens: 0, llmTokens: 0, costOcr: 0, costLlm: 0, cost: 0,
-    };
     const ocrTokenUsage: TokenUsage = {
       inputTokens: ocrUsage.inputTokens,
       outputTokens: ocrUsage.outputTokens,
       pages: ocrUsage.pages,
+      ...(ocrUsage.cachedInputTokens ? { cachedInputTokens: ocrUsage.cachedInputTokens } : {}),
+      ...(ocrUsage.cachedWriteTokens ? { cachedWriteTokens: ocrUsage.cachedWriteTokens } : {}),
+      ...(ocrUsage.reasoningTokens ? { reasoningTokens: ocrUsage.reasoningTokens } : {}),
     };
     if (ocr.model?.pricing) {
       const c = calculateCost(ocr.model.pricing, ocrTokenUsage);
@@ -198,6 +208,7 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     const needsLlm = job.outputs.includes('summary') || job.outputs.includes('structured');
     if (needsLlm && job.llmModelKey) {
       const llmModel = await getModelByKey(ctx.tenantDbName, job.llmModelKey, projectId);
+      llmPricing = llmModel?.pricing;
 
       if (job.outputs.includes('summary')) {
         const resp = await handleChatCompletion({
@@ -277,6 +288,7 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
       },
       { costCurrency: totals.currency, lastItemAt: new Date() },
     );
+    aggregated = true;
 
     // Rollup event per item — attribution comes from the fields stamped on
     // the job row at creation (the runner is outside the request ALS). No
@@ -312,8 +324,48 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     return updated ?? item;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await db.updateOcrJobItem(itemId, { status: 'failed', errorMessage: message, endedAt: new Date() });
-    const afterJob = await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
+    // An output-limit hit burned real LLM tokens that never reached a response.
+    if (err instanceof OutputTokenLimitError && err.usage) {
+      accumulateLlm(totals, err.usage, llmPricing);
+    }
+    totals.totalTokens = totals.inputTokens + totals.outputTokens;
+    const burned = !aggregated
+      && (totals.inputTokens > 0 || totals.outputTokens > 0 || totals.pages > 0 || totals.cost > 0);
+    await db.updateOcrJobItem(itemId, {
+      status: 'failed',
+      errorMessage: message,
+      endedAt: new Date(),
+      ...(burned
+        ? {
+            usage: {
+              inputTokens: totals.inputTokens,
+              outputTokens: totals.outputTokens,
+              totalTokens: totals.totalTokens,
+              pages: totals.pages,
+            },
+            costTotal: totals.cost,
+            ...(totals.currency ? { costCurrency: totals.currency } : {}),
+          }
+        : {}),
+    });
+    const afterJob = await db.incrementOcrJobAggregates(
+      item.jobId,
+      burned
+        ? {
+            itemsFailed: 1,
+            usageInputTokens: totals.inputTokens,
+            usageOutputTokens: totals.outputTokens,
+            usageTotalTokens: totals.totalTokens,
+            usagePages: totals.pages,
+            usageOcrTokens: totals.ocrTokens,
+            usageLlmTokens: totals.llmTokens,
+            costOcr: totals.costOcr,
+            costLlm: totals.costLlm,
+            costTotal: totals.cost,
+          }
+        : { itemsFailed: 1 },
+      { ...(burned && totals.currency ? { costCurrency: totals.currency } : {}), lastItemAt: new Date() },
+    );
     recordUsageEvent({
       tenantDbName: ctx.tenantDbName,
       tenantId: ctx.tenantId,

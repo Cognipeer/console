@@ -273,6 +273,23 @@ describe('response translation', () => {
     });
   });
 
+  it('reports cache writes as cache_creation_input_tokens and takes them out of input_tokens', () => {
+    const out = openAiResponseToAnthropic({
+      choices: [{ finish_reason: 'stop', message: { content: 'hi' } }],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 30,
+        prompt_tokens_details: { cached_tokens: 700, cache_write_tokens: 200 },
+      },
+    }, 'm');
+    expect(out.usage).toEqual({
+      input_tokens: 100,
+      output_tokens: 30,
+      cache_read_input_tokens: 700,
+      cache_creation_input_tokens: 200,
+    });
+  });
+
   it('maps every finish reason to a Messages stop reason', () => {
     const stopFor = (finish: string) => openAiResponseToAnthropic(
       { choices: [{ finish_reason: finish, message: { content: '' } }] },
@@ -413,6 +430,22 @@ describe('stream translation', () => {
       output_tokens: 42,
       cache_read_input_tokens: 400,
       cache_creation_input_tokens: 0,
+    });
+  });
+
+  it('carries cache writes through message_start and message_delta of a streamed turn', async () => {
+    const sse = await collect(openAiStreamToAnthropic(streamOf([
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":500,"completion_tokens":42,"prompt_tokens_details":{"cached_tokens":300,"cache_write_tokens":100}}}\n\n',
+      'data: [DONE]\n\n',
+    ]), 'm'));
+
+    const messageDelta = frames(sse).find(([e]) => e === 'message_delta')?.[1];
+    expect(messageDelta?.usage).toEqual({
+      input_tokens: 100,
+      output_tokens: 42,
+      cache_read_input_tokens: 300,
+      cache_creation_input_tokens: 100,
     });
   });
 

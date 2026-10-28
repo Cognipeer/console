@@ -106,6 +106,7 @@ interface ModelPricing {
   inputTokenPer1M: number;
   outputTokenPer1M: number;
   cachedTokenPer1M?: number;
+  cacheWriteTokenPer1M?: number;
 }
 
 interface SemanticCacheConfigDto {
@@ -171,6 +172,7 @@ interface CostSummary {
   inputCost?: number;
   outputCost?: number;
   cachedCost?: number;
+  cacheWriteCost?: number;
   totalCost?: number;
 }
 
@@ -193,6 +195,7 @@ interface UsageAggregateDto {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCachedInputTokens: number;
+  totalCachedWriteTokens?: number;
   totalTokens: number;
   totalToolCalls: number;
   cacheHits: number;
@@ -235,6 +238,8 @@ interface UsageLogDto {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens?: number;
+  /** Cache-write subset of inputTokens. */
+  cachedWriteTokens?: number;
   totalTokens: number;
   // Subset of outputTokens, never additive — see the table/modal rendering below.
   reasoningTokens?: number;
@@ -1215,6 +1220,11 @@ export default function ModelDetailPage() {
                   output={selectedLog.outputTokens}
                   cached={selectedLog.cachedInputTokens}
                   reasoning={selectedLog.reasoningTokens}
+                  extra={
+                    selectedLog.cachedWriteTokens
+                      ? [{ label: 'Cache write', value: selectedLog.cachedWriteTokens }]
+                      : undefined
+                  }
                 />
               ),
             },
@@ -1655,14 +1665,19 @@ function OverviewTab({
                 {model.pricing.outputTokenPer1M.toFixed(2)} {model.pricing.currency || 'USD'}/1M
               </span>
             </div>
-            {model.pricing.cachedTokenPer1M ? (
-              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
-                <span className="ds-muted">Cached</span>
+            {([
+              ['Cache read', model.pricing.cachedTokenPer1M],
+              ['Cache write', model.pricing.cacheWriteTokenPer1M],
+            ] as const).map(([label, price]) => (
+              <div key={label} className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">{label}</span>
                 <span className="ds-mono">
-                  {model.pricing.cachedTokenPer1M.toFixed(2)} {model.pricing.currency || 'USD'}/1M
+                  {price && price > 0
+                    ? `${price.toFixed(2)} ${model.pricing.currency || 'USD'}/1M`
+                    : 'input rate'}
                 </span>
               </div>
-            ) : null}
+            ))}
           </Stack>
         </div>
 

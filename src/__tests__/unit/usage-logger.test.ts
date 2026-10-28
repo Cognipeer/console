@@ -153,6 +153,107 @@ describe('calculateCost', () => {
   });
 });
 
+describe('calculateCost — cache prices', () => {
+  // Claude Sonnet 5.5 list prices: $2 input, $10 output, $0.10 cache read, $2.50 5-minute cache write.
+  const SONNET: IModelPricing = {
+    currency: 'USD',
+    inputTokenPer1M: 2,
+    outputTokenPer1M: 10,
+    cachedTokenPer1M: 0.1,
+    cacheWriteTokenPer1M: 2.5,
+  };
+
+  it('prices every slice of the prompt at its own rate (the prod incident turn)', () => {
+    // 1,000 uncached + 418,987 read + 58,736 written = 478,723 prompt tokens; 16,100 out.
+    const result = calculateCost(SONNET, {
+      inputTokens: 478_723,
+      cachedInputTokens: 418_987,
+      cachedWriteTokens: 58_736,
+      outputTokens: 16_100,
+    });
+    expect(result.inputCost).toBeCloseTo(0.002, 9);
+    expect(result.cachedCost).toBeCloseTo(0.0418987, 9);
+    expect(result.cacheWriteCost).toBeCloseTo(0.14684, 9);
+    expect(result.outputCost).toBeCloseTo(0.161, 9);
+    expect(result.totalCost).toBeCloseTo(0.3517387, 9);
+    expect(result.totalCost).toBeCloseTo(result.inputCost + result.cachedCost + result.cacheWriteCost + result.outputCost, 12);
+    expect(result.assumedRates).toBeUndefined();
+  });
+
+  it('bills cache reads at the input rate when no cache price was entered — never as free', () => {
+    for (const cachedTokenPer1M of [undefined, 0, null as unknown as number, Number.NaN]) {
+      const result = calculateCost({ ...SONNET, cachedTokenPer1M }, {
+        inputTokens: 1_000_000,
+        cachedInputTokens: 800_000,
+      });
+      expect(result.inputCost).toBeCloseTo(0.4); // 200k uncached @ $2
+      expect(result.cachedCost).toBeCloseTo(1.6); // 800k read @ $2 (input rate)
+      expect(result.totalCost).toBeCloseTo(2.0); // exactly the uncached price of the prompt
+      expect(result.assumedRates).toEqual(['cacheRead']);
+    }
+  });
+
+  it('bills cache writes at the input rate when no cache-write price was entered', () => {
+    const result = calculateCost({ ...SONNET, cacheWriteTokenPer1M: undefined }, {
+      inputTokens: 1_000_000,
+      cachedWriteTokens: 300_000,
+    });
+    expect(result.inputCost).toBeCloseTo(1.4); // 700k uncached @ $2
+    expect(result.cacheWriteCost).toBeCloseTo(0.6); // 300k written @ $2 (input rate)
+    expect(result.totalCost).toBeCloseTo(2.0); // a write is a subset: no double billing
+    expect(result.assumedRates).toEqual(['cacheWrite']);
+  });
+
+  it('bills a cache write at its premium rate when one was entered', () => {
+    const result = calculateCost(SONNET, { inputTokens: 1_000_000, cachedWriteTokens: 1_000_000 });
+    expect(result.inputCost).toBe(0);
+    expect(result.cacheWriteCost).toBeCloseTo(2.5);
+    expect(result.totalCost).toBeCloseTo(2.5);
+  });
+
+  it('assumes nothing for a free model', () => {
+    const result = calculateCost({ inputTokenPer1M: 0, outputTokenPer1M: 0 }, {
+      inputTokens: 1000,
+      cachedInputTokens: 500,
+      cachedWriteTokens: 200,
+    });
+    expect(result.totalCost).toBe(0);
+    expect(result.assumedRates).toBeUndefined();
+  });
+
+  it('flags an assumed rate only for the cache slices the call actually had', () => {
+    const noCachePrices: IModelPricing = { inputTokenPer1M: 2, outputTokenPer1M: 10 };
+    expect(calculateCost(noCachePrices, { inputTokens: 1000, outputTokens: 10 }).assumedRates).toBeUndefined();
+    expect(calculateCost(noCachePrices, { inputTokens: 1000, cachedInputTokens: 10, cachedWriteTokens: 10 }).assumedRates)
+      .toEqual(['cacheRead', 'cacheWrite']);
+  });
+
+  it('keeps a malformed split from pushing the uncached input negative, and prices each slice in full', () => {
+    const result = calculateCost(SONNET, { inputTokens: 100, cachedInputTokens: 10_000, cachedWriteTokens: 1_000 });
+    expect(result.inputCost).toBe(0);
+    expect(result.cachedCost).toBeCloseTo(0.001);
+    expect(result.cacheWriteCost).toBeCloseTo(0.0025);
+  });
+});
+
+describe('resolveTokenRates', () => {
+  it('treats a blank, zero or null cache price as not entered', async () => {
+    const { resolveTokenRates, hasCacheReadPrice, hasCacheWritePrice } = await import('@/lib/services/models/pricingRates');
+    expect(resolveTokenRates({ inputTokenPer1M: 3, outputTokenPer1M: 15 })).toEqual({
+      input: 3, output: 15, cacheRead: 3, cacheWrite: 3, cacheReadAssumed: true, cacheWriteAssumed: true,
+    });
+    expect(resolveTokenRates({ inputTokenPer1M: 3, outputTokenPer1M: 15, cachedTokenPer1M: 0.3, cacheWriteTokenPer1M: 3.75 })).toEqual({
+      input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, cacheReadAssumed: false, cacheWriteAssumed: false,
+    });
+    expect(hasCacheReadPrice({ cachedTokenPer1M: 0 })).toBe(false);
+    expect(hasCacheReadPrice({ cachedTokenPer1M: null as unknown as number })).toBe(false);
+    expect(hasCacheReadPrice({ cachedTokenPer1M: 0.1 })).toBe(true);
+    expect(hasCacheReadPrice(undefined)).toBe(false);
+    expect(hasCacheWritePrice({ cacheWriteTokenPer1M: 2.5 })).toBe(true);
+    expect(hasCacheWritePrice({ cacheWriteTokenPer1M: -1 })).toBe(false);
+  });
+});
+
 // ── logModelUsage ─────────────────────────────────────────────────────────────
 
 describe('logModelUsage', () => {
@@ -310,6 +411,36 @@ describe('logModelUsage', () => {
     const snap = payload.pricingSnapshot as unknown as Record<string, unknown>;
     expect(snap['inputCost']).toBeCloseTo(5.0);
     expect(snap['currency']).toBe('USD');
+  });
+
+  it('persists the cache-write subset and never adds the cache counts into a missing total', async () => {
+    await logModelUsage('tenant_acme', MOCK_MODEL, {
+      requestId: 'req-cw',
+      route: '/api/chat',
+      status: 'success',
+      providerRequest: {},
+      providerResponse: {},
+      usage: { inputTokens: 1000, outputTokens: 100, cachedInputTokens: 600, cachedWriteTokens: 300 },
+    });
+    const payload = db.createModelUsageLog.mock.calls[0][0];
+    expect(payload.cachedInputTokens).toBe(600);
+    expect(payload.cachedWriteTokens).toBe(300);
+    expect(payload.totalTokens).toBe(1100);
+    const snap = payload.pricingSnapshot as unknown as Record<string, number>;
+    // PRICING has no cache-write price: the write slice bills at the $5 input rate.
+    expect(snap.inputCost).toBeCloseTo((100 * 5) / 1e6, 12);
+    expect(snap.cachedCost).toBeCloseTo((600 * 0.5) / 1e6, 12);
+    expect(snap.cacheWriteCost).toBeCloseTo((300 * 5) / 1e6, 12);
+    expect(snap.totalCost).toBeCloseTo((100 * 5 + 600 * 0.5 + 300 * 5 + 100 * 15) / 1e6, 12);
+    expect((payload.pricingSnapshot as unknown as Record<string, unknown>).assumedRates).toEqual(['cacheWrite']);
+  });
+
+  it('writes a numeric cache-write count even when the usage has none (Mongo stores undefined as null)', async () => {
+    await logModelUsage('tenant_acme', MOCK_MODEL, {
+      requestId: 'req-cw0', route: '/api/chat', status: 'success', providerRequest: {}, providerResponse: {},
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    expect(db.createModelUsageLog.mock.calls[0][0].cachedWriteTokens).toBe(0);
   });
 
   it('defaults missing usage fields to 0', async () => {

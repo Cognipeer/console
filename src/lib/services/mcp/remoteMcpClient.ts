@@ -9,7 +9,8 @@
  * accept both), and fails with a clear error otherwise.
  */
 
-import { safeFetch } from '@/lib/security/outboundFetch';
+import { readResponseText, ResponseTooLargeError, safeFetch } from '@/lib/security/outboundFetch';
+import { getConfig } from '@/lib/core/config';
 import { McpUpstreamError } from './errors';
 import {
   MAX_TOOL_LIST_PAGES,
@@ -45,6 +46,36 @@ export function buildUpstreamAuthHeaders(auth: IMcpAuthConfig | undefined): Reco
     headers['Authorization'] = `Basic ${encoded}`;
   }
   return headers;
+}
+
+/**
+ * Run one upstream call under the configured total-time and response-size
+ * limits. `signal` covers headers and body together; a call that exceeds
+ * either limit fails as an upstream error with a neutral message.
+ */
+export async function withUpstreamLimits<T>(
+  run: (limits: { signal: AbortSignal; maxBytes: number }) => Promise<T>,
+): Promise<T> {
+  const { maxResponseBytes: maxBytes, timeoutMs } = getConfig().mcp.upstream;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`Upstream did not answer within ${timeoutMs} ms`));
+  }, timeoutMs);
+  try {
+    return await run({ signal: controller.signal, maxBytes });
+  } catch (error) {
+    if (timedOut) {
+      throw new McpUpstreamError(`Upstream did not answer within ${timeoutMs} ms`, 504);
+    }
+    if (error instanceof ResponseTooLargeError) {
+      throw new McpUpstreamError(error.message, 502);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 let rpcId = 0;
@@ -87,14 +118,26 @@ function sseEventData(block: string): string {
  * events until the one answering `id` arrives, then stop: a server that keeps
  * the stream open afterwards is not waited for.
  */
-async function readSseResponse(response: Response, id: number): Promise<JsonRpcMessage> {
+async function readSseResponse(
+  response: Response,
+  id: number,
+  limits: { signal: AbortSignal; maxBytes: number },
+): Promise<JsonRpcMessage> {
   if (!response.body) throw new Error('MCP server returned an empty SSE response');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let received = 0;
+  const onAbort = () => { reader.cancel().catch(() => { /* already closed */ }); };
+  limits.signal.addEventListener('abort', onAbort, { once: true });
   try {
     for (;;) {
       const { done, value } = await reader.read();
+      if (limits.signal.aborted) throw limits.signal.reason ?? new Error('Aborted');
+      if (value) {
+        received += value.byteLength;
+        if (received > limits.maxBytes) throw new ResponseTooLargeError(limits.maxBytes);
+      }
       if (value) buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
       if (done) buffer += '\n\n';
       let boundary = buffer.indexOf('\n\n');
@@ -108,12 +151,15 @@ async function readSseResponse(response: Response, id: number): Promise<JsonRpcM
       if (done) break;
     }
   } finally {
+    limits.signal.removeEventListener('abort', onAbort);
     reader.cancel().catch(() => { /* already closed */ });
   }
   throw new Error('MCP server closed the SSE stream without answering the request');
 }
 
 const SESSION_HEADER = 'Mcp-Session-Id';
+
+type UpstreamLimits = { signal: AbortSignal; maxBytes: number };
 
 function requestHeaders(target: RemoteMcpTarget, sessionId?: string): Record<string, string> {
   return {
@@ -131,15 +177,22 @@ function sensitiveHeaderNames(headers: Record<string, string>): string[] {
   return Object.keys(headers).filter((name) => name !== 'Content-Type' && name !== 'Accept');
 }
 
+/** The call's limits, with the caller's signal (an agent turn's) aborting it too. */
+function callLimits(target: RemoteMcpTarget, limits: UpstreamLimits): UpstreamLimits {
+  return target.signal ? { signal: AbortSignal.any([limits.signal, target.signal]), maxBytes: limits.maxBytes } : limits;
+}
+
 /** One POST: a JSON-RPC request, its JSON or SSE answer, and the session id the server sent, if any. */
 async function exchange(
   target: RemoteMcpTarget,
   method: string,
-  params?: Record<string, unknown>,
+  params: Record<string, unknown> | undefined,
+  upstreamLimits: UpstreamLimits,
   sessionId?: string,
 ): Promise<{ result: unknown; sessionId?: string }> {
   const id = ++rpcId;
   const headers = requestHeaders(target, sessionId);
+  const limits = callLimits(target, upstreamLimits);
 
   const response = await safeFetch(target.url, {
     method: 'POST',
@@ -150,22 +203,26 @@ async function exchange(
       method,
       ...(params !== undefined ? { params } : {}),
     }),
-    ...(target.signal ? { signal: target.signal } : {}),
+    signal: limits.signal,
   }, {
+    keepAbortLinked: true,
     // Credentials injected for this upstream do not follow a redirect to
     // another origin.
     sensitiveHeaders: sensitiveHeaderNames(headers),
   });
 
   if (!response.ok) {
-    const errText = await response.text().catch(() => 'Unknown error');
+    const errText = await readResponseText(response, {
+      maxBytes: Math.min(limits.maxBytes, 64 * 1024),
+      signal: limits.signal,
+    }).catch(() => 'Unknown error');
     throw new McpUpstreamError(`MCP server responded with ${response.status}: ${errText.slice(0, 500)}`, response.status);
   }
 
   const contentType = response.headers.get('content-type') ?? '';
   const payload: JsonRpcMessage = contentType.includes('text/event-stream')
-    ? await readSseResponse(response, id)
-    : await response.json();
+    ? await readSseResponse(response, id, limits)
+    : JSON.parse(await readResponseText(response, limits)) as JsonRpcMessage;
 
   if (payload.error) {
     throw new Error(`MCP error ${payload.error.code ?? ''}: ${payload.error.message ?? 'unknown'}`);
@@ -176,22 +233,23 @@ async function exchange(
 const CLIENT_INFO = { name: 'cognipeer-mcp-gateway', version: '1.0.0' };
 
 /** `initialize`, then `notifications/initialized`. Undefined when the server hands out no session id. */
-async function openSession(target: RemoteMcpTarget): Promise<string | undefined> {
+async function openSession(target: RemoteMcpTarget, upstreamLimits: UpstreamLimits): Promise<string | undefined> {
   const { sessionId } = await exchange(target, 'initialize', {
     protocolVersion: MCP_PROTOCOL_VERSION,
     capabilities: {},
     clientInfo: CLIENT_INFO,
-  });
+  }, upstreamLimits);
   if (!sessionId) return undefined;
   const headers = requestHeaders(target, sessionId);
+  const limits = callLimits(target, upstreamLimits);
   const response = await safeFetch(target.url, {
     method: 'POST',
     headers,
     body: JSON.stringify({ jsonrpc: JSONRPC_VERSION, method: 'notifications/initialized' }),
-    ...(target.signal ? { signal: target.signal } : {}),
-  }, { sensitiveHeaders: sensitiveHeaderNames(headers) });
+    signal: limits.signal,
+  }, { keepAbortLinked: true, sensitiveHeaders: sensitiveHeaderNames(headers) });
   // 202 with no body; nothing in it matters.
-  await response.text().catch(() => '');
+  await readResponseText(response, { maxBytes: Math.min(limits.maxBytes, 64 * 1024), signal: limits.signal }).catch(() => '');
   return sessionId;
 }
 
@@ -199,28 +257,38 @@ async function openSession(target: RemoteMcpTarget): Promise<string | undefined>
 const sessionUpstreams = new Set<string>();
 
 /**
- * One JSON-RPC call. A server that requires a session answers a call without
- * one with 400 or 404 (streamable HTTP); the call then opens a session and is
- * sent once more inside it, and later calls to that upstream open the session
- * first. A session is not reused across calls.
+ * One JSON-RPC call, under one time and size budget (a session it opens
+ * included). A server that requires a session answers a call without one with
+ * 400 or 404 (streamable HTTP); the call then opens a session and is sent once
+ * more inside it, and later calls to that upstream open the session first. A
+ * session is not reused across calls.
  */
-async function rpcCall(
+function rpcCall(
   target: RemoteMcpTarget,
   method: string,
   params?: Record<string, unknown>,
 ): Promise<unknown> {
+  return withUpstreamLimits((limits) => rpcCallBounded(target, method, params, limits));
+}
+
+async function rpcCallBounded(
+  target: RemoteMcpTarget,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  limits: UpstreamLimits,
+): Promise<unknown> {
   if (method !== 'initialize' && sessionUpstreams.has(target.url)) {
-    return (await exchange(target, method, params, await openSession(target))).result;
+    return (await exchange(target, method, params, limits, await openSession(target, limits))).result;
   }
   try {
-    return (await exchange(target, method, params)).result;
+    return (await exchange(target, method, params, limits)).result;
   } catch (error) {
     const sessionRefusal = error instanceof McpUpstreamError && (error.status === 400 || error.status === 404);
     if (method === 'initialize' || !sessionRefusal) throw error;
-    const sessionId = await openSession(target).catch(() => undefined);
+    const sessionId = await openSession(target, limits).catch(() => undefined);
     if (!sessionId) throw error;
     sessionUpstreams.add(target.url);
-    return (await exchange(target, method, params, sessionId)).result;
+    return (await exchange(target, method, params, limits, sessionId)).result;
   }
 }
 

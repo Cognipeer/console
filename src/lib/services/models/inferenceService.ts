@@ -162,11 +162,12 @@ export async function handleChatCompletion(params: {
    * per-tenant budget key) isn't reconstructible from inside this module, but
    * a plain closure over it costs the caller nothing to provide. Computed
    * here (not by the caller) so a Dynamic LLM child model's own pricing is
-   * always what gets charged, never the router's. Fires for success and for
-   * a cancelled stream with partial usage (the provider still billed for
-   * those tokens); never for a request that produced no usage at all.
+   * always what gets charged, never the router's. Fires for every call that
+   * billed tokens: success, an output-limit hit, a stream whose upstream sent no
+   * usage (estimated), a cancelled stream with partial usage and a stream cut
+   * after it produced output; never for a request that produced nothing.
    */
-  onUsageSettled?: (cost: UsageCostResult) => void;
+  onUsageSettled?: (cost: UsageCostResult, usage?: TokenUsage) => void;
   /** Aborts the upstream request. A streamed call that is aborted is logged `cancelled`. */
   signal?: AbortSignal;
   /** Usage row route and attribution for an in-process caller. Defaults to the gateway's own route. */
@@ -1471,13 +1472,19 @@ export async function handleOcrRequest(params: {
 
   const latencyMs = Date.now() - start;
 
+  // VLM OCR bills like a chat call: the cached read/write slice and the reasoning are
+  // subsets the cost needs.
+  const ocrUsage = result.usage;
   const usage: TokenUsage = {
-    inputTokens: result.usage?.inputTokens ?? 0,
-    outputTokens: result.usage?.outputTokens ?? 0,
+    inputTokens: ocrUsage?.inputTokens ?? 0,
+    outputTokens: ocrUsage?.outputTokens ?? 0,
     totalTokens:
-      result.usage?.totalTokens ??
-      (result.usage?.inputTokens ?? 0) + (result.usage?.outputTokens ?? 0),
-    pages: result.usage?.pages,
+      ocrUsage?.totalTokens ??
+      (ocrUsage?.inputTokens ?? 0) + (ocrUsage?.outputTokens ?? 0),
+    pages: ocrUsage?.pages,
+    ...(ocrUsage?.cachedInputTokens ? { cachedInputTokens: ocrUsage.cachedInputTokens } : {}),
+    ...(ocrUsage?.cachedWriteTokens ? { cachedWriteTokens: ocrUsage.cachedWriteTokens } : {}),
+    ...(ocrUsage?.reasoningTokens ? { reasoningTokens: ocrUsage.reasoningTokens } : {}),
   };
 
   fireAndForget('log-ocr-usage', () =>

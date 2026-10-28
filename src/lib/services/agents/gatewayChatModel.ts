@@ -48,7 +48,7 @@ import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
 import { nativeRequestToWire } from '@/lib/services/models/openaiAdapter';
 import type { GatewayChatRequest, ModelCallInput, ModelCallOutcome } from '@/lib/services/models/gatewayTypes';
-import type { UsageCostResult } from '@/lib/services/models/usageLogger';
+import type { TokenUsage as GatewayUsage, UsageCostResult } from '@/lib/services/models/usageLogger';
 import { isSyntheticActor } from './syntheticActor';
 import { addRunUsage } from './runUsage';
 import { outputLimitNotice } from './outputLimitNotice';
@@ -140,6 +140,45 @@ function providerFamily(model: IModel): 'openai' | 'azure' | 'anthropic' | 'bedr
     default:
       return 'openai-compatible';
   }
+}
+
+/** agent-sdk's own usage shape (what the SDK ledger, its budgets and message usage are built from). */
+type SdkUsage = ChatCompletionResponse['usage'];
+
+/**
+ * What the agent-sdk is handed as a call's usage: the CORE's canonical gateway usage
+ * (`inputTokens` = the whole prompt, cache read + write included; `outputTokens` = the
+ * whole completion, reasoning included; cache / reasoning counts are subsets;
+ * `totalTokens` = input + output), already converted by `toGatewayUsage` with the
+ * driver that SERVED the call (a Dynamic LLM hands back its child's usage). It is never
+ * re-folded here: the provider's own (native) numbers differ in basis per driver.
+ */
+function sdkUsage(usage: GatewayUsage): SdkUsage {
+  const input = usage.inputTokens ?? 0;
+  const output = usage.outputTokens ?? 0;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: usage.totalTokens || input + output,
+    cachedInputTokens: usage.cachedInputTokens ?? 0,
+    cachedWriteTokens: usage.cachedWriteTokens ?? 0,
+    cachedOutputTokens: 0,
+    reasoningTokens: usage.reasoningTokens ?? 0,
+  };
+}
+
+/** Field-wise sum of two SDK usages; absent when both are. */
+function addSdkUsage(a: SdkUsage | undefined, b: SdkUsage | undefined): SdkUsage | undefined {
+  if (!a || !b) return a ?? b;
+  return {
+    inputTokens: (a.inputTokens ?? 0) + (b.inputTokens ?? 0),
+    outputTokens: (a.outputTokens ?? 0) + (b.outputTokens ?? 0),
+    totalTokens: (a.totalTokens ?? 0) + (b.totalTokens ?? 0),
+    cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
+    cachedWriteTokens: (a.cachedWriteTokens ?? 0) + (b.cachedWriteTokens ?? 0),
+    cachedOutputTokens: (a.cachedOutputTokens ?? 0) + (b.cachedOutputTokens ?? 0),
+    reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
+  };
 }
 
 /** The OpenAI-shaped reasoning an API request carried (the lowest rung of the precedence). */
@@ -269,28 +308,44 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
   const provider = {
     providerName: providerFamily(model),
     defaultModel: model.key,
+    // Every number this provider reports is already inclusive (see `sdkUsage`). agent-sdk
+    // >= 0.21 reads this to skip its own fold; 0.20 ignores it.
+    usageBasis: {},
 
     async complete(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+      // What the attempts that hit the output limit burned: the provider bills them, so
+      // the SDK ledger (budgets, cost) must see them next to the answer the retry gives.
+      const carried: { usage?: SdkUsage } = {};
+      const carry = (error: OutputTokenLimitError) => {
+        if (error.usage) carried.usage = addSdkUsage(carried.usage, sdkUsage(error.usage));
+      };
       try {
         return await completeOnce(request);
       } catch (error) {
         if (!(error instanceof OutputTokenLimitError)) throw error;
+        carry(error);
         const raised = nextLimit(error);
         if (raised !== undefined) {
           try {
-            return await completeOnce(request, raised);
+            const retried = await completeOnce(request, raised);
+            const usage = addSdkUsage(carried.usage, retried.usage);
+            return usage ? { ...retried, usage } : retried;
           } catch (retryError) {
             if (!(retryError instanceof OutputTokenLimitError)) throw retryError;
-            return limitResponse(retryError.limit ?? raised);
+            carry(retryError);
+            return limitResponse(retryError.limit ?? raised, carried.usage);
           }
         }
-        return limitResponse(error.limit);
+        return limitResponse(error.limit, carried.usage);
       }
     },
 
     async *completeStream(request: ChatCompletionRequest): AsyncGenerator<ChatCompletionChunk, void, unknown> {
+      // The usage of the attempts that hit the output limit (their `done` chunk is not
+      // forwarded): it rides on the retry's final chunk, or on the limit notice.
+      const carried: { usage?: SdkUsage } = {};
       try {
-        yield* streamOnce(request);
+        yield* streamOnce(request, undefined, carried);
         return;
       } catch (error) {
         if (!(error instanceof OutputTokenLimitError)) throw error;
@@ -298,14 +353,14 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         let finalLimit = error.limit;
         if (raised !== undefined) {
           try {
-            yield* streamOnce(request, raised);
+            yield* streamOnce(request, raised, carried);
             return;
           } catch (retryError) {
             if (!(retryError instanceof OutputTokenLimitError)) throw retryError;
             finalLimit = retryError.limit ?? raised;
           }
         }
-        yield limitChunk(finalLimit);
+        yield limitChunk(finalLimit, carried.usage);
       }
     },
   };
@@ -319,21 +374,22 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
 
   const emptyUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0 };
 
-  /** The graceful end of a turn whose model cannot fit an answer in its output limit. */
-  const limitResponse = (limit?: number): ChatCompletionResponse => ({
+  /** The graceful end of a turn whose model cannot fit an answer in its output limit (`burned`: what the failed attempts used). */
+  const limitResponse = (limit?: number, burned?: SdkUsage): ChatCompletionResponse => ({
     id: `limit_${crypto.randomUUID()}`,
     model: model.modelId,
     content: outputLimitNotice(limit),
     toolCalls: [],
-    usage: emptyUsage,
+    usage: burned ?? emptyUsage,
     finishReason: 'stop',
     raw: null,
   });
 
-  const limitChunk = (limit?: number): ChatCompletionChunk => ({
+  const limitChunk = (limit?: number, burned?: SdkUsage): ChatCompletionChunk => ({
     id: `limit_${crypto.randomUUID()}`,
     model: model.modelId,
     delta: { content: outputLimitNotice(limit) },
+    ...(burned ? { usage: burned } : {}),
     finishReason: 'stop',
   });
 
@@ -351,11 +407,21 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       const named = response.toolCalls?.some((call) => !call.id)
         ? { ...response, toolCalls: response.toolCalls.map((call, index) => (call.id ? call : { ...call, id: `call_${index}_${crypto.randomUUID()}` })) }
         : response;
-      return outcome.includeReasoning === false ? withoutReasoningText(named) : named;
+      // The core's canonical usage, not the provider's native one (the response's own is
+      // only the fallback when the outcome carries none).
+      const own = outcome.usage ? sdkUsage(outcome.usage) : named.usage;
+      // A Dynamic LLM primary that hit its output limit before the fallback answered: billed, so counted.
+      const usage = outcome.burnedUsage ? addSdkUsage(own, sdkUsage(outcome.burnedUsage)) : own;
+      const counted = usage ? { ...named, usage } : named;
+      return outcome.includeReasoning === false ? withoutReasoningText(counted) : counted;
     }
   };
 
-  async function* streamOnce(request: ChatCompletionRequest, limitOverride?: number): AsyncGenerator<ChatCompletionChunk, void, unknown> {
+  async function* streamOnce(
+    request: ChatCompletionRequest,
+    limitOverride?: number,
+    carried?: { usage?: SdkUsage },
+  ): AsyncGenerator<ChatCompletionChunk, void, unknown> {
     {
       let outcome: ModelCallOutcome;
       try {
@@ -421,12 +487,24 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
           // The whole set of provider reasoning blocks, once: the SDK keeps the last
           // blocks it saw, and the signed set is what the next request replays.
           const blocks = event.response.reasoning?.blocks;
+          // The core's canonical usage, only when the stream had one (the provider's, or an
+          // estimate the core flagged); a stream with none reports none.
+          const own = event.nativeUsage || event.usageEstimated
+            ? sdkUsage(event.usage)
+            : undefined;
+          if (event.outputLimitReached && carried) {
+            // An attempt that hit the output limit: its chunk (finish reason, reasoning
+            // blocks) belongs to an abandoned answer. Only its usage lives on.
+            carried.usage = addSdkUsage(carried.usage, own);
+            continue;
+          }
+          const usage = addSdkUsage(carried?.usage, own);
           yield {
             id,
             model: modelName,
             delta: blocks?.length ? { reasoning: { blocks } } : {},
             ...(event.response.providerFields ? { providerFields: event.response.providerFields } : {}),
-            ...(event.nativeUsage ? { usage: event.nativeUsage } : {}),
+            ...(usage ? { usage } : {}),
             finishReason: event.response.finishReason,
             ...(event.response.rawFinishReason ? { rawFinishReason: event.response.rawFinishReason } : {}),
           };

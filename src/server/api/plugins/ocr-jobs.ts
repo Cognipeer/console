@@ -26,7 +26,6 @@ import {
 import type {
   IOcrJob,
   IOcrJobItem,
-  IUser,
   OcrJobWebhookEvent,
   OcrOutputKind,
 } from '@/lib/database';
@@ -180,18 +179,16 @@ function ctxFrom(session: { tenantDbName: string; tenantId: string; userId: stri
  * address any project's job in the same tenant — reading its OCR results,
  * repointing its callbackUrl at their own endpoint, or deleting it. Returns
  * null for an out-of-scope id so it is indistinguishable from a missing one.
- * Owners/admins keep tenant-wide reach (resolveProjectContext already grants
- * it), and jobs stored without a projectId stay tenant-wide.
+ * Owners/admins too (the active project decides; they switch to reach another),
+ * and jobs stored without a projectId stay tenant-wide.
  */
 async function jobInProjectScope(
   session: { tenantDbName: string; tenantId: string },
   jobId: string,
   projectId: string,
-  user: Pick<IUser, 'role'>,
 ): Promise<IOcrJob | null> {
   const job = await getOcrJob(session, jobId);
   if (!job) return null;
-  if (user.role === 'owner' || user.role === 'admin') return job;
   if (!job.projectId) return job;
   return String(job.projectId) === String(projectId) ? job : null;
 }
@@ -224,9 +221,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/ocr-jobs/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const job = await jobInProjectScope(session, id, projectId, user);
+      const job = await jobInProjectScope(session, id, projectId);
       if (!job) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ job: serializeJob(job) });
     } catch (error) {
@@ -237,9 +234,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/ocr-jobs/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(404).send({ error: 'Not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(404).send({ error: 'Not found' });
       const body = readJsonBody<Record<string, unknown>>(request);
       const patch: UpdateOcrJobInput = {};
       if (typeof body.name === 'string') patch.name = body.name;
@@ -265,9 +262,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/ocr-jobs/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(404).send({ error: 'Not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(404).send({ error: 'Not found' });
       const ok = await deleteOcrJob(session, id);
       if (!ok) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ ok: true });
@@ -280,9 +277,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Send files ────────────────────────────────────────────────────
   app.post('/ocr-jobs/:id/files', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(400).send({ error: 'Job not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(400).send({ error: 'Job not found' });
       const body = readJsonBody<Record<string, unknown>>(request);
       const items = parseItems(body.items);
       if (!items.length) return reply.code(400).send({ error: 'At least one file is required' });
@@ -298,9 +295,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/ocr-jobs/:id/pause', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(404).send({ error: 'Not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(404).send({ error: 'Not found' });
       const job = await setOcrJobStatus(session, id, 'paused');
       if (!job) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ job: serializeJob(job) });
@@ -312,9 +309,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/ocr-jobs/:id/resume', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(404).send({ error: 'Not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(404).send({ error: 'Not found' });
       const job = await setOcrJobStatus(session, id, 'active');
       if (!job) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ job: serializeJob(job) });
@@ -327,9 +324,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Items ─────────────────────────────────────────────────────────
   app.get('/ocr-jobs/:id/items', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(404).send({ error: 'Not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(404).send({ error: 'Not found' });
       const { limit, skip, status } = (request.query ?? {}) as { limit?: string; skip?: string; status?: string };
       const items = await getOcrJobItems(session, id, { limit: limit ? Number(limit) : undefined, skip: skip ? Number(skip) : undefined, status });
       if (!items) return reply.code(404).send({ error: 'Not found' });
@@ -342,9 +339,9 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/ocr-jobs/:id/items/:itemId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id, itemId } = request.params as { id: string; itemId: string };
-      if (!(await jobInProjectScope(session, id, projectId, user))) return reply.code(404).send({ error: 'Not found' });
+      if (!(await jobInProjectScope(session, id, projectId))) return reply.code(404).send({ error: 'Not found' });
       const item = await getOcrJobItem(session, id, itemId);
       if (!item) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ item: serializeItem(item) });
@@ -357,11 +354,11 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Export ────────────────────────────────────────────────────────
   app.get('/ocr-jobs/:id/export', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const { format: formatRaw } = (request.query ?? {}) as { format?: string };
       const format = (formatRaw ?? 'json').toLowerCase();
-      const job = await jobInProjectScope(session, id, projectId, user);
+      const job = await jobInProjectScope(session, id, projectId);
       if (!job) return reply.code(404).send({ error: 'Not found' });
       const items = (await getOcrJobItems(session, id)) ?? [];
       const filenameBase = `ocr_${String(job._id)}`;

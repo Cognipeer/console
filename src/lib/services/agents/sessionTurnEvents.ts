@@ -322,6 +322,8 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
         inputTokens: spent.inputTokens,
         outputTokens: spent.outputTokens,
         cachedInputTokens: spent.cachedInputTokens,
+        // A store without the column leaves it undefined; a turn with no cache write carries no key.
+        ...(spent.cachedWriteTokens ? { cachedWriteTokens: spent.cachedWriteTokens } : {}),
         reasoningTokens: spent.reasoningTokens,
         totalTokens: spent.totalTokens,
         costUsd: spent.costUsd,
