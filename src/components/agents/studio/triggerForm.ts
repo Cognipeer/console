@@ -7,7 +7,7 @@
 
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
-import type { ConnectorSubscriptionWire, ConnectorTriggerFormValue } from '@/lib/shared/connectorTriggers';
+import type { ConnectorSubscriptionWire, ConnectorTriggerCatalogConnector, ConnectorTriggerFormValue } from '@/lib/shared/connectorTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 
 /** A trigger as the API returns it. */
@@ -380,11 +380,27 @@ export function rowsOnWebhookOnlyData(rows: ReadonlyArray<Pick<WebhookFilterRow,
 
 /**
  * A trigger API path with the reader's language (`?locale=tr|en`): the Connectors module writes some texts
- * itself (a trigger's label, the reason a subscription is not active) and writes them in that language. Any other
- * locale leaves the path as it is.
+ * itself (the reason a subscription is not active, the steps to set a webhook up) and writes them in that language.
+ * Any other locale leaves the path as it is.
  */
 export function withTriggerLocale(path: string, locale: string): string {
     return locale === 'tr' || locale === 'en' ? `${path}${path.includes('?') ? '&' : '?'}locale=${locale}` : path;
+}
+
+/**
+ * The name of a connector trigger's event source for a list row. The label the Connectors module stored is always English
+ * (`GitHub · Pull request`, whoever saved the trigger); where the catalog the screen holds, asked in the reader's language,
+ * lists the connector and its trigger, that title is shown instead. Without it (the module is off, the connector or the
+ * trigger is gone) the stored label stands, else the package and trigger names.
+ */
+export function connectorTriggerLabel(
+    connector: { connector_id: string; trigger: string; label?: string | null; package_id?: string | null },
+    catalog: ReadonlyArray<Pick<ConnectorTriggerCatalogConnector, 'id' | 'packageName' | 'triggers'>>,
+): string {
+    const entry = catalog.find((item) => item.id === connector.connector_id);
+    const title = entry?.triggers.find((item) => item.name === connector.trigger)?.title;
+    if (entry && title) return `${entry.packageName} · ${title}`;
+    return connector.label ?? connector.package_id ?? connector.trigger;
 }
 
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };

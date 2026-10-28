@@ -73,6 +73,7 @@ import {
     CRON_PRESETS,
     TRIGGER_TYPES,
     connectorFormFromRetired,
+    connectorTriggerLabel,
     emptyTriggerForm,
     formFromTrigger,
     isRetiredWebhook,
@@ -194,7 +195,7 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
         }
         if (trigger.type === 'connector') {
             const connector = trigger.connector;
-            const label = connector.label ?? connector.package_id ?? connector.trigger;
+            const label = connectorTriggerLabel(connector, catalog.connectors);
             const summary = connector.events.length > 0 ? t('summaryConnector', { label, events: connector.events.join(', ') }) : t('summaryConnectorAny', { label });
             return connector.kind === 'poll' && connector.schedule ? `${summary} · ${connector.schedule.cron}` : summary;
         }

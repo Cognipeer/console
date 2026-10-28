@@ -19,6 +19,7 @@ import {
   WEBHOOK_SAMPLES,
   WEBHOOK_TEMPLATE_VARIABLES,
   connectorFormFromRetired,
+  connectorTriggerLabel,
   emptyTriggerForm,
   formFromTrigger,
   isRetiredWebhook,
@@ -428,5 +429,29 @@ describe('withTriggerLocale', () => {
 
   it('adds to a query string that is already there', () => {
     expect(withTriggerLocale('/api/agents/a1/triggers?limit=5', 'tr')).toBe('/api/agents/a1/triggers?limit=5&locale=tr');
+  });
+});
+
+describe('connectorTriggerLabel', () => {
+  const stored = { connector_id: 'c1', trigger: 'pull_request', package_id: 'cognipeer.github', label: 'GitHub · Pull request' };
+  const entry = (title: string, over: Record<string, unknown> = {}) => ({
+    id: 'c1', packageName: 'GitHub', triggers: [{ name: 'issues', title: 'Issues' }, { name: 'pull_request', title }], ...over,
+  }) as unknown as Parameters<typeof connectorTriggerLabel>[1][number];
+
+  it('is the title the reader\'s catalog gives the connector\'s trigger, with the package name in front', () => {
+    expect(connectorTriggerLabel(stored, [entry('Çekme isteği')])).toBe('GitHub · Çekme isteği');
+    expect(connectorTriggerLabel(stored, [entry('Pull request')])).toBe('GitHub · Pull request');
+  });
+
+  it('is the stored label where the catalog does not know the connector or the trigger', () => {
+    expect(connectorTriggerLabel(stored, [])).toBe('GitHub · Pull request');
+    expect(connectorTriggerLabel(stored, [entry('Çekme isteği', { id: 'c9' })])).toBe('GitHub · Pull request');
+    expect(connectorTriggerLabel({ ...stored, trigger: 'workflow_run' }, [entry('Çekme isteği')])).toBe('GitHub · Pull request');
+    expect(connectorTriggerLabel(stored, [entry('')])).toBe('GitHub · Pull request');
+  });
+
+  it('is the package or the trigger name for a trigger stored without a label', () => {
+    expect(connectorTriggerLabel({ ...stored, label: null }, [])).toBe('cognipeer.github');
+    expect(connectorTriggerLabel({ ...stored, label: undefined, package_id: null }, [])).toBe('pull_request');
   });
 });

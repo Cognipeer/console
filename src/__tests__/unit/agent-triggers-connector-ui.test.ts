@@ -292,6 +292,20 @@ describe('the list', () => {
     expect(text()).not.toContain('Needs Connectors');
   });
 
+  it('writes the connector trigger in the words of the reader\'s own catalog, and keeps the stored label where the catalog does not list it', async () => {
+    // The stored label is English whoever saved the trigger; the catalog the screen holds is asked in the reader's language.
+    catalog.connectors = [{ id: 'c1', key: 'github', name: 'Company GitHub', packageId: 'cognipeer.github', packageName: 'GitHub', status: 'active', accountStatus: 'active', triggers: [{ name: 'pull_request', title: 'Çekme isteği' }] }];
+    listOf(
+      connectorRow(),
+      connectorRow({ id: 'r3', name: 'Elsewhere' }, { connector_id: 'c7', trigger: 'issues', label: 'Tracker · Issues', events: [] }),
+    );
+    mount(panel());
+    await flush();
+    expect(text()).toContain('GitHub · Çekme isteği · pull_request.opened');
+    expect(text()).not.toContain('GitHub · Pull request');
+    expect(text()).toContain('Tracker · Issues · every event');
+  });
+
   it('marks a stored connector trigger that has no module to run it, and offers no Run now', async () => {
     catalog.available = false;
     listOf(connectorRow({ connector_available: false }));

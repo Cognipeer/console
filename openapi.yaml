@@ -16717,7 +16717,7 @@ components:
       in: query
       required: false
       description: >-
-        The language the Enterprise Connectors module writes in the texts it adds to a `connector` trigger (the label it stores and the `reason` of a subscription). Any other value, or none, leaves the module's default; nothing else about the answer changes.
+        The language the Enterprise Connectors module writes in the texts it adds to the subscription of a `connector` trigger (its `reason` and its `setup` steps). The `label` of the trigger is stored in English whatever this says. Any other value, or none, leaves the module's default; nothing else about the answer changes.
       schema:
         type: string
         enum: [tr, en]
@@ -30265,7 +30265,8 @@ components:
         label:
           type: string
           nullable: true
-          description: A short description of the binding for lists (connector name and trigger).
+          description: >-
+            A short description of the binding for lists: the package name and the title of the trigger, stored in English whatever the language of the call (`GitHub · Pull request`). A screen that knows the reader's language names the trigger from the connector catalog instead.
       required: [connector_id, trigger, params, schedule, events, filter, include_payload, subscription_id, package_id, kind, label]
     AgentTriggerConnectorRequest:
       type: object

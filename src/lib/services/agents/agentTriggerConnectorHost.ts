@@ -47,8 +47,8 @@ export function connectorScope(
 }
 
 /**
- * The reader's language for the texts the Connectors module writes (a label it stores, a reason it gives): the
- * `locale` query parameter, `tr` or `en`. Anything else is left out, and the module uses its default.
+ * The reader's language for the texts the Connectors module writes (the reason of a subscription, the setup steps of
+ * a webhook): the `locale` query parameter, `tr` or `en`. Anything else is left out, and the module uses its default.
  */
 export function connectorLocale(query: unknown): { locale?: 'tr' | 'en' } {
   const raw = typeof query === 'object' && query !== null ? (query as { locale?: unknown }).locale : undefined;
