@@ -84,8 +84,11 @@ export interface ConnectorTriggerStatusProps {
   agentId: string;
   triggerId: string;
   subscription: ConnectorSubscriptionWire | null;
-  /** The subscription changed (retried, rotated): reload the trigger. */
-  onChanged(): void;
+  /**
+   * The subscription changed (retried, rotated): reload the trigger. A retry or a rotation hands over the subscription its answer
+   * carried, for a host that wants to show that one until the reload is back.
+   */
+  onChanged(subscription?: ConnectorSubscriptionWire | null): void;
   /**
    * The secret a create or a rotation showed once, kept by the editor for as long as it is open (the card is
    * unmounted when the editor shows another tab). Absent: the card keeps what it shows for as long as it lives.

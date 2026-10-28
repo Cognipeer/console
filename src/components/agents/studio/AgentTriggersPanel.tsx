@@ -15,7 +15,7 @@
  * a retired vendor preset is marked and can be converted to a connector trigger.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActionIcon,
     Alert,
@@ -462,12 +462,26 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
         ...(problem?.field === 'connector' ? { 'connector.connector_id': t(problem.key) } : {}),
     };
 
+    /**
+     * Counts the reads of the trigger and the answers that outrank them. Reads are not answered in the order they are asked (a slow
+     * link, a retry and a rotation close together), and a save, a retry or a rotation answers with the subscription it left: only the
+     * newest of all of these may set the subscription, or a late read of an older row would take the one-time secret off the screen.
+     */
+    const reads = useRef(0);
+    /** The subscription a save, a retry or a rotation answered with: shown now, and no read that began before it may replace it. */
+    const showAnswered = (answered: ConnectorSubscriptionWire | null) => {
+        reads.current += 1;
+        setSubscription(answered);
+    };
+
     const loadSubscription = useCallback(async () => {
         if (!savedId) return;
+        const mine = ++reads.current;
         try {
             const res = await fetch(withTriggerLocale(`/api/agents/${agentId}/triggers/${savedId}`, locale), { cache: 'no-store' });
             if (!res.ok) return;
-            setSubscription(subscriptionOf(await res.json() as TriggerRow) ?? null);
+            const read = subscriptionOf(await res.json() as TriggerRow) ?? null;
+            if (mine === reads.current) setSubscription(read);
         } catch {
             // The status stays as it was; the next open or retry reads it again.
         }
@@ -507,7 +521,7 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                 // left empty is the package's own schedule now).
                 setForm(formFromTrigger(saved));
                 const answered = subscriptionOf(saved) ?? null;
-                setSubscription(answered);
+                showAnswered(answered);
                 // The answer that created the hook shows its secret once; a later read of the trigger does not.
                 if (answered?.secret) setReveal({ subscriptionId: answered.subscription_id, secret: answered.secret, previousValidUntil: answered.previous_secret_valid_until ?? null });
             }
@@ -821,7 +835,11 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                                     agentId={agentId}
                                     triggerId={trigger.id}
                                     subscription={subscription ?? null}
-                                    onChanged={() => void loadSubscription()}
+                                    onChanged={(answered?: ConnectorSubscriptionWire | null) => {
+                                        // A retry or a rotation hands over the subscription its answer carried: it shows now, and the read confirms it.
+                                        if (answered?.subscription_id) showAnswered(answered);
+                                        void loadSubscription();
+                                    }}
                                     reveal={currentReveal}
                                     onReveal={setReveal}
                                 />

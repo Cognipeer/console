@@ -60,7 +60,7 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
     ),
     ConnectorTriggerStatus: (props: {
       subscription: { status: string; subscription_id: string } | null;
-      onChanged: () => void;
+      onChanged: (answered?: unknown) => void;
       reveal?: { secret: string | null; previousValidUntil: number | null } | null;
       onReveal?: (reveal: unknown) => void;
     }) => el(
@@ -70,7 +70,12 @@ vi.mock('@/components/enterprise/EnterpriseConnectorTriggerUi', () => {
       el('span', null, `subscription:${props.subscription?.subscription_id ?? 'none'}`),
       el('span', null, `secret:${props.reveal?.secret ?? 'none'}`),
       el('span', null, `until:${props.reveal?.previousValidUntil ?? 'none'}`),
-      el('button', { type: 'button', onClick: props.onChanged }, 'Reload status'),
+      // Asked to read the trigger again, with nothing to hand over.
+      el('button', { type: 'button', onClick: () => props.onChanged() }, 'Reload status'),
+      // What the card hands over after a Retry or a rotation: the subscription its answer carried (or none).
+      el('button', { type: 'button', onClick: () => props.onChanged({ subscription_id: 'sub-retry', status: 'pending', kind: 'webhook', bindings: 1 }) }, 'Answer of a Retry'),
+      el('button', { type: 'button', onClick: () => props.onChanged({ subscription_id: 'sub-rotation', status: 'active', kind: 'webhook', bindings: 1 }) }, 'Answer of a rotation'),
+      el('button', { type: 'button', onClick: () => props.onChanged(null) }, 'Answer without a subscription'),
       // A rotation: the card hands the secret it was shown to the editor.
       el('button', {
         type: 'button',
@@ -185,6 +190,22 @@ const retiredRow = () => ({
 const listOf = (...rows: unknown[]) => routes.push((url, method) => (method === 'GET' && /\/triggers(?:\?|$)/.test(url) ? json({ data: rows }) : null));
 /** A subscription as the trigger routes answer it. */
 const subscriptionWire = (id: string, status = 'active', over: Record<string, unknown> = {}) => ({ subscription_id: id, status, kind: 'webhook', bindings: 1, ...over });
+/**
+ * Holds every read of the saved trigger `r2` until the test answers it, so the test chooses the order the answers come back in (a
+ * slow link). Each read is answered with the trigger as it stood when the test says so.
+ */
+const holdReads = () => {
+  const reads: Array<{ answer: (subscription: unknown) => void; fail: () => void }> = [];
+  routes.unshift((url, method) => (method === 'GET' && /\/triggers\/r2(?:\?|$)/.test(url)
+    ? new Promise<Response>((resolve) => reads.push({
+      answer: (subscription) => resolve({ ok: true, status: 200, json: () => Promise.resolve(connectorRow({ connector_subscription: subscription })) } as Response),
+      fail: () => resolve({ ok: false, status: 500, json: () => Promise.resolve({}) } as Response),
+    }))
+    : null));
+  return reads;
+};
+/** Lets a held read's answer (or failure) reach the screen. */
+const settle = async (step: () => void) => { await act(async () => { step(); for (let i = 0; i < 6; i += 1) await Promise.resolve(); }); };
 
 /** The sentences of the editor, as the reader's language has them. */
 const words = (locale: 'en' | 'tr' = 'en') => messages[locale].agents.triggers;
@@ -752,6 +773,106 @@ describe('a saved connector trigger', () => {
     expect(text()).toContain('events this trigger received from its connector');
     expect(text()).toContain('pull_request.opened');
     expect(text()).toContain('Accepted');
+  });
+});
+
+describe('a saved connector trigger whose reads of the subscription come back late', () => {
+  beforeEach(() => {
+    listOf(connectorRow());
+  });
+
+  it('keeps what a save answered, the one-time secret too, when the first read of the trigger is only answered afterwards', async () => {
+    const reads = holdReads();
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r2(?:\?|$)/.test(url)
+      ? json(connectorRow({ connector_subscription: subscriptionWire('sub2', 'manual', { secret: 'whsec_saved' }) }))
+      : null));
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    // On a slow link the editor does not know the subscription yet, and the form can be saved meanwhile.
+    expect(reads).toHaveLength(1);
+    expect(text()).toContain('status:none');
+    await click(button('Save trigger'));
+    expect(calls.some((call) => call.method === 'PATCH')).toBe(true);
+    expect(text()).toContain('subscription:sub2');
+    expect(text()).toContain('secret:whsec_saved');
+
+    // The read that began before the save is answered with the trigger as it was then: it does not outvote the save.
+    await settle(() => reads[0]!.answer(subscriptionWire('sub1', 'active')));
+    expect(text()).toContain('subscription:sub2');
+    expect(text()).toContain('status:manual');
+    expect(text()).toContain('secret:whsec_saved');
+    expect(text()).not.toContain('subscription:sub1');
+  });
+
+  it('still takes the first read when nothing has answered since', async () => {
+    const reads = holdReads();
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    await settle(() => reads[0]!.answer(subscriptionWire('sub1', 'active')));
+    expect(text()).toContain('subscription:sub1');
+    expect(text()).toContain('status:active');
+    expect(reads).toHaveLength(1);
+  });
+
+  it.each([
+    ['the read that followed the rotation comes back first', [1, 0]],
+    ['the reads come back in the order they were asked', [0, 1]],
+  ] as Array<[string, number[]]>)('shows the answer of a Retry and then of a rotation at once, and keeps the newer one when %s', async (_what, order) => {
+    const reads = holdReads();
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    await settle(() => reads[0]!.answer(subscriptionWire('sub1', 'failed')));
+    expect(text()).toContain('subscription:sub1');
+
+    // The card hands over what each answer carried: it shows before the read that confirms it is back.
+    await click(button('Answer of a Retry'));
+    expect(text()).toContain('subscription:sub-retry');
+    expect(text()).toContain('status:pending');
+    expect(reads).toHaveLength(2);
+    await click(button('Answer of a rotation'));
+    expect(text()).toContain('subscription:sub-rotation');
+    expect(text()).toContain('status:active');
+    expect(reads).toHaveLength(3);
+
+    // Two reads are on their way, each with the trigger as it stood when it was asked. Only the newer may be shown.
+    const stood = [subscriptionWire('sub-retry', 'manual'), subscriptionWire('sub-rotation', 'paused')];
+    for (const index of order) await settle(() => reads[index + 1]!.answer(stood[index]));
+    expect(text()).toContain('subscription:sub-rotation');
+    expect(text()).toContain('status:paused');
+    expect(text()).not.toContain('subscription:sub-retry');
+  });
+
+  it('keeps the subscription a Retry answered when the read that follows it fails', async () => {
+    const reads = holdReads();
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    await settle(() => reads[0]!.answer(subscriptionWire('sub1', 'failed')));
+    await click(button('Answer of a Retry'));
+    await settle(() => reads[1]!.fail());
+    expect(text()).toContain('subscription:sub-retry');
+    expect(text()).toContain('status:pending');
+  });
+
+  it('only reads the trigger again when the card hands over no subscription', async () => {
+    const reads = holdReads();
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    await settle(() => reads[0]!.answer(subscriptionWire('sub1', 'failed')));
+    await click(button('Answer without a subscription'));
+    expect(text()).toContain('status:failed');
+    expect(reads).toHaveLength(2);
+    await settle(() => reads[1]!.answer(subscriptionWire('sub1', 'active')));
+    expect(text()).toContain('status:active');
+
+    await click(button('Reload status'));
+    expect(reads).toHaveLength(3);
+    await settle(() => reads[2]!.answer(subscriptionWire('sub1', 'paused')));
+    expect(text()).toContain('status:paused');
   });
 });
 
