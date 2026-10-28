@@ -249,7 +249,9 @@ shown and never used to decide. The users, groups, tokens and directories an ent
 | Ingest, re-indexing, connector syncs | Every document |
 
 A flow runs as its owner, but no person is asking, so its agent steps and the tools they call read as no one in
-particular. The flow editor's playground reads as the person at the screen.
+particular. The flow editor's playground reads as the person at the screen. A reminder an agent sets wakes reading no
+more than the turn that set it: one set by an agent step of a flow, in a shared channel, or in a paused turn that
+someone else continued reads as no one.
 
 The people who administer a knowledge base (Knowledge Engine `admin` in its project) read every document in searches,
 answers, agent tools and document reads, unless the knowledge base turns that off with `"adminBypass": false`. In
