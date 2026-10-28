@@ -215,6 +215,23 @@ describe('a synced document put into its folder with its permissions', () => {
     expect(await reads('ada', doc)).toBe(false);
   });
 
+  it('moves with the source, though only admins change the structure of the knowledge base, and is read as its new folder is', async () => {
+    const [lib, fin] = await chainOf([['lib', 'Documents'], ['fin', 'Finance']]);
+    await folderAcl(lib, 'own', [`x:${DOMAIN}:u:u-bob`]);
+    await folderAcl(fin, 'own', [`x:${DOMAIN}:g:g-finance`]);
+    const doc = await newDoc();
+    await place(doc, lib, 'inherit');
+    expect([await reads('bob', doc), await reads('ada', doc)]).toEqual([true, false]);
+
+    await place(doc, fin, 'inherit');
+    expect(String((await db.findRagDocumentById(doc))!.folderId)).toBe(fin);
+    expect([await reads('bob', doc), await reads('ada', doc)], 'the nearest folder with its own permissions decides').toEqual([false, true]);
+
+    await place(doc, lib, 'inherit');
+    expect(String((await db.findRagDocumentById(doc))!.folderId)).toBe(lib);
+    expect([await reads('bob', doc), await reads('ada', doc)]).toEqual([true, false]);
+  });
+
   it('changes only through the source from then on', async () => {
     const doc = await newDoc();
     await place(doc, null, 'own', [`x:${DOMAIN}:all`]);

@@ -67,7 +67,7 @@ import { deleteFile, downloadFile, uploadFile } from '@/lib/services/files/fileS
 import type { IRagDocument } from '@/lib/database';
 import { VectorFilterError } from '@/lib/providers';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
-import { __resetRagModuleChangeListenerForTests, registerRagModuleChangeListener } from '@/enterprise/rag-module-changes';
+import { __resetRagModuleChangeListenerForTests, registerRagModuleChangeListener, type RagModuleChangeListener } from '@/enterprise/rag-module-changes';
 
 const DB_NAME = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
@@ -255,7 +255,7 @@ describe('RAG Service', () => {
     });
 
     it('tells the listener of module changes (enterprise connectors) when access control is switched, and only then', async () => {
-      const told = vi.fn(async () => undefined);
+      const told = vi.fn<RagModuleChangeListener>(async () => undefined);
       registerRagModuleChangeListener(told);
       try {
         const turn = async (from: boolean | undefined, to: boolean, request: Parameters<typeof updateRagModule>[2]) => {
@@ -352,7 +352,7 @@ describe('RAG Service', () => {
     });
 
     it('tells the listener of module changes that the module is gone, once it is', async () => {
-      const told = vi.fn(async () => undefined);
+      const told = vi.fn<RagModuleChangeListener>(async () => undefined);
       registerRagModuleChangeListener(told);
       try {
         await deleteRagModule(DB_NAME, TENANT_ID, PROJECT_ID, 'ragmod-1');
