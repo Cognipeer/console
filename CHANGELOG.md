@@ -739,10 +739,10 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ### Knowledge base access control
 
-- A knowledge base can decide who reads each of its documents. **Access control** is off by default and switched on
-  per knowledge base (`access.enabled` on the module; changing `access` needs Knowledge Engine `admin`). A knowledge
-  base that leaves it off, its documents and its API behave as before, and switching it on hides nothing by itself:
-  the top level stays open to everyone until its permissions are changed.
+- A knowledge base can decide who reads each of its documents. [Access control](docs/guide/rag.md#access-control) is
+  off by default and switched on per knowledge base (`access.enabled` on the module; changing `access` needs Knowledge
+  Engine `admin`). A knowledge base that leaves it off, its documents and its API behave as before, and switching it on
+  hides nothing by itself: the top level stays open to everyone until its permissions are changed.
 - Documents can be put in **folders**, with access control on or off: an ingest takes a `folderId`, or a `folderPath`
   that is created as needed, and dashboard routes create, rename, move and delete folders and move documents. With
   access control on, only the knowledge base's administrators change folders and move documents.
@@ -759,11 +759,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   (`access.adminBypass: false`). The management views always show them every document, so they can set permissions.
   `GET /rag/modules/:key/access/explain` tells them whether a person of the project can read a document, and which
   permission decides.
-- **External directories** map the people and groups of another system to console people. A person is matched by
-  e-mail address (against the directory's e-mail, then its sign-in name) or by another field, such as the person's
-  external id or a directory attribute; a console group whose external id is a directory group's id stands for that
-  group, and a person can also be linked by hand. Dashboard routes under `/rag/identity` list and edit the
-  directories, their people and the links.
+- [External directories](docs/guide/rag.md#external-directories) map the people and groups of another system to
+  console people. A person is matched by e-mail address (against the directory's e-mail, then its sign-in name) or by
+  another field, such as the person's external id or a directory attribute; a console group whose external id is a
+  directory group's id stands for that group, and a person can also be linked by hand. Dashboard routes under
+  `/rag/identity` list and edit the directories, their people and the links.
 - What is left behind by work that used documents not open to everyone is shown in full only to the person who asked
   and the administrators of those knowledge bases: sessions, background runs, reminders, traces, model logs, and
   evaluation, red-team and analysis results. Others see such a row without its content, opening it answers `403`
