@@ -73,6 +73,8 @@ export interface FakeConnectorHost {
   subscriptions: Map<string, Subscription>;
   /** Make the next call of a method throw (`attach`, `detach`, `view`, `sample`, `rotate`, `retry`). */
   failing: Set<string>;
+  /** Make a method throw this value instead of the plain error `failing` throws (a refusal with a status and a code, say). */
+  failWith: Map<string, unknown>;
   /** Make `attach` answer a `failed` view instead of `active`. */
   attachStatus: ConnectorTriggerView['status'];
   /** What `sample` answers; null = none. */
@@ -86,6 +88,7 @@ export function createFakeConnectorHost(): FakeConnectorHost {
   const scopes: ConnectorTriggerScope[] = [];
   const subscriptions = new Map<string, Subscription>();
   const failing = new Set<string>();
+  const failWith = new Map<string, unknown>();
   let counter = 0;
 
   const state: FakeConnectorHost = {
@@ -94,6 +97,7 @@ export function createFakeConnectorHost(): FakeConnectorHost {
     scopes,
     subscriptions,
     failing,
+    failWith,
     attachStatus: 'active',
     // The package's own flat event data (see githubConnectorFixture), with the repository and number the tests read.
     sampleEvent: { eventType: GITHUB_TRIGGERS.pull_request.sample.type, data: { ...GITHUB_TRIGGERS.pull_request.sample.data, repository: 'acme/api', number: 42 } },
@@ -102,6 +106,7 @@ export function createFakeConnectorHost(): FakeConnectorHost {
 
   const keyOf = (settings: AgentTriggerConnector) => JSON.stringify([settings.connectorId, settings.trigger, settings.params, settings.schedule ?? null]);
   const fail = (method: string) => {
+    if (failWith.has(method)) throw failWith.get(method);
     if (failing.has(method)) throw new Error(`${method} failed`);
   };
   const viewOf = (subscription: Subscription, secret?: string | null): ConnectorTriggerView => ({

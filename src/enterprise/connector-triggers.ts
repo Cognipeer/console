@@ -110,13 +110,17 @@ export interface ConnectorTriggerHost {
   view(scope: ConnectorTriggerScope, trigger: IAgentTrigger): Promise<ConnectorTriggerView | null>;
   /** A sample event for Run now and the Test tab (the package's declared sample). */
   sample(scope: ConnectorTriggerScope, trigger: IAgentTrigger): Promise<ConnectorTriggerSample | null>;
-  /** Webhook: a new signing secret (manual setup keeps the old one for `graceSeconds`; auto setup re-registers). */
+  /**
+   * Webhook: a new signing secret (manual setup keeps the old one for `graceSeconds`; auto setup re-registers). A call the
+   * module will not make throws an error with a 4xx `status` and a string `code` (the licence guard's 402 / 403
+   * `service_unavailable`): the API answers with that status, message and code. Any other throw is a 502.
+   */
   rotate(
     scope: ConnectorTriggerScope,
     trigger: IAgentTrigger,
     options: { graceSeconds: number },
   ): Promise<ConnectorTriggerView | null>;
-  /** Tries the vendor registration again, or resumes a paused poll. */
+  /** Tries the vendor registration again, or resumes a paused poll. Refuses like `rotate`. */
   retry(scope: ConnectorTriggerScope, trigger: IAgentTrigger): Promise<ConnectorTriggerView | null>;
 }
 

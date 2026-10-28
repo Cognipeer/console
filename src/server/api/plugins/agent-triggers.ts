@@ -66,6 +66,7 @@ import {
   CONNECTOR_TRIGGERS_UNAVAILABLE_MESSAGE,
   connectorLocale,
   connectorScope,
+  hostRefusal,
   parseConnectorWrite,
   sampleConnectorTrigger,
   toSubscriptionWire,
@@ -710,6 +711,28 @@ async function rotateTriggerWebhookSecret(request: FastifyRequest, reply: Fastif
 const connectorUnavailable = (reply: FastifyReply) =>
   reply.code(409).send(apiErrorBody('invalid_request_error', CONNECTOR_TRIGGERS_UNAVAILABLE_MESSAGE, 'connector_triggers_unavailable'));
 
+/** The envelope `type` that fits the status of a refusal the host gave (the licence guard's 402 / 403 are `permission_error`, like every service refusal). */
+function refusalType(status: number): string {
+  switch (status) {
+    case 401: return 'authentication_error';
+    case 402:
+    case 403: return 'permission_error';
+    case 404: return 'not_found_error';
+    case 413: return 'request_too_large';
+    case 429: return 'rate_limit_error';
+    default: return 'invalid_request_error';
+  }
+}
+
+/**
+ * Answers an error the host threw the way it meant it: a refusal (a 4xx status and a code, like the licence guard's 402 / 403
+ * `service_unavailable`) keeps its status, message and code; null for any other failure, which the caller answers as a 502.
+ */
+function sendHostRefusal(reply: FastifyReply, error: unknown) {
+  const refusal = hostRefusal(error);
+  return refusal ? reply.code(refusal.status).send(apiErrorBody(refusalType(refusal.status), refusal.message, refusal.code)) : null;
+}
+
 /** A connector trigger's webhook secret: a new one through the host (manual setup keeps the old one for the grace; auto setup re-registers). */
 async function rotateConnectorSecret(reply: FastifyReply, caller: TriggerCaller, trigger: IAgentTrigger, grace: number) {
   const host = getConnectorTriggerHost();
@@ -719,7 +742,8 @@ async function rotateConnectorSecret(reply: FastifyReply, caller: TriggerCaller,
     view = await host.rotate(connectorScope(caller.scope, caller.userId), trigger, { graceSeconds: grace });
   } catch (error) {
     logger.warn('Rotating a connector trigger secret failed', { triggerId: String(trigger._id), error: error instanceof Error ? error.message : String(error) });
-    return reply.code(502).send(apiErrorBody('api_error', 'The connector could not rotate the secret; try again.', 'connector_rotate_failed'));
+    return sendHostRefusal(reply, error)
+      ?? reply.code(502).send(apiErrorBody('api_error', 'The connector could not rotate the secret; try again.', 'connector_rotate_failed'));
   }
   if (!view) return reply.code(400).send(invalidRequestErrorBody('This connector trigger has no webhook secret to rotate', 'connector_no_secret'));
   const wire = toSubscriptionWire(view);
@@ -747,7 +771,8 @@ async function retryConnectorTrigger(request: FastifyRequest, reply: FastifyRepl
     view = await host.retry(connectorScope(caller.scope, caller.userId), trigger);
   } catch (error) {
     logger.warn('Retrying a connector trigger failed', { triggerId: String(trigger._id), error: error instanceof Error ? error.message : String(error) });
-    return reply.code(502).send(apiErrorBody('api_error', 'The connector could not be reached; try again.', 'connector_retry_failed'));
+    return sendHostRefusal(reply, error)
+      ?? reply.code(502).send(apiErrorBody('api_error', 'The connector could not be reached; try again.', 'connector_retry_failed'));
   }
   if (!view) return reply.code(409).send(invalidRequestErrorBody('This connector trigger has no subscription to retry', 'connector_subscription_missing'));
   return reply.code(200).send(triggerAnswer(trigger, undefined, toSubscriptionWire(view)));

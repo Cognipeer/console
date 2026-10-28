@@ -367,6 +367,57 @@ describe.each([
       expect(json(await call('GET', `/${created.id}`)).connector_subscription.previous_secret_valid_until).toBeNull();
     });
 
+    // The Connectors module throws its ConnectorError for a call it will not make: a 4xx status and a code (the licence guard: 402 / 403).
+    const refusal = (status: number, code: string, message: string) => Object.assign(new Error(message), { status, code });
+
+    describe.each([
+      ['retry', (id: string) => call('POST', `/${id}/connector/retry`), 'connector_retry_failed'],
+      ['rotate-secret', (id: string) => call('POST', `/${id}/webhook/rotate-secret`, {}), 'connector_rotate_failed'],
+    ] as const)('%s when the host refuses', (method, send, failedCode) => {
+      const hostMethod = method === 'retry' ? 'retry' : 'rotate';
+      let id = '';
+      beforeEach(async () => {
+        id = json(await call('POST', '', body())).id;
+      });
+
+      it.each([
+        [402, 'permission_error', 'service_unavailable', 'Connectors require an active ENTERPRISE license.'],
+        [403, 'permission_error', 'service_unavailable', 'Connector triggers start agent runs, and the Agents service is off for this workspace.'],
+        [409, 'invalid_request_error', 'account_required', 'The connector "GitHub" has no connected account'],
+        [404, 'not_found_error', 'NOT_FOUND', 'Connector not found'],
+        [429, 'rate_limit_error', 'rate_limited', 'Too many tries; wait a minute'],
+        [400, 'invalid_request_error', 'credential_rejected', 'GitHub refused the credential'],
+      ])('answers a %i with its own message and code as a %s', async (status, type, code, message) => {
+        fake.failWith.set(hostMethod, refusal(status, code, message));
+        const res = await send(id);
+        expect(res.statusCode, res.body).toBe(status);
+        expect(json(res)).toEqual({ error: { type, message, code } });
+        expect(shapeProblems(json(res), 'Error')).toEqual([]);
+        expect(fake.calls.at(-1)).toBe(`${hostMethod}:${id}`);
+      });
+
+      it.each([
+        ['an error without a status', new Error('boom')],
+        ['a 500 with a code', refusal(500, 'internal_error', 'boom')],
+        ['a 502 with a code', refusal(502, 'vendor_unavailable', 'boom')],
+        ['a 503 with a code', refusal(503, 'connector_unavailable', 'boom')],
+        ['a status below 400 with a code', refusal(399, 'redirected', 'boom')],
+        ['a 4xx status without a code', Object.assign(new Error('boom'), { status: 402 })],
+        ['a 4xx status with an empty code', refusal(402, '', 'boom')],
+        ['a 4xx status with a code that is a number', Object.assign(new Error('boom'), { status: 402, code: 11000 })],
+        ['a status that is a string', Object.assign(new Error('boom'), { status: '402', code: 'service_unavailable' })],
+        ['a status that is not a whole number', refusal(402.5, 'service_unavailable', 'boom')],
+        ['a thrown string', 'boom'],
+        ['a thrown null', null],
+      ])('stays a 502 for %s, and says nothing of what the host said', async (_what, thrown) => {
+        fake.failWith.set(hostMethod, thrown);
+        const res = await send(id);
+        expect(res.statusCode, res.body).toBe(502);
+        expect(json(res)).toEqual({ error: expect.objectContaining({ type: 'api_error', code: failedCode }) });
+        expect(res.body).not.toContain('boom');
+      });
+    });
+
     it('tells the Connectors module the reader\'s language (?locale=tr|en) on every call it makes for the request', async () => {
       const localesOf = async (run: () => Promise<unknown>) => {
         fake.scopes.length = 0;

@@ -3305,6 +3305,10 @@ paths:
         secret. The answer carries `connector_subscription` (with the new `secret` in manual mode and
         `previous_secret_valid_until`). A poll trigger has no secret (`400 connector_no_secret`); without the module
         it is `409 connector_triggers_unavailable`.
+
+        While the Connectors licence or switch, or the Agents service, is off the module changes no secret: the call
+        is `402` or `403` with `error.code` `service_unavailable`. A call the module refuses for another reason keeps the
+        status, message and code it gave (a `4xx`); any other failure of the module is `502 connector_rotate_failed`.
       operationId: rotateAgentTriggerWebhookSecret
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
@@ -3356,12 +3360,33 @@ paths:
           $ref: '#/components/responses/TriggerInvalid'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: '`service_unavailable` (connector trigger): the Connectors licence is not active for this workspace, or the Connectors or Tools service is not in its license. Nothing is changed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: permission_error
+                  message: Connectors require an active ENTERPRISE license.
+                  code: service_unavailable
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: >-
+            `service_unavailable` (connector trigger): the Connectors, Tools or Agents service is switched off on this deployment. Also the permission gate (`Forbidden`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: permission_error
+                  message: Connector triggers start agent runs, and the Agents service is off for this workspace.
+                  code: service_unavailable
         '404':
           $ref: '#/components/responses/TriggerNotFound'
         '409':
-          description: '`connector_triggers_unavailable`: a connector trigger and no Connectors module.'
+          description: '`connector_triggers_unavailable`: a connector trigger and no Connectors module. Also a refusal of the module that is a conflict (for example `not_active`).'
           content:
             application/json:
               schema:
@@ -3373,7 +3398,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '502':
-          description: '`connector_rotate_failed`: the Connectors module could not rotate the secret (connector trigger).'
+          description: '`connector_rotate_failed`: the Connectors module failed and could not rotate the secret (connector trigger).'
           content:
             application/json:
               schema:
@@ -3393,7 +3418,12 @@ paths:
 
         A trigger of another type is `400 trigger_not_connector`. Without the Enterprise Connectors module it is
         `409 connector_triggers_unavailable`; a trigger without a subscription is
-        `409 connector_subscription_missing`; a module failure is `502 connector_retry_failed`.
+        `409 connector_subscription_missing`.
+
+        While the Connectors licence or switch, or the Agents service, is off the module registers and resumes
+        nothing: the call is `402` or `403` with `error.code` `service_unavailable`. A call the module refuses for
+        another reason keeps the status, message and code it gave (a `4xx`, for example `409 account_required` when the
+        connector has no connected account); any other failure of the module is `502 connector_retry_failed`.
       operationId: retryAgentTriggerConnector
       parameters:
         - $ref: '#/components/parameters/TriggerAgentKey'
@@ -3410,18 +3440,39 @@ paths:
           $ref: '#/components/responses/TriggerInvalid'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: '`service_unavailable`: the Connectors licence is not active for this workspace, or the Connectors or Tools service is not in its license. Nothing is registered or resumed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: permission_error
+                  message: Connectors require an active ENTERPRISE license.
+                  code: service_unavailable
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: >-
+            `service_unavailable`: the Connectors, Tools or Agents service is switched off on this deployment. Also the permission gate (`Forbidden`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: permission_error
+                  message: Connector triggers start agent runs, and the Agents service is off for this workspace.
+                  code: service_unavailable
         '404':
           $ref: '#/components/responses/TriggerNotFound'
         '409':
-          description: '`connector_triggers_unavailable` (no Connectors module) or `connector_subscription_missing`.'
+          description: '`connector_triggers_unavailable` (no Connectors module), `connector_subscription_missing`, or a refusal of the module that is a conflict (`account_required`: the connector has no connected account; `not_active`: it is disabled or its package is gone).'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '502':
-          description: '`connector_retry_failed`: the Connectors module could not be reached.'
+          description: '`connector_retry_failed`: the Connectors module failed or could not be reached.'
           content:
             application/json:
               schema:

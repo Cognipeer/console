@@ -57,6 +57,26 @@ export function connectorLocale(query: unknown): { locale?: 'tr' | 'en' } {
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+/** What a host refused with: the whole 4xx status, the code and the message it gave. */
+export interface HostRefusal {
+  status: number;
+  code: string;
+  message: string;
+}
+
+/**
+ * The refusal in an error the host threw, or null. The Connectors module throws its `ConnectorError` (a numeric `status`
+ * and a string `code`) for a call it will not make, such as the licence guard's 402 / 403 `service_unavailable`; core reads
+ * that shape, so it needs no import of the module. An error without a 4xx status and a code is a failure of the host.
+ */
+export function hostRefusal(error: unknown): HostRefusal | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const { status, code, message } = error as { status?: unknown; code?: unknown; message?: unknown };
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 400 || status > 499) return null;
+  if (typeof code !== 'string' || code === '') return null;
+  return { status, code, message: typeof message === 'string' && message !== '' ? message : code };
+}
+
 /** What a failed `attach` leaves the editor with: the trigger is stored, the subscription is not usable yet. */
 function failedView(trigger: IAgentTrigger & { type: 'connector' }): ConnectorTriggerView {
   return {
