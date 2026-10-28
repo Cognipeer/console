@@ -26,7 +26,7 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 import { isSyntheticActor } from '@/lib/services/agents/syntheticActor';
 
-export type KbAnonymousReason = 'trigger' | 'public' | 'shared' | 'synthetic' | 'unknown';
+export type KbAnonymousReason = 'trigger' | 'flow' | 'public' | 'shared' | 'synthetic' | 'unknown';
 
 export type KbCaller =
   | { kind: 'person'; userId: string; tokenId?: string; delegated?: boolean }
@@ -75,13 +75,16 @@ export function kbCallerFromApiToken(ctx: Pick<ApiTokenContext, 'tokenRecord' | 
 /**
  * The runtime context of a run (agents, MCP, realtime, portal, messaging,
  * reminders, queued runs). A run a trigger started has no person, whoever owns
- * the trigger.
+ * the trigger. An agent step of a flow has none either: it runs as the flow's
+ * owner, unattended or for whoever started the flow, and its output is kept on
+ * the flow run and passed on to the next steps.
  */
 export function kbCallerFromRuntime(
   ctx: Pick<AgentRuntimeContext, 'userId' | 'tokenId' | 'source' | 'via' | 'kbReader'> | null | undefined,
 ): KbCaller {
   if (!ctx) return anonymousKbCaller('unknown');
   if (ctx.source === 'trigger') return anonymousKbCaller('trigger');
+  if (ctx.source === 'flow') return anonymousKbCaller('flow');
   if (ctx.kbReader === 'anonymous') return anonymousKbCaller('shared');
   const userId = realUserId(ctx.userId);
   if (!userId) {

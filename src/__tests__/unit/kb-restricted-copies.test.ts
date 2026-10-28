@@ -207,6 +207,18 @@ describe('a run that reads as no one in particular (a shared channel)', () => {
   });
 });
 
+describe('an agent step of a flow', () => {
+  it('reads as no one, though it runs as the flow\'s owner, and its MCP calls too', () => {
+    expect(kbCallerFromRuntime({ userId: 'owner-1', source: 'flow' })).toEqual({ kind: 'anonymous', reason: 'flow' });
+    expect(kbCallerFromRuntime({ userId: 'owner-1', tokenId: 't1', source: 'flow' })).toEqual({ kind: 'anonymous', reason: 'flow' });
+    const caller = consoleIdentityCallerOf({ userId: 'owner-1', source: 'flow' });
+    expect(caller).toMatchObject({ userId: 'owner-1', kbReader: 'anonymous' });
+    expect(kbCallerFromIdentity(caller)).toEqual({ kind: 'anonymous', reason: 'shared' });
+    // the editor's playground runs the same agent for the person at the screen
+    expect(kbCallerFromRuntime({ userId: 'u1', source: 'playground' })).toEqual({ kind: 'person', userId: 'u1' });
+  });
+});
+
 describe('memory written by marked work', () => {
   const ctx = { tenantDbName: 't', tenantId: 'tid', projectId: 'p1', storeKey: 'mem', scopeIds: { session: 's1', user: 'u1', workspace: 'agent-1' } };
   const fact = { key: 'k', value: 'band A pays 100', sourceTurn: 1, confidence: 0.9, obsolete: false, tags: [] };

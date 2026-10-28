@@ -239,7 +239,8 @@ export function consoleIdentityCallerOf(
     ...(source ? { source } : {}),
     ...(extra.agentKey ? { agentKey: extra.agentKey } : {}),
     ...(extra.projectId ? { projectId: extra.projectId } : {}),
-    ...(runtimeContext?.kbReader === 'anonymous' ? { kbReader: 'anonymous' as const } : {}),
+    // A flow's agent step reads knowledge as no one (rag/access/caller.ts); its MCP calls do the same.
+    ...(runtimeContext?.kbReader === 'anonymous' || runtimeContext?.source === 'flow' ? { kbReader: 'anonymous' as const } : {}),
   };
 }
 
