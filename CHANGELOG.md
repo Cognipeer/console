@@ -242,6 +242,16 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
   breaks).
 
+### Text recognition (OCR) screens
+
+- The OCR settings have screens: a shared form (off, scanned pages only, or every page; the project's OCR or vision
+  model or the local engine; languages; page cap; also read images) in the Document Store upload and the Markdown tab
+  of a file ("Convert again with text recognition"), the Knowledge Engine create and edit screens (an Extraction
+  section after Chunking), the agent's Files settings (Text extraction (OCR)) and the crawler's Content extraction.
+  A converted file shows how many pages were read ("OCR · 3/5 pages"), a Knowledge Engine document shows the progress
+  of a file that is still being read, and a document with a stored original has a Re-extract action.
+- Saving a crawler's HTTP settings no longer drops an OCR option that was set through the API.
+
 ### Knowledge Engine
 
 - **OCR per knowledge base.** A module gets an optional `extraction.ocr` setting (`mode` `auto` or `always`, an optional

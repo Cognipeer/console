@@ -23,6 +23,7 @@ import { filesCreateTr } from './filesCreate.tr';
 import { filesDetailTr } from './filesDetail.tr';
 import { filesListTr } from './filesList.tr';
 import { filesUploadTr } from './filesUpload.tr';
+import { ocrSettingsTr } from './ocrSettings.tr';
 import { healthDigestTr } from './healthDigest.tr';
 import { consoleIdentityTr } from './consoleIdentity.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
@@ -35,6 +36,7 @@ export const tr: typeof en = {
   ...en,
   // Projects list / create / detail / limits / settings (projectsAccess.tr.ts).
   ...projectsAccessTr,
+  ocrSettings: ocrSettingsTr,
   common: {
     ...en.common,
     confirm: {
@@ -3589,6 +3591,12 @@ export const tr: typeof en = {
       cfgReadPageDescription: 'Sayfa sayfa okurken agent’ın her okumada dosyadan aldığı miktar.',
       cfgAttachNew: 'Yeni yüklemeleri sonraki mesajla gönder',
       cfgAttachNewDescription: 'Oturuma yüklenmiş ve henüz hiçbir mesajın taşımadığı dosya, sonraki mesajla birlikte gider. Kapalıysa yalnızca mesajın belirttiği dosyalar gönderilir.',
+      ocrTitle: 'Metin çıkarma (OCR)',
+      ocrDescription: 'Dosya yüklendiğinde taranmış PDF’lerin ve, “Resimleri de oku” açıksa resimlerin metnini okur. Metin dosyanın yanında saklanır ve agent onu diğer belgeler gibi okur.',
+      ocrImagesNote: 'Resim, görsel alabilen bir modele yine resim olarak gösterilir. Model görsel alamıyorsa ya da hiçbir modelin kabul etmediği bir biçimse, tanınan metin onun yerine geçer.',
+      ocrModelInvalid: 'Metin çıkarma: model adı geçerli değil. Bir model ya da yerel motoru seçin.',
+      ocrLanguagesInvalid: 'Metin çıkarma: tr, en veya de gibi dil kodları kullanın.',
+      ocrPagesInvalid: 'Metin çıkarma: en çok sayfa sayısı en az 1 olan bir tam sayı olmalı.',
       imagesTitle: 'Görseller',
       cfgMaxImages: 'Model isteği başına görsel sayısı',
       cfgMaxImagesDescription: 'Görseller modele referans olarak gider ve model çağrılırken bucket’tan okunur. Bu sayının ötesinde en eskiler, dosyayı adıyla anan bir nota dönüşür; agent bunlara yeniden bakabilir.',

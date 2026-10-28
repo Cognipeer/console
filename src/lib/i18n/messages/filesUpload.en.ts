@@ -82,6 +82,8 @@ export const filesUploadEn = {
       'Works for PDF, Word, PowerPoint (.pptx), Excel, HTML and text files such as CSV and JSON. Other files, such as images, are stored without a Markdown copy. A Markdown copy is stored next to the file it is made from; the original is never changed.',
     background:
       'Conversion runs in the background after the upload. Its status shows in the file list and in the file details, where a failed conversion can be retried.',
+    ocrHint:
+      'Text recognition reads scanned PDFs and pictures. It runs in the background with the conversion; the file list and the file details say how many pages were read.',
     advanced: 'Advanced',
     contentType: 'Content type',
     contentTypeHint: 'Only for a single file. Leave empty to use the type the browser detected.',
@@ -93,6 +95,7 @@ export const filesUploadEn = {
     totalSize: 'Total size',
     destination: 'Destination',
     markdown: 'Markdown copy',
+    ocr: 'Text recognition',
     on: 'On',
     off: 'Off',
     preflight: 'Pre-flight',

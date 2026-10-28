@@ -13,6 +13,7 @@ import {
   Select,
   Stack,
   Switch,
+  Text,
   Textarea,
   TextInput,
   Tooltip,
@@ -38,6 +39,9 @@ import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import RunDetailModal from '@/components/crawler/RunDetailModal';
+import { crawlerOcrToSettings, settingsToCrawlerOcr } from '@/components/crawler/crawlerOcr';
+import OcrSettingsFields from '@/components/extraction/OcrSettingsFields';
+import type { OcrSettings } from '@/components/extraction/ocrForm';
 import type {
   CrawlerView,
   CrawlJobView,
@@ -76,6 +80,8 @@ interface HttpForm {
   contentSelector: string;
   removeSelectors: string;
   maxBodyChars: number;
+  /** OCR for files the crawler downloads (`markdownOptions.ocr`); undefined = off. */
+  ocr: OcrSettings | undefined;
 }
 
 interface IntegrationForm {
@@ -160,6 +166,7 @@ export default function CrawlerDetailPage() {
       contentSelector: '',
       removeSelectors: '',
       maxBodyChars: 0,
+      ocr: undefined,
     },
   });
 
@@ -231,6 +238,7 @@ export default function CrawlerDetailPage() {
         contentSelector: c.markdownOptions?.contentSelector ?? '',
         removeSelectors: (c.markdownOptions?.removeSelectors ?? []).join('\n'),
         maxBodyChars: c.markdownOptions?.maxBodyChars ?? 0,
+        ocr: crawlerOcrToSettings(c.markdownOptions?.ocr),
       });
 
       intForm.setValues({
@@ -444,6 +452,7 @@ export default function CrawlerDetailPage() {
         };
       }
 
+      const ocr = settingsToCrawlerOcr(values.ocr);
       const markdownOptions: Record<string, unknown> = {
         outputFormat: values.outputFormat,
         cleanup: values.cleanup,
@@ -454,6 +463,8 @@ export default function CrawlerDetailPage() {
         removeSelectors: values.removeSelectors
           .split('\n').map((s) => s.trim()).filter(Boolean),
         maxBodyChars: values.maxBodyChars > 0 ? values.maxBodyChars : undefined,
+        // Part of the replaced object: leaving it out would wipe an OCR setting made through the API.
+        ...(ocr ? { ocr } : {}),
       };
 
       const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, {
@@ -1215,6 +1226,16 @@ Content-Type: application/json
                   max={5000000}
                   {...httpForm.getInputProps('maxBodyChars')}
                 />
+                <OcrSettingsFields
+                  english
+                  showImages
+                  value={httpForm.values.ocr}
+                  onChange={(next) => httpForm.setFieldValue('ocr', next)}
+                />
+                <Text size="xs" c="dimmed">
+                  Applies to PDFs and images the crawler downloads. Scanned pages are read with the engine chosen
+                  above; without OCR only the text a file already contains is kept.
+                </Text>
                 <Group justify="flex-end">
                   <Button type="submit" loading={savingHttp}>Save HTTP settings</Button>
                 </Group>

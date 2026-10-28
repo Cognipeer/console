@@ -34,6 +34,7 @@ import {
 } from '@mantine/core';
 import type { ComboboxItem, ComboboxLikeRenderOptionInput } from '@mantine/core';
 import { IconAlertTriangle, IconCheck, IconFolder, IconInfoCircle } from '@tabler/icons-react';
+import OcrSettingsFields from '@/components/extraction/OcrSettingsFields';
 import { useTranslations } from '@/lib/i18n';
 import { FILE_OUTPUT_EXTENSIONS, SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
 import { ConfigBlock } from './ConfigSection';
@@ -53,9 +54,11 @@ import {
     MIME_TYPE_SUGGESTIONS,
     mbToBytes,
     normalizeFolder,
+    ocrIssue,
     OUTPUTS_LIMITS,
     outputsEnabled,
     patchAttachments,
+    patchOcr,
     patchOutputs,
     type AttachmentBucketOption,
     type AttachmentsSettings,
@@ -399,6 +402,21 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                                         checked={attachesNewUploads(value)}
                                         onChange={(event) => set({ attachNewUploads: event.currentTarget.checked ? undefined : false })}
                                     />
+                                </Stack>
+                            </ConfigBlock>
+
+                            <ConfigBlock title={t('ocrTitle')}>
+                                <Stack gap="sm">
+                                    <Text size="xs" c="dimmed">{t('ocrDescription')}</Text>
+                                    <OcrSettingsFields
+                                        value={current.ocr}
+                                        onChange={(next) => onChange(patchOcr(value, next))}
+                                        showImages
+                                        modelError={showErrors && ocrIssue(value) === 'model' ? t('ocrModelInvalid') : undefined}
+                                    />
+                                    {current.ocr && current.ocr.mode !== 'off' && current.ocr.images ? (
+                                        <Text size="xs" c="dimmed">{t('ocrImagesNote')}</Text>
+                                    ) : null}
                                 </Stack>
                             </ConfigBlock>
 

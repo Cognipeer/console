@@ -57,6 +57,8 @@ export const filesDetailEn = {
       'This conversion has not finished for a while. If the server was restarted since, the job may have been lost. Convert again to start it anew.',
     keptCopy: 'The earlier Markdown copy is still here.',
     convertAgain: 'Convert again',
+    ocrOptions: 'Text recognition options',
+    ocrAgain: 'Convert again with text recognition…',
     noneHint: 'This file has no Markdown copy.',
     retry: 'Retry conversion',
     convert: 'Convert to Markdown',
