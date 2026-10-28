@@ -198,8 +198,8 @@ A cron a connector schedule cannot take is `400` on `connector.schedule.cron`, a
 | The cron | The message of the `400` |
 | --- | --- |
 | Is not five fields: a macro (`@daily`), a seconds field (`0 0 9 * * *`), four, six or seven fields, words | `cron must be a five-field cron expression (minute hour day-of-month month day-of-week)` |
-| Has five fields and an item of another dialect: `L`, `W`, `#` or `?` (`0 9 L * *`, `0 9 15W * *`, `0 9 * * 5#2`, `0 9 ? * 1`) | `cron uses syntax connector schedules do not support (L, W, # or ?); use numbers, ranges, lists, steps and month or weekday names` |
-| Has a value that is out of range or not a name (`60 * * * *`, `0 9 * * 8`, `*/0 * * * *`, `0 9 * * 5-1`, `0 9 * * funday`) | `cron has a value that is out of range or not a name: minute 0-59, hour 0-23, day 1-31, month 1-12 or jan-dec, weekday 0-7 or sun-sat` |
+| Has five fields and an item of another dialect: `L`, `LW`, a number followed by `L` or `W`, or an item that holds `#` or `?` (`0 9 L * *`, `0 9 15W * *`, `0 9 * * 5L`, `0 9 * * 5#2`, `0 9 ? * 1`) | `cron uses syntax connector schedules do not support (L, W, # or ?); use numbers, ranges, lists, steps and month or weekday names` |
+| Has a value that is out of range or not a name, including any other word that is no month or weekday name (`60 * * * *`, `0 9 * * 8`, `*/0 * * * *`, `0 9 * * 5-1`, `0 9 * * funday`, `0 9 * * sunday`, `0 9 W * *`) | `cron has a value that is out of range or not a name: minute 0-59, hour 0-23, day 1-31, month 1-12 or jan-dec, weekday 0-7 or sun-sat` |
 | Is read, but runs more often than the package allows | `cron runs every N minutes, below the M minutes this trigger allows` (N is its shortest gap, M the package's minimum); a gap of one minute reads `cron runs every minute, below the M minutes this trigger allows` |
 | Is read, but has no run in the timezone (`0 0 31 2 *`, the 31st of February) | `cron cannot be evaluated in this timezone` |
 

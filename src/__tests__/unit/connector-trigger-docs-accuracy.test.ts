@@ -384,7 +384,7 @@ describe('the triggers guide, the schedule of a poll', () => {
 
   it('gives examples for each class, and says the Studio field names the same problems', () => {
     const text = section();
-    for (const example of ['`@daily`', '`0 0 9 * * *`', '`0 9 L * *`', '`0 9 15W * *`', '`0 9 * * 5#2`', '`0 9 ? * 1`', '`60 * * * *`', '`*/0 * * * *`', '`0 9 * * funday`', '`0 0 31 2 *`']) {
+    for (const example of ['`@daily`', '`0 0 9 * * *`', '`0 9 L * *`', '`0 9 15W * *`', '`0 9 * * 5L`', '`0 9 * * 5#2`', '`0 9 ? * 1`', '`60 * * * *`', '`*/0 * * * *`', '`0 9 * * funday`', '`0 9 * * sunday`', '`0 9 W * *`', '`0 0 31 2 *`']) {
       expect(text, example).toContain(example);
     }
     expect(text).toContain('Studio\'s schedule field shows the same problems while you type');
