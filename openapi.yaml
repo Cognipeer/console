@@ -2809,7 +2809,7 @@ paths:
         registered again with the new secret (or when the Connectors module could not bind the stored trigger).
         The event's `payload` is the data the package shapes, not the vendor's own request body (for the GitHub
         package `payload.repository` is the text `owner/name`, `payload.draft`, `payload.number`,
-        `payload.baseBranch` ...); the connector page lists each trigger's fields and a sample.
+        `payload.baseBranch` ...); the Studio Test tab of a saved connector trigger shows its sample event.
         Without the module a connector trigger is `400 invalid_trigger` (field `type`).
 
         A webhook trigger answers `201` with the generated secret in `webhook.secret`: it is shown only in this
