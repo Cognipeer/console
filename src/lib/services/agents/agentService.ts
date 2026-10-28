@@ -1215,6 +1215,9 @@ async function buildKnowledgeTools(
                     topK: opts.topK ?? (opts.suffix ? undefined : 5),
                     ...(opts.minScore !== undefined ? { minScore: opts.minScore } : {}),
                     filter: mergeKnowledgeFilters(opts.filter, args.filter),
+                    // The model fills `args.filter`; it may not send provider-native filters.
+                    // The binding's own filter alone stays trusted.
+                    ...(args.filter && Object.keys(args.filter).length > 0 ? { filterSource: 'untrusted' as const } : {}),
                 }, { signal: currentTurnSignal() });
                 return result.matches
                     .filter((m) => m.content)

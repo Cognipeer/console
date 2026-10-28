@@ -141,6 +141,21 @@ describe('token MCP routes', () => {
       const response = await post(url, { jsonrpc: '2.0', id: 1, method: 'm'.repeat(5000) });
       expect(JSON.parse(response.body).error.message.length).toBeLessThan(200);
     });
+
+    it('refuses an id that is not a string, a number or null', async () => {
+      const response = await post(url, { jsonrpc: '2.0', id: { a: 1 }, method: 'ping' });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body)).toMatchObject({ id: null, error: { code: -32600 } });
+    });
+
+    it('refuses a page on an origin that is not allowed, and serves callers that send none', async () => {
+      const foreign = await app.inject({
+        method: 'POST', url, headers: { ...headers, origin: 'https://other-site.example.net' }, payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+      });
+      expect(foreign.statusCode).toBe(403);
+      expect(JSON.parse(foreign.body).error).toEqual({ code: -32600, message: 'Origin not allowed' });
+      expect((await post(url, { jsonrpc: '2.0', id: 1, method: 'ping' })).statusCode).toBe(200);
+    });
   });
 
   describe('instructions', () => {

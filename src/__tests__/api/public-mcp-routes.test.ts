@@ -53,7 +53,7 @@ function server(overrides: Partial<IMcpServer> = {}): IMcpServer {
     sourceType: 'openapi',
     endpointSlug: SLUG,
     exposure: { protocols: ['streamable-http', 'sse'], accessMode: 'public' },
-    tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object', properties: {} } }],
+    tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }],
     ...overrides,
   } as unknown as IMcpServer;
 }
@@ -520,6 +520,77 @@ describe('public MCP routes', () => {
       const response = await post(callTool('echo', { text: 'hi' }));
       expect(json(response).result).toEqual({ content: [{ text: '{"echoed":true}', type: 'text' }], isError: false });
       expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { text: 'hi' });
+    });
+  });
+
+  describe('browser origins', () => {
+    it('refuses a page on another origin with 403 before anything runs', async () => {
+      await start({ APP_URL: 'https://console.example.com' });
+      const response = await post(callTool(), { headers: { origin: 'https://other-site.example.net' } });
+      expect(response.statusCode).toBe(403);
+      expect(json(response)).toEqual({ jsonrpc: '2.0', error: { code: -32600, message: 'Origin not allowed' } });
+      expect(db.findTenantById).not.toHaveBeenCalled();
+      expect(executeMcpTool).not.toHaveBeenCalled();
+      const stream = await app.inject({ method: 'GET', url: `${BASE}/sse`, headers: { origin: 'null' } });
+      expect(stream.statusCode).toBe(403);
+    });
+
+    it('serves callers without an Origin, the app itself and MCP_ALLOWED_ORIGINS', async () => {
+      await start({ APP_URL: 'https://console.example.com/', MCP_ALLOWED_ORIGINS: 'https://inspector.example.org,*.tools.example.com' });
+      expect((await post(rpc('ping'))).statusCode).toBe(200);
+      for (const origin of ['https://console.example.com', 'https://inspector.example.org', 'https://a.tools.example.com']) {
+        expect((await post(rpc('ping'), { headers: { origin } })).statusCode).toBe(200);
+      }
+      expect((await post(rpc('ping'), { headers: { origin: 'https://inspector.example.org.evil.test' } })).statusCode).toBe(403);
+    });
+  });
+
+  describe('what a request may name and carry', () => {
+    it('refuses an id that is not a string, a number or null', async () => {
+      await start();
+      for (const id of [{ a: 1 }, [1], true, 'i'.repeat(257)]) {
+        const response = await post(rpc('ping', undefined, id));
+        expect(response.statusCode).toBe(400);
+        expect(json(response)).toMatchObject({ id: null, error: { code: -32600 } });
+      }
+      expect(json(await post(rpc('ping', undefined, 'req-1'))).id).toBe('req-1');
+    });
+
+    it('answers initialize with the configured server name', async () => {
+      await start();
+      expect((json(await post(rpc('initialize'))).result as { serverInfo?: unknown }).serverInfo)
+        .toEqual({ name: 'cognipeer-mcp-gateway', version: '1.0.0' });
+      await app.close();
+      await start({ MCP_SERVER_INFO_NAME: 'acme-genai' });
+      expect((json(await post(rpc('initialize'))).result as { serverInfo?: { name: string } }).serverInfo?.name)
+        .toBe('acme-genai');
+    });
+
+    it('drops arguments the tool does not declare', async () => {
+      await start();
+      await post(callTool('echo', { text: 'hi', extra: { nested: true } }));
+      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { text: 'hi' });
+    });
+
+    it('keeps undeclared arguments when the schema accepts extra keys', async () => {
+      current = server({
+        tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object', properties: {}, additionalProperties: true } }],
+      } as Partial<IMcpServer>);
+      await start();
+      await post(callTool('echo', { extra: 1 }));
+      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { extra: 1 });
+    });
+
+    it('refuses a string longer than MCP_PUBLIC_MAX_ARGUMENT_CHARS, at any depth', async () => {
+      await start({ MCP_PUBLIC_MAX_ARGUMENT_CHARS: '1000' });
+      const flat = json(await post(callTool('echo', { text: 'x'.repeat(1001) })));
+      expect(flat.result).toEqual({ content: [{ text: 'An argument is longer than 1000 characters', type: 'text' }], isError: true });
+      current = server({
+        tools: [{ name: 'echo', description: 'Echo', inputSchema: { type: 'object', properties: { items: { type: 'array' } } } }],
+      } as Partial<IMcpServer>);
+      const nested = json(await post(callTool('echo', { items: [{ deep: 'y'.repeat(1001) }] })));
+      expect(nested.result?.isError).toBe(true);
+      expect(executeMcpTool).not.toHaveBeenCalled();
     });
   });
 

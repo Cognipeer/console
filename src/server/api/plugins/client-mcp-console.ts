@@ -39,6 +39,7 @@ import {
 } from '../fastify-utils';
 import {
   lookupMessageSession,
+  mcpOriginGuard,
   readJsonObjectBody,
   readJsonRpcRequest,
   sendSessionNotFound,
@@ -54,6 +55,8 @@ const SERVER_INFO = {
   name: 'cognipeer-console',
   version: '1.0.0',
 };
+/** The MCP transport routes: browser pages may call them only from an allowed origin. */
+const TRANSPORT_ROUTE = { onRequest: mcpOriginGuard };
 
 function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
@@ -113,7 +116,7 @@ async function runTool(
 
 export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   // ── REST: list tools ───────────────────────────────────────────────
-  app.get('/client/v1/mcp/console/execute', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/mcp/console/execute', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       // Auth happens in the wrapper; the token decides which tools are listed.
       await getApiTokenContextForRequest(request);
@@ -137,7 +140,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── REST: execute a tool ───────────────────────────────────────────
-  app.post('/client/v1/mcp/console/execute', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/mcp/console/execute', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonObjectBody<Record<string, unknown>>(request);
@@ -186,7 +189,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── JSON-RPC message endpoint ──────────────────────────────────────
-  app.post('/client/v1/mcp/console/message', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/mcp/console/message', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       // A message that names an SSE session is delivered into that stream —
@@ -304,7 +307,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   // ── SSE transport ──────────────────────────────────────────────────
   // `exposeHeadRoute: false`: a HEAD request must not open a stream (and so a
   // session) it would never read.
-  app.get('/client/v1/mcp/console/sse', { exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/mcp/console/sse', { ...TRANSPORT_ROUTE, exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const tokenId = ctx.tokenRecord._id?.toString();

@@ -27,6 +27,13 @@ const DEFAULT_PUBLIC = {
   bodyLimitBytes: 1_048_576,
   maxInflightPerTenant: 100,
   logPayloadLimitBytes: 16_384,
+  maxArgumentChars: 32_768,
+};
+
+const DEFAULT_ACCESS = {
+  allowedOrigins: [],
+  serverInfoName: 'cognipeer-mcp-gateway',
+  upstream: { maxResponseBytes: 8_388_608, timeoutMs: 90_000 },
 };
 
 describe('MCP gateway limits', () => {
@@ -40,6 +47,7 @@ describe('MCP gateway limits', () => {
       logUserAgentMaxChars: 300,
       logClientMeta: true,
       logClientMetaMaxBytes: 2048,
+      ...DEFAULT_ACCESS,
       sse: DEFAULT_SSE,
       stdio: DEFAULT_STDIO,
       public: DEFAULT_PUBLIC,
@@ -64,6 +72,7 @@ describe('MCP gateway limits', () => {
       logUserAgentMaxChars: 150,
       logClientMeta: false,
       logClientMetaMaxBytes: 4096,
+      ...DEFAULT_ACCESS,
       sse: DEFAULT_SSE,
       stdio: DEFAULT_STDIO,
       public: DEFAULT_PUBLIC,
@@ -87,6 +96,7 @@ describe('MCP gateway limits', () => {
       logUserAgentMaxChars: 300,
       logClientMeta: true,
       logClientMetaMaxBytes: 256,
+      ...DEFAULT_ACCESS,
       sse: DEFAULT_SSE,
       stdio: DEFAULT_STDIO,
       public: DEFAULT_PUBLIC,
@@ -124,7 +134,37 @@ describe('MCP gateway limits', () => {
       bodyLimitBytes: 262_144,
       maxInflightPerTenant: 20,
       logPayloadLimitBytes: 4096,
+      maxArgumentChars: 32_768,
     });
+  });
+
+  it('reads the origin list, server name and upstream bounds from their environment variables', () => {
+    setConfigSource(sourceWith({
+      MCP_ALLOWED_ORIGINS: 'https://a.example.com, *.tools.example.com',
+      MCP_SERVER_INFO_NAME: ' acme-genai ',
+      MCP_UPSTREAM_MAX_RESPONSE_BYTES: '1048576',
+      MCP_UPSTREAM_TIMEOUT_MS: '30000',
+      MCP_PUBLIC_MAX_ARGUMENT_CHARS: '4096',
+    }));
+    const { allowedOrigins, serverInfoName, upstream } = getConfig().mcp;
+    expect({ allowedOrigins, serverInfoName, upstream }).toEqual({
+      allowedOrigins: ['https://a.example.com', '*.tools.example.com'],
+      serverInfoName: 'acme-genai',
+      upstream: { maxResponseBytes: 1_048_576, timeoutMs: 30_000 },
+    });
+    expect(getConfig().mcp.public.maxArgumentChars).toBe(4096);
+  });
+
+  it('clamps the upstream bounds and argument length, and keeps a server name', () => {
+    setConfigSource(sourceWith({
+      MCP_SERVER_INFO_NAME: '   ',
+      MCP_UPSTREAM_MAX_RESPONSE_BYTES: '10',
+      MCP_UPSTREAM_TIMEOUT_MS: '0',
+      MCP_PUBLIC_MAX_ARGUMENT_CHARS: '1',
+    }));
+    expect(getConfig().mcp.serverInfoName).toBe('cognipeer-mcp-gateway');
+    expect(getConfig().mcp.upstream).toEqual({ maxResponseBytes: 65_536, timeoutMs: 1000 });
+    expect(getConfig().mcp.public.maxArgumentChars).toBe(256);
   });
 
   describe('the request rate of a public endpoint as a whole', () => {

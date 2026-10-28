@@ -58,6 +58,7 @@ import {
 } from '../fastify-utils';
 import {
   lookupMessageSession,
+  mcpOriginGuard,
   readJsonObjectBody,
   readJsonRpcRequest,
   sendSessionNotFound,
@@ -214,10 +215,9 @@ function resolveMcpRuntimeHeaders(
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
-const SERVER_INFO = {
-  name: 'cognipeer-mcp-gateway',
-  version: '1.0.0',
-};
+const SERVER_VERSION = '1.0.0';
+/** The MCP transport routes: browser pages may call them only from an allowed origin. */
+const TRANSPORT_ROUTE = { onRequest: mcpOriginGuard };
 
 function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
@@ -424,7 +424,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         tools: { listChanged: false },
       },
       protocolVersion: MCP_PROTOCOL_VERSION,
-      serverInfo: SERVER_INFO,
+      serverInfo: { name: getConfig().mcp.serverInfoName, version: SERVER_VERSION },
       ...(instructions ? { instructions } : {}),
     }));
   }
@@ -526,7 +526,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
 }
 
 export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/client/v1/mcp/:serverKey/execute', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/mcp/:serverKey/execute', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
@@ -592,7 +592,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/mcp/:serverKey/execute', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/mcp/:serverKey/execute', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
@@ -614,7 +614,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/mcp/:serverKey/message', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/mcp/:serverKey/message', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       return await handleClientMcpMessage(request, reply);
     } catch (error) {
@@ -627,7 +627,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
   // they open the SSE stream on (the advertised `/sse` URL). Without this POST
   // handler such a client's streamable-HTTP attempt 404s (falling through to
   // the Next.js app) before it can fall back to the GET SSE transport below.
-  app.post('/client/v1/mcp/:serverKey/sse', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/mcp/:serverKey/sse', TRANSPORT_ROUTE, withClientApiRequestContext(async (request, reply) => {
     try {
       return await handleClientMcpMessage(request, reply);
     } catch (error) {
@@ -638,7 +638,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
 
   // `exposeHeadRoute: false`: a HEAD request must not open a stream (and so a
   // session) it would never read.
-  app.get('/client/v1/mcp/:serverKey/sse', { exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/mcp/:serverKey/sse', { ...TRANSPORT_ROUTE, exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };

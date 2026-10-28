@@ -28,12 +28,12 @@ function parseOrigin(origin: string): URL | null {
   }
 }
 
-function isOriginAllowed(origin: string): boolean {
-  const cfg = getConfig();
-  if (!cfg.cors.enabled || cfg.cors.allowedOrigins.length === 0) {
-    return false;
-  }
-
+/**
+ * Whether `origin` is one of `allowedOrigins`: an exact origin (scheme, host
+ * and port) or a `*.example.com` wildcard. A bare `*`, a TLD-wide wildcard and
+ * the opaque `null` origin never match.
+ */
+export function matchesAllowedOrigin(origin: string, allowedOrigins: string[]): boolean {
   // `null` is sent by browsers for opaque origins (sandboxed iframes, file://) — never allow.
   if (origin === 'null') return false;
 
@@ -41,14 +41,9 @@ function isOriginAllowed(origin: string): boolean {
   if (!parsed) return false;
   const requestHost = parsed.hostname.toLowerCase();
 
-  return cfg.cors.allowedOrigins.some((allowed) => {
+  return allowedOrigins.some((allowed) => {
     const trimmed = allowed.trim();
-    if (!trimmed || trimmed === '*') {
-      // Refuse the unrestricted wildcard: with credentials enabled it is unsafe
-      // and an admin-edit accident could open every origin.
-      corsLogger.warn('Ignoring "*" entry in CORS_ALLOWED_ORIGINS (unsafe with credentials)');
-      return false;
-    }
+    if (!trimmed || trimmed === '*') return false;
 
     if (trimmed.startsWith('*.')) {
       const domain = trimmed.slice(2).toLowerCase();
@@ -62,6 +57,19 @@ function isOriginAllowed(origin: string): boolean {
     // Exact origin match (scheme + host + port preserved).
     return trimmed.toLowerCase() === parsed.origin.toLowerCase();
   });
+}
+
+function isOriginAllowed(origin: string): boolean {
+  const cfg = getConfig();
+  if (!cfg.cors.enabled || cfg.cors.allowedOrigins.length === 0) {
+    return false;
+  }
+  if (cfg.cors.allowedOrigins.some((allowed) => allowed.trim() === '*')) {
+    // Refuse the unrestricted wildcard: with credentials enabled it is unsafe
+    // and an admin-edit accident could open every origin.
+    corsLogger.warn('Ignoring "*" entry in CORS_ALLOWED_ORIGINS (unsafe with credentials)');
+  }
+  return matchesAllowedOrigin(origin, cfg.cors.allowedOrigins);
 }
 
 export function applyCorsHeaders(

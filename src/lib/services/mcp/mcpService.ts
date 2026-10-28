@@ -1,7 +1,7 @@
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { createHash, randomUUID } from 'crypto';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type {
   DatabaseProvider,
   IMcpAegisConfig,
@@ -35,7 +35,7 @@ import {
   redactLogString,
 } from '@/lib/services/logRedaction';
 import { recordUsageEvent, resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
-import { safeFetch } from '@/lib/security/outboundFetch';
+import { readResponseText, safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { deleteInstanceAssignment, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
@@ -62,7 +62,7 @@ import {
   sealAuthConfig,
   sealStdioEnv,
 } from './secretVault';
-import { remoteCallTool, remoteDiscover } from './remoteMcpClient';
+import { remoteCallTool, remoteDiscover, withUpstreamLimits } from './remoteMcpClient';
 import {
   CONSOLE_IDENTITY_AUTH_TYPE,
   consoleIdentityHeaders,
@@ -2021,8 +2021,6 @@ export async function logMcpRequest(
     const maxBytes = typeof opts?.payloadLimitBytes === 'number' && opts.payloadLimitBytes > 0
       ? opts.payloadLimitBytes
       : undefined;
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
     const row: Omit<IMcpRequestLog, '_id' | 'createdAt'> = {
       ...entry,
       // The name comes from the caller's request: bound it.
@@ -2047,7 +2045,9 @@ export async function logMcpRequest(
     // Also from the caller's request: keep a session id only when this
     // gateway issued it.
     if (!isServerIssuedSessionId(entry.sessionId)) delete row.sessionId;
-    const created = await db.createMcpRequestLog(row);
+    // A real tenant scope for the write: callers such as the public endpoints
+    // log after their own scope has ended.
+    const created = await runWithTenantScope(tenantDbName, (db) => db.createMcpRequestLog(row));
     // The id a caller can quote to the operator to have the call looked up.
     return created?._id ? String(created._id) : undefined;
   } catch (err) {
@@ -2745,7 +2745,8 @@ async function markServerError(
   }
 }
 
-async function executeOpenApiTool(
+/** Exported for the response-limit tests; callers go through `executeMcpTool`. */
+export async function executeOpenApiTool(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
@@ -2799,21 +2800,26 @@ async function executeOpenApiTool(
 
   // The configured auth header and the runtime headers hold credentials meant
   // for this upstream; they do not follow a redirect to another origin.
-  const response = await safeFetch(request.url, fetchOptions, {
-    sensitiveHeaders: [
-      ...(auth?.type === 'header' && auth.headerName ? [auth.headerName] : []),
-      ...Object.keys(runtimeHeaders ?? {}),
-    ],
+  return withUpstreamLimits(async ({ signal, maxBytes }) => {
+    const response = await safeFetch(request.url, { ...fetchOptions, signal }, {
+      keepAbortLinked: true,
+      sensitiveHeaders: [
+        ...(auth?.type === 'header' && auth.headerName ? [auth.headerName] : []),
+        ...Object.keys(runtimeHeaders ?? {}),
+      ],
+    });
+
+    if (!response.ok) {
+      const errorText = await readResponseText(response, { maxBytes: Math.min(maxBytes, 64 * 1024), signal })
+        .catch(() => 'Unknown error');
+      throw new McpUpstreamError(`Upstream API error (${response.status}): ${errorText}`, response.status);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const text = await readResponseText(response, { maxBytes, signal });
+    if (contentType.includes('application/json')) {
+      return JSON.parse(text);
+    }
+    return text;
   });
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => 'Unknown error');
-    throw new McpUpstreamError(`Upstream API error (${response.status}): ${errorText}`, response.status);
-  }
-
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    return response.json();
-  }
-  return response.text();
 }

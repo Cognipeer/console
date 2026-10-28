@@ -575,6 +575,54 @@ function stripCrossOriginHeaders(
   return out;
 }
 
+/** A response body grew past the byte cap given to `readResponseText`. */
+export class ResponseTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`Upstream response exceeded ${maxBytes} bytes`);
+    this.name = 'ResponseTooLargeError';
+  }
+}
+
+/**
+ * Read a response body as UTF-8 text, stopping at `maxBytes`: the reader is
+ * cancelled and `ResponseTooLargeError` thrown as soon as the cap is crossed,
+ * so an oversized body is never fully buffered. Aborting `signal` cancels the
+ * read and rejects with the signal's reason.
+ */
+export async function readResponseText(
+  response: Response,
+  options: { maxBytes: number; signal?: AbortSignal },
+): Promise<string> {
+  const { maxBytes, signal } = options;
+  if (!response.body) return '';
+  if (signal?.aborted) {
+    await response.body.cancel().catch(() => { /* already closed */ });
+    throw signal.reason ?? new Error('Aborted');
+  }
+  const reader = response.body.getReader();
+  const onAbort = () => { reader.cancel(signal?.reason).catch(() => { /* already closed */ }); };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const decoder = new TextDecoder();
+  let text = '';
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) throw new ResponseTooLargeError(maxBytes);
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } catch (error) {
+    reader.cancel().catch(() => { /* already closed */ });
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * `fetch` with SSRF protection and a timeout. Redirects are followed manually
  * (up to 5 hops) so each hop is re-validated against the private-network

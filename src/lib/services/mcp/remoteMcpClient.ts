@@ -8,7 +8,8 @@
  * accept both), and fails with a clear error otherwise.
  */
 
-import { safeFetch } from '@/lib/security/outboundFetch';
+import { readResponseText, ResponseTooLargeError, safeFetch } from '@/lib/security/outboundFetch';
+import { getConfig } from '@/lib/core/config';
 import { McpUpstreamError } from './errors';
 import {
   MAX_TOOL_LIST_PAGES,
@@ -42,6 +43,36 @@ export function buildUpstreamAuthHeaders(auth: IMcpAuthConfig | undefined): Reco
     headers['Authorization'] = `Basic ${encoded}`;
   }
   return headers;
+}
+
+/**
+ * Run one upstream call under the configured total-time and response-size
+ * limits. `signal` covers headers and body together; a call that exceeds
+ * either limit fails as an upstream error with a neutral message.
+ */
+export async function withUpstreamLimits<T>(
+  run: (limits: { signal: AbortSignal; maxBytes: number }) => Promise<T>,
+): Promise<T> {
+  const { maxResponseBytes: maxBytes, timeoutMs } = getConfig().mcp.upstream;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`Upstream did not answer within ${timeoutMs} ms`));
+  }, timeoutMs);
+  try {
+    return await run({ signal: controller.signal, maxBytes });
+  } catch (error) {
+    if (timedOut) {
+      throw new McpUpstreamError(`Upstream did not answer within ${timeoutMs} ms`, 504);
+    }
+    if (error instanceof ResponseTooLargeError) {
+      throw new McpUpstreamError(error.message, 502);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 let rpcId = 0;
@@ -84,14 +115,26 @@ function sseEventData(block: string): string {
  * events until the one answering `id` arrives, then stop: a server that keeps
  * the stream open afterwards is not waited for.
  */
-async function readSseResponse(response: Response, id: number): Promise<JsonRpcMessage> {
+async function readSseResponse(
+  response: Response,
+  id: number,
+  limits: { signal: AbortSignal; maxBytes: number },
+): Promise<JsonRpcMessage> {
   if (!response.body) throw new Error('MCP server returned an empty SSE response');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let received = 0;
+  const onAbort = () => { reader.cancel().catch(() => { /* already closed */ }); };
+  limits.signal.addEventListener('abort', onAbort, { once: true });
   try {
     for (;;) {
       const { done, value } = await reader.read();
+      if (limits.signal.aborted) throw limits.signal.reason ?? new Error('Aborted');
+      if (value) {
+        received += value.byteLength;
+        if (received > limits.maxBytes) throw new ResponseTooLargeError(limits.maxBytes);
+      }
       if (value) buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
       if (done) buffer += '\n\n';
       let boundary = buffer.indexOf('\n\n');
@@ -105,15 +148,25 @@ async function readSseResponse(response: Response, id: number): Promise<JsonRpcM
       if (done) break;
     }
   } finally {
+    limits.signal.removeEventListener('abort', onAbort);
     reader.cancel().catch(() => { /* already closed */ });
   }
   throw new Error('MCP server closed the SSE stream without answering the request');
 }
 
-async function rpcCall(
+function rpcCall(
   target: RemoteMcpTarget,
   method: string,
   params?: Record<string, unknown>,
+): Promise<unknown> {
+  return withUpstreamLimits((limits) => rpcCallBounded(target, method, params, limits));
+}
+
+async function rpcCallBounded(
+  target: RemoteMcpTarget,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  limits: { signal: AbortSignal; maxBytes: number },
 ): Promise<unknown> {
   const id = ++rpcId;
   const authHeaders = buildUpstreamAuthHeaders(target.auth);
@@ -134,21 +187,26 @@ async function rpcCall(
       method,
       ...(params !== undefined ? { params } : {}),
     }),
+    signal: limits.signal,
   }, {
+    keepAbortLinked: true,
     // Credentials injected for this upstream do not follow a redirect to
     // another origin.
     sensitiveHeaders: [...Object.keys(authHeaders), ...Object.keys(target.extraHeaders ?? {})],
   });
 
   if (!response.ok) {
-    const errText = await response.text().catch(() => 'Unknown error');
+    const errText = await readResponseText(response, {
+      maxBytes: Math.min(limits.maxBytes, 64 * 1024),
+      signal: limits.signal,
+    }).catch(() => 'Unknown error');
     throw new McpUpstreamError(`MCP server responded with ${response.status}: ${errText.slice(0, 500)}`, response.status);
   }
 
   const contentType = response.headers.get('content-type') ?? '';
   const payload: JsonRpcMessage = contentType.includes('text/event-stream')
-    ? await readSseResponse(response, id)
-    : await response.json();
+    ? await readSseResponse(response, id, limits)
+    : JSON.parse(await readResponseText(response, limits)) as JsonRpcMessage;
 
   if (payload.error) {
     throw new Error(`MCP error ${payload.error.code ?? ''}: ${payload.error.message ?? 'unknown'}`);

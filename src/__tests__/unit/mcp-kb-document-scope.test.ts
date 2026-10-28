@@ -19,6 +19,8 @@ const rag = vi.hoisted(() => ({
 
 vi.mock('@/lib/services/rag/ragService', () => rag);
 
+import { McpToolInputError } from '@/lib/services/mcp/errors';
+import { VectorFilterError } from '@/lib/providers';
 import { knowledgeBaseProvider } from '@/lib/services/mcp/internal/knowledgeBaseProvider';
 
 const CTX = { tenantDbName: 'tenant_db', tenantId: 'tenant-1', projectId: 'project-a' };
@@ -79,5 +81,49 @@ describe.each(['read_document', 'read_document_lines'] as const)('%s', (tool) =>
   it('does not restrict a legacy server that has no project', async () => {
     const legacy = { tenantDbName: CTX.tenantDbName, tenantId: CTX.tenantId };
     await expect(read(tool, doc({ projectId: 'project-b' }), legacy)).resolves.toBeDefined();
+  });
+});
+
+describe('search', () => {
+  const search = (args: Record<string, unknown>) =>
+    knowledgeBaseProvider.execute(CTX, MODULE_KEY, {}, 'search', args);
+
+  const result = (responseDetail?: 'full' | 'text') => ({
+    query: 'q',
+    responseDetail,
+    matches: [{
+      id: 'm1', score: 0.9, content: 'text', documentId: 'doc-1', fileName: 'a.md',
+      metadata: { source: 'web', _ragModule: 'docs', _documentId: 'doc-1' },
+    }],
+  });
+
+  it('marks the filter as untrusted', async () => {
+    rag.queryRag.mockResolvedValueOnce(result('full'));
+    await search({ query: 'q', filter: { a: 1 } });
+    expect(rag.queryRag.mock.calls[0][3]).toMatchObject({ filter: { a: 1 }, filterSource: 'untrusted' });
+  });
+
+  it('rejects a query over 4000 characters', async () => {
+    await expect(search({ query: 'x'.repeat(4001) })).rejects.toBeInstanceOf(McpToolInputError);
+    expect(rag.queryRag).not.toHaveBeenCalled();
+  });
+
+  it('answers a filter error as an input error', async () => {
+    rag.queryRag.mockRejectedValueOnce(new VectorFilterError('nope'));
+    await expect(search({ query: 'q', filter: { a: 1 } })).rejects.toBeInstanceOf(McpToolInputError);
+  });
+
+  it('drops internal metadata keys when the module returns full detail', async () => {
+    rag.queryRag.mockResolvedValueOnce(result('full'));
+    const out = await search({ query: 'q' }) as { matches: Array<Record<string, unknown>> };
+    expect(out.matches[0]).toMatchObject({ content: 'text', score: 0.9, documentId: 'doc-1', metadata: { source: 'web' } });
+    expect(out.matches[0].metadata).not.toHaveProperty('_ragModule');
+  });
+
+  it('omits metadata when the module returns text only', async () => {
+    rag.queryRag.mockResolvedValueOnce(result('text'));
+    const out = await search({ query: 'q' }) as { matches: Array<Record<string, unknown>> };
+    expect(out.matches[0]).not.toHaveProperty('metadata');
+    expect(out.matches[0].documentId).toBe('doc-1');
   });
 });

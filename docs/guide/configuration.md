@@ -233,6 +233,10 @@ credential, stdio environment values, runtime headers) are masked as
 | `MCP_LOG_USER_AGENT_MAX_CHARS` | Longest caller user-agent stored with an MCP request-log row (minimum `16`). | `300` |
 | `MCP_LOG_CLIENT_META` | Store the `params._meta` an MCP host sends with a tool call in the request-log row (under `_client.meta`, bounded and with sensitive values masked; coordinates are never stored). `false` stores nothing. | `true` |
 | `MCP_LOG_CLIENT_META_MAX_BYTES` | Largest serialized `_meta` kept per request-log row; keys beyond it are dropped and the row is marked `_truncated` (minimum `256`). | `2048` |
+| `MCP_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the MCP endpoints besides the app's own (`APP_URL`): exact origins or `*.example.com` wildcards. A request whose `Origin` header is not allowed gets `403`; a request without one (server-side MCP clients) is not affected. | *(none)* |
+| `MCP_SERVER_INFO_NAME` | `serverInfo.name` the gateway answers `initialize` with. | `cognipeer-mcp-gateway` |
+| `MCP_UPSTREAM_MAX_RESPONSE_BYTES` | Largest response body read from the upstream of an OpenAPI or remote MCP server; a bigger one fails the call (minimum `65536`). | `8388608` |
+| `MCP_UPSTREAM_TIMEOUT_MS` | Longest a call to that upstream may take, headers and body together (minimum `1000`). | `90000` |
 | `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
 | `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
 | `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |
@@ -285,6 +289,7 @@ agent, and with smaller payloads than token calls.
 | `MCP_PUBLIC_BODY_LIMIT_BYTES` | Largest request body a public POST may carry (minimum `1024`). | `1048576` |
 | `MCP_PUBLIC_MAX_INFLIGHT_PER_TENANT` | Tool calls one tenant may have running at once through its public endpoints; a call over it gets `503`. `0` turns the cap off. | `100` |
 | `MCP_PUBLIC_LOG_PAYLOAD_LIMIT_BYTES` | Largest request or response payload a public call stores in the request log (minimum `256`). | `16384` |
+| `MCP_PUBLIC_MAX_ARGUMENT_CHARS` | Longest string a public tool call may carry in its arguments, at any depth; a longer one fails the call (minimum `256`). Arguments the tool's input schema does not declare are dropped unless the schema accepts extra keys. | `32768` |
 
 The client address is the one Fastify resolves; when the gateway runs behind a
 reverse proxy, list the proxy in `TRUSTED_PROXIES` so the address cannot be

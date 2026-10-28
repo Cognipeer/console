@@ -102,6 +102,12 @@ export interface RagQueryRequest {
   topK?: number;
   minScore?: number;
   filter?: Record<string, unknown>;
+  /**
+   * Where `filter` came from. Callers outside the project (MCP, model-filled
+   * tool arguments) pass 'untrusted' and may not send provider-native filters.
+   * Defaults to 'trusted'.
+   */
+  filterSource?: 'trusted' | 'untrusted';
   includeContent?: boolean;
 }
 
