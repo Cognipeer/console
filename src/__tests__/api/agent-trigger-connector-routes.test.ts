@@ -317,6 +317,43 @@ describe.each([
         expect(await storedTriggers()).toEqual([]);
       });
 
+      // What docs/guide/agent-triggers.md ("Editing a poll's schedule") and openapi.yaml (the PATCH operation, `AgentTriggerConnectorRequest.schedule`)
+      // say about a schedule object on a PATCH, held to the real route on both mounts.
+      it('is replaced as a whole by a PATCH that gives an object: a timezone left out, null or empty is UTC, a timezone alone is refused', async () => {
+        const created = json(await call('POST', '', body({}, poll))); // */15 * * * *, Europe/Istanbul
+        const patch = (schedule: unknown) => call('PATCH', `/${created.id}`, { type: 'connector', connector: { schedule } });
+        const stored = async () => (await storedConnector(created.id)).schedule;
+
+        // Left out of the request: the stored schedule stays. The request changes the events, because a body that changes nothing is not parsed at all.
+        const kept = await call('PATCH', `/${created.id}`, { type: 'connector', connector: { events: ['issue.created'] } });
+        expect(kept.statusCode, kept.body).toBe(200);
+        expect(await storedConnector(created.id)).toMatchObject({ events: ['issue.created'], schedule: { cron: '*/15 * * * *', timezone: 'Europe/Istanbul' } });
+
+        // An object without a timezone (or with null or '') is UTC, whatever was stored; the answer and the stored row say so.
+        for (const [index, extra] of [{}, { timezone: null }, { timezone: '' }].entries()) {
+          await patch({ cron: '*/15 * * * *', timezone: 'Europe/Istanbul' });
+          expect(await stored(), `reset ${index}`).toEqual({ cron: '*/15 * * * *', timezone: 'Europe/Istanbul' });
+          const res = await patch({ cron: '*/20 * * * *', ...extra });
+          expect(res.statusCode, JSON.stringify(extra) + res.body).toBe(200);
+          expect(json(res).connector.schedule, JSON.stringify(extra)).toEqual({ cron: '*/20 * * * *', timezone: 'UTC' });
+          expect(await stored(), JSON.stringify(extra)).toEqual({ cron: '*/20 * * * *', timezone: 'UTC' });
+        }
+
+        // The same cron without a timezone is a change too: it does not keep the stored timezone.
+        await patch({ cron: '*/20 * * * *', timezone: 'Europe/Istanbul' });
+        const same = await patch({ cron: '*/20 * * * *' });
+        expect(same.statusCode, same.body).toBe(200);
+        expect(await stored()).toEqual({ cron: '*/20 * * * *', timezone: 'UTC' });
+
+        // The timezone is kept only when it is sent again with the cron; a timezone alone is refused and nothing changes.
+        const again = await patch({ cron: '*/25 * * * *', timezone: 'Europe/Istanbul' });
+        expect(json(again).connector.schedule).toEqual({ cron: '*/25 * * * *', timezone: 'Europe/Istanbul' });
+        const alone = await patch({ timezone: 'UTC' });
+        expect(alone.statusCode).toBe(400);
+        expect(errorsOf(alone)).toEqual([{ field: 'connector.schedule.cron', message: 'cron is required' }]);
+        expect(await stored()).toEqual({ cron: '*/25 * * * *', timezone: 'Europe/Istanbul' });
+      });
+
       it('is the same when a saved trigger is edited: the host\'s sentence, and the stored schedule and subscription stay', async () => {
         const created = json(await call('POST', '', body({}, poll)));
         const before = await storedConnector(created.id);
