@@ -832,6 +832,23 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   The file routes serve its files, and the vector routes query and copy its index, only to its administrators while
   the admin exception is on, and never to an API token; anyone else gets `404` for a file and
   `403 kb_access_controlled` for the index. Another knowledge base cannot be put on that index.
+- **Screens.** The Documents tab of a knowledge base lists folders and documents together, with a path bar, creating,
+  renaming, moving and deleting folders, moving documents, and a search across folders that shows where each match is.
+  An Access column shows who can read each folder and document. A full-screen permission editor sets the permissions
+  of the knowledge base, a folder or a document, its own or inherited, for people, groups, API tokens, e-mail
+  addresses and connected directories, and shows the permissions a connector brings read-only.
+- An **Access** tab for the knowledge base's administrators switches access control and the admin exception, sets the
+  default access, and shows the counts, what nobody can read, the directories in use, and whether a person can read a
+  document and why. The page header shows them whether access control is on.
+- A member sees a folder they cannot read only as part of the path to one they can (`pathOnly` in the folder list).
+- Readers no longer see write controls on the knowledge base page. With access control on, changes to the folder
+  structure, import and export are for its administrators.
+- New dashboard reads behind these screens, all with Knowledge Engine `admin`: `GET /rag/modules/:key/access/summary`,
+  `POST /rag/modules/:key/access/nodes`, `POST /rag/modules/:key/access/audience`,
+  `GET /rag/modules/:key/access/principals`, `GET /rag/identity/console-people`,
+  `GET /rag/identity/domains/:domainKey/people`, `…/groups` and `…/links`, and
+  `POST /rag/identity/domains/:domainKey/preview`. See [Views of the Access
+  tab](docs/guide/rag.md#views-of-the-access-tab).
 
 ### Knowledge base access control from connectors (Enterprise)
 
@@ -857,3 +874,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   person may read in a direct message, and as no one with the identity mode **none**.
 - A portal's conversation history lists a conversation that used documents not open to everyone without its title;
   only the person who started it and the administrators of those knowledge bases can open it.
+- A connector whose source reads permissions has a **People** tab: the directory's users and groups, the console
+  person or group each one is matched to and how (by which rule or by a link), and the links made by hand, with
+  **Link…** for someone no rule matches. A full-screen form sets whether permissions are read, up to 8 matching rules
+  in order and group matching by external id, and previews what the rules match before they are saved
+  (`GET` and `PUT /connectors/:id/sources/:sourceId/identity`).
