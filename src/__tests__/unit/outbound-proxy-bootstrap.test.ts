@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Agent, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
 import { configureOutboundProxy } from '@/lib/core/outboundProxyBootstrap';
 
-const ENV_KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy'] as const;
+const ENV_KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'Https_Proxy'] as const;
 const originalEnv: Record<string, string | undefined> = {};
 for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
 const originalDispatcher = getGlobalDispatcher();
@@ -41,6 +41,18 @@ describe('configureOutboundProxy', () => {
 
     configureOutboundProxy();
 
+    expect(getGlobalDispatcher().constructor.name).toBe('EnvHttpProxyAgent');
+  });
+
+  it('adopts a proxy set under a non-standard spelling, so undici, axios and child processes see it too', () => {
+    for (const key of ENV_KEYS) delete process.env[key];
+    process.env.Https_Proxy = 'http://proxy.internal.example:8080';
+    setGlobalDispatcher(new Agent());
+
+    configureOutboundProxy();
+
+    expect(process.env.HTTPS_PROXY).toBe('http://proxy.internal.example:8080');
+    expect(process.env.https_proxy).toBe('http://proxy.internal.example:8080');
     expect(getGlobalDispatcher().constructor.name).toBe('EnvHttpProxyAgent');
   });
 });

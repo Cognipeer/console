@@ -129,11 +129,61 @@ not an IP address, such as an empty or unusually long one, is limited together
 with every other such value instead of getting a counter of its own. A trailing
 port (`203.0.113.9:51234`, `[2001:db8::1]:443`) is ignored.
 
+### Egress proxy
+
+On a network that reaches the internet only through a corporate (forward) proxy, set the standard proxy
+variables on every Console process:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HTTPS_PROXY` | Proxy for every outbound request: `http://host:port`, or `http://user:password@host:port` with special characters in the password percent-encoded. The managed browser and the crawler use it for `http://` and `https://` sites alike. | *(unset: direct)* |
+| `HTTP_PROXY` | Used when `HTTPS_PROXY` is not set. | *(unset)* |
+| `NO_PROXY` | Comma-separated hosts reached directly, without the proxy: `localhost`, `127.0.0.1`, the cluster's services, internal hosts. | *(unset)* |
+
+The managed browser and the crawler's Playwright engine launch Chromium with the proxy and with `NO_PROXY` as
+its bypass list. `fetch()` (model providers, webhooks and the other plain HTTP calls) goes through undici's
+environment proxy agent, installed at startup. The crawler's axios engine and local MCP servers (stdio) read
+the variables themselves. Sandboxes (Enterprise) get them only with `SANDBOX_INHERIT_PROXY_ENV=true`, see
+[Sandbox](/guide/sandbox#configuration).
+
+- **Spelling.** Use `HTTPS_PROXY` or `https_proxy` (likewise for the other two). A variable spelled any other
+  way, such as `HTTPS_Proxy`, is adopted at startup with a warning in the log, but tools outside Console do
+  not read it.
+- **`http://` for most proxies.** The scheme says how Console talks to the proxy, not to the sites behind it:
+  HTTPS sites are tunnelled through an `http://` proxy with `CONNECT`. Use `https://` only for a proxy that
+  itself speaks TLS; otherwise every connection to it fails.
+- **`NO_PROXY` is read differently by different clients.** For the browser and the crawler a plain entry
+  (`corp.example`) covers the domain and its subdomains, `.corp.example` its subdomains only, and CIDR
+  ranges (`10.0.0.0/8`) match addresses. Node's `fetch()` reads a plain entry as that exact host and ignores
+  CIDR ranges, so write internal domains in the leading-dot form (`.svc.cluster.local`).
+- **TLS inspection.** A proxy that re-signs certificates with a corporate CA needs `NODE_EXTRA_CA_CERTS` for
+  Node and [`BROWSER_IGNORE_CERTIFICATE_ERRORS`](#browser-runtime) for the browser, which cannot read it.
+- **Browser egress guard.** With `BROWSER_BLOCK_PRIVATE_NETWORK` on, a host that resolves to a private
+  address stays refused. A host the server's own DNS cannot resolve is left to the proxy when the request
+  goes through it: the proxy resolves the name, and in an air-gapped network it is often the only resolver
+  that knows public names. A single-label name (`intranet`), a private-use domain (`.corp`, `.home`, `.lan`,
+  `.intranet`) and an unresolvable host reached directly stay refused. For a request through the proxy the
+  guard waits at most 3 seconds for the server's DNS.
+
+To check the whole path, run this inside the Console container with the sites the browser cannot reach:
+
+```bash
+node --import tsx scripts/diagnose-egress-proxy.ts https://www.example.com https://other.example.com
+```
+
+It prints the proxy configuration it found, whether each URL goes through the proxy, what the server's DNS
+answers, what the proxy answers when asked for the host (`403`: its policy does not allow the host; `407`:
+it wants credentials), and the outcome of a real browser navigation with every request that failed. When a
+navigation times out, the error names the hosts the page was still waiting on: behind an allow-listing proxy
+those are usually third-party hosts (CDNs, fonts, analytics) the firewall does not let through.
+
 ### Browser Runtime
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BROWSER_BLOCK_PRIVATE_NETWORK` | Blocks localhost, link-local, private, and reserved network egress from managed browser sessions. | `true` |
+| `BROWSER_IGNORE_CERTIFICATE_ERRORS` | Ignores certificate errors in the managed browser and the crawler's Playwright engine, for a TLS-inspecting proxy whose CA Chromium cannot trust. Turns certificate checks off for every page. | `false` |
+| `BROWSER_CHROMIUM_EXTRA_ARGS` | Extra Chromium flags, comma-separated, appended to every launch (for example `--proxy-bypass-list=*.corp.example;localhost`, rules separated by `;`). | *(empty)* |
 
 ### Outbound HTTP (SSRF Guard)
 

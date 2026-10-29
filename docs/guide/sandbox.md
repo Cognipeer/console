@@ -266,6 +266,12 @@ Beyond the in-app [Settings](#settings), a few environment variables tune the ru
 | `SANDBOX_DEFAULT_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` | `0.5` / `1024` / `1024` / `512` | Platform default resource limits for new sandboxes. |
 | `SANDBOX_MAX_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` | — | Hard upper bound per field (`0`/unset = unbounded). Clamps every launch. |
 | `SANDBOX_DISK_QUOTA` | `off` | `on` enforces `diskMb` via `--storage-opt size` (needs xfs-pquota / btrfs); otherwise disk is advisory. |
+| `SANDBOX_INHERIT_PROXY_ENV` | `false` | `true` gives every sandbox launched from then on the console's [egress proxy](/guide/configuration#egress-proxy): `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in both spellings, with `localhost,127.0.0.1,::1` added to `NO_PROXY` so an app the sandbox serves to itself is reached directly. A template or sandbox that sets one of these variables keeps its own value. The proxy URL, credentials included, is visible to everything that runs in the sandbox; its password is masked in what an agent reads back. |
+
+On a network that reaches the internet only through a proxy, a sandbox has no way out without these variables:
+no sandbox runtime passes the console's own environment on. Package installs, `git` and the Playwright of the
+web-e2e template then time out. Turn `SANDBOX_INHERIT_PROXY_ENV` on, or set the variables on the templates that
+need the internet.
 
 ## Security & tenant isolation
 
