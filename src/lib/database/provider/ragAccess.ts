@@ -150,14 +150,26 @@ export function clampRagIdentityPage(options?: { limit?: number; offset?: number
 }
 
 /**
- * The literal prefix `deleteRagAclEntriesByPrincipalPrefix` removes by, or null
- * when nothing may be removed: an empty prefix would match every entry, and a
+ * The literal prefix `deleteRagAclEntriesByPrincipalPrefix` removes by (and
+ * `countRagAclNodes` / `listRagAclPrincipalLabels` read entries by), or null
+ * when nothing may match: an empty prefix would match every entry, and a
  * principal never holds a control character, so a prefix with one matches none
  * (and a NUL cannot be put into a MongoDB regular expression).
  */
 export function ragAclPrincipalPrefix(prefix: unknown): string | null {
   if (typeof prefix !== 'string' || prefix.length === 0) return null;
   return /[\u0000-\u001f\u007f]/.test(prefix) ? null : prefix;
+}
+
+/** `listRagAclPrincipalLabels`: rows when no limit is given, and the most one call may return. */
+export const RAG_ACL_LABELS_LIMIT_DEFAULT = 5000;
+export const RAG_ACL_LABELS_LIMIT_MAX = 20000;
+
+/** The row limit of `listRagAclPrincipalLabels`: 5000 by default, at most 20000, and 0 (or less) asks for nothing. */
+export function clampRagAclLabelsLimit(options?: { limit?: number }): number {
+  const raw = options?.limit;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return RAG_ACL_LABELS_LIMIT_DEFAULT;
+  return Math.min(Math.max(Math.floor(raw), 0), RAG_ACL_LABELS_LIMIT_MAX);
 }
 
 /** Permission entries of one node with each principal once (the first wins) and blank principals dropped. */

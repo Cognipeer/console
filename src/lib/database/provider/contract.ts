@@ -178,6 +178,7 @@ import type {
   ModelCategory,
   ModelProviderType,
   ProviderDomain,
+  RagAclNodeType,
   RagDocumentListFilters,
   RagDocumentStatus,
   ToolSourceType,
@@ -1405,8 +1406,21 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   countRagDocuments(
     ragModuleKey: string,
     projectId?: string,
-    filters?: Pick<RagDocumentListFilters, 'status' | 'search' | 'folderId' | 'ids' | 'access' | 'withUnscoped'>,
+    filters?: Pick<
+      RagDocumentListFilters,
+      'status' | 'search' | 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged' | 'withUnscoped'
+    >,
   ): Promise<number>;
+  /**
+   * Documents per folder: `folderId` → how many, with the key `''` for the top level (a document with no folder, or
+   * an empty one). Counts exactly the documents `countRagDocuments` counts for the same `projectId` and filters, so
+   * an `access` filter counts what that caller can list. A folder without documents is absent.
+   */
+  countRagDocumentsByFolder(
+    ragModuleKey: string,
+    projectId: string | undefined,
+    filters?: Pick<RagDocumentListFilters, 'access' | 'withUnscoped'>,
+  ): Promise<Record<string, number>>;
   /** Ids only, newest first — for access filters that name documents. `limit` is required. */
   listRagDocumentIds(
     ragModuleKey: string,
@@ -1569,6 +1583,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     nodeId: string,
     projectId?: string,
   ): Promise<boolean>;
+  /**
+   * How many entries each of `nodeIds` holds: node id → count. A node without entries is absent from the record.
+   * Built for pages of at most 1000 ids.
+   */
+  countRagAclEntriesByNode(
+    ragModuleKey: string,
+    filter: { projectId?: string; nodeType: RagAclNodeType; nodeIds: string[] },
+  ): Promise<Record<string, number>>;
+  /**
+   * How many DISTINCT nodes of that type hold at least one entry. With `principalPrefix`, only entries whose
+   * principal starts with it count (a literal prefix: no wildcard, case-sensitive). A prefix no principal can start
+   * with (an empty one, or one with a control character) matches nothing; leave it out to count every entry.
+   */
+  countRagAclNodes(
+    ragModuleKey: string,
+    filter: { projectId?: string; nodeType: RagAclNodeType; principalPrefix?: string },
+  ): Promise<number>;
   /** Replace every entry of one node with `entries` (an empty list removes them all). */
   replaceRagAclEntries(
     ragModuleKey: string,
@@ -1583,6 +1614,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * nothing. Returns how many entries were removed.
    */
   deleteRagAclEntriesByPrincipalPrefix(prefix: string): Promise<number>;
+  /**
+   * The display names entries carry, tenant-wide (every module and project): the distinct principals that start with
+   * `principalPrefix` (literal, case-sensitive; an empty one matches nothing) and have a non-empty `label`, one label
+   * each, ordered by principal: the label of an entry a connected source wrote (`managed: 'sync'`) wins over one written
+   * in the console, and the greatest wins among equals. Default `limit` 5000, at most 20000.
+   */
+  listRagAclPrincipalLabels(
+    principalPrefix: string,
+    options?: { limit?: number },
+  ): Promise<Array<{ principal: string; label: string }>>;
 
   // ── Knowledge Engine identity directories (tenant-specific) ──
   upsertRagIdentityDomain(
@@ -1605,10 +1646,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     field: 'extId' | 'email' | 'upn' | `attr:${string}`,
     values: string[],
   ): Promise<IRagIdentityUser[]>;
+  /**
+   * `extIds` keeps only these users (an empty list: none) and `excludeExtIds` leaves these out; ids are compared as
+   * given and `total` counts what remains. Each list is meant for at most 50000 ids.
+   */
   listRagIdentityUsers(
     domain: string,
-    options?: { search?: string; limit?: number; offset?: number },
+    options?: { search?: string; limit?: number; offset?: number; extIds?: string[]; excludeExtIds?: string[] },
   ): Promise<{ users: IRagIdentityUser[]; total: number }>;
+  /** Every group id found in the `groups` of the domain's users, with how many users hold it, ordered by id. */
+  listRagIdentityGroupCounts(domain: string): Promise<Array<{ id: string; users: number }>>;
   listRagIdentityLinks(filters?: {
     domain?: string;
     consoleKind?: IRagIdentityLink['consoleKind'];

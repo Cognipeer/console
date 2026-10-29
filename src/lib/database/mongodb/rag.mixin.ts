@@ -45,6 +45,12 @@ const DOCUMENT_NULLABLE_FIELDS: readonly string[] = ['folderId', 'aclMode', 'acl
 /** Written only through `bumpRagModuleAclRevision` (and at create). */
 const MODULE_BUMP_ONLY_FIELDS: readonly string[] = ['aclRevision'];
 
+/** What `countRagDocuments` can narrow by (a list's paging and project fields are its own arguments here). */
+type RagDocumentCountFilters = Pick<
+  RagDocumentListFilters,
+  'status' | 'search' | 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged' | 'withUnscoped'
+>;
+
 function distinctStrings(values: readonly unknown[]): string[] {
   return [...new Set(values.filter((v): v is string => typeof v === 'string' && v.length > 0))];
 }
@@ -330,22 +336,38 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
     async countRagDocuments(
       ragModuleKey: string,
       projectId?: string,
-      filters?: Pick<RagDocumentListFilters, 'status' | 'search' | 'folderId' | 'ids' | 'access' | 'withUnscoped'>,
+      filters?: RagDocumentCountFilters,
     ): Promise<number> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = {
-        ragModuleKey,
-        ...this.buildRagDocumentProjectScope(projectId, filters?.withUnscoped === true),
-      };
-      if (filters?.status) query.status = filters.status;
-      if (filters?.search) {
-        query.fileName = { $regex: this.escapeRegex(filters.search), $options: 'i' };
-      }
-      this.applyRagDocumentSelection(query, filters);
+      const query = this.buildRagDocumentCountQuery(ragModuleKey, projectId, filters);
       return db
         .collection(COLLECTIONS.ragDocuments)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .countDocuments(query as any);
+    }
+
+    /** One count per folder (`''` = top level), over exactly the rows `countRagDocuments` counts for the same arguments. */
+    async countRagDocumentsByFolder(
+      ragModuleKey: string,
+      projectId: string | undefined,
+      filters?: Pick<RagDocumentListFilters, 'access' | 'withUnscoped'>,
+    ): Promise<Record<string, number>> {
+      const db = this.getTenantDb();
+      const query = this.buildRagDocumentCountQuery(ragModuleKey, projectId, filters);
+      // A document without a folder (missing or null) is one group, and an empty folder id is another: both are the top level.
+      const rows = await db
+        .collection(COLLECTIONS.ragDocuments)
+        .aggregate<{ _id: unknown; count: number }>([
+          { $match: query },
+          { $group: { _id: '$folderId', count: { $sum: 1 } } },
+        ])
+        .toArray();
+      const counts = new Map<string, number>();
+      for (const row of rows) {
+        const folder = row._id === null || row._id === undefined ? '' : String(row._id);
+        counts.set(folder, (counts.get(folder) ?? 0) + row.count);
+      }
+      return Object.fromEntries(counts);
     }
 
     /** Same filters and order as `listRagDocuments`, ids only. `limit` is required. */
@@ -408,6 +430,27 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
       return query;
     }
 
+    /**
+     * The query of `countRagDocuments` / `countRagDocumentsByFolder`: module, project scope, status, search, selection.
+     * An absent project is scoped like `buildProjectScopeFilter(undefined)`: only the rows that carry no project.
+     */
+    private buildRagDocumentCountQuery(
+      ragModuleKey: string,
+      projectId: string | undefined,
+      filters?: RagDocumentCountFilters,
+    ): Record<string, unknown> {
+      const query: Record<string, unknown> = {
+        ragModuleKey,
+        ...this.buildRagDocumentProjectScope(projectId, filters?.withUnscoped === true),
+      };
+      if (filters?.status) query.status = filters.status;
+      if (filters?.search) {
+        query.fileName = { $regex: this.escapeRegex(filters.search), $options: 'i' };
+      }
+      this.applyRagDocumentSelection(query, filters);
+      return query;
+    }
+
     /** A project's rows; with `withUnscoped` also the rows that carry no project. */
     private buildRagDocumentProjectScope(projectId: string | undefined, withUnscoped: boolean): Record<string, unknown> {
       const scoped = this.buildProjectScopeFilter(projectId);
@@ -417,14 +460,16 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
     }
 
     /**
-     * Which documents: a folder (or the top level), a set of ids, and/or what an
-     * access scope may read. The access clause goes under `$and`, because the
-     * project scope may already have put an `$or` on the query. An empty id list
-     * matches nothing.
+     * Which documents: a folder (or the top level), a set of ids, whether they
+     * carry their own permissions and who keeps those, and/or what an access
+     * scope may read. The access clause goes under `$and`, because the project
+     * scope may already have put an `$or` on the query. An empty id list
+     * matches nothing. 'inherit' and 'console' are "everything but 'own' /
+     * 'sync'", so a document without the field (or with it null) is theirs.
      */
     private applyRagDocumentSelection(
       query: Record<string, unknown>,
-      filters?: Pick<RagDocumentListFilters, 'folderId' | 'ids' | 'access'>,
+      filters?: Pick<RagDocumentListFilters, 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged'>,
     ): void {
       if (!filters) return;
       if (filters.folderId === null || filters.folderId === '') {
@@ -434,6 +479,10 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
         query.folderId = filters.folderId;
       }
       if (filters.ids !== undefined) query._id = { $in: toObjectIds(filters.ids) };
+      if (filters.aclMode === 'own') query.aclMode = 'own';
+      else if (filters.aclMode === 'inherit') query.aclMode = { $ne: 'own' };
+      if (filters.aclManaged === 'sync') query.aclManaged = 'sync';
+      else if (filters.aclManaged === 'console') query.aclManaged = { $ne: 'sync' };
       if (filters.access) {
         const clause = this.buildRagAccessQuery(filters.access);
         if (clause) query.$and = [...((query.$and as unknown[] | undefined) ?? []), clause];

@@ -21,6 +21,11 @@
  * the address and the subject of such an account are what the application
  * claimed, not something a directory vouches for.
  *
+ * The pieces of that matching (what a rule asks, what a hit adds, how links
+ * apply) are in `audience.ts` and are shared with the dashboard's views, which
+ * ask the same question for many people at once. This file adds what only a
+ * single lookup needs: one directory query per rule, run lazily, and the cache.
+ *
  * Nothing here is stored on documents or vectors, so changing a rule or a link
  * takes effect on the next query without re-syncing anything. The person part
  * is cached for 15 seconds per process (as IAM's principal context is).
@@ -32,25 +37,36 @@ import {
   type DatabaseProvider,
   type IRagIdentityDomain,
   type IRagIdentityLink,
-  type IRagIdentityUser,
   type IRagIdentityUserMatchRule,
-  type IUser,
 } from '@/lib/database';
 import { fetchGroupsByIds, listUserGroupIds } from '@/lib/iam/groupGrants';
+import {
+  addLinkedGroupKey,
+  addLinkedUserKeys,
+  applyRuleHit,
+  consoleKeysOf,
+  directoryField,
+  externalIdFallback,
+  groupExternalIdKeys,
+  groupExternalIdsOf,
+  matchablePersonOf,
+  ruleHitOf,
+  ruleQueryOf,
+  type MatchablePerson,
+  type PersonIdentityMatch,
+  type RuleHit,
+} from './audience';
 import type { KbCaller } from './caller';
 import {
   EVERYONE_PRINCIPAL,
   formatPrincipal,
   isValidIdentityDomainKey,
-  normalizeEmail,
 } from './principals';
 
 const logger = createLogger('rag:access:identity');
 
 const PERSON_CACHE_TTL_MS = 15_000;
 const PERSON_CACHE_MAX = 2_000;
-/** Directory users one rule may match for one person (same e-mail on a member and a guest account, ...). */
-const MAX_DIRECTORY_MATCHES = 10;
 /** A principal set larger than this is cut (fewer keys can only mean less access). */
 export const MAX_CALLER_PRINCIPALS = 5_000;
 
@@ -59,14 +75,7 @@ export const DEFAULT_USER_MATCH: readonly IRagIdentityUserMatchRule[] = Object.f
   { console: 'email', external: 'upn' },
 ]) as readonly IRagIdentityUserMatchRule[];
 
-export interface PersonIdentityMatch {
-  domain: string;
-  /** How the person was matched: a `userMatch` rule, a manual link, or their external id taken as the domain's user id. */
-  via: 'rule' | 'link' | 'external_id' | 'group_external_id';
-  rule?: IRagIdentityUserMatchRule;
-  /** External user ids (or, for group matches, external group ids) the match produced. */
-  externalIds: string[];
-}
+export type { PersonIdentityMatch };
 
 export interface PersonPrincipals {
   userId: string;
@@ -96,13 +105,23 @@ const personCache = new Map<string, { value: PersonPrincipals; expiresAt: number
 const personInflight = new Map<string, Promise<PersonPrincipals>>();
 /** Per tenant: bumped by every invalidation, so a load that started before it is not cached. */
 const generations = new Map<string, number>();
+/** Bumped by every invalidation of all tenants, so tenants that have no counter of their own change too. */
+let globalEpoch = 0;
 
 function cacheKey(tenantDbName: string, userId: string): string {
   return `${tenantDbName}\u0000${userId}`;
 }
 
 function generationOf(tenantDbName: string): number {
-  return generations.get(tenantDbName) ?? 0;
+  return (generations.get(tenantDbName) ?? 0) + globalEpoch;
+}
+
+/**
+ * Changes whenever `invalidateRagIdentityCache` is called for the tenant (or for all). A cache of something derived
+ * from identity domains, directory users or links compares it before it serves and before it stores.
+ */
+export function ragIdentityCacheGeneration(tenantDbName: string): number {
+  return generationOf(tenantDbName);
 }
 
 /**
@@ -114,10 +133,10 @@ export function invalidateRagIdentityCache(tenantDbName?: string): void {
   if (!tenantDbName) {
     personCache.clear();
     personInflight.clear();
-    for (const key of [...generations.keys()]) generations.set(key, generationOf(key) + 1);
+    globalEpoch += 1;
     return;
   }
-  generations.set(tenantDbName, generationOf(tenantDbName) + 1);
+  generations.set(tenantDbName, (generations.get(tenantDbName) ?? 0) + 1);
   const prefix = `${tenantDbName}\u0000`;
   for (const key of [...personCache.keys()]) if (key.startsWith(prefix)) personCache.delete(key);
   for (const key of [...personInflight.keys()]) if (key.startsWith(prefix)) personInflight.delete(key);
@@ -135,24 +154,6 @@ function remember(key: string, value: PersonPrincipals): void {
 
 // ── matching ───────────────────────────────────────────────────────────
 
-/**
- * The person's values a rule's `console` side names. `externalId` is the SSO / LDAP anchor (`IUser.externalId`) only:
- * `IUser.externalIds` holds what host applications call their people, names the application (or its users) chooses,
- * so they are never an identity in a customer's directory.
- */
-function consoleValues(user: IUser, side: IRagIdentityUserMatchRule['console'], email: string | undefined): string[] {
-  if (side === 'email') return email ? [email] : [];
-  const anchor = typeof user.externalId === 'string' ? user.externalId.trim() : '';
-  return anchor ? [anchor] : [];
-}
-
-function directoryField(external: IRagIdentityUserMatchRule['external']): 'extId' | 'email' | 'upn' | `attr:${string}` | null {
-  if (external === 'id') return 'extId';
-  if (external === 'email' || external === 'upn') return external;
-  if (typeof external === 'string' && external.startsWith('attr:') && external.length > 5) return external;
-  return null;
-}
-
 /** Whether `value` is a rule the matching understands (what a directory's settings are validated with). */
 export function isUserMatchRule(value: unknown): value is IRagIdentityUserMatchRule {
   if (!value || typeof value !== 'object') return false;
@@ -167,40 +168,23 @@ export function userMatchRulesOf(domain: Pick<IRagIdentityDomain, 'userMatch'>):
   return rules.length > 0 ? rules : [...DEFAULT_USER_MATCH];
 }
 
+/**
+ * The first rule that finds directory users. One query per rule, in order, and none after a hit: a person is looked up
+ * one rule at a time, so a hit on the first rule costs one query.
+ */
 async function matchDirectoryUsers(
   db: IdentityDb,
-  domain: IRagIdentityDomain,
-  user: IUser,
-  email: string | undefined,
-): Promise<{ rule: IRagIdentityUserMatchRule; users: IRagIdentityUser[] } | null> {
-  for (const rule of userMatchRulesOf(domain)) {
-    const field = directoryField(rule.external);
-    if (!field) continue;
-    const raw = consoleValues(user, rule.console, email);
-    if (raw.length === 0) continue;
-    // Directory e-mails, UPNs and attributes are stored lower-cased; ids are compared as they are.
-    const values = field === 'extId' ? raw : [...new Set(raw.map((v) => v.toLowerCase()))];
-    const found = await db.findRagIdentityUsers(domain.key, field, values);
-    if (Array.isArray(found) && found.length > 0) {
-      return { rule, users: found.slice(0, MAX_DIRECTORY_MATCHES) };
-    }
+  domainKey: string,
+  person: MatchablePerson,
+  rules: readonly IRagIdentityUserMatchRule[],
+): Promise<RuleHit | null> {
+  for (let index = 0; index < rules.length; index += 1) {
+    const query = ruleQueryOf(person, rules[index]);
+    if (!query) continue;
+    const found = await db.findRagIdentityUsers(domainKey, query.field, query.values);
+    if (Array.isArray(found) && found.length > 0) return ruleHitOf(index, rules[index], found);
   }
   return null;
-}
-
-function addDirectoryUserKeys(keys: Set<string>, domainKey: string, users: IRagIdentityUser[]): void {
-  for (const directoryUser of users) {
-    const userKey = formatPrincipal({ kind: 'external_user', domain: domainKey, id: directoryUser.extId });
-    if (userKey) keys.add(userKey);
-    for (const groupId of Array.isArray(directoryUser.groups) ? directoryUser.groups : []) {
-      const groupKey = formatPrincipal({ kind: 'external_group', domain: domainKey, id: groupId });
-      if (groupKey) keys.add(groupKey);
-    }
-    if (directoryUser.type !== 'guest') {
-      const allKey = formatPrincipal({ kind: 'external_all', domain: domainKey });
-      if (allKey) keys.add(allKey);
-    }
-  }
 }
 
 async function loadPersonPrincipals(db: IdentityDb, tenantId: string, userId: string): Promise<PersonPrincipals> {
@@ -209,24 +193,12 @@ async function loadPersonPrincipals(db: IdentityDb, tenantId: string, userId: st
     return { userId, active: false, groupIds: [], principals: [EVERYONE_PRINCIPAL], matches: [] };
   }
 
-  const keys = new Set<string>([EVERYONE_PRINCIPAL]);
-  const userKey = formatPrincipal({ kind: 'user', id: userId });
-  if (userKey) keys.add(userKey);
+  const groupIds = await listUserGroupIds(db, userId);
   // An account of a host application (kind 'external') carries the address the application claimed, which nobody checked
   // here: it is no identity, so such an account holds no e-mail key and is matched to no directory user by e-mail, UPN,
   // attribute or external id. Its user and group keys, and the links an admin made by hand, still count.
-  const hostApp = user.kind === 'external';
-  const email = hostApp ? undefined : normalizeEmail(user.emailLower || user.email) ?? undefined;
-  if (email) {
-    const emailKey = formatPrincipal({ kind: 'email', email });
-    if (emailKey) keys.add(emailKey);
-  }
-
-  const groupIds = await listUserGroupIds(db, userId);
-  for (const groupId of groupIds) {
-    const groupKey = formatPrincipal({ kind: 'group', id: groupId });
-    if (groupKey) keys.add(groupKey);
-  }
+  const base = matchablePersonOf(user, groupIds.map((id) => ({ _id: id })));
+  const keys = new Set<string>(consoleKeysOf({ ...base, userId }));
 
   const matches: PersonIdentityMatch[] = [];
   const domains = (await db.listRagIdentityDomains()).filter((d) => isValidIdentityDomainKey(d.key));
@@ -238,35 +210,22 @@ async function loadPersonPrincipals(db: IdentityDb, tenantId: string, userId: st
       db.listRagIdentityLinks({ consoleKind: 'user', consoleIds: [userId] }),
       groupIds.length > 0 ? db.listRagIdentityLinks({ consoleKind: 'group', consoleIds: groupIds }) : Promise.resolve([] as IRagIdentityLink[]),
     ]);
-    const groupExternalIds = [...new Set(groups
-      .map((g) => (typeof g.externalId === 'string' ? g.externalId.trim() : ''))
-      .filter(Boolean))];
+    const person: MatchablePerson = { ...base, userId, groupExternalIds: groupExternalIdsOf(groups) };
 
     for (const domain of domains) {
-      const matched = hostApp ? null : await matchDirectoryUsers(db, domain, user, email);
-      if (matched) {
-        addDirectoryUserKeys(keys, domain.key, matched.users);
-        matches.push({ domain: domain.key, via: 'rule', rule: matched.rule, externalIds: matched.users.map((u) => u.extId) });
-      } else if (!hostApp) {
+      const rules = userMatchRulesOf(domain);
+      const hit = person.hostApp ? null : await matchDirectoryUsers(db, domain.key, person, rules);
+      if (hit) {
+        matches.push(applyRuleHit(keys, domain.key, hit));
+      } else if (!person.hostApp) {
         // No directory row: an `externalId -> id` rule still names the person's id in that domain.
-        const direct = userMatchRulesOf(domain).some((r) => r.console === 'externalId' && r.external === 'id')
-          ? consoleValues(user, 'externalId', email)
-          : [];
-        const added: string[] = [];
-        for (const id of direct) {
-          const key = formatPrincipal({ kind: 'external_user', domain: domain.key, id });
-          if (key) { keys.add(key); added.push(id); }
-        }
-        if (added.length > 0) matches.push({ domain: domain.key, via: 'external_id', externalIds: added });
+        const direct = externalIdFallback(keys, person, domain.key, rules);
+        if (direct) matches.push(direct);
       }
 
-      if (domain.matchGroupsByExternalId !== false && groupExternalIds.length > 0) {
-        const added: string[] = [];
-        for (const id of groupExternalIds) {
-          const key = formatPrincipal({ kind: 'external_group', domain: domain.key, id });
-          if (key) { keys.add(key); added.push(id); }
-        }
-        if (added.length > 0) matches.push({ domain: domain.key, via: 'group_external_id', externalIds: added });
+      if (domain.matchGroupsByExternalId !== false) {
+        const viaGroups = groupExternalIdKeys(keys, person, domain.key);
+        if (viaGroups) matches.push(viaGroups);
       }
     }
 
@@ -275,9 +234,7 @@ async function loadPersonPrincipals(db: IdentityDb, tenantId: string, userId: st
     for (const link of [...userLinks, ...groupLinks]) {
       if (!domainKeys.has(link.domain)) continue;
       if (link.externalKind === 'group') {
-        const key = formatPrincipal({ kind: 'external_group', domain: link.domain, id: link.externalId });
-        if (key) keys.add(key);
-        matches.push({ domain: link.domain, via: 'link', externalIds: [link.externalId] });
+        matches.push(addLinkedGroupKey(keys, link.domain, link.externalId));
       } else if (link.consoleKind === 'user') {
         const list = linkedUsersByDomain.get(link.domain) ?? [];
         list.push(link.externalId);
@@ -286,13 +243,8 @@ async function loadPersonPrincipals(db: IdentityDb, tenantId: string, userId: st
       // A console GROUP linked to an external USER is not a valid link (refused on create); ignored here.
     }
     for (const [domainKey, externalIds] of linkedUsersByDomain) {
-      for (const id of externalIds) {
-        const key = formatPrincipal({ kind: 'external_user', domain: domainKey, id });
-        if (key) keys.add(key);
-      }
       const directoryUsers = await db.findRagIdentityUsers(domainKey, 'extId', externalIds);
-      addDirectoryUserKeys(keys, domainKey, Array.isArray(directoryUsers) ? directoryUsers : []);
-      matches.push({ domain: domainKey, via: 'link', externalIds });
+      matches.push(addLinkedUserKeys(keys, domainKey, externalIds, Array.isArray(directoryUsers) ? directoryUsers : []));
     }
   }
 
@@ -303,6 +255,7 @@ async function loadPersonPrincipals(db: IdentityDb, tenantId: string, userId: st
     principals = principals.slice(0, MAX_CALLER_PRINCIPALS);
     truncated = true;
   }
+  const email = base.email;
   return { userId, active: true, ...(email ? { email } : {}), groupIds, principals, matches, ...(truncated ? { truncated } : {}) };
 }
 

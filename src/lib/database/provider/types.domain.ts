@@ -1749,6 +1749,10 @@ export interface RagDocumentListFilters {
   ids?: string[];
   /** Only the documents an access scope may read (or, with `negate`, may not read). */
   access?: RagDocumentAccessFilter;
+  /** 'own' = documents with their own permissions; 'inherit' = the others. */
+  aclMode?: 'own' | 'inherit';
+  /** 'sync' = documents whose folder and permissions a connected source owns; 'console' = the others. */
+  aclManaged?: 'sync' | 'console';
   /**
    * With a `projectId`: also the module's rows written before documents carried
    * a project (no project). Lets one query count what a module owns.

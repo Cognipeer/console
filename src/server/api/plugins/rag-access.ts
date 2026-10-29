@@ -8,11 +8,29 @@
  * admins) only, and a writer lists the folders they can see. Permission and
  * directory routes are `admin` (directories are workspace-wide, so their
  * handlers also ask for the admin level outside any project).
+ *
+ * The read-only views of the Access tab (summary, permission states of listed
+ * rows, who a key stands for, the pickers) and of the identity directories
+ * (people, rule preview, groups, links) are `admin` too, and the directory ones
+ * are for the workspace's admins; the answers are built in ragAccessViews.ts.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
+import {
+  MAX_AUDIENCE_PRINCIPALS,
+  MAX_NODE_STATE_IDS,
+  getRagAccessAudience,
+  getRagAccessSummary,
+  getRagNodeStates,
+  listRagIdentityGroups,
+  listRagIdentityLinkViews,
+  listRagIdentityPeople,
+  previewRagIdentityMatch,
+  searchRagAccessPrincipals,
+  searchRagConsolePeople,
+} from '@/lib/services/rag/ragAccessViews';
 import {
   createRagIdentityLinkFor,
   createRagModuleFolder,
@@ -34,6 +52,7 @@ import {
 } from '@/lib/services/rag/ragAccessService';
 import {
   readJsonBody,
+  readJsonObjectBody,
   requireProjectContextForRequest,
   sendProjectContextError,
   serviceActionAllowedForRequest,
@@ -72,6 +91,30 @@ async function requireWorkspaceRagAdmin(request: FastifyRequest, reply: FastifyR
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/** The JSON object a request sent, or null when it sent none (empty, not JSON, or not an object): the caller's mistake, 400. */
+function jsonObjectBody(request: FastifyRequest): Record<string, unknown> | null {
+  try {
+    return readJsonObjectBody<Record<string, unknown>>(request);
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+/** A list of strings of at most `max` entries; not sent is an empty list, anything else that is no such list is null. */
+function stringList(value: unknown, max: number): string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > max || value.some((entry) => typeof entry !== 'string')) return null;
+  return value as string[];
+}
+
+/** A paging number from the query string, when it is one. */
+function intParam(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
@@ -251,6 +294,76 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── views of the Access tab ──────────────────────────────────────────
+
+  app.get('/rag/modules/:key/access/summary', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      const { key } = request.params as { key: string };
+      const summary = await getRagAccessSummary(ctx, key);
+      return reply.code(200).send({ summary });
+    } catch (error) {
+      return fail(reply, error, 'Get Knowledge Engine access summary');
+    }
+  }));
+
+  app.post('/rag/modules/:key/access/nodes', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      const { key } = request.params as { key: string };
+      const body = jsonObjectBody(request);
+      if (!body) return reply.code(400).send({ error: 'A JSON body is required' });
+      const folderIds = stringList(body.folderIds, MAX_NODE_STATE_IDS);
+      if (!folderIds) return reply.code(400).send({ error: `folderIds must be an array of at most ${MAX_NODE_STATE_IDS} folder ids` });
+      const documentIds = stringList(body.documentIds, MAX_NODE_STATE_IDS);
+      if (!documentIds) return reply.code(400).send({ error: `documentIds must be an array of at most ${MAX_NODE_STATE_IDS} document ids` });
+      const nodes = await getRagNodeStates(ctx, key, { folderIds, documentIds });
+      return reply.code(200).send({ nodes });
+    } catch (error) {
+      return fail(reply, error, 'Get Knowledge Engine permission states');
+    }
+  }));
+
+  app.post('/rag/modules/:key/access/audience', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      const { key } = request.params as { key: string };
+      const body = jsonObjectBody(request);
+      if (!body) return reply.code(400).send({ error: 'A JSON body is required' });
+      const principals = body.principals === undefined ? null : stringList(body.principals, MAX_AUDIENCE_PRINCIPALS);
+      if (!principals) {
+        return reply.code(400).send({ error: `principals must be an array of at most ${MAX_AUDIENCE_PRINCIPALS} principal keys` });
+      }
+      // Counting the people a directory key reaches reads the directory, which is for the workspace's admins; the
+      // admins of this project alone get everything else.
+      const directoryCounts = await serviceActionAllowedForRequest(request, 'rag', 'admin', { workspace: true });
+      const audience = await getRagAccessAudience(ctx, key, principals, { directoryCounts });
+      return reply.code(200).send({ audience });
+    } catch (error) {
+      return fail(reply, error, 'Resolve Knowledge Engine audience');
+    }
+  }));
+
+  app.get('/rag/modules/:key/access/principals', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      const { key } = request.params as { key: string };
+      const query = (request.query ?? {}) as { type?: string; q?: string; limit?: string };
+      if (query.type !== 'user' && query.type !== 'group' && query.type !== 'token') {
+        return reply.code(400).send({ error: 'type must be "user", "group" or "token"' });
+      }
+      const limit = intParam(query.limit);
+      const items = await searchRagAccessPrincipals(ctx, key, {
+        type: query.type,
+        q: asOptionalString(query.q),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+      return reply.code(200).send({ items });
+    } catch (error) {
+      return fail(reply, error, 'Search Knowledge Engine principals');
+    }
+  }));
+
   // ── identity directories (workspace-wide) ─────────────────────────────
 
   app.get('/rag/identity/domains', ADMIN, withApiRequestContext(async (request, reply) => {
@@ -313,6 +426,100 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send(page);
     } catch (error) {
       return fail(reply, error, 'List identity directory users');
+    }
+  }));
+
+  app.get('/rag/identity/console-people', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
+      const query = (request.query ?? {}) as { type?: string; q?: string; limit?: string };
+      if (query.type !== 'user' && query.type !== 'group') {
+        return reply.code(400).send({ error: 'type must be "user" or "group"' });
+      }
+      const limit = intParam(query.limit);
+      const items = await searchRagConsolePeople(ctx, {
+        type: query.type,
+        q: asOptionalString(query.q),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+      return reply.code(200).send({ items });
+    } catch (error) {
+      return fail(reply, error, 'Search console people');
+    }
+  }));
+
+  app.get('/rag/identity/domains/:domainKey/people', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
+      const { domainKey } = request.params as { domainKey: string };
+      const query = (request.query ?? {}) as { search?: string; filter?: string; limit?: string; offset?: string };
+      if (query.filter !== undefined && query.filter !== 'all' && query.filter !== 'matched' && query.filter !== 'unmatched') {
+        return reply.code(400).send({ error: 'filter must be "all", "matched" or "unmatched"' });
+      }
+      const limit = intParam(query.limit);
+      const offset = intParam(query.offset);
+      const page = await listRagIdentityPeople(ctx, domainKey, {
+        search: query.search,
+        ...(query.filter ? { filter: query.filter } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+      });
+      return reply.code(200).send(page);
+    } catch (error) {
+      return fail(reply, error, 'List identity directory people');
+    }
+  }));
+
+  app.post('/rag/identity/domains/:domainKey/preview', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
+      const { domainKey } = request.params as { domainKey: string };
+      const body = jsonObjectBody(request);
+      if (!body) return reply.code(400).send({ error: 'A JSON body is required' });
+      if (body.matchGroupsByExternalId !== undefined && typeof body.matchGroupsByExternalId !== 'boolean') {
+        return reply.code(400).send({ error: 'matchGroupsByExternalId must be a boolean' });
+      }
+      const preview = await previewRagIdentityMatch(ctx, domainKey, {
+        userMatch: body.userMatch,
+        ...(typeof body.matchGroupsByExternalId === 'boolean' ? { matchGroupsByExternalId: body.matchGroupsByExternalId } : {}),
+      });
+      return reply.code(200).send({ preview });
+    } catch (error) {
+      return fail(reply, error, 'Preview identity matching');
+    }
+  }));
+
+  app.get('/rag/identity/domains/:domainKey/groups', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
+      const { domainKey } = request.params as { domainKey: string };
+      const query = (request.query ?? {}) as { search?: string; limit?: string; offset?: string };
+      const limit = intParam(query.limit);
+      const offset = intParam(query.offset);
+      const page = await listRagIdentityGroups(ctx, domainKey, {
+        search: query.search,
+        ...(limit !== undefined ? { limit } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+      });
+      return reply.code(200).send(page);
+    } catch (error) {
+      return fail(reply, error, 'List identity directory groups');
+    }
+  }));
+
+  app.get('/rag/identity/domains/:domainKey/links', ADMIN, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await contextFor(request);
+      if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
+      const { domainKey } = request.params as { domainKey: string };
+      const links = await listRagIdentityLinkViews(ctx, domainKey);
+      return reply.code(200).send({ links });
+    } catch (error) {
+      return fail(reply, error, 'List identity directory links');
     }
   }));
 

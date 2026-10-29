@@ -275,7 +275,7 @@ dashboard routes (session authentication, in the active project) manage folders:
 
 | Route | Does |
 |---|---|
-| `GET /api/rag/modules/:key/folders` | Lists the folders |
+| `GET /api/rag/modules/:key/folders` | Lists the folders, each with the number of `documents` directly in it, counted as the caller's document list shows them. A folder the caller sees only on the way to one they may read is marked `pathOnly` and shows `documents: 0` |
 | `POST /api/rag/modules/:key/folders` | Creates one: `{ "name": "Budgets", "parentId": "<folder id>" }` (`parentId: null`: the top level) |
 | `PATCH /api/rag/modules/:key/folders/:folderId` | Renames it (`name`) or moves it (`parentId`) |
 | `DELETE /api/rag/modules/:key/folders/:folderId` | Deletes it, when it holds no folder and no document (`409 folder_not_empty`) |
@@ -318,6 +318,23 @@ user of the project can read the document (`readable`), which node decides (`eff
 person's keys its entries name (`grantedBy`). Knowledge Engine admins of the whole workspace also see who the person
 is: their e-mail address, groups, every key and how the directories matched them.
 
+### Views of the Access tab
+
+The console's Access tab reads these dashboard routes. All need Knowledge Engine `admin` in the project, and answer
+`404 module_not_found` for a knowledge base that is not in it.
+
+| Route | Does |
+|---|---|
+| `GET /api/rag/modules/:key/access/summary` | The state of the knowledge base: `enabled`, `adminBypass`, whether the top level is open to everyone (`root`), how many folders and documents are `total`, have their `own` permissions, come from a source (`synced`) or are `closed`, and the directories the permissions name |
+| `POST /api/rag/modules/:key/access/nodes` | The permission state of listed rows: `{ "folderIds": ["..."], "documentIds": ["..."] }`, up to 500 of each. Answers `nodes` keyed `folder:<id>` and `document:<id>`, each with `mode` (`own` or `inherit`), `managed: "sync"` when a source owns it and the number of `entries` of its own list (0 while it inherits). Ids that are not in the knowledge base are left out |
+| `POST /api/rag/modules/:key/access/audience` | Who each key stands for: `{ "principals": ["user:...", "x:corp:all"] }`, up to 1000 keys, invalid ones left out. Answers `audience` keyed by the key as sent, with its `kind`, a `label`, a `detail`, whether it `exists` and `people`, the active console people the key reaches (`null` for `everyone`, for tokens, and for a directory key unless the caller is a Knowledge Engine admin of the whole workspace) |
+| `GET /api/rag/modules/:key/access/principals` | People who can open the project, groups or API tokens to add to a list: `type` (`user`, `group` or `token`), `q`, `limit` (1 to 50, 20 by default). Answers `items` with the `principal` key to store |
+
+A folder or a document with its own permissions and no entries is **closed**: nobody reads it apart from the
+administrators with the exception above. The summary lists up to 50 closed items, folders first and then documents,
+newest first, and sets `closedComplete: false` when the list is cut or the scan for closed documents stopped
+before its end.
+
 ### External directories
 
 An external directory holds the users and groups of another system, such as the people and groups a SharePoint
@@ -347,6 +364,11 @@ document is rewritten.
 | `PUT /api/rag/identity/domains/:domainKey` | Creates or changes one: `label`, `userMatch`, `matchGroupsByExternalId` |
 | `DELETE /api/rag/identity/domains/:domainKey` | Deletes one, with the permissions that name it |
 | `GET /api/rag/identity/domains/:domainKey/users` | Lists its users (`search`, `limit`, `offset`) |
+| `GET /api/rag/identity/domains/:domainKey/people` | Lists its users with the console people each one is matched to, by rule (`rule`: the position of the rule) or by link (`linkId`). Takes `search`, `filter` (`matched` or `unmatched`), `limit` (up to 200) and `offset`; answers `users`, `total` and a `summary` of the whole directory (`directoryUsers`, `matchedUsers`, `consolePeople`, `matchedPeople`, `groups`, the `rules` in force and whether they are the `defaults`) |
+| `POST /api/rag/identity/domains/:domainKey/preview` | Counts what unsaved rules would match, before they are saved: `{ "userMatch": [...] }`, checked like a saved list (`400 domain_invalid`), where `[]` previews the default rules. Answers a `preview` with the matched users and people, `decidedByRule` (the users each rule decided) and the first 20 `unmatchedUsers` |
+| `GET /api/rag/identity/domains/:domainKey/groups` | Lists its groups, those its users belong to and those a permission names, with the number of `users` of each and the console groups that stand for it (`search`, `limit`, `offset`) |
+| `GET /api/rag/identity/domains/:domainKey/links` | Lists its links with the names of both ends, newest first |
+| `GET /api/rag/identity/console-people` | Console users or groups to link: `type` (`user` or `group`), `q`, `limit` (1 to 50, 20 by default) |
 | `GET /api/rag/identity/links` | Lists the links (`domain`, `consoleKind`, `consoleId`) |
 | `POST /api/rag/identity/links` | Adds one: `domain`, `externalKind` and `externalId`, `consoleKind` and `consoleId` (each kind `user` or `group`) |
 | `DELETE /api/rag/identity/links/:linkId` | Removes one |

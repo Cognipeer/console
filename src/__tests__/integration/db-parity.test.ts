@@ -20,6 +20,7 @@ import type {
   GuardrailHooksConfig,
   IGuardrailBinding,
   IRagDocument,
+  RagAclNodeType,
   RagDocumentAccessFilter,
 } from '@/lib/database/provider.interface';
 import {
@@ -27,6 +28,7 @@ import {
   ensureTenantDbIndexes,
   TENANT_DB_INDEXES,
 } from '@/lib/database/mongodb/indexManifest';
+import { clampRagAclLabelsLimit } from '@/lib/database/provider/ragAccess';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { describeForEachProvider, listTenantIndexNames } from './db-parity.helper';
 
@@ -4653,6 +4655,728 @@ describeForEachProvider('RAG access: identity directory', (getDb) => {
     // So unlinking it once leaves nothing that still grants.
     expect(await db.deleteRagIdentityLink(String(a._id))).toBe(true);
     expect(await db.listRagIdentityLinks({ domain: 'dom' })).toEqual([]);
+  });
+});
+
+// ── Knowledge Engine access control: the numbers behind the Access tab and the folder list ─────────
+// Ownership filters on documents, documents per folder, entries per node, principal labels and group
+// counts. Both backends must answer alike; "missing" and "null" are the same thing everywhere.
+
+describeForEachProvider('RAG access: ownership filters and documents per folder', (getDb) => {
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragown-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Ownership Co', slug, dbName: `tenant_${slug}`, licenseType: 'FREE', ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(`tenant_${slug}`);
+  });
+
+  type CountFilters = NonNullable<Parameters<DatabaseProvider['countRagDocuments']>[2]>;
+
+  const makeDoc = (fileName: string, over: Partial<IRagDocument> = {}) =>
+    getDb().createRagDocument({
+      tenantId, projectId: 'proj-1', ragModuleKey: 'km-own', fileName, status: 'indexed', createdBy: 'tester', ...over,
+    });
+  const namesOf = (docs: IRagDocument[]) => docs.map((d) => d.fileName);
+  const sorted = (values: string[]) => [...values].sort();
+  const sum = (counts: Record<string, number>) => Object.values(counts).reduce((total, n) => total + n, 0);
+  /** The documents grouped by folder the way `countRagDocumentsByFolder` keys them: no folder (or an empty one) is `''`. */
+  const groupedByFolder = (docs: IRagDocument[]) => {
+    const counts: Record<string, number> = {};
+    for (const doc of docs) counts[doc.folderId ?? ''] = (counts[doc.folderId ?? ''] ?? 0) + 1;
+    return counts;
+  };
+
+  /** A document row with explicit NULLs in the three optional columns (what an older code path left behind). */
+  const insertNullRow = async (fileName: string) => {
+    const raw = rawTenantHandle(getDb());
+    const now = new Date();
+    if (typeof raw.collection === 'function') {
+      await raw.collection('rag_documents').insertOne({
+        tenantId, projectId: 'proj-1', ragModuleKey: 'km-own', fileName, status: 'indexed',
+        folderId: null, aclMode: null, aclManaged: null, createdBy: 'tester', createdAt: now, updatedAt: now,
+      });
+    } else {
+      raw.prepare!(
+        `INSERT INTO rag_documents (id, tenantId, projectId, ragModuleKey, fileName, status, folderId, aclMode, aclManaged, createdBy, createdAt, updatedAt)
+         VALUES (@id, @tenantId, 'proj-1', 'km-own', @fileName, 'indexed', NULL, NULL, NULL, 'tester', @now, @now)`,
+      ).run({ id: `raw-${fileName}`, tenantId, fileName, now: now.toISOString() });
+    }
+  };
+
+  /**
+   * Nine documents of km-own / proj-1 (the raw NULL row is the ninth), and rows that must never be part of an answer.
+   *   top-inherit, top-own, top-own-sync   top level (nothing / own / own and synced)
+   *   empty-folder                          the folder id '' (the top level), inherits
+   *   fa-inherit, fa-own, fa-inherit-sync   in fa
+   *   fb-own-sync                           in fb
+   *   nulls                                 explicit NULLs in folder, mode and owner
+   */
+  const seed = async () => {
+    const docs = {
+      topInherit: await makeDoc('top-inherit'),
+      topOwn: await makeDoc('top-own', { aclMode: 'own' }),
+      topOwnSync: await makeDoc('top-own-sync', { aclMode: 'own', aclManaged: 'sync' }),
+      emptyFolder: await makeDoc('empty-folder', { folderId: '' }),
+      faInherit: await makeDoc('fa-inherit', { folderId: 'fa' }),
+      faOwn: await makeDoc('fa-own', { folderId: 'fa', aclMode: 'own' }),
+      faInheritSync: await makeDoc('fa-inherit-sync', { folderId: 'fa', aclManaged: 'sync' }),
+      fbOwnSync: await makeDoc('fb-own-sync', { folderId: 'fb', aclMode: 'own', aclManaged: 'sync' }),
+    };
+    await insertNullRow('nulls');
+    // The same shapes in another module and in another project.
+    await makeDoc('x-module', { ragModuleKey: 'km-other', folderId: 'fa', aclMode: 'own', aclManaged: 'sync' });
+    await makeDoc('x-project', { projectId: 'proj-2', folderId: 'fa', aclMode: 'own', aclManaged: 'sync' });
+    return Object.fromEntries(Object.entries(docs).map(([key, doc]) => [key, String(doc._id)])) as Record<keyof typeof docs, string>;
+  };
+
+  /** What the filters select, sorted by name; the listing, the count and the id-only listing must agree on it. */
+  const matched = async (filters: CountFilters) => {
+    const db = getDb();
+    const listed = sorted(namesOf(await db.listRagDocuments('km-own', { projectId: 'proj-1', ...filters })));
+    expect(await db.countRagDocuments('km-own', 'proj-1', filters)).toBe(listed.length);
+    expect(await db.listRagDocumentIds('km-own', { projectId: 'proj-1', ...filters, limit: 100 })).toHaveLength(listed.length);
+    return listed;
+  };
+
+  // ── the ownership filters ───────────────────────────────────────────────
+
+  it('keeps the documents with their own permissions apart from the ones that inherit', async () => {
+    await seed();
+    expect(await matched({ aclMode: 'own' })).toEqual(['fa-own', 'fb-own-sync', 'top-own', 'top-own-sync']);
+    // "inherit" is everything else: documents with no mode at all, and with a NULL one, are among them.
+    expect(await matched({ aclMode: 'inherit' })).toEqual(['empty-folder', 'fa-inherit', 'fa-inherit-sync', 'nulls', 'top-inherit']);
+    // No filter, and an undefined one, select every document.
+    expect(await matched({})).toHaveLength(9);
+    expect(await matched({ aclMode: undefined })).toHaveLength(9);
+  });
+
+  it('keeps the documents a connected source owns apart from the ones people manage in the console', async () => {
+    await seed();
+    expect(await matched({ aclManaged: 'sync' })).toEqual(['fa-inherit-sync', 'fb-own-sync', 'top-own-sync']);
+    // "console" is everything else, a missing and a NULL owner included.
+    expect(await matched({ aclManaged: 'console' })).toEqual(['empty-folder', 'fa-inherit', 'fa-own', 'nulls', 'top-inherit', 'top-own']);
+    expect(await matched({ aclManaged: undefined })).toHaveLength(9);
+  });
+
+  it('combines the two filters with each other, with every other filter, and with paging', async () => {
+    const db = getDb();
+    const d = await seed();
+    expect(await matched({ aclMode: 'own', aclManaged: 'sync' })).toEqual(['fb-own-sync', 'top-own-sync']);
+    expect(await matched({ aclMode: 'own', aclManaged: 'console' })).toEqual(['fa-own', 'top-own']);
+    expect(await matched({ aclMode: 'inherit', aclManaged: 'sync' })).toEqual(['fa-inherit-sync']);
+    expect(await matched({ aclMode: 'inherit', aclManaged: 'console' })).toEqual(['empty-folder', 'fa-inherit', 'nulls', 'top-inherit']);
+
+    // With a folder, the top level, ids, search and status.
+    expect(await matched({ aclMode: 'own', folderId: 'fa' })).toEqual(['fa-own']);
+    expect(await matched({ aclMode: 'inherit', folderId: 'fa' })).toEqual(['fa-inherit', 'fa-inherit-sync']);
+    expect(await matched({ aclMode: 'inherit', folderId: null })).toEqual(['empty-folder', 'nulls', 'top-inherit']);
+    expect(await matched({ aclManaged: 'sync', folderId: null })).toEqual(['top-own-sync']);
+    expect(await matched({ aclMode: 'own', ids: [d.topOwn, d.faOwn, d.topInherit] })).toEqual(['fa-own', 'top-own']);
+    expect(await matched({ aclMode: 'own', ids: [] })).toEqual([]);
+    expect(await matched({ aclManaged: 'sync', search: 'own' })).toEqual(['fb-own-sync', 'top-own-sync']);
+    expect(await matched({ aclMode: 'own', status: 'failed' })).toEqual([]);
+
+    // With an access filter: the filter and the ownership both have to hold; negated, the filter has to fail.
+    const access: RagDocumentAccessFilter = { ownAllowedIds: [d.faOwn, d.fbOwnSync], inheritFolderIds: ['fa'], includeTopLevel: false };
+    expect(await matched({ access })).toEqual(['fa-inherit', 'fa-inherit-sync', 'fa-own', 'fb-own-sync']);
+    expect(await matched({ access, aclMode: 'own' })).toEqual(['fa-own', 'fb-own-sync']);
+    expect(await matched({ access, aclManaged: 'sync' })).toEqual(['fa-inherit-sync', 'fb-own-sync']);
+    expect(await matched({ access: { ...access, negate: true }, aclMode: 'own' })).toEqual(['top-own', 'top-own-sync']);
+    expect(await matched({ access: { ...access, negate: true }, aclMode: 'inherit', aclManaged: 'console' })).toEqual(['empty-folder', 'nulls', 'top-inherit']);
+
+    // Paging runs over the filtered rows, newest first, on the full listing and on the id-only one.
+    const own = await db.listRagDocuments('km-own', { projectId: 'proj-1', aclMode: 'own' });
+    expect(own).toHaveLength(4);
+    expect(namesOf(await db.listRagDocuments('km-own', { projectId: 'proj-1', aclMode: 'own', limit: 2, offset: 1 }))).toEqual(namesOf(own).slice(1, 3));
+    expect(await db.listRagDocumentIds('km-own', { projectId: 'proj-1', aclMode: 'own', limit: 3, offset: 2 })).toEqual(own.slice(2).map((doc) => String(doc._id)));
+  });
+
+  it('stays inside the module and the project, and withUnscoped adds the rows that carry no project', async () => {
+    const db = getDb();
+    await seed();
+    expect(namesOf(await db.listRagDocuments('km-other', { projectId: 'proj-1', aclMode: 'own', aclManaged: 'sync' }))).toEqual(['x-module']);
+    expect(namesOf(await db.listRagDocuments('km-own', { projectId: 'proj-2', aclMode: 'own', aclManaged: 'sync' }))).toEqual(['x-project']);
+    expect(await db.countRagDocuments('km-own', 'proj-2', { aclMode: 'inherit' })).toBe(0);
+    expect(await db.countRagDocuments('km-nothing', 'proj-1', { aclMode: 'own' })).toBe(0);
+
+    // Rows written before documents carried a project.
+    const mk = (fileName: string, over: Partial<IRagDocument> = {}) =>
+      db.createRagDocument({ tenantId, ragModuleKey: 'km-legacy', fileName, status: 'indexed', createdBy: 'tester', ...over });
+    await mk('p1-own', { projectId: 'proj-1', aclMode: 'own' });
+    await mk('p1-inherit', { projectId: 'proj-1' });
+    await mk('legacy-own-sync', { aclMode: 'own', aclManaged: 'sync' });
+    await mk('legacy-inherit');
+    await mk('p2-own', { projectId: 'proj-2', aclMode: 'own' });
+    expect(await db.countRagDocuments('km-legacy', 'proj-1', { aclMode: 'own' })).toBe(1);
+    expect(await db.countRagDocuments('km-legacy', 'proj-1', { aclMode: 'own', withUnscoped: true })).toBe(2);
+    expect(await db.countRagDocuments('km-legacy', 'proj-1', { aclManaged: 'sync', withUnscoped: true })).toBe(1);
+    expect(await db.countRagDocuments('km-legacy', 'proj-1', { aclMode: 'inherit', aclManaged: 'console', withUnscoped: true })).toBe(2);
+    expect(sorted(namesOf(await db.listRagDocuments('km-legacy', { projectId: 'proj-1', withUnscoped: true, aclMode: 'own' }))))
+      .toEqual(['legacy-own-sync', 'p1-own']);
+    expect(await db.listRagDocumentIds('km-legacy', { projectId: 'proj-1', withUnscoped: true, aclManaged: 'sync', limit: 10 })).toHaveLength(1);
+  });
+
+  // ── documents per folder ────────────────────────────────────────────────
+
+  it('counts the documents per folder, the top level under the empty key', async () => {
+    const db = getDb();
+    await seed();
+    // A document with no folder, one with a NULL folder and one in the folder "" are all the top level.
+    const all = await db.countRagDocumentsByFolder('km-own', 'proj-1');
+    expect(all).toEqual({ '': 5, fa: 3, fb: 1 });
+    expect(sum(all)).toBe(await db.countRagDocuments('km-own', 'proj-1'));
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', {})).toEqual(all);
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: undefined, withUnscoped: false })).toEqual(all);
+
+    // Another project, another module, and what does not exist: a folder without documents is simply absent.
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-2')).toEqual({ fa: 1 });
+    expect(await db.countRagDocumentsByFolder('km-other', 'proj-1')).toEqual({ fa: 1 });
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-3')).toEqual({});
+    expect(await db.countRagDocumentsByFolder('km-nothing', 'proj-1')).toEqual({});
+  });
+
+  it('counts what an access scope can list, folder by folder: the selection of countRagDocuments', async () => {
+    const db = getDb();
+    const d = await seed();
+    const cases: RagDocumentAccessFilter[] = [
+      { ownAllowedIds: [], inheritFolderIds: [], includeTopLevel: false },
+      { ownAllowedIds: [], inheritFolderIds: [], includeTopLevel: true },
+      { ownAllowedIds: [d.faOwn], inheritFolderIds: ['fa'], includeTopLevel: false },
+      { ownAllowedIds: [d.topOwn, d.fbOwnSync], inheritFolderIds: ['fb'], includeTopLevel: true },
+      { ownAllowedIds: [d.topOwn, d.topOwnSync, d.faOwn, d.fbOwnSync], inheritFolderIds: ['fa', 'fb', 'nope'], includeTopLevel: true },
+    ];
+    for (const base of cases) {
+      for (const access of [base, { ...base, negate: true }]) {
+        const counted = await db.countRagDocumentsByFolder('km-own', 'proj-1', { access });
+        // What that caller lists, grouped by folder - and the total the plain count gives.
+        expect(counted).toEqual(groupedByFolder(await db.listRagDocuments('km-own', { projectId: 'proj-1', access })));
+        expect(sum(counted)).toBe(await db.countRagDocuments('km-own', 'proj-1', { access }));
+      }
+    }
+    // A scope that reads nothing leaves no key at all; one folder grant reads the three documents of the folder.
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: cases[0] })).toEqual({});
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: { ...cases[0], negate: true } })).toEqual({ '': 5, fa: 3, fb: 1 });
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: cases[1] })).toEqual({ '': 3 });
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: { ...cases[1], negate: true } })).toEqual({ '': 2, fa: 3, fb: 1 });
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: cases[2] })).toEqual({ fa: 3 });
+    expect(await db.countRagDocumentsByFolder('km-own', 'proj-1', { access: { ...cases[2], negate: true } })).toEqual({ '': 5, fb: 1 });
+  });
+
+  it('adds the rows without a project to a project with withUnscoped, like countRagDocuments', async () => {
+    const db = getDb();
+    const mk = (fileName: string, over: Partial<IRagDocument> = {}) =>
+      db.createRagDocument({ tenantId, ragModuleKey: 'km-legacy', fileName, status: 'indexed', createdBy: 'tester', ...over });
+    const own = await mk('own-p1', { projectId: 'proj-1', aclMode: 'own' });
+    await mk('fa-p1', { projectId: 'proj-1', folderId: 'fa' });
+    await mk('legacy-top');
+    await mk('legacy-fa', { folderId: 'fa' });
+    await mk('other-project', { projectId: 'proj-2', folderId: 'fa' });
+    const access: RagDocumentAccessFilter = { ownAllowedIds: [String(own._id)], inheritFolderIds: ['fa'], includeTopLevel: false };
+
+    expect(await db.countRagDocumentsByFolder('km-legacy', 'proj-1')).toEqual({ '': 1, fa: 1 });
+    expect(await db.countRagDocumentsByFolder('km-legacy', 'proj-1', { withUnscoped: true })).toEqual({ '': 2, fa: 2 });
+    expect(await db.countRagDocumentsByFolder('km-legacy', 'proj-1', { withUnscoped: true, access })).toEqual({ '': 1, fa: 2 });
+    expect(await db.countRagDocumentsByFolder('km-legacy', 'proj-1', { withUnscoped: true, access: { ...access, negate: true } })).toEqual({ '': 1 });
+    for (const filters of [{}, { withUnscoped: true }, { withUnscoped: true, access }, { access: { ...access, negate: true } }]) {
+      expect(sum(await db.countRagDocumentsByFolder('km-legacy', 'proj-1', filters)), JSON.stringify(filters))
+        .toBe(await db.countRagDocuments('km-legacy', 'proj-1', filters));
+    }
+  });
+
+  it('counts a module whose documents carry no project the way countRagDocuments does', async () => {
+    const db = getDb();
+    const mk = (fileName: string, over: Partial<IRagDocument> = {}) =>
+      db.createRagDocument({ tenantId, ragModuleKey: 'km-solo', fileName, status: 'indexed', createdBy: 'tester', ...over });
+    const own = await mk('own', { aclMode: 'own' });
+    await mk('top');
+    await mk('in-fa', { folderId: 'fa' });
+    await mk('in-fa-too', { folderId: 'fa' });
+    const access: RagDocumentAccessFilter = { ownAllowedIds: [String(own._id)], inheritFolderIds: ['fa'], includeTopLevel: false };
+
+    expect(await db.countRagDocumentsByFolder('km-solo', undefined)).toEqual({ '': 2, fa: 2 });
+    expect(await db.countRagDocumentsByFolder('km-solo', undefined, { access })).toEqual({ '': 1, fa: 2 });
+    expect(await db.countRagDocumentsByFolder('km-solo', undefined, { access: { ...access, negate: true } })).toEqual({ '': 1 });
+    for (const filters of [{}, { access }, { access: { ...access, negate: true } }]) {
+      expect(sum(await db.countRagDocumentsByFolder('km-solo', undefined, filters)), JSON.stringify(filters))
+        .toBe(await db.countRagDocuments('km-solo', undefined, filters));
+    }
+  });
+});
+
+describeForEachProvider('RAG access: permission entry counts and principal labels', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragcnt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Counts Co', slug, dbName, licenseType: 'FREE', ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  type Grant = string | { principal: string; label?: string; managed?: 'sync' };
+
+  /** Replace the entries of one node: bare principals, or principals with a label or a keeper. */
+  const put = (moduleKey: string, type: RagAclNodeType, nodeId: string, grants: Grant[], projectId = 'proj-1') =>
+    getDb().replaceRagAclEntries(
+      moduleKey,
+      { type, id: nodeId },
+      grants.map((grant) => {
+        const { principal, ...rest } = typeof grant === 'string' ? { principal: grant } : grant;
+        return { tenantId, projectId, principal, createdBy: 'tester', ...rest };
+      }),
+      projectId,
+    );
+
+  // ── entries per node ────────────────────────────────────────────────────
+
+  it('counts the entries of each named node and leaves out the nodes that hold none', async () => {
+    const db = getDb();
+    await put('km-f', 'folder', 'fo-1', ['user:u1', 'group:g1', { principal: 'x:corp:g:1', label: 'Finance', managed: 'sync' }]);
+    await put('km-f', 'folder', 'fo-2', ['user:u2']);
+    await put('km-f', 'folder', 'fo-3', ['user:u3']);
+    await put('km-f', 'folder', 'fo-3', []);
+    await put('km-f', 'folder', 'fo-dup', ['user:a', 'user:a', 'user:b']);
+    await put('km-f', 'document', 'doc-1', ['everyone', 'user:u1']);
+    await put('km-f', 'document', 'fo-1', ['user:same-id-as-a-folder']);
+    await put('km-f', 'module', 'km-f', ['group:g1']);
+    await put('km-f', 'folder', 'fo-1', ['user:p2'], 'proj-2');
+    await put('km-other', 'folder', 'fo-1', ['user:o1', 'user:o2', 'user:o3', 'user:o4', 'user:o5']);
+    const count = (nodeType: RagAclNodeType, nodeIds: string[], projectId?: string, moduleKey = 'km-f') =>
+      db.countRagAclEntriesByNode(moduleKey, { projectId, nodeType, nodeIds });
+
+    // fo-3 was emptied again, 'nope' never existed, doc-1 is a document: none of them is in the answer. Labelled and synced entries count like any other.
+    expect(await count('folder', ['fo-1', 'fo-2', 'fo-3', 'nope', 'doc-1'], 'proj-1')).toEqual({ 'fo-1': 3, 'fo-2': 1 });
+    // The node type is part of the key: a document and a folder may share an id.
+    expect(await count('document', ['doc-1', 'fo-1'], 'proj-1')).toEqual({ 'doc-1': 2, 'fo-1': 1 });
+    expect(await count('module', ['km-f', 'fo-1'], 'proj-1')).toEqual({ 'km-f': 1 });
+    // A principal listed twice is stored once.
+    expect(await count('folder', ['fo-dup'], 'proj-1')).toEqual({ 'fo-dup': 2 });
+
+    // The project scopes it; without one, every project of the module counts.
+    expect(await count('folder', ['fo-1', 'fo-2'], 'proj-2')).toEqual({ 'fo-1': 1 });
+    expect(await count('folder', ['fo-1', 'fo-2'])).toEqual({ 'fo-1': 4, 'fo-2': 1 });
+    expect(await count('folder', ['fo-1'], 'proj-3')).toEqual({});
+    // The module scopes it.
+    expect(await count('folder', ['fo-1', 'fo-2'], 'proj-1', 'km-other')).toEqual({ 'fo-1': 5 });
+    expect(await count('folder', ['fo-1'], 'proj-1', 'km-empty')).toEqual({});
+
+    // Nothing asked, nothing answered; duplicate and blank ids change nothing.
+    expect(await count('folder', [], 'proj-1')).toEqual({});
+    expect(await count('folder', ['', 'fo-1', 'fo-1'], 'proj-1')).toEqual({ 'fo-1': 3 });
+  });
+
+  it('counts for a page of a thousand ids and for a list far longer than that', async () => {
+    const db = getDb();
+    await put('km-f', 'folder', 'fo-big', Array.from({ length: 300 }, (_, i) => `user:u${i}`));
+    await put('km-f', 'folder', 'fo-2', ['user:u2']);
+    const page = [...Array.from({ length: 998 }, (_, i) => `ghost-${i}`), 'fo-big', 'fo-2'];
+    expect(page).toHaveLength(1000);
+    expect(await db.countRagAclEntriesByNode('km-f', { projectId: 'proj-1', nodeType: 'folder', nodeIds: page })).toEqual({ 'fo-big': 300, 'fo-2': 1 });
+    const many = [...Array.from({ length: 5000 }, (_, i) => `ghost-${i}`), 'fo-2'];
+    expect(await db.countRagAclEntriesByNode('km-f', { projectId: 'proj-1', nodeType: 'folder', nodeIds: many })).toEqual({ 'fo-2': 1 });
+  });
+
+  // ── nodes that hold entries ─────────────────────────────────────────────
+
+  it('counts the distinct nodes of a type that hold at least one entry', async () => {
+    const db = getDb();
+    await put('km-f', 'folder', 'fo-1', ['user:u1', 'group:g1', 'user:u2']);
+    await put('km-f', 'folder', 'fo-2', ['user:u1']);
+    await put('km-f', 'folder', 'fo-3', ['user:u1']);
+    await put('km-f', 'folder', 'fo-3', []);
+    await put('km-f', 'document', 'doc-1', ['user:u1', 'user:u2']);
+    await put('km-f', 'document', 'fo-1', ['user:u3']);
+    await put('km-f', 'module', 'km-f', ['everyone']);
+    await put('km-f', 'folder', 'fo-1', ['user:p2'], 'proj-2');
+    await put('km-f', 'folder', 'fo-p2', ['user:p2'], 'proj-2');
+    await put('km-other', 'folder', 'fo-9', ['user:o1']);
+    const nodes = (nodeType: RagAclNodeType, projectId?: string, moduleKey = 'km-f') =>
+      db.countRagAclNodes(moduleKey, { projectId, nodeType });
+
+    // fo-1 holds three entries and is one node; fo-3 was emptied again.
+    expect(await nodes('folder', 'proj-1')).toBe(2);
+    expect(await nodes('document', 'proj-1')).toBe(2);
+    expect(await nodes('module', 'proj-1')).toBe(1);
+    expect(await nodes('folder', 'proj-2')).toBe(2);
+    // Without a project every project of the module counts, and a folder with entries in two of them is still one.
+    expect(await nodes('folder')).toBe(3);
+    expect(await nodes('folder', 'proj-3')).toBe(0);
+    expect(await nodes('folder', 'proj-1', 'km-other')).toBe(1);
+    expect(await nodes('folder', 'proj-1', 'km-empty')).toBe(0);
+    // No node, no count; and emptying the last node of a type takes it to zero.
+    await put('km-f', 'module', 'km-f', []);
+    expect(await nodes('module', 'proj-1')).toBe(0);
+  });
+
+  it('counts the nodes that hold an entry starting with a principal prefix', async () => {
+    const db = getDb();
+    await put('km-f', 'folder', 'fo-1', ['user:u1', 'x:corp:g:1', 'x:corp:g:2', 'x:corp:u:1']);
+    await put('km-f', 'folder', 'fo-2', ['x:corp:g:1']);
+    await put('km-f', 'folder', 'fo-3', ['x:corp2:all']);
+    await put('km-f', 'folder', 'fo-4', ['user:u2']);
+    await put('km-f', 'document', 'doc-1', ['x:corp:all', 'x:corp:g:3']);
+    await put('km-f', 'document', 'doc-2', ['x:other:all']);
+    await put('km-f', 'folder', 'fo-p2', ['x:corp:g:1'], 'proj-2');
+    await put('km-other', 'folder', 'fo-9', ['x:corp:g:1']);
+    const folders = (principalPrefix?: string) =>
+      db.countRagAclNodes('km-f', { projectId: 'proj-1', nodeType: 'folder', principalPrefix });
+
+    expect(await folders()).toBe(4);
+    // fo-1 holds three entries of the directory and counts once.
+    expect(await folders('x:corp:')).toBe(2);
+    expect(await folders('x:corp:g:')).toBe(2);
+    expect(await folders('x:corp:u:')).toBe(1);
+    // A whole principal is a prefix of itself; a prefix is not a directory: "x:corp2:" starts with "x:corp" too.
+    expect(await folders('x:corp:g:1')).toBe(2);
+    expect(await folders('x:corp')).toBe(3);
+    expect(await folders('x:corp2:')).toBe(1);
+    expect(await folders('user:')).toBe(2);
+    expect(await folders('x:nobody:')).toBe(0);
+    // Another type, project and module have their own nodes.
+    expect(await db.countRagAclNodes('km-f', { projectId: 'proj-1', nodeType: 'document', principalPrefix: 'x:corp:' })).toBe(1);
+    expect(await db.countRagAclNodes('km-f', { projectId: 'proj-2', nodeType: 'folder', principalPrefix: 'x:corp:' })).toBe(1);
+    expect(await db.countRagAclNodes('km-f', { nodeType: 'folder', principalPrefix: 'x:corp:' })).toBe(3);
+    expect(await db.countRagAclNodes('km-other', { projectId: 'proj-1', nodeType: 'folder', principalPrefix: 'x:corp:' })).toBe(1);
+    expect(await db.countRagAclNodes('km-f', { projectId: 'proj-1', nodeType: 'module', principalPrefix: 'x:corp:' })).toBe(0);
+  });
+
+  it('reads the prefix literally: no wildcard, no pattern, upper case is another letter, and a prefix nothing can start with matches nothing', async () => {
+    const db = getDb();
+    const folders = (principalPrefix?: string) =>
+      db.countRagAclNodes('km-f', { projectId: 'proj-1', nodeType: 'folder', principalPrefix });
+    const prefixes = ['x:a_b:', 'x:100%:', 'x:c.d:', 'x:d*:', 'x:case:', 'x:(e):', '^x:aXb', 'x:aXb:u:1|x:Case'];
+
+    // Look-alikes only: what a LIKE pattern or an unescaped regular expression would also take.
+    await put('km-f', 'folder', 'lookalikes', ['x:aXb:u:1', 'x:1000:u:1', 'x:100:u:1', 'x:cXd:u:1', 'x:ddd:u:1', 'x:Case:u:1', 'X:case:u:1', 'x:e:u:1']);
+    for (const prefix of prefixes) expect(await folders(prefix), prefix).toBe(0);
+    // The real thing, each on a node of its own.
+    for (const [index, principal] of ['x:a_b:u:1', 'x:100%:u:1', 'x:c.d:u:1', 'x:d*:u:1', 'x:case:u:1', 'x:(e):u:1'].entries()) {
+      await put('km-f', 'folder', `real-${index}`, [principal]);
+    }
+    for (const prefix of prefixes.slice(0, 6)) expect(await folders(prefix), prefix).toBe(1);
+    expect(await folders('^x:aXb')).toBe(0);
+
+    // An empty prefix is not "every entry", and a control character is in no principal (a NUL cannot even be put in a regular expression).
+    expect(await folders('')).toBe(0);
+    expect(await folders('x:\u0000')).toBe(0);
+    expect(await folders('x:a_b:\n')).toBe(0);
+    // Without a prefix every entry counts: the look-alike node and the six real ones.
+    expect(await folders(undefined)).toBe(7);
+  });
+
+  // ── principal labels ────────────────────────────────────────────────────
+
+  it('lists the labels entries carry, one per principal, from every module and project, ordered by principal', async () => {
+    const db = getDb();
+    await put('km-f', 'folder', 'fo-1', [
+      { principal: 'x:corp:g:1', label: 'Finance' },
+      { principal: 'x:corp:g:2', label: 'Legal' },
+      { principal: 'x:corp:u:1', label: 'Ada' },
+      { principal: 'x:corp:all', label: 'All members' },
+      { principal: 'user:u1', label: 'Ada Lovelace' },
+      'x:corp:g:4',
+      { principal: 'x:corp:g:5', label: '' },
+    ]);
+    await put('km-f', 'document', 'doc-1', [{ principal: 'x:corp:g:1', label: 'Finance (documents)' }, { principal: 'x:corp:g:6', label: 'Six' }]);
+    await put('km-f', 'document', 'doc-2', ['x:corp:g:6']);
+    await put('km-other', 'folder', 'fo-9', [{ principal: 'x:corp:g:3', label: 'Ops' }, { principal: 'x:corp:g:1', label: 'Finance' }], 'proj-2');
+    await put('km-f', 'folder', 'fo-look', [
+      { principal: 'x:corpx:g:1', label: 'Look-alike' },
+      { principal: 'X:corp:g:1', label: 'Upper' },
+      { principal: 'x:c_rp:g:1', label: 'Underscore' },
+    ]);
+
+    // g:1 carries three different labels (the greatest wins, every time); g:4 has none, g:5 an empty one, g:6 one of two entries.
+    expect(await db.listRagAclPrincipalLabels('x:corp:g:')).toEqual([
+      { principal: 'x:corp:g:1', label: 'Finance (documents)' },
+      { principal: 'x:corp:g:2', label: 'Legal' },
+      { principal: 'x:corp:g:3', label: 'Ops' },
+      { principal: 'x:corp:g:6', label: 'Six' },
+    ]);
+    expect(await db.listRagAclPrincipalLabels('x:corp:')).toEqual([
+      { principal: 'x:corp:all', label: 'All members' },
+      { principal: 'x:corp:g:1', label: 'Finance (documents)' },
+      { principal: 'x:corp:g:2', label: 'Legal' },
+      { principal: 'x:corp:g:3', label: 'Ops' },
+      { principal: 'x:corp:g:6', label: 'Six' },
+      { principal: 'x:corp:u:1', label: 'Ada' },
+    ]);
+    // A prefix is text: a whole principal names just itself, "x:corp" also takes "x:corpx:", upper case and "_" are what they are.
+    expect(await db.listRagAclPrincipalLabels('x:corp:g:2')).toEqual([{ principal: 'x:corp:g:2', label: 'Legal' }]);
+    expect((await db.listRagAclPrincipalLabels('x:corp')).map((row) => row.principal).slice(-2)).toEqual(['x:corp:u:1', 'x:corpx:g:1']);
+    expect(await db.listRagAclPrincipalLabels('X:corp:')).toEqual([{ principal: 'X:corp:g:1', label: 'Upper' }]);
+    expect(await db.listRagAclPrincipalLabels('x:c_rp:')).toEqual([{ principal: 'x:c_rp:g:1', label: 'Underscore' }]);
+    expect(await db.listRagAclPrincipalLabels('x:c%')).toEqual([]);
+    expect(await db.listRagAclPrincipalLabels('user:')).toEqual([{ principal: 'user:u1', label: 'Ada Lovelace' }]);
+    expect(await db.listRagAclPrincipalLabels('x:nobody:')).toEqual([]);
+    // An empty prefix is not "everything", and no principal holds a control character.
+    expect(await db.listRagAclPrincipalLabels('')).toEqual([]);
+    expect(await db.listRagAclPrincipalLabels('x:corp:\u0000')).toEqual([]);
+    expect(await db.listRagAclPrincipalLabels('x:corp:\n')).toEqual([]);
+
+    // The label a connected source wrote beats a greater one written in the console, in any module or project.
+    await put('km-f', 'folder', 'fo-sync', [{ principal: 'x:corp:g:7', label: 'Payroll', managed: 'sync' }]);
+    await put('km-other', 'folder', 'fo-spoof', [{ principal: 'x:corp:g:7', label: 'zzz Payroll' }], 'proj-2');
+    expect(await db.listRagAclPrincipalLabels('x:corp:g:7')).toEqual([{ principal: 'x:corp:g:7', label: 'Payroll' }]);
+    await put('km-f', 'folder', 'fo-sync', []);
+    await put('km-other', 'folder', 'fo-spoof', [], 'proj-2');
+
+    // A label follows the entry: once nothing carries it, the principal is gone from the list.
+    await put('km-f', 'folder', 'fo-1', ['user:u1']);
+    expect((await db.listRagAclPrincipalLabels('x:corp:g:')).map((row) => row.principal)).toEqual(['x:corp:g:1', 'x:corp:g:3', 'x:corp:g:6']);
+  });
+
+  it('limits the labels: 5000 by default, at most 20000, and nothing for a limit of zero', async () => {
+    const db = getDb();
+    await put('km-f', 'folder', 'fo-1', [
+      { principal: 'x:corp:g:1', label: 'One' },
+      { principal: 'x:corp:g:2', label: 'Two' },
+      { principal: 'x:corp:g:3', label: 'Three' },
+    ]);
+    const principals = async (options?: { limit?: number }) =>
+      (await db.listRagAclPrincipalLabels('x:corp:g:', options)).map((row) => row.principal);
+
+    expect(await principals({ limit: 2 })).toEqual(['x:corp:g:1', 'x:corp:g:2']);
+    expect(await principals({ limit: 1 })).toEqual(['x:corp:g:1']);
+    expect(await principals({ limit: 2.9 })).toEqual(['x:corp:g:1', 'x:corp:g:2']);
+    expect(await principals({ limit: 0 })).toEqual([]);
+    expect(await principals({ limit: -4 })).toEqual([]);
+    expect(await principals({ limit: Number.NaN })).toHaveLength(3);
+    expect(await principals({ limit: 1_000_000_000 })).toHaveLength(3);
+    expect(await principals({})).toHaveLength(3);
+    expect(await principals(undefined)).toHaveLength(3);
+
+    // The numbers behind it.
+    expect(clampRagAclLabelsLimit()).toBe(5000);
+    expect(clampRagAclLabelsLimit({ limit: 7 })).toBe(7);
+    expect(clampRagAclLabelsLimit({ limit: 1e9 })).toBe(20000);
+    expect(clampRagAclLabelsLimit({ limit: Number.POSITIVE_INFINITY })).toBe(5000);
+    expect(clampRagAclLabelsLimit({ limit: -1 })).toBe(0);
+    expect(clampRagAclLabelsLimit({ limit: Number.NaN })).toBe(5000);
+  });
+
+  it('answers 5000 labels when no limit is given, and all of them when the limit allows', async () => {
+    const db = getDb();
+    const wide = Array.from({ length: 5050 }, (_, i) => ({ principal: `x:wide:g:${String(i).padStart(5, '0')}`, label: `Group ${i}` }));
+    await put('km-f', 'folder', 'fo-wide', wide);
+
+    const byDefault = await db.listRagAclPrincipalLabels('x:wide:');
+    expect(byDefault).toHaveLength(5000);
+    expect(byDefault[0]).toEqual({ principal: 'x:wide:g:00000', label: 'Group 0' });
+    expect(byDefault[4999]).toEqual({ principal: 'x:wide:g:04999', label: 'Group 4999' });
+    const all = await db.listRagAclPrincipalLabels('x:wide:', { limit: 20000 });
+    expect(all).toHaveLength(5050);
+    expect(all[5049]).toEqual({ principal: 'x:wide:g:05049', label: 'Group 5049' });
+  });
+
+  it('reads the tenant it runs in and none of another tenant', async () => {
+    const db = getDb();
+    const otherDbName = `tenant_ragcnt-other-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // SQLite's runWithTenant also re-binds the provider's fallback handle, so every access names its tenant.
+    const inTenant = <T>(name: string, work: () => Promise<T>) => db.runWithTenant!(name, work);
+    await inTenant(dbName, () => put('km-f', 'folder', 'fo-1', [{ principal: 'x:corp:g:1', label: 'Finance' }]));
+    await inTenant(otherDbName, async () => {
+      await put('km-f', 'folder', 'fo-1', [{ principal: 'x:corp:g:1', label: 'Other tenant' }, { principal: 'x:corp:g:2', label: 'Only there' }]);
+      await put('km-f', 'folder', 'fo-2', ['x:corp:g:2']);
+    });
+
+    expect(await inTenant(dbName, () => db.listRagAclPrincipalLabels('x:corp:'))).toEqual([{ principal: 'x:corp:g:1', label: 'Finance' }]);
+    expect(await inTenant(otherDbName, () => db.listRagAclPrincipalLabels('x:corp:'))).toHaveLength(2);
+    expect(await inTenant(dbName, () => db.countRagAclNodes('km-f', { projectId: 'proj-1', nodeType: 'folder' }))).toBe(1);
+    expect(await inTenant(otherDbName, () => db.countRagAclNodes('km-f', { projectId: 'proj-1', nodeType: 'folder' }))).toBe(2);
+    expect(await inTenant(dbName, () => db.countRagAclEntriesByNode('km-f', { projectId: 'proj-1', nodeType: 'folder', nodeIds: ['fo-1', 'fo-2'] }))).toEqual({ 'fo-1': 1 });
+  });
+});
+
+describeForEachProvider('RAG access: identity group counts and user selection', (getDb) => {
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `ragidg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'RAG Groups Co', slug, dbName: `tenant_${slug}`, licenseType: 'FREE', ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(`tenant_${slug}`);
+  });
+
+  const user = (extId: string, over: Partial<Parameters<DatabaseProvider['upsertRagIdentityUsers']>[1][number]> = {}) => ({
+    tenantId,
+    extId,
+    ...over,
+  });
+  const extIds = (users: Array<{ extId: string }>) => users.map((u) => u.extId);
+
+  // ── group counts ────────────────────────────────────────────────────────
+
+  it('counts the users holding each group id, ordered by id', async () => {
+    const db = getDb();
+    await db.upsertRagIdentityUsers('d1', [
+      user('u1', { groups: ['g-b', 'g-a'] }),
+      user('u2', { groups: ['g-a'] }),
+      user('u3', { groups: [] }),
+      user('u4', {}),
+      user('u5', { type: 'guest', groups: ['g-c', 'g-a', 'g-a'] }),
+      user('u6', { groups: ['Z-upper', 'a1b2', 'a1b2:owners', 'sp:site-1:12'] }),
+    ]);
+    await db.upsertRagIdentityUsers('d2', [user('u1', { groups: ['g-z', 'g-a'] })]);
+
+    // Binary order of the ids; a guest counts like anybody else, a group listed twice for one user counts once.
+    expect(await db.listRagIdentityGroupCounts('d1')).toEqual([
+      { id: 'Z-upper', users: 1 },
+      { id: 'a1b2', users: 1 },
+      { id: 'a1b2:owners', users: 1 },
+      { id: 'g-a', users: 3 },
+      { id: 'g-b', users: 1 },
+      { id: 'g-c', users: 1 },
+      { id: 'sp:site-1:12', users: 1 },
+    ]);
+    // Another directory has its own users and groups.
+    expect(await db.listRagIdentityGroupCounts('d2')).toEqual([{ id: 'g-a', users: 1 }, { id: 'g-z', users: 1 }]);
+    expect(await db.listRagIdentityGroupCounts('nope')).toEqual([]);
+    // Users without any group give an empty list, not an error.
+    await db.upsertRagIdentityUsers('d3', [user('x', {}), user('y', { groups: [] })]);
+    expect(await db.listRagIdentityGroupCounts('d3')).toEqual([]);
+  });
+
+  it('follows the next sync: a user reported with fewer groups, and a pruned user', async () => {
+    const db = getDb();
+    await db.upsertRagIdentityUsers('d1', [user('u1', { groups: ['g1', 'g2'], syncRunId: 'r1' }), user('u2', { groups: ['g1'], syncRunId: 'r1' })]);
+    expect(await db.listRagIdentityGroupCounts('d1')).toEqual([{ id: 'g1', users: 2 }, { id: 'g2', users: 1 }]);
+    // u1 left g1; u2 was not reported again.
+    await db.upsertRagIdentityUsers('d1', [user('u1', { groups: ['g2'], syncRunId: 'r2' })]);
+    expect(await db.listRagIdentityGroupCounts('d1')).toEqual([{ id: 'g1', users: 1 }, { id: 'g2', users: 1 }]);
+    await db.pruneRagIdentityUsers('d1', 'r2');
+    expect(await db.listRagIdentityGroupCounts('d1')).toEqual([{ id: 'g2', users: 1 }]);
+    await db.deleteRagIdentityDomain('d1');
+    expect(await db.listRagIdentityGroupCounts('d1')).toEqual([]);
+  });
+
+  it('counts a big directory in one answer', async () => {
+    const db = getDb();
+    const count = 2600;
+    await db.upsertRagIdentityUsers('big', Array.from({ length: count }, (_, i) => user(`big-${i}`, { groups: ['g-all', `g-${i % 3}`] })));
+    expect(await db.listRagIdentityGroupCounts('big')).toEqual([
+      { id: 'g-0', users: 867 },
+      { id: 'g-1', users: 867 },
+      { id: 'g-2', users: 866 },
+      { id: 'g-all', users: count },
+    ]);
+  });
+
+  // ── choosing users by external id ───────────────────────────────────────
+
+  describe('by extId and excludeExtIds', () => {
+    /** u0 and u3 have no e-mail (so they come first, by id), then by e-mail: u4 u1 u6 u2 u5. */
+    const seed = async () => {
+      const db = getDb();
+      await db.upsertRagIdentityUsers('d1', [
+        user('u1', { email: 'Ada.Lovelace@Example.com', upn: 'ada@corp.example', name: 'Ada Lovelace' }),
+        user('u2', { email: 'grace@example.com', name: 'Grace Hopper', type: 'guest' }),
+        user('u3', { upn: 'ismail@corp.example', name: 'İsmail Yılmaz' }),
+        user('u4', { email: 'a.b@example.com', name: 'a.b (c) test' }),
+        user('u5', { email: 'pct@example.com', name: '100%_done' }),
+        user('u6', { email: 'axb@example.com', name: 'AXB' }),
+        user('u0', {}),
+      ]);
+      await db.upsertRagIdentityUsers('d2', [user('other', { email: 'other@example.com' })]);
+    };
+    const ids = async (options: Parameters<DatabaseProvider['listRagIdentityUsers']>[1]) =>
+      extIds((await getDb().listRagIdentityUsers('d1', options)).users);
+    const total = async (options: Parameters<DatabaseProvider['listRagIdentityUsers']>[1]) =>
+      (await getDb().listRagIdentityUsers('d1', options)).total;
+
+    it('keeps only the named users, in the usual order, and counts only those', async () => {
+      await seed();
+      expect(await ids({ extIds: ['u1', 'u3', 'nope'] })).toEqual(['u3', 'u1']);
+      expect(await total({ extIds: ['u1', 'u3', 'nope'] })).toBe(2);
+      expect(await ids({ extIds: ['u1', 'u1', ''] })).toEqual(['u1']);
+      expect(((await getDb().listRagIdentityUsers('d1', { extIds: ['u1'] })).users[0])).toMatchObject({
+        extId: 'u1', email: 'ada.lovelace@example.com', name: 'Ada Lovelace', domain: 'd1',
+      });
+      // Ids are compared as given, and another directory's users are not in this one.
+      expect(await ids({ extIds: ['U1'] })).toEqual([]);
+      expect(await ids({ extIds: ['other'] })).toEqual([]);
+      expect((await getDb().listRagIdentityUsers('d2', { extIds: ['other', 'u1'] })).total).toBe(1);
+      // An empty list names nobody, whatever else is asked.
+      expect(await getDb().listRagIdentityUsers('d1', { extIds: [] })).toEqual({ users: [], total: 0 });
+      expect(await getDb().listRagIdentityUsers('d1', { extIds: [], search: 'ada', limit: 0 })).toEqual({ users: [], total: 0 });
+    });
+
+    it('leaves the named users out, and counts without them', async () => {
+      await seed();
+      expect(await ids({ excludeExtIds: ['u1', 'u2', 'nope'] })).toEqual(['u0', 'u3', 'u4', 'u6', 'u5']);
+      expect(await total({ excludeExtIds: ['u1', 'u2', 'nope'] })).toBe(5);
+      // An empty exclusion leaves nobody out; so does one that names nobody here.
+      expect(await total({ excludeExtIds: [] })).toBe(7);
+      expect(await total({ excludeExtIds: ['nope', 'other'] })).toBe(7);
+      expect(await ids({ excludeExtIds: ['u0', 'u3', 'u4', 'u1', 'u6', 'u2', 'u5'] })).toEqual([]);
+      expect(await total({ excludeExtIds: ['u0', 'u3', 'u4', 'u1', 'u6', 'u2', 'u5'] })).toBe(0);
+      expect(await ids({ excludeExtIds: ['U1'] })).toHaveLength(7);
+    });
+
+    it('takes both: the named users that are not left out', async () => {
+      await seed();
+      expect(await ids({ extIds: ['u1', 'u2', 'u3'], excludeExtIds: ['u2'] })).toEqual(['u3', 'u1']);
+      expect(await total({ extIds: ['u1', 'u2', 'u3'], excludeExtIds: ['u2'] })).toBe(2);
+      expect(await ids({ extIds: ['u1'], excludeExtIds: ['u1'] })).toEqual([]);
+      expect(await total({ extIds: ['u1'], excludeExtIds: ['u1'] })).toBe(0);
+      expect(await ids({ extIds: ['u1', 'u2'], excludeExtIds: [] })).toEqual(['u1', 'u2']);
+    });
+
+    it('works with search and paging, and the total is the whole selection', async () => {
+      await seed();
+      expect(await ids({ extIds: ['u1', 'u2', 'u4'], search: 'ada' })).toEqual(['u1']);
+      expect(await total({ extIds: ['u1', 'u2', 'u4'], search: 'ada' })).toBe(1);
+      expect(await ids({ excludeExtIds: ['u1'], search: 'ada' })).toEqual([]);
+      expect(await ids({ excludeExtIds: ['u2'], search: 'CORP.EXAMPLE' })).toEqual(['u3', 'u1']);
+
+      const named = ['u0', 'u1', 'u2', 'u3', 'u4'];
+      expect(await ids({ extIds: named, limit: 2, offset: 1 })).toEqual(['u3', 'u4']);
+      expect(await total({ extIds: named, limit: 2, offset: 1 })).toBe(5);
+      expect(await ids({ extIds: named, limit: 2, offset: 4 })).toEqual(['u2']);
+      expect(await ids({ extIds: ['u1'], limit: 3, offset: 5 })).toEqual([]);
+      // limit 0 asks for the total only.
+      expect(await getDb().listRagIdentityUsers('d1', { excludeExtIds: ['u0'], limit: 0 })).toEqual({ users: [], total: 6 });
+      expect(await getDb().listRagIdentityUsers('d1', { extIds: named, limit: 0 })).toEqual({ users: [], total: 5 });
+      // Without the new options nothing changed.
+      expect(await ids({})).toEqual(['u0', 'u3', 'u4', 'u1', 'u6', 'u2', 'u5']);
+      expect(await ids(undefined)).toEqual(['u0', 'u3', 'u4', 'u1', 'u6', 'u2', 'u5']);
+      expect(await ids({ extIds: undefined, excludeExtIds: undefined })).toHaveLength(7);
+    });
+
+    it('takes thousands of ids to keep or to leave out', async () => {
+      const db = getDb();
+      const count = 2450;
+      const everyone = Array.from({ length: count }, (_, i) => `bulk-${String(i).padStart(4, '0')}`);
+      await db.upsertRagIdentityUsers('big', everyone.map((extId, i) => user(extId, { email: `${extId}@example.com`, name: i % 2 === 0 ? 'Even Person' : 'Odd Person' })));
+      const ghosts = Array.from({ length: 5000 }, (_, i) => `ghost-${i}`);
+      const evens = everyone.filter((_, i) => i % 2 === 0);
+
+      const kept = await db.listRagIdentityUsers('big', { extIds: [...ghosts, ...evens], limit: 200 });
+      expect(kept.total).toBe(evens.length);
+      expect(extIds(kept.users)).toEqual(evens.slice(0, 200));
+      const odds = everyone.filter((_, i) => i % 2 === 1);
+      const left = await db.listRagIdentityUsers('big', { excludeExtIds: [...ghosts, ...evens], limit: 200, offset: 1000 });
+      expect(left.total).toBe(odds.length);
+      expect(extIds(left.users)).toEqual(odds.slice(1000, 1200));
+      // Kept and left out together: the odd ones among the first thousand.
+      const both = await db.listRagIdentityUsers('big', { extIds: everyone.slice(0, 1000), excludeExtIds: evens });
+      expect(both.total).toBe(500);
+      // The search of the box still narrows the selection.
+      expect((await db.listRagIdentityUsers('big', { extIds: everyone.slice(0, 1000), search: 'even' })).total).toBe(500);
+    });
   });
 });
 

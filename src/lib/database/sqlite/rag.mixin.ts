@@ -33,6 +33,12 @@ const RAG_DOCUMENT_COLUMNS_WITHOUT_TEXT = [
   'metadata', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
 ].join(', ');
 
+/** What `countRagDocuments` can narrow by (a list's paging and project fields are its own arguments here). */
+type RagDocumentCountFilters = Pick<
+  RagDocumentListFilters,
+  'status' | 'search' | 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged' | 'withUnscoped'
+>;
+
 /** The distinct, non-empty strings of `values`. */
 function distinctStrings(values: readonly unknown[]): string[] {
   return [...new Set(values.filter((v): v is string => typeof v === 'string' && v.length > 0))];
@@ -445,23 +451,29 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
     async countRagDocuments(
       ragModuleKey: string,
       projectId?: string,
-      filters?: Pick<RagDocumentListFilters, 'status' | 'search' | 'folderId' | 'ids' | 'access' | 'withUnscoped'>,
+      filters?: RagDocumentCountFilters,
     ): Promise<number> {
       const db = this.getTenantDb();
-      const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
-      const params: Record<string, unknown> = { ragModuleKey };
-      if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
-      if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
-      this.appendRagDocumentSelectionClauses(clauses, params, filters);
-      if (projectId) {
-        const scopeFilter = this.buildRagDocumentProjectScope(projectId, filters?.withUnscoped === true);
-        clauses.push(scopeFilter.clause);
-        Object.assign(params, scopeFilter.params);
-      }
+      const { clauses, params } = this.buildRagDocumentCountWhere(ragModuleKey, projectId, filters);
       const row = db.prepare(
         `SELECT COUNT(*) as cnt FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow;
       return (row.cnt as number) || 0;
+    }
+
+    /** One count per folder (`''` = top level), over exactly the rows `countRagDocuments` counts for the same arguments. */
+    async countRagDocumentsByFolder(
+      ragModuleKey: string,
+      projectId: string | undefined,
+      filters?: Pick<RagDocumentListFilters, 'access' | 'withUnscoped'>,
+    ): Promise<Record<string, number>> {
+      const db = this.getTenantDb();
+      const { clauses, params } = this.buildRagDocumentCountWhere(ragModuleKey, projectId, filters);
+      // A missing folder and an empty one are both the top level.
+      const rows = db.prepare(
+        `SELECT COALESCE(folderId, '') AS folder, COUNT(*) AS cnt FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} GROUP BY COALESCE(folderId, '')`,
+      ).all(params) as SqliteRow[];
+      return Object.fromEntries(rows.map((row) => [String(row.folder), Number(row.cnt)]));
     }
 
     /** Same filters and order as `listRagDocuments`, ids only. `limit` is required. */
@@ -519,6 +531,29 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       return { clauses, params };
     }
 
+    /**
+     * The WHERE of `countRagDocuments` / `countRagDocumentsByFolder`: module, status, search, the selection, then the
+     * project scope. A project that is absent or empty does not narrow the count (a list narrows an empty one to the
+     * rows without a project).
+     */
+    private buildRagDocumentCountWhere(
+      ragModuleKey: string,
+      projectId: string | undefined,
+      filters?: RagDocumentCountFilters,
+    ): { clauses: string[]; params: Record<string, unknown> } {
+      const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
+      const params: Record<string, unknown> = { ragModuleKey };
+      if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
+      if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
+      this.appendRagDocumentSelectionClauses(clauses, params, filters);
+      if (projectId) {
+        const scopeFilter = this.buildRagDocumentProjectScope(projectId, filters?.withUnscoped === true);
+        clauses.push(scopeFilter.clause);
+        Object.assign(params, scopeFilter.params);
+      }
+      return { clauses, params };
+    }
+
     /** A project's rows; with `withUnscoped` also the rows that carry no project. */
     private buildRagDocumentProjectScope(projectId: string, withUnscoped: boolean): { clause: string; params: Record<string, unknown> } {
       const scoped = this.buildProjectScopeFilter(projectId);
@@ -528,15 +563,17 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
     }
 
     /**
-     * Which documents: a folder (or the top level), a set of ids, and/or what an
-     * access scope may read. Lists travel as ONE JSON parameter each
+     * Which documents: a folder (or the top level), a set of ids, whether they
+     * carry their own permissions and who keeps those, and/or what an access
+     * scope may read. Lists travel as ONE JSON parameter each
      * (`json_each(@x)`), so a scope carrying thousands of ids never meets the
-     * bound-variable limit; an empty list matches nothing.
+     * bound-variable limit; an empty list matches nothing. 'inherit' and
+     * 'console' are "everything but 'own' / 'sync'", so a NULL column is theirs.
      */
     private appendRagDocumentSelectionClauses(
       clauses: string[],
       params: Record<string, unknown>,
-      filters?: Pick<RagDocumentListFilters, 'folderId' | 'ids' | 'access'>,
+      filters?: Pick<RagDocumentListFilters, 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged'>,
     ): void {
       if (!filters) return;
       if (filters.folderId === null || filters.folderId === '') {
@@ -549,6 +586,10 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         clauses.push('id IN (SELECT value FROM json_each(@idsJson))');
         params.idsJson = jsonList(distinctStrings(filters.ids));
       }
+      if (filters.aclMode === 'own') clauses.push("aclMode IS 'own'");
+      else if (filters.aclMode === 'inherit') clauses.push("aclMode IS NOT 'own'");
+      if (filters.aclManaged === 'sync') clauses.push("aclManaged IS 'sync'");
+      else if (filters.aclManaged === 'console') clauses.push("aclManaged IS NOT 'sync'");
       if (filters.access) {
         const clause = this.buildRagAccessClause(filters.access, params);
         if (clause) clauses.push(clause);

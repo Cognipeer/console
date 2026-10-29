@@ -340,6 +340,13 @@ export interface RagFolderView {
   aclMode: 'own' | 'inherit';
   aclManaged?: RagAclManagedBy;
   source?: IRagFolder['source'];
+  /**
+   * Documents directly in the folder, as the documents list shows them to the caller. Set by the folder list only
+   * (not by create / update). 0 for a folder that is only on the way to one the caller may read (`pathOnly`).
+   */
+  documents?: number;
+  /** The caller sees this folder only as part of the path to a folder they may read: its name and nothing in it. */
+  pathOnly?: true;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -369,9 +376,26 @@ export async function listRagModuleFolders(
     const ragModule = await requireModule(db, ctx, ragModuleKey);
     const folders = await db.listRagFolders(ragModule.key, { projectId: ragModule.projectId });
     const tree = treeOf(folders);
+    // Documents per folder, counted the way the documents list lists them for this caller (the same project, the same
+    // access filter), so a number on a folder is what opening it shows.
+    const access = scope?.managementFilter();
+    const counts = await db.countRagDocumentsByFolder(
+      ragModule.key,
+      ctx.projectId ?? ragModule.projectId,
+      access ? { access } : undefined,
+    );
     return folders
       .filter((f) => f._id && folderVisible(scope, String(f._id)))
-      .map((f) => folderView(tree, f))
+      .map((f) => {
+        const id = String(f._id);
+        // A folder the caller sees only because a folder below it is readable: its name, not what is in it.
+        const pathOnly = !!scope && scope.enabled && !scope.manage && scope.canSeeFolder(id) && !scope.canReadFolder(id);
+        return {
+          ...folderView(tree, f),
+          documents: pathOnly ? 0 : counts[id] ?? 0,
+          ...(pathOnly ? { pathOnly: true as const } : {}),
+        };
+      })
       .sort((a, b) => a.path.localeCompare(b.path));
   });
 }
@@ -1012,9 +1036,13 @@ export async function explainRagAccess(
 
 // ── identity directories ────────────────────────────────────────────────
 
-/** The rules as sent, each one checked; not sent (undefined) is not the same as an empty list, which stands for the default rules. */
-function cleanRules(raw: unknown): IRagIdentityUserMatchRule[] | undefined {
-  if (raw === undefined || raw === null) return undefined;
+/**
+ * The matching rules of a directory as sent, each one checked: a list of at most 8 rules, each comparing console
+ * "email" or "externalId" with "email", "upn", "id" or "attr:<name>". An empty list is valid and stands for the default
+ * rules. Anything that is no list (nothing sent included) is refused with 400 `domain_invalid`; the rules of a
+ * directory that is only being updated are `cleanRules`, which lets "not sent" through.
+ */
+export function cleanUserMatchRules(raw: unknown): IRagIdentityUserMatchRule[] {
   if (!Array.isArray(raw)) throw new RagAccessError('domain_invalid', 'userMatch must be an array');
   if (raw.length > 8) throw new RagAccessError('domain_invalid', 'userMatch takes at most 8 rules');
   return raw.map((rule): IRagIdentityUserMatchRule => {
@@ -1026,6 +1054,12 @@ function cleanRules(raw: unknown): IRagIdentityUserMatchRule[] | undefined {
     }
     return { console: rule.console, external: rule.external };
   });
+}
+
+/** The rules as sent, each one checked; not sent (undefined) is not the same as an empty list, which stands for the default rules. */
+function cleanRules(raw: unknown): IRagIdentityUserMatchRule[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  return cleanUserMatchRules(raw);
 }
 
 function cleanDomainLabel(label: unknown, fallback: string): string {

@@ -25,8 +25,10 @@ import type {
   IRagIdentityDomain,
   IRagIdentityLink,
   IRagIdentityUser,
+  RagAclNodeType,
 } from '../provider.interface';
 import {
+  clampRagAclLabelsLimit,
   clampRagIdentityPage,
   dedupeAclEntries,
   distinctNonEmptyStrings,
@@ -258,6 +260,56 @@ export function RagAccessMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return found !== null;
     }
 
+    /** Node id -> its number of entries; a node with none is not in the record. */
+    async countRagAclEntriesByNode(
+      ragModuleKey: string,
+      filter: { projectId?: string; nodeType: RagAclNodeType; nodeIds: string[] },
+    ): Promise<Record<string, number>> {
+      const nodeIds = distinctNonEmptyStrings(filter.nodeIds);
+      if (nodeIds.length === 0) return {};
+      const db = this.getTenantDb();
+      const query = this.ragModuleQuery(ragModuleKey, filter.projectId);
+      query.nodeType = filter.nodeType;
+      query.nodeId = { $in: nodeIds };
+      const rows = await db
+        .collection(COLLECTIONS.ragAclEntries)
+        .aggregate<{ _id: unknown; count: number }>([
+          { $match: query },
+          { $group: { _id: '$nodeId', count: { $sum: 1 } } },
+        ])
+        .toArray();
+      return Object.fromEntries(rows.map((row) => [String(row._id), row.count]));
+    }
+
+    /**
+     * Distinct nodes of one type with at least one entry. The prefix is an
+     * anchored regular expression over the escaped text, like
+     * `deleteRagAclEntriesByPrincipalPrefix`; one that no principal can start
+     * with matches nothing.
+     */
+    async countRagAclNodes(
+      ragModuleKey: string,
+      filter: { projectId?: string; nodeType: RagAclNodeType; principalPrefix?: string },
+    ): Promise<number> {
+      const db = this.getTenantDb();
+      const query = this.ragModuleQuery(ragModuleKey, filter.projectId);
+      query.nodeType = filter.nodeType;
+      if (filter.principalPrefix !== undefined) {
+        const literal = ragAclPrincipalPrefix(filter.principalPrefix);
+        if (literal === null) return 0;
+        query.principal = { $regex: `^${this.escapeRegex(literal)}` };
+      }
+      const rows = await db
+        .collection(COLLECTIONS.ragAclEntries)
+        .aggregate<{ count: number }>([
+          { $match: query },
+          { $group: { _id: '$nodeId' } },
+          { $count: 'count' },
+        ])
+        .toArray();
+      return rows[0]?.count ?? 0;
+    }
+
     /**
      * MongoDB has no transaction on a standalone server, so the node's current
      * entries are noted, the new entries written, and only the noted ones then
@@ -328,6 +380,34 @@ export function RagAccessMixin<TBase extends Constructor<MongoDBProviderBase>>(B
         .collection(COLLECTIONS.ragAclEntries)
         .deleteMany({ principal: { $regex: `^${this.escapeRegex(literal)}` } });
       return result.deletedCount;
+    }
+
+    /**
+     * Every module and project of the tenant, the prefix read literally like the
+     * delete above. One label per principal (`$max`, so the same one every time
+     * when entries disagree), ordered by principal; `$nin: [null, '']` leaves out
+     * entries whose label is missing, null or empty.
+     */
+    async listRagAclPrincipalLabels(
+      principalPrefix: string,
+      options?: { limit?: number },
+    ): Promise<Array<{ principal: string; label: string }>> {
+      const literal = ragAclPrincipalPrefix(principalPrefix);
+      const limit = clampRagAclLabelsLimit(options);
+      if (literal === null || limit === 0) return [];
+      const coll = this.getTenantDb().collection(COLLECTIONS.ragAclEntries);
+      const labelsOf = (match: Record<string, unknown>) => coll
+        .aggregate<{ _id: unknown; label: unknown }>([
+          { $match: { principal: { $regex: `^${this.escapeRegex(literal)}` }, label: { $nin: [null, ''] }, ...match } },
+          { $group: { _id: '$principal', label: { $max: '$label' } } },
+          { $sort: { _id: 1 } },
+          { $limit: limit },
+        ])
+        .toArray();
+      // A label the connected source wrote wins over one written in the console (two plain reads: no $cond in a group).
+      const [rows, synced] = await Promise.all([labelsOf({}), labelsOf({ managed: 'sync' })]);
+      const fromSource = new Map(synced.map((row) => [String(row._id), String(row.label)] as const));
+      return rows.map((row) => ({ principal: String(row._id), label: fromSource.get(String(row._id)) ?? String(row.label) }));
     }
 
     // ── Identity domains ─────────────────────────────────────────────
@@ -483,10 +563,14 @@ export function RagAccessMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return docs.map((doc) => withStringId<IRagIdentityUser>(doc));
     }
 
-    /** Ordered by e-mail, then `extId`. `search` looks in e-mail, UPN and name, ignoring case. */
+    /**
+     * Ordered by e-mail, then `extId`. `search` looks in e-mail, UPN and name,
+     * ignoring case. `extIds` keeps only those users (an empty list: nobody),
+     * `excludeExtIds` leaves those out; ids are compared as given.
+     */
     async listRagIdentityUsers(
       domain: string,
-      options?: { search?: string; limit?: number; offset?: number },
+      options?: { search?: string; limit?: number; offset?: number; extIds?: string[]; excludeExtIds?: string[] },
     ): Promise<{ users: IRagIdentityUser[]; total: number }> {
       const db = this.getTenantDb();
       const coll = db.collection(COLLECTIONS.ragIdentityUsers);
@@ -499,6 +583,17 @@ export function RagAccessMixin<TBase extends Constructor<MongoDBProviderBase>>(B
         const matcher = { $regex: foldedRegexSource(search), $options: 'i' };
         query.$or = [{ email: matcher }, { upn: matcher }, { name: matcher }];
       }
+      const extIdFilter: Record<string, unknown> = {};
+      if (options?.extIds !== undefined) {
+        const wanted = distinctNonEmptyStrings(options.extIds);
+        if (wanted.length === 0) return { users: [], total: 0 };
+        extIdFilter.$in = wanted;
+      }
+      if (options?.excludeExtIds !== undefined) {
+        const unwanted = distinctNonEmptyStrings(options.excludeExtIds);
+        if (unwanted.length > 0) extIdFilter.$nin = unwanted;
+      }
+      if (Object.keys(extIdFilter).length > 0) query.extId = extIdFilter;
       const total = await coll.countDocuments(query as Filter<Document>);
       if (limit === 0) return { users: [], total };
       const docs = await coll
@@ -508,6 +603,21 @@ export function RagAccessMixin<TBase extends Constructor<MongoDBProviderBase>>(B
         .limit(limit)
         .toArray();
       return { users: docs.map((doc) => withStringId<IRagIdentityUser>(doc)), total };
+    }
+
+    /** Each group id in the users' `groups` with the number of users holding it, by id. `$unwind` drops a user whose `groups` is missing, null or empty. */
+    async listRagIdentityGroupCounts(domain: string): Promise<Array<{ id: string; users: number }>> {
+      const db = this.getTenantDb();
+      const rows = await db
+        .collection(COLLECTIONS.ragIdentityUsers)
+        .aggregate<{ _id: unknown; users: number }>([
+          { $match: { domain } },
+          { $unwind: '$groups' },
+          { $group: { _id: '$groups', users: { $sum: 1 } } },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+      return rows.map((row) => ({ id: String(row._id), users: row.users }));
     }
 
     // ── Identity links ───────────────────────────────────────────────

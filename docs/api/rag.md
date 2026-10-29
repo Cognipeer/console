@@ -36,6 +36,10 @@ PATCH /api/client/v1/rag/modules/:key
 Changing `access` needs Knowledge Engine `admin`. `adminBypass` (default `true`) lets the administrators of the
 knowledge base read every document in the console; calls of the client API never get that exception.
 
+What the console's Access tab shows (the summary of a knowledge base, the permission state of the rows it lists, who
+a permission key stands for, and the people, groups and links of an identity directory) comes from dashboard routes
+with session authentication, not from this API. They are listed under [Access control](/guide/rag#access-control).
+
 ### Delete Module
 
 ```

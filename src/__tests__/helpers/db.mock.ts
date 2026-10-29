@@ -180,6 +180,9 @@ function buildPrimers(): Record<string, Mock> {
       chunkCount: 0,
     }),
     bulkInsertRagChunks: vi.fn().mockResolvedValue(undefined),
+    // Per-node / per-folder counts answer a record (id -> count); the `count*` default would be the number 0.
+    countRagAclEntriesByNode: vi.fn().mockResolvedValue({}),
+    countRagDocumentsByFolder: vi.fn().mockResolvedValue({}),
 
     // Agent tracing dashboard (callers rely on the nested shape)
     aggregateAgentTracingDashboard: vi.fn().mockResolvedValue({

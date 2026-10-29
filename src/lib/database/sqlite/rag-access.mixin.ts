@@ -19,8 +19,10 @@ import type {
   IRagIdentityDomain,
   IRagIdentityLink,
   IRagIdentityUser,
+  RagAclNodeType,
 } from '../provider/types.domain';
 import {
+  clampRagAclLabelsLimit,
   clampRagIdentityPage,
   dedupeAclEntries,
   distinctNonEmptyStrings,
@@ -260,6 +262,50 @@ export function RagAccessMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return row !== undefined;
     }
 
+    /** Node id -> its number of entries; a node with none is not in the record. */
+    async countRagAclEntriesByNode(
+      ragModuleKey: string,
+      filter: { projectId?: string; nodeType: RagAclNodeType; nodeIds: string[] },
+    ): Promise<Record<string, number>> {
+      const nodeIds = distinctNonEmptyStrings(filter.nodeIds);
+      if (nodeIds.length === 0) return {};
+      const db = this.getTenantDb();
+      const { clauses, params } = this.ragModuleScope(ragModuleKey, filter.projectId);
+      clauses.push('nodeType = @nodeType', 'nodeId IN (SELECT value FROM json_each(@nodeIds))');
+      params.nodeType = filter.nodeType;
+      params.nodeIds = jsonList(nodeIds);
+      const rows = db.prepare(
+        `SELECT nodeId, COUNT(*) AS cnt FROM ${TABLES.ragAclEntries} WHERE ${clauses.join(' AND ')} GROUP BY nodeId`,
+      ).all(params) as Array<{ nodeId: string; cnt: number }>;
+      return Object.fromEntries(rows.map((row) => [String(row.nodeId), Number(row.cnt)]));
+    }
+
+    /**
+     * Distinct nodes of one type with at least one entry. The prefix is compared
+     * as it is (`substr`, not LIKE: `%` and `_` are no wildcards, the case counts),
+     * like `deleteRagAclEntriesByPrincipalPrefix`; one that no principal can start
+     * with matches nothing.
+     */
+    async countRagAclNodes(
+      ragModuleKey: string,
+      filter: { projectId?: string; nodeType: RagAclNodeType; principalPrefix?: string },
+    ): Promise<number> {
+      const db = this.getTenantDb();
+      const { clauses, params } = this.ragModuleScope(ragModuleKey, filter.projectId);
+      clauses.push('nodeType = @nodeType');
+      params.nodeType = filter.nodeType;
+      if (filter.principalPrefix !== undefined) {
+        const literal = ragAclPrincipalPrefix(filter.principalPrefix);
+        if (literal === null) return 0;
+        clauses.push('substr(principal, 1, length(@prefix)) = @prefix');
+        params.prefix = literal;
+      }
+      const row = db.prepare(
+        `SELECT COUNT(DISTINCT nodeId) AS cnt FROM ${TABLES.ragAclEntries} WHERE ${clauses.join(' AND ')}`,
+      ).get(params) as { cnt: number };
+      return Number(row.cnt) || 0;
+    }
+
     /**
      * One transaction: the node's entries are removed and the new ones written,
      * so no reader sees the node without its permissions in between (an empty
@@ -325,6 +371,28 @@ export function RagAccessMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return db.prepare(
         `DELETE FROM ${TABLES.ragAclEntries} WHERE substr(principal, 1, length(@prefix)) = @prefix`,
       ).run({ prefix: literal }).changes;
+    }
+
+    /**
+     * Every module and project of the tenant, the prefix read literally like the
+     * delete above. One label per principal (`MAX`, so the same one every time
+     * when entries disagree), ordered by principal; entries without a label say
+     * nothing.
+     */
+    async listRagAclPrincipalLabels(
+      principalPrefix: string,
+      options?: { limit?: number },
+    ): Promise<Array<{ principal: string; label: string }>> {
+      const literal = ragAclPrincipalPrefix(principalPrefix);
+      const limit = clampRagAclLabelsLimit(options);
+      if (literal === null || limit === 0) return [];
+      const db = this.getTenantDb();
+      const rows = db.prepare(`
+        SELECT principal, COALESCE(MAX(CASE WHEN managed = 'sync' THEN label END), MAX(label)) AS label FROM ${TABLES.ragAclEntries}
+        WHERE substr(principal, 1, length(@prefix)) = @prefix AND label IS NOT NULL AND label <> ''
+        GROUP BY principal ORDER BY principal ASC LIMIT @limit
+      `).all({ prefix: literal, limit }) as Array<{ principal: string; label: string }>;
+      return rows.map((row) => ({ principal: String(row.principal), label: String(row.label) }));
     }
 
     // ── Identity domains ─────────────────────────────────────────────
@@ -477,10 +545,15 @@ export function RagAccessMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return rows.map((row) => this.mapRagIdentityUserRow(row));
     }
 
-    /** Ordered by e-mail, then `extId`. `search` looks in e-mail, UPN and name, ignoring case. */
+    /**
+     * Ordered by e-mail, then `extId`. `search` looks in e-mail, UPN and name,
+     * ignoring case. `extIds` keeps only those users (an empty list: nobody),
+     * `excludeExtIds` leaves those out; ids are compared as given and travel as
+     * one JSON parameter each.
+     */
     async listRagIdentityUsers(
       domain: string,
-      options?: { search?: string; limit?: number; offset?: number },
+      options?: { search?: string; limit?: number; offset?: number; extIds?: string[]; excludeExtIds?: string[] },
     ): Promise<{ users: IRagIdentityUser[]; total: number }> {
       const db = this.getTenantDb();
       const { limit, offset } = clampRagIdentityPage(options);
@@ -494,6 +567,19 @@ export function RagAccessMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         clauses.push(`(${columns.join(' OR ')})`);
         params.search = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
       }
+      if (options?.extIds !== undefined) {
+        const wanted = distinctNonEmptyStrings(options.extIds);
+        if (wanted.length === 0) return { users: [], total: 0 };
+        clauses.push('extId IN (SELECT value FROM json_each(@extIds))');
+        params.extIds = jsonList(wanted);
+      }
+      if (options?.excludeExtIds !== undefined) {
+        const unwanted = distinctNonEmptyStrings(options.excludeExtIds);
+        if (unwanted.length > 0) {
+          clauses.push('extId NOT IN (SELECT value FROM json_each(@excludeExtIds))');
+          params.excludeExtIds = jsonList(unwanted);
+        }
+      }
       const where = clauses.join(' AND ');
       const total = (db.prepare(`SELECT COUNT(*) AS cnt FROM ${TABLES.ragIdentityUsers} WHERE ${where}`).get(params) as {
         cnt: number;
@@ -503,6 +589,22 @@ export function RagAccessMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         `SELECT * FROM ${TABLES.ragIdentityUsers} WHERE ${where} ORDER BY email ASC, extId ASC LIMIT @limit OFFSET @offset`,
       ).all({ ...params, limit, offset }) as SqliteRow[];
       return { users: rows.map((row) => this.mapRagIdentityUserRow(row)), total };
+    }
+
+    /**
+     * Each group id in the users' `groups` with the number of users holding it,
+     * by id. The write keeps a group once per user, so one (user, group) row is
+     * one user. A user without groups adds nothing (`json_each(NULL)` has no rows).
+     */
+    async listRagIdentityGroupCounts(domain: string): Promise<Array<{ id: string; users: number }>> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`
+        SELECT g.value AS id, COUNT(*) AS users
+        FROM ${TABLES.ragIdentityUsers} u, json_each(u.groups) g
+        WHERE u.domain = @domain
+        GROUP BY g.value ORDER BY g.value ASC
+      `).all({ domain }) as Array<{ id: string; users: number }>;
+      return rows.map((row) => ({ id: String(row.id), users: Number(row.users) }));
     }
 
     // ── Identity links ───────────────────────────────────────────────
