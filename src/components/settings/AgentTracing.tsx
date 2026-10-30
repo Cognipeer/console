@@ -165,7 +165,7 @@ export default function AgentTracing() {
               <Text component="span" ff="monospace">/api/client/tracing/sessions</Text>
               {' '}to stream tracing data from any stack.
               {' '}See our{' '}
-              <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
+              <Anchor component="button" onClick={() => openDocs('observe-integrations')}>
                 LangChain/LangGraph integration examples
               </Anchor>
               {' '}for quick setup.

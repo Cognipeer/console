@@ -22,6 +22,7 @@
       "category": "operate",
       "navLabelKey": "servicesHome",
       "navDescriptionKey": "servicesHomeDescription",
+      "docsPath": "/console/guide/start/",
       "tags": [
         "services",
         "home"
@@ -41,6 +42,7 @@
       "category": "build",
       "navLabelKey": "models",
       "navDescriptionKey": "modelsDescription",
+      "docsPath": "/console/guide/models/model-hub",
       "tags": [
         "llm",
         "providers",
@@ -64,6 +66,7 @@
       "category": "build",
       "navLabelKey": "prompts",
       "navDescriptionKey": "promptsDescription",
+      "docsPath": "/console/guide/models/prompts",
       "tags": [
         "templates",
         "prompting"
@@ -83,6 +86,7 @@
       "category": "data",
       "navLabelKey": "vector",
       "navDescriptionKey": "vectorDescription",
+      "docsPath": "/console/guide/knowledge/vector-stores",
       "tags": [
         "indexes",
         "embeddings"
@@ -103,6 +107,7 @@
       "category": "data",
       "navLabelKey": "memory",
       "navDescriptionKey": "memoryDescription",
+      "docsPath": "/console/guide/knowledge/memory",
       "tags": [
         "semantic",
         "memory",
@@ -122,6 +127,7 @@
       "category": "data",
       "navLabelKey": "files",
       "navDescriptionKey": "filesDescription",
+      "docsPath": "/console/guide/knowledge/files",
       "tags": [
         "storage",
         "uploads"
@@ -140,6 +146,7 @@
       "category": "data",
       "navLabelKey": "rag",
       "navDescriptionKey": "ragDescription",
+      "docsPath": "/console/guide/knowledge/rag",
       "tags": [
         "knowledge",
         "retrieval",
@@ -161,6 +168,7 @@
       "category": "data",
       "navLabelKey": "reranker",
       "navDescriptionKey": "rerankerDescription",
+      "docsPath": "/console/guide/models/reranker",
       "tags": [
         "rerank",
         "retrieval",
@@ -182,6 +190,7 @@
       "category": "build",
       "navLabelKey": "realtime",
       "navDescriptionKey": "realtimeDescription",
+      "docsPath": "/console/guide/models/realtime",
       "tags": [
         "realtime",
         "voice",
@@ -208,6 +217,7 @@
       "category": "build",
       "navLabelKey": "agents",
       "navDescriptionKey": "agentsDescription",
+      "docsPath": "/console/guide/agents/",
       "tags": [
         "agents",
         "orchestration"
@@ -227,6 +237,7 @@
       "category": "build",
       "navLabelKey": "portals",
       "navDescriptionKey": "portalsDescription",
+      "docsPath": "/console/guide/portals/",
       "tags": [
         "portal",
         "chat",
@@ -257,6 +268,7 @@
       "category": "admin",
       "navLabelKey": "config",
       "navDescriptionKey": "configDescription",
+      "docsPath": "/console/guide/operate/config",
       "tags": [
         "config",
         "secrets"
@@ -276,6 +288,7 @@
       "category": "operate",
       "navLabelKey": "agentTracing",
       "navDescriptionKey": "agentTracingDescription",
+      "docsPath": "/console/guide/observe/tracing",
       "tags": [
         "observability",
         "sessions"
@@ -295,6 +308,7 @@
       "category": "operate",
       "navLabelKey": "inferenceMonitoring",
       "navDescriptionKey": "inferenceMonitoringDescription",
+      "docsPath": "/console/guide/models/inference",
       "tags": [
         "vllm",
         "gpu",
@@ -316,6 +330,7 @@
       "category": "operate",
       "navLabelKey": "guardrails",
       "navDescriptionKey": "guardrailsDescription",
+      "docsPath": "/console/guide/govern/guardrails",
       "tags": [
         "safety",
         "pii",
@@ -347,6 +362,7 @@
       "category": "operate",
       "navLabelKey": "evaluations",
       "navDescriptionKey": "evaluationsDescription",
+      "docsPath": "/console/guide/observe/evaluation",
       "tags": [
         "evaluation",
         "testing",
@@ -373,6 +389,7 @@
       "category": "operate",
       "navLabelKey": "redteam",
       "navDescriptionKey": "redteamDescription",
+      "docsPath": "/console/guide/observe/red-teaming",
       "tags": [
         "redteam",
         "security",
@@ -401,6 +418,7 @@
       "category": "operate",
       "navLabelKey": "analysis",
       "navDescriptionKey": "analysisDescription",
+      "docsPath": "/console/guide/observe/evaluation",
       "tags": [
         "analysis",
         "conversations",
@@ -427,6 +445,7 @@
       "category": "operate",
       "navLabelKey": "pii",
       "navDescriptionKey": "piiDescription",
+      "docsPath": "/console/guide/govern/pii",
       "tags": [
         "pii",
         "redaction",
@@ -452,6 +471,7 @@
       "category": "build",
       "navLabelKey": "mcp",
       "navDescriptionKey": "mcpDescription",
+      "docsPath": "/console/guide/tools/mcp-hub",
       "tags": [
         "mcp",
         "servers",
@@ -474,6 +494,7 @@
       "category": "operate",
       "navLabelKey": "browser",
       "navDescriptionKey": "browserDescription",
+      "docsPath": "/console/guide/agents/browser",
       "tags": [
         "browser",
         "automation",
@@ -496,6 +517,7 @@
       "category": "data",
       "navLabelKey": "crawler",
       "navDescriptionKey": "crawlerDescription",
+      "docsPath": "/console/guide/knowledge/crawl",
       "tags": [
         "crawler",
         "scraping",
@@ -520,6 +542,7 @@
       "category": "data",
       "navLabelKey": "websearch",
       "navDescriptionKey": "websearchDescription",
+      "docsPath": "/console/guide/tools/web-search",
       "tags": [
         "search",
         "web",
@@ -545,6 +568,7 @@
       "category": "data",
       "navLabelKey": "ocr",
       "navDescriptionKey": "ocrDescription",
+      "docsPath": "/console/guide/knowledge/ocr",
       "tags": [
         "ocr",
         "extraction",
@@ -571,6 +595,7 @@
       "category": "operate",
       "navLabelKey": "alerts",
       "navDescriptionKey": "alertsDescription",
+      "docsPath": "/console/guide/operate/monitoring#alerts-incidents",
       "tags": [
         "thresholds",
         "notifications",
@@ -591,6 +616,7 @@
       "category": "operate",
       "navLabelKey": "cost",
       "navDescriptionKey": "costDescription",
+      "docsPath": "/console/guide/observe/cost",
       "tags": [
         "finops",
         "spend",
@@ -619,6 +645,7 @@
       "category": "admin",
       "navLabelKey": "automations",
       "navDescriptionKey": "automationsDescription",
+      "docsPath": "/console/guide/operate/automations",
       "tags": [
         "automations",
         "scheduler",
@@ -644,6 +671,7 @@
       "category": "admin",
       "navLabelKey": "cluster",
       "navDescriptionKey": "clusterDescription",
+      "docsPath": "/console/guide/operate/cluster",
       "tags": [
         "cluster",
         "nodes",
@@ -671,6 +699,7 @@
       "category": "operate",
       "navLabelKey": "gpuFleet",
       "navDescriptionKey": "gpuFleetDescription",
+      "docsPath": "/console/guide/operate/gpu-fleet/overview",
       "tags": [
         "gpu",
         "fleet",
@@ -701,6 +730,7 @@
       "category": "operate",
       "navLabelKey": "sandbox",
       "navDescriptionKey": "sandboxDescription",
+      "docsPath": "/console/guide/agents/sandbox",
       "tags": [
         "sandbox",
         "runtime",
@@ -731,6 +761,7 @@
       "category": "operate",
       "navLabelKey": "aiAppGateway",
       "navDescriptionKey": "aiAppGatewayDescription",
+      "docsPath": "/console/guide/models/gateway",
       "tags": [
         "gateway",
         "coding agents",
@@ -761,6 +792,7 @@
       "category": "operate",
       "navLabelKey": "promptOptimizer",
       "navDescriptionKey": "promptOptimizerDescription",
+      "docsPath": "/console/guide/models/prompt-optimizer",
       "tags": [
         "prompt",
         "optimization",
@@ -789,6 +821,7 @@
       "category": "admin",
       "navLabelKey": "resources",
       "navDescriptionKey": "resourcesDescription",
+      "docsPath": "/console/guide/govern/resources",
       "tags": [
         "inventory",
         "assets",
@@ -810,6 +843,7 @@
       "category": "admin",
       "navLabelKey": "projects",
       "navDescriptionKey": "projectsDescription",
+      "docsPath": "/console/guide/govern/multi-tenancy#projects-members",
       "tags": [
         "workspaces",
         "access"
@@ -827,6 +861,7 @@
       "category": "admin",
       "navLabelKey": "providers",
       "navDescriptionKey": "providersDescription",
+      "docsPath": "/console/guide/models/providers",
       "tags": [
         "providers",
         "integrations"
@@ -846,6 +881,7 @@
       "category": "admin",
       "navLabelKey": "tokens",
       "navDescriptionKey": "tokensDescription",
+      "docsPath": "/console/guide/govern/authentication#api-token-authentication",
       "tags": [
         "api",
         "tokens",
@@ -866,6 +902,7 @@
       "category": "admin",
       "navLabelKey": "audit",
       "navDescriptionKey": "auditDescription",
+      "docsPath": "/console/guide/operate/monitoring#audit-log",
       "tags": [
         "audit",
         "security",
@@ -888,6 +925,7 @@
       "category": "admin",
       "navLabelKey": "dataRetention",
       "navDescriptionKey": "dataRetentionDescription",
+      "docsPath": "/console/guide/govern/data-retention",
       "tags": ["retention", "logs", "privacy", "gdpr", "kvkk"],
       "searchKeywords": ["retention", "data retention", "delete logs", "purge", "clean", "gdpr", "kvkk", "saklama", "veri saklama", "imha", "log silme", "temizle"],
       "tenantAdminOnly": true,
@@ -902,6 +940,7 @@
       "category": "admin",
       "navLabelKey": "iam",
       "navDescriptionKey": "iamDescription",
+      "docsPath": "/console/guide/govern/iam/",
       "tags": ["iam", "authorization", "policy", "security", "members", "users", "invite", "roles", "groups"],
       "searchKeywords": ["iam", "authorization", "policy", "cedar", "access", "permissions", "yetki", "yetki motoru", "politika", "members", "users", "invite", "roles", "tenant", "people", "groups", "service account", "\u00fcyeler", "ki\u015filer", "gruplar", "servis hesab\u0131"],
       "tenantAdminOnly": true,
@@ -914,6 +953,7 @@
       "category": "admin",
       "navLabelKey": "license",
       "navDescriptionKey": "licenseDescription",
+      "docsPath": "/console/guide/govern/licensing",
       "tags": [
         "license",
         "limits",
@@ -935,6 +975,7 @@
       "category": "admin",
       "navLabelKey": "sso",
       "navDescriptionKey": "ssoDescription",
+      "docsPath": "/console/guide/govern/authentication#sso-oidc",
       "tags": [
         "sso",
         "oidc",
@@ -963,6 +1004,7 @@
       "category": "admin",
       "navLabelKey": "ldap",
       "navDescriptionKey": "ldapDescription",
+      "docsPath": "/console/guide/govern/authentication#ldap",
       "tags": [
         "ldap",
         "directory",

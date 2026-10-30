@@ -29,6 +29,7 @@ import DataGrid, { type DataGridColumn, type DataGridFilter } from '@/components
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import StatTile from '@/components/common/ui/StatTile';
+import { useDocLink } from '@/components/docs/DocsDrawerContext';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { CreateFileBucketForm } from '../create/CreateFileBucketForm';
@@ -51,7 +52,6 @@ import BucketRowActions from './BucketRowActions';
 import ListStateCard from './ListStateCard';
 import NoBucketsState from './NoBucketsState';
 import {
-  FILES_DOCS_URL,
   bucketHref,
   bucketProviderOptions,
   filterBuckets,
@@ -63,6 +63,7 @@ import { useBucketListFilters } from './useBucketListFilters';
 
 export default function BucketListPage() {
   const t = useTranslations('files.list');
+  const docsLink = useDocLink('knowledge-files');
   const tCommon = useTranslations('files.common');
   const tBucket = useTranslations('files.bucket');
   const locale = useLocale();
@@ -230,9 +231,7 @@ export default function BucketListPage() {
     <>
       <Button
         component="a"
-        href={FILES_DOCS_URL}
-        target="_blank"
-        rel="noopener noreferrer"
+        {...docsLink}
         variant="default"
         size="sm"
         leftSection={<IconBook size={14} stroke={1.7} />}
