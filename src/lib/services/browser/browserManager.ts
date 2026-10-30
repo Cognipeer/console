@@ -23,7 +23,14 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
-import { resolveBrowserProxyConfig } from '@/lib/core/browserProxyConfig';
+import {
+  browserProxyRouting,
+  explainProxyNetworkError,
+  isProxiedUrl,
+  resolveBrowserProxyConfig,
+  safeProxyHost,
+  type BrowserProxyRouting,
+} from '@/lib/core/browserProxyConfig';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import {
   getConcurrencyLimiter,
@@ -144,13 +151,30 @@ type PwPage = PwLocatorRoot & {
 
 const logger = createLogger('browser:manager');
 const HOST_SECURITY_CACHE_TTL_MS = 5 * 60 * 1000;
+/**
+ * How long the egress guard waits for the local resolver before leaving a
+ * request that goes through the proxy to the proxy. A resolver that never
+ * answers (a cluster DNS forwarding to an upstream the firewall drops)
+ * otherwise held every request, and the navigation it belongs to, until that
+ * navigation timed out.
+ */
+const HOST_LOOKUP_TIMEOUT_MS = 3_000;
+/** Requests remembered per session to name what a timed-out navigation was still waiting on. */
+const INFLIGHT_BUFFER = 500;
+/** Hosts named in the error of a timed-out navigation. */
+const PENDING_HOSTS_REPORTED = 5;
 /** How long to wait for an aria `ref` before falling back to a durable strategy. */
 const REF_PROBE_TIMEOUT_MS = 2_000;
 /** How long a snapshot waits for a navigation in flight before giving up on it. */
 const SNAPSHOT_SETTLE_MS = 3_000;
 /** Per-session ring buffer size for console messages and failed requests. */
 const OBSERVATION_BUFFER = 200;
-const hostSecurityCache = new Map<string, { privateNetwork: boolean; expiresAt: number }>();
+/** What the local resolver answered for a host: only private, some public, or nothing in time. */
+type HostResolution = 'private' | 'public' | 'unresolved';
+const hostSecurityCache = new Map<string, { resolution: HostResolution; expiresAt: number }>();
+const pendingHostLookups = new Map<string, Promise<HostResolution>>();
+/** Hosts whose lookup a proxied request already stopped waiting for, while it is still running. */
+const slowHostLookups = new Set<string>();
 
 /**
  * One node of the last aria snapshot, keyed by its `[ref=…]` marker.
@@ -210,6 +234,10 @@ interface LiveSession {
   networkFailures: NetworkFailureRecord[];
   /** Last dialog the page raised, after the configured policy answered it. */
   lastDialog?: { type: string; message: string; action: 'accept' | 'dismiss'; at: Date };
+  /** The proxy this session's requests go through, if any: the profile's own, else the deployment's. */
+  egressProxy?: BrowserProxyRouting;
+  /** Requests sent and not yet finished or failed, with their host, newest last. */
+  inflight: Map<object, string>;
   /** Redirect hops still being checked against the egress policy (see `watchRedirects`). */
   egressChecks: Set<Promise<void>>;
   /** Set when a redirect reached a blocked address: the session is closing and nothing it loaded is returned. */
@@ -220,6 +248,8 @@ interface LiveSession {
 
 class BrowserManager {
   private browserPromise: Promise<PwBrowser> | null = null;
+  /** The deployment-wide proxy routing the browser was launched with. */
+  private launchProxy: BrowserProxyRouting | undefined;
   private sessions = new Map<string, LiveSession>();
   private uploadResolver?: UploadResolver;
   private reaperTimer: NodeJS.Timeout | null = null;
@@ -304,6 +334,7 @@ class BrowserManager {
 
       const cfg = getConfig().browser;
       const proxy = resolveBrowserProxyConfig();
+      this.launchProxy = browserProxyRouting(proxy, cfg.chromiumExtraArgs);
       const args = [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -329,7 +360,12 @@ class BrowserManager {
         // from the pod's own logs whether the configured proxy matched what
         // the network actually required.
         proxyHost: proxy ? safeProxyHost(proxy.server) : undefined,
+        // `https` here, against a proxy that only speaks plain HTTP, is a
+        // common misconfiguration: every TLS handshake to it fails.
+        proxyScheme: proxy ? (/^([a-z][a-z0-9+.-]*):\/\//i.exec(proxy.server)?.[1].toLowerCase() ?? 'http') : undefined,
+        proxyCredentials: Boolean(proxy?.username),
         proxyBypassConfigured: Boolean(proxy?.bypass),
+        proxyBypassRules: proxy?.bypass?.split(',').length ?? 0,
         extraArgs: cfg.chromiumExtraArgs.length,
         ignoreCertificateErrors: cfg.ignoreCertificateErrors,
       });
@@ -456,12 +492,16 @@ class BrowserManager {
       // Allow/block-list and egress enforcement on every navigation/resource request.
       const access = sessionConfig.access;
       const blockPrivateNetwork = cfg.blockPrivateNetwork;
+      const egressProxy: BrowserProxyRouting | undefined = sessionConfig.proxy?.server
+        ? { server: sessionConfig.proxy.server, bypass: sessionConfig.proxy.bypass }
+        : this.launchProxy;
       const guarded = Boolean(blockPrivateNetwork || access?.allowList?.length || access?.blockList?.length);
       if (guarded) {
         await context.route('**/*', async (route) => {
           const url = route.request().url();
           const decision = await evaluateBrowserRequestAccess(url, access, {
             blockPrivateNetwork,
+            proxy: egressProxy,
           });
           if (!decision.allowed) {
             // `warn`, not `debug`: this only fires when a policy actually
@@ -482,6 +522,7 @@ class BrowserManager {
         await context.routeWebSocket(() => true, async (ws) => {
           const decision = await evaluateBrowserRequestAccess(ws.url().replace(/^ws/i, 'http'), access, {
             blockPrivateNetwork,
+            proxy: egressProxy,
           });
           if (decision.allowed) {
             ws.connectToServer();
@@ -519,6 +560,8 @@ class BrowserManager {
         refIndex: new Map(),
         console: [],
         networkFailures: [],
+        egressProxy,
+        inflight: new Map(),
         egressChecks: new Set(),
         onClose: input.onClose,
       };
@@ -678,11 +721,24 @@ class BrowserManager {
     page.on('pageerror', (error: Error) => {
       push(live.console, { type: 'pageerror', text: error.message, at: new Date() });
     });
+    // What a navigation that times out was still waiting on: behind an
+    // allow-listing proxy or firewall that is usually one third-party host.
+    page.on('request', (request: { url(): string }) => {
+      if (live.inflight.size >= INFLIGHT_BUFFER) {
+        const oldest = live.inflight.keys().next().value;
+        if (oldest) live.inflight.delete(oldest);
+      }
+      live.inflight.set(request, getSafeUrlHost(request.url()) ?? '');
+    });
+    page.on('requestfinished', (request: object) => {
+      live.inflight.delete(request);
+    });
     page.on('requestfailed', (request: {
       url(): string;
       method(): string;
       failure(): { errorText: string } | null;
     }) => {
+      live.inflight.delete(request);
       push(live.networkFailures, {
         url: request.url(),
         method: request.method(),
@@ -725,7 +781,10 @@ class BrowserManager {
   private watchRedirects(live: LiveSession, blockPrivateNetwork: boolean): void {
     live.context.on('request', (request: PwRequest) => {
       if (!request.redirectedFrom() || live.egressBlocked) return;
-      const check: Promise<void> = evaluateBrowserRequestAccess(request.url(), live.config.access, { blockPrivateNetwork })
+      const check: Promise<void> = evaluateBrowserRequestAccess(request.url(), live.config.access, {
+        blockPrivateNetwork,
+        proxy: live.egressProxy,
+      })
         .then(async (decision) => {
           if (decision.allowed || live.egressBlocked) return;
           live.egressBlocked = `${decision.reason ?? 'Browser navigation blocked by egress policy'} (reached through a redirect); the session was closed.`;
@@ -987,10 +1046,12 @@ class BrowserManager {
           const decision = await evaluateBrowserRequestAccess(action.url, live.config.access, {
             blockPrivateNetwork: getConfig().browser.blockPrivateNetwork,
             requireHttp: true,
+            proxy: live.egressProxy,
           });
           if (!decision.allowed) {
             throw new Error(decision.reason ?? 'Browser navigation blocked by egress policy');
           }
+          const earlier = new Set(live.inflight.keys());
           await this.activePage(live).goto(action.url, {
             // Playwright's own default. 'load' waits for every last
             // subresource on the page -- trackers, fonts, third-party
@@ -1001,6 +1062,8 @@ class BrowserManager {
             // most browser-automation tooling default to for the same reason.
             waitUntil: action.waitUntil ?? 'domcontentloaded',
             timeout: action.timeout,
+          }).catch((err: unknown) => {
+            throw describeNavigationFailure(live, err, earlier);
           });
           break;
         }
@@ -1195,11 +1258,17 @@ class BrowserManager {
         const decision = await evaluateBrowserRequestAccess(action.url, live.config.access, {
           blockPrivateNetwork: getConfig().browser.blockPrivateNetwork,
           requireHttp: true,
+          proxy: live.egressProxy,
         });
         if (!decision.allowed) {
           throw new Error(decision.reason ?? 'Browser navigation blocked by egress policy');
         }
-        await page.goto(action.url, { waitUntil: 'load' });
+        const earlier = new Set(live.inflight.keys());
+        // Same reasoning as `goto`: `load` waits on every third-party
+        // resource, which a filtering proxy may never answer.
+        await page.goto(action.url, { waitUntil: 'domcontentloaded' }).catch((err: unknown) => {
+          throw describeNavigationFailure(live, err, earlier);
+        });
       }
     } else if (action.op === 'switch') {
       const index = action.index ?? 0;
@@ -1632,7 +1701,7 @@ function indexAriaRefs(snapshot: string): Map<string, AriaRefNode> {
 async function evaluateBrowserRequestAccess(
   rawUrl: string,
   access: IBrowserSessionConfig['access'],
-  options: { blockPrivateNetwork: boolean; requireHttp?: boolean },
+  options: { blockPrivateNetwork: boolean; requireHttp?: boolean; proxy?: BrowserProxyRouting },
 ): Promise<{ allowed: boolean; reason?: string }> {
   let url: URL;
   try {
@@ -1665,26 +1734,43 @@ async function evaluateBrowserRequestAccess(
     }
   }
 
-  if (options.blockPrivateNetwork && await resolvesToPrivateNetwork(host)) {
+  if (options.blockPrivateNetwork && await resolvesToPrivateNetwork(host, isProxiedUrl(url, options.proxy))) {
     return { allowed: false, reason: 'Browser private-network egress is blocked' };
   }
 
   return { allowed: true };
 }
 
+/**
+ * A navigation error an operator can act on. A timeout names the hosts the
+ * page was still waiting on (hosts only: paths and query strings can carry
+ * tokens, and this message is stored in the session's event log); a proxy
+ * error says what the proxy did. Both otherwise read as the site being down.
+ */
+function describeNavigationFailure(live: LiveSession, err: unknown, earlier: Set<object>): unknown {
+  if (!(err instanceof Error)) return err;
+  const [summary, ...detail] = err.message.split('\n');
+  let note: string | undefined;
+  if (err.name === 'TimeoutError' || /Timeout \d+ms exceeded/.test(summary)) {
+    const hosts = [...new Set(
+      [...live.inflight].filter(([request, host]) => host && !earlier.has(request)).map(([, host]) => host),
+    )];
+    if (hosts.length > 0) {
+      const more = hosts.length > PENDING_HOSTS_REPORTED ? ` and ${hosts.length - PENDING_HOSTS_REPORTED} more` : '';
+      note = `Still waiting on: ${hosts.slice(0, PENDING_HOSTS_REPORTED).join(', ')}${more}. `
+        + 'A host the network (egress proxy, firewall) does not let through holds the page until it times out.';
+    }
+  } else {
+    note = explainProxyNetworkError(summary, live.egressProxy);
+  }
+  if (!note) return err;
+  err.message = [`${summary} ${note}`, ...detail].join('\n');
+  return err;
+}
+
 function getSafeUrlHost(rawUrl: string): string | undefined {
   try {
     return normalizeHost(new URL(rawUrl).hostname);
-  } catch {
-    return undefined;
-  }
-}
-
-/** `host:port`, stripped of scheme and any embedded basic-auth credentials — safe to log. */
-function safeProxyHost(rawUrl: string): string | undefined {
-  try {
-    const parsed = new URL(rawUrl);
-    return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
   } catch {
     return undefined;
   }
@@ -1704,7 +1790,10 @@ function isLocalHostname(host: string): boolean {
   );
 }
 
-async function resolvesToPrivateNetwork(host: string): Promise<boolean> {
+/** Top-level domains no public resolver answers for: reserved or never delegated, used for private networks. */
+const PRIVATE_USE_SUFFIXES = ['.corp', '.home', '.mail', '.lan', '.intranet', '.private', '.home.arpa'];
+
+async function resolvesToPrivateNetwork(host: string, proxied: boolean): Promise<boolean> {
   if (isLocalHostname(host)) {
     return true;
   }
@@ -1713,25 +1802,78 @@ async function resolvesToPrivateNetwork(host: string): Promise<boolean> {
     return isPrivateIpAddress(host);
   }
 
+  // Through the proxy the local answer only tells whether the name is a
+  // private one: a resolver that is slow or never answers must not hold the
+  // request, which the proxy resolves anyway -- and once one request has
+  // given up on a lookup, the rest of the page does not wait for it again. A
+  // direct connection needs that resolver itself, so it waits for the answer
+  // as it always has. The lookup carries on either way and caches what it finds.
+  let resolution = cachedResolution(host);
+  if (!resolution && !proxied) {
+    resolution = await resolveHost(host);
+  } else if (!resolution) {
+    resolution = slowHostLookups.has(host)
+      ? 'unresolved'
+      : await withTimeout(resolveHost(host), HOST_LOOKUP_TIMEOUT_MS, 'unresolved' as const);
+    if (pendingHostLookups.has(host)) slowHostLookups.add(host);
+  }
+  if (resolution !== 'unresolved') return resolution === 'private';
+
+  // Nothing resolved here. A direct connection could not resolve the name
+  // either, so refusing it costs nothing, and keeps a resolver that answers
+  // differently a moment later (DNS rebinding) from reaching a private
+  // address. Through the proxy, though, the proxy resolves the name -- and in
+  // an air-gapped network the proxy is often the only thing that can resolve
+  // public names at all, so refusing here blocked the whole internet. A name
+  // that cannot be a public one stays refused.
+  return !proxied || !host.includes('.') || PRIVATE_USE_SUFFIXES.some((suffix) => host.endsWith(suffix));
+}
+
+function cachedResolution(host: string): HostResolution | undefined {
   const cached = hostSecurityCache.get(host);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.privateNetwork;
-  }
+  return cached && cached.expiresAt > Date.now() ? cached.resolution : undefined;
+}
 
-  let privateNetwork = true;
+/** What the local resolver answers for `host`: cached, with one lookup in flight per host. */
+function resolveHost(host: string): Promise<HostResolution> {
+  const cached = cachedResolution(host);
+  if (cached) return Promise.resolve(cached);
+
+  let pending = pendingHostLookups.get(host);
+  if (!pending) {
+    pending = lookup(host, { all: true, verbatim: true })
+      .then(
+        (records): HostResolution => (records.some((record) => isPrivateIpAddress(record.address)) ? 'private' : 'public'),
+        (): HostResolution => 'unresolved',
+      )
+      .then((resolution) => {
+        hostSecurityCache.set(host, {
+          resolution,
+          expiresAt: Date.now() + HOST_SECURITY_CACHE_TTL_MS,
+        });
+        return resolution;
+      })
+      .finally(() => {
+        pendingHostLookups.delete(host);
+        slowHostLookups.delete(host);
+      });
+    pendingHostLookups.set(host, pending);
+  }
+  return pending;
+}
+
+async function withTimeout<T, F>(promise: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  let timer: NodeJS.Timeout | undefined;
   try {
-    const records = await lookup(host, { all: true, verbatim: true });
-    privateNetwork = records.some((record) => isPrivateIpAddress(record.address));
-  } catch {
-    privateNetwork = true;
+    return await Promise.race([
+      promise,
+      new Promise<F>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-
-  hostSecurityCache.set(host, {
-    privateNetwork,
-    expiresAt: Date.now() + HOST_SECURITY_CACHE_TTL_MS,
-  });
-
-  return privateNetwork;
 }
 
 function isPrivateIpAddress(ip: string): boolean {

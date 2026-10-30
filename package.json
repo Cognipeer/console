@@ -27,6 +27,7 @@
     "backfill:trace-usage": "node --import tsx scripts/backfill-trace-usage.ts",
     "backfill:trace-fields": "node --import tsx scripts/backfill-trace-fields.ts",
     "backfill:rag-project-ids": "node --import tsx scripts/backfill-rag-document-project-ids.ts",
+    "diagnose:egress-proxy": "node --import tsx scripts/diagnose-egress-proxy.ts",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",

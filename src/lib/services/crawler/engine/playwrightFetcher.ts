@@ -9,7 +9,12 @@ import fs from 'node:fs/promises';
 import { chromium, type Browser, type BrowserContext, type Download, type Page } from 'playwright';
 import mime from 'mime-types';
 import { getConfig } from '@/lib/core/config';
-import { resolveBrowserProxyConfig } from '@/lib/core/browserProxyConfig';
+import {
+  browserProxyRouting,
+  explainProxyNetworkError,
+  resolveBrowserProxyConfig,
+  type BrowserProxyRouting,
+} from '@/lib/core/browserProxyConfig';
 import { looksLikeJsShell } from './links';
 import { parseContentTypeBase } from './normalize';
 import { assertSafeUrl } from './ssrf';
@@ -52,6 +57,7 @@ export class PlaywrightSession {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private launching: Promise<void> | null = null;
+  private proxyRouting: BrowserProxyRouting | undefined;
 
   constructor(
     private readonly http: CrawlHttpConfig,
@@ -64,6 +70,7 @@ export class PlaywrightSession {
     this.launching = (async () => {
       const proxy = resolveBrowserProxyConfig();
       const cfg = getConfig().browser;
+      this.proxyRouting = browserProxyRouting(proxy, cfg.chromiumExtraArgs);
       this.browser = await chromium.launch({
         headless: true,
         args: [
@@ -230,8 +237,13 @@ export class PlaywrightSession {
             return await this.harvestDownload(download, url);
           }
         }
-        if (err instanceof Error && navChain.length > 0) {
-          err.message = `${err.message.split('\n')[0]} [navigation chain: ${navChain.join(' -> ')}]`;
+        if (err instanceof Error) {
+          const summary = err.message.split('\n')[0];
+          const hint = explainProxyNetworkError(summary, this.proxyRouting);
+          if (hint || navChain.length > 0) {
+            err.message = `${summary}${hint ? ` ${hint}` : ''}`
+              + `${navChain.length > 0 ? ` [navigation chain: ${navChain.join(' -> ')}]` : ''}`;
+          }
         }
         throw err;
       }

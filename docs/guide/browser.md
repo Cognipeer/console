@@ -310,6 +310,15 @@ Once a session has run a few steps, **Record as flow** freezes them into a flow 
 
 Browser is one of the entity types the [Cluster](./cluster.md) layer can pin to a specific node. The `browserConsumer` registers a queue handler; when a profile is assigned to a node, all of its sessions and actions route through that node's queue. This matters when only some nodes have a real browser binary installed.
 
+## Behind an egress proxy
+
+On a network that reaches the internet only through a corporate proxy, set `HTTPS_PROXY` (and `NO_PROXY`) on the
+Console processes: Chromium is launched with them, and a profile's own **proxy** setting overrides them for its
+sessions. [Egress proxy](./configuration.md#egress-proxy) covers the variables, how the private-network guard treats
+hosts only the proxy can resolve, and `scripts/diagnose-egress-proxy.ts`, which checks the path from inside the
+Console container. A navigation that times out names the hosts the page was still waiting on, usually third-party
+hosts the proxy does not let through.
+
 ## Concurrency
 
 Each profile has a concurrency ceiling defined by its `defaultSessionConfig` and the worker pool in `browserManager.ts`. When the ceiling is hit, new `createSession` calls are queued — the session starts as soon as a slot frees.
