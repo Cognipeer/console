@@ -1,8 +1,8 @@
 /**
- * The part of `@cognipeer/to-markdown` 3.6 the engine uses, declared here because the version installed with Console
- * may be older: its types lack `convertToMarkdownDetailed` and the OCR options of 3.6. The engine therefore never
- * names those exports directly. It asks `getConvertToMarkdownDetailed()`, which answers `undefined` when the
- * installed library does not have them, and OCR requests then degrade to the plain conversion.
+ * The part of `@cognipeer/to-markdown` 3.6 the engine uses. Console installs 3.6, and the engine still runs on an
+ * older converter (an install that pins one), whose types lack `convertToMarkdownDetailed` and the OCR options of
+ * 3.6: it never names those exports directly. It asks `getConvertToMarkdownDetailed()`, which answers `undefined`
+ * when the installed library does not have them, and OCR requests then degrade to the plain conversion.
  */
 
 import * as toMarkdown from '@cognipeer/to-markdown';

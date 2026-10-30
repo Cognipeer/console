@@ -51,7 +51,7 @@
     "@cognipeer/agent-sdk": "^0.22.0",
     "@cognipeer/guardrail": "^0.1.0",
     "@cognipeer/pii": "^0.1.1",
-    "@cognipeer/to-markdown": "^3.4.2",
+    "@cognipeer/to-markdown": "^3.6.0",
     "@dagrejs/dagre": "3.1.1",
     "@elastic/elasticsearch": "^8.19.1",
     "@fastify/cookie": "^11.0.2",
