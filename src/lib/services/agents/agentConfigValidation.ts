@@ -40,7 +40,7 @@ import { checkEmbeddedClientTools } from './agentClientTools';
 import { normalizeAttachmentsFolder, SESSION_FILE_OUTPUTS_LIMITS } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { reasoningConfigIssues } from './agentReasoning';
-import { MAX_MEMORY_MOUNTS } from './agentMemoryMounts';
+import { resolveAgentMemoryStore } from './agentMemoryStore';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -425,18 +425,14 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     issues.warnings.push(...hitl.warnings);
 
     const memory = config.memory;
-    if (memory?.enabled && !memory.memoryStoreKey && !memory.mounts?.length) {
+    const memoryStore = resolveAgentMemoryStore(memory);
+    if (memory?.enabled && !memoryStore) {
         issues.errors.push({ field: 'memory.memoryStoreKey', message: 'Pick a memory store, or turn memory off' });
     }
-    if (memory?.enabled && memory.mounts?.length) {
-        if (memory.mounts.length > MAX_MEMORY_MOUNTS) {
-            issues.errors.push({ field: 'memory.mounts', message: `At most ${MAX_MEMORY_MOUNTS} memory stores can be mounted` });
-        }
-        const seen = new Set<string>();
-        memory.mounts.forEach((m, i) => {
-            if (!m?.storeKey) issues.errors.push({ field: `memory.mounts[${i}].storeKey`, message: 'Pick a memory store' });
-            else if (seen.has(m.storeKey)) issues.errors.push({ field: `memory.mounts[${i}].storeKey`, message: `Memory store "${m.storeKey}" is mounted twice` });
-            seen.add(m.storeKey);
+    if (memory?.enabled && memoryStore?.ignoredStoreKeys.length) {
+        issues.warnings.push({
+            field: 'memory.mounts',
+            message: `An agent uses one memory store; ${memoryStore.ignoredStoreKeys.map((k) => `"${k}"`).join(', ')} are no longer used`,
         });
     }
 
@@ -698,15 +694,11 @@ export async function validateAgentConfig(input: {
         }
         await checkKnowledge(`${field}.key`, key);
     }
-    if (config.memory?.enabled) {
-        const mounts = config.memory.mounts?.length
-            ? config.memory.mounts.map((m, i) => ({ key: m?.storeKey, field: `memory.mounts[${i}].storeKey` }))
-            : config.memory.memoryStoreKey ? [{ key: config.memory.memoryStoreKey, field: 'memory.memoryStoreKey' }] : [];
-        for (const { key, field } of mounts) {
-            if (!key) continue;
-            const store = await db.findMemoryStoreByKey(key, projectId).catch(() => null);
-            if (!store) issues.errors.push({ field, message: `Memory store "${key}" does not exist` });
-        }
+    const memoryStore = config.memory?.enabled ? resolveAgentMemoryStore(config.memory) : undefined;
+    if (memoryStore) {
+        const field = config.memory?.mounts?.length ? 'memory.mounts[0].storeKey' : 'memory.memoryStoreKey';
+        const store = await db.findMemoryStoreByKey(memoryStore.storeKey, projectId).catch(() => null);
+        if (!store) issues.errors.push({ field, message: `Memory store "${memoryStore.storeKey}" does not exist` });
     }
     for (const key of config.skills ?? []) {
         const skill = await db.findSkillByKey(key, projectId).catch(() => null);

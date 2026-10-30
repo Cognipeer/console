@@ -111,9 +111,10 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
 
   const memory = config.memory as Doc | undefined;
   if (memory && memory.enabled !== false) {
-    edges.add('agent.memory', memory.memoryStoreKey, 'config.memory.memoryStoreKey');
-    const mounts = Array.isArray(memory.mounts) ? (memory.mounts as Doc[]) : [];
-    mounts.forEach((m, i) => edges.add('agent.memory', m?.storeKey, `config.memory.mounts[${i}].storeKey`));
+    // Only the store a run uses: a legacy first mount wins over memoryStoreKey, as it does at run time.
+    const firstMount = Array.isArray(memory.mounts) ? (memory.mounts as Doc[])[0] : undefined;
+    if (firstMount?.storeKey) edges.add('agent.memory', firstMount.storeKey, 'config.memory.mounts[0].storeKey');
+    else edges.add('agent.memory', memory.memoryStoreKey, 'config.memory.memoryStoreKey');
   }
 
   if (Array.isArray(config.skills)) {

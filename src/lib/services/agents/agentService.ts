@@ -28,8 +28,8 @@ import {
     resolveTurnOutputSchema,
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
-import { buildAgentMemoryOption, buildMountedMemoryStores } from './agentMemoryAdapter';
-import { buildMemoryPromptSection } from './agentMemoryMounts';
+import { buildAgentMemoryOption } from './agentMemoryAdapter';
+import { resolveAgentMemoryStore } from './agentMemoryStore';
 import type { IAgentConversationMessage, IAgentConversationStep, IAgentMessageVersion, IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
@@ -4454,17 +4454,8 @@ async function buildLocalAgentRun(input: {
         onWarning: (message) => warnings.add(message),
     });
     const memoryToolMode = config.memory?.tools ?? 'readwrite';
-    const memoryMountPrompt = buildMemoryPromptSection(config.memory);
-    if (memoryMountPrompt) systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memoryMountPrompt}` : memoryMountPrompt;
     if (memory?.store && memoryToolMode !== 'off') {
-        const mountedStores = buildMountedMemoryStores(config.memory, {
-            tenantDbName, tenantId, projectId, agentKey,
-            conversationId: input.memoryConversationId,
-            userId: input.userId,
-            onWarning: (message) => warnings.add(message),
-        });
-        const mountScope = (m: (typeof mountedStores)[number]) => m.mount.scope;
-        const allowWrites = memoryToolMode === 'readwrite' && mountedStores.some((m) => m.mount.access === 'read_write');
+        const allowWrites = memoryToolMode === 'readwrite' && !resolveAgentMemoryStore(config.memory)?.readOnly;
         tools.push(...buildMemoryTools({
             store: memory.store,
             // 'workspace' is the SDK's OWN default when a config names no
@@ -4476,9 +4467,8 @@ async function buildLocalAgentRun(input: {
             zod: z,
             guard: toolGuard,
             allowWrites,
-            mounts: mountedStores.map((m) => ({ key: m.mount.storeKey, access: m.mount.access, scope: mountScope(m), store: m.store })),
         }));
-        toolDefinitions.push(...memoryToolDefinitions(allowWrites, mountedStores.map((m) => m.mount.storeKey)));
+        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
 
     // Files attached to the session: the agent can list them (`session_files_list`) and read

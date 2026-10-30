@@ -2631,13 +2631,21 @@ export interface IAgentMemoryConfig {
   /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
   memoryStoreKey?: string;
   /**
-   * One or more stores ("mounts") the agent reads from / writes into. Several
-   * agents mounting the same store (+ a shared scope) share memory. When set
-   * this wins over the legacy `memoryStoreKey`; the FIRST mount is the primary
-   * store for the SDK's pre-injected recall and summary writes.
+   * @deprecated Configs saved while agents could mount several stores. Read
+   * only for compatibility (`agentMemoryStore.ts`): the first mount is the
+   * agent's store and the rest are ignored. Saving from the panel replaces it
+   * with `memoryStoreKey`.
    */
   mounts?: IAgentMemoryMount[];
   scope?: AgentMemoryScope;
+  /**
+   * 'workspace' scope is shared by the agents of the project that use this
+   * store, instead of belonging to this agent alone. Only set when a former
+   * `mounts` config is converted: its workspace facts were written
+   * project-wide, and this keeps them visible. Nothing else sets it; agents
+   * share memory through 'tenant' scope.
+   */
+  sharedWorkspace?: boolean;
   writePolicy?: AgentMemoryWritePolicy;
   readPolicy?: AgentMemoryReadPolicy;
   /**
@@ -2654,6 +2662,7 @@ export interface IAgentMemoryConfig {
   tools?: AgentMemoryToolMode;
 }
 
+/** @deprecated See `IAgentMemoryConfig.mounts`. */
 export interface IAgentMemoryMount {
   /** Key of an existing `IMemoryStore`. */
   storeKey: string;
