@@ -20,6 +20,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import JSZip from 'jszip';
 
 const tmpRoot = mkdtempSync(path.join(tmpdir(), 'cognipeer-rag-access-read-fixes-'));
 process.env.DB_PROVIDER = 'sqlite';
@@ -640,8 +641,15 @@ describe('an export', () => {
   const exported = async (who: Who, key: string) => {
     const res = await send(who, 'GET', `/rag/modules/${key}/export`);
     expect(res.statusCode, res.body).toBe(200);
-    const [header, ...lines] = res.body.trim().split('\n').map((line) => JSON.parse(line));
-    return { raw: res.body, header, names: lines.map((line: { fileName: string }) => line.fileName).sort() };
+    // A ZIP of JSONL parts, each led by the export's header.
+    const zip = await JSZip.loadAsync(res.rawPayload);
+    const parts = await Promise.all(Object.keys(zip.files).sort().map((name) => zip.file(name)!.async('string')));
+    const files = parts.map((part) => part.trim().split('\n').map((line) => JSON.parse(line)));
+    return {
+      raw: parts.join(''),
+      header: files[0][0],
+      names: files.flatMap(([, ...lines]) => lines.map((line: { fileName: string }) => line.fileName)).sort(),
+    };
   };
 
   it('holds only the documents a manager whose own reads are checked may read, and does not say how many were left out', async () => {

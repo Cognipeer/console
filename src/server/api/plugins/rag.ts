@@ -17,7 +17,6 @@ import {
   getRagModule,
   ingestDocument,
   ingestFile,
-  listRagDocuments,
   listRagDocumentsPage,
   listRagModules,
   listRagQueryLogs,
@@ -37,16 +36,7 @@ import {
   startRagReindex,
 } from '@/lib/services/rag/ragReindexService';
 import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnswerService';
-import {
-  RAG_EXPORT_FORMAT,
-  RAG_EXPORT_VERSION,
-  exportRagModule,
-  importRagModuleJsonl,
-  type RagExportDocumentLine,
-  type RagExportHeader,
-  type RagExportResult,
-} from '@/lib/services/rag/ragTransfer';
-import { loadSourceText } from '@/lib/services/rag/ragSource';
+import { exportRagModule, importRagModuleJsonl } from '@/lib/services/rag/ragTransfer';
 import {
   authorizeServiceForRequest,
   readJsonBody,
@@ -509,72 +499,6 @@ function reindexRunForCaller(reader: RunReader | undefined, run: IRagReindexRun)
   return view as IRagReindexRun;
 }
 
-/**
- * `exportRagModule` for a caller whose reads are checked (a manager while the
- * module keeps the admin exception off): the file holds the documents the scope
- * reads and nothing says how many were left out. Same file as the export of a
- * module without access control.
- */
-async function exportReadableDocuments(
-  tenantDbName: string,
-  tenantId: string,
-  projectId: string,
-  ragModuleKey: string,
-  scope: RagAccessScope,
-): Promise<RagExportResult | undefined> {
-  const ragModule = await getRagModule(tenantDbName, ragModuleKey, projectId);
-  if (!ragModule) return undefined;
-
-  const access = scope.documentFilter();
-  const listed = await listRagDocuments(tenantDbName, ragModuleKey, {
-    projectId,
-    ...(access ? { access } : {}),
-  });
-  const lines: string[] = [];
-  let skippedDocuments = 0;
-
-  for (const row of listed) {
-    if (!scope.canReadDocument(row)) continue;
-    // The list drops the inline source text, and a short document keeps its text nowhere else.
-    const document = (await getRagDocument(tenantDbName, String(row._id))) ?? row;
-    const content = await loadSourceText(tenantDbName, tenantId, projectId, document);
-    if (!content) {
-      skippedDocuments += 1;
-      continue;
-    }
-    const line: RagExportDocumentLine = {
-      type: 'document',
-      fileName: document.fileName,
-      contentType: document.contentType,
-      metadata: document.metadata,
-      chunkConfig: document.chunkConfig,
-      content,
-    };
-    lines.push(JSON.stringify(line));
-  }
-
-  const header: RagExportHeader = {
-    format: RAG_EXPORT_FORMAT,
-    version: RAG_EXPORT_VERSION,
-    exportedAt: new Date().toISOString(),
-    module: {
-      key: ragModule.key,
-      name: ragModule.name,
-      description: ragModule.description,
-    },
-    documentCount: lines.length,
-    skippedDocuments,
-  };
-
-  const safeKey = ragModule.key.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return {
-    fileName: `${safeKey}.rag.jsonl`,
-    body: [JSON.stringify(header), ...lines].join('\n') + '\n',
-    documentCount: lines.length,
-    skippedDocuments,
-  };
-}
-
 export const ragApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/rag/modules', withApiRequestContext(async (request, reply) => {
     try {
@@ -901,9 +825,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
       // A manager whose own reads are checked (admin exception off) exports what the checks let them read.
-      const result = scope?.enforced
-        ? await exportReadableDocuments(session.tenantDbName, session.tenantId, projectId, key, scope)
-        : await exportRagModule(session.tenantDbName, session.tenantId, projectId, key);
+      const result = await exportRagModule(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        key,
+        scope?.enforced ? scope : undefined,
+      );
 
       if (!result) {
         return reply.code(404).send({ error: 'Knowledge Engine module not found' });
