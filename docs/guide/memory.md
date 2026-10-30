@@ -166,16 +166,13 @@ Query → Embed → Vector Search → Rank by score + importance → Return
 - **Inference Service** — For generating embeddings
 - **Vector Service** — For storing and querying vectors
 
-## Mounting memory stores on an agent
+## Using a memory store from an agent
 
-An agent's **Memory** section lets you mount one or more stores (up to 5) instead of a single one. Each mount has:
+An agent's **Memory** section picks one store from this module. The agent reads and writes facts there in the scope you choose:
 
-- **Store** - an existing store from this module.
-- **Access** - `read & write` or `read only`. Read-only mounts are never written to or forgotten from.
-- **Use for** - a short description; it is added to the agent's system prompt so the model knows which store holds what.
-- **Scope** - optional per-mount override of the agent's memory scope.
+- **session** - this conversation only.
+- **user** - follows the caller across conversations.
+- **workspace** - this agent only (the default).
+- **tenant** - shared by every agent that uses the store. Pick it when several agents should share memory.
 
-The first mount is the primary store: it feeds the pre-injected recall and the automatic summary writes (skipped if it is read-only). With several mounts, `memory_search` takes an optional `store` (omitted = search all mounts, results interleaved by rank and tagged with their store), and `memory_write` / `memory_forget` take `store` (required when more than one mount is writable).
-
-**Sharing across agents:** several agents that mount the same store with the same scope read and write the same facts. For mounts, `workspace` scope is shared project-wide (not per agent) and `tenant` scope is shared by the whole store; `session` and `user` follow the conversation and caller. Agents with only the legacy single store key keep their per-agent `workspace` namespace. A legacy key is treated as the first read & write mount when you edit mounts.
-
+**Agents saved with several stores:** agents could briefly mount several stores. They now use only the first one, with its access and scope; the other stores are no longer read or written, and their facts stay in this module. Those agents keep the project-wide `workspace` namespace they wrote to. Saving the agent from its Memory section stores the first store as its only one.
