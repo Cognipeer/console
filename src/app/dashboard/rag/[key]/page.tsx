@@ -681,6 +681,7 @@ export default function RagModuleDetailPage() {
   const [reingestingDocId, setReingestingDocId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ file: number; files: number } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const handleExport = async () => {
@@ -696,7 +697,7 @@ export default function RagModuleDetailPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `${moduleKey}.rag.jsonl`;
+      link.download = `${moduleKey}.rag.zip`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
@@ -706,47 +707,56 @@ export default function RagModuleDetailPage() {
     }
   };
 
-  const handleImportFile = async (file: File) => {
-    if (!moduleKey) return;
+  const handleImportFiles = async (selected: File[]) => {
+    if (!moduleKey || selected.length === 0) return;
+    // An export's parts are numbered (….part-002.rag.jsonl), so a natural name
+    // sort imports them in order whatever order the file picker returned.
+    const files = [...selected].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     setImporting(true);
+    const url = `/api/rag/modules/${encodeURIComponent(moduleKey)}/import`;
+    let total = 0;
+    let imported = 0;
+    let failed = 0;
     try {
-      const text = await file.text();
-      const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
-      // The export header is informational here; each batch is posted as plain JSONL.
-      if (lines.length > 0 && lines[0].includes(`"format":"${IMPORT_FORMAT_NAME}"`)) lines.shift();
+      for (const [fileIndex, file] of files.entries()) {
+        setImportProgress({ file: fileIndex + 1, files: files.length });
+        const text = await file.text();
+        const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
+        // The export header is informational here; each batch is posted as plain JSONL.
+        if (lines.length > 0 && lines[0].includes(`"format":"${IMPORT_FORMAT_NAME}"`)) lines.shift();
+        total += lines.length;
 
-      const url = `/api/rag/modules/${encodeURIComponent(moduleKey)}/import`;
-      let imported = 0;
-      let failed = 0;
-      let batchError: string | undefined;
-
-      for (let start = 0; start < lines.length; start += IMPORT_BATCH_SIZE) {
-        const batch = lines.slice(start, start + IMPORT_BATCH_SIZE).join('\n');
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: batch }),
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          batchError = body.error || `Import failed (${res.status}) at document ${start + 1}`;
-          break;
+        for (let start = 0; start < lines.length; start += IMPORT_BATCH_SIZE) {
+          const batch = lines.slice(start, start + IMPORT_BATCH_SIZE).join('\n');
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: batch }),
+          });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const batchError = body.error || `Import failed (${res.status}) at document ${start + 1}`;
+            throw new Error(`${file.name}: ${batchError}. ${imported} document(s) were queued before it.`);
+          }
+          imported += body.imported;
+          failed += body.failed;
         }
-        imported += body.imported;
-        failed += body.failed;
       }
 
-      if (batchError) throw new Error(`${batchError}. ${imported} document(s) were queued before it.`);
       notifications.show({
         color: failed > 0 ? 'orange' : 'green',
         title: 'Import finished',
-        message: `${imported} of ${lines.length} document(s) queued${failed > 0 ? `, ${failed} failed` : ''}.`,
+        message: `${imported} of ${total} document(s) queued${files.length > 1 ? ` from ${files.length} files` : ''}`
+          + `${failed > 0 ? `, ${failed} failed` : ''}.`,
       });
       void loadDocuments(true);
     } catch (error) {
       notifications.show({ color: 'red', title: 'Import failed', message: String(error) });
+      // Files before the failing one are already queued.
+      if (imported > 0) void loadDocuments(true);
     } finally {
       setImporting(false);
+      setImportProgress(null);
       if (importInputRef.current) importInputRef.current.value = '';
     }
   };
@@ -1520,7 +1530,7 @@ export default function RagModuleDetailPage() {
                   </Text>
                 </div>
                 <Group gap="xs">
-                  <Tooltip label="Download every document's source text as JSONL" withArrow>
+                  <Tooltip label="Download every document's source text as a ZIP of JSONL files" withArrow>
                     <Button
                       variant="light"
                       size="xs"
@@ -1531,7 +1541,10 @@ export default function RagModuleDetailPage() {
                       Export
                     </Button>
                   </Tooltip>
-                  <Tooltip label="Import a JSONL export; documents are re-chunked and re-embedded with this module" withArrow>
+                  <Tooltip
+                    label="Import one or more JSONL files of an export, in name order; documents are re-chunked and re-embedded with this module"
+                    withArrow
+                  >
                     <Button
                       variant="light"
                       size="xs"
@@ -1539,17 +1552,19 @@ export default function RagModuleDetailPage() {
                       onClick={() => importInputRef.current?.click()}
                       disabled={importing}
                     >
-                      Import
+                      {importProgress && importProgress.files > 1
+                        ? `Importing ${importProgress.file}/${importProgress.files}`
+                        : 'Import'}
                     </Button>
                   </Tooltip>
                   <input
                     ref={importInputRef}
                     type="file"
                     accept=".jsonl,.ndjson,application/x-ndjson"
+                    multiple
                     style={{ display: 'none' }}
                     onChange={(event) => {
-                      const file = event.currentTarget.files?.[0];
-                      if (file) void handleImportFile(file);
+                      void handleImportFiles(Array.from(event.currentTarget.files ?? []));
                     }}
                   />
                   <Tooltip

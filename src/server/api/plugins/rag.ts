@@ -546,7 +546,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply
         .code(200)
-        .header('content-type', 'application/x-ndjson; charset=utf-8')
+        .header('content-type', 'application/zip')
         .header('content-disposition', `attachment; filename="${result.fileName}"`)
         .send(result.body);
     } catch (error) {
