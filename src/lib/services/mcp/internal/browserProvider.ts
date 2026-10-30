@@ -147,6 +147,8 @@ export const browserProvider: InternalMcpProvider = {
   description:
     'Drive one of this project\'s browsers: open a session, navigate, click, type, read the page and replay recorded flows.',
   configFields: [],
+  // A browser reaches whatever address the console can.
+  tokenOnly: true,
 
   async listInstances(ctx): Promise<InternalMcpInstanceOption[]> {
     const browsers = await listBrowsers(ctx, { status: 'active' });

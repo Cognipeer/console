@@ -43,6 +43,7 @@ import {
 } from '@/lib/services/config/configRefs';
 import { readJsonBody } from '../fastify-utils';
 import { configReadRequiredBody } from './config-permission';
+import { sandboxWriteRequiredBody } from './sandbox-permission';
 import { CONSOLE_IDENTITY_AUTH_TYPE, ensureConsoleIdentityKey } from '@/lib/iam/consoleIdentity';
 import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { FILES_WRITE_REQUIRED_MESSAGE } from './files-permission';
@@ -183,6 +184,12 @@ export interface AgentConfigWriteScope {
    * references asks nothing.
    */
   canReferenceConfig: () => Promise<boolean>;
+  /**
+   * May the caller work in this project's sandboxes (Sandbox write)? Asked only when a write sets or changes
+   * `config.sandbox.instanceId`: the agent then runs its commands in that persistent sandbox and reads its files,
+   * so choosing it is a Sandbox decision. Absent = such a write is refused (fails closed).
+   */
+  canUseSandbox?: () => Promise<boolean>;
 }
 
 /** `canReferenceConfig` answered once per write: it is asked before the lookups and again after them. */
@@ -335,6 +342,23 @@ async function configReferenceRefusal(
 }
 
 /**
+ * The 403 for a write that sets or changes the persistent sandbox (`config.sandbox.instanceId`) without Sandbox
+ * write access, else null. Asked whatever the mode and the `enabled` switch say, so a sandbox cannot be chosen
+ * while switched off and turned on later by someone the stored id no longer asks. Re-saving the stored id asks
+ * nothing; clearing it asks nothing.
+ */
+async function sandboxInstanceRefusal(
+  next: IAgentConfig,
+  previous: IAgentConfig | undefined,
+  scope: Pick<AgentConfigWriteScope, 'canUseSandbox'>,
+): Promise<{ forbidden: Record<string, unknown> } | null> {
+  const chosen = typeof next.sandbox?.instanceId === 'string' ? next.sandbox.instanceId.trim() : '';
+  if (!chosen || chosen === previous?.sandbox?.instanceId) return null;
+  if (scope.canUseSandbox && await scope.canUseSandbox()) return null;
+  return { forbidden: sandboxWriteRequiredBody('config.sandbox.instanceId') };
+}
+
+/**
  * A connected agent set up for Console identity: make sure the workspace's signing key exists, so
  * its key set is published before the first call (that call creates it otherwise).
  */
@@ -364,6 +388,9 @@ export async function prepareNewAgentConfig(
   if (bindingError) return { badRequest: { error: bindingError } };
   const refsError = await normalizeSandboxConfigRefs(config, undefined, scope);
   if (refsError) return refsError;
+  // Before validation, whose lookup would tell a caller without Sandbox access which sandboxes exist.
+  const instanceRefusal = await sandboxInstanceRefusal(config, undefined, scope);
+  if (instanceRefusal) return instanceRefusal;
   await prepareConnectedAgentIdentity(config, scope.tenantDbName);
 
   const validation = await validateAgentConfig({
@@ -408,6 +435,9 @@ export async function validateNativeConfigUpdate(
   if (bindingError) return { badRequest: { error: bindingError } };
   const refsError = await normalizeSandboxConfigRefs(config, previous, scope);
   if (refsError) return refsError;
+  // Before validation, whose lookup would tell a caller without Sandbox access which sandboxes exist.
+  const instanceRefusal = await sandboxInstanceRefusal(config, previous, scope);
+  if (instanceRefusal) return instanceRefusal;
 
   // A config that would not run as configured is not saved: the runtime
   // would skip the broken parts silently.

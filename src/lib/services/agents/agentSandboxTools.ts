@@ -14,6 +14,12 @@
  *    stateless playground call) there is nothing to keep it against, so the
  *    run is per-message.
  *  - `ephemeral`: a fresh sandbox for the run, deleted when the run ends.
+ *  - `instance`: an existing persistent sandbox of the project
+ *    (`config.sandbox.instanceId`), started when it is stopped and otherwise
+ *    left alone: never created, stopped or deleted here, and its template,
+ *    resources and network are its own. Every conversation shares it, so the
+ *    agent's plain variables go with each command instead of onto the machine,
+ *    and only files written during the run are delivered from `/outputs/`.
  *
  * Secrets are decrypted per run and passed to each command as environment
  * variables — never set on the instance, so they are not stored on its row —
@@ -36,9 +42,9 @@ import {
     type AgentSandboxRunner,
 } from '@/enterprise/registry';
 import { getDatabase, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentSandboxConfig } from '@/lib/database';
-import { isTenantEnterpriseLicensed } from '@/lib/license/tenantLicense';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 import { resolveSandboxMode } from './agentSandboxMode';
+import { resolveSandboxAvailability } from './sandboxAvailability';
 import { downloadFile } from '@/lib/services/files';
 import { applySeedFiles, buildSeedPromptNote, isOwnedObjectKey, type SeedApplyResult } from './agentSandboxSeedFiles';
 import {
@@ -47,6 +53,7 @@ import {
     parseStatListing,
     readBytesViaExec,
     shQuote,
+    type OutputEntry,
 } from './agentSandboxOutputs';
 import { resolveAttachmentsConfig } from './sessionFilesConfig';
 import { resolveUploadMimeType, saveAgentOutputFile } from './sessionFiles';
@@ -80,20 +87,7 @@ export interface ConversationSandboxRecord {
     lastUsedAt: string;
 }
 
-export type SandboxAvailability =
-    | { available: true; runner: AgentSandboxRunner }
-    | { available: false; reason: 'edition' | 'license' };
-
-/** Whether this deployment and tenant can give agents a sandbox at all. */
-export async function resolveSandboxAvailability(tenantId: string): Promise<SandboxAvailability> {
-    // Optional chaining on the REF too: an overlay registry from before seam 4
-    // replaces this file without exporting `agentSandboxRunner` at all, and
-    // that mismatch must read as "no sandbox module", not crash every agent.
-    const runner = agentSandboxRunner?.current;
-    if (!runner) return { available: false, reason: 'edition' };
-    if (!(await isTenantEnterpriseLicensed(tenantId))) return { available: false, reason: 'license' };
-    return { available: true, runner };
-}
+export { resolveSandboxAvailability, type SandboxAvailability } from './sandboxAvailability';
 
 function sandboxUnavailableMessage(reason: 'edition' | 'license'): string {
     return reason === 'license'
@@ -184,6 +178,16 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
 
     const conversationId = input.conversation?._id ? String(input.conversation._id) : undefined;
     const mode = resolveSandboxMode(config.mode);
+    const attachedId = mode === 'instance' ? config.instanceId?.trim() : undefined;
+    if (mode === 'instance' && !attachedId) {
+        input.onWarning('The agent is set to use a persistent sandbox, but none is chosen; the agent ran without its sandbox tools.');
+        return NO_TOOLS;
+    }
+    if (attachedId && !runner.describeInstance) {
+        // A module from before persistent sandboxes could be chosen would treat the id as a machine to reuse or replace.
+        input.onWarning('This sandbox module cannot attach an agent to an existing sandbox; the agent ran without its sandbox tools.');
+        return NO_TOOLS;
+    }
     const sessionConversationId = mode === 'session' ? conversationId : undefined;
     const session = Boolean(sessionConversationId);
     if (mode === 'session' && !conversationId) {
@@ -209,7 +213,9 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         secrets: typedSecrets,
     });
     const secrets = configVars.secrets;
-    const machineEnv = configVars.machineEnv;
+    // A shared persistent sandbox keeps its own environment: the agent's plain variables go with each command.
+    const machineEnv = attachedId ? {} : configVars.machineEnv;
+    const commandEnv = attachedId ? { ...configVars.machineEnv, ...secrets } : secrets;
     const configProblems = configVars.problems;
     if (configProblems.length > 0) input.onWarning(describeConfigRefProblems(configProblems));
     const unavailableConfig = blockingConfigRefProblems(configProblems);
@@ -254,6 +260,8 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     let seedResult: SeedApplyResult | undefined;
     /** Told to the model once, with the first command result, when a seed file failed. */
     let seedNotice: string | undefined;
+    /** `/outputs/` as the run found a shared persistent sandbox: those files are not this run's to deliver. */
+    let outputsBaseline: Record<string, string> = {};
 
     /**
      * Writes the conversation's sandbox record. `metadata` is replaced
@@ -309,7 +317,39 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         }
     };
 
+    const listOutputs = async (instanceId: string): Promise<OutputEntry[]> => {
+        const res = await runner.exec(ref, instanceId, {
+            command: `find ${shQuote(SANDBOX_OUTPUTS_DIR)} -type f -exec stat -c '%Y|%s|%n' {} +`,
+            timeoutSec: 60,
+        });
+        if (res.exitCode === 0) return parseStatListing(res.stdout);
+        const listed = await runner.listFiles(ref, instanceId, SANDBOX_OUTPUTS_DIR).catch(() => []);
+        return listed.filter((e) => e.type === 'file').map((e) => ({ path: e.path, size: e.size ?? 0 }));
+    };
+
+    /** The persistent sandbox the operator chose: started if stopped, otherwise used as it is. */
+    const attach = async (instanceId: string): Promise<string> => {
+        await runner.ensureInstance(ref, {
+            attach: true,
+            instanceId,
+            persist: true,
+            preview: { enabled: Boolean(preview), public: preview?.public ?? false },
+        });
+        launchSecrets = await readLaunchSecrets(instanceId);
+        logger.info('Agent attached to a persistent sandbox', { agentKey: input.agentKey, instanceId });
+        await seedInstance(instanceId);
+        if (input.outputs && conversationId) {
+            // Same signature `collectSandboxOutputs` compares (size:mtime); an entry without a time is
+            // left out, so a file the listing cannot date is delivered rather than lost.
+            outputsBaseline = Object.fromEntries((await listOutputs(instanceId).catch(() => []))
+                .filter((entry) => entry.mtime !== undefined)
+                .map((entry) => [entry.path, `${entry.size}:${entry.mtime}`]));
+        }
+        return instanceId;
+    };
+
     const provision = async (): Promise<string> => {
+        if (attachedId) return attach(attachedId);
         let previous: ConversationSandboxRecord | undefined;
         if (sessionConversationId) {
             const db = await getDatabase();
@@ -409,9 +449,11 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         };
     };
 
-    const lifetime = session
-        ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
-        : 'The sandbox is discarded when this reply is finished.';
+    const lifetime = attachedId
+        ? 'This is a persistent sandbox shared by every conversation of this agent, and by anyone else given access to it: files and installed packages stay, and what you write can be seen by others.'
+        : session
+            ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
+            : 'The sandbox is discarded when this reply is finished.';
     const secretNote = [
         secretsUnreadable ? ` ${SECRETS_UNAVAILABLE_NOTICE}` : '',
         configNotice ? ` ${configNotice}` : '',
@@ -442,7 +484,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 return shapeExec(await runner.exec(ref, instanceId, {
                     command: args.command,
                     cwd: args.cwd || WORKDIR,
-                    env: secrets,
+                    env: commandEnv,
                     timeoutSec,
                     ...turnSignalField(),
                 }));
@@ -462,7 +504,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 return shapeExec(await runner.runCode(ref, instanceId, {
                     language: args.language,
                     code: args.code,
-                    env: secrets,
+                    env: commandEnv,
                     timeoutSec,
                     ...turnSignalField(),
                 }));
@@ -535,11 +577,12 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 // preview has been idle for `keepAliveMinutes`
                 // (idleStopSeconds on the instance).
                 logger.info('Agent sandbox left running for its preview', { agentKey: input.agentKey, instanceId });
-            } else if (!session) {
+            } else if (!session && !attachedId) {
                 await runner.destroy(ref, instanceId);
             }
             // A session sandbox is left up on purpose: the next turn reuses it,
-            // and the sandbox module closes it once it has sat idle.
+            // and the sandbox module closes it once it has sat idle. A persistent
+            // one is the operator's: never stopped or deleted here.
             if (session) await saveRecord(instanceId);
         } catch (error) {
             logger.warn('Agent sandbox cleanup failed', {
@@ -562,14 +605,9 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             const sh = (command: string) => runner.exec(ref, instanceId, { command, timeoutSec: 60 });
             const stored = (input.conversation.metadata?.sandboxOutputs ?? {}) as Record<string, string>;
             const result = await collectSandboxOutputs({
-                seen: session ? stored : {},
+                seen: session ? stored : outputsBaseline,
                 maxFileBytes,
-                list: async () => {
-                    const res = await sh(`find ${shQuote(SANDBOX_OUTPUTS_DIR)} -type f -exec stat -c '%Y|%s|%n' {} +`);
-                    if (res.exitCode === 0) return parseStatListing(res.stdout);
-                    const listed = await runner.listFiles(ref, instanceId, SANDBOX_OUTPUTS_DIR).catch(() => []);
-                    return listed.filter((e) => e.type === 'file').map((e) => ({ path: e.path, size: e.size ?? 0 }));
-                },
+                list: () => listOutputs(instanceId),
                 readBytes: async (entry) => runner.readFileBytes
                     ? runner.readFileBytes(ref, instanceId, entry.path)
                     : readBytesViaExec(sh, entry.path, entry.size),

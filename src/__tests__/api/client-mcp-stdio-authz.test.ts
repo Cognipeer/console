@@ -368,6 +368,20 @@ describe('the dashboard and the token API give the same answer for the same pers
     }
   });
 
+  it('a sandbox server needs Sandbox write: a member without Sandbox access is refused (403) before anything is created', async () => {
+    for (const provider of ['sandbox', 'sandbox-instance']) {
+      const body = createBody({ sourceType: 'internal', internalConfig: { provider, instanceKey: 'sbx-1' } });
+      const member = await sessionPost(users.plain, body);
+      expect(member).toEqual({ status: 403, body: expect.objectContaining({ code: 'sandbox_write_required', field: 'internalConfig' }) });
+      expect(hoisted.createMcpServer).not.toHaveBeenCalled();
+      expect((await sessionPost(users.admin, body)).status).toBe(201);
+      hoisted.createMcpServer.mockClear();
+    }
+    // Other internal services ask nothing of Sandbox.
+    const kb = await sessionPost(users.plain, createBody({ sourceType: 'internal', internalConfig: { provider: 'knowledge-base', instanceKey: 'kb' } }));
+    expect(kb.status).toBe(201);
+  });
+
   it('a configuration the MCP service refuses is a 400 with its reason on the dashboard too', async () => {
     const { McpServerConfigError } = await import('@/lib/services/mcp');
     hoisted.createMcpServer.mockRejectedValueOnce(new McpServerConfigError('A browser server is available with an API token only'));

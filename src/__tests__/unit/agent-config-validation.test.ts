@@ -362,6 +362,46 @@ describe('validateAgentConfig', () => {
         expect(result.errors).toContainEqual({ field: 'sandbox.templateKey', message: 'Pick a sandbox template for this agent' });
         sandboxAvailability.value = { available: true };
     });
+
+    it('sandbox: a persistent sandbox (instance mode) needs a well-formed id, and no template', () => {
+        const missing = validateAgentConfigShape({ modelKey: 'gpt-main', sandbox: { enabled: true, mode: 'instance' } });
+        expect(missing.errors).toContainEqual({ field: 'sandbox.instanceId', message: 'Pick the persistent sandbox this agent works in' });
+        const malformed = validateAgentConfigShape({ modelKey: 'gpt-main', sandbox: { enabled: true, mode: 'instance', instanceId: '../etc' } });
+        expect(fields(malformed.errors)).toContain('sandbox.instanceId');
+        const ok = validateAgentConfigShape({ modelKey: 'gpt-main', sandbox: { enabled: true, mode: 'instance', instanceId: 'b6f0c1d2-0000-4000-8000-000000000001' } });
+        expect(fields(ok.errors)).not.toContain('sandbox.instanceId');
+    });
+
+    it('sandbox: the persistent sandbox must exist in the project and be persistent', async () => {
+        const describe = vi.fn(async (_ref: unknown, id: string) => (id === 'sbx-p'
+            ? { id, name: 'Shared', state: 'running', persist: true }
+            : id === 'sbx-e' ? { id, name: 'Scratch', state: 'running', persist: false } : null));
+        sandboxAvailability.value = {
+            available: true,
+            runner: { listTemplates: async () => [], describeInstance: describe },
+        };
+        const run = (instanceId: string) => validateAgentConfig({
+            tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me',
+            config: { modelKey: 'gpt-main', sandbox: { enabled: true, mode: 'instance', instanceId } },
+        });
+        expect(fields((await run('sbx-p')).errors)).not.toContain('sandbox.instanceId');
+        // No template is asked for: the machine is an existing one.
+        expect(fields((await run('sbx-p')).errors)).not.toContain('sandbox.templateKey');
+        expect((await run('sbx-e')).errors).toContainEqual({ field: 'sandbox.instanceId', message: 'Sandbox "Scratch" is not persistent — an agent can only be given a persistent sandbox' });
+        expect((await run('sbx-x')).errors).toContainEqual({ field: 'sandbox.instanceId', message: 'Sandbox "sbx-x" does not exist in this project' });
+        expect(describe).toHaveBeenCalledWith(expect.objectContaining({ tenantDbName: 't', projectId: 'p' }), 'sbx-p');
+        sandboxAvailability.value = { available: true };
+    });
+
+    it('sandbox: a module that cannot attach refuses instance mode', async () => {
+        sandboxAvailability.value = { available: true, runner: { listTemplates: async () => [] } };
+        const result = await validateAgentConfig({
+            tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me',
+            config: { modelKey: 'gpt-main', sandbox: { enabled: true, mode: 'instance', instanceId: 'sbx-p' } },
+        });
+        expect(fields(result.errors)).toContain('sandbox.instanceId');
+        sandboxAvailability.value = { available: true };
+    });
 });
 
 describe('validateAgentConfigShape — callback', () => {

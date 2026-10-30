@@ -168,6 +168,25 @@ New sandboxes default to **0.5 vCPU / 1 GB RAM / 1 GB disk**. The effective limi
 
 CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) is enforced only when `SANDBOX_DISK_QUOTA=on` **and** the Docker storage driver supports `--storage-opt size` (overlay2 on xfs pquota, or btrfs); otherwise it is tracked and shown but advisory.
 
+## A persistent sandbox for an agent
+
+An agent's sandbox (Agents → Build → Sandbox → **Lifetime**) is normally its own: one per conversation (**Session**) or one per message (**Per message**). **Persistent sandbox** gives the agent an existing sandbox of the project instead — one created with **Persistent** on — picked under **Machine** (`config.sandbox.mode: "instance"`, `config.sandbox.instanceId`).
+
+- **Shared.** Every conversation of the agent, and anyone else with access to the sandbox, works on the same machine: files and installed packages stay until someone deletes them, and what the agent writes can be seen by others. The model is told so.
+- **The machine's own settings apply.** Its template, resources, network block and environment are its own; the agent's Template, CPU, memory and Block network settings are not used. The agent's plain variables go with each command (like its secrets) instead of onto the machine.
+- **Never created, stopped or deleted by the agent.** A stopped sandbox is started on first use; nothing is recorded on the conversation, and deleting a conversation leaves the sandbox alone. A preview link keeps working because the machine stays up.
+- **Outputs.** Only files written to `/outputs/` during a reply are delivered as session files — not what the shared machine already held.
+- **Who may choose it.** Setting or changing the sandbox needs **write access to Sandbox** in the project (`403 sandbox_write_required` otherwise); re-saving the agent asks nothing. The sandbox must be a persistent sandbox of the agent's project (`400` otherwise). Manifest exports leave the id out; importing over an agent keeps the one it has.
+
+## Sandbox over MCP
+
+The MCP module can serve sandboxes as an **internal service** (**MCP Servers → New MCP server → Internal service**), with the MCP module's endpoints, tool toggles and renames, guardrail binding, logs and hubs:
+
+- **Sandbox** — pick a template. Callers start their own sandboxes with `sandbox_create` (it returns a `sandboxId`), pass the id to `sandbox_exec`, `sandbox_run_code`, `sandbox_read_file`, `sandbox_write_file` and `sandbox_list_files`, and end them with `sandbox_delete`. A sandbox is usable only through the MCP server that started it; one left behind is not persistent and is deleted by the idle timeout.
+- **Persistent sandbox** — pick a persistent sandbox of the project. The same work tools, without a `sandboxId`, run in that one machine, which is started when it is stopped and never stopped or deleted through MCP. Every caller shares it.
+
+Both run code, so they have **no public URL**: such a server, and a composite with one as a member, is always called with an API token. Creating one, or pointing one at another template or sandbox, needs write access to Sandbox. Both need the Sandbox module and an Enterprise license (checked on every call), and the values a sandbox's launch carries are masked in their results, as for an agent.
+
 ## Preloaded files (agent sandbox)
 
 An agent's sandbox settings (Agents → Build → Sandbox → **Preloaded files**) can carry files that are written into the sandbox automatically when it starts, before the agent works — for example a presentation template (`.pptx`).

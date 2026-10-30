@@ -93,7 +93,7 @@ import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
-import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
+import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import EnterpriseAgentShipSections from './EnterpriseAgentShipSections';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
@@ -194,6 +194,13 @@ async function loadList<T>(
     console.error(`Failed to load ${what}`, err);
   }
 }
+
+/** The Sandbox section's header badge. */
+const SANDBOX_MODE_BADGES: Record<ResolvedSandboxMode, string> = {
+  session: 'session',
+  ephemeral: 'per message',
+  instance: 'persistent',
+};
 
 /**
  * Deep-link compatibility for `?tab=`.
@@ -1458,7 +1465,7 @@ export default function AgentDetailPage() {
               <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} agentId={agentId} />,
               sandboxConfig?.enabled ? (
                 <Badge size="xs" color="grape" variant="light" w="fit-content">
-                  {resolveSandboxMode(sandboxConfig.mode) === 'session' ? 'session' : 'per message'}
+                  {SANDBOX_MODE_BADGES[resolveSandboxMode(sandboxConfig.mode)]}
                 </Badge>
               ) : null,
             )}
