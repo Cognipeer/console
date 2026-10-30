@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import JSZip from 'jszip';
 
 // SQLite + tmp dir BEFORE getDatabase() is imported.
 const tmpRoot = mkdtempSync(path.join(tmpdir(), 'cognipeer-rag-plugin-'));
@@ -935,14 +936,21 @@ describe('document routes are project-scoped and never answer with the source te
   });
 });
 
-describe('export and import routes move a module as JSONL', () => {
+describe('export and import routes move a module as zipped JSONL parts', () => {
   const SOURCE_KEY = 'transfer-source';
   const TARGET_KEY = 'transfer-target';
   /** Multi-line and quoted: what one JSONL line has to carry intact. */
   const REFUND_TEXT = 'Q: how long does a refund take?\nA: "14" days from the request.';
 
-  function exportLines(body: string): Array<Record<string, unknown>> {
-    return body.trimEnd().split('\n').map((line) => parseJsonBody<Record<string, unknown>>(line));
+  /** The export ZIP's only part: these modules hold fewer documents than one part. */
+  async function exportedText(res: { rawPayload: Buffer }, key: string): Promise<string> {
+    const zip = await JSZip.loadAsync(res.rawPayload);
+    expect(Object.keys(zip.files)).toEqual([`${key}.part-001.rag.jsonl`]);
+    return zip.file(`${key}.part-001.rag.jsonl`)!.async('string');
+  }
+
+  function exportLines(text: string): Array<Record<string, unknown>> {
+    return text.trimEnd().split('\n').map((line) => parseJsonBody<Record<string, unknown>>(line));
   }
 
   async function exportModule(key: string) {
@@ -1029,20 +1037,22 @@ describe('export and import routes move a module as JSONL', () => {
     });
   });
 
-  it('GET /export answers a header line, then each document with its full text', async () => {
+  it('GET /export answers a ZIP whose part has a header line, then each document with its full text', async () => {
     const res = await exportModule(SOURCE_KEY);
 
     expect(res.statusCode).toBe(200);
-    expect(res.headers['content-type']).toContain('application/x-ndjson');
-    expect(res.headers['content-disposition']).toBe(`attachment; filename="${SOURCE_KEY}.rag.jsonl"`);
+    expect(res.headers['content-type']).toBe('application/zip');
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="${SOURCE_KEY}.rag.zip"`);
 
-    const [header, ...documents] = exportLines(res.body);
+    const text = await exportedText(res, SOURCE_KEY);
+    const [header, ...documents] = exportLines(text);
     expect(header).toMatchObject({
       format: 'cognipeer.rag-module',
       version: 1,
       module: { key: SOURCE_KEY },
       documentCount: 1,
       skippedDocuments: 0,
+      part: { index: 1, count: 1, documentCount: 1 },
     });
     expect(documents).toHaveLength(1);
     expect(documents[0]).toMatchObject({
@@ -1053,7 +1063,7 @@ describe('export and import routes move a module as JSONL', () => {
       content: REFUND_TEXT,
     });
     // The same-key module of another project stays out.
-    expect(res.body).not.toContain(FOREIGN_PROJECT_QUERY);
+    expect(text).not.toContain(FOREIGN_PROJECT_QUERY);
   });
 
   it('GET /export 404s an unknown module and one that only another project has', async () => {
@@ -1062,9 +1072,9 @@ describe('export and import routes move a module as JSONL', () => {
   });
 
   it('POST /import re-ingests an export into another module, queued for indexing', async () => {
-    const exported = await exportModule(SOURCE_KEY);
+    const exported = await exportedText(await exportModule(SOURCE_KEY), SOURCE_KEY);
 
-    const res = await importInto(TARGET_KEY, { data: exported.body });
+    const res = await importInto(TARGET_KEY, { data: exported });
 
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody(res.body)).toEqual({ total: 1, imported: 1, failed: 0, errors: [] });
@@ -1087,8 +1097,24 @@ describe('export and import routes move a module as JSONL', () => {
     }));
 
     // And it comes back out the same.
-    const [, ...roundTripped] = exportLines((await exportModule(TARGET_KEY)).body);
-    expect(roundTripped).toEqual(exportLines(exported.body).slice(1));
+    const [, ...roundTripped] = exportLines(await exportedText(await exportModule(TARGET_KEY), TARGET_KEY));
+    expect(roundTripped).toEqual(exportLines(exported).slice(1));
+  });
+
+  it('POST /import takes a line whose optional fields are null, as older exports from Mongo wrote them', async () => {
+    const line = JSON.stringify({
+      type: 'document',
+      fileName: 'null-fields.md',
+      contentType: null,
+      metadata: null,
+      chunkConfig: null,
+      content: 'stored with nulls',
+    });
+
+    const res = await importInto(TARGET_KEY, { data: line });
+
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody(res.body)).toEqual({ total: 1, imported: 1, failed: 0, errors: [] });
   });
 
   it('POST /import rejects a body without a JSONL string', async () => {

@@ -289,6 +289,61 @@ export const tr: typeof en = {
       responses: '/responses cagrilir. Yalnizca orada sunulan modeller veya muhakeme ozetleri icin secin. Upstream Responses API\'sini desteklemelidir.',
     },
   },
+  modelPromptCaching: {
+    title: 'İstem önbelleği',
+    badge: 'Yeni',
+    description:
+      'İsteğin değişmeyen başlangıcını (araçlar, sistem istemi, önceki turlar) yeniden kullanır; tekrarlanan girdi önbellek okuma fiyatından faturalanır.',
+    switch: 'İstemleri önbelleğe al',
+    caption: {
+      claude: 'Claude modellerinde varsayılan olarak açık.',
+      nova: 'Nova modellerinde varsayılan olarak kapalı.',
+      other: 'Bu modelde varsayılan olarak kapalı.',
+      off: 'Kapalı: istekler önbellek işaretleri olmadan gider. Her çağrı girdisinin tamamını girdi fiyatından faturalar.',
+    },
+    what: {
+      label: 'Ne önbelleğe alınsın',
+      auto: 'Konuşma (önerilir)',
+      static: 'Yalnızca araçlar ve sistem istemi',
+      staticNova: 'Yalnızca sistem istemi',
+      autoHint: 'Araçlar, sistem istemi ve o ana kadarki konuşma. Her ajan adımı önceki turları önbellekten okur.',
+      staticHint: 'Yalnızca araç tanımları ve sistem istemi önbelleğe alınır. Önceki turlar girdi fiyatından faturalanır.',
+      novaHint: 'Nova sistem istemini ve mesajları önbelleğe alır. Bu ailede araç tanımları önbelleğe alınmaz.',
+    },
+    billing: {
+      line: 'Bu modelin fiyatlarıyla faturalanır: önbellek okuma {read} / 1M, önbellek yazma {write} / 1M.',
+      inputPrice: 'girdi fiyatı',
+      assumedWrite: 'girdi fiyatının {multiplier} katı (varsayım)',
+      edit: 'Fiyatlandırmada düzenle',
+    },
+    priceWarning: {
+      text: 'Önbellek fiyatları boş, bu yüzden önbellekteki token\'lar girdi fiyatından faturalanır ve tasarruf maliyet raporlarında görünmez.',
+      assumedWrite: 'Önbellek yazma fiyatı girdi fiyatının {multiplier} katı olarak varsayılır.',
+      fill: 'Katalogdan doldur',
+      orSet: 'ya da Fiyatlandırma bölümünden girin.',
+      setInPricing: 'Fiyatlandırma bölümünden girin.',
+    },
+    markers: {
+      before: 'Kendi',
+      on: 'işaretlerini getiren istekler bunları korur.',
+      off: 'işaretlerini getiren istekler bunları yine korur.',
+    },
+    automatic: {
+      text: 'Bu sağlayıcı uzun istemleri kendiliğinden önbelleğe alır. Burada ayarlanacak bir şey yok.',
+      usage: 'Önbellekten gelen girdi kullanımda önbelleğe alınmış token olarak görünür ve Fiyatlandırma\'da girilen önbellek okuma fiyatından faturalanır.',
+    },
+    none: {
+      bedrock: 'Bedrock bu model ailesi için istem önbelleği sunmaz, bu yüzden önbellek işareti gönderilmez.',
+      other: 'Bu sağlayıcı bu model için istem önbelleği sunmaz, bu yüzden önbellek işareti gönderilmez.',
+    },
+    detail: {
+      effective: 'İstemleri önbelleğe al',
+      on: 'Açık',
+      off: 'Kapalı',
+      fiveMinutes: 'Önbelleğe alınan istemler 5 dakika yaşar.',
+      edit: 'Düzenle',
+    },
+  },
   modelReasoning: {
     title: 'Akıl yürütme',
     description:
@@ -311,13 +366,15 @@ export const tr: typeof en = {
     },
     hint: {
       responsesOnly: 'Akıl yürütme metni yalnızca Responses API üzerinden döner. Görmek için Upstream API\'yi Responses yapın.',
+      forcedNoneOnChat:
+        'İstekte araç varsa bu model Chat Completions üzerinde, hangi seviye ayarlı olursa olsun akıl yürütme olmadan çalışır: sağlayıcı fonksiyon araçlarının yanında başka bir seviyeyi reddeder. Responses upstream API\'si araçlarla birlikte akıl yürütmeyi korur (Upstream API\'yi Responses yapın).',
       effort: 'reasoning_effort olarak gönderilir. Burada ayarlıysa API isteğindeki değerin önüne geçer.',
       budget: 'Seviye bir düşünme token bütçesine çevrilir; üzerine yazmak için aşağıya tam bütçe girin.',
       toggle: 'Bu motorda yalnızca düşünme açık veya kapalı olabilir.',
       none: '',
     },
     budgetLabel: 'Düşünme bütçesi (token)',
-    budgetHint: 'Seviyenin üzerine yazar. Çıktı sınırı bütçenin üstüne otomatik çıkarılır.',
+    budgetHint: "Seviyenin üzerine yazar. Modelin kendi çıktı sınırı bütçenin üstüne otomatik çıkarılır; çağıranın gönderdiği max_tokens ise kesin sınırdır: bütçe buna sığacak şekilde küçültülür, hiçbir şey sığmıyorsa düşünme kapatılır.",
     budgetPlaceholder: 'Seviyeden gelir',
     includeThoughts: {
       label: 'Düşünceleri iste',
@@ -407,12 +464,14 @@ export const tr: typeof en = {
       maxOutputTokens: {
         label: 'Maksimum çıktı token sayısı',
         description:
-          'Üretilebilecek maksimum token sayısı; bağlam penceresini aşmamalıdır.',
+          'Modelin tek bir yanıtta üretebileceği en fazla token sayısı. Varsayılanları ve yeniden denemeleri sınırlamak için kullanılır ve istemcilere bildirilir; bağlam penceresini aşmamalıdır. İstek başına varsayılan değildir: bunun için Varsayılan maksimum token alanına bakın.',
         placeholder: 'ör. 16384',
       },
       runtimeMaxTokens: {
         label: 'Varsayılan maksimum token',
-        description: 'İstekte belirtilmediğinde kullanılan çalışma zamanı çıktı sınırı.',
+        description: 'Kendi max_tokens değerini belirtmeyen her isteğe uygulanan çıktı sınırı. Boşsa sağlayıcının veya modelin varsayılanı geçerlidir. Maksimum çıktı token sayısının altında veya eşit tutun. Akıl yürütme (düşünme) token\'ları da bu sınıra dahildir.',
+        providerDefault: 'Sağlayıcı varsayılanı',
+        modelDefaultSplit: 'Model varsayılanı: {streaming} akışlı / {nonStreaming} akışsız',
       },
     },
     review: {
@@ -427,6 +486,11 @@ export const tr: typeof en = {
     validation: {
       ...en.modelWizard.validation,
       maxOutputTokens: 'Maksimum çıktı token sayısı bağlam penceresini aşamaz.',
+    },
+    // Sınırların yanında gösterilir, kaydetmeyi engellemez.
+    limitWarnings: {
+      defaultAboveMaxOutput: 'Varsayılan maksimum token, maksimum çıktı token sayısının üzerinde: bunu kullanan istekler sağlayıcı tarafından reddedilebilir.',
+      maxOutputAboveContext: 'Maksimum çıktı token sayısı bağlam penceresinden büyük, bu yüzden bir yanıt ona hiçbir zaman ulaşamaz.',
     },
   },
   account: {
@@ -2811,7 +2875,7 @@ export const tr: typeof en = {
   agents: {
     ...en.agents,
     outputLimit: {
-      message: 'Model, yanıt veremeden çıktı token sınırına ulaştı. Modelin en yüksek çıktı token değerini artırın veya akıl yürütme eforunu düşürün, sonra tekrar deneyin.',
+      message: 'Model, yanıt veremeden çıktı token sınırına ulaştı. İsteğin max_tokens değerini (veya modelin Varsayılan maksimum token ayarını ya da agent’ın çağrı başına maksimum çıktı token ayarını) artırın veya akıl yürütme eforunu düşürün, sonra tekrar deneyin.',
     },
     title: 'Agent’lar',
     subtitle: 'Modellerinizle çalışan AI agent’ları oluşturun ve yönetin',
@@ -2983,6 +3047,9 @@ export const tr: typeof en = {
       reasoningEffortHint: 'Burada seçilirse Model Hub varsayılanının ve API isteğinin önüne geçer.',
       reasoningPickerAria: '{model} için akıl yürütme',
       showReasoning: 'Akıl yürütmeyi göster',
+      maxTokensPerCall: 'Çağrı başına maksimum çıktı token',
+      maxTokensPerCallDescription: 'Bu agent’ın her model çağrısı için çıktı sınırı; düşünme token’ları dahildir. Boşsa modelin kendi varsayılanı (Model Hub’daki Varsayılan maksimum token) kullanılır. Tüm çalışmayı sınırlayan Max total output tokens ile aynı şey değildir.',
+      maxTokensPerCallPlaceholder: 'Model varsayılanı',
       showReasoningDescription: 'Varsayılan olarak açık. Kapalıyken akıl yürütme metni API yanıtlarında, oturum mesajlarında ve Studio sohbetinde yer almaz. Düşünme token\'ları yine sayılır ve faturalanır.',
       guardrails: 'Guardrail’ler',
       inputGuardrail: 'Girdi Guardrail’i',
@@ -3511,22 +3578,11 @@ export const tr: typeof en = {
       unitSeconds: '{count} sn',
       badgeCallback: 'geri çağrı',
     },
-    memoryMounts: {
-      title: 'Bellek depoları',
-      description: 'Ajanın okuyup yazacağı bir veya birden çok depo bağlayın. Aynı depoyu bağlayan ajanlar belleği paylaşır.',
-      store: 'Depo',
-      storePlaceholder: 'Depo seçin…',
-      access: 'Erişim',
-      readWrite: 'Okuma ve yazma',
-      readOnly: 'Salt okunur',
-      useFor: 'Kullanım amacı',
-      useForPlaceholder: 'örn. şirket politikaları ve SSS',
-      scope: 'Kapsam',
-      scopeDefault: 'Varsayılan kapsam',
-      add: 'Depo ekle',
-      remove: 'Depoyu kaldır',
-      limit: 'En fazla 5 depo bağlanabilir.',
-      primaryNote: 'İlk depo birincildir: önceden eklenen hatırlamayı ve otomatik özet yazımlarını o besler.',
+    memoryStore: {
+      label: 'Bellek deposu',
+      description: 'Bu ajanın bilgileri okuyup yazdığı Bellek modülü deposu.',
+      placeholder: 'Depo seçin…',
+      ignoredStores: 'Bu ajan önceden birden çok depo bağlıyordu. Artık yalnızca ilki kullanılıyor; {stores} artık okunmuyor ve yazılmıyor. Bilgileri Bellek modülünde duruyor.',
     },
     attachments: {
       attach: 'Dosya ekle',
@@ -4560,7 +4616,7 @@ export const tr: typeof en = {
       missingModelIdMessage: 'Katalog, model ID alanına göre eşleştirilir.',
       noMatchTitle: 'Katalogda eşleşme yok',
       noMatchMessage: '"{name}" için katalogda kesin bir fiyat bulunamadı.',
-      filledTitle: 'Fiyatlar katalogdan dolduruldu',
+      filledTitle: 'Katalogdan dolduruldu',
       filledMessage: '{key} ile eşleşti ({confidence})',
       errorTitle: 'Katalog sorgusu başarısız',
     },

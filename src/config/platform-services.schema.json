@@ -79,7 +79,7 @@
     },
     "service": {
       "type": "object",
-      "required": ["id", "href", "icon", "category", "navLabelKey", "navDescriptionKey"],
+      "required": ["id", "href", "icon", "category", "navLabelKey", "navDescriptionKey", "docsPath"],
       "additionalProperties": false,
       "properties": {
         "id": {
@@ -101,6 +101,11 @@
         "navDescriptionKey": {
           "type": "string",
           "description": "i18n key under the 'navigation' namespace for the short description."
+        },
+        "docsPath": {
+          "type": "string",
+          "description": "The service's page on the docs site, relative to its root (DOCS_BASE_URL): what the Documentation button opens while the service is active. A trailing slash is a section index; an #anchor opens a section. The docs repo checks every docsPath against its pages.",
+          "pattern": "^/(console|console-sdk)/[a-z0-9/-]*(#[a-z0-9-]+)?$"
         },
         "tags": {
           "type": "array",

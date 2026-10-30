@@ -1,4 +1,4 @@
-import { NumberInput } from '@mantine/core';
+import { NumberInput, Text } from '@mantine/core';
 import { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import type { FieldProps } from './types';
 
@@ -6,10 +6,15 @@ interface LimitsSectionProps {
   number: number;
   contextWindow?: { label: string; hint?: string; placeholder?: string; props: FieldProps };
   maxOutputTokens?: { label: string; hint?: string; placeholder?: string; props: FieldProps };
-  /** Runtime default for `max_tokens` when the caller sends none. */
-  maxTokens: { label?: string; hint?: string; props: FieldProps };
+  /**
+   * Runtime default for `max_tokens` when the caller sends none. `placeholder` is what a blank field amounts to
+   * (the model maximum for Anthropic, the provider's own default otherwise).
+   */
+  maxTokens: { label?: string; hint?: string; placeholder?: string; props: FieldProps };
   /** Default temperature (create only). */
   temperatureProps?: FieldProps;
+  /** Non-blocking notes on limits that do not fit together (already translated). */
+  warnings?: string[];
 }
 
 /** Section "Limits": context window, output cap and default sampling parameters. */
@@ -19,6 +24,7 @@ export default function LimitsSection({
   maxOutputTokens,
   maxTokens,
   temperatureProps,
+  warnings,
 }: LimitsSectionProps) {
   return (
     <FormSection
@@ -60,9 +66,14 @@ export default function LimitsSection({
           </FormField>
         ) : null}
         <FormField label={maxTokens.label ?? 'Max tokens'} optional hint={maxTokens.hint}>
-          <NumberInput min={1} step={1024} thousandSeparator="," placeholder="Optional" {...maxTokens.props} />
+          <NumberInput min={1} step={1024} thousandSeparator="," placeholder={maxTokens.placeholder ?? 'Optional'} {...maxTokens.props} />
         </FormField>
       </FormRow>
+      {warnings?.map((warning) => (
+        <Text key={warning} size="xs" c="orange" data-testid="limits-warning">
+          {warning}
+        </Text>
+      ))}
     </FormSection>
   );
 }

@@ -17,16 +17,18 @@
  * Deliberately NOT symmetric with the AI App Gateway's native mode. There, the
  * bytes must reach api.anthropic.com unchanged and translation is forbidden.
  * Here the destination is our own Model Hub and translation is the entire job.
- * The cost of translating is real and worth naming: `cache_control` breakpoints
- * and extended-thinking blocks have no OpenAI equivalent and are dropped, so a
- * client that depends on prompt caching should point at a native gateway
- * instance rather than at this endpoint.
+ * The cost of translating is real and worth naming: extended-thinking blocks
+ * have no OpenAI equivalent and are dropped. A `cache_control` marker on a text
+ * block (system, message, tool_result) is kept as the chat body's `cache_control`,
+ * which the gateway reads as a breakpoint whether the model's caching switch is on
+ * or off; a marker on any other block (image, tool_use, tool definition) is dropped.
  */
 
 /** Anthropic content blocks we understand on the way in. */
 type AnthropicContentBlock = {
   type?: string;
   text?: string;
+  cache_control?: unknown;
   id?: string;
   name?: string;
   input?: unknown;
@@ -79,6 +81,19 @@ function textOf(blocks: AnthropicContentBlock[]): string {
     .filter((b) => b?.type === 'text' && typeof b.text === 'string')
     .map((b) => b.text as string)
     .join('\n');
+}
+
+/** The ephemeral breakpoint a client put on a block (`ttl` only when it is `5m` or `1h`), else undefined. */
+function blockCacheControl(block: { cache_control?: unknown } | undefined): { type: 'ephemeral'; ttl?: '5m' | '1h' } | undefined {
+  const raw = block?.cache_control as { type?: unknown; ttl?: unknown } | null | undefined;
+  if (!raw || typeof raw !== 'object' || raw.type !== 'ephemeral') return undefined;
+  return raw.ttl === '5m' || raw.ttl === '1h' ? { type: 'ephemeral', ttl: raw.ttl } : { type: 'ephemeral' };
+}
+
+/** A chat text part, carrying the block's `cache_control` when it has one. */
+function textPartOf(text: string, block: { cache_control?: unknown } | undefined): Record<string, unknown> {
+  const cache_control = blockCacheControl(block);
+  return cache_control ? { type: 'text', text, cache_control } : { type: 'text', text };
 }
 
 /**
@@ -194,7 +209,13 @@ export function anthropicRequestToOpenAi(
   const system = typeof body.system === 'string'
     ? body.system
     : Array.isArray(body.system) ? textOf(body.system) : '';
-  if (system.trim()) {
+  // System blocks stay separate parts only when one carries a breakpoint; the flat string is the unmarked form.
+  const systemBlocks = Array.isArray(body.system)
+    ? body.system.filter((b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim())
+    : [];
+  if (systemBlocks.some((b) => blockCacheControl(b))) {
+    messages.push({ role: 'system', content: systemBlocks.map((b) => textPartOf(b.text as string, b)) });
+  } else if (system.trim()) {
     messages.push({ role: 'system', content: system });
   }
 
@@ -222,21 +243,29 @@ export function anthropicRequestToOpenAi(
     for (const block of content) {
       if (block?.type !== 'tool_result') continue;
       const flattened = flattenToolResult(block.content);
-      messages.push({
-        role: 'tool',
-        tool_call_id: block.tool_use_id ?? '',
-        // OpenAI's `tool` message has no error flag; the marker is how the model
-        // still learns the call failed rather than reading the error text as a
-        // successful result.
-        content: block.is_error === true ? `[tool error] ${flattened}` : flattened,
-      });
+      // OpenAI's `tool` message has no error flag; the marker is how the model
+      // still learns the call failed rather than reading the error text as a
+      // successful result.
+      const text = block.is_error === true ? `[tool error] ${flattened}` : flattened;
+      // A breakpoint on the result itself, or on one of its text blocks, rides on a text part.
+      const resultBlocks = Array.isArray(block.content) ? (block.content as AnthropicContentBlock[]) : [];
+      const marked = blockCacheControl(block) ?? resultBlocks.some((b) => b?.type === 'text' && blockCacheControl(b));
+      let content: unknown = text;
+      if (marked) {
+        const innerText = resultBlocks.filter((b) => b?.type === 'text' && typeof b.text === 'string');
+        content = blockCacheControl(block) || innerText.length !== resultBlocks.length || block.is_error === true
+          // The result is not purely text blocks (or the whole result is marked): one part for all of it.
+          ? [textPartOf(text, block.cache_control ? block : innerText.find((b) => blockCacheControl(b)))]
+          : innerText.map((b) => textPartOf(b.text as string, b));
+      }
+      messages.push({ role: 'tool', tool_call_id: block.tool_use_id ?? '', content });
     }
 
     const parts: Array<Record<string, unknown>> = [];
     const toolCalls: OpenAiToolCall[] = [];
     for (const block of content) {
       if (block?.type === 'text' && typeof block.text === 'string') {
-        parts.push({ type: 'text', text: block.text });
+        parts.push(textPartOf(block.text, block));
         continue;
       }
       if (block?.type === 'image') {
@@ -265,7 +294,7 @@ export function anthropicRequestToOpenAi(
     const out: OpenAiMessage = { role };
     // A single text part goes as a plain string: some providers reject the
     // multipart array form for text-only messages.
-    if (parts.length === 1 && parts[0].type === 'text') {
+    if (parts.length === 1 && parts[0].type === 'text' && !parts[0].cache_control) {
       out.content = parts[0].text;
     } else if (parts.length > 0) {
       out.content = parts;

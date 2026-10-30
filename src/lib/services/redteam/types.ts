@@ -251,6 +251,10 @@ export interface RedTeamAggregate {
   /** Per-OWASP-category rollup. */
   byCategory: Record<string, CategoryBreakdown>;
   avgLatencyMs: number | null;
+  /** Attempts whose llm-judge detector errored: counted here, never folded into "not hit". */
+  judgeErrors: number;
+  /** Judge errors exceed 20% of the judged attempts: the attack-success rate cannot be trusted. */
+  inconclusive: boolean;
 }
 
 export interface RedTeamRunResult {

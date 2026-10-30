@@ -30,8 +30,8 @@ import {
     resolveTurnOutputSchema,
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
-import { buildAgentMemoryOption, buildMountedMemoryStores } from './agentMemoryAdapter';
-import { buildMemoryPromptSection } from './agentMemoryMounts';
+import { buildAgentMemoryOption } from './agentMemoryAdapter';
+import { resolveAgentMemoryStore } from './agentMemoryStore';
 import type { IAgentConversationMessage, IAgentConversationStep, IAgentMessageVersion, IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
@@ -144,6 +144,7 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from './playgroundUsage';
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
+import { createOutputLimitTap, markOutputLimitNotice, type OutputLimitTap } from './outputLimitNotice';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import {
@@ -1816,16 +1817,16 @@ async function buildAgentCostEstimator(
     if (!limited && subagentModels.length === 0) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
     const models: Parameters<typeof buildCostEstimator>[0] = [
-        { names: [primary.key, primary.modelId], pricing: primary.pricing },
+        { names: [primary.key, primary.modelId], pricing: primary.pricing, model: primary },
     ];
     for (const child of subagentModels) {
         if (child.key && child.key === primary.key) continue;
-        models.push({ names: [child.key, child.modelId], pricing: child.pricing, noFallback: true });
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing, model: child, noFallback: true });
         if (limited && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
             onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted against the cost limit or the session budget.`);
         }
     }
-    const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
+    const estimator = buildCostEstimator(models, primary.pricing, calculateCost, primary);
     if (!estimator && limited) {
         logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
@@ -2005,6 +2006,9 @@ export interface AgentModelCaller {
     userId?: string;
 }
 
+/** What a sub-agent's own model call is told about output tokens (see `buildSubagentModel`). */
+export type SubagentOutputOptions = { maxTokens?: number; maxTotalOutputTokens?: number };
+
 type BuildSubagentsInput = {
     db: Awaited<ReturnType<typeof getDatabase>>;
     tenantDbName: string;
@@ -2030,6 +2034,11 @@ type BuildSubagentsInput = {
     modelTakesImages?: boolean;
     /** Whose run this is, for the usage rows of a sub-agent's model calls. */
     caller?: AgentModelCaller;
+    /**
+     * The parent's output settings, which a sub-agent's own model call carries as the parent's
+     * does: the per-call `max_tokens` and the run's `maxTotalOutputTokens` (a raised retry's budget).
+     */
+    output?: SubagentOutputOptions;
     /**
      * Reasoning of a sub-agent's model: the parent's selection for the same
      * model (when it is one the parent picked), then Model Hub, then the request.
@@ -2104,6 +2113,9 @@ export async function buildAgentSubagents(
         let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
         let modelKey = entry.modelKey;
         let targetHitl: ResolvedHitlConfig | undefined;
+        // The parent's output settings, unless the child states its own (its agent's `maxTokens`, its own limits).
+        const output: SubagentOutputOptions = { ...input.output };
+        if (Number(entry.limits?.maxTotalOutputTokens) > 0) output.maxTotalOutputTokens = Number(entry.limits?.maxTotalOutputTokens);
 
         if (entry.kind === 'ref') {
             const target = await resolveSubagentTarget(input.tenantDbName, input.projectId, entry);
@@ -2121,6 +2133,7 @@ export async function buildAgentSubagents(
             };
             modelKey = entry.modelKey ?? target.config.modelKey;
             targetHitl = resolveHitlConfig(target.config.humanInTheLoop);
+            if (target.config.maxTokens !== undefined) output.maxTokens = target.config.maxTokens;
         }
 
         if (entry.kind !== 'ref') systemPrompt = await resolveChildPrompt(input, entry);
@@ -2176,7 +2189,7 @@ export async function buildAgentSubagents(
         let childModel: unknown;
         let childTakesImages = input.modelTakesImages === true;
         if (modelKey) {
-            const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
+            const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller, output);
             if (built.ok) {
                 childModel = built.chatModel;
                 // Its model is only wrapped to resolve image references when the run has image options.
@@ -2255,7 +2268,7 @@ async function resolveChildPrompt(
 }
 
 /** What the cost estimator needs of a model: the names its requests are reported under, and its prices. */
-type PricedModel = { key?: string; modelId?: string; pricing?: IModelPricing | null };
+type PricedModel = { key?: string; modelId?: string; providerDriver?: string; pricing?: IModelPricing | null };
 
 /**
  * Builds the gateway chat model for a sub-agent's model override. Answers why
@@ -2267,7 +2280,7 @@ type PricedModel = { key?: string; modelId?: string; pricing?: IModelPricing | n
  * model's own guardrails, cache, pool and routing apply to the child too, and its
  * usage row (`agent.subagent`) lands on ITS model.
  */
-async function buildSubagentModel(
+export async function buildSubagentModel(
     tenantDbName: string,
     tenantId: string,
     projectId: string,
@@ -2276,6 +2289,7 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
+    output?: SubagentOutputOptions,
 ): Promise<{ ok: true; chatModel: unknown; model: PricedModel; takesImages: boolean } | { ok: false; message: string }> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
@@ -2290,6 +2304,10 @@ async function buildSubagentModel(
             projectId,
             model,
             route: 'agent.subagent',
+            // Like the main agent's model: the per-call limit rides as the call's own setting, and the
+            // run's output budget bounds a raised retry.
+            ...(output?.maxTokens !== undefined ? { overrides: { max_tokens: output.maxTokens } } : {}),
+            ...(output?.maxTotalOutputTokens !== undefined && output.maxTotalOutputTokens > 0 ? { maxTotalOutputTokens: output.maxTotalOutputTokens } : {}),
             ...(caller?.agentKey ? { agentKey: caller.agentKey } : {}),
             ...(caller?.sessionId ? { sessionId: caller.sessionId } : {}),
             ...(caller?.userId ? { userId: caller.userId } : {}),
@@ -2302,7 +2320,7 @@ async function buildSubagentModel(
         return {
             ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
-            model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+            model: { key: model.key, modelId: model.modelId, providerDriver: model.providerDriver, pricing: model.pricing },
             takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
         };
     } catch (error) {
@@ -3584,7 +3602,22 @@ export async function buildAgentChatModel(
 }
 
 /** The usage-row side of `buildAgentChatModel`. */
-export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'showReasoning' | 'onReasoning' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens'>;
+export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'showReasoning' | 'onReasoning' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens' | 'outputLimitTap'>;
+
+/**
+ * `describeTurnOutcome` for a run of the agent's own model: it is told how the model's last call
+ * ended at its output limit, and a limit notice is flagged in the run's state so the next turn
+ * does not replay it to the model (outputLimitNotice.ts).
+ */
+function describeRunOutcome(
+    result: Parameters<typeof describeTurnOutcome>[0],
+    inputMessageCount: number,
+    outputLimit: OutputLimitTap,
+): AgentTurnOutcome {
+    const report = outputLimit.latest();
+    markOutputLimitNotice(result.state, report);
+    return describeTurnOutcome(result, inputMessageCount, report);
+}
 
 /**
  * One tiny completion through exactly the path an agent run uses (the model's
@@ -4622,6 +4655,8 @@ async function buildLocalAgentRun(input: {
         : undefined;
 
     if (!config.modelKey) throw new Error('Agent has no model configured');
+    // How the main model's calls end at the output limit, read when the turn's outcome is described.
+    const outputLimit = createOutputLimitTap();
     const { model, chatModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
         ...(config.topP !== undefined ? { top_p: config.topP } : {}),
@@ -4640,6 +4675,7 @@ async function buildLocalAgentRun(input: {
             ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
             : {}),
         ...(spend ? { onCost: agentSpendSettler(spend, config.modelKey) } : {}),
+        outputLimitTap: outputLimit,
     });
 
     // System prompt
@@ -4738,17 +4774,8 @@ async function buildLocalAgentRun(input: {
         onWarning: (message) => warnings.add(message),
     });
     const memoryToolMode = config.memory?.tools ?? 'readwrite';
-    const memoryMountPrompt = buildMemoryPromptSection(config.memory);
-    if (memoryMountPrompt) systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memoryMountPrompt}` : memoryMountPrompt;
     if (memory?.store && memoryToolMode !== 'off') {
-        const mountedStores = buildMountedMemoryStores(config.memory, {
-            tenantDbName, tenantId, projectId, agentKey,
-            conversationId: input.memoryConversationId,
-            userId: input.userId,
-            onWarning: (message) => warnings.add(message),
-        });
-        const mountScope = (m: (typeof mountedStores)[number]) => m.mount.scope;
-        const allowWrites = memoryToolMode === 'readwrite' && mountedStores.some((m) => m.mount.access === 'read_write');
+        const allowWrites = memoryToolMode === 'readwrite' && !resolveAgentMemoryStore(config.memory)?.readOnly;
         tools.push(...buildMemoryTools({
             store: memory.store,
             // 'workspace' is the SDK's OWN default when a config names no
@@ -4760,9 +4787,8 @@ async function buildLocalAgentRun(input: {
             zod: z,
             guard: toolGuard,
             allowWrites,
-            mounts: mountedStores.map((m) => ({ key: m.mount.storeKey, access: m.mount.access, scope: mountScope(m), store: m.store })),
         }));
-        toolDefinitions.push(...memoryToolDefinitions(allowWrites, mountedStores.map((m) => m.mount.storeKey)));
+        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
 
     // Files attached to the session: the agent can list them (`session_files_list`) and read
@@ -5027,6 +5053,12 @@ async function buildLocalAgentRun(input: {
             ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
             ...(input.userId ? { userId: input.userId } : {}),
         },
+        output: {
+            ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+            ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
+                ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
+                : {}),
+        },
         reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
         prompt: {
             parent: { config, variables: promptVariables },
@@ -5139,6 +5171,8 @@ async function buildLocalAgentRun(input: {
         collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
         routedModel: () => routedModelKey,
+        /** How the main model's last call ended at its output limit (`describeRunOutcome`). */
+        outputLimit,
         /** After the turn: the trace session's totals take in the sub-agents' calls (see `reconcileTraceTotals`). */
         /** Feed every SDK event: a child's approval / question is remembered so its trace step can name the child. */
         noteSdkEvent: (event: AgentSdkEvent) => {
@@ -5951,7 +5985,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6098,13 +6132,13 @@ async function runAgentChatTurn(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), request.signal);
+        const turnOutcome = endedByCallerAbort(describeRunOutcome(result, inputState.messages.length, outputLimit), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         await reconcileTrace(usage);
         // What the turn cost: kept on the message (the session's running total
         // is the sum of these) and, with a session budget, checked against it.
         const turnCostUsd = usage
-            ? await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage })
+            ? await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, model, usage })
             : undefined;
         if (usage && turnCostUsd !== undefined) usage.costUsd = turnCostUsd;
         const budget = budgetPlan
@@ -6444,6 +6478,7 @@ export function extractPlaygroundSteps(
 async function priceTurn(
     pricing: IModelPricing | null | undefined,
     usage: AgentPlaygroundChatResult['usage'],
+    model?: { providerDriver?: string; modelId?: string },
 ): Promise<number | undefined> {
     if (!pricing || !usage) return undefined;
     try {
@@ -6453,7 +6488,7 @@ async function priceTurn(
             outputTokens: usage.outputTokens,
             cachedInputTokens: usage.cachedInputTokens,
             ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
-        }).totalCost;
+        }, model).totalCost;
     } catch {
         return undefined;
     }
@@ -6489,6 +6524,8 @@ async function priceAgentTurn(input: {
     costEstimator: ReturnType<typeof buildCostEstimator>;
     pricing: IModelPricing | null | undefined;
     usage: AgentPlaygroundChatResult['usage'];
+    /** Driver + model id of the pricing's model (a Claude cache write follows the provider's rate). */
+    model?: { providerDriver?: string; modelId?: string };
 }): Promise<number | undefined> {
     const perRequest = (input.result.state as {
         usage?: {
@@ -6530,7 +6567,7 @@ async function priceAgentTurn(input: {
         }
         return cost;
     }
-    return priceTurn(input.pricing, input.usage);
+    return priceTurn(input.pricing, input.usage, input.model);
 }
 
 /**
@@ -6782,7 +6819,7 @@ async function runPlaygroundChatTurn(
         return flowResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6904,7 +6941,7 @@ async function runPlaygroundChatTurn(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), signal);
+        const turnOutcome = endedByCallerAbort(describeRunOutcome(result, inputState.messages.length, outputLimit), signal);
         const flowRecord = turnFlowRecord(flow, () => compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined));
 
         // Priced below; the session budget (if any) is settled once the cost is known.
@@ -6942,7 +6979,7 @@ async function runPlaygroundChatTurn(
         };
 
         const costUsd = await priceAgentTurn({
-            plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage: playgroundResult.usage,
+            plan: budgetPlan, result, costEstimator, pricing: model.pricing, model, usage: playgroundResult.usage,
         });
         if (costUsd !== undefined && playgroundResult.usage) {
             playgroundResult.usage.costUsd = costUsd;
@@ -7445,7 +7482,7 @@ async function runAgentResumeTurn(
         })
         : undefined;
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -7635,11 +7672,11 @@ async function runAgentResumeTurn(
         // `config.showReasoning: false` keeps the thinking text out of the API response, the
         // stored session message and Studio chat. The tokens were spent and are counted regardless.
         const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
-        const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
+        const turnOutcome = endedByCallerAbort(describeRunOutcome(result, inputMessageCount, outputLimit), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const flowRecord = turnFlowRecord(flow, () => compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined));
         const steps = extractPlaygroundSteps(result, priorExecutionIds, hitlLog);
-        const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
+        const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, model, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
         // The usage the turn reports (response, run result, `agent.message` event) is every leg of it —
         // the SDK counts only the leg it just ran. The stored message keeps its own leg.

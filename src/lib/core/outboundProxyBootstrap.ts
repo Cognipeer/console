@@ -12,26 +12,36 @@
  * equivalent fix there, and Node's own DNS/connect errors rarely name a
  * proxy as the cause.
  *
- * `EnvHttpProxyAgent` is undici's own env-driven dispatcher: it parses
- * NO_PROXY with the same bypass semantics curl and most HTTP tooling use,
- * so internal/allow-listed hosts still connect directly. A no-op when no
+ * `EnvHttpProxyAgent` is undici's own env-driven dispatcher: hosts named in
+ * NO_PROXY still connect directly. Its matching is narrower than curl's: a
+ * plain entry matches that exact host, `.domain` / `*.domain` its
+ * subdomains, and CIDR ranges are not understood at all. A no-op when no
  * proxy variable is set, which is the overwhelming majority of deployments
  * -- `setGlobalDispatcher` is not called at all, so there is no behavior
  * change and no experimental-API warning for anyone not using a proxy.
  */
 import { setGlobalDispatcher, EnvHttpProxyAgent } from 'undici';
 import { createLogger } from './logger';
+import { normalizeProxyEnv, readEgressProxyEnv } from './proxyEnv';
 
 const logger = createLogger('startup');
 
 export function configureOutboundProxy(): void {
-  const hasProxy =
-    process.env.HTTPS_PROXY || process.env.https_proxy
-    || process.env.HTTP_PROXY || process.env.http_proxy;
-  if (!hasProxy) return;
+  // Before anything reads the variables: undici, axios, Chromium and child
+  // processes only know the standard spellings.
+  for (const { variable, adoptedAs } of normalizeProxyEnv()) {
+    logger.warn('Proxy variable read under a non-standard name; rename it, most tools ignore it', {
+      variable,
+      adoptedAs,
+    });
+  }
+
+  const { proxy, noProxy } = readEgressProxyEnv();
+  if (!proxy) return;
 
   setGlobalDispatcher(new EnvHttpProxyAgent());
   logger.info('Outbound fetch() routed through the configured egress proxy', {
-    bypassConfigured: Boolean(process.env.NO_PROXY || process.env.no_proxy),
+    proxyVariable: proxy.variable,
+    bypassConfigured: Boolean(noProxy),
   });
 }

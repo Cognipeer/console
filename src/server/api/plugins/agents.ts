@@ -161,6 +161,7 @@ import {
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
 import { configReadRequiredBody, requestHasConfigRead } from './config-permission';
+import { requestHasSandboxRead, requestHasSandboxWrite } from './sandbox-permission';
 import { sessionHasAgentsPermission } from './agents-permission';
 import {
   FeedbackError,
@@ -861,6 +862,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         user,
         canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
         canReferenceConfig: () => requestHasConfigRead(request, projectId),
+        canUseSandbox: () => requestHasSandboxWrite(request, projectId),
       });
       if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
@@ -966,6 +968,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             user,
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
             canReferenceConfig: () => requestHasConfigRead(request, projectId),
+            canUseSandbox: () => requestHasSandboxWrite(request, projectId),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('conflict' in checked) return reply.code(409).send(checked.conflict);
@@ -1358,23 +1361,41 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   /**
    * What the Sandbox section of an agent can offer: whether this deployment
-   * has the sandbox module, whether the tenant's license unlocks it, and the
-   * templates to pick from. Always 200 — `available: false` with a `reason`
-   * is an answer the UI renders, not a failure.
+   * has the sandbox module, whether the tenant's license unlocks it, the
+   * templates to pick from, and the project's persistent sandboxes an agent
+   * can be given (`instances`, listed only to a caller with Sandbox read;
+   * `canAttach` says whether the caller may choose one). Always 200 —
+   * `available: false` with a `reason` is an answer the UI renders, not a
+   * failure.
    */
   app.get('/agents/sandbox/capabilities', withApiRequestContext(async (request, reply) => {
     try {
-      const { session } = await requireProjectContextForRequest(request);
+      const { session, projectId } = await requireProjectContextForRequest(request);
       const availability = await resolveSandboxAvailability(session.tenantId);
       if (!availability.available) {
-        return reply.code(200).send({ available: false, reason: availability.reason, templates: [] });
+        return reply.code(200).send({ available: false, reason: availability.reason, templates: [], instances: [], canAttach: false });
       }
-      const templates = await availability.runner.listTemplates(session.tenantDbName, session.tenantId)
+      const { runner } = availability;
+      const templates = await runner.listTemplates(session.tenantDbName, session.tenantId)
         .catch((error: unknown) => {
           logger.warn('Could not list sandbox templates', { error });
           return [];
         });
-      return reply.code(200).send({ available: true, templates });
+      const attachSupported = Boolean(runner.listInstances && runner.describeInstance);
+      const instances = attachSupported && await requestHasSandboxRead(request, projectId)
+        ? await runner.listInstances!(session.tenantDbName, session.tenantId, projectId, { persist: true })
+          .catch((error: unknown) => {
+            logger.warn('Could not list persistent sandboxes', { error });
+            return [];
+          })
+        : [];
+      const canAttach = attachSupported && await requestHasSandboxWrite(request, projectId);
+      return reply.code(200).send({
+        available: true,
+        templates,
+        instances: instances.map(({ id, name, state, templateKey }) => ({ id, name, state, ...(templateKey ? { templateKey } : {}) })),
+        canAttach,
+      });
     } catch (error) {
       return sendRouteError(reply, error, 'Agent sandbox capabilities error', 'Failed to read sandbox capabilities');
     }

@@ -86,6 +86,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
       supportEnabled={isSupportEntryPointEnabled()}
       isOnPrem={getConfig().deployment.isOnPrem}
       enterpriseLicensed={enterpriseLicensed}
+      docsBaseUrl={getConfig().docs.baseUrl}
       user={{
         name: user.name || (email ? email.split('@')[0] : 'Account'),
         email,

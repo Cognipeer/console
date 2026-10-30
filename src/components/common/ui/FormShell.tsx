@@ -236,6 +236,8 @@ export default function FormShell({
 
 export function FormSection({
   focusOnMount = false,
+  id,
+  badge,
   number,
   title,
   description,
@@ -246,6 +248,10 @@ export function FormSection({
 }: {
   /** Scroll this section into view and focus its first control as it appears (deep link into a long form). */
   focusOnMount?: boolean;
+  /** DOM id of the section (a link inside the form can scroll to it). */
+  id?: string;
+  /** Small label after the title, e.g. "New". */
+  badge?: ReactNode;
   number?: number | string;
   title: ReactNode;
   description?: ReactNode;
@@ -270,7 +276,7 @@ export function FormSection({
     return () => cancelAnimationFrame(frame);
   }, [focusOnMount]);
   return (
-    <section className="form-section" ref={sectionRef} style={focusOnMount ? { scrollMarginTop: 16 } : undefined}>
+    <section id={id} className="form-section" ref={sectionRef} style={focusOnMount ? { scrollMarginTop: 16 } : undefined}>
       <header
         className="form-section-header"
         onClick={collapsible ? () => setOpen((o) => !o) : undefined}
@@ -297,6 +303,7 @@ export function FormSection({
           </div>
         ) : null}
         <div className="form-section-title">{title}</div>
+        {badge ? <span className="ds-badge ds-badge-teal">{badge}</span> : null}
         {collapsible ? (
           <div style={{ marginLeft: 'auto', display: 'flex', color: 'var(--ds-text-muted)' }}>
             {expanded ? <IconChevronDown size={15} /> : <IconChevronRight size={15} />}

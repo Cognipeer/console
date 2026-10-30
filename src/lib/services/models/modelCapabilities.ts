@@ -255,6 +255,33 @@ export function parseModelCapabilityOverrides(
   };
 }
 
+/**
+ * What "Fill from catalog" writes into the Limits fields: the catalog entry's max input tokens as the context
+ * window and its max output tokens as the model maximum — each only while the form's field is EMPTY (a value
+ * somebody typed is never overwritten). The maximum output is skipped when it would exceed the context window
+ * the form will hold, because the save would be refused (`maxOutputTokens cannot exceed contextWindow`).
+ * Returns only the fields to set.
+ */
+export function limitsFromCatalogFill(
+  current: { contextWindow: number | '' | undefined; maxOutputTokens: number | '' | undefined },
+  catalog: { maxInputTokens?: number; maxOutputTokens?: number },
+): { contextWindow?: number; maxOutputTokens?: number } {
+  const fill: { contextWindow?: number; maxOutputTokens?: number } = {};
+  const catalogContext = readPositiveInteger(catalog.maxInputTokens);
+  const catalogMaxOutput = readPositiveInteger(catalog.maxOutputTokens);
+
+  if ((current.contextWindow === '' || current.contextWindow === undefined) && catalogContext !== undefined) {
+    fill.contextWindow = catalogContext;
+  }
+  if ((current.maxOutputTokens === '' || current.maxOutputTokens === undefined) && catalogMaxOutput !== undefined) {
+    const contextWindow = fill.contextWindow ?? (typeof current.contextWindow === 'number' ? current.contextWindow : undefined);
+    if (contextWindow === undefined || catalogMaxOutput <= contextWindow) {
+      fill.maxOutputTokens = catalogMaxOutput;
+    }
+  }
+  return fill;
+}
+
 export function applyModelCapabilityOverrides(
   metadata: Record<string, unknown> | undefined,
   capabilities: ModelCapabilityOverrides | null | undefined,
@@ -304,8 +331,9 @@ export function resolveModelCapabilities(model: IModel): ResolvedModelCapabiliti
       metadata.max_output_tokens,
       settings.maxOutputTokens,
       settings.max_output_tokens,
-      settings.maxTokens,
-      settings.max_tokens,
+      // No `settings.maxTokens` / `max_tokens` here: that is the DEFAULT per-request limit ("Default max tokens"),
+      // not what the model can produce. Advertising it as the maximum capped clients, defaults and the
+      // raised retry at an operator's convenience value.
     ),
     inputModalities,
     outputModalities,

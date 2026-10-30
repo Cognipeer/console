@@ -7,6 +7,7 @@ import { IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import {
   getDefaultModelOutputModalities,
+  limitsFromCatalogFill,
   type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
 import {
@@ -34,16 +35,21 @@ import {
   PricingSection,
   ProviderSection,
   ReasoningSection,
+  PromptCachingSection,
   RequestParamsSection,
   UpstreamApiSection,
 } from './modelFormSections';
 import {
+  blankMaxTokensPlaceholder,
   detectUnsupportedParams,
+  limitWarnings,
   parseRequestDefaults,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
+import { normalizePromptCaching } from '@/components/models/promptCachingForm';
+import { useCatalogCachePrices } from '@/components/models/useCatalogCachePrices';
+import { promptCachingSupport, type PromptCachingSettings } from '@/lib/services/models/promptCaching';
 import { EMPTY_REASONING_FORM, reasoningSettingsPatch, type ReasoningFormValue } from '@/components/models/reasoningForm';
-import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -143,6 +149,8 @@ interface FormValues {
     requestDefaults: string;
     allowUnknownPassthrough: boolean;
     upstreamApi: UpstreamApi;
+    /** Only what differs from the provider's default; undefined = the default. */
+    promptCaching?: PromptCachingSettings;
   };
   ocr: {
     mode: OcrMode;
@@ -508,6 +516,10 @@ export default function CreateModelModal({
               ? { allowUnknownPassthrough: true }
               : {}),
             ...(isLlmCategory(values.category) ? definedOnly(reasoningSettingsPatch(values.reasoning, undefined)) : {}),
+            // Only a change from the provider's default is stored (a Claude model caches without a stored value).
+            ...(isLlmCategory(values.category) && normalizePromptCaching(values.settings.promptCaching, selectedProvider?.driver, values.modelId)
+              ? { promptCaching: normalizePromptCaching(values.settings.promptCaching, selectedProvider?.driver, values.modelId) }
+              : {}),
             // P1 decision models are always served by the structured-output emulator
             // over the chat model named below; `native` is reserved for later phases.
             ...(values.category === 'decision'
@@ -640,6 +652,21 @@ export default function CreateModelModal({
   const dirty = opened && Boolean(formValues.name || formValues.key || formValues.modelId);
   const canSubmit = !noProviders && validProvider && validIdentity && validPricing;
   const isLlm = CAPABILITY_CATEGORIES.includes(formValues.category);
+  // What a blank "Default max tokens" amounts to, and the limits that do not fit together (shown, never blocking).
+  const blankMaxTokensText = blankMaxTokensPlaceholder({
+    driver: selectedProvider?.driver,
+    modelId: formValues.modelId,
+    maxOutputTokens: isLlm ? formValues.capabilities.maxOutputTokens : undefined,
+  }, tWizard('fields.runtimeMaxTokens.modelDefaultSplit'), tWizard('fields.runtimeMaxTokens.providerDefault'));
+  const limitNotes = limitWarnings({
+    contextWindow: isLlm ? formValues.capabilities.contextWindow : undefined,
+    maxOutputTokens: isLlm ? formValues.capabilities.maxOutputTokens : undefined,
+    maxTokens: formValues.settings.maxTokens,
+  }).map((warning) => tWizard(`limitWarnings.${warning}`));
+  const catalogCachePrices = useCatalogCachePrices(
+    formValues.modelId,
+    isLlm && promptCachingSupport(selectedProvider?.driver, formValues.modelId).support === 'explicit',
+  );
   let sectionCounter = 0;
   const sectionNumber = () => ++sectionCounter;
 
@@ -837,12 +864,18 @@ export default function CreateModelModal({
         outputProps={form.getInputProps('pricing.outputTokenPer1M')}
         cachedProps={form.getInputProps('pricing.cachedTokenPer1M')}
         cacheWriteProps={form.getInputProps('pricing.cacheWriteTokenPer1M')}
-        onApplyCatalog={(pricing) => {
+        onApplyCatalog={(pricing, meta) => {
           setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
           setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
           // 0 = the catalog has no such price; keep the field blank.
           setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M || '');
           setFieldValue('pricing.cacheWriteTokenPer1M', pricing.cacheWriteTokenPer1M || '');
+          // Token limits of the entry fill the (chat model) limit fields only while they are empty.
+          if (isLlm) {
+            const limits = limitsFromCatalogFill(formValues.capabilities, meta);
+            if (limits.contextWindow !== undefined) setFieldValue('capabilities.contextWindow', limits.contextWindow);
+            if (limits.maxOutputTokens !== undefined) setFieldValue('capabilities.maxOutputTokens', limits.maxOutputTokens);
+          }
         }}
       >
         {formValues.category === 'stt' && (
@@ -929,8 +962,14 @@ export default function CreateModelModal({
               }
             : undefined
         }
-        maxTokens={{ props: form.getInputProps('settings.maxTokens') }}
+        maxTokens={{
+          label: tWizard('fields.runtimeMaxTokens.label'),
+          hint: tWizard('fields.runtimeMaxTokens.description'),
+          placeholder: blankMaxTokensText,
+          props: form.getInputProps('settings.maxTokens'),
+        }}
         temperatureProps={form.getInputProps('settings.temperature')}
+        warnings={limitNotes}
       />
 
       {isLlm ? (
@@ -941,9 +980,30 @@ export default function CreateModelModal({
             settings={formValues.settings}
           value={formValues.reasoning}
           onChange={(patch) => setFieldValue('reasoning', { ...formValues.reasoning, ...patch })}
-          forcedNoneWithTools={Boolean(
-            detectForcedParams(selectedProvider?.driver, formValues.modelId, true).forced?.reasoning_effort,
-          )}
+        />
+      ) : null}
+
+      {isLlm ? (
+        <PromptCachingSection
+          number={sectionNumber()}
+          driver={selectedProvider?.driver}
+          modelId={formValues.modelId}
+          value={formValues.settings.promptCaching}
+          onChange={(next) => setFieldValue('settings.promptCaching', next)}
+          pricing={{
+            currency: formValues.pricing.currency,
+            cached: formValues.pricing.cachedTokenPer1M,
+            cacheWrite: formValues.pricing.cacheWriteTokenPer1M,
+          }}
+          catalogPrices={catalogCachePrices}
+          onFillCatalog={(prices) => {
+            if (prices.cachedTokenPer1M > 0 && !(Number(formValues.pricing.cachedTokenPer1M) > 0)) {
+              setFieldValue('pricing.cachedTokenPer1M', prices.cachedTokenPer1M);
+            }
+            if (prices.cacheWriteTokenPer1M > 0 && !(Number(formValues.pricing.cacheWriteTokenPer1M) > 0)) {
+              setFieldValue('pricing.cacheWriteTokenPer1M', prices.cacheWriteTokenPer1M);
+            }
+          }}
         />
       ) : null}
 
@@ -957,6 +1017,7 @@ export default function CreateModelModal({
 
       <RequestParamsSection
         number={sectionNumber()}
+        driver={selectedProvider?.driver}
         autoDropped={autoDropped}
         autoDrop={{
           checked: formValues.settings.autoDropUnsupportedParams,

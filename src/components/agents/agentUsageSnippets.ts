@@ -20,31 +20,23 @@
  */
 
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
+import type { DocId } from '@/lib/docs/docsLinks';
 
-/** Where the product documentation lives. */
-export const AGENT_DOCS_BASE_URL = 'https://docs.cognipeer.com';
+/** The API reference of the runs API (a docs-links page): the link in the header of the tab (the list of guides does not repeat it). */
+export const AGENT_REFERENCE_DOC = 'agents-runs-api' satisfies DocId;
 
-/** The API reference of the runs API: the link in the header of the tab (the list of guides does not repeat it). */
-export const AGENT_REFERENCE_PATH = '/console/developer/api/agents#runs-api';
-
-/**
- * The guides the tab lists (`path` is the route of the page on the docs site).
- *
- * Release order: the pages under /console/guide/integrations/agents, the background-runs guide and the `#runs-api`
- * anchor of the API reference exist on the docs branch that documents the agent platform, which has to be deployed with
- * (or before) a console build that carries this tab; until then those links answer 404 or open the top of the page.
- */
+/** The guides the tab lists: `id` names the label (`agents.usage.docs.<id>`), `doc` the docs-links page. */
 export const AGENT_DOC_LINKS = [
-  { id: 'integrations', path: '/console/guide/integrations/agents/overview' },
-  { id: 'backgroundRuns', path: '/console/guide/agents/background-runs' },
-  { id: 'triggers', path: '/console/guide/integrations/agents/triggers' },
-  { id: 'webhookTriggers', path: '/console/guide/integrations/agents/webhook-triggers' },
-  { id: 'openaiSdk', path: '/console/guide/integrations/agents/openai-sdk' },
-  { id: 'n8n', path: '/console/guide/integrations/agents/n8n' },
-  { id: 'openWebui', path: '/console/guide/integrations/agents/open-webui' },
-  { id: 'litellmA2a', path: '/console/guide/integrations/agents/litellm-and-a2a' },
-  { id: 'sdkAgents', path: '/console-sdk/api/agents' },
-] as const;
+  { id: 'integrations', doc: 'agents-integrations' },
+  { id: 'backgroundRuns', doc: 'agents-background-runs' },
+  { id: 'triggers', doc: 'agents-triggers' },
+  { id: 'webhookTriggers', doc: 'agents-webhook-triggers' },
+  { id: 'openaiSdk', doc: 'agents-openai-sdk' },
+  { id: 'n8n', doc: 'agents-n8n' },
+  { id: 'openWebui', doc: 'agents-open-webui' },
+  { id: 'litellmA2a', doc: 'agents-litellm-a2a' },
+  { id: 'sdkAgents', doc: 'sdk-agents' },
+] as const satisfies ReadonlyArray<{ id: string; doc: DocId }>;
 
 export type AgentDocId = (typeof AGENT_DOC_LINKS)[number]['id'];
 
@@ -81,8 +73,8 @@ export interface AgentUsageSnippets {
   defaultVersion: number | null;
   /** The agent declares variables, so every sample passes them. */
   hasVariables: boolean;
-  /** The API reference the header of the tab links to. */
-  referenceUrl: string;
+  /** The API reference the header of the tab links to (a docs-links page). */
+  referenceDoc: DocId;
   runs: {
     /** Ask and wait up to 30 seconds. */
     start: string;
@@ -145,7 +137,7 @@ export interface AgentUsageSnippets {
     /** `message/send`; null while A2A is off (there is no endpoint to call). */
     send: string | null;
   };
-  docs: Array<{ id: AgentDocId; url: string }>;
+  docs: Array<{ id: AgentDocId; doc: DocId }>;
 }
 
 // ── Values the samples are built from ─────────────────────────────────────
@@ -798,12 +790,12 @@ export function buildAgentUsageSnippets(options: AgentUsageSnippetOptions): Agen
     agentKey,
     defaultVersion,
     hasVariables,
-    referenceUrl: `${AGENT_DOCS_BASE_URL}${AGENT_REFERENCE_PATH}`,
+    referenceDoc: AGENT_REFERENCE_DOC,
     runs,
     sdk,
     sdkReuses,
     openai,
     a2a,
-    docs: AGENT_DOC_LINKS.map((link) => ({ id: link.id, url: `${AGENT_DOCS_BASE_URL}${link.path}` })),
+    docs: AGENT_DOC_LINKS.map((link) => ({ id: link.id, doc: link.doc })),
   };
 }

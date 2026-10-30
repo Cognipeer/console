@@ -32,14 +32,17 @@ import { validateSeedFiles } from './agentSandboxSeedFiles';
 import { unsuppliableRequiredVariables, validateVariableDeclaration } from './agentVariables';
 import { resolveSubagentTarget } from './subagentRoster';
 import { subagentConfigIssues } from './subagentConfigRules';
-import { SANDBOX_MODES } from './agentSandboxMode';
+import { SANDBOX_MODES, resolveSandboxMode } from './agentSandboxMode';
+
+/** What a sandbox instance id looks like (a UUID or a database id). */
+const SANDBOX_INSTANCE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
 import { checkEmbeddedClientTools } from './agentClientTools';
 import { normalizeAttachmentsFolder, SESSION_FILE_OUTPUTS_LIMITS } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { reasoningConfigIssues } from './agentReasoning';
-import { MAX_MEMORY_MOUNTS } from './agentMemoryMounts';
+import { resolveAgentMemoryStore } from './agentMemoryStore';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -137,6 +140,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         });
     }
     checkNumber(issues, 'topP', config.topP, { min: 0, max: 1 });
+    checkNumber(issues, 'maxTokens', config.maxTokens, { min: 1, integer: true });
 
     const runtime = config.runtime ?? {};
     checkEnum(issues, 'runtime.profile', runtime.profile, PROFILES);
@@ -381,7 +385,16 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     const sandbox = config.sandbox;
     if (sandbox?.enabled) {
         if (sandbox.mode !== undefined && !SANDBOX_MODES.includes(sandbox.mode)) {
-            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: session, ephemeral' });
+            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: session, ephemeral, instance' });
+        }
+        if (resolveSandboxMode(sandbox.mode) === 'instance') {
+            if (typeof sandbox.instanceId !== 'string' || !sandbox.instanceId.trim()) {
+                issues.errors.push({ field: 'sandbox.instanceId', message: 'Pick the persistent sandbox this agent works in' });
+            } else if (!SANDBOX_INSTANCE_ID.test(sandbox.instanceId)) {
+                issues.errors.push({ field: 'sandbox.instanceId', message: 'is not a sandbox id' });
+            }
+        } else if (sandbox.instanceId !== undefined && typeof sandbox.instanceId !== 'string') {
+            issues.errors.push({ field: 'sandbox.instanceId', message: 'must be a string' });
         }
         for (const issue of validateSeedFiles(sandbox.seedFiles)) issues.errors.push(issue);
         checkNumber(issues, 'sandbox.commandTimeoutSec', sandbox.commandTimeoutSec, { min: 1, max: 600, integer: true });
@@ -403,7 +416,8 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         if (sandbox.preview?.enabled) {
             checkNumber(issues, 'sandbox.preview.linkTtlHours', sandbox.preview.linkTtlHours, { min: 1, max: 168 });
             checkNumber(issues, 'sandbox.preview.keepAliveMinutes', sandbox.preview.keepAliveMinutes, { min: 5, max: 24 * 60, integer: true });
-            if (sandbox.blockNetwork) {
+            // A persistent sandbox's network is its own; the agent's switch does not apply to it.
+            if (sandbox.blockNetwork && resolveSandboxMode(sandbox.mode) !== 'instance') {
                 issues.warnings.push({
                     field: 'sandbox.preview',
                     message: 'Preview links do not work while the sandbox network is blocked',
@@ -426,18 +440,14 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     issues.warnings.push(...hitl.warnings);
 
     const memory = config.memory;
-    if (memory?.enabled && !memory.memoryStoreKey && !memory.mounts?.length) {
+    const memoryStore = resolveAgentMemoryStore(memory);
+    if (memory?.enabled && !memoryStore) {
         issues.errors.push({ field: 'memory.memoryStoreKey', message: 'Pick a memory store, or turn memory off' });
     }
-    if (memory?.enabled && memory.mounts?.length) {
-        if (memory.mounts.length > MAX_MEMORY_MOUNTS) {
-            issues.errors.push({ field: 'memory.mounts', message: `At most ${MAX_MEMORY_MOUNTS} memory stores can be mounted` });
-        }
-        const seen = new Set<string>();
-        memory.mounts.forEach((m, i) => {
-            if (!m?.storeKey) issues.errors.push({ field: `memory.mounts[${i}].storeKey`, message: 'Pick a memory store' });
-            else if (seen.has(m.storeKey)) issues.errors.push({ field: `memory.mounts[${i}].storeKey`, message: `Memory store "${m.storeKey}" is mounted twice` });
-            seen.add(m.storeKey);
+    if (memory?.enabled && memoryStore?.ignoredStoreKeys.length) {
+        issues.warnings.push({
+            field: 'memory.mounts',
+            message: `An agent uses one memory store; ${memoryStore.ignoredStoreKeys.map((k) => `"${k}"`).join(', ')} are no longer used`,
         });
     }
 
@@ -660,6 +670,26 @@ export async function validateAgentConfig(input: {
                     ? 'Sandbox access requires an Enterprise license'
                     : 'This edition has no sandbox module',
             });
+        } else if (resolveSandboxMode(config.sandbox.mode) === 'instance') {
+            // The machine is an existing one: its template is its own, and it must be a persistent
+            // sandbox of THIS project (the shape check has already asked for an id).
+            const instanceId = config.sandbox.instanceId?.trim();
+            const describe = availability.runner.describeInstance;
+            if (instanceId && !describe) {
+                issues.errors.push({ field: 'sandbox.instanceId', message: 'This sandbox module cannot attach an agent to an existing sandbox' });
+            } else if (instanceId && describe) {
+                const found = await describe.call(availability.runner, {
+                    tenantDbName: input.tenantDbName,
+                    tenantId: input.tenantId,
+                    projectId,
+                    agentKey: input.agentKey ?? '',
+                }, instanceId).catch(() => undefined);
+                if (found === null) {
+                    issues.errors.push({ field: 'sandbox.instanceId', message: `Sandbox "${instanceId}" does not exist in this project` });
+                } else if (found && !found.persist) {
+                    issues.errors.push({ field: 'sandbox.instanceId', message: `Sandbox "${found.name}" is not persistent — an agent can only be given a persistent sandbox` });
+                }
+            }
         } else if (!config.sandbox.templateKey?.trim()) {
             // No implicit default: built-in templates are only created by the
             // explicit "Seed defaults" action, so an unset key could resolve
@@ -742,15 +772,11 @@ export async function validateAgentConfig(input: {
         }
         await checkKnowledge(`${field}.key`, key);
     }
-    if (config.memory?.enabled) {
-        const mounts = config.memory.mounts?.length
-            ? config.memory.mounts.map((m, i) => ({ key: m?.storeKey, field: `memory.mounts[${i}].storeKey` }))
-            : config.memory.memoryStoreKey ? [{ key: config.memory.memoryStoreKey, field: 'memory.memoryStoreKey' }] : [];
-        for (const { key, field } of mounts) {
-            if (!key) continue;
-            const store = await db.findMemoryStoreByKey(key, projectId).catch(() => null);
-            if (!store) issues.errors.push({ field, message: `Memory store "${key}" does not exist` });
-        }
+    const memoryStore = config.memory?.enabled ? resolveAgentMemoryStore(config.memory) : undefined;
+    if (memoryStore) {
+        const field = config.memory?.mounts?.length ? 'memory.mounts[0].storeKey' : 'memory.memoryStoreKey';
+        const store = await db.findMemoryStoreByKey(memoryStore.storeKey, projectId).catch(() => null);
+        if (!store) issues.errors.push({ field, message: `Memory store "${memoryStore.storeKey}" does not exist` });
     }
     for (const key of config.skills ?? []) {
         const skill = await db.findSkillByKey(key, projectId).catch(() => null);

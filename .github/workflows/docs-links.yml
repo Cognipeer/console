@@ -1,0 +1,36 @@
+name: Docs links
+
+# Every docs page the console links to (src/config/docs-links.json and the docsPath of each service in
+# platform-services.json) must exist on the live docs site as itself, not as a "Page moved" redirect page.
+# The docs repo checks the same links against its pages on every pull request there; this run catches a
+# console change that links a page the site does not have, and (daily) a site that lost one.
+
+on:
+  pull_request:
+    paths:
+      - src/config/docs-links.json
+      - src/config/platform-services.json
+      - scripts/check-docs-links.mjs
+      - .github/workflows/docs-links.yml
+  schedule:
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check docs links
+        run: node scripts/check-docs-links.mjs

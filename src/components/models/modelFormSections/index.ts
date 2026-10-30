@@ -7,3 +7,4 @@ export { default as RequestParamsSection } from './RequestParamsSection';
 export type { FieldProps } from './types';
 export { default as ReasoningSection } from './ReasoningSection';
 export { default as UpstreamApiSection } from './UpstreamApiSection';
+export { default as PromptCachingSection } from './PromptCachingSection';

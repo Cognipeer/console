@@ -25,9 +25,11 @@
  */
 
 import { resolveRuleForDriver, unsupportedParamsOfRule } from '@/lib/services/models/modelRules';
-
-/** Drivers that speak the OpenAI chat-completions schema. */
-const OPENAI_SCHEMA_DRIVERS = ['openai', 'openai-compatible', 'azure'] as const;
+// The one list of OpenAI-schema drivers (`together` included) lives in services/models/reasoning.ts; the native clients
+// (contracts/nativeClients.ts) re-export it. Taken from this pure module, not from nativeClients: that one pulls the
+// server-side clients into the model forms' bundle.
+import { OPENAI_SCHEMA_DRIVERS } from '@/lib/services/models/reasoning';
+import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 
 export interface UnsupportedParamRule {
   /** Stable id, used in logs so a surprising drop can be traced to its rule. */
@@ -91,7 +93,15 @@ export const UNSUPPORTED_PARAM_RULES: readonly UnsupportedParamRule[] = [
  * OpenAI-schema drivers whose parameter limits come from the SDK rule table. Bedrock / Vertex / Anthropic
  * clients apply their own rules inside the SDK, so nothing is detected for them here.
  */
-const RULE_DRIVEN_DRIVERS: ReadonlySet<string> = new Set(OPENAI_SCHEMA_DRIVERS);
+const RULE_DRIVEN_DRIVERS: ReadonlySet<string> = OPENAI_SCHEMA_DRIVERS;
+
+/**
+ * Whether the driver speaks the OpenAI chat-completions schema: the only ones with a `max_tokens` /
+ * `max_completion_tokens` choice to make (Anthropic, Bedrock and Vertex carry the cap in their own field).
+ */
+export function isOpenAiSchemaDriver(driver: string | undefined | null): boolean {
+  return !!driver && RULE_DRIVEN_DRIVERS.has(driver);
+}
 
 function detectFromSdkRule(driver: string, modelId: string, hasTools: boolean): DetectedUnsupportedParams | undefined {
   if (!RULE_DRIVEN_DRIVERS.has(driver)) return undefined;
@@ -216,8 +226,8 @@ export function resolveUnsupportedParamNames(input: {
   };
 }
 
-/** OpenAI-schema drivers, `together` included: it is a record driver of its own that speaks the same wire. */
-const REASONING_EFFORT_DRIVERS: ReadonlySet<string> = new Set([...OPENAI_SCHEMA_DRIVERS, 'together']);
+/** OpenAI-schema drivers (`together` included, see `OPENAI_SCHEMA_DRIVERS`). */
+const REASONING_EFFORT_DRIVERS: ReadonlySet<string> = OPENAI_SCHEMA_DRIVERS;
 
 /**
  * Whether a reasoning effort that arrived on the REQUEST may be sent to this
@@ -238,4 +248,25 @@ export function requestReasoningEffortAccepted(
   if (!driver || !REASONING_EFFORT_DRIVERS.has(driver)) return true;
   if (!effort) return true;
   return resolveRuleForDriver(driver, modelId)?.reasoning.style !== 'none';
+}
+
+/**
+ * Whether a reasoning picker should tell the operator that, with tools, this model runs WITHOUT reasoning: on GPT-5.1+
+ * and gpt-6 (rule `chatTools.reasoning: 'force-none'`) Chat Completions answers any effort but `none` next to function
+ * tools with a 400, so the gateway sends `none` whatever is set. Only while the model's Upstream API is Chat
+ * Completions: the Responses API takes both together and keeps reasoning (`buildTransformRequest` skips the rule
+ * there). Follows what the gateway detects, so a model with automatic detection switched off is not announced either.
+ */
+export function reasoningForcedNoneOnChat(
+  driver: string | undefined | null,
+  modelId: string | undefined,
+  settings: unknown,
+): boolean {
+  if (!driver || resolveUpstreamApi(settings) !== 'chat') return false;
+  const autoDetect = settings && typeof settings === 'object'
+    ? (settings as Record<string, unknown>).autoDropUnsupportedParams
+    : undefined;
+  return Boolean(
+    resolveUnsupportedParamNames({ driver, modelId, autoDetect, hasTools: true }).detected.forced?.reasoning_effort,
+  );
 }

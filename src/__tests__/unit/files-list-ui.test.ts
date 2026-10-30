@@ -42,7 +42,6 @@ import { useBucketListFilters, SEARCH_URL_DELAY_MS } from '@/components/files/li
 import type { BucketListItem, FileProviderListItem, ProviderHealth } from '@/components/files/filesApi';
 import { formatBytes } from '@/components/files/shared';
 import {
-  FILES_DOCS_URL,
   NO_BUCKET_FILTERS,
   bucketHref,
   bucketListQuery,
@@ -432,9 +431,8 @@ describe('BucketListPage', () => {
 
     await click(rowOf('Contracts')!);
     expect(push.mock.calls.map((call) => call[0])).toEqual(['/dashboard/files/contracts']);
-    expect(FILES_DOCS_URL).toBe('https://docs.cognipeer.com/console/guide/knowledge/files');
-    const docs = q<HTMLAnchorElement>(`a[href="${FILES_DOCS_URL}"]`)!;
-    expect(docs.getAttribute('href')).toBe('https://docs.cognipeer.com/console/guide/knowledge/files');
+    const docs = q<HTMLAnchorElement>('a[href="https://docs.cognipeer.com/console/guide/knowledge/files"]')!;
+    expect(docs).not.toBeNull();
     expect(docs.textContent).toBe('Docs');
     expect(docs.getAttribute('target')).toBe('_blank');
     expect(docs.getAttribute('rel')).toContain('noopener');

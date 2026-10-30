@@ -19,8 +19,8 @@
  * Not checked here: that the SDK's own types accept the samples. The SDK is not a dependency of this repo and the table
  * of SDK methods is written by hand from console-sdk 4.0, so a rename on the SDK side is caught by type-checking the
  * generated samples against the SDK's dist (`tsc --strict`), not by this file. Neither is it checked that the Python
- * and shell samples parse (`py_compile` and `bash -n` do that), that the docs pages exist (the links are static; see
- * the release-order note on `AGENT_DOC_LINKS`), or what a running server answers (none is started).
+ * and shell samples parse (`py_compile` and `bash -n` do that), that the docs pages exist (the docs repo checks every
+ * docs-links page against its pages), or what a running server answers (none is started).
  *
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
@@ -37,8 +37,7 @@ import AgentUsagePanel, { USAGE_SECTIONS, usageSectionId, withInlineCode } from 
 import AgentOverviewPanel from '@/components/agents/studio/AgentOverviewPanel';
 import {
   AGENT_DOC_LINKS,
-  AGENT_DOCS_BASE_URL,
-  AGENT_REFERENCE_PATH,
+  AGENT_REFERENCE_DOC,
   STRUCTURED_OUTPUT_SAMPLE,
   a2aSendCurl,
   buildAgentUsageSnippets,
@@ -51,6 +50,7 @@ import {
   type AgentUsageSnippets,
 } from '@/components/agents/agentUsageSnippets';
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
+import { buildDocsUrl, DEFAULT_DOCS_BASE_URL } from '@/lib/docs/docsLinks';
 import { I18nProvider } from '@/lib/i18n';
 import { en } from '@/lib/i18n/messages/en';
 import { tr } from '@/lib/i18n/messages/tr';
@@ -626,12 +626,12 @@ describe('what the page passes shows up in the samples', () => {
 
   it('links the docs under the docs site, one page each, and the API reference once, in the header', () => {
     const s = buildAgentUsageSnippets(options());
-    expect(AGENT_DOCS_BASE_URL).toBe('https://docs.cognipeer.com');
+    const urls = s.docs.map((link) => buildDocsUrl(DEFAULT_DOCS_BASE_URL, link.doc));
     expect(s.docs.map((link) => link.id)).toEqual(AGENT_DOC_LINKS.map((link) => link.id));
     expect(AGENT_DOC_LINKS).toHaveLength(9);
-    expect(new Set(s.docs.map((link) => link.url)).size).toBe(AGENT_DOC_LINKS.length);
-    for (const link of s.docs) expect(link.url).toMatch(/^https:\/\/docs\.cognipeer\.com\/(console|console-sdk)\/[a-z0-9\-/]+(#[a-z-]+)?$/);
-    expect(s.docs.map((link) => link.url)).toEqual(
+    expect(new Set(urls).size).toBe(AGENT_DOC_LINKS.length);
+    for (const url of urls) expect(url).toMatch(/^https:\/\/docs\.cognipeer\.com\/(console|console-sdk)\/[a-z0-9\-/]+(#[a-z-]+)?$/);
+    expect(urls).toEqual(
       expect.arrayContaining([
         'https://docs.cognipeer.com/console/guide/integrations/agents/overview',
         'https://docs.cognipeer.com/console/guide/agents/background-runs',
@@ -645,15 +645,14 @@ describe('what the page passes shows up in the samples', () => {
       ]),
     );
     // The reference is the link in the header; the list does not repeat it under another name.
-    expect(AGENT_REFERENCE_PATH).toBe('/console/developer/api/agents#runs-api');
-    expect(s.referenceUrl).toBe('https://docs.cognipeer.com/console/developer/api/agents#runs-api');
-    expect(s.docs.map((link) => link.url)).not.toContain(s.referenceUrl);
+    expect(s.referenceDoc).toBe(AGENT_REFERENCE_DOC);
+    expect(buildDocsUrl(DEFAULT_DOCS_BASE_URL, s.referenceDoc)).toBe('https://docs.cognipeer.com/console/developer/api/agents#runs-api');
+    expect(s.docs.map((link) => link.doc)).not.toContain(s.referenceDoc);
     expect(AGENT_DOC_LINKS.map((link) => link.id)).not.toContain('runsApi');
   });
 
-  it('keeps the release-order notes next to the install line and the docs links', () => {
+  it('keeps the release-order note next to the install line', () => {
     const source = sourceOf('components/agents/agentUsageSnippets.ts');
-    expect(source).toMatch(/Release order: the pages under[^]*?export const AGENT_DOC_LINKS = \[/);
     expect(source).toMatch(/Release order: console-sdk 4\.0\.0 is not on npm yet[^]*?install: 'npm install @cognipeer\/console-sdk@\^4'/);
   });
 });
@@ -1443,10 +1442,10 @@ describe('the Usage tab', () => {
   it('links every docs page, in a new tab, safely', () => {
     const html = render(panel());
     for (const link of buildAgentUsageSnippets(options()).docs) {
-      expect(html).toContain(`href="${link.url}"`);
+      expect(html).toContain(`href="${buildDocsUrl(DEFAULT_DOCS_BASE_URL, link.doc)}"`);
     }
     // The nine guides and the API reference of the header; the links of the nav stay on the page.
-    expect(html).toContain(`href="https://docs.cognipeer.com${AGENT_REFERENCE_PATH}"`);
+    expect(html).toContain('href="https://docs.cognipeer.com/console/developer/api/agents#runs-api"');
     expect(html.match(/rel="noopener noreferrer"/g)?.length).toBe(AGENT_DOC_LINKS.length + 1);
     expect(html.match(/target="_blank"/g)?.length).toBe(AGENT_DOC_LINKS.length + 1);
   });

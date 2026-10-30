@@ -168,6 +168,25 @@ New sandboxes default to **0.5 vCPU / 1 GB RAM / 1 GB disk**. The effective limi
 
 CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) is enforced only when `SANDBOX_DISK_QUOTA=on` **and** the Docker storage driver supports `--storage-opt size` (overlay2 on xfs pquota, or btrfs); otherwise it is tracked and shown but advisory.
 
+## A persistent sandbox for an agent
+
+An agent's sandbox (Agents → Build → Sandbox → **Lifetime**) is normally its own: one per conversation (**Session**) or one per message (**Per message**). **Persistent sandbox** gives the agent an existing sandbox of the project instead — one created with **Persistent** on — picked under **Machine** (`config.sandbox.mode: "instance"`, `config.sandbox.instanceId`).
+
+- **Shared.** Every conversation of the agent, and anyone else with access to the sandbox, works on the same machine: files and installed packages stay until someone deletes them, and what the agent writes can be seen by others. The model is told so.
+- **The machine's own settings apply.** Its template, resources, network block and environment are its own; the agent's Template, CPU, memory and Block network settings are not used. The agent's plain variables go with each command (like its secrets) instead of onto the machine.
+- **Never created, stopped or deleted by the agent.** A stopped sandbox is started on first use; nothing is recorded on the conversation, and deleting a conversation leaves the sandbox alone. A preview link keeps working because the machine stays up.
+- **Outputs.** Only files written to `/outputs/` during a reply are delivered as session files — not what the shared machine already held.
+- **Who may choose it.** Setting or changing the sandbox needs **write access to Sandbox** in the project (`403 sandbox_write_required` otherwise); re-saving the agent asks nothing. The sandbox must be a persistent sandbox of the agent's project (`400` otherwise). Manifest exports leave the id out; importing over an agent keeps the one it has.
+
+## Sandbox over MCP
+
+The MCP module can serve sandboxes as an **internal service** (**MCP Servers → New MCP server → Internal service**), with the MCP module's endpoints, tool toggles and renames, guardrail binding, logs and hubs:
+
+- **Sandbox** — pick a template. Callers start their own sandboxes with `sandbox_create` (it returns a `sandboxId`), pass the id to `sandbox_exec`, `sandbox_run_code`, `sandbox_read_file`, `sandbox_write_file` and `sandbox_list_files`, and end them with `sandbox_delete`. A sandbox is usable only through the MCP server that started it; one left behind is not persistent and is deleted by the idle timeout.
+- **Persistent sandbox** — pick a persistent sandbox of the project. The same work tools, without a `sandboxId`, run in that one machine, which is started when it is stopped and never stopped or deleted through MCP. Every caller shares it.
+
+Both run code, so they have **no public URL**: such a server, and a composite with one as a member, is always called with an API token. Creating one, or pointing one at another template or sandbox, needs write access to Sandbox. Both need the Sandbox module and an Enterprise license (checked on every call), and the values a sandbox's launch carries are masked in their results, as for an agent.
+
 ## Preloaded files (agent sandbox)
 
 An agent's sandbox settings (Agents → Build → Sandbox → **Preloaded files**) can carry files that are written into the sandbox automatically when it starts, before the agent works — for example a presentation template (`.pptx`).
@@ -266,6 +285,12 @@ Beyond the in-app [Settings](#settings), a few environment variables tune the ru
 | `SANDBOX_DEFAULT_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` | `0.5` / `1024` / `1024` / `512` | Platform default resource limits for new sandboxes. |
 | `SANDBOX_MAX_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` | — | Hard upper bound per field (`0`/unset = unbounded). Clamps every launch. |
 | `SANDBOX_DISK_QUOTA` | `off` | `on` enforces `diskMb` via `--storage-opt size` (needs xfs-pquota / btrfs); otherwise disk is advisory. |
+| `SANDBOX_INHERIT_PROXY_ENV` | `false` | `true` gives every sandbox launched from then on the console's [egress proxy](/guide/configuration#egress-proxy): `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in both spellings, with `localhost,127.0.0.1,::1` added to `NO_PROXY` so an app the sandbox serves to itself is reached directly. A template or sandbox that sets one of these variables keeps its own value. The proxy URL, credentials included, is visible to everything that runs in the sandbox; its password is masked in what an agent reads back. |
+
+On a network that reaches the internet only through a proxy, a sandbox has no way out without these variables:
+no sandbox runtime passes the console's own environment on. Package installs, `git` and the Playwright of the
+web-e2e template then time out. Turn `SANDBOX_INHERIT_PROXY_ENV` on, or set the variables on the templates that
+need the internet.
 
 ## Security & tenant isolation
 

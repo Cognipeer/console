@@ -270,7 +270,7 @@ The live screenshot endpoint (`GET …/screenshot/live`) returns an inline PNG/J
 
 ## Browser over MCP
 
-A browser is published over MCP from the MCP module: **MCP Servers → New MCP server → Internal service → Browser**, then pick the browser. The server gets the MCP module's endpoints, tool toggles and renames, guardrail binding, logs and hubs, like any other MCP server. It has no public URL: a browser server, and a composite server with a browser member, is always called with an API token. (Browsers no longer expose an MCP endpoint of their own; the former `/api/client/v1/browser/:browserKey/mcp/*` routes have been removed.)
+A browser is published over MCP from the MCP module: **MCP Servers → New MCP server → Internal service → Browser**, then pick the browser. The server gets the MCP module's endpoints, tool toggles and renames, guardrail binding, logs and hubs, like any other MCP server. It has no public URL: a browser server, and a composite server with a browser member, is always called with an API token (so is a [sandbox server](/guide/sandbox#sandbox-over-mcp)). (Browsers no longer expose an MCP endpoint of their own; the former `/api/client/v1/browser/:browserKey/mcp/*` routes have been removed.)
 
 The toolset mirrors the action API and is derived from the same tool definitions the `Browser Use` system tool binds, so the two surfaces cannot drift apart:
 
@@ -309,6 +309,15 @@ Once a session has run a few steps, **Record as flow** freezes them into a flow 
 ## Distributed execution
 
 Browser is one of the entity types the [Cluster](./cluster.md) layer can pin to a specific node. The `browserConsumer` registers a queue handler; when a profile is assigned to a node, all of its sessions and actions route through that node's queue. This matters when only some nodes have a real browser binary installed.
+
+## Behind an egress proxy
+
+On a network that reaches the internet only through a corporate proxy, set `HTTPS_PROXY` (and `NO_PROXY`) on the
+Console processes: Chromium is launched with them, and a profile's own **proxy** setting overrides them for its
+sessions. [Egress proxy](./configuration.md#egress-proxy) covers the variables, how the private-network guard treats
+hosts only the proxy can resolve, and `scripts/diagnose-egress-proxy.ts`, which checks the path from inside the
+Console container. A navigation that times out names the hosts the page was still waiting on, usually third-party
+hosts the proxy does not let through.
 
 ## Concurrency
 

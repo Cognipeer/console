@@ -706,7 +706,8 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
     await executeModelCall({ ...BASE, request: ASK });
     await executeModelCall({ ...BASE, request: { ...ASK, tools: [tool] } });
     expect(upstream.calls.map((c) => c.body.reasoning_effort)).toEqual(['high', 'none']);
-    expect(upstream.calls[0].body.max_completion_tokens).toBe(400);
+    // Reasoning tokens count against the limit: the model's small 400 is raised to the table value of effort high.
+    expect(upstream.calls[0].body.max_completion_tokens).toBe(32768);
   });
 
   it('renames the token budget when the model declares max_tokens unsupported', async () => {

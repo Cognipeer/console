@@ -34,18 +34,34 @@
  * evaluation runs must not pollute production spend/usage reporting (the
  * gateway path does log; that difference is by design). Run items still carry
  * the measured per-invocation usage/cost via the adapter's pricing math.
+ *
+ * The model's "Cache prompts" switch is applied as in the gateway (`withPromptCaching`), so an evaluation of a
+ * Bedrock / Vertex Claude model measures the cached cost profile production runs under.
+ *
+ * The call is sized like a gateway call: the output limit comes from
+ * `resolveNativeCall` (the native client's own resolver: caller cap > the
+ * model's "Default max tokens" > driver default, thinking headroom, model
+ * maximum) and the hub model's reasoning default is sent, so an evaluation
+ * measures the model as production runs it. The finish reason is returned so
+ * the adapter can tell a cut-off answer from a finished one.
  */
 
 import { createProvider } from '@cognipeer/agent-sdk';
 import { toGatewayUsage } from '@/lib/services/models/gatewayUsage';
 import type {
   ChatCompletionRequest,
+  FinishReason,
   ProviderConfig,
   ProviderToolCall,
   ProviderToolDefinition,
   TokenUsage as SdkTokenUsage,
   UnifiedMessage,
 } from '@cognipeer/agent-sdk';
+import { modelDefaultReasoning, normalizeNativeReasoning, resolveNativeCall, withPromptCaching } from '@/lib/providers/contracts/nativeClients';
+import { azureApiVersion, predatesAzureResponses } from '@/lib/providers/contracts/azureApiVersion';
+import { openAiResponseFormatToNative } from '@/lib/services/models/openaiAdapter';
+import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
+import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
 import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import { getModelByKey } from '@/lib/services/models/modelService';
@@ -93,6 +109,12 @@ export interface SdkChatResult {
   usage?: SdkUsageSnapshot;
   latencyMs: number;
   raw: unknown;
+  /** Why the model stopped; `length` = cut off at the output limit. Absent when the provider said nothing. */
+  finishReason?: FinishReason;
+  /** The provider's own stop reason (`max_tokens`, `length`, `MAX_TOKENS` ...), for diagnostics. */
+  rawFinishReason?: string;
+  /** The output limit the call was sent with; absent when none was sent (the provider's maximum applied). */
+  outputTokenLimit?: number;
 }
 
 /** Model + provider config resolved once so per-item calls skip the DB. */
@@ -118,6 +140,12 @@ function nonEmptyString(value: unknown): string | undefined {
  * (unknown driver, dynamic router, non-llm category, missing required config
  * field) — the caller falls back to the gateway, which owns the canonical
  * error message for those states.
+ *
+ * `openai` / `azure` are pinned to the model's "Upstream API" (Chat Completions
+ * unless the operator chose Responses), as the gateway pins them: left on the
+ * SDK's `auto`, a request carrying `reasoning` (the hub model's reasoning
+ * default, sent below) would move an o-series / gpt-5 model to the Responses
+ * API, and an Azure api-version without that route would answer 404.
  */
 export async function resolveSdkProviderConfig(
   tenantDbName: string,
@@ -158,6 +186,7 @@ export async function resolveSdkProviderConfig(
         provider: 'openai',
         apiKey: require(nonEmptyString(creds.apiKey), 'apiKey'),
         ...(organization ? { organization } : {}),
+        api: resolveUpstreamApi(model.settings),
       };
     }
     case 'openai-compatible':
@@ -174,32 +203,38 @@ export async function resolveSdkProviderConfig(
       };
     case 'azure': {
       const instanceName = require(nonEmptyString(settings.instanceName), 'instanceName');
+      // The gateway's own resolution (the model's `azureApiVersion`, the Responses upgrade of an older provider
+      // version), so an evaluation runs on the same Azure API as production.
+      const apiVersion = azureApiVersion(require(nonEmptyString(settings.apiVersion), 'apiVersion'), model.settings);
+      // The Responses route exists on Azure from api-version 2025-03-01-preview; an older dated version has none.
+      const hasResponsesRoute = !predatesAzureResponses(apiVersion);
       return {
         provider: 'azure',
         apiKey: require(nonEmptyString(creds.apiKey), 'apiKey'),
         endpoint: `https://${instanceName}.openai.azure.com`,
         deploymentName: require(nonEmptyString(settings.deploymentName), 'deploymentName'),
-        apiVersion: require(nonEmptyString(settings.apiVersion), 'apiVersion'),
+        apiVersion,
+        api: hasResponsesRoute ? resolveUpstreamApi(model.settings) : 'chat',
       };
     }
     case 'bedrock': {
       const sessionToken = nonEmptyString(creds.sessionToken);
-      return {
+      return withPromptCaching({
         provider: 'bedrock',
         region: require(nonEmptyString(settings.region), 'region'),
         accessKeyId: require(nonEmptyString(creds.accessKeyId), 'accessKeyId'),
         secretAccessKey: require(nonEmptyString(creds.secretAccessKey), 'secretAccessKey'),
         ...(sessionToken ? { sessionToken } : {}),
-      };
+      }, 'bedrock', primaryReplicaModel(model).modelId, model.settings);
     }
     case 'vertex': {
       const serviceAccountJson = nonEmptyString(creds.serviceAccountKey);
-      return {
+      return withPromptCaching({
         provider: 'vertex',
         projectId: require(nonEmptyString(settings.projectId), 'projectId'),
         location: require(nonEmptyString(settings.location), 'location'),
         ...(serviceAccountJson ? { serviceAccountJson } : {}),
-      };
+      }, 'vertex', primaryReplicaModel(model).modelId, model.settings);
     }
     default:
       throw new SdkProviderMappingError(record.driver, 'no native agent-sdk provider for this driver');
@@ -333,9 +368,14 @@ export function toUsageSnapshot(
   };
 }
 
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 /**
  * One chat completion through the SDK's native provider. Applies the hub
- * model's own sampling settings (temperature / maxTokens) and forwards
+ * model's own sampling settings (temperature), its reasoning default and its
+ * output limit (resolved like a gateway call, see the header), and forwards
  * `settings.requestDefaults` + `settings.extraBody` verbatim via `extra` —
  * the same operator-owned body fields the gateway would merge upstream.
  * Latency is measured around `complete()` only, mirroring the gateway's
@@ -350,13 +390,30 @@ export async function invokeChatViaSdk(
     toolChoice?: ChatCompletionRequest['toolChoice'];
     /**
      * Structured-output contract to send with the call (OpenAI
-     * `response_format` shape). Carried through `extra` so it reaches the wire
-     * on every provider the SDK supports — a suite that omits it is testing a
-     * looser contract than production runs under.
+     * `response_format` shape). Converted to the SDK's native `responseFormat`
+     * (the conversion the gateway applies to a client's body) so it reaches
+     * the wire on every provider that has one - a suite that omits it is
+     * testing a looser contract than production runs under.
      */
     responseFormat?: Record<string, unknown>;
-    /** Output-token ceiling; overrides the model's configured default. */
+    /**
+     * Output-token ceiling for this call. The CALLER'S value: it beats the
+     * model's configured limit and is a hard cap, never raised for thinking.
+     */
     maxTokens?: number;
+    /**
+     * The limit used when neither the caller nor the model record sets one
+     * (the record's "Default max tokens" still wins and, like any limit the
+     * model record sets, may get thinking headroom). For calls whose answer
+     * size is known, so they are not left to the provider's own default.
+     */
+    defaultMaxTokens?: number;
+    /**
+     * A reasoning setting for THIS call (a side call's lowest thinking, `sideCallReasoning`): it replaces the hub
+     * model's reasoning default, with the same guards (no extended thinking on a Bedrock non-Claude model, none next
+     * to an operator-supplied `thinking` block).
+     */
+    reasoning?: unknown;
     /** Pre-resolved config (from `prepareSdkInvocation`) to skip re-resolution. */
     config?: ProviderConfig;
   },
@@ -366,20 +423,43 @@ export async function invokeChatViaSdk(
   const provider = createProvider(config);
 
   const settings = asRecord(model.settings);
+  const served = primaryReplicaModel(model);
   const extra = {
     ...asRecord(settings.requestDefaults),
     ...asRecord(settings.extraBody),
-    ...(opts?.responseFormat ? { response_format: opts.responseFormat } : {}),
   };
   const tools = toSdkTools(opts?.tools);
+  const responseFormat = openAiResponseFormatToNative(opts?.responseFormat);
+
+  // The limit and the reasoning are decided together, by the resolver the native client uses: a caller's cap
+  // leaves a thinking budget no room to be raised (the SDK would raise `max_tokens` itself), so the budget is
+  // fitted under it; everything else follows `computeOutputTokenLimit`.
+  const { maxTokens, reasoning } = resolveNativeCall({
+    driver: config.provider,
+    modelId: served.modelId,
+    overrides: {
+      maxCompletionTokens: positiveNumber(settings.maxCompletionTokens),
+      maxTokens: positiveNumber(settings.maxTokens) ?? positiveNumber(opts?.defaultMaxTokens),
+      extraBody: extra,
+    },
+    reasoning: modelDefaultReasoning(
+      config.provider,
+      served.modelId,
+      { extraBody: extra },
+      normalizeNativeReasoning(opts?.reasoning) ?? normalizeNativeReasoning(settings.reasoning),
+    ),
+    requestMaxTokens: opts?.maxTokens,
+    stream: false,
+    modelMax: modelMaxOutputTokens(served),
+  });
 
   const request: ChatCompletionRequest = {
-    model: primaryReplicaModel(model).modelId,
+    model: served.modelId,
     messages: toUnifiedMessages(wireMessages),
     ...(typeof settings.temperature === 'number' ? { temperature: settings.temperature } : {}),
-    ...(typeof opts?.maxTokens === 'number'
-      ? { maxTokens: opts.maxTokens }
-      : typeof settings.maxTokens === 'number' ? { maxTokens: settings.maxTokens } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(responseFormat ? { responseFormat } : {}),
     ...(tools ? { tools, toolChoice: opts?.toolChoice ?? 'auto' } : {}),
     ...(Object.keys(extra).length > 0 ? { extra } : {}),
   };
@@ -394,5 +474,8 @@ export async function invokeChatViaSdk(
     usage: toUsageSnapshot(response.usage, config.provider),
     latencyMs,
     raw: response.raw,
+    ...(response.finishReason ? { finishReason: response.finishReason } : {}),
+    ...(response.rawFinishReason ? { rawFinishReason: response.rawFinishReason } : {}),
+    ...(maxTokens !== undefined ? { outputTokenLimit: maxTokens } : {}),
   };
 }

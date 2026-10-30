@@ -248,7 +248,7 @@ export default function TracingThreadsPage() {
             variant="default"
             size="sm"
             leftSection={<IconBook size={14} stroke={1.7} />}
-            onClick={() => openDocs('api-tracing')}
+            onClick={() => openDocs('observe-tracing')}
           >
             {th('common.docs')}
           </Button>

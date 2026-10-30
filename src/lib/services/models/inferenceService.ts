@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { AGENT_REASONING_OVERRIDE } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import { abortErrorFrom, withResilience, type RetryConfig } from '@/lib/core/resilience';
@@ -1479,8 +1480,12 @@ export async function handleOcrRequest(params: {
     // The OCR factory itself decides native vs VLM based on the contract. We pass
     // the requested mode through modelSettings.ocr.mode so VLM-only providers can
     // refuse a native request explicitly if they wanted to.
+    // The model's declared maximum output is injected the way a chat call gets it, so a VLM read sizes its
+    // page calls from it (Model Hub-declared maximum included).
+    const declaredMax = modelMaxOutputTokens(model);
     const ocrSettings = {
       ...((model.settings ?? {}) as Record<string, unknown>),
+      ...(declaredMax !== undefined ? { maxOutputTokens: declaredMax } : {}),
       ocr: {
         ...(((model.settings ?? {}) as Record<string, unknown>).ocr as
           | Record<string, unknown>
@@ -1507,10 +1512,14 @@ export async function handleOcrRequest(params: {
       ocrRuntime = ensureOcrRuntime(await runtime.createOcrRuntime!(ocrConfig));
     }
 
+    // A VLM read is many page calls that already retry and time out one by one: by default the whole extract is
+    // neither retried (every page would be billed again) nor held to the single-request timeout. A caller that
+    // sends one page at a time (the extraction engine) sets its own.
     result = await withResilience(
       () => ocrRuntime.extract(input),
       {
         key: `ocr:${model.providerKey}`,
+        ...(mode === 'vlm' ? { retry: { enabled: false }, timeoutMs: 0 } : {}),
         ...(params.resilience?.timeoutMs !== undefined ? { timeoutMs: params.resilience.timeoutMs } : {}),
         ...(params.resilience?.retry ? { retry: params.resilience.retry } : {}),
         ...(params.signal ? { signal: params.signal } : {}),

@@ -18351,6 +18351,16 @@ components:
               $ref: '#/components/schemas/ReasoningEffort'
         reasoning_effort:
           $ref: '#/components/schemas/ReasoningEffort'
+        prompt_cache_key:
+          type: string
+          description: 'Model target on an OpenAI or Azure OpenAI model (an OpenAI-compatible or Together model only with its "Allow extra parameters" switch on): OpenAI''s cache routing key, sent upstream unchanged. Never sent to Anthropic, Bedrock or Vertex.'
+        prompt_cache_retention:
+          type: string
+          description: 'Model target on an OpenAI or Azure OpenAI model (an OpenAI-compatible or Together model only with its "Allow extra parameters" switch on; before GPT-5.6): `in_memory` or `24h`, sent upstream unchanged. Never sent to Anthropic, Bedrock or Vertex.'
+        prompt_cache_options:
+          type: object
+          description: 'Model target on an OpenAI or Azure OpenAI model (an OpenAI-compatible or Together model only with its "Allow extra parameters" switch on; GPT-5.6 and later): `{ "ttl": "30m" | "12h", "mode": ... }`, sent upstream unchanged. Never sent to Anthropic, Bedrock or Vertex.'
+          additionalProperties: true
         include_reasoning:
           type: boolean
           description: '`false` leaves reasoning out of the response and the stream. It can only narrow: what an agent''s `showReasoning: false` hid stays hidden.'
@@ -20617,6 +20627,16 @@ components:
           properties:
             effort:
               $ref: '#/components/schemas/ReasoningEffort'
+        prompt_cache_key:
+          type: string
+          description: 'Model target on an OpenAI or Azure OpenAI model (an OpenAI-compatible or Together model only with its "Allow extra parameters" switch on): OpenAI''s cache routing key, sent upstream unchanged. Never sent to Anthropic, Bedrock or Vertex.'
+        prompt_cache_retention:
+          type: string
+          description: 'Model target on an OpenAI or Azure OpenAI model (an OpenAI-compatible or Together model only with its "Allow extra parameters" switch on; before GPT-5.6): `in_memory` or `24h`, sent upstream unchanged. Never sent to Anthropic, Bedrock or Vertex.'
+        prompt_cache_options:
+          type: object
+          description: 'Model target on an OpenAI or Azure OpenAI model (an OpenAI-compatible or Together model only with its "Allow extra parameters" switch on; GPT-5.6 and later): `{ "ttl": "30m" | "12h", "mode": ... }`, sent upstream unchanged. Never sent to Anthropic, Bedrock or Vertex.'
+          additionalProperties: true
         include_reasoning:
           type: boolean
           description: '`false` hides the reasoning text from the answer. It cannot show what the Model Hub or the agent hid.'
@@ -29614,13 +29634,24 @@ components:
           type: boolean
         templateKey:
           type: string
-          description: The sandbox template; required when enabled.
+          description: The sandbox template; required when enabled, except in `instance` mode.
         mode:
           type: string
           enum:
             - session
             - ephemeral
+            - instance
           default: session
+          description: >-
+            `session`: one sandbox per conversation, kept between turns. `ephemeral`: a fresh sandbox per message.
+            `instance`: an existing persistent sandbox of the project (`instanceId`), shared by every conversation;
+            the agent starts it when it is stopped and never creates, stops or deletes it.
+        instanceId:
+          type: string
+          description: >-
+            The persistent sandbox an `instance`-mode agent works in (an instance of the agent's project). Setting
+            or changing it needs write access to Sandbox (`403` `sandbox_write_required`); an id that is not a
+            persistent sandbox of the project is `400`.
         commandTimeoutSec:
           type: integer
           minimum: 1
@@ -29950,6 +29981,19 @@ components:
           example: text
         text:
           type: string
+        cache_control:
+          type: object
+          description: 'Model target, `text` parts (also on `system` and `tool` messages): a prompt-cache breakpoint, `{ "type": "ephemeral" }` (`ttl` `5m` or `1h`). Kept whether or not the model''s "Cache prompts" switch is on, and used by Anthropic, Bedrock Claude / Nova and Claude on Vertex (at most four breakpoints per request count, the SDK drops the earliest above that). Other providers ignore it.'
+          properties:
+            type:
+              type: string
+              enum:
+                - ephemeral
+            ttl:
+              type: string
+              enum:
+                - 5m
+                - 1h
         image_url:
           type: object
           properties:

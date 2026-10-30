@@ -22,6 +22,7 @@ import {
   PricingSection,
   ProviderSection,
   ReasoningSection,
+  PromptCachingSection,
   RequestParamsSection,
   UpstreamApiSection,
 } from '@/components/models/modelFormSections';
@@ -29,19 +30,25 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBrain, IconDeviceFloppy, IconShield } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { normalizePromptCaching } from '@/components/models/promptCachingForm';
+import { useCatalogCachePrices } from '@/components/models/useCatalogCachePrices';
+import { promptCachingSupport } from '@/lib/services/models/promptCaching';
 import { reasoningFormFromSettings, reasoningSettingsPatch } from '@/components/models/reasoningForm';
-import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
+  blankMaxTokensPlaceholder,
   detectUnsupportedParams,
   formatRequestDefaults,
+  limitWarnings,
+  numberSettingOrNull,
   parseRequestDefaults,
   toStringArray,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
 import {
   getDefaultModelOutputModalities,
+  limitsFromCatalogFill,
   type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
 import {
@@ -191,7 +198,7 @@ interface EditModelModalProps {
   /** Called after a successful save (the caller refreshes its list / detail). */
   onSaved: () => void;
   /** Open scrolled to this section with its first control focused (a shortcut from the model page). */
-  initialSection?: 'reasoning';
+  initialSection?: 'reasoning' | 'promptCaching';
 }
 
 export default function EditModelModal({ modelId: editModelId, opened, onClose, onSaved, initialSection }: EditModelModalProps) {
@@ -263,6 +270,13 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     () =>
       modelProviders.find((candidate) => candidate.key === form.values.providerKey) ?? null,
     [form.values.providerKey, modelProviders],
+  );
+
+  // The catalog's cache prices for "Fill from catalog" in Prompt caching (only asked while caching is on offer).
+  const catalogCachePrices = useCatalogCachePrices(
+    form.values.modelId ?? '',
+    model?.category === 'llm' &&
+      promptCachingSupport(selectedProvider?.driver, form.values.modelId).support === 'explicit',
   );
 
   // What the model id is known to accept — the boxes start from it until someone ticks one.
@@ -561,6 +575,8 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           },
           settings: {
             ...values.settings,
+            // A cleared "Default max tokens" is `null` too: the key is removed instead of being stored as ''.
+            maxTokens: numberSettingOrNull(values.settings.maxTokens),
             // `null` clears the key server-side, so emptying the editor removes
             // the defaults rather than persisting an empty object. Reached only
             // when the text is genuinely empty — invalid JSON is rejected above.
@@ -573,6 +589,13 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             // `null` removes the key: "Not set" must stop sending anything.
             ...(model.category === 'llm'
               ? reasoningSettingsPatch(reasoningFormFromSettings(values.settings), null, values.settings)
+              : {}),
+            // Only a change from the provider's default is stored; `null` removes the key (back to the default).
+            ...(model.category === 'llm'
+              ? {
+                  promptCaching:
+                    normalizePromptCaching(values.settings.promptCaching, selectedProvider?.driver, values.modelId) ?? null,
+                }
               : {}),
           },
           isMultimodal: isMultimodalFor(shownInputModalities(inputModalities, inferredModalities)),
@@ -641,6 +664,17 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
 
   const isLlm = model.category === 'llm';
   const validIdentity = Boolean(form.values.name && form.values.modelId);
+  // What a blank "Default max tokens" amounts to, and the limits that do not fit together (shown, never blocking).
+  const blankMaxTokensText = blankMaxTokensPlaceholder({
+    driver: selectedProvider?.driver,
+    modelId: form.values.modelId,
+    maxOutputTokens: form.values.maxOutputTokens,
+  }, tWizard('fields.runtimeMaxTokens.modelDefaultSplit'), tWizard('fields.runtimeMaxTokens.providerDefault'));
+  const limitNotes = limitWarnings({
+    contextWindow: form.values.contextWindow,
+    maxOutputTokens: form.values.maxOutputTokens,
+    maxTokens: form.values.settings.maxTokens,
+  }).map((warning) => tWizard(`limitWarnings.${warning}`));
   const sectionNumber = (() => {
     let n = 0;
     return () => ++n;
@@ -781,12 +815,18 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             value: form.values.pricing.cacheWriteTokenPer1M,
             onChange: setOptionalPrice('pricing.cacheWriteTokenPer1M'),
           }}
-          onApplyCatalog={(pricing) => {
+          onApplyCatalog={(pricing, meta) => {
             form.setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
             form.setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
             // 0 = the catalog has no such price; keep the field blank.
             form.setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M || '');
             form.setFieldValue('pricing.cacheWriteTokenPer1M', pricing.cacheWriteTokenPer1M || '');
+            // Token limits of the entry fill the (chat model) limit fields only while they are empty.
+            if (isLlm) {
+              const limits = limitsFromCatalogFill(form.values, meta);
+              if (limits.contextWindow !== undefined) form.setFieldValue('contextWindow', limits.contextWindow);
+              if (limits.maxOutputTokens !== undefined) form.setFieldValue('maxOutputTokens', limits.maxOutputTokens);
+            }
           }}
         />
 
@@ -805,8 +845,10 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           maxTokens={{
             label: tWizard('fields.runtimeMaxTokens.label'),
             hint: tWizard('fields.runtimeMaxTokens.description'),
+            placeholder: blankMaxTokensText,
             props: form.getInputProps('settings.maxTokens'),
           }}
+          warnings={limitNotes}
         />
 
         {isLlm ? (
@@ -825,9 +867,35 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
               if (returnReasoning === false) settings.returnReasoning = false; else delete settings.returnReasoning;
               form.setFieldValue('settings', settings);
             }}
-            forcedNoneWithTools={Boolean(
-              detectForcedParams(selectedProvider?.driver, form.values.modelId, true).forced?.reasoning_effort,
-            )}
+          />
+        ) : null}
+
+        {isLlm ? (
+          <PromptCachingSection
+            number={sectionNumber()}
+            driver={selectedProvider?.driver}
+            modelId={form.values.modelId ?? undefined}
+            value={normalizePromptCaching(form.values.settings.promptCaching, selectedProvider?.driver, form.values.modelId)}
+            onChange={(next) => {
+              const settings = { ...form.values.settings };
+              if (next) settings.promptCaching = next; else delete settings.promptCaching;
+              form.setFieldValue('settings', settings);
+            }}
+            pricing={{
+              currency: form.values.pricing.currency,
+              cached: form.values.pricing.cachedTokenPer1M,
+              cacheWrite: form.values.pricing.cacheWriteTokenPer1M,
+            }}
+            focusOnMount={initialSection === 'promptCaching'}
+            catalogPrices={catalogCachePrices}
+            onFillCatalog={(prices) => {
+              if (prices.cachedTokenPer1M > 0 && !(Number(form.values.pricing.cachedTokenPer1M) > 0)) {
+                form.setFieldValue('pricing.cachedTokenPer1M', prices.cachedTokenPer1M);
+              }
+              if (prices.cacheWriteTokenPer1M > 0 && !(Number(form.values.pricing.cacheWriteTokenPer1M) > 0)) {
+                form.setFieldValue('pricing.cacheWriteTokenPer1M', prices.cacheWriteTokenPer1M);
+              }
+            }}
           />
         ) : null}
 
@@ -846,6 +914,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
         {isLlm ? (
           <RequestParamsSection
             number={sectionNumber()}
+            driver={selectedProvider?.driver}
             autoDropped={autoDropped}
             autoDrop={{
               checked: form.values.settings.autoDropUnsupportedParams !== false,

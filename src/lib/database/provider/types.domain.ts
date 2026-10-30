@@ -1240,6 +1240,10 @@ export interface IRedTeamAggregate {
   bySeverity: Record<string, number>;
   byCategory: Record<string, IRedTeamCategoryBreakdown>;
   avgLatencyMs: number | null;
+  /** Attempts whose llm-judge detector errored: counted apart, never folded into "not hit". Absent on runs recorded before it existed. */
+  judgeErrors?: number;
+  /** Judge errors exceeded 20% of the judged attempts: the attack-success rate cannot be trusted. */
+  inconclusive?: boolean;
 }
 
 export interface IRedTeamRun {
@@ -2219,6 +2223,8 @@ export interface IRerankerConfig {
   batchSize?: number;
   /** Temperature for LLM strategies. */
   temperature?: number;
+  /** Output token limit of one LLM scoring call (llm-judge / llm-listwise). Default 32 for llm-judge, 1024 for llm-listwise. */
+  maxTokens?: number;
   /** Custom prompt template (llm-judge / llm-listwise). Supports {{query}} and {{document}} placeholders. */
   promptTemplate?: string;
   /** Score normalization — 'minmax' rescales scores to [0,1]. */
@@ -2360,6 +2366,8 @@ export type AlertMetric =
   | 'appgw_block_rate'
   | 'appgw_error_rate'
   | 'appgw_requests_per_user'
+  | 'appgw_output_limit_turns'
+  | 'appgw_output_limit_rate'
   // agents (entity_metrics; traced + hosted agents)
   | 'agent_sessions'
   | 'agent_error_rate'
@@ -2898,13 +2906,21 @@ export interface IAgentMemoryConfig {
   /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
   memoryStoreKey?: string;
   /**
-   * One or more stores ("mounts") the agent reads from / writes into. Several
-   * agents mounting the same store (+ a shared scope) share memory. When set
-   * this wins over the legacy `memoryStoreKey`; the FIRST mount is the primary
-   * store for the SDK's pre-injected recall and summary writes.
+   * @deprecated Configs saved while agents could mount several stores. Read
+   * only for compatibility (`agentMemoryStore.ts`): the first mount is the
+   * agent's store and the rest are ignored. Saving from the panel replaces it
+   * with `memoryStoreKey`.
    */
   mounts?: IAgentMemoryMount[];
   scope?: AgentMemoryScope;
+  /**
+   * 'workspace' scope is shared by the agents of the project that use this
+   * store, instead of belonging to this agent alone. Only set when a former
+   * `mounts` config is converted: its workspace facts were written
+   * project-wide, and this keeps them visible. Nothing else sets it; agents
+   * share memory through 'tenant' scope.
+   */
+  sharedWorkspace?: boolean;
   writePolicy?: AgentMemoryWritePolicy;
   readPolicy?: AgentMemoryReadPolicy;
   /**
@@ -2921,6 +2937,7 @@ export interface IAgentMemoryConfig {
   tools?: AgentMemoryToolMode;
 }
 
+/** @deprecated See `IAgentMemoryConfig.mounts`. */
 export interface IAgentMemoryMount {
   /** Key of an existing `IMemoryStore`. */
   storeKey: string;
@@ -3467,9 +3484,13 @@ export interface IAgentHumanInTheLoopConfig {
  *    there is nothing to keep it against, so it lasts one message.
  *  - `ephemeral`: a fresh sandbox per message (run), created on the first
  *    sandbox tool call and deleted when the run ends. Nothing carries over.
+ *  - `instance`: an existing persistent sandbox of the project, chosen in
+ *    `instanceId`. Every conversation and run shares it; the agent never
+ *    creates, stops or deletes it, and its template, resources and network
+ *    are its own.
  *  - `persist`: the former name of `session`, still accepted as such.
  */
-export type AgentSandboxMode = 'session' | 'ephemeral' | 'persist';
+export type AgentSandboxMode = 'session' | 'ephemeral' | 'instance' | 'persist';
 
 /**
  * Gives an agent a sandbox (the enterprise Agent Runtime Sandbox module) and
@@ -3506,6 +3527,12 @@ export interface IAgentSandboxConfig {
   templateKey?: string;
   /** Default `session`. */
   mode?: AgentSandboxMode;
+  /**
+   * The persistent sandbox (an instance of this project) the agent works in when `mode` is `instance`. Choosing
+   * or changing it needs write access to Sandbox. Not carried by an exported manifest: an id names one project's
+   * machine.
+   */
+  instanceId?: string;
   /** Per-command timeout. Default 60, max 600. */
   commandTimeoutSec?: number;
   /** @deprecated No longer used — a session sandbox closes by the sandbox module's idle timeout. Still accepted so saved configs load. */

@@ -57,7 +57,19 @@ interface InternalProviderInfo {
   label: string;
   description: string;
   configFields: InternalProviderConfigField[];
+  /** A server on it (and a composite that includes one) takes an API token only. Absent on an older API. */
+  tokenOnly?: boolean;
+  /** False when the tenant cannot use it (an enterprise module or license missing). Absent on an older API. */
+  available?: boolean;
 }
+
+/** What the provider picker offers before capabilities load. */
+const FALLBACK_INTERNAL_PROVIDERS: InternalProviderInfo[] = [
+  { id: 'knowledge-base', label: 'Knowledge Base', description: '', configFields: [] },
+];
+
+/** Token-only providers an older API does not flag yet. */
+const TOKEN_ONLY_FALLBACK = new Set(['browser']);
 
 interface McpCapabilities {
   stdioSubprocess: { enabled: boolean; npx: boolean; uvx: boolean };
@@ -155,6 +167,20 @@ const INSTANCE_PICKERS: Record<string, {
     placeholder: 'Choose a browser',
     empty: 'No active browsers yet — create one under Dashboard → Browser first.',
     required: 'Choose which browser to publish',
+  },
+  sandbox: {
+    label: 'Template',
+    hint: 'What each sandbox starts from. Callers start their own sandboxes with sandbox_create and delete them with sandbox_delete; an idle one is deleted on its own.',
+    placeholder: 'Choose a sandbox template',
+    empty: 'No sandbox templates yet — create one (or run "Seed defaults") under Dashboard → Sandbox → Templates first.',
+    required: 'Choose which template the sandboxes start from',
+  },
+  'sandbox-instance': {
+    label: 'Persistent sandbox',
+    hint: 'The machine these tools work in. Every caller shares it: files and installed packages stay between calls.',
+    placeholder: 'Choose a persistent sandbox',
+    empty: 'No persistent sandboxes in this project yet — create one with "Persistent" on under Dashboard → Sandbox first.',
+    required: 'Choose which sandbox to publish',
   },
 };
 
@@ -347,22 +373,29 @@ export default function CreateMcpModal({
       })
       .catch(() => setGuardrails([]));
     // Instances for the "internal" providers that publish one chosen resource.
-    const loadInstances = (provider: string, url: string, field: string) => fetch(url)
+    type InstanceRow = { key?: string; id?: string; name: string; description?: string; persist?: boolean; actualState?: string };
+    const loadInstances = (
+      provider: string,
+      url: string,
+      field: string,
+      toOption: (m: InstanceRow) => InternalInstanceOption | null = (m) => ({ key: m.key ?? '', label: m.name, description: m.description }),
+    ) => fetch(url)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const list = Array.isArray(data?.[field]) ? data[field] : [];
+        const list: InstanceRow[] = Array.isArray(data?.[field]) ? data[field] : [];
         setInstanceOptions((prev) => ({
           ...prev,
-          [provider]: list.map((m: { key: string; name: string; description?: string }) => ({
-            key: m.key,
-            label: m.name,
-            description: m.description,
-          })),
+          [provider]: list.map(toOption).filter((option): option is InternalInstanceOption => Boolean(option?.key)),
         }));
       })
       .catch(() => setInstanceOptions((prev) => ({ ...prev, [provider]: [] })));
     loadInstances('knowledge-base', '/api/rag/modules?status=active', 'modules');
     loadInstances('browser', '/api/browser/browsers?status=active', 'browsers');
+    // Sandbox (enterprise): no route in community, and only listed to Sandbox users — both read as "none yet".
+    loadInstances('sandbox', '/api/sandbox/templates', 'templates');
+    loadInstances('sandbox-instance', '/api/sandbox/instances', 'instances', (m) => (m.persist && m.id
+      ? { key: m.id, label: `${m.name}${m.actualState ? ` (${m.actualState})` : ''}` }
+      : null));
     // MCP hubs — enterprise only; degrade silently when unavailable.
     fetch('/api/mcp/hubs')
       .then((r) => (r.ok ? r.json() : null))
@@ -428,16 +461,19 @@ export default function CreateMcpModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.values.sourceType, form.values.internalProvider]);
 
-  // A browser reaches whatever address the console can: its server, and a
-  // composite that includes it, take an API token only (the server refuses
-  // a public one).
-  const browserTokenOnly = (form.values.sourceType === 'internal' && form.values.internalProvider === 'browser')
+  // A browser reaches whatever address the console can, a sandbox runs code:
+  // a server on such a provider, and a composite that includes one, take an
+  // API token only (the server refuses a public one).
+  const isTokenOnlyProvider = (id: string | undefined) => Boolean(id) && (
+    capabilities?.internalProviders?.find((p) => p.id === id)?.tokenOnly ?? TOKEN_ONLY_FALLBACK.has(id!)
+  );
+  const tokenOnly = (form.values.sourceType === 'internal' && isTokenOnlyProvider(form.values.internalProvider))
     || (form.values.sourceType === 'composite'
-      && form.values.compositeMembers.some((id) => memberOptions.find((m) => m.id === id)?.provider === 'browser'));
+      && form.values.compositeMembers.some((id) => isTokenOnlyProvider(memberOptions.find((m) => m.id === id)?.provider)));
   useEffect(() => {
-    if (browserTokenOnly && form.values.accessMode === 'public') form.setFieldValue('accessMode', 'token');
+    if (tokenOnly && form.values.accessMode === 'public') form.setFieldValue('accessMode', 'token');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [browserTokenOnly, form.values.accessMode]);
+  }, [tokenOnly, form.values.accessMode]);
 
   const v = form.values;
 
@@ -894,7 +930,8 @@ export default function CreateMcpModal({
           <>
             <FormField label="Internal service" hint="More internal services will show up here over time.">
               <ChipPicker<string>
-                options={(capabilities?.internalProviders ?? [{ id: 'knowledge-base', label: 'Knowledge Base', description: '' }])
+                options={(capabilities?.internalProviders ?? FALLBACK_INTERNAL_PROVIDERS)
+                  .filter((p) => p.available !== false || p.id === v.internalProvider)
                   .map((p) => ({ value: p.id, label: p.label }))}
                 value={v.internalProvider}
                 onChange={(val) => {
@@ -1209,14 +1246,14 @@ export default function CreateMcpModal({
         ) : null}
         <FormField
           label="Access mode"
-          hint={browserTokenOnly
-            ? 'A browser can reach any address the console can, so this server takes an API token only. Callers send a Cognipeer API token (PAT) in the Authorization header.'
+          hint={tokenOnly
+            ? 'This server\'s tools reach past the console (a browser goes to any address the console can, a sandbox runs code), so it takes an API token only. Callers send a Cognipeer API token (PAT) in the Authorization header.'
             : v.accessMode === 'public'
               ? 'Anyone with the URL can call this server — treat it like a webhook URL.'
               : 'Callers must send a Cognipeer API token (PAT) in the Authorization header.'}
         >
           <ChipPicker<AccessMode>
-            options={browserTokenOnly
+            options={tokenOnly
               ? [{ value: 'token', label: 'API token required' }]
               : [
                 { value: 'token', label: 'API token required' },

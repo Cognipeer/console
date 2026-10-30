@@ -1,6 +1,7 @@
 import { NumberInput, Select, Text } from '@mantine/core';
 import { FormField, FormSection, ToggleList, ToggleRow } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import { reasoningForcedNoneOnChat } from '@/lib/providers/unsupportedParams';
 import { reasoningControlForDriver } from '@/lib/services/models/reasoning';
 import { reasoningTextNeedsResponses } from '@/lib/services/models/upstreamApi';
 import type { ReasoningFormValue } from '@/components/models/reasoningForm';
@@ -12,9 +13,10 @@ interface ReasoningSectionProps {
   modelId?: string;
   value: ReasoningFormValue;
   onChange: (patch: Partial<ReasoningFormValue>) => void;
-  /** The GPT-5 + tools rule applies to this model: it is shown, not editable. */
-  forcedNoneWithTools?: boolean;
-  /** The model's settings: the Upstream API decides whether reasoning text can come back. */
+  /**
+   * The model's settings: the Upstream API decides whether reasoning text can come back, and whether the GPT-5.1+ /
+   * gpt-6 "no reasoning next to tools" rule of Chat Completions applies.
+   */
   settings?: unknown;
   /** Opened from a "set the reasoning" shortcut: scroll here and focus the effort picker. */
   focusOnMount?: boolean;
@@ -32,7 +34,6 @@ export default function ReasoningSection({
   modelId,
   value,
   onChange,
-  forcedNoneWithTools,
   focusOnMount,
   settings,
 }: ReasoningSectionProps) {
@@ -99,9 +100,9 @@ export default function ReasoningSection({
         </Text>
       ) : null}
 
-      {forcedNoneWithTools ? (
+      {control.kind !== 'none' && reasoningForcedNoneOnChat(driver, modelId, settings) ? (
         <Text size="sm" c="orange" data-testid="reasoning-forced-none">
-          {t('forcedNoneWithTools')}
+          {t('hint.forcedNoneOnChat')}
         </Text>
       ) : null}
 

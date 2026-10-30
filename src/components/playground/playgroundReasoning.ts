@@ -1,4 +1,5 @@
 import {
+  bedrockCarriesThinking,
   readModelReasoning,
   reasoningControlForDriver,
   shouldReturnReasoning,
@@ -109,7 +110,7 @@ export function playgroundReasoningHint(input: PlaygroundModelInfo & {
   if ((driver === 'openai' || driver === 'azure') && resolveUpstreamApi(input.settings) === 'chat') {
     return 'responsesOnly';
   }
-  if (driver === 'anthropic' || (driver === 'bedrock' && /claude|anthropic/i.test(modelId))) {
+  if (driver === 'anthropic' || (driver === 'bedrock' && bedrockCarriesThinking(modelId))) {
     return 'tryHigher';
   }
   return null;

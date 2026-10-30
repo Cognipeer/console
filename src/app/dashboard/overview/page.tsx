@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent,
   type ReactNode,
 } from 'react';
 import Link from 'next/link';
@@ -28,6 +29,7 @@ import { SkeletonText, StatGridSkeleton } from '@/components/common/ui/Skeletons
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { CardLink } from '@/components/dashboard/CardLink';
+import { useDocLink } from '@/components/docs/DocsDrawerContext';
 import {
   ActivityListSkeleton,
   PinnedServicesSkeleton,
@@ -126,6 +128,7 @@ function emailLocalPart(email?: string | null): string | null {
 
 export default function DashboardOverviewPage() {
   const t = useTranslations('dashboardOverview');
+  const apiDocsLink = useDocLink('api-overview');
   const tNav = useTranslations('navigation');
   const locale = useLocale();
   const shellUser = useDashboardUser();
@@ -564,7 +567,9 @@ export default function DashboardOverviewPage() {
               icon={<IconBook size={16} stroke={1.7} />}
               title={t('resources.docs')}
               description={t('resources.docsDesc')}
-              href="/dashboard/docs"
+              href={apiDocsLink.href}
+              onClick={apiDocsLink.onClick}
+              external
             />
             <ResourceLink
               icon={<IconRocket size={16} stroke={1.7} />}
@@ -689,6 +694,7 @@ function ResourceLink({
   description,
   href,
   external = false,
+  onClick,
 }: {
   icon: ReactNode;
   title: string;
@@ -696,6 +702,8 @@ function ResourceLink({
   href: string;
   /** Opens outside the app, in a new tab. */
   external?: boolean;
+  /** For an external link that opens in the app instead (a docs page, in the docs panel). */
+  onClick?: (event: MouseEvent<HTMLElement>) => void;
 }) {
   const content = (
     <>
@@ -721,6 +729,7 @@ function ResourceLink({
       href={href}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={onClick}
       className="ds-link-row"
       style={style}
     >

@@ -23,6 +23,8 @@ interface SlimRailProps {
   recents: DashboardServiceDefinition[];
   activeServiceId: string | null;
   onLauncherClick: () => void;
+  /** Opens the docs panel on the page of the service in view. */
+  onHelpClick: () => void;
   settingsHref: string;
   settingsActive: boolean;
 }
@@ -32,6 +34,7 @@ export default function SlimRail({
   recents,
   activeServiceId,
   onLauncherClick,
+  onHelpClick,
   settingsHref,
   settingsActive,
 }: SlimRailProps) {
@@ -143,15 +146,9 @@ export default function SlimRail({
         </Link>
       </Tooltip>
       <Tooltip label="Help" position="right" withArrow offset={8} openDelay={120}>
-        <Link
-          href="/dashboard/docs"
-          className={classes.railBtn}
-          aria-label="Help"
-          data-pending={pendingAttr(isHrefPending('/dashboard/docs'), false)}
-          {...getIntentProps('/dashboard/docs')}
-        >
+        <button type="button" className={classes.railBtn} aria-label="Help" onClick={onHelpClick}>
           <IconHelp size={17} stroke={1.7} />
-        </Link>
+        </button>
       </Tooltip>
     </aside>
   );

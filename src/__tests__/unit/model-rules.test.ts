@@ -73,9 +73,15 @@ describe('pickers offer exactly the matched rule', () => {
     ['anthropic', 'claude-opus-5-5', ['low', 'medium', 'high', 'xhigh', 'max']],
     ['anthropic', 'claude-haiku-5-5', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
     ['azure', 'my-prod-deployment', LADDER],
-    ['bedrock', 'us.amazon.nova-pro-v1:0', LADDER],
+    // An application inference profile hides its model: the id cannot tell, so the control stays.
+    ['bedrock', 'arn:aws:bedrock:eu-central-1:123456789012:application-inference-profile/abc123', LADDER],
   ])('%s / %s', (driver, modelId, expected) => {
     expect(efforts(driver, modelId)).toEqual(expected);
+  });
+
+  it('a Bedrock model that is not Claude has no picker: the client leaves reasoning off its wire', () => {
+    expect(efforts('bedrock', 'us.amazon.nova-pro-v1:0')).toBeUndefined();
+    expect(efforts('bedrock', 'meta.llama3-3-70b-instruct-v1:0')).toBeUndefined();
   });
 
   it('the playground control and the Model Hub form read the same list', () => {

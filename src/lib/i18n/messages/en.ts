@@ -3465,6 +3465,61 @@ export const en = {
       responses: 'Calls /responses. Pick it for models that are only served there, or for reasoning summaries. The upstream must support the Responses API.',
     },
   },
+  modelPromptCaching: {
+    title: 'Prompt caching',
+    badge: 'New',
+    description:
+      'Reuses the unchanged start of a request (tools, system prompt, earlier turns), so repeated input bills at the cache-read price.',
+    switch: 'Cache prompts',
+    caption: {
+      claude: 'On by default for Claude models.',
+      nova: 'Off by default for Nova models.',
+      other: 'Off by default for this model.',
+      off: 'Off: requests go out without cache markers. Every call bills its full input at the input price.',
+    },
+    what: {
+      label: 'What to cache',
+      auto: 'Conversation (recommended)',
+      static: 'Tools and system prompt only',
+      staticNova: 'System prompt only',
+      autoHint: 'Tools, system prompt and the conversation so far. Each agent step reads the earlier turns from cache.',
+      staticHint: 'Only the tool definitions and the system prompt are cached. Earlier turns are billed at the input price.',
+      novaHint: 'Nova caches the system prompt and messages. Tool definitions are not cached on this family.',
+    },
+    billing: {
+      line: "Billed with this model's prices: cache read {read} / 1M, cache write {write} / 1M.",
+      inputPrice: 'the input price',
+      assumedWrite: '{multiplier} x the input price (assumed)',
+      edit: 'Edit in Pricing',
+    },
+    priceWarning: {
+      text: 'Cache prices are empty, so cached tokens bill at the input price and the savings do not show in cost reports.',
+      assumedWrite: 'The cache write price is assumed at {multiplier} x the input price.',
+      fill: 'Fill from catalog',
+      orSet: 'or set them in Pricing.',
+      setInPricing: 'Set them in Pricing.',
+    },
+    markers: {
+      before: 'Requests that bring their own',
+      on: 'markers keep them.',
+      off: 'markers still keep them.',
+    },
+    automatic: {
+      text: 'This provider caches long prompts by itself. There is nothing to set here.',
+      usage: 'Cached input shows up in usage as cached tokens and bills at the cache-read price set in Pricing.',
+    },
+    none: {
+      bedrock: 'Bedrock has no prompt caching for this model family, so no cache markers are sent.',
+      other: 'This provider has no prompt caching for this model, so no cache markers are sent.',
+    },
+    detail: {
+      effective: 'Cache prompts',
+      on: 'On',
+      off: 'Off',
+      fiveMinutes: 'Cached prompts live for 5 minutes.',
+      edit: 'Edit',
+    },
+  },
   modelReasoning: {
     title: 'Reasoning',
     description:
@@ -3487,13 +3542,15 @@ export const en = {
     },
     hint: {
       responsesOnly: 'Reasoning text is only returned over the Responses API. Set Upstream API to Responses to see it.',
+      forcedNoneOnChat:
+        'With tools in a request this model runs without reasoning on Chat Completions, whatever effort is set: the provider rejects any other effort next to function tools. The Responses upstream API keeps reasoning with tools (set Upstream API to Responses).',
       effort: 'Sent as reasoning_effort. When set here it wins over the value in an API request.',
       budget: 'A level is turned into a thinking token budget; enter an exact budget below to override it.',
       toggle: 'This engine only has thinking on or off.',
       none: '',
     },
     budgetLabel: 'Thinking budget (tokens)',
-    budgetHint: 'Overrides the level. The output cap is raised above the budget automatically.',
+    budgetHint: "Overrides the level. The model's own output limit is raised above the budget automatically; a max_tokens sent by the caller is a hard cap: the budget is shrunk to fit it, or thinking is dropped when nothing fits.",
     budgetPlaceholder: 'From the level',
     includeThoughts: {
       label: 'Ask for thoughts',
@@ -3640,12 +3697,14 @@ export const en = {
       },
       maxOutputTokens: {
         label: 'Maximum output tokens',
-        description: 'Maximum generated tokens; must not exceed the context window.',
+        description: 'The most tokens this model can generate in one response. Used to cap defaults and retries and advertised to clients; must not exceed the context window. It is not a per-request default: see Default max tokens.',
         placeholder: 'e.g. 16384',
       },
       runtimeMaxTokens: {
         label: 'Default max tokens',
-        description: 'Runtime output limit used when the request does not provide one.',
+        description: 'Output limit applied to every request that does not set its own max_tokens. Blank = the provider or model default. Keep it at or below Maximum output tokens. Reasoning (thinking) tokens count against this limit.',
+        providerDefault: 'Provider default',
+        modelDefaultSplit: 'Model default: {streaming} streaming / {nonStreaming} non-streaming',
       },
     },
     review: {
@@ -3687,6 +3746,11 @@ export const en = {
       name: 'Model name is required.',
       modelId: 'Provider model ID is required.',
       maxOutputTokens: 'Maximum output tokens cannot exceed the context window.',
+    },
+    // Shown next to the limits, never blocking the save.
+    limitWarnings: {
+      defaultAboveMaxOutput: 'Default max tokens is above Maximum output tokens: requests that use it can be rejected by the provider.',
+      maxOutputAboveContext: 'Maximum output tokens is larger than the context window, so a response can never reach it.',
     },
   },
   playground: {
@@ -4321,7 +4385,7 @@ export const en = {
   },
   agents: {
     outputLimit: {
-      message: "The model reached its output token limit before it could answer. Raise the model's maximum output tokens or lower its reasoning effort, then try again.",
+      message: "The model reached its output token limit before it could answer. Raise the request's max_tokens (or the model's Default max tokens, or the agent's Max output tokens per call) or lower the reasoning effort, then try again.",
     },
     title: 'Agents',
     subtitle: 'Create and manage AI agents powered by your models',
@@ -4484,6 +4548,9 @@ export const en = {
       reasoningEffortHint: 'Chosen here, it wins over the Model Hub default and over an API request.',
       reasoningPickerAria: 'Reasoning for {model}',
       showReasoning: 'Show reasoning',
+      maxTokensPerCall: 'Max output tokens per call',
+      maxTokensPerCallDescription: "Output limit for each model call of this agent, thinking tokens included. Blank = the model's own default (Default max tokens in the Model Hub). Not the same as Max total output tokens, which caps the whole run.",
+      maxTokensPerCallPlaceholder: 'Model default',
       showReasoningDescription: 'On by default. When off, reasoning text is left out of API responses, session messages and Studio chat. The thinking tokens are still counted and billed.',
       guardrails: 'Guardrails',
       inputGuardrail: 'Input Guardrail',
@@ -5007,22 +5074,11 @@ export const en = {
       unitSeconds: '{count}s',
       badgeCallback: 'callback',
     },
-    memoryMounts: {
-      title: 'Memory stores',
-      description: 'Mount one or more stores this agent reads from and writes to. Agents that mount the same store share its memory.',
-      store: 'Store',
-      storePlaceholder: 'Select a store…',
-      access: 'Access',
-      readWrite: 'Read & write',
-      readOnly: 'Read only',
-      useFor: 'Use for',
-      useForPlaceholder: 'e.g. company-wide policies and FAQs',
-      scope: 'Scope',
-      scopeDefault: 'Default scope',
-      add: 'Add store',
-      remove: 'Remove store',
-      limit: 'At most 5 stores can be mounted.',
-      primaryNote: 'The first store is the primary one: it feeds the pre-injected recall and the automatic summary writes.',
+    memoryStore: {
+      label: 'Memory store',
+      description: 'Which Memory module store this agent reads and writes facts to.',
+      placeholder: 'Select a store…',
+      ignoredStores: 'This agent used to mount several stores. Only the first is used now; {stores} are no longer read or written. Their facts stay in the Memory module.',
     },
     attachments: {
       attach: 'Attach files',
@@ -6303,7 +6359,7 @@ export const en = {
       missingModelIdMessage: 'The catalog is matched against the model ID field.',
       noMatchTitle: 'No catalog match',
       noMatchMessage: 'No unambiguous price found for "{name}" in the catalog.',
-      filledTitle: 'Pricing filled from catalog',
+      filledTitle: 'Filled from catalog',
       filledMessage: 'Matched {key} ({confidence})',
       errorTitle: 'Catalog lookup failed',
     },

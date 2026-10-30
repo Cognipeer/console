@@ -525,3 +525,69 @@ describe('stream translation', () => {
     expect((err?.error as Record<string, unknown>).type).toBe('api_error');
   });
 });
+
+describe('cache_control on the way in', () => {
+  const base = { model: 'm', max_tokens: 10 };
+  const eph = { type: 'ephemeral' };
+
+  it('system blocks keep their markers (ttl only when 5m / 1h)', () => {
+    const out = anthropicRequestToOpenAi({
+      ...base,
+      system: [
+        { type: 'text', text: 'rules', cache_control: { type: 'ephemeral', ttl: '1h' } },
+        { type: 'text', text: 'more', cache_control: { type: 'ephemeral', ttl: '2h' } },
+        { type: 'text', text: 'plain' },
+      ],
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect((out.messages as Array<Record<string, unknown>>)[0]).toEqual({
+      role: 'system',
+      content: [
+        { type: 'text', text: 'rules', cache_control: { type: 'ephemeral', ttl: '1h' } },
+        { type: 'text', text: 'more', cache_control: eph },
+        { type: 'text', text: 'plain' },
+      ],
+    });
+  });
+
+  it('an unmarked system array still flattens to a string; a non-ephemeral marker is no marker', () => {
+    const out = anthropicRequestToOpenAi({
+      ...base,
+      system: [{ type: 'text', text: 'a', cache_control: { type: 'weird' } }, { type: 'text', text: 'b' }],
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect((out.messages as Array<Record<string, unknown>>)[0]).toEqual({ role: 'system', content: 'a\nb' });
+  });
+
+  it('a marked message text block stays an array part; an unmarked single block is still a string', () => {
+    const out = anthropicRequestToOpenAi({
+      ...base,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'big doc', cache_control: eph }, { type: 'text', text: 'question' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'ok', cache_control: eph }] },
+        { role: 'user', content: [{ type: 'text', text: 'plain' }] },
+      ],
+    });
+    const messages = out.messages as Array<Record<string, unknown>>;
+    expect(messages[0].content).toEqual([{ type: 'text', text: 'big doc', cache_control: eph }, { type: 'text', text: 'question' }]);
+    expect(messages[1].content).toEqual([{ type: 'text', text: 'ok', cache_control: eph }]);
+    expect(messages[2].content).toBe('plain');
+  });
+
+  it('tool_result text blocks keep their markers; a marked tool_result block marks its whole text', () => {
+    const out = anthropicRequestToOpenAi({
+      ...base,
+      messages: [
+        { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'a', content: [{ type: 'text', text: 'r1', cache_control: eph }, { type: 'text', text: 'r2' }] },
+          { type: 'tool_result', tool_use_id: 'b', content: 'whole', cache_control: eph },
+          { type: 'tool_result', tool_use_id: 'c', content: 'unmarked' },
+        ] },
+      ],
+    });
+    const messages = out.messages as Array<Record<string, unknown>>;
+    expect(messages[0]).toMatchObject({ role: 'tool', tool_call_id: 'a', content: [{ type: 'text', text: 'r1', cache_control: eph }, { type: 'text', text: 'r2' }] });
+    expect(messages[1]).toMatchObject({ role: 'tool', tool_call_id: 'b', content: [{ type: 'text', text: 'whole', cache_control: eph }] });
+    expect(messages[2]).toMatchObject({ role: 'tool', tool_call_id: 'c', content: 'unmarked' });
+  });
+});

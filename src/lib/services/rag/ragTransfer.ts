@@ -1,3 +1,4 @@
+import JSZip from 'jszip';
 import { createLogger } from '@/lib/core/logger';
 import type { IRagChunkConfig, IRagDocument } from '@/lib/database';
 import { listRagDocuments, getRagDocument, getRagModule, ingestDocument } from './ragService';
@@ -7,7 +8,9 @@ import { validateChunkConfig } from './chunking';
 const logger = createLogger('rag-transfer');
 
 /**
- * Knowledge Engine export/import as JSONL (one JSON object per line).
+ * Knowledge Engine export/import as JSONL (one JSON object per line). An export
+ * is a ZIP of JSONL parts of RAG_EXPORT_PART_SIZE documents each, so a large
+ * module comes out as files small enough to import one request at a time.
  *
  * Why JSONL and not CSV: each document carries multi-line text, a nested
  * metadata object and an optional chunkConfig. CSV would need escaping for
@@ -24,14 +27,19 @@ export const RAG_EXPORT_FORMAT = 'cognipeer.rag-module';
 export const RAG_EXPORT_VERSION = 1;
 /** Upper bound on documents in one import, so one request can't queue unbounded work. */
 export const RAG_IMPORT_MAX_DOCUMENTS = 5_000;
+/** Documents per JSONL part inside an export ZIP. */
+export const RAG_EXPORT_PART_SIZE = 150;
 
 export interface RagExportHeader {
   format: typeof RAG_EXPORT_FORMAT;
   version: typeof RAG_EXPORT_VERSION;
   exportedAt: string;
   module: { key: string; name: string; description?: string };
+  /** Documents in the whole export, across every part. */
   documentCount: number;
   skippedDocuments: number;
+  /** This file's place in the export: 1-based index, part count, documents in this part. */
+  part: { index: number; count: number; documentCount: number };
 }
 
 export interface RagExportDocumentLine {
@@ -45,9 +53,11 @@ export interface RagExportDocumentLine {
 
 export interface RagExportResult {
   fileName: string;
-  body: string;
+  /** ZIP of the JSONL parts. */
+  body: Buffer;
   documentCount: number;
   skippedDocuments: number;
+  partCount: number;
 }
 
 export interface RagImportError {
@@ -92,36 +102,51 @@ export async function exportRagModule(
       skippedDocuments += 1;
       continue;
     }
+    // Mongo stores an unset optional field as null; `?? undefined` keeps it
+    // out of the line, since the import reads `"chunkConfig":null` as a config.
     const line: RagExportDocumentLine = {
       type: 'document',
       fileName: document.fileName,
-      contentType: document.contentType,
-      metadata: document.metadata,
-      chunkConfig: document.chunkConfig,
+      contentType: document.contentType ?? undefined,
+      metadata: document.metadata ?? undefined,
+      chunkConfig: document.chunkConfig ?? undefined,
       content,
     };
     lines.push(JSON.stringify(line));
   }
 
-  const header: RagExportHeader = {
-    format: RAG_EXPORT_FORMAT,
-    version: RAG_EXPORT_VERSION,
-    exportedAt: new Date().toISOString(),
-    module: {
-      key: ragModule.key,
-      name: ragModule.name,
-      description: ragModule.description,
-    },
-    documentCount: lines.length,
-    skippedDocuments,
-  };
-
+  const exportedAt = new Date().toISOString();
   const safeKey = ragModule.key.replace(/[^a-zA-Z0-9_-]/g, '_');
+  // An empty module still gets one part, so the header says what was exported.
+  const partCount = Math.max(1, Math.ceil(lines.length / RAG_EXPORT_PART_SIZE));
+  const indexWidth = Math.max(3, String(partCount).length);
+  const zip = new JSZip();
+
+  for (let index = 0; index < partCount; index += 1) {
+    const partLines = lines.slice(index * RAG_EXPORT_PART_SIZE, (index + 1) * RAG_EXPORT_PART_SIZE);
+    const header: RagExportHeader = {
+      format: RAG_EXPORT_FORMAT,
+      version: RAG_EXPORT_VERSION,
+      exportedAt,
+      module: {
+        key: ragModule.key,
+        name: ragModule.name,
+        description: ragModule.description ?? undefined,
+      },
+      documentCount: lines.length,
+      skippedDocuments,
+      part: { index: index + 1, count: partCount, documentCount: partLines.length },
+    };
+    const partName = `${safeKey}.part-${String(index + 1).padStart(indexWidth, '0')}.rag.jsonl`;
+    zip.file(partName, [JSON.stringify(header), ...partLines].join('\n') + '\n');
+  }
+
   return {
-    fileName: `${safeKey}.rag.jsonl`,
-    body: [JSON.stringify(header), ...lines].join('\n') + '\n',
+    fileName: `${safeKey}.rag.zip`,
+    body: await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
     documentCount: lines.length,
     skippedDocuments,
+    partCount,
   };
 }
 
@@ -141,7 +166,8 @@ function parseDocumentLine(raw: string): RagExportDocumentLine {
     fileName: obj.fileName,
     contentType: typeof obj.contentType === 'string' ? obj.contentType : undefined,
     metadata: plainObject(obj.metadata),
-    chunkConfig: obj.chunkConfig === undefined
+    // null counts as absent: exports written before nulls were dropped carry it.
+    chunkConfig: obj.chunkConfig == null
       ? undefined
       : validateChunkConfig(obj.chunkConfig, 'chunkConfig'),
     content: obj.content,

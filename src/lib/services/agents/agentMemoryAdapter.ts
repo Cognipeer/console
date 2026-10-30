@@ -29,7 +29,7 @@ import type {
 import type { IAgentMemoryConfig } from '@/lib/database';
 import type { MemoryScope as ConsoleMemoryScope } from '@/lib/database/provider/types.extended';
 import { addMemory, getMemoryStore, listMemoryItems, searchMemories, updateMemoryItem } from '@/lib/services/memory/memoryService';
-import { normalizeMemoryMounts, type ResolvedMemoryMount } from './agentMemoryMounts';
+import { resolveAgentMemoryStore } from './agentMemoryStore';
 import { createLogger } from '@/lib/core/logger';
 import { currentKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 
@@ -250,64 +250,43 @@ export interface AgentMemoryRunContext {
     onWarning?: (message: string) => void;
 }
 
-export interface MountedMemoryStore {
-    mount: ResolvedMemoryMount;
-    store: MemoryStore;
-}
-
-/** A store view whose writes are dropped — for read_only mounts. */
+/** A store view whose writes are dropped — for a read-only store. */
 function readOnly(store: MemoryStore): MemoryStore {
     return { ...store, upsert: async () => undefined, markObsolete: async () => undefined };
-}
-
-/**
- * One store per mount. Scope ids: session/user come from the run; 'workspace'
- * is per-agent for the legacy single key (unchanged) but project-wide for
- * explicit mounts, so several agents mounting the same store read ONE
- * namespace; 'tenant' carries no scope id and is already shared.
- */
-export function buildMountedMemoryStores(
-    memory: IAgentMemoryConfig | undefined,
-    ctx: AgentMemoryRunContext,
-): MountedMemoryStore[] {
-    if (!memory?.enabled) return [];
-    return normalizeMemoryMounts(memory).map((mount) => ({
-        mount,
-        store: createConsoleMemoryStore({
-            tenantDbName: ctx.tenantDbName,
-            tenantId: ctx.tenantId,
-            projectId: ctx.projectId,
-            storeKey: mount.storeKey,
-            scopeIds: {
-                session: ctx.conversationId,
-                user: ctx.userId,
-                workspace: mount.legacy ? ctx.agentKey : ctx.projectId,
-            },
-            onWarning: ctx.onWarning,
-        }),
-    }));
 }
 
 /**
  * Builds the SDK's `SmartAgentMemoryConfig` for one run, or undefined when
  * memory is off / unconfigured. `scopeIds.session` is the conversation id —
  * a Session's memory is scoped to that conversation, not shared tenant-wide,
- * unless the operator picks a wider scope. The FIRST mount is the primary
- * store; a read_only primary is never written by the SDK path.
+ * unless the operator picks a wider scope. 'workspace' is this agent, or the
+ * project for a converted multi-store config (`sharedWorkspace`); 'tenant'
+ * carries no scope id and is shared by everything using the store. The memory
+ * tools use the same `store` and `scope`.
  */
 export function buildAgentMemoryOption(
     memory: IAgentMemoryConfig | undefined,
     ctx: AgentMemoryRunContext,
 ): SmartAgentMemoryConfig | undefined {
-    const [primary] = buildMountedMemoryStores(memory, ctx);
-    if (!memory?.enabled || !primary) return undefined;
-    const primaryReadOnly = primary.mount.access === 'read_only';
-    const scope = primary.mount.legacy ? memory.scope : primary.mount.scope;
+    const resolved = memory?.enabled ? resolveAgentMemoryStore(memory) : undefined;
+    if (!memory || !resolved) return undefined;
+    const store = createConsoleMemoryStore({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        storeKey: resolved.storeKey,
+        scopeIds: {
+            session: ctx.conversationId,
+            user: ctx.userId,
+            workspace: resolved.sharedWorkspace ? ctx.projectId : ctx.agentKey,
+        },
+        onWarning: ctx.onWarning,
+    });
 
     return {
-        store: primaryReadOnly ? readOnly(primary.store) : primary.store,
-        ...(scope ? { scope } : {}),
-        ...(primaryReadOnly ? { writePolicy: 'manual' as const } : memory.writePolicy ? { writePolicy: memory.writePolicy } : {}),
+        store: resolved.readOnly ? readOnly(store) : store,
+        scope: resolved.scope,
+        ...(resolved.readOnly ? { writePolicy: 'manual' as const } : memory.writePolicy ? { writePolicy: memory.writePolicy } : {}),
         ...(memory.readPolicy ? { readPolicy: memory.readPolicy } : {}),
     };
 }

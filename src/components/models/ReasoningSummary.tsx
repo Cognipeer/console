@@ -3,7 +3,7 @@
 import { Badge, Button, Group, Stack, Text } from '@mantine/core';
 import { IconPencil } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import { detectUnsupportedParams } from '@/lib/providers/unsupportedParams';
+import { reasoningForcedNoneOnChat } from '@/lib/providers/unsupportedParams';
 import { describeEffectiveReasoning, reasoningBudget } from '@/lib/services/models/reasoning';
 
 interface ReasoningSummaryProps {
@@ -21,7 +21,7 @@ interface ReasoningSummaryProps {
  */
 export default function ReasoningSummary({ settings, driver, modelId, onEdit }: ReasoningSummaryProps) {
   const t = useTranslations('modelReasoning');
-  const forced = Boolean(detectUnsupportedParams(driver, modelId, true).forced?.reasoning_effort);
+  const forced = reasoningForcedNoneOnChat(driver, modelId, settings);
   const { reasoning, returned, forcedNoneWithTools } = describeEffectiveReasoning({
     settings,
     forcedNoneWithTools: forced,

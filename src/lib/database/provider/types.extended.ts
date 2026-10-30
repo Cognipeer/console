@@ -1312,6 +1312,12 @@ export interface IOcrJobItemResult {
   summary?: string;
   structured?: Record<string, unknown>;
   pages?: number;
+  /**
+   * The model steps whose reply was cut off at the output limit. Present only when one was: the item still
+   * succeeded, but that part is incomplete (a cut-off `structured` reply is stored unparsed, as `{_raw, _truncated}`;
+   * 'ocr' = at least one page of a VLM transcription was cut off).
+   */
+  truncated?: Array<'ocr' | 'summary' | 'structured'>;
 }
 
 export interface IOcrJobItem {
@@ -1436,6 +1442,13 @@ export interface IBatchJobItem {
   /** HTTP-equivalent status of the executed request (200 on success). */
   responseStatusCode?: number;
   responseBody?: Record<string, unknown>;
+  /** The chat completion's finish reason (`stop`, `length` ...), recorded for a succeeded chat item that has one. */
+  finishReason?: string;
+  /**
+   * The reply was cut off at the output limit (`finishReason` says `length` / `max_tokens`). The item is still
+   * `succeeded` - the text it has is returned - but it is incomplete. Present only when true.
+   */
+  truncated?: boolean;
   errorMessage?: string;
   usage?: {
     inputTokens?: number;

@@ -1,0 +1,27 @@
+{
+  "$comment": "Every docs page the console links to outside the service pages, by id. A path is relative to the root of the docs site (DOCS_BASE_URL, https://docs.cognipeer.com by default); a trailing slash is a section index, an #anchor a section. The page of each service is the docsPath of its entry in platform-services.json. The docs repo checks both lists against its pages on every pull request (scripts/check-console-links.mjs there), and `npm run docs:links` checks them against the live site.",
+  "pages": {
+    "console-home": { "title": "What is Console", "path": "/console/guide/start/" },
+    "api-overview": { "title": "API Reference Overview", "path": "/console/developer/api/overview" },
+    "models-model-hub": { "title": "Model Hub", "path": "/console/guide/models/model-hub" },
+    "models-inference": { "title": "Inference (LLM & Embeddings)", "path": "/console/guide/models/inference" },
+    "observe-tracing": { "title": "Agent Tracing", "path": "/console/guide/observe/tracing" },
+    "observe-trace-an-agent": { "title": "Trace an existing agent", "path": "/console/guide/observe/trace-an-agent" },
+    "observe-integrations": { "title": "Observability Integrations", "path": "/console/guide/observe/integrations/overview" },
+    "knowledge-vector-stores": { "title": "Vector Stores", "path": "/console/guide/knowledge/vector-stores" },
+    "knowledge-files": { "title": "Files", "path": "/console/guide/knowledge/files" },
+    "api-files": { "title": "Files API", "path": "/console/developer/api/files" },
+    "iam-console-identity": { "title": "Console identity for MCP servers and connected agents", "path": "/console/guide/govern/iam/console-identity" },
+    "portals-embed": { "title": "Embedding a portal", "path": "/console/guide/portals/embed/" },
+    "agents-integrations": { "title": "Calling agents from other systems", "path": "/console/guide/integrations/agents/overview" },
+    "agents-background-runs": { "title": "Background runs", "path": "/console/guide/agents/background-runs" },
+    "agents-triggers": { "title": "Triggers", "path": "/console/guide/integrations/agents/triggers" },
+    "agents-webhook-triggers": { "title": "Webhook triggers", "path": "/console/guide/integrations/agents/webhook-triggers" },
+    "agents-openai-sdk": { "title": "OpenAI SDK", "path": "/console/guide/integrations/agents/openai-sdk" },
+    "agents-n8n": { "title": "n8n", "path": "/console/guide/integrations/agents/n8n" },
+    "agents-open-webui": { "title": "Open WebUI", "path": "/console/guide/integrations/agents/open-webui" },
+    "agents-litellm-a2a": { "title": "LiteLLM and A2A", "path": "/console/guide/integrations/agents/litellm-and-a2a" },
+    "agents-runs-api": { "title": "Agents API", "path": "/console/developer/api/agents#runs-api" },
+    "sdk-agents": { "title": "Agents API (SDK)", "path": "/console-sdk/api/agents" }
+  }
+}

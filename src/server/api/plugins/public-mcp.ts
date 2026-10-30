@@ -37,7 +37,7 @@ import {
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
-  reachesBrowser,
+  reachesTokenOnlyServer,
   resolveExposure,
   resolveMcpInstructions,
   resolveSourceType,
@@ -118,8 +118,8 @@ async function resolvePublicServer(
 
   if (!server || server.status !== 'active') return null;
   if (resolveExposure(server).accessMode !== 'public') return null;
-  // A browser is served with a token only, whatever the stored settings say.
-  if (await withTenantDb(db, tenant.dbName, () => reachesBrowser(db, server))) return null;
+  // A browser or a sandbox is served with a token only, whatever the stored settings say.
+  if (await withTenantDb(db, tenant.dbName, () => reachesTokenOnlyServer(db, server))) return null;
   return { tenant, server };
 }
 

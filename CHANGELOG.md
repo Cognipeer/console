@@ -443,6 +443,25 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   reason; a WebSocket to a refused host is closed with code `1008` before it connects.
 - The browser forms pick the **Artifact bucket** from the project's file buckets.
 
+### Egress proxy
+
+- Behind an egress proxy (`HTTPS_PROXY`) the managed browser reaches sites whose names only the proxy can resolve.
+  Its private-network guard treated every host the server's own DNS could not resolve as private, so in an
+  air-gapped network every public site was refused (and a DNS server that never answered held every page until it
+  timed out). Such a host is now left to the proxy when the request goes through it; a single-label or private-use
+  name (`.corp`, `.lan`, ...) and an unresolvable host reached directly stay refused, a host that resolves to a
+  private address is still refused, and for a request through the proxy the guard waits at most 3 seconds for DNS.
+- `NO_PROXY` means what it means to curl and Go for the browser and the crawler's Playwright engine: `corp.example`
+  covers its subdomains too. Chromium had read it as that one host and sent the subdomains to the proxy.
+- A proxy variable spelled with non-standard casing (`HTTPS_Proxy`, `No_proxy`) is adopted under the standard names at
+  startup, with a warning, so the browser, `fetch()`, axios and MCP subprocesses all see it.
+- A browser navigation that times out names the hosts the page was still waiting on, and proxy errors
+  (`ERR_TUNNEL_CONNECTION_FAILED`, `ERR_PROXY_CONNECTION_FAILED`, an untrusted certificate behind a TLS-inspecting
+  proxy) say what the proxy did. Opening a tab with a URL waits for `domcontentloaded`, as `goto` does.
+- `scripts/diagnose-egress-proxy.ts` (`npm run diagnose:egress-proxy -- <url>`) checks the proxy path end to end from
+  inside the Console container. [Configuration](docs/guide/configuration.md#egress-proxy) describes the variables.
+- `SANDBOX_INHERIT_PROXY_ENV=true` hands the console's proxy to sandboxes (Enterprise).
+
 ### Media from tools
 
 - The `read` tool reads text, images, PDFs (text and page images) and videos (one contact sheet). A model that sends

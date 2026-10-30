@@ -35,7 +35,7 @@ import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { createInlineReasoningSplitter, splitInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
-import { OPENAI_SCHEMA_DRIVERS, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
+import { OPENAI_SCHEMA_DRIVERS, hasUnreplayableToolTurn, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import type { NativeChatClient, NativeChatRequest } from '@/lib/providers/domains/model';
 import { createStreamGate } from '@/lib/services/guardrail';
 import type { HookScope } from '@/lib/services/guardrail';
@@ -46,7 +46,13 @@ import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
 import { replicaOrder, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
 import { MAX_ROUTING_DEPTH, getDynamicRoutingConfig } from './dynamicRouting';
-import { normalizeInferenceError, OutputTokenLimitError } from './openaiErrors';
+import {
+  UpstreamFinishError,
+  isUsageBookedError,
+  normalizeInferenceError,
+  OutputTokenLimitError,
+  type OutputLimitDialect,
+} from './openaiErrors';
 import { buildCacheVariantKey, isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
 import { currentKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
@@ -79,8 +85,16 @@ import {
   openAiResponseToNative,
   toOpenAIChatResponse,
 } from './openaiAdapter';
-import { StreamAssembler, finishWithToolCalls, frameHasContent, fromGateFrame, toGateFrame, wireFinishReason } from './gatewayStream';
-import { estimateInputTokens, estimateTokensFromText, toGatewayUsage, toWireUsage } from './gatewayUsage';
+import {
+  StreamAssembler,
+  finishWithToolCalls,
+  frameHasContent,
+  fromGateFrame,
+  isProviderErrorFinish,
+  toGateFrame,
+  wireFinishReason,
+} from './gatewayStream';
+import { estimateInputTokens, estimateTokensFromText, floorOutputAtEstimate, toGatewayUsage, toWireUsage } from './gatewayUsage';
 import type {
   GatewayChatRequest,
   ContentPart,
@@ -110,6 +124,42 @@ function ensureLlmModel(model: IModel) {
 function wantsJsonOutput(responseFormat: unknown): boolean {
   const type = (responseFormat as { type?: unknown } | undefined)?.type;
   return type === 'json_object' || type === 'json_schema';
+}
+
+/**
+ * The wire dialect a call arrived in, from its usage route: the limit message names the parameter the
+ * caller actually sends (`max_tokens` on /messages, `max_output_tokens` on /responses). Anything else,
+ * agents and the chat-completions edge included, reads as chat completions (the default wording).
+ */
+function limitDialect(route: string): OutputLimitDialect | undefined {
+  if (route === 'messages' || route.startsWith('messages.')) return 'messages';
+  if (route === 'responses' || route.startsWith('responses.')) return 'responses';
+  return undefined;
+}
+
+/**
+ * A call whose tool calls the console's own agent loop runs. There, a tool call the output limit cut off
+ * is a limit hit (the agent retries with a raised limit): its arguments are incomplete and must not run.
+ * Every other caller gets the reply as the provider sent it (`finish_reason: "length"` with the partial
+ * tool call), the way the provider's own API answers.
+ */
+function runsToolCalls(route: string): boolean {
+  return route.startsWith('agent.');
+}
+
+/** The error of a call that hit its output limit, carrying the limit it sent and the provider's own stop reason. */
+function buildLimitError(
+  state: CallState,
+  limit: number | undefined,
+  rawFinishReason: string | undefined,
+  billing?: ConstructorParameters<typeof OutputTokenLimitError>[1],
+): OutputTokenLimitError {
+  const dialect = limitDialect(state.route);
+  return new OutputTokenLimitError(limit, {
+    ...billing,
+    ...(rawFinishReason ? { rawFinishReason } : {}),
+    ...(dialect ? { dialect } : {}),
+  });
 }
 
 // ── Replica pool ──────────────────────────────────────────────────────────
@@ -256,6 +306,13 @@ function messagesFor(client: NativeChatClient, messages: UnifiedMessage[]): Unif
   const openAiSchema = OPENAI_SCHEMA_DRIVERS.has(client.driver);
   return messages.map((message) => {
     if (typeof message.content === 'string') return message;
+    // The adapter keeps a client's cache breakpoint on the part (and a system / tool message as parts when one is
+    // marked). Anthropic, Bedrock, Vertex and OpenAI-compatible servers read it; OpenAI and Azure never send it, so
+    // for them a message kept as parts only for the breakpoint goes back to the plain text it always was.
+    if ((message.role === 'system' || message.role === 'tool') && (client.driver === 'openai' || client.driver === 'azure')) {
+      const texts = message.content.filter((part) => part.type === 'text') as Array<{ text: string }>;
+      if (texts.length === message.content.length) return { ...message, content: texts.map((part) => part.text).filter(Boolean).join('\n') };
+    }
     const parts = message.content.flatMap((part): ContentPart[] => {
       if (!KNOWN_PART_TYPES.has(part.type)) return openAiSchema ? [part] : [];
       if (openAiSchema && part.type === 'image' && (part as ImagePartWithDetail).detail) {
@@ -417,7 +474,7 @@ function settleUsage(
   usage: TokenUsage,
   row: Omit<Parameters<typeof logModelUsage>[2], 'usage'>,
 ): UsageCostResult {
-  const cost = calculateCost(state.model.pricing, usage);
+  const cost = calculateCost(state.model.pricing, usage, state.model);
   state.context.onUsageSettled?.(cost, usage);
   usageRow(state, label, { ...row, usage } as Parameters<typeof logModelUsage>[2]);
   return cost;
@@ -454,13 +511,18 @@ async function prepareCall(state: CallState, activeModel: IModel) {
     state.includeReasoning,
     activeModel.providerDriver,
     supportsUpstreamApiChoice(activeModel.providerDriver) ? resolveUpstreamApi(activeModel.settings) : undefined,
+    activeModel.modelId,
   );
   if (visibleReasoning) modelSettings.reasoning = visibleReasoning;
   // The resolved invocation settings are a fresh object (sampling, limits, reasoning):
   // the model's Upstream API choice has to be carried over for the provider spec.
   if (supportsUpstreamApiChoice(activeModel.providerDriver)) modelSettings.upstreamApi = resolveUpstreamApi(activeModel.settings);
-  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
-
+  // A streamed call of a model that cannot stream tool calls is served by one non-streamed request.
+  const disableProviderStreaming = Boolean(
+    state.input.stream
+    && modelSettings.disableStreamingWithTools === true
+    && (state.request.tools?.length ?? 0) > 0,
+  );
   const client = await runtime.createNativeChatClient({
     modelId: activeModel.modelId,
     category: activeModel.category,
@@ -469,19 +531,31 @@ async function prepareCall(state: CallState, activeModel: IModel) {
     // provider must not retry underneath it.
     options: { maxRetries: 0 },
   });
+  const request = buildNativeCall(client, state.request, state.wire);
+
+  // A tool loop whose signed thinking blocks were lost runs without thinking (the native client's
+  // `prepare` drops it), so its limit carries no thinking headroom either.
+  const driver = activeModel.providerDriver;
+  const runsWithoutThinking = (driver === 'anthropic' || driver === 'bedrock') && hasUnreplayableToolTurn(request.messages);
+  // The limit the native client SENDS (caller / retry override > Default max tokens > the driver default,
+  // the thinking headroom on top, capped by the model maximum): the one number the error, the stream
+  // event and the agent's raised retry all work from. `reasoning` is what the client derives thinking
+  // from; `stream` is the transport actually used (a non-streamed request has a lower default cap).
+  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings, {
+    driver,
+    model: activeModel,
+    stream: Boolean(state.input.stream) && !disableProviderStreaming,
+    reasoning: runsWithoutThinking ? undefined : modelSettings.reasoning,
+  });
 
   return {
     client,
-    request: buildNativeCall(client, state.request, state.wire),
+    request,
     modelSettings,
     overrides,
     outputTokenLimit,
     // A model behind an upstream that cannot stream tool calls (opt-in per model).
-    disableProviderStreaming: Boolean(
-      state.input.stream
-      && modelSettings.disableStreamingWithTools === true
-      && (state.request.tools?.length ?? 0) > 0,
-    ),
+    disableProviderStreaming,
     includeStreamUsage: asRecord(overrides.stream_options).include_usage === true,
   };
 }
@@ -496,9 +570,12 @@ type Prepared = Awaited<ReturnType<typeof prepareCall>>;
  * 1's last user text, so a hit would replay step 1's tool call forever, and two
  * agents with different system prompts would trade answers. Such calls bypass the
  * cache: anything that offers tools, replays tool turns, or comes from an agent.
+ * An evaluation call (a judge, dataset generation, the prompt optimizer) bypasses it
+ * too: it measures what the model says NOW, and a cached answer would score the cache.
  */
 function isCacheableConversation(request: ModelCallInput['request'], wire: AnyRecord, route: string): boolean {
   if (route.startsWith('agent.')) return false;
+  if (route === 'evaluation' || route.startsWith('evaluation.')) return false;
   if ((request.tools?.length ?? 0) > 0) return false;
   if (Array.isArray(wire.tools) && wire.tools.length > 0) return false;
   if (Array.isArray(wire.functions) && wire.functions.length > 0) return false;
@@ -535,7 +612,7 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
   // Dynamic LLM attribution: rows this call writes carry the router decision
   // that caused them (and the baseline pricing to measure savings against).
   const routedByLog = context.routedBy
-    ? { routing: context.routedBy.routing, routingBaselinePricing: context.routedBy.baselinePricing }
+    ? { routing: context.routedBy.routing, routingBaselinePricing: context.routedBy.baselinePricing, routingBaselineModel: context.routedBy.baselineModel }
     : {};
 
   const model = await getModelByKey(tenantDbName, modelKey, projectId);
@@ -742,9 +819,10 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
  */
 function logFailedCall(state: CallState, error: unknown): void {
   if (error instanceof GuardrailBlockError) return;
-  // Booked already, with the tokens the provider billed for it: a second, empty
-  // row would double the request count.
-  if (error instanceof OutputTokenLimitError && error.usageBooked) return;
+  // Booked already, with the tokens the provider billed for it (an output-limit hit,
+  // a call the provider ended in an error finish): a second, empty row would double
+  // the request count.
+  if (isUsageBookedError(error)) return;
   const cancelled = Boolean(state.context.signal?.aborted);
   if (!cancelled && !state.context.logFailures) return;
   const message = error instanceof Error ? error.message : String(error);
@@ -821,15 +899,13 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
 
   const usage = toGatewayUsage(client.driver, native.usage);
 
-  if (
-    native.finishReason === 'length'
-    && !guardrailContentToText(rawText).trim()
-    && native.toolCalls.length === 0
-  ) {
-    // The provider billed the prompt and the capped output (reasoning included)
-    // even though no answer came back, so the call is settled - budget and row,
-    // whatever `logFailures` says - before the error leaves.
-    const limitError = new OutputTokenLimitError(outputTokenLimit);
+  // The provider ended the call in its OWN error finish (Gemini MALFORMED_FUNCTION_CALL, Bedrock
+  // malformed_tool_use ...): what it produced is unusable, and a `stop` on the wire would hand the caller
+  // a broken tool call as a finished answer. The call fails as an upstream error - but the provider
+  // billed what it burned, so the call is settled once (budget and row, whatever `logFailures` says)
+  // before the error leaves, the way a limit hit is.
+  if (isProviderErrorFinish(native.rawFinishReason, native.finishReason)) {
+    const failure = new UpstreamFinishError(native.rawFinishReason);
     const cost = settleUsage(state, 'log-chat-usage', usage, {
       requestId,
       route: state.route,
@@ -842,13 +918,56 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
         ...describeRequestContract(wire),
         ...replicaTrace(model, servingReplica, completed.failed),
       }),
-      providerResponse: sanitizeForLogging({ finish_reason: 'length', output_token_limit: true }),
+      providerResponse: sanitizeForLogging({
+        error: failure.message,
+        finish_reason: failure.rawFinishReason ?? 'error',
+        ...(failure.rawFinishReason ? { raw_finish_reason: failure.rawFinishReason } : {}),
+      }),
+      errorMessage: failure.message,
+      latencyMs,
+      cacheHit: false,
+      finishReason: failure.rawFinishReason ?? 'error',
+    });
+    throw new UpstreamFinishError(native.rawFinishReason, { usage, cost, usageBooked: true });
+  }
+
+  // A `length` finish is a limit hit when there is no ANSWER: no visible text (judged on the content
+  // AFTER the inline reasoning was split out: a model that spent its budget inside `<reasoning>` has
+  // said nothing) and no tool call - or, for the console's agent loop, a tool call the limit cut off
+  // (its arguments are not to be trusted).
+  const lengthFinish = native.finishReason === 'length';
+  const cutOffToolCall = native.toolCalls.length > 0 && runsToolCalls(state.route);
+  if (
+    lengthFinish
+    && (cutOffToolCall || (native.toolCalls.length === 0 && !guardrailContentToText(finalResponse.content ?? '').trim()))
+  ) {
+    // The provider billed the prompt and the capped output (reasoning included)
+    // even though no answer came back, so the call is settled - budget and row,
+    // whatever `logFailures` says - before the error leaves.
+    const limitError = buildLimitError(state, outputTokenLimit, native.rawFinishReason);
+    const cost = settleUsage(state, 'log-chat-usage', usage, {
+      requestId,
+      route: state.route,
+      status: 'error',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        messages: state.loggedMessages,
+        overrides,
+        stream: false,
+        ...describeRequestContract(wire),
+        ...replicaTrace(model, servingReplica, completed.failed),
+      }),
+      providerResponse: sanitizeForLogging({
+        finish_reason: 'length',
+        output_token_limit: true,
+        ...(native.rawFinishReason ? { raw_finish_reason: native.rawFinishReason } : {}),
+      }),
       errorMessage: limitError.message,
       latencyMs,
       cacheHit: false,
       finishReason: 'length',
     });
-    throw new OutputTokenLimitError(outputTokenLimit, { usage, cost, usageBooked: true });
+    throw buildLimitError(state, outputTokenLimit, native.rawFinishReason, { usage, cost, usageBooked: true });
   }
 
   if (native.toolCalls.length > 0) usage.toolCalls = native.toolCalls.length;
@@ -950,6 +1069,8 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     usage,
     latencyMs,
     cacheHit: false,
+    // Visible text the limit cut off: handed back as it is, flagged for a caller that cares (an agent).
+    ...(lengthFinish ? { truncated: true } : {}),
     wireModel: model.modelId,
     includeReasoning: state.includeReasoning,
   };
@@ -1112,6 +1233,14 @@ async function* streamEvents(args: {
   let pendingFinish: string | undefined;
   let hasFinalOutput = false;
   let outputLimitError: OutputTokenLimitError | null = null;
+  /** The terminal chunk said `length`: the output limit (or the context window) ended the answer. */
+  let lengthFinish = false;
+  let rawLengthFinish: string | undefined;
+  /**
+   * The terminal chunk was the provider's own error finish (a malformed tool call ...): the call fails. Nothing
+   * more of it is delivered, and the stream is read on to its end only for the usage that trails that chunk.
+   */
+  let finishFailure: UpstreamFinishError | undefined;
   /** True once gated characters actually reached the caller. */
   let releasedGatedText = false;
 
@@ -1127,18 +1256,37 @@ async function* streamEvents(args: {
   // output (text, reasoning summary and tool-call arguments). The log marks it
   // `usage_estimated` (and `output_tokens_estimated`) so a measured count and a
   // guessed one stay distinguishable downstream.
+  const estimatedOutputTokens = (): number => estimateTokensFromText(
+    assembler.content
+    + assembler.reasoningSummary
+    + assembler.toolCalls().map((call) => call.arguments).join(''),
+  );
   const estimatedUsage = (): TokenUsage => {
     const inputTokens = estimateInputTokens(wire.messages, wire.tools);
-    const outputTokens = estimateTokensFromText(
-      assembler.content
-      + assembler.reasoningSummary
-      + assembler.toolCalls().map((call) => call.arguments).join(''),
-    );
+    const outputTokens = estimatedOutputTokens();
     return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, toolCalls: toolCallCount() };
   };
-  const partialUsage = (): TokenUsage => {
-    if (assembler.usage) return { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() };
-    return estimatedUsage();
+  /** The provider sent a terminal chunk (a finish reason, or its own error finish): its usage is the final count. */
+  const finishArrived = () => pendingFinish !== undefined || finishFailure !== undefined;
+  /**
+   * The provider's own count says the output limit this call sent is spent. For a stream with no finish
+   * reason that count is the only word on how it ended; no usage, or no limit sent, says nothing.
+   */
+  const outputLimitSpent = (): boolean => {
+    if (!assembler.usage || outputTokenLimit === undefined) return false;
+    const spent = toGatewayUsage(driver, assembler.usage).outputTokens ?? 0;
+    return spent > 0 && spent >= outputTokenLimit;
+  };
+  // What a stream that stopped short is booked at (a hang-up, a failure, a guardrail block). The
+  // provider's usage chunks are cumulative, and an early one (Anthropic's `message_start`) holds the
+  // exact prompt with an output of about 1 - so for a stream with no terminal chunk that count is only
+  // a floor: the booked output is the larger of it and the estimate from what was streamed, and the
+  // log is flagged only when the estimate won. A stream that finished keeps the provider's own usage.
+  const partialBooking = (): { usage: TokenUsage; estimated: boolean } => {
+    if (!assembler.usage) return { usage: estimatedUsage(), estimated: true };
+    const provider = { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() };
+    if (finishArrived()) return { usage: provider, estimated: false };
+    return floorOutputAtEstimate(provider, estimatedOutputTokens());
   };
   // A stream that completed carries the provider's usage; an upstream that never
   // sent it (it ignored or rejected `stream_options.include_usage`) still billed
@@ -1266,7 +1414,8 @@ async function* streamEvents(args: {
   const settleCancelled = () => {
     settled = true;
     const latencyMs = Date.now() - startedAt;
-    settleUsage(state, 'log-stream-cancelled', partialUsage(), {
+    const booking = partialBooking();
+    settleUsage(state, 'log-stream-cancelled', booking.usage, {
       requestId,
       route: state.route,
       status: 'cancelled',
@@ -1279,7 +1428,7 @@ async function* streamEvents(args: {
       providerResponse: sanitizeForLogging({
         cancelled: 'client_disconnected',
         partial: partialMessage(),
-        ...(assembler.usage ? {} : { output_tokens_estimated: true, usage_estimated: true }),
+        ...(booking.estimated ? { output_tokens_estimated: true, usage_estimated: true } : {}),
       }),
       latencyMs,
     });
@@ -1301,7 +1450,7 @@ async function* streamEvents(args: {
     blockCtl.abort();
 
     // The provider generated and billed these tokens whether or not they were delivered.
-    const blockedUsage = partialUsage();
+    const blocked = partialBooking();
     // A stream that already settled (a limit hit that completed before the block
     // landed) has had its budget debit: the row is written, the debit is not repeated.
     const blockRow = {
@@ -1320,7 +1469,7 @@ async function* streamEvents(args: {
         partial_delivery: releasedGatedText,
         // The provider produced this whether or not we delivered it.
         partial: partialMessage(),
-        ...(assembler.usage ? {} : { output_tokens_estimated: true, usage_estimated: true }),
+        ...(blocked.estimated ? { output_tokens_estimated: true, usage_estimated: true } : {}),
       }),
       errorMessage: blockMessage,
       latencyMs: Date.now() - startedAt,
@@ -1329,7 +1478,7 @@ async function* streamEvents(args: {
     if (!settled) {
       settled = true;
       // The same estimator the cancel path uses, for the same reason.
-      settleUsage(state, 'log-stream-guardrail-block', blockedUsage, blockRow);
+      settleUsage(state, 'log-stream-guardrail-block', blocked.usage, blockRow);
     } else {
       // Whatever settled first already wrote the tokens on its own row.
       usageRow(state, 'log-stream-guardrail-block', { ...blockRow, usage: {} });
@@ -1392,6 +1541,12 @@ async function* streamEvents(args: {
 
     for await (const chunk of withFirst(opened.value.first, opened.value.gen)) {
       assembler.push(chunk);
+      // The provider's own error finish (a malformed tool call ...): the call fails, so nothing more of
+      // it is delivered. The stream is still read to its end, for the usage that trails the terminal chunk.
+      if (!finishFailure && isProviderErrorFinish(chunk.rawFinishReason, chunk.finishReason)) {
+        finishFailure = new UpstreamFinishError(chunk.rawFinishReason);
+      }
+      if (finishFailure) continue;
       const delta = chunk.delta ?? {};
 
       let contentText: string | undefined = delta.content || undefined;
@@ -1405,12 +1560,24 @@ async function* streamEvents(args: {
       if (inline) inlineReasoning += inline;
       const reasoningDelta = `${delta.reasoning?.summary ?? ''}${inline ?? ''}`;
 
-      if (typeof chunk.rawFinishReason === 'string') {
+      // A chunk that says `length` is terminal even without a raw reason (a Responses-API
+      // `incomplete` arrives that way); any other normalized value only counts with its raw
+      // reason, because OpenAI chat chunks carry `stop` on every chunk.
+      if (typeof chunk.rawFinishReason === 'string' || chunk.finishReason === 'length') {
         // The terminal frame is said LAST (after the splitter tail and the
         // argument repairs), so it is held here.
         pendingFinish = wireFinishReason(driver, chunk.rawFinishReason, chunk.finishReason);
-        if (chunk.finishReason === 'length' && !hasFinalOutput && !contentText?.trim() && !(delta.toolCalls?.length)) {
-          outputLimitError = new OutputTokenLimitError(outputTokenLimit);
+        lengthFinish = chunk.finishReason === 'length';
+        rawLengthFinish = lengthFinish && typeof chunk.rawFinishReason === 'string' ? chunk.rawFinishReason : undefined;
+        // No answer (nothing visible), or a tool call the limit cut off in the agent loop, is a limit
+        // hit; visible text, or a client's partial tool call, is a truncated answer the caller keeps.
+        if (
+          lengthFinish
+          && (assembler.toolCallCount > 0
+            ? runsToolCalls(state.route)
+            : !hasFinalOutput && !contentText?.trim())
+        ) {
+          outputLimitError = buildLimitError(state, outputTokenLimit, rawLengthFinish);
         }
       }
       if (contentText?.trim() || (delta.toolCalls && delta.toolCalls.length > 0)) hasFinalOutput = true;
@@ -1439,6 +1606,23 @@ async function* streamEvents(args: {
       }
     }
 
+    // The call fails as an upstream error. What the provider burned is booked once, by the catch below.
+    if (finishFailure) throw finishFailure;
+
+    // A stream that ended with no terminal chunk at all (the upstream dropped the connection, a proxy closed
+    // it) has no finish reason to tell a limit hit from a clean end - its usage does. When the provider's own
+    // count says the output limit this call sent is spent, the answer was cut off, and it is judged exactly as
+    // a `length` finish is: no visible text (or, in the agent loop, a tool call) is a limit hit; otherwise the
+    // text is delivered with finish `length`, flagged truncated. No usage, or no limit sent, keeps the
+    // synthetic finish below.
+    if (pendingFinish === undefined && outputLimitSpent()) {
+      pendingFinish = 'length';
+      lengthFinish = true;
+      if (assembler.toolCallCount > 0 ? runsToolCalls(state.route) : !hasFinalOutput) {
+        outputLimitError = buildLimitError(state, outputTokenLimit, undefined);
+      }
+    }
+
     // A stream that ended mid-tag - or mid-thought, when the model was cut off
     // inside its reasoning - leaves text in the splitter. Release it instead of
     // truncating the answer.
@@ -1462,8 +1646,9 @@ async function* streamEvents(args: {
 
     // Arguments that do not parse on their own - empty, or the lone `{` Bedrock's
     // Qwen tool parser emits for a no-argument tool - are completed with the
-    // missing fragment, so a strict client (and the agent loop) can parse them.
-    if (!outputLimitError) {
+    // missing fragment, so a strict client (and the agent loop) can parse them. Never on a
+    // `length` finish: those arguments are cut off, not blank, and completing them would hide it.
+    if (!outputLimitError && !lengthFinish) {
       for (const blank of assembler.blankToolCalls()) {
         assembler.complete(blank.index, blank.completion);
         const out = await emit({ type: 'delta', toolCalls: [{ index: blank.index, arguments: blank.completion }] });
@@ -1505,7 +1690,12 @@ async function* streamEvents(args: {
     }
 
     if (outputLimitError) {
-      yield { type: 'output_limit', error: normalizeInferenceError(outputLimitError).error };
+      yield {
+        type: 'output_limit',
+        error: normalizeInferenceError(outputLimitError).error,
+        ...(outputLimitError.limit !== undefined ? { limit: outputLimitError.limit } : {}),
+        ...(outputLimitError.rawFinishReason ? { rawFinishReason: outputLimitError.rawFinishReason } : {}),
+      };
     }
 
     // Some upstreams never send a terminal finish_reason. Clients that wait for
@@ -1531,6 +1721,10 @@ async function* streamEvents(args: {
     const response: ChatCompletionResponse = {
       ...assembled,
       content: emittedContent.length > 0 ? emittedContent : null,
+      // The assembler only learns a finish reason from a chunk that carries a raw one.
+      ...(lengthFinish ? { finishReason: 'length' as const } : {}),
+      // Tool calls cut off by the limit are never handed on: the `output_limit` event above is the answer.
+      ...(outputLimitError ? { toolCalls: [] } : {}),
       ...(reasoning ? { reasoning } : {}),
     };
     donePending = true;
@@ -1542,6 +1736,8 @@ async function* streamEvents(args: {
       ...(usageEstimated ? { usageEstimated: true } : {}),
       wireFinishReason: finishForSettle,
       outputLimitReached: Boolean(outputLimitError),
+      // Visible text the limit cut off: delivered as it is, flagged.
+      ...(lengthFinish && !outputLimitError ? { truncated: true } : {}),
     };
     settleSuccess(finishForSettle);
     exitedEarly = false;
@@ -1569,10 +1765,11 @@ async function* streamEvents(args: {
     // The provider bills what it generated before it failed, so a stream that had
     // already produced output (or reported usage) is booked. One that failed
     // before its first chunk generated nothing: no estimate of an input it never
-    // billed.
+    // billed. A call the provider ended in its own error finish was billed whole.
     const produced = Boolean(
-      assembler.usage || assembler.content || assembler.reasoningSummary || assembler.toolCallCount > 0,
+      finishFailure || assembler.usage || assembler.content || assembler.reasoningSummary || assembler.toolCallCount > 0,
     );
+    const booking = produced ? partialBooking() : undefined;
     const errorRow = {
       requestId,
       route: state.route,
@@ -1580,19 +1777,26 @@ async function* streamEvents(args: {
       providerRequest: requestLog({ ...describeRequestContract(wire), ...replicaTrace(model, servingReplica, opened.failed) }),
       providerResponse: sanitizeForLogging({
         error: normalized.error.message,
-        ...(produced && !assembler.usage ? { usage_estimated: true } : {}),
+        ...(finishFailure?.rawFinishReason ? { raw_finish_reason: finishFailure.rawFinishReason } : {}),
+        ...(booking?.estimated ? { usage_estimated: true } : {}),
       }),
       errorMessage: normalized.error.message,
       latencyMs,
-      finishReason: assembler.finishReason === "error" ? undefined : assembler.finishReason,
+      finishReason: finishFailure
+        ? (finishFailure.rawFinishReason ?? 'error')
+        : (assembler.finishReason === 'error' ? undefined : assembler.finishReason),
     } satisfies Omit<Parameters<typeof logModelUsage>[2], 'usage'>;
-    if (produced && !settled && !donePending) {
+    if (booking && !settled && !donePending) {
       settled = true;
-      settleUsage(state, 'log-stream-error', partialUsage(), errorRow);
+      settleUsage(state, 'log-stream-error', booking.usage, errorRow);
     } else {
       usageRow(state, 'log-stream-error', { ...errorRow, usage: {} });
     }
-    yield { type: 'failed', error: normalized.error, status: normalized.status };
+    yield {
+      type: 'failed',
+      error: normalized.error,
+      status: normalized.status,
+    };
   } finally {
     // A consumer that stopped reading right after a terminal event still gets its
     // bookkeeping: the block's abort + row, or the success row.

@@ -896,7 +896,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
           images: result.response.usage?.images ?? result.response.data.length,
           inputTokens: result.response.usage?.inputTokens ?? 0,
           outputTokens: result.response.usage?.outputTokens ?? 0,
-        });
+        }, result.model);
         if (cost.currency === 'USD' && Number.isFinite(cost.totalCost) && cost.totalCost > 0) {
           void checkBudget(quotaContext, { usd: cost.totalCost }).catch((error) =>
             logger.error('Failed to update image budget usage', { error }),
@@ -1031,7 +1031,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
             inputTokens: estimatedInputTokens,
             outputTokens: 0,
             totalTokens: estimatedInputTokens,
-          });
+          }, model);
           if (
             cost.currency === 'USD'
             && Number.isFinite(cost.totalCost)

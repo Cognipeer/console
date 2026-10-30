@@ -116,14 +116,10 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       {
         name: 'region',
         label: 'Region',
-        type: 'select',
+        type: 'text',
         required: true,
-        options: [
-          { label: 'us-east-1', value: 'us-east-1' },
-          { label: 'us-west-2', value: 'us-west-2' },
-          { label: 'eu-central-1', value: 'eu-central-1' },
-          { label: 'ap-southeast-1', value: 'ap-southeast-1' },
-        ],
+        placeholder: 'us-east-1',
+        description: 'AWS region id of the Bedrock endpoint, for example us-east-1, us-west-2, eu-central-1 or ap-southeast-1.',
       },
       {
         name: 'sessionToken',

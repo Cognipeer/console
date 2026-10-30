@@ -186,6 +186,12 @@ export interface TargetOutput {
   /** Raw provider payload, kept for debugging / trajectory scoring. */
   raw?: unknown;
   /**
+   * The answer was cut off at the output limit (a partial answer is not a verdict on the model: the flag lets it
+   * be told apart). Present only when true (Mongo stores `undefined` as null). A `perTurn` replay sets it when
+   * ANY of its turns was cut off.
+   */
+  truncated?: boolean;
+  /**
    * `perTurn` replays only: what the model said at every turn, in order.
    *
    * Only the LAST turn is scored (it is the one the item's `expected` refers

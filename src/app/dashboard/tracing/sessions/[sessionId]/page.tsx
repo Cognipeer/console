@@ -1301,7 +1301,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
 
     const headerActions = (
         <>
-            <Button onClick={() => openDocs('api-tracing')} variant="default" size="sm" leftSection={<IconBook size={14} stroke={1.7} />}>
+            <Button onClick={() => openDocs('observe-tracing')} variant="default" size="sm" leftSection={<IconBook size={14} stroke={1.7} />}>
                 Docs
             </Button>
             <Button leftSection={<IconRefresh size={14} stroke={1.7} />} variant="default" size="sm" onClick={() => void fetchDetail(true)} loading={refreshing}>

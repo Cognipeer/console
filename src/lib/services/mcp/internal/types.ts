@@ -52,6 +52,16 @@ export interface InternalMcpProvider {
   label: string;
   description: string;
   configFields: InternalMcpConfigField[];
+  /**
+   * Served with an API token only: neither a server on this provider nor a composite that includes one can be
+   * public. Set by providers whose tools reach past the console — a browser, a sandbox that runs code.
+   */
+  tokenOnly?: boolean;
+  /**
+   * Whether the provider can be used in this tenant (an enterprise module and license, say). Absent = always.
+   * The create screen hides a provider that is not; its calls fail on their own.
+   */
+  isAvailable?(ctx: Pick<InternalMcpProviderContext, 'tenantId'>): Promise<boolean>;
   /** List the tenant's selectable instances (e.g. RAG modules) for this provider. */
   listInstances(ctx: InternalMcpProviderContext): Promise<InternalMcpInstanceOption[]>;
   /** Validate an instance key + config exist/are well-formed before saving. */

@@ -217,6 +217,8 @@ export const BATCH_TENANT_SCHEMA_SQL = `
     responseBody TEXT,
     errorMessage TEXT,
     usage TEXT,
+    finishReason TEXT,
+    truncated INTEGER,
     startedAt TEXT,
     endedAt TEXT,
     createdAt TEXT NOT NULL,

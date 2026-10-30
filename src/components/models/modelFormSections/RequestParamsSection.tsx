@@ -1,10 +1,12 @@
 import { Badge, Group, JsonInput, MultiSelect, Text } from '@mantine/core';
 import { FormField, FormSection, ToggleList, ToggleRow } from '@/components/common/ui/FormShell';
-import { REQUEST_DEFAULTS_PLACEHOLDER, UNSUPPORTED_PARAM_OPTIONS } from '@/components/models/requestParams';
+import { REQUEST_DEFAULTS_PLACEHOLDER, toStringArray, unsupportedParamOptions } from '@/components/models/requestParams';
 import type { FieldProps } from './types';
 
 interface RequestParamsSectionProps {
   number: number;
+  /** The model's provider driver: `max_tokens` is only offered for the OpenAI-schema ones. */
+  driver?: string;
   autoDropped: { params: string[]; reason?: string };
   autoDrop: { checked: boolean; onChange: (checked: boolean) => void };
   unsupportedProps: FieldProps;
@@ -15,6 +17,7 @@ interface RequestParamsSectionProps {
 /** Section "Request parameters": what the gateway drops, adds or forwards on calls to this model. */
 export default function RequestParamsSection({
   number,
+  driver,
   autoDropped,
   autoDrop,
   unsupportedProps,
@@ -64,7 +67,7 @@ export default function RequestParamsSection({
         hint="Added on top of what was detected, for anything the registry does not know about this provider yet."
       >
         <MultiSelect
-          data={UNSUPPORTED_PARAM_OPTIONS}
+          data={unsupportedParamOptions(driver, toStringArray((unsupportedProps as { value?: unknown }).value))}
           searchable
           clearable
           placeholder="None"

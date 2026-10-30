@@ -77,6 +77,9 @@ export interface PricingSuggestion {
     provider?: string;
     pricing: IModelPricing;
     confidence: SuggestionConfidence;
+    /** The entry's `max_input_tokens` / `max_output_tokens`, when the feed has them (used to fill the model form's limits). */
+    maxInputTokens?: number;
+    maxOutputTokens?: number;
   };
 }
 
@@ -313,6 +316,8 @@ function toMatch(
     provider: entry.provider,
     pricing: entry.pricing,
     confidence,
+    ...(entry.maxInputTokens !== undefined && entry.maxInputTokens > 0 ? { maxInputTokens: entry.maxInputTokens } : {}),
+    ...(entry.maxOutputTokens !== undefined && entry.maxOutputTokens > 0 ? { maxOutputTokens: entry.maxOutputTokens } : {}),
   };
 }
 

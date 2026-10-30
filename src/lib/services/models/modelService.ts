@@ -34,6 +34,7 @@ import type {
 } from './types';
 import { applyModelCapabilityOverrides, ModelCapabilityValidationError, ModelKeyConflictError } from './modelCapabilities';
 import { validateUpstreamApi } from './upstreamApi';
+import { validatePromptCaching } from './promptCaching';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 
 const logger = createLogger('model-service');
@@ -206,6 +207,11 @@ function assertUpstreamApi(settings: unknown, driver: string | undefined): void 
   if (problem) throw new ModelCapabilityValidationError(problem);
 }
 
+function assertPromptCaching(settings: unknown): void {
+  const problem = validatePromptCaching(settings);
+  if (problem) throw new ModelCapabilityValidationError(problem);
+}
+
 export async function createModel(
   tenantDbName: string,
   tenantId: string,
@@ -225,6 +231,7 @@ export async function createModel(
 
   ensureProviderSupportsCategory(provider, payload.category);
   assertUpstreamApi(payload.settings, provider.driver);
+  assertPromptCaching(payload.settings);
   validateSettingsDynamicConfig(payload.settings);
   const createDynamic = settingsDynamicConfig(payload.settings);
   if (createDynamic) {
@@ -261,6 +268,8 @@ export async function createModel(
   };
 
   const created = await db.createModel(newModel);
+  // The gateway caches 'not priced' (null) entries; drop them for the new key.
+  await invalidateModelMetaCache(tenantDbName, projectId, [created.key]);
   return created;
 }
 
@@ -662,6 +671,8 @@ export async function updateModel(
     );
   }
 
+  if (updatePayload.settings !== undefined) assertPromptCaching(updatePayload.settings);
+
   // `updates.settings` may attach a brand-new `dynamic` config or (via a
   // caller's shallow merge, e.g. the `PUT /models/:id` route) wholesale
   // replace an existing one — validate whatever is about to be persisted
@@ -708,10 +719,13 @@ function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string)
 /**
  * Drops the `getModelByKey` cache entries for a model so an edit (pricing,
  * routing config, guardrail bindings, provider) or a delete takes effect on
- * the next request instead of up to two minutes later. Best effort: the TTL
+ * the next request instead of up to two minutes later. Also drops the AI App
+ * Gateway price entries (`appgw:price:…`), which mirror gatewayPricingCacheKey()
+ * in the EE overlay's aiAppGateway/pricing.ts (core cannot import it): one for
+ * the project gateway and one for the tenant-wide gateway (projectId ''). Best effort: the TTL
  * still bounds staleness if the cache is unreachable.
  */
-async function invalidateModelMetaCache(
+export async function invalidateModelMetaCache(
   tenantDbName: string,
   projectId: string,
   keys: Array<string | undefined>,
@@ -719,9 +733,11 @@ async function invalidateModelMetaCache(
   try {
     const cache = await getCache();
     await Promise.all(
-      [...new Set(keys.filter((k): k is string => Boolean(k)))].map((key) =>
+      [...new Set(keys.filter((k): k is string => Boolean(k)))].flatMap((key) => [
         cache.del(modelMetaCacheKey(tenantDbName, projectId, key)),
-      ),
+        cache.del(`appgw:price:${tenantDbName}:${projectId}:${key}`),
+        cache.del(`appgw:price:${tenantDbName}::${key}`),
+      ]),
     );
   } catch { /* best effort — the 120s TTL bounds staleness */ }
 }

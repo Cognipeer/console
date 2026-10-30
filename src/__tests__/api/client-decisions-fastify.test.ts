@@ -65,6 +65,7 @@ import { checkRateLimit, settleUsageBudget } from '@/lib/quota/quotaGuard';
 import { mapSegmentsBounded } from '@/lib/services/models/decisionService';
 import { selectDecisionRuntime } from '@/lib/providers/contracts/nativeDecisionRuntime';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
+import { DecisionBackendError } from '@/lib/providers/contracts/structuredDecisionRuntime';
 import { clientDecisionsApiPlugin } from '@/server/api/plugins/client-decisions';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -397,6 +398,18 @@ describe('POST /client/v1/decisions', () => {
     await vi.waitFor(() => expect(logModelUsage).toHaveBeenCalledWith(
       'tenant_acme', expect.anything(), expect.objectContaining({ status: 'error', route: 'decisions' }),
     ));
+  });
+
+  it('books the usage a failed decision burned on its error row, once', async () => {
+    const burned = { inputTokens: 1200, outputTokens: 300, totalTokens: 1500 };
+    invoke.mockRejectedValue(new DecisionBackendError('output cut off twice', burned));
+    const response = await post(BODY);
+    expect(response.statusCode).toBe(502);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(logModelUsage).toHaveBeenCalled());
+    const rows = mockFn(logModelUsage).mock.calls.filter(([, , payload]) => payload.status === 'error');
+    expect(rows).toHaveLength(1);
+    expect(rows[0][2]).toMatchObject({ route: 'decisions', usage: burned });
   });
 
   it('still retries a transient upstream error (503) and then succeeds', async () => {

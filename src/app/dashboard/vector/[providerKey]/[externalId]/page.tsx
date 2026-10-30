@@ -630,7 +630,7 @@ export default function VectorIndexDetailPage() {
               Back
             </Button>
             <Button
-              onClick={() => openDocs('api-vectors')}
+              onClick={() => openDocs('knowledge-vector-stores')}
               variant="light"
               size="xs"
               leftSection={<IconBook size={14} />}

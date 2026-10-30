@@ -259,6 +259,10 @@ export function responsesRequestToChat(body: AnyRecord): AnyRecord {
   if (typeof effort === 'string') chat.reasoning_effort = effort;
   if (typeof body.include_reasoning === 'boolean') chat.include_reasoning = body.include_reasoning;
   if (typeof body.user === 'string') chat.user = body.user;
+  // OpenAI's prompt-cache fields ride along unchanged; the gateway sends them to an OpenAI-schema upstream only.
+  for (const field of ['prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options']) {
+    if (body[field] !== undefined && body[field] !== null) chat[field] = body[field];
+  }
   return chat;
 }
 

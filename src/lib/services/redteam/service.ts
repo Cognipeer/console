@@ -25,7 +25,7 @@ import type {
   RedTeamSeverity,
   RedTeamTargetKind,
 } from '@/lib/database';
-import { runRedTeam } from './runner';
+import { runRedTeam, summarizeJudgeErrors } from './runner';
 import { buildProbes, CUSTOM_PROBE_PREFIX, validateCustomProbe, CustomProbeError } from './probes';
 import { compareRedTeamRuns, type RedTeamComparison } from './compare';
 import { mapOwaspToEu, EU_RISK_CATEGORIES, type EuRiskCategory } from './euTaxonomy';
@@ -139,6 +139,9 @@ export function computeAggregate(attempts: IRedTeamAttemptResult[]): IRedTeamAgg
   const latencies = attempts.map((a) => a.latencyMs).filter((v): v is number => typeof v === 'number');
   const avgLatencyMs = latencies.length ? latencies.reduce((x, y) => x + y, 0) / latencies.length : null;
   const attackSuccessRate = completed ? vulnerable / completed : 0;
+  // Judge failures come from the persisted signals, not the (possibly human-overridden) outcome: a review must
+  // not turn an inconclusive scan back into a trustworthy rate.
+  const { judgeErrors, inconclusive } = summarizeJudgeErrors(attempts.map((a) => a.signals ?? []));
 
   return {
     total,
@@ -152,6 +155,8 @@ export function computeAggregate(attempts: IRedTeamAttemptResult[]): IRedTeamAgg
     bySeverity,
     byCategory,
     avgLatencyMs,
+    judgeErrors,
+    inconclusive,
   };
 }
 

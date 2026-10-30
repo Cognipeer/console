@@ -56,6 +56,10 @@ interface SandboxCapabilities {
     reason?: 'edition' | 'license' | 'unreachable';
     detail?: string;
     templates: Array<{ key: string; name: string; description?: string }>;
+    /** The project's persistent sandboxes (empty without Sandbox read access). */
+    instances?: Array<{ id: string; name: string; state: string; templateKey?: string }>;
+    /** May this user choose a persistent sandbox (Sandbox write)? */
+    canAttach?: boolean;
 }
 
 export interface AgentSandboxPanelProps {
@@ -122,6 +126,15 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
     }, []);
 
     const unavailable = capabilities && !capabilities.available;
+    const attached = mode === 'instance';
+    const instanceOptions = (capabilities?.instances ?? []).map((instance) => ({
+        value: instance.id,
+        label: `${instance.name} (${instance.state})`,
+    }));
+    if (value?.instanceId && !instanceOptions.some((option) => option.value === value.instanceId)) {
+        // The stored choice, even when this user cannot list it (no Sandbox read) or it is gone.
+        instanceOptions.unshift({ value: value.instanceId, label: `Sandbox ${value.instanceId}` });
+    }
 
     return (
         <Stack gap="md">
@@ -153,56 +166,86 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
             {enabled ? (
                 <>
                     <ConfigBlock title="Machine">
-                        <Stack gap="sm">
-                            {capabilities?.available && capabilities.templates.length === 0 ? (
-                                <Alert variant="light" color="orange" icon={<IconInfoCircle size={16} />} p="xs">
-                                    <Text size="sm">
-                                        No sandbox templates yet. Create one, or add the built-in ones with “Seed defaults”, on the{' '}
-                                        <Anchor component={Link} href="/dashboard/sandbox/templates" size="sm">Sandbox templates</Anchor> page.
+                        {attached ? (
+                            <Stack gap="sm">
+                                <Select
+                                    label="Persistent sandbox"
+                                    description="An existing persistent sandbox of this project. Its template, resources, network and own variables apply; the agent starts it when it is stopped and never stops or deletes it."
+                                    placeholder="Pick a persistent sandbox"
+                                    withAsterisk
+                                    error={!value?.instanceId ? 'Pick a sandbox — the agent cannot be saved without one.' : undefined}
+                                    data={instanceOptions}
+                                    value={value?.instanceId ?? null}
+                                    onChange={(next) => patch({ instanceId: next ?? undefined })}
+                                    disabled={capabilities?.canAttach === false}
+                                    searchable
+                                    nothingFoundMessage="No persistent sandboxes"
+                                />
+                                {capabilities?.canAttach === false ? (
+                                    <Text size="xs" c="dimmed">
+                                        Choosing a sandbox needs write access to Sandbox in this project. Ask someone with Sandbox access to pick it.
                                     </Text>
-                                </Alert>
-                            ) : null}
-                            <Select
-                                label="Template"
-                                description="The image the sandbox starts from."
-                                placeholder="Pick a template"
-                                withAsterisk
-                                error={capabilities?.available && !value?.templateKey ? 'Pick a template — the agent cannot be saved without one.' : undefined}
-                                data={(capabilities?.templates ?? []).map((template) => ({
-                                    value: template.key,
-                                    label: template.description ? `${template.name} — ${template.description}` : template.name,
-                                }))}
-                                value={value?.templateKey ?? null}
-                                onChange={(next) => patch({ templateKey: next ?? undefined })}
-                                searchable
-                            />
-                            <Group grow align="flex-start">
-                                <NumberInput
-                                    label="CPU cores"
-                                    placeholder="Template default"
-                                    min={0.25}
-                                    max={64}
-                                    step={0.5}
-                                    decimalScale={2}
-                                    value={value?.resources?.cpuCores ?? ''}
-                                    onChange={(next) => patchResources({ cpuCores: optionalNumber(next) })}
+                                ) : capabilities?.available && (capabilities.instances ?? []).length === 0 ? (
+                                    <Alert variant="light" color="orange" icon={<IconInfoCircle size={16} />} p="xs">
+                                        <Text size="sm">
+                                            No persistent sandboxes in this project yet. Create one with “Persistent” on, on the{' '}
+                                            <Anchor component={Link} href="/dashboard/sandbox/instances" size="sm">Sandboxes</Anchor> page.
+                                        </Text>
+                                    </Alert>
+                                ) : null}
+                            </Stack>
+                        ) : (
+                            <Stack gap="sm">
+                                {capabilities?.available && capabilities.templates.length === 0 ? (
+                                    <Alert variant="light" color="orange" icon={<IconInfoCircle size={16} />} p="xs">
+                                        <Text size="sm">
+                                            No sandbox templates yet. Create one, or add the built-in ones with “Seed defaults”, on the{' '}
+                                            <Anchor component={Link} href="/dashboard/sandbox/templates" size="sm">Sandbox templates</Anchor> page.
+                                        </Text>
+                                    </Alert>
+                                ) : null}
+                                <Select
+                                    label="Template"
+                                    description="The image the sandbox starts from."
+                                    placeholder="Pick a template"
+                                    withAsterisk
+                                    error={capabilities?.available && !value?.templateKey ? 'Pick a template — the agent cannot be saved without one.' : undefined}
+                                    data={(capabilities?.templates ?? []).map((template) => ({
+                                        value: template.key,
+                                        label: template.description ? `${template.name} — ${template.description}` : template.name,
+                                    }))}
+                                    value={value?.templateKey ?? null}
+                                    onChange={(next) => patch({ templateKey: next ?? undefined })}
+                                    searchable
                                 />
-                                <NumberInput
-                                    label="Memory (MB)"
-                                    placeholder="Template default"
-                                    min={128}
-                                    step={256}
-                                    value={value?.resources?.memoryMb ?? ''}
-                                    onChange={(next) => patchResources({ memoryMb: optionalNumber(next) })}
+                                <Group grow align="flex-start">
+                                    <NumberInput
+                                        label="CPU cores"
+                                        placeholder="Template default"
+                                        min={0.25}
+                                        max={64}
+                                        step={0.5}
+                                        decimalScale={2}
+                                        value={value?.resources?.cpuCores ?? ''}
+                                        onChange={(next) => patchResources({ cpuCores: optionalNumber(next) })}
+                                    />
+                                    <NumberInput
+                                        label="Memory (MB)"
+                                        placeholder="Template default"
+                                        min={128}
+                                        step={256}
+                                        value={value?.resources?.memoryMb ?? ''}
+                                        onChange={(next) => patchResources({ memoryMb: optionalNumber(next) })}
+                                    />
+                                </Group>
+                                <Switch
+                                    label="Block network access"
+                                    description="No internet from inside the sandbox — package installs will fail."
+                                    checked={value?.blockNetwork ?? false}
+                                    onChange={(event) => patch({ blockNetwork: event.currentTarget.checked })}
                                 />
-                            </Group>
-                            <Switch
-                                label="Block network access"
-                                description="No internet from inside the sandbox — package installs will fail."
-                                checked={value?.blockNetwork ?? false}
-                                onChange={(event) => patch({ blockNetwork: event.currentTarget.checked })}
-                            />
-                        </Stack>
+                            </Stack>
+                        )}
                     </ConfigBlock>
 
                     <ConfigBlock title="Lifetime">
@@ -213,12 +256,15 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                                 data={[
                                     { value: 'session', label: 'Session' },
                                     { value: 'ephemeral', label: 'Per message' },
+                                    { value: 'instance', label: 'Persistent sandbox' },
                                 ]}
                             />
                             <Text size="xs" c="dimmed">
-                                {mode === 'ephemeral'
-                                    ? 'A fresh sandbox for every message, deleted when the reply is done. Nothing carries over between turns.'
-                                    : 'One sandbox per conversation, kept running between messages: files and installed packages carry over, and every use extends its life. It is shut down and deleted once it has been idle for the sandbox idle timeout (Sandbox → Settings, or the template\'s own), or with the conversation; the next message then starts a fresh one. A call without a conversation gets a throwaway sandbox.'}
+                                {mode === 'instance'
+                                    ? 'Every conversation works in the same persistent sandbox you pick under Machine: files and installed packages stay until someone deletes them, and anyone with access to that sandbox sees what the agent writes. The agent\'s variables below go with each command instead of onto the machine; only files written to /outputs/ during a reply are delivered.'
+                                    : mode === 'ephemeral'
+                                        ? 'A fresh sandbox for every message, deleted when the reply is done. Nothing carries over between turns.'
+                                        : 'One sandbox per conversation, kept running between messages: files and installed packages carry over, and every use extends its life. It is shut down and deleted once it has been idle for the sandbox idle timeout (Sandbox → Settings, or the template\'s own), or with the conversation; the next message then starts a fresh one. A call without a conversation gets a throwaway sandbox.'}
                             </Text>
                             <Group grow align="flex-start">
                                 <NumberInput
@@ -270,17 +316,19 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                                                 onChange={(next) => patchPreview({ linkTtlHours: optionalNumber(next) })}
                                             />
                                         ) : null}
-                                        <NumberInput
-                                            label="Keep running while idle (minutes)"
-                                            description="A machine with a live preview is not stopped when the reply ends; it stops after this long without activity."
-                                            placeholder="30"
-                                            min={5}
-                                            max={1440}
-                                            value={value.preview.keepAliveMinutes ?? ''}
-                                            onChange={(next) => patchPreview({ keepAliveMinutes: optionalNumber(next) })}
-                                        />
+                                        {attached ? null : (
+                                            <NumberInput
+                                                label="Keep running while idle (minutes)"
+                                                description="A machine with a live preview is not stopped when the reply ends; it stops after this long without activity."
+                                                placeholder="30"
+                                                min={5}
+                                                max={1440}
+                                                value={value.preview.keepAliveMinutes ?? ''}
+                                                onChange={(next) => patchPreview({ keepAliveMinutes: optionalNumber(next) })}
+                                            />
+                                        )}
                                     </Group>
-                                    {value.blockNetwork ? (
+                                    {value.blockNetwork && !attached ? (
                                         <Text size="xs" c="orange.7">Preview links do not work while the network is blocked.</Text>
                                     ) : null}
                                 </>

@@ -26,7 +26,12 @@
 
 import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from 'node:zlib';
 
-import { parseOutputLimitNotice } from './outputLimitNotice';
+import {
+    isOutputLimitNoticeMessage,
+    isOutputLimitNoticeStop,
+    outputLimitStopDetail,
+    type OutputLimitReport,
+} from './outputLimitNotice';
 import { clientToolMeta } from './agentClientTools';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
@@ -251,7 +256,9 @@ function pickCarried(state: AgentSdkSmartState | undefined): CarriedState {
             .filter((message): message is AgentSdkMessage => message !== null)
             // The system prompt is rebuilt from the CURRENT config every turn;
             // a stored one would pin the prompt the conversation started with.
-            .filter((message) => message.role !== 'system'),
+            .filter((message) => message.role !== 'system')
+            // A limit notice is the console's words, not the model's: the next turn must not see it.
+            .filter((message) => !isOutputLimitNoticeMessage(message)),
     );
     return carried;
 }
@@ -451,7 +458,7 @@ export async function saveConversationState(
  */
 export function buildTurnInputState(input: {
     carried: CarriedState | null;
-    transcript: Array<{ role: string; content: string; attachments?: IAgentMessageAttachment[] }>;
+    transcript: Array<{ role: string; content: string; attachments?: IAgentMessageAttachment[]; stopReason?: string; stopDetail?: string }>;
     userMessage: string;
     /**
      * What the model is shown as the user turn when it is more than the text —
@@ -475,12 +482,15 @@ export function buildTurnInputState(input: {
 }): AgentSdkSmartState {
     const replay = input.attachments;
     const history: AgentSdkMessage[] = input.carried?.messages
-        ?? input.transcript.map((m) => ({
-            role: m.role,
-            content: replay && m.role === 'user' && m.attachments?.length
-                ? rebuildUserTurn(m.content, m.attachments, { supportsVision: replay.supportsVision })
-                : m.content,
-        }) as AgentSdkMessage);
+        ?? input.transcript
+            // The turn that ended with a limit notice has no answer of the model's to replay.
+            .filter((m) => !(m.role === 'assistant' && isOutputLimitNoticeStop(m.stopReason, m.stopDetail)))
+            .map((m) => ({
+                role: m.role,
+                content: replay && m.role === 'user' && m.attachments?.length
+                    ? rebuildUserTurn(m.content, m.attachments, { supportsVision: replay.supportsVision })
+                    : m.content,
+            }) as AgentSdkMessage);
 
     let userContent: string | unknown[] = input.userContent ?? input.userMessage;
     if (replay && replay.supportsVision && replay.carryRecentImages > 0) {
@@ -580,6 +590,8 @@ export function describeTurnOutcome(
     result: Pick<AgentSdkInvokeResult, 'content' | 'state'>,
     /** How many messages the run started with — only text written after that counts. */
     inputMessageCount: number,
+    /** How the run's last model call ended at its output limit, as the chat model reported it (outputLimitNotice.ts). */
+    outputLimit?: OutputLimitReport,
 ): AgentTurnOutcome {
     const ctx = ((result.state as { ctx?: Record<string, unknown> } | undefined)?.ctx ?? {}) as Record<string, unknown>;
     const content = result.content || '';
@@ -602,18 +614,17 @@ export function describeTurnOutcome(
                 : undefined;
     }
 
-    // The model could not fit an answer in its output limit even after a raised
-    // retry: the turn ended gracefully with a notice (gatewayChatModel.ts).
-    if (stopReason === 'completed') {
-        const notice = parseOutputLimitNotice(content);
-        if (notice) {
-            return {
-                stopReason: 'limit',
-                stopDetail: `maxOutputTokens${notice.limit ? ` (${notice.limit})` : ''} reached by the model`,
-                content,
-                partial: true,
-            };
-        }
+    // The model's last call ended at its output limit (gatewayChatModel.ts): either it
+    // could not fit an answer even after a raised retry, and the turn ended gracefully
+    // with a notice, or its answer was cut off and is partial. The chat model reports
+    // it; the text of `content` is never read for it.
+    if (stopReason === 'completed' && outputLimit) {
+        return {
+            stopReason: 'limit',
+            stopDetail: outputLimitStopDetail(outputLimit),
+            content,
+            partial: true,
+        };
     }
 
     if (stopReason === 'completed' || content.trim()) {
@@ -716,6 +727,8 @@ export function compactedToolResults(
  * The SDK's estimator, with the cache-write slot a later SDK passes (0.20's args have
  * none, so a live call simply omits it).
  */
+export type CostModelContext = { providerDriver?: string; modelId?: string };
+
 export type AgentCostEstimator = (args: Parameters<CostEstimator>[0] & { cacheWriteTokens?: number }) => number;
 
 /**
@@ -728,41 +741,43 @@ export type AgentCostEstimator = (args: Parameters<CostEstimator>[0] & { cacheWr
  * own model, which makes the cap err on the side of stopping.
  */
 export function buildCostEstimator(
-    models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null; /** A model with no price of its own that must not be priced at the fallback rate (a sub-agent's). */ noFallback?: boolean }>,
+    models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null; /** Driver + model id: lets a Claude cache write be priced at its assumed rate. */ model?: CostModelContext; /** A model with no price of its own that must not be priced at the fallback rate (a sub-agent's). */ noFallback?: boolean }>,
     fallback: IModelPricing | null | undefined,
-    calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cachedWriteTokens?: number }) => { totalCost: number },
+    calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cachedWriteTokens?: number }, model?: CostModelContext) => { totalCost: number },
+    fallbackModel?: CostModelContext,
 ): AgentCostEstimator | undefined {
     // A pricing record of zeros is "nobody entered prices", not "free": it
     // would price every call at $0 and the cap would never fire.
     const priced = (pricing: IModelPricing | null | undefined): pricing is IModelPricing =>
         !!pricing && ((pricing.inputTokenPer1M ?? 0) > 0 || (pricing.outputTokenPer1M ?? 0) > 0);
     const fallbackPricing = priced(fallback) ? fallback : undefined;
-    const byName = new Map<string, IModelPricing>();
+    const byName = new Map<string, { pricing: IModelPricing; model?: CostModelContext }>();
     const unpriced = new Set<string>();
     for (const entry of models) {
         if (!priced(entry.pricing)) {
             if (entry.noFallback) for (const name of entry.names) if (name) unpriced.add(name.toLowerCase());
             continue;
         }
-        for (const name of entry.names) if (name) byName.set(name.toLowerCase(), entry.pricing);
+        for (const name of entry.names) if (name) byName.set(name.toLowerCase(), { pricing: entry.pricing, model: entry.model });
     }
     if (byName.size === 0 && !fallbackPricing) return undefined;
-    // `cacheWriteTokens` is not in agent-sdk 0.20's estimator args (a later SDK passes it);
-    // the live budget stop prices a cache write at the input rate until then, and
-    // `priceAgentTurn` (post-turn) prices it exactly. `inputTokens` is the whole prompt,
-    // cache read + write included (the gateway's canonical usage).
+    // agent-sdk >= 0.21 passes `cacheWriteTokens` in the estimator args, so the live
+    // budget stop prices a cache write at its own rate, as `priceAgentTurn` does
+    // post-turn. `inputTokens` is the whole prompt, cache read + write included (the
+    // gateway's canonical usage).
     return (args) => {
         const name = args.modelName?.toLowerCase();
         // A sub-agent's model nobody priced counts as free here (the owner is warned) rather than at the parent's rate.
         if (name && !byName.has(name) && unpriced.has(name)) return 0;
-        const pricing = (name ? byName.get(name) : undefined) ?? fallbackPricing;
+        const hit = name ? byName.get(name) : undefined;
+        const pricing = hit?.pricing ?? fallbackPricing;
         if (!pricing) return 0;
         return calculate(pricing, {
             inputTokens: args.inputTokens,
             outputTokens: args.outputTokens,
             cachedInputTokens: args.cachedInputTokens,
             cachedWriteTokens: args.cacheWriteTokens,
-        }).totalCost;
+        }, hit ? hit.model : fallbackModel).totalCost;
     };
 }
 

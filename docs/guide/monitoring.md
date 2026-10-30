@@ -73,7 +73,7 @@ Latency percentiles are read from a fixed histogram (bounds at 100, 250, 500 ms,
 | Guardrails (`guardrails`) | `guardrail_fail_rate`, `guardrail_avg_latency_ms`, `guardrail_total_evaluations`, `guardrail_block_rate`, `guardrail_avg_risk_score`, `guardrail_total_decisions`, `guardrail_approval_rate` (kept for compatibility; always 0) |
 | Knowledge Engine (`rag`) | `rag_failed_documents` |
 | Analysis, Evaluation, Red Team | `analysis_pass_rate`, `analysis_avg_judge_score`, `analysis_avg_accuracy`, `evaluation_pass_rate`, `evaluation_avg_score`, `redteam_attack_success_rate`, `redteam_resilience_score` (percentages averaged over the runs completed in the window) |
-| AI App Gateway (`ai-app-gateway`) | `appgw_requests`, `appgw_block_rate`, `appgw_error_rate`, `appgw_requests_per_user` (collected by the Enterprise build) |
+| AI App Gateway (`ai-app-gateway`) | `appgw_requests`, `appgw_block_rate`, `appgw_error_rate`, `appgw_requests_per_user`, `appgw_output_limit_turns`, `appgw_output_limit_rate` (collected by the Enterprise build) |
 
 Rules created before per-entity alerting use the older module-wide metrics (`error_rate`, `avg_latency_ms`, `p95_latency_ms`, `total_cost`, `total_requests`, `rag_avg_latency_ms`, `rag_total_queries`, `mcp_error_rate`, `mcp_avg_latency_ms`, `mcp_total_requests` and the `aegis_*` spellings of the guardrail metrics). They keep working unchanged, with their scope and their channels, and are no longer offered for new rules. Create the per-entity equivalent to get one state and one incident per model, knowledge base or MCP server.
 
