@@ -250,6 +250,8 @@ interface UsageLogDto {
   routing?: RoutingInfoDto;
   providerRequest?: Record<string, unknown>;
   providerResponse?: Record<string, unknown>;
+  /** The call carried knowledge base passages this viewer may not read: sent without its request, response or error. */
+  restricted?: boolean;
   createdAt?: string;
 }
 
@@ -1218,6 +1220,11 @@ export default function ModelDetailPage() {
               label: t('logs.modal.model'),
               value: <Text size="sm">{model?.key ?? '—'}</Text>,
             },
+            ...(selectedLog.restricted ? [{
+              key: 'restricted',
+              label: t('logs.modal.restrictedLabel'),
+              value: <Text size="sm" c="dimmed" data-testid="model-log-restricted">{t('logs.modal.restricted')}</Text>,
+            }] : []),
             {
               key: 'tokens',
               label: t('logs.modal.tokens'),

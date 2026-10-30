@@ -34,6 +34,12 @@ vi.mock('@/lib/services/crawler', async (importActual) => ({
     getCrawler,
 }));
 
+const ocrModels = vi.hoisted(() => ({ validate: vi.fn() }));
+vi.mock('@/lib/services/extraction', async (importActual) => ({
+    ...(await importActual<typeof import('@/lib/services/extraction')>()),
+    validateOcrModelRef: ocrModels.validate,
+}));
+
 import {
     invalidConfigBody,
     validateAgentConfig,
@@ -500,4 +506,57 @@ describe('callback secret without a url', () => {
     expect(result.errors.map((e) => e.field)).toContain('callback.secret');
     expect(validateAgentConfigShape({ modelKey: 'm', callback: { url: 'https://example.com/hook', secret: 'a-long-enough-secret-value' } } as never).errors).toEqual([]);
   });
+});
+
+describe('attachments.ocr', () => {
+    const withOcr = (ocr: unknown, extra: Record<string, unknown> = {}) => validateAgentConfig({
+        tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me',
+        config: { modelKey: 'gpt-main', attachments: { enabled: true, bucketKey: 'docs', ocr, ...extra } } as IAgentConfig,
+    });
+    const shape = (ocr: unknown) => validateAgentConfigShape({ modelKey: 'gpt-main', attachments: { ocr } } as IAgentConfig);
+
+    beforeEach(() => {
+        ocrModels.validate.mockReset();
+        ocrModels.validate.mockResolvedValue(undefined);
+    });
+
+    it('accepts none, null, and a well-formed setting', () => {
+        expect(shape(undefined).errors).toEqual([]);
+        expect(shape(null).errors).toEqual([]);
+        expect(shape({ mode: 'auto' }).errors).toEqual([]);
+        expect(shape({ mode: 'always', modelKey: 'ocr-1', languages: ['tr', 'en'], maxPages: 20, images: true }).errors).toEqual([]);
+        expect(shape({ mode: 'off' }).errors).toEqual([]);
+    });
+
+    it('refuses a setting that is not an object, a mode that is not one, unknown keys and wrong types', () => {
+        for (const bad of ['auto', [], 5, {}, { mode: 'model' }, { mode: 'auto', engine: 'local' }, { mode: 'auto', modelKey: 5 },
+            { mode: 'auto', languages: 'tr' }, { mode: 'auto', languages: ['turkish!'] }, { mode: 'auto', maxPages: 0 }, { mode: 'auto', maxPages: 1.5 }, { mode: 'auto', images: 'yes' }]) {
+            const errors = shape(bad).errors;
+            expect(errors.map((issue) => issue.field), JSON.stringify(bad)).toEqual(['attachments.ocr']);
+        }
+        expect(shape({ mode: 'sometimes' }).errors[0]!.message).toContain("'off', 'auto', 'always'");
+    });
+
+    it('checks the model it names against the project', async () => {
+        expect((await withOcr({ mode: 'auto', modelKey: 'ocr-1' })).errors).toEqual([]);
+        expect(ocrModels.validate).toHaveBeenCalledWith({ tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p' }, 'ocr-1');
+
+        ocrModels.validate.mockResolvedValue('The OCR model "ghost" was not found in this project.');
+        const result = await withOcr({ mode: 'always', modelKey: 'ghost' });
+        expect(result.errors).toEqual([{ field: 'attachments.ocr.modelKey', message: 'The OCR model "ghost" was not found in this project.' }]);
+    });
+
+    it('asks nothing of the project for the local engine, for OCR switched off, or for a malformed setting', async () => {
+        await withOcr({ mode: 'auto' });
+        await withOcr({ mode: 'off', modelKey: 'stale' });
+        const malformed = await withOcr({ mode: 'sometimes', modelKey: 'ocr-1' });
+        expect(malformed.errors.map((issue) => issue.field)).toEqual(['attachments.ocr']);
+        expect(ocrModels.validate).not.toHaveBeenCalled();
+    });
+
+    it('a model that cannot be checked is a refusal with a reason, not a crash', async () => {
+        ocrModels.validate.mockRejectedValue(new Error('db down'));
+        const result = await withOcr({ mode: 'auto', modelKey: 'ocr-1' });
+        expect(result.errors).toEqual([{ field: 'attachments.ocr.modelKey', message: 'The OCR model "ocr-1" could not be checked: db down' }]);
+    });
 });

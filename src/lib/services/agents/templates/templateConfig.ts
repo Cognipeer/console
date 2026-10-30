@@ -55,17 +55,42 @@ export function buildTemplateConfig(template: AgentTemplate, picks: TemplateConf
   return config;
 }
 
+/** A connector trigger's parameters without the entries a form leaves empty (nothing, `null`, `''`, an empty list). */
+export function givenConnectorParams(params: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const isEmpty = (value: unknown) => value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0);
+  return Object.fromEntries(Object.entries(params ?? {}).filter(([, value]) => !isEmpty(value)));
+}
+
 /**
  * The request body of a suggested trigger, in the shape `POST /agents/:id/triggers`
  * takes (so it goes through the same validation a hand-made trigger does):
- * always disabled and unpinned (it runs the published version).
+ * always disabled and unpinned (it runs the published version). A connector
+ * trigger takes `params` over its own `params`: what the package's trigger needs
+ * from the user (a repository), which no template can know.
  */
-export function buildTriggerBody(trigger: AgentTemplateTrigger, timezone: string): Record<string, unknown> {
+export function buildTriggerBody(
+  trigger: AgentTemplateTrigger,
+  timezone: string,
+  connectorId?: string,
+  params?: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     name: trigger.name,
     type: trigger.type,
     ...(trigger.type === 'schedule' && trigger.schedule ? { schedule: { cron: trigger.schedule.cron, timezone } } : {}),
     ...(trigger.type === 'webhook' && trigger.webhook ? { webhook: structuredClone(trigger.webhook) } : {}),
+    ...(trigger.type === 'connector' && trigger.connector
+      ? {
+        connector: {
+          connector_id: connectorId,
+          trigger: trigger.connector.trigger,
+          params: { ...structuredClone(trigger.connector.params ?? {}), ...structuredClone(givenConnectorParams(params)) },
+          ...(trigger.connector.events ? { events: [...trigger.connector.events] } : {}),
+          ...(trigger.connector.filter ? { filter: structuredClone(trigger.connector.filter) } : {}),
+          include_payload: trigger.connector.includePayload,
+        },
+      }
+      : {}),
     prompt: trigger.prompt,
     ...(trigger.variables ? { variables: structuredClone(trigger.variables) } : {}),
     enabled: false,

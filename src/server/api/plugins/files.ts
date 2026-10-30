@@ -32,6 +32,7 @@ import { IMPORT_DEFAULT_LIMIT, IMPORT_MAX_LIMIT, importFromStorage } from '@/lib
 import { startBucketDeletion } from '@/lib/services/files/jobs/bucketDeletion';
 import { bucketHoldsSourcesBody, findModulesKeepingSourcesIn } from '@/lib/services/files/knowledgeSources';
 import { queueMarkdownConversion } from '@/lib/services/files/jobs/markdownConversion';
+import { parseExtractionBody } from '@/lib/services/files/markdownExtraction';
 import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import { assertPreviewSize, planPreview } from '@/lib/services/files/preview';
 import type { FileRecordView } from '@/lib/services/files/types';
@@ -60,8 +61,9 @@ import {
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import { isUploadMetadata, sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
+import { ragFileGuard, withoutHiddenFiles } from '../ragOwnedResources';
 import {
-  SESSION_FORBIDDEN_MESSAGE,
+  sessionRefusalMessage,
   refuseSessionLinked,
   sendSessionRefusal,
   sessionActorOf,
@@ -128,6 +130,15 @@ function parseLimit(value?: string): number | undefined {
     return undefined;
   }
   return Math.min(parsed, 200);
+}
+
+/**
+ * The objects of a knowledge base with access control are read through the knowledge base: of the ones in this request,
+ * the caller gets those of a module they administer (or of a module without access control), and the rest are not
+ * there for them. See `ragOwnedResources`.
+ */
+function kbFilesOf(request: FastifyRequest, session: { tenantDbName: string; tenantId: string }, projectId: string) {
+  return ragFileGuard(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId });
 }
 
 /** A missing bucket is the handlers' 404; the in-use guard only speaks for one that exists. */
@@ -271,7 +282,7 @@ async function sessionRefusedForBucketDeletion(
 
 /** What a batch says about a file of a session the caller may not act on. */
 function denialMessage(denial: SessionDenial): string {
-  return denial.status === 403 ? SESSION_FORBIDDEN_MESSAGE[denial.need] : 'Authorization is temporarily unavailable.';
+  return denial.status === 403 ? sessionRefusalMessage(denial) : 'Authorization is temporarily unavailable.';
 }
 
 export const filesApiPlugin: FastifyPluginAsync = async (app) => {
@@ -629,12 +640,13 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
       // The files a session holds are the session's: those of somebody else's session the caller may not view
       // are left out, and the page is filled from the following reads rather than cut short (a caller who may
-      // view every session costs one plain read and no lookup).
+      // view every session costs one plain read and no lookup). The same goes for the objects of a knowledge
+      // base with access control that the caller does not administer.
       const limit = parseLimit(query.limit) ?? 50;
       const visible = await listVisibleFiles(request, {
         cursor: query.cursor || undefined,
         limit,
-        read: (cursor, size) => listFiles(session.tenantDbName, session.tenantId, projectId, {
+        read: withoutHiddenFiles(kbFilesOf(request, session, projectId), (cursor, size) => listFiles(session.tenantDbName, session.tenantId, projectId, {
           bucketKey,
           cursor,
           limit: size,
@@ -643,7 +655,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
           ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
           // A kind filter lists like a search: every match under the prefix, flat. An unknown kind is ignored.
           ...(isFileTypeFilter(query.type) ? { type: query.type } : {}),
-        }),
+        })),
       });
       return reply.code(200).send({
         items: await withUploaderNames(
@@ -678,6 +690,9 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       // `folder` (alias `prefix`) = upload into that folder; `keyHint` is then the file's name in it.
       const destination = composeUploadKeyHint({ folder: body.folder ?? body.prefix, keyHint: body.keyHint });
       if ('error' in destination) return reply.code(400).send({ error: destination.error });
+      // Optional OCR settings for the Markdown copy (`ocr`, `images`): checked here, kept on the file's record.
+      const extraction = await parseExtractionBody(body, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId });
+      if ('error' in extraction) return reply.code(400).send({ error: extraction.error });
 
       // The bucket first: the quotas below are those of its provider, and a bucket that is missing or switched
       // off is refused before any of them is spent.
@@ -762,6 +777,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         data: body.data as string,
         fileName: body.fileName as string,
         ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
+        ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
         metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
         providerKey: (body.providerKey as string | undefined) ?? undefined,
       });
@@ -778,11 +794,17 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { bucketKey } = request.params as { bucketKey: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const key = readObjectKey(readJsonObjectBody(request).key, 'key');
+      const body = readJsonObjectBody(request);
+      const key = readObjectKey(body.key, 'key');
+      // Optional `ocr` / `images`: when the body names either, they replace the settings the file has (none = the plain conversion).
+      const extraction = await parseExtractionBody(body, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId });
+      if ('error' in extraction) return reply.code(400).send({ error: extraction.error });
 
       // Converting a file a session holds changes that session's file: its owner always may, anybody else needs
-      // `agent.session_manage_others`.
+      // `agent.session_manage_others`. The answer is the file's record, so a file of a knowledge base the caller
+      // may not read is not there for them.
       const existing = await getFileRecord(session.tenantDbName, session.tenantId, projectId, bucketKey, key);
+      await kbFilesOf(request, session, projectId).assertVisible(existing);
       const refusal = await refuseSessionLinked(request, sessionOfFile(existing), 'manage');
       if (refusal) return sendSessionRefusal(reply, request, refusal);
 
@@ -793,6 +815,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         bucketKey,
         key,
         actor: session.userId,
+        ...(extraction.present ? { extraction: extraction.extraction ?? {} } : {}),
       });
       const [withAgent] = await withAgentIds(session.tenantDbName, projectId, [record]);
       const [named] = await withUploaderNames(session.tenantDbName, [withAgent]);
@@ -851,7 +874,10 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         const { projectId, session } = await requireProjectContextForRequest(request);
         const keys = readObjectKeys(readJsonObjectBody(request), ARCHIVE_MAX_FILES);
 
-        const { found, missing, duplicates } = await findFileRecordsByKeys(session.tenantDbName, session.tenantId, projectId, bucketKey, keys);
+        const { found, missing: notFound, duplicates } = await findFileRecordsByKeys(session.tenantDbName, session.tenantId, projectId, bucketKey, keys);
+        // A file of a knowledge base the caller may not read is as good as missing: named among the keys that were not found.
+        const hidden = await kbFilesOf(request, session, projectId).hiddenKeys([...found, ...duplicates]);
+        const missing = hidden.size === 0 ? notFound : keys.filter((key) => hidden.has(key) || notFound.includes(key));
         if (missing.length > 0) {
           throw new FileServiceError('file_not_found', 404, 'File not found', { details: { keys: missing } });
         }
@@ -916,8 +942,10 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
 
       // A file a session holds (`purpose: 'conversation'`) is read as the session it belongs to: its owner
       // always may, anybody else needs `agent.session_view_others`. This holds for every way of reading it:
-      // the record, the download and the preview.
+      // the record, the download and the preview. A file of a knowledge base with access control is read through
+      // the knowledge base: for a caller who does not administer it, it is not there, in every one of those ways.
       const wanted = await getFileRecord(session.tenantDbName, session.tenantId, projectId, bucketKey, key);
+      await kbFilesOf(request, session, projectId).assertVisible(wanted);
       const refusal = await refuseSessionLinked(request, sessionOfFile(wanted), 'view');
       if (refusal) return sendSessionRefusal(reply, request, refusal);
 

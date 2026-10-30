@@ -28,7 +28,7 @@ const NOT_LOGS: Record<string, string> = {
 };
 
 /** Written by enterprise modules, which register their own retention entries (console-ee). */
-const ENTERPRISE_OWNED = new Set(['gpu_fleet_commands', 'gpu_host_metrics', 'realtime_sessions', 'realtime_session_turns', 'sandbox_events', 'sandbox_commands']);
+const ENTERPRISE_OWNED = new Set(['gpu_fleet_commands', 'gpu_host_metrics', 'realtime_sessions', 'realtime_session_turns', 'sandbox_events', 'sandbox_commands', 'flow_runs', 'flow_run_events']);
 
 function collectionNames(): Set<string> {
   const names = new Set<string>();

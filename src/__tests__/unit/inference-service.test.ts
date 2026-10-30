@@ -2760,3 +2760,261 @@ describe('handleOcrRequest', () => {
     });
   });
 });
+
+describe('handleOcrRequest: options for callers outside a request (document extraction)', () => {
+  const baseParams = {
+    tenantDbName: 'tenant_acme',
+    projectId: 'proj-1',
+    input: { document: { kind: 'bytes' as const, data: Buffer.from('png'), contentType: 'image/png' } },
+  };
+
+  const ocrRuntimeOf = (extract: ReturnType<typeof vi.fn>) => ({
+    runtime: { createOcrRuntime: vi.fn().mockResolvedValue({ extract }) },
+  });
+
+  const visionRuntime = (content = '{"text":"# From vision"}') => {
+    const complete = vi.fn().mockResolvedValue({
+      content,
+      usage: { inputTokens: 700, outputTokens: 20 },
+    });
+    return {
+      complete,
+      built: {
+        runtime: {
+          createNativeChatClient: vi.fn().mockResolvedValue({ driver: 'openai', complete }),
+        },
+      },
+    };
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (logModelUsage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+  });
+
+  it('refuses a vision LLM unless the caller allows it, with the message it always had', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ key: 'vision', category: 'llm', isMultimodal: true }),
+    );
+
+    await expect(handleOcrRequest({ ...baseParams, modelKey: 'vision' })).rejects.toThrow(
+      'Model is not configured for OCR',
+    );
+    expect(buildModelRuntime).not.toHaveBeenCalled();
+  });
+
+  it('reads through a multimodal LLM as a vision-model OCR when allowVisionLlm is set', async () => {
+    const { complete, built } = visionRuntime();
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ key: 'vision', category: 'llm', isMultimodal: true }),
+    );
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(built);
+
+    const result = await handleOcrRequest({
+      ...baseParams,
+      modelKey: 'vision',
+      allowVisionLlm: true,
+      input: { ...baseParams.input, prompt: 'Return Markdown' },
+    });
+    await flush();
+
+    expect(result.response.text).toBe('# From vision');
+    expect(result.response.invokedVia).toBe('vlm');
+    expect(result.usage).toMatchObject({ inputTokens: 700, outputTokens: 20 });
+    // The prompt of the request reached the vision model, with the image.
+    const sent = complete.mock.calls[0][0].messages[0].content;
+    expect(sent[0]).toEqual({ type: 'text', text: 'Return Markdown' });
+    expect(sent[1]).toMatchObject({ type: 'image' });
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]).toMatchObject({
+      route: 'ocr',
+      status: 'success',
+      providerRequest: expect.objectContaining({ mode: 'vlm' }),
+    });
+  });
+
+  it('keeps the recognised text out of the usage row when the caller turns logContent off, and keeps it otherwise', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockResolvedValue({ text: 'Secret contract text', pages: [{ pageNumber: 1, text: 'x' }] })),
+    );
+
+    await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model', logContent: false });
+    await flush();
+    const quiet = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2];
+    expect(quiet.providerResponse).toMatchObject({ pageCount: 1 });
+    expect(JSON.stringify(quiet.providerResponse)).not.toContain('Secret contract text');
+
+    await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model' });
+    await flush();
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].providerResponse).toMatchObject({ text: 'Secret contract text' });
+  });
+
+  it('stops at once, and logs no error row, when the caller\'s signal aborts', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockImplementation(() => new Promise(() => undefined))),
+    );
+    const controller = new AbortController();
+
+    const call = handleOcrRequest({ ...baseParams, modelKey: 'ocr-model', signal: controller.signal, logErrors: true });
+    await flush();
+    controller.abort();
+
+    await expect(call).rejects.toBeDefined();
+    expect(logModelUsage).not.toHaveBeenCalled();
+  });
+
+  it('still refuses an LLM that does not take images, and any other category, with allowVisionLlm set', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'text-only', category: 'llm' }));
+    await expect(handleOcrRequest({ ...baseParams, modelKey: 'text-only', allowVisionLlm: true })).rejects.toThrow(
+      'Model is not configured for OCR',
+    );
+
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmbeddingModel());
+    await expect(handleOcrRequest({ ...baseParams, modelKey: 'embedding-model', allowVisionLlm: true })).rejects.toThrow(
+      'Model is not configured for OCR',
+    );
+  });
+
+  it('says a vision LLM whose provider cannot chat is not usable', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ key: 'vision', category: 'llm', isMultimodal: true }),
+    );
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: {} });
+
+    await expect(handleOcrRequest({ ...baseParams, modelKey: 'vision', allowVisionLlm: true })).rejects.toThrow(
+      /createNativeChatClient/,
+    );
+  });
+
+  it('forwards the attribution to the usage row', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockResolvedValue({ text: 'page', usage: { pages: 1 } })),
+    );
+
+    await handleOcrRequest({
+      ...baseParams,
+      modelKey: 'ocr-model',
+      attribution: { userId: 'user-9', actorType: 'system', projectId: 'proj-1' },
+    });
+    await flush();
+
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]).toMatchObject({
+      status: 'success',
+      attribution: { userId: 'user-9', actorType: 'system', projectId: 'proj-1' },
+    });
+  });
+
+  it('leaves the usage row without an attribution key when none is given (the request decides)', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockResolvedValue({ text: 'page' })),
+    );
+
+    await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model' });
+    await flush();
+
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]).not.toHaveProperty('attribution');
+  });
+
+  it('applies the caller\'s timeout and retry policy to the call', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    // Every attempt takes longer than the timeout: with retries off, one attempt is all there is.
+    const extract = vi.fn().mockImplementation(() => new Promise(() => {}));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(ocrRuntimeOf(extract));
+
+    await expect(
+      handleOcrRequest({
+        ...baseParams,
+        modelKey: 'ocr-model',
+        resilience: { timeoutMs: 30, retry: { enabled: false } },
+      }),
+    ).rejects.toThrow(/timed out/i);
+
+    expect(extract).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries as configured by the caller', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    const extract = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('upstream hiccup'), { status: 503 }))
+      .mockResolvedValue({ text: 'second try' });
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(ocrRuntimeOf(extract));
+
+    const result = await handleOcrRequest({
+      ...baseParams,
+      modelKey: 'ocr-model',
+      resilience: { retry: { enabled: true, maxAttempts: 2, initialDelayMs: 1, maxDelayMs: 2, jitterFactor: 0 } },
+    });
+
+    expect(result.response.text).toBe('second try');
+    expect(extract).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs a failed call as an error row only when logErrors is set', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockRejectedValue(Object.assign(new Error('bad scan'), { status: 400 }))),
+    );
+
+    await expect(handleOcrRequest({ ...baseParams, modelKey: 'ocr-model' })).rejects.toThrow('bad scan');
+    expect(logModelUsage).not.toHaveBeenCalled();
+
+    await expect(
+      handleOcrRequest({
+        ...baseParams,
+        modelKey: 'ocr-model',
+        logErrors: true,
+        attribution: { userId: 'user-9' },
+      }),
+    ).rejects.toThrow('bad scan');
+    expect(logModelUsage).toHaveBeenCalledTimes(1);
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls[0][2]).toMatchObject({
+      route: 'ocr',
+      status: 'error',
+      errorMessage: 'bad scan',
+      usage: {},
+      attribution: { userId: 'user-9' },
+    });
+  });
+
+  it('logs a failure to build the runtime too, and survives a log that fails', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel({ key: 'ocr-model', category: 'ocr' }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: {} });
+    (logModelUsage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('log store down'));
+
+    await expect(handleOcrRequest({ ...baseParams, modelKey: 'ocr-model', logErrors: true })).rejects.toThrow(
+      'Model provider does not support OCR',
+    );
+    expect(logModelUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the mode a VLM-only driver really reads in', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ key: 'ocr-model', category: 'ocr', providerDriver: 'openai', settings: {} }),
+    );
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(
+      ocrRuntimeOf(vi.fn().mockResolvedValue({ text: 'page' })),
+    );
+
+    await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model' });
+    await flush();
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].providerRequest).toMatchObject({ mode: 'vlm' });
+
+    // A native driver, a stored mode and an unknown driver keep what they had.
+    for (const [driver, settings, expected] of [
+      ['mistral-ocr', {}, 'native'],
+      ['openai', { ocr: { mode: 'native' } }, 'native'],
+      ['no-such-driver', {}, 'native'],
+    ] as const) {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+        makeLlmModel({ key: 'ocr-model', category: 'ocr', providerDriver: driver, settings }),
+      );
+      await handleOcrRequest({ ...baseParams, modelKey: 'ocr-model' });
+      await flush();
+      expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].providerRequest).toMatchObject({ mode: expected });
+    }
+  });
+});

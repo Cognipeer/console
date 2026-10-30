@@ -336,6 +336,12 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   totalBytesOut?: number;
   totalRequestBytes?: number;
   totalResponseBytes?: number;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the traced work handed on
+   * (see rag/access/exposure.ts): its content is shown only to `userId` and to those who read all of them through the
+   * admin exception. A session of an agent conversation is also governed by the conversation's own marks.
+   */
+  kbRestricted?: string[];
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -959,6 +965,31 @@ export interface IFileBucketRecord {
   updatedAt?: Date;
 }
 
+/** What a file's Markdown conversion was asked to do and what it did (OCR on or off, which engine, how many pages). */
+export interface IFileMarkdownExtraction {
+  /** The OCR setting the conversion uses (the same shape as the extraction engine's `OcrSettings`). */
+  ocr?: {
+    mode: 'off' | 'auto' | 'always';
+    modelKey?: string;
+    languages?: string[];
+    maxPages?: number;
+    images?: boolean;
+  };
+  /** What becomes of pictures inside Word / HTML / PowerPoint files; absent = kept inline, as before. */
+  images?: 'inline' | 'placeholder' | 'omit';
+  /** What the last conversion found; absent until one has run with OCR on. */
+  result?: {
+    sourceType: 'converted' | 'ocr' | 'mixed';
+    engine?: 'model' | 'local';
+    modelKey?: string;
+    pageCount?: number;
+    /** How many pages were read by OCR. */
+    ocrPages?: number;
+    ocrImages?: number;
+    warnings?: string[];
+  };
+}
+
 export interface IFileRecord {
   _id?: ObjectId | string;
   tenantId: string;
@@ -977,6 +1008,8 @@ export interface IFileRecord {
   markdownError?: string;
   markdownSize?: number;
   markdownContentType?: string;
+  /** OCR / image settings of the Markdown conversion and the result of the last run. Absent = the plain conversion. */
+  markdownExtraction?: IFileMarkdownExtraction;
   /** Set on a file uploaded to an agent session (stored in the bucket the agent's `attachments.bucketKey` names); absent on every other file. */
   purpose?: 'conversation';
   conversationId?: string;
@@ -1005,7 +1038,8 @@ type ClearableFileRecordField =
   | 'markdownKey'
   | 'markdownError'
   | 'markdownSize'
-  | 'markdownContentType';
+  | 'markdownContentType'
+  | 'markdownExtraction';
 
 /**
  * What `updateFileRecord` can change. The fields that can be empty also take `null`: it clears what an earlier run
@@ -1203,6 +1237,12 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   turnId?: string;
   runId?: string;
   traceSessionId?: string;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the call's work had handed on
+   * when it settled (see rag/access/restricted.ts): its request and response are shown only to `userId` and to those
+   * who read all of them through the admin exception.
+   */
+  kbRestricted?: string[];
   createdAt?: Date;
 }
 

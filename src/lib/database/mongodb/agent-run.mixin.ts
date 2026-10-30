@@ -65,6 +65,7 @@ type IAgentRunListFn = (filter: {
   createdBefore?: Date;
   cursor?: string;
   userId?: string;
+  excludeAgentKeys?: string[];
   limit?: number;
 }) => Promise<IAgentRun[]>;
 
@@ -488,6 +489,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       const col = db.collection<IAgentRun>(COLLECTIONS.agentRuns);
       const and: Record<string, unknown>[] = [{ tenantId: filter.tenantId, projectId: filter.projectId }];
       if (filter.agentKey) and.push({ agentKey: filter.agentKey });
+      if (filter.excludeAgentKeys && filter.excludeAgentKeys.length > 0) and.push({ agentKey: { $nin: filter.excludeAgentKeys } });
       if (filter.conversationId) and.push({ conversationId: filter.conversationId });
       if (filter.status && filter.status.length > 0) and.push({ status: { $in: filter.status } });
       const modes = filter.mode === undefined ? [] : Array.isArray(filter.mode) ? filter.mode : [filter.mode];

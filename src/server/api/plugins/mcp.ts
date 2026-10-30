@@ -64,6 +64,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { withoutRestrictedMcpLogContent } from '../restrictedKnowledgeRequest';
 
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
@@ -407,7 +408,10 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const snapshot = await getMcpMonitorSnapshot(session.tenantDbName, projectId);
-      return reply.code(200).send(snapshot);
+      return reply.code(200).send({
+        ...snapshot,
+        recentLogs: await withoutRestrictedMcpLogContent(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, snapshot.recentLogs),
+      });
     } catch (error) {
       logger.error('MCP monitor snapshot error', { error });
       return sendProjectContextError(reply, error)
@@ -596,7 +600,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.includeLogs === 'true') {
-        payload.logs = await listMcpRequestLogs(session.tenantDbName, server, { limit: 50 });
+        payload.logs = await withoutRestrictedMcpLogContent(
+          request,
+          { tenantDbName: session.tenantDbName, viewerUserId: session.userId },
+          await listMcpRequestLogs(session.tenantDbName, server, { limit: 50 }),
+        );
       }
 
       if (query.includeAggregate === 'true') {
@@ -848,7 +856,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({
         limit,
-        logs,
+        logs: await withoutRestrictedMcpLogContent(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, logs),
         page,
         total,
         totalPages: Math.max(Math.ceil(total / limit), 1),

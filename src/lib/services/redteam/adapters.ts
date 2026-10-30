@@ -20,6 +20,7 @@ import { AGENT_REASONING_OVERRIDE, type NormalizedReasoning } from '@/lib/servic
 import { extractAgentText, extractAssistantText } from '@/lib/services/evaluation/adapters';
 import type { AgentRunSelector } from '@/lib/services/agents/agentRevision';
 import type { AttackerInvoker, JudgeInvoker, RedTeamMessage, RedTeamOutput, TargetInvoker } from './types';
+import { runtimeContextForActor } from '@/lib/services/evaluation/kbCaller';
 
 export interface RedTeamModelContext {
   tenantDbName: string;
@@ -27,6 +28,8 @@ export interface RedTeamModelContext {
   projectId: string;
   /** Actor running the campaign — required for agent targets. */
   userId?: string;
+  /** The API token a client API call started the scan with: knowledge bases are then read as the token. */
+  tokenId?: string;
 }
 
 /** What is under test. Agent targets exercise the whole agent stack. */
@@ -150,6 +153,7 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
       // Lazy import: the agent runtime pulls a heavy module graph we only want
       // loaded when an agent target actually runs.
       const { executeAgentChat, createConversation } = await import('@/lib/services/agents/agentService');
+      const redTeamRuntime = runtimeContextForActor(ctx.userId, ctx.tokenId, 'redteam');
       // A fresh attempt (no assistant turns yet) gets its own conversation, so
       // multi-turn state is shared within an attempt but never across attempts.
       // The conversation must exist before executeAgentChat (it loads by id).
@@ -178,6 +182,8 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
         // No one is present during a red-team run: a gated tool follows the agent's
         // `humanInTheLoop.unattended` setting (deny by default).
         unattended: true,
+        // Its knowledge tools read as the person who started the scan (or the token it was started with).
+        ...(redTeamRuntime ? { runtimeContext: redTeamRuntime } : {}),
       });
       return { text: extractAgentText(response), latencyMs: Date.now() - started, raw: response };
     }

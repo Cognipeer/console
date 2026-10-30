@@ -29,6 +29,8 @@ export interface RedTeamJobPayload extends QueuePayload {
   tenantId: string;
   projectId?: string;
   createdBy: string;
+  /** The API token a client API call started the scan with (its agent target reads knowledge bases as the token). */
+  apiTokenId?: string;
   runId: string;
   campaignId: string;
   options?: RunOptions;
@@ -39,6 +41,8 @@ export interface EnqueueCampaignRunInput {
   tenantId: string;
   projectId?: string;
   createdBy: string;
+  /** See RedTeamJobPayload.apiTokenId. */
+  apiTokenId?: string;
   campaignKey: string;
   /** Per-run overrides (turns, concurrency, probe/judge selection). */
   options?: RunOptions;
@@ -58,6 +62,7 @@ export async function enqueueCampaignRun(input: EnqueueCampaignRunInput): Promis
     tenantId: input.tenantId,
     projectId: input.projectId,
     createdBy: input.createdBy,
+    ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
     runId: run.id,
     campaignId: String(campaign._id),
     options: input.options,
@@ -88,6 +93,7 @@ export async function runCampaignJob(payload: RedTeamJobPayload): Promise<void> 
       tenantId: payload.tenantId,
       projectId: payload.projectId,
       createdBy: payload.createdBy,
+      ...(payload.apiTokenId ? { apiTokenId: payload.apiTokenId } : {}),
       runId: payload.runId,
       campaign,
       options: payload.options,

@@ -497,6 +497,23 @@ People still sign in on the Console host (password, LDAP and SSO are unchanged, 
 
 See [Files](/guide/files#limits) for the other limits of the Document Store.
 
+### Document text extraction (OCR)
+
+These apply only where a Knowledge Engine module, an agent, an upload or a crawler turns OCR on; with OCR off nothing here is used.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OCR_DEFAULT_LANGUAGES` | Languages (ISO 639-1) the local engine reads when a setting names none. The bundled data covers `tr` and `en`. | `tr,en` |
+| `OCR_MAX_PAGES` | Pages read by OCR per document when a setting names no limit. | `100` |
+| `OCR_MAX_PAGES_LIMIT` | The largest page limit a setting may ask for. | `500` |
+| `OCR_MODEL_CONCURRENCY` | Concurrent calls to an OCR or vision model inside one document. | `4` |
+| `OCR_LOCAL_CONCURRENCY` | Pages recognised in parallel inside one document by the local engine. | `1` |
+| `OCR_LOCAL_MAX_DOCS` | Documents the local engine reads at once per node. | `1` |
+| `OCR_CALL_TIMEOUT_MS` | One OCR call (a page, an image or a whole-document request). | `180000` |
+| `OCR_DOCUMENT_TIMEOUT_MS` | A whole document read by a job. When it is reached the document keeps its native text and a warning is recorded. | `900000` |
+| `OCR_INLINE_TIMEOUT_MS` | A whole document read while the request waits. | `120000` |
+| `OCR_TESSDATA_DIR` | Directory with `<lang>.traineddata.gz` files for the local engine. Empty uses the bundled Turkish and English data. | *(empty)* |
+
 ## Config Source Abstraction
 
 The config module uses a `ConfigSource` interface, making it easy to swap between ENV-based and database-backed configuration:

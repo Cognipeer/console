@@ -79,6 +79,12 @@ export const TABLES = {
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
   ragReindexRuns: 'rag_reindex_runs',
+  // Knowledge Engine access control (folders, permissions, identity directories)
+  ragFolders: 'rag_folders',
+  ragAclEntries: 'rag_acl_entries',
+  ragIdentityDomains: 'rag_identity_domains',
+  ragIdentityUsers: 'rag_identity_users',
+  ragIdentityLinks: 'rag_identity_links',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
@@ -379,6 +385,7 @@ export class SQLiteProviderBase {
       ['fileBucketKey', 'fileBucketKey TEXT'],
       ['fileProviderKey', 'fileProviderKey TEXT'],
       ['chunkConfig', 'chunkConfig TEXT'],
+      ['extraction', 'extraction TEXT'],
       ['sourceText', 'sourceText TEXT'],
       ['sourceTextKey', 'sourceTextKey TEXT'],
       ['sourceHash', 'sourceHash TEXT'],
@@ -431,11 +438,30 @@ export class SQLiteProviderBase {
       ['filterableFields', 'filterableFields TEXT'],
       ['hybrid', 'hybrid TEXT'],
       ['isolateByModule', 'isolateByModule INTEGER'],
+      ['extraction', 'extraction TEXT'],
       ['reindexRequired', 'reindexRequired INTEGER'],
       ['activeReindexRunKey', 'activeReindexRunKey TEXT'],
       ['lastReindexAt', 'lastReindexAt TEXT'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.ragModules, column, ddl);
+    }
+    // Knowledge Engine access control. Every column is nullable with no default
+    // and nothing is backfilled: an existing module or document reads NULL,
+    // which the mappers turn into `undefined` = "access control off / inherit",
+    // so a tenant provisioned before this change behaves exactly as it did.
+    // No index here on purpose - these tables already exist and are not reindexed.
+    for (const [column, ddl] of [
+      ['access', 'access TEXT'],
+      ['aclRevision', 'aclRevision INTEGER'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragModules, column, ddl);
+    }
+    for (const [column, ddl] of [
+      ['folderId', 'folderId TEXT'],
+      ['aclMode', 'aclMode TEXT'],
+      ['aclManaged', 'aclManaged TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.ragDocuments, column, ddl);
     }
     this.ensureTableColumn(
       db,
@@ -1038,6 +1064,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'turnId', 'turnId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'runId', 'runId TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'traceSessionId', 'traceSessionId TEXT');
+    // Knowledge bases whose restricted documents the call's work carried (JSON array of tags).
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'kbRestricted', 'kbRestricted TEXT');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'kbRestricted', 'kbRestricted TEXT');
+    this.ensureTableColumn(db, TABLES.analysisResults, 'kbRestricted', 'kbRestricted TEXT');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, TABLES.usageDaily, 'cachedWriteTokens', 'cachedWriteTokens INTEGER NOT NULL DEFAULT 0');
 
@@ -1149,6 +1179,10 @@ export class SQLiteProviderBase {
     // `mapPiiPolicyRow` reads that back as `undefined`, which every caller
     // (`scanWithPolicy`, etc.) treats as 'regex' — pre-existing behaviour.
     this.ensureTableColumn(db, TABLES.piiPolicies, 'engine', 'engine TEXT');
+    // Hidden agents owned by a flow node: `owner` is the JSON, `ownerFlowId` the indexed copy (NULL for every ordinary agent).
+    this.ensureTableColumn(db, TABLES.agents, 'owner', 'owner TEXT');
+    this.ensureTableColumn(db, TABLES.agents, 'ownerFlowId', 'ownerFlowId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agents_owner_flow ON ${TABLES.agents}(ownerFlowId)`);
     // Sealed HMAC secret for agent-run callbacks (agentRunService).
     this.ensureTableColumn(db, TABLES.agentRuns, 'callbackSecret', 'callbackSecret TEXT');
     this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');
@@ -1167,6 +1201,8 @@ export class SQLiteProviderBase {
       // Trigger runs: unattended (no one to ask), external content (event values stay out of the system
       // prompt) and the variable names whose values did not come from the event (JSON list).
       ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'], ['literalVariables', 'TEXT'],
+      // The event behind a webhook / connector trigger fire (JSON, at most 64 KiB), for the engine behind the run.
+      ['triggerData', 'TEXT'],
       // The request's `background: true` on a run that streams inline.
       ['background', 'INTEGER'],
       // The event the callback bookkeeping belongs to; what continues a paused turn and who
@@ -1182,6 +1218,10 @@ export class SQLiteProviderBase {
     // An incoming webhook finds its trigger by the URL's hook id (copied out of the `webhook` JSON).
     this.ensureTableColumn(db, TABLES.agentTriggers, 'hookId', 'hookId TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_triggers_hook ON ${TABLES.agentTriggers}(hookId)`);
+    // A connector trigger: its settings (JSON) and the subscription they are bound to (copied out of the JSON, for the Connectors module's lookup).
+    this.ensureTableColumn(db, TABLES.agentTriggers, 'connector', 'connector TEXT');
+    this.ensureTableColumn(db, TABLES.agentTriggers, 'connectorSubscriptionId', 'connectorSubscriptionId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_triggers_connector_sub ON ${TABLES.agentTriggers}(connectorSubscriptionId)`);
     // Session files: ordinary file records tagged with the conversation they belong
     // to. Indexed here (not in the schema SQL) because an older table has no such
     // column until the lines above add it.
@@ -1191,6 +1231,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.files, 'expiresAt', 'expiresAt TEXT');
     this.ensureTableColumn(db, TABLES.files, 'uploadedBy', 'uploadedBy TEXT');
     this.ensureTableColumn(db, TABLES.files, 'origin', 'origin TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'markdownExtraction', 'markdownExtraction TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_purpose_expiresAt ON ${TABLES.files}(purpose, expiresAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_conversationId ON ${TABLES.files}(conversationId)`);
     // A bucket's objects by key: the lookup of one object, the prefix / folder
@@ -1208,6 +1249,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
     // Digest of the transcript a chat-completions client holds, to match a resent transcript back to its session.
     this.ensureTableColumn(db, TABLES.agentConversations, 'transcriptHash', 'transcriptHash TEXT');
+    // The knowledge bases whose restricted documents the session handed to its model (JSON array of tags).
+    this.ensureTableColumn(db, TABLES.agentConversations, 'kbRestricted', 'kbRestricted TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // A client tool call a host page has to answer: its timeout (JSON).
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');

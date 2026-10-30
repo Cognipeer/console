@@ -35,6 +35,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { kbBindingRefusal, kbIngestRefusal } from '../ragOwnedResources';
 
 const logger = createLogger('api:crawler');
 
@@ -44,11 +45,15 @@ function sendError(
   fallback: string,
 ) {
   const message = error instanceof Error ? error.message : fallback;
-  const status = /not found/i.test(message)
-    ? 404
-    : /already exists|not active|invalid/i.test(message)
-      ? 400
-      : 500;
+  // An error that says it is a bad input is a 400 whatever its wording ("model not found" included).
+  const badInput = (error as { statusCode?: unknown } | null)?.statusCode === 400;
+  const status = badInput
+    ? 400
+    : /not found/i.test(message)
+      ? 404
+      : /already exists|not active|invalid/i.test(message)
+        ? 400
+        : 500;
   return reply.code(status).send({ error: message });
 }
 
@@ -63,10 +68,10 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = createCrawlerInputSchema.parse(readJsonBody<unknown>(request));
-      const created = await createCrawler(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        { ...body, createdBy: session.userEmail ?? session.userId },
-      );
+      const where = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const refusal = await kbBindingRefusal(request, where, body.rag);
+      if (refusal) return reply.code(403).send(refusal);
+      const created = await createCrawler(where, { ...body, createdBy: session.userEmail ?? session.userId });
       return reply.code(201).send({ crawler: created });
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
@@ -113,11 +118,12 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { idOrKey } = request.params as { idOrKey: string };
       const body = updateCrawlerInputSchema.parse(readJsonBody<unknown>(request));
-      const updated = await updateCrawler(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
-        idOrKey,
-        { ...body, updatedBy: session.userEmail ?? session.userId },
-      );
+      const where = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      // Its runs send pages in the crawler's own project, which a crawler from before crawlers carried a project lacks.
+      const current = body.rag?.enabled ? await getCrawler(where, idOrKey) : null;
+      const refusal = await kbBindingRefusal(request, current ? { ...where, projectId: current.projectId } : where, body.rag);
+      if (refusal) return reply.code(403).send(refusal);
+      const updated = await updateCrawler(where, idOrKey, { ...body, updatedBy: session.userEmail ?? session.userId });
       if (!updated) return reply.code(404).send({ error: 'Crawler not found' });
       return reply.code(200).send({ crawler: updated });
     } catch (error) {
@@ -261,8 +267,11 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = adhocCrawlInputSchema.parse(readJsonBody<unknown>(request));
+      const where = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const refusal = await kbBindingRefusal(request, where, body.rag);
+      if (refusal) return reply.code(403).send(refusal);
       const result = await runAdhocCrawl(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        where,
         { ...body, mode: body.mode ?? 'async', triggerActor: session.userEmail ?? session.userId },
       );
       return reply.code(202).send(result);
@@ -373,8 +382,17 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { jobId } = request.params as { jobId: string };
       const body = syncCrawlJobToRagSchema.parse(readJsonBody<unknown>(request) ?? {});
+      const where = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      // The module the sync would write to (the one asked for, else the one the run was bound to), looked up as the
+      // ingest looks it up: in the job's own project, which a job from before jobs carried a project does not have.
+      const job = await getCrawlJob(where, jobId);
+      const ragModuleKey = body.ragModuleKey ?? job?.planSnapshot?.rag?.ragModuleKey;
+      const refusal = job && ragModuleKey
+        ? await kbIngestRefusal(request, { ...where, projectId: job.projectId }, ragModuleKey)
+        : null;
+      if (refusal) return reply.code(403).send(refusal);
       const summary = await syncCrawlJobToRag(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        where,
         jobId,
         { ragModuleKey: body.ragModuleKey },
         session.userEmail ?? session.userId,

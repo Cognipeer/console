@@ -773,8 +773,12 @@ export interface DatabaseProvider {
     projectId?: string;
     status?: AgentStatus;
     search?: string;
+    owned?: 'include' | 'only';
+    ownerFlowId?: string;
   }): Promise<IAgent[]>;
-  countAgents(projectId?: string): Promise<number>;
+  countAgents(projectId?: string, options?: { owned?: 'include' }): Promise<number>;
+  /** The keys of the hidden agents flows own (of one project, or all): what the session and run lists leave out. */
+  listOwnedAgentKeys(projectId?: string): Promise<string[]>;
 
   // ── Agent Version operations (tenant-specific) ──
   createAgentVersion(

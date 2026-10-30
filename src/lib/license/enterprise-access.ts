@@ -161,10 +161,23 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     prefixes: ['/api/channels/'],
   },
   {
+    // Connectors: connections to external systems, their organization accounts and the tools they manage.
+    // Gates the admin API (/api/connectors), the OAuth callback included.
+    module: 'connectors',
+    prefixes: ['/api/connectors/'],
+  },
+  {
     // Entity Health: the health scoreboard of agents, models, knowledge bases, MCP servers and tools,
     // its detail series and the health digests. The trailing slash also gates the bare collection path.
     module: 'health',
     prefixes: ['/api/entity-health/'],
+  },
+  {
+    // Flows: visual flows, FlowBase agents and flows as agent tools. Gates the admin API (/api/flows). The client
+    // prefix is listed for discoverability: bearer routes never reach this guard, so the client handlers check the
+    // license themselves.
+    module: 'flows',
+    prefixes: ['/api/flows/', '/api/client/v1/flows/'],
   },
 ];
 

@@ -3,9 +3,10 @@
  *
  * A trigger is a saved way of starting an agent (prompt + type). The document
  * keeps `type` and the one settings object named after it (`schedule`, `once`
- * or `webhook`; manual has none). The scheduler reads due triggers tenant-wide
+ * `webhook` or `connector`; manual has none). The scheduler reads due triggers tenant-wide
  * (`(enabled, nextFireAt)`), the APIs by agent (`(tenantId, projectId,
- * agentKey)`), an incoming webhook by its hook id (`webhook.hookId`). A webhook
+ * agentKey)`), an incoming webhook by its hook id (`webhook.hookId`), a connector
+ * trigger by its subscription (`connector.subscriptionId`). A webhook
  * trigger's delivery log is `agent_trigger_deliveries`. Indexes are plain
  * (Cosmos DB's Mongo API rejects partial ones) and ensured on the write path,
  * memoized per tenant DB, like `ensureAgentRunsIndexes`.
@@ -13,6 +14,7 @@
 
 import { ObjectId, type Filter } from 'mongodb';
 import type {
+  AgentTriggerConnector,
   AgentTriggerPatch,
   AgentTriggerTypeSettings,
   IAgentTrigger,
@@ -27,7 +29,18 @@ type TriggerDoc = Omit<IAgentTriggerBase, '_id'> & AgentTriggerTypeSettings & { 
 type DeliveryDoc = Omit<IAgentTriggerDelivery, '_id'> & { _id: ObjectId };
 
 /** The settings objects a trigger can carry, one per type (manual has none). */
-const TYPE_SETTINGS_KEYS = ['schedule', 'once', 'webhook'] as const;
+const TYPE_SETTINGS_KEYS = ['schedule', 'once', 'webhook', 'connector'] as const;
+
+/** `value` without its undefined fields: the driver would store them as null (SQLite's JSON drops them). */
+function definedOnly<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
+}
+
+/** The doc form of a write: a connector trigger's settings without undefined fields. */
+function withDefinedConnector<T extends { type?: string }>(record: T): T {
+  const settings = (record as { connector?: AgentTriggerConnector }).connector;
+  return record.type === 'connector' && settings ? { ...record, connector: definedOnly(settings as unknown as Record<string, unknown>) } : record;
+}
 
 function toTrigger(doc: TriggerDoc): IAgentTrigger {
   return { ...doc, _id: doc._id.toString() };
@@ -52,6 +65,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
         [{ tenantId: 1, projectId: 1, agentKey: 1 }, 'idx_tenant_project_agent'],
         [{ enabled: 1, nextFireAt: 1 }, 'idx_enabled_nextFireAt'],
         [{ 'webhook.hookId': 1 }, 'idx_webhook_hookId'],
+        [{ 'connector.subscriptionId': 1 }, 'idx_connector_subscription'],
       ] as Array<[Record<string, 1>, string]>) {
         try {
           await col.createIndex(keys, { name });
@@ -96,7 +110,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     async createAgentTrigger(record: NewAgentTrigger): Promise<IAgentTrigger> {
       await this.ensureAgentTriggersIndexes();
       const now = new Date();
-      const doc: TriggerDoc = { ...record, _id: new ObjectId(), createdAt: now, updatedAt: now };
+      const doc: TriggerDoc = { ...withDefinedConnector(record), _id: new ObjectId(), createdAt: now, updatedAt: now };
       await this.agentTriggers().insertOne(doc);
       return toTrigger(doc);
     }
@@ -120,7 +134,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
       if (!_id) return null;
       await this.ensureAgentTriggersIndexes();
       const set: Record<string, unknown> = { updatedAt: new Date() };
-      for (const [key, value] of Object.entries(patch)) {
+      for (const [key, value] of Object.entries(withDefinedConnector(patch))) {
         if (value !== undefined) set[key] = value;
       }
       // A new type replaces the settings as a whole: the objects of the other types go.
@@ -196,6 +210,23 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     async findAgentTriggerByHookId(hookId: string): Promise<IAgentTrigger | null> {
       const doc = await this.agentTriggers().findOne({ 'webhook.hookId': hookId } as Filter<TriggerDoc>);
       return doc ? toTrigger(doc) : null;
+    }
+
+    async listAgentTriggersBySubscription(subscriptionId: string): Promise<IAgentTrigger[]> {
+      await this.ensureAgentTriggersIndexes();
+      const docs = await this.agentTriggers()
+        .find({ 'connector.subscriptionId': subscriptionId } as Filter<TriggerDoc>)
+        .sort({ createdAt: 1, _id: 1 })
+        .toArray();
+      return docs.map(toTrigger);
+    }
+
+    async countAgentTriggersBySubscription(subscriptionId: string, opts?: { enabledOnly?: boolean }): Promise<number> {
+      await this.ensureAgentTriggersIndexes();
+      return this.agentTriggers().countDocuments({
+        'connector.subscriptionId': subscriptionId,
+        ...(opts?.enabledOnly ? { enabled: true } : {}),
+      } as Filter<TriggerDoc>);
     }
 
     // ── Webhook deliveries ────────────────────────────────────────

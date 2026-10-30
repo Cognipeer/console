@@ -105,13 +105,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
          eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens, totalReasoningTokens, truncatedEvents,
          errorEvents, toolErrors, aiErrors, metricsOutcome, statusExplicit,
          totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes,
-         userId, apiTokenId, actorType, createdAt, updatedAt)
+         userId, apiTokenId, actorType, kbRestricted, createdAt, updatedAt)
         VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel, @metadata,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
          @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens, @totalReasoningTokens, @truncatedEvents,
          @errorEvents, @toolErrors, @aiErrors, @metricsOutcome, @statusExplicit,
          @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes,
-         @userId, @apiTokenId, @actorType, @createdAt, @updatedAt)
+         @userId, @apiTokenId, @actorType, @kbRestricted, @createdAt, @updatedAt)
       `).run({
         id,
         sessionId: session.sessionId,
@@ -154,6 +154,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         userId: session.userId ?? null,
         apiTokenId: session.apiTokenId ?? null,
         actorType: session.actorType ?? null,
+        kbRestricted: session.kbRestricted?.length ? this.toJson(this.normalizeStringArray(session.kbRestricted)) : null,
         createdAt: now,
         updatedAt: now,
       });
@@ -432,6 +433,10 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.totalBytesOut !== undefined) { sets.push('totalBytesOut = @totalBytesOut'); params.totalBytesOut = data.totalBytesOut; }
       if (data.totalRequestBytes !== undefined) { sets.push('totalRequestBytes = @totalRequestBytes'); params.totalRequestBytes = data.totalRequestBytes; }
       if (data.totalResponseBytes !== undefined) { sets.push('totalResponseBytes = @totalResponseBytes'); params.totalResponseBytes = data.totalResponseBytes; }
+      if (data.kbRestricted !== undefined) {
+        sets.push('kbRestricted = @kbRestricted');
+        params.kbRestricted = data.kbRestricted.length ? this.toJson(this.normalizeStringArray(data.kbRestricted)) : null;
+      }
 
       db.prepare(`UPDATE ${TABLES.agentTracingSessions} SET ${sets.join(', ')} WHERE ${where}`).run(params);
 
@@ -1020,6 +1025,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         userId: (r.userId as string | null) ?? undefined,
         apiTokenId: (r.apiTokenId as string | null) ?? undefined,
         actorType: (r.actorType as IAgentTracingSession['actorType'] | null) ?? undefined,
+        ...(r.kbRestricted ? { kbRestricted: this.parseJson<string[]>(r.kbRestricted, []) } : {}),
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

@@ -28,7 +28,10 @@ import {
   folderPreview,
   mbToBytes,
   normalizeFolder,
+  ocrEnabled,
+  ocrIssue,
   patchAttachments,
+  patchOcr,
   type AttachmentBucketOption,
   type AttachmentsSettings,
 } from '@/components/agents/studio/filesSettings';
@@ -197,6 +200,47 @@ describe('saving with files on', () => {
   });
 });
 
+describe('text extraction (OCR) of uploads', () => {
+  it('is off unless chosen, and an agent that never touched it saves no `ocr` key', () => {
+    expect(ocrEnabled(undefined)).toBe(false);
+    expect(ocrEnabled({ enabled: true })).toBe(false);
+    expect(ocrEnabled({ enabled: true, ocr: { mode: 'off' } })).toBe(false);
+    expect(ocrEnabled({ enabled: true, ocr: { mode: 'auto' } })).toBe(true);
+    expect(patchOcr({ enabled: true, bucketKey: 'docs' }, undefined)).toEqual({ enabled: true, bucketKey: 'docs' });
+    expect(patchOcr(undefined, undefined)).toBeUndefined();
+  });
+
+  it('replaces the setting with what the fields hand back, like patchOutputs does for outputs', () => {
+    const on = patchOcr({ enabled: true }, { mode: 'auto', modelKey: 'doc-ocr', maxPages: 20, images: true });
+    expect(on).toEqual({ enabled: true, ocr: { mode: 'auto', modelKey: 'doc-ocr', maxPages: 20, images: true } });
+    // A key the person removed goes with it instead of surviving a merge.
+    expect(patchOcr(on, { mode: 'always', modelKey: 'doc-ocr' })).toEqual({ enabled: true, ocr: { mode: 'always', modelKey: 'doc-ocr' } });
+    // Off drops the key; the other settings stay.
+    expect(patchOcr(on, undefined)).toEqual({ enabled: true });
+    expect(patchOcr(on, { mode: 'off' })).toEqual({ enabled: true });
+    // No undefined key is left behind: a Mongo `$set` would store it as null.
+    expect(Object.keys(patchOcr({ enabled: true }, { mode: 'auto', modelKey: undefined })!.ocr!)).toEqual(['mode']);
+  });
+
+  it('names what is wrong with a setting that is on, and nothing for one that is off', () => {
+    expect(ocrIssue(undefined)).toBeNull();
+    expect(ocrIssue({ ocr: { mode: 'auto' } })).toBeNull();
+    expect(ocrIssue({ ocr: { mode: 'auto', modelKey: '   ' } })).toBe('model');
+    expect(ocrIssue({ ocr: { mode: 'auto', languages: ['tr', 'not a code'] } })).toBe('languages');
+    expect(ocrIssue({ ocr: { mode: 'always', maxPages: 0 } })).toBe('pages');
+    expect(ocrIssue({ ocr: { mode: 'off', modelKey: '   ' } })).toBeNull();
+  });
+
+  it('blocks a save only for a broken setting on an agent that takes files', () => {
+    expect(filesSaveErrors({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', modelKey: ' ' } }))
+      .toEqual([{ field: 'attachments.ocr', code: 'ocr_model' }]);
+    expect(filesSaveErrors({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', languages: ['x1'] } }))
+      .toEqual([{ field: 'attachments.ocr', code: 'ocr_languages' }]);
+    expect(filesSaveErrors({ enabled: false, ocr: { mode: 'auto', modelKey: ' ' } })).toEqual([]);
+    expect(filesSaveErrors({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', modelKey: 'doc-ocr' } })).toEqual([]);
+  });
+});
+
 describe('Configure → Files', () => {
   const panel = (value: AttachmentsSettings | undefined, buckets: BucketsState, extra: Record<string, unknown> = {}, locale: 'en' | 'tr' = 'en') =>
     render(h(AgentFilesPanelView, { value, onChange: noop, agentKey: 'support', buckets, ...extra }), locale);
@@ -244,6 +288,31 @@ describe('Configure → Files', () => {
     // All of a message’s files are summed — said in the help text.
     expect(html).toContain('is added up');
     expect(html).toContain('none is');
+  });
+
+  it('has a Text extraction (OCR) block while uploads are on: only the mode while it is off, the rest once it is on', () => {
+    const off = panel({ enabled: true, bucketKey: 'docs' }, ready(docs));
+    expect(off).toContain('Text extraction (OCR)');
+    expect(off).toContain('Read scanned pages (OCR)');
+    expect(off).not.toContain('Maximum pages per document');
+    // Nothing OCR-shaped while the agent takes no files.
+    expect(panel(undefined, { status: 'loading' })).not.toContain('Text extraction (OCR)');
+
+    const on = panel({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', maxPages: 12, images: true } }, ready(docs), {});
+    for (const text of ['Engine', 'Local engine (CPU, Tesseract)', 'Languages', 'Maximum pages per document', 'Also read images']) expect(on).toContain(text);
+    expect(on).toContain('value="12"');
+    expect(on).toContain('A picture is still shown to a model that takes images');
+    // Without “Also read images” the note about pictures is not shown.
+    expect(panel({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto' } }, ready(docs))).not.toContain('A picture is still shown');
+  });
+
+  it('says a saved OCR setting is wrong when a save was refused, and speaks Turkish', () => {
+    const refused = panel({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', modelKey: ' ' } }, ready(docs), { showErrors: true });
+    expect(refused).toContain('Text extraction: the model name is not valid.');
+    expect(panel({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', modelKey: ' ' } }, ready(docs))).not.toContain('Text extraction: the model name');
+    const tr_ = panel({ enabled: true, bucketKey: 'docs', ocr: { mode: 'auto' } }, ready(docs), {}, 'tr');
+    expect(tr_).toContain('Metin çıkarma (OCR)');
+    expect(tr_).toContain('Taranmış sayfaları oku (OCR)');
   });
 
   it('keeps the image budget editable: images per request, megabytes per request, and how many recent ones are shown again', () => {

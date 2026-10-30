@@ -4,7 +4,8 @@
  * The webhook parts of the trigger editor (SPEC-webhooks W8): the webhook
  * fields, the Connect card shown after a save (URL, the secret once, the
  * sender's setup steps, rotation), the Test tab (a sample delivery → dry run →
- * run) and the Deliveries tab (the delivery log).
+ * run) and the Deliveries tab (the delivery log). The filter rows, the payload
+ * switch, the dry-run result and the delivery log are shared with connector triggers.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -23,7 +24,6 @@ import {
     PasswordInput,
     SegmentedControl,
     Select,
-    SimpleGrid,
     Stack,
     Switch,
     TagsInput,
@@ -39,8 +39,6 @@ import { FormField } from '@/components/common/ui/FormShell';
 import { useConfirm } from '@/components/common/confirm';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import {
-    WEBHOOK_ACTION_PATH,
-    WEBHOOK_ACTION_SUGGESTIONS,
     WEBHOOK_EVENT_SUGGESTIONS,
     WEBHOOK_FILTER_EXAMPLES,
     WEBHOOK_FILTER_OPS,
@@ -48,14 +46,14 @@ import {
     WEBHOOK_PRESETS,
     WEBHOOK_SAMPLES,
     WEBHOOK_TEMPLATE_VARIABLES,
-    hasWebhookAuthorRule,
     type TriggerForm,
     type WebhookAuth,
     type WebhookFilterOp,
     type WebhookPreset,
 } from './triggerForm';
 
-export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset, string> = {
+/** The names of the presets, including the retired vendor ones a stored trigger may still carry. */
+export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset | 'github' | 'gitlab' | 'azure_devops', string> = {
     github: 'presetGithub',
     gitlab: 'presetGitlab',
     azure_devops: 'presetAzureDevops',
@@ -63,17 +61,14 @@ export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset, string> = {
 };
 
 const AUTH_LABEL_KEY: Record<WebhookAuth, string> = {
-    github_signature: 'authGithubSignature',
-    gitlab_token: 'authGitlabToken',
     standard_webhooks: 'authStandardWebhooks',
-    basic: 'authBasic',
     header: 'authHeader',
     bearer: 'authBearer',
     signature: 'authSignature',
 };
 
 /** The message of an API error body (`{ error: { message } }`), else the status. */
-async function errorMessage(res: Response): Promise<string> {
+export async function errorMessage(res: Response): Promise<string> {
     const data = await res.json().catch(() => null) as { error?: { message?: string } | string } | null;
     const error = data?.error;
     if (typeof error === 'string') return error;
@@ -96,36 +91,13 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
     const t = useTranslations('agents.triggers');
     const preset = form.webhookPreset;
     const auths = WEBHOOK_PRESET_AUTH[preset];
-    const actionPath = WEBHOOK_ACTION_PATH[preset];
-    const ops = WEBHOOK_FILTER_OPS.map((op) => ({ value: op, label: t(`op_${op}`) }));
-
-    const choosePreset = (next: WebhookPreset) => {
-        set('webhookPreset', next);
-        if (!WEBHOOK_PRESET_AUTH[next].includes(form.webhookAuth)) set('webhookAuth', WEBHOOK_PRESET_AUTH[next][0]);
-        // Actions are per preset (their path differs).
-        if (WEBHOOK_ACTION_PATH[next] !== WEBHOOK_ACTION_PATH[preset]) set('webhookActions', []);
-    };
-    const setRow = (index: number, patch: Partial<TriggerForm['webhookFilter'][number]>) =>
-        set('webhookFilter', form.webhookFilter.map((row, at) => (at === index ? { ...row, ...patch } : row)));
 
     return (
         <Stack gap="md">
-            <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="xs">
-                {WEBHOOK_PRESETS.map((item) => (
-                    <UnstyledButton key={item} onClick={() => choosePreset(item)} aria-pressed={preset === item}>
-                        <Card withBorder padding="sm" radius="md" style={{ borderColor: preset === item ? 'var(--mantine-color-teal-6)' : undefined }}>
-                            <Text size="sm" fw={600}>{t(WEBHOOK_PRESET_LABEL_KEY[item])}</Text>
-                            <Text size="xs" c="dimmed">{t(`${WEBHOOK_PRESET_LABEL_KEY[item]}Hint`)}</Text>
-                        </Card>
-                    </UnstyledButton>
-                ))}
-            </SimpleGrid>
-
             <Group grow align="flex-start">
                 <FormField label={t('webhookAuth')} required>
                     <Select
                         allowDeselect={false}
-                        disabled={auths.length === 1}
                         value={form.webhookAuth}
                         data={auths.map((auth) => ({ value: auth, label: t(AUTH_LABEL_KEY[auth]) }))}
                         onChange={(value) => value && set('webhookAuth', value as WebhookAuth)}
@@ -148,7 +120,7 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
                 ) : null}
             </Group>
 
-            <FormField label={t('webhookEvents')} hint={t(preset === 'azure_devops' ? 'webhookEventsHintAzure' : 'webhookEventsHint')} optional>
+            <FormField label={t('webhookEvents')} hint={t('webhookEventsHint')} optional>
                 <TagsInput
                     value={form.webhookEvents}
                     data={[...WEBHOOK_EVENT_SUGGESTIONS[preset]]}
@@ -158,76 +130,97 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
                 />
             </FormField>
 
-            {actionPath ? (
-                <FormField label={t('webhookActions')} hint={t('webhookActionsHint', { path: actionPath })} optional>
-                    <TagsInput
-                        value={form.webhookActions}
-                        data={[...(WEBHOOK_ACTION_SUGGESTIONS[preset] ?? [])]}
-                        clearable
-                        onChange={(value) => set('webhookActions', value)}
-                    />
-                </FormField>
-            ) : null}
-
-            <Stack gap={6}>
-                <Group justify="space-between">
-                    <Text size="sm" fw={500}>{t('webhookFilter')}</Text>
-                    <Button size="compact-xs" variant="subtle" leftSection={<IconPlus size={12} />} onClick={() => set('webhookFilter', [...form.webhookFilter, { path: 'payload.', op: 'eq', value: '' }])}>
-                        {t('webhookFilterAdd')}
-                    </Button>
-                </Group>
-                <Text size="xs" c="dimmed">{t('webhookFilterHint')}</Text>
-                {form.webhookFilter.map((row, index) => (
-                    <Group key={index} gap="xs" wrap="nowrap" align="flex-start">
-                        <TextInput ff="monospace" style={{ flex: 2 }} value={row.path} aria-label={t('webhookFilterPath')} onChange={(event) => setRow(index, { path: event.currentTarget.value })} />
-                        <Select style={{ flex: '0 0 190px' }} comboboxProps={{ width: 'max-content' }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />
-                        <TextInput
-                            style={{ flex: 2 }}
-                            disabled={row.op === 'exists' || row.op === 'not_exists'}
-                            placeholder={row.op === 'in' || row.op === 'not_in' ? t('webhookFilterListPlaceholder') : ''}
-                            value={row.value}
-                            aria-label={t('webhookFilterValue')}
-                            onChange={(event) => setRow(index, { value: event.currentTarget.value })}
-                        />
-                        <ActionIcon variant="subtle" color="red" mt={6} aria-label={t('delete')} onClick={() => set('webhookFilter', form.webhookFilter.filter((_, at) => at !== index))}>
-                            <IconTrash size={14} />
-                        </ActionIcon>
-                    </Group>
-                ))}
-                {errorOf('webhookFilter') ? <Text size="xs" c="red">{errorOf('webhookFilter')}</Text> : null}
-                {WEBHOOK_FILTER_EXAMPLES[preset].length > 0 ? (
-                    <Group gap={6}>
-                        <Text size="xs" c="dimmed">{t('webhookFilterExamples')}</Text>
-                        {WEBHOOK_FILTER_EXAMPLES[preset].map((example) => (
-                            <Badge key={example.key} component="button" type="button" variant="light" style={{ cursor: 'pointer' }} onClick={() => set('webhookFilter', [...form.webhookFilter, ...example.rows])}>
-                                {t(example.key)}
-                            </Badge>
-                        ))}
-                    </Group>
-                ) : null}
-                {preset !== 'generic' && !hasWebhookAuthorRule(form) ? (
-                    <Alert color="yellow" variant="light" icon={<IconInfoCircle size={14} />}>{t('webhookAuthorHint')}</Alert>
-                ) : null}
-            </Stack>
-
-            <Switch
-                label={t('webhookIncludePayload')}
-                description={t('webhookIncludePayloadHint')}
-                checked={form.webhookIncludePayload}
-                onChange={(event) => set('webhookIncludePayload', event.currentTarget.checked)}
-            />
+            <WebhookFilterEditor form={form} set={set} errorOf={errorOf} />
+            <WebhookIncludePayload form={form} set={set} />
         </Stack>
     );
 }
 
-/** The variables a webhook prompt template may use, shown under the prompt. */
-export function WebhookTemplateVariables() {
+export interface WebhookFilterEditorProps {
+    form: TriggerForm;
+    set: <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => void;
+    errorOf: (field: keyof TriggerForm) => string | undefined;
+    /** Rows (by index) to point out, each group with the reason shown under the path of its rows. */
+    flagged?: ReadonlyArray<{ rows: readonly number[]; reason: string }>;
+}
+
+/** The filter rows: every rule must match the event. Shared by webhook and connector triggers (both match over `payload.`). */
+export function WebhookFilterEditor({ form, set, errorOf, flagged }: WebhookFilterEditorProps) {
+    const t = useTranslations('agents.triggers');
+    const ops = WEBHOOK_FILTER_OPS.map((op) => ({ value: op, label: t(`op_${op}`) }));
+    const examples = WEBHOOK_FILTER_EXAMPLES[form.webhookPreset];
+    const setRow = (index: number, patch: Partial<TriggerForm['webhookFilter'][number]>) =>
+        set('webhookFilter', form.webhookFilter.map((row, at) => (at === index ? { ...row, ...patch } : row)));
+
+    return (
+        <Stack gap={6}>
+            <Group justify="space-between">
+                <Text size="sm" fw={500}>{t('webhookFilter')}</Text>
+                <Button size="compact-xs" variant="subtle" leftSection={<IconPlus size={12} />} onClick={() => set('webhookFilter', [...form.webhookFilter, { path: 'payload.', op: 'eq', value: '' }])}>
+                    {t('webhookFilterAdd')}
+                </Button>
+            </Group>
+            <Text size="xs" c="dimmed">{t('webhookFilterHint')}</Text>
+            {form.webhookFilter.map((row, index) => (
+                <Group key={index} gap="xs" wrap="nowrap" align="flex-start">
+                    <TextInput
+                        ff="monospace"
+                        style={{ flex: 2 }}
+                        value={row.path}
+                        aria-label={t('webhookFilterPath')}
+                        error={flagged?.find((group) => group.rows.includes(index))?.reason}
+                        onChange={(event) => setRow(index, { path: event.currentTarget.value })}
+                    />
+                    <Select style={{ flex: '0 0 190px' }} comboboxProps={{ width: 'max-content' }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />
+                    <TextInput
+                        style={{ flex: 2 }}
+                        disabled={row.op === 'exists' || row.op === 'not_exists'}
+                        placeholder={row.op === 'in' || row.op === 'not_in' ? t('webhookFilterListPlaceholder') : ''}
+                        value={row.value}
+                        aria-label={t('webhookFilterValue')}
+                        onChange={(event) => setRow(index, { value: event.currentTarget.value })}
+                    />
+                    <ActionIcon variant="subtle" color="red" mt={6} aria-label={t('delete')} onClick={() => set('webhookFilter', form.webhookFilter.filter((_, at) => at !== index))}>
+                        <IconTrash size={14} />
+                    </ActionIcon>
+                </Group>
+            ))}
+            {errorOf('webhookFilter') ? <Text size="xs" c="red">{errorOf('webhookFilter')}</Text> : null}
+            {examples.length > 0 ? (
+                <Group gap={6}>
+                    <Text size="xs" c="dimmed">{t('webhookFilterExamples')}</Text>
+                    {examples.map((example) => (
+                        <Badge key={example.key} component="button" type="button" variant="light" style={{ cursor: 'pointer' }} onClick={() => set('webhookFilter', [...form.webhookFilter, ...example.rows])}>
+                            {t(example.key)}
+                        </Badge>
+                    ))}
+                </Group>
+            ) : null}
+        </Stack>
+    );
+}
+
+/** Whether the event payload goes to the agent (as external data). Shared by webhook and connector triggers. */
+export function WebhookIncludePayload({ form, set }: Pick<WebhookFilterEditorProps, 'form' | 'set'>) {
+    const t = useTranslations('agents.triggers');
+    return (
+        <Switch
+            label={t('webhookIncludePayload')}
+            description={t('webhookIncludePayloadHint')}
+            checked={form.webhookIncludePayload}
+            onChange={(event) => set('webhookIncludePayload', event.currentTarget.checked)}
+        />
+    );
+}
+
+/** The variables a webhook (or, with its own list, a connector) prompt template may use, shown under the prompt. */
+export function WebhookTemplateVariables({ variables = WEBHOOK_TEMPLATE_VARIABLES }: { variables?: readonly string[] }) {
     const t = useTranslations('agents.triggers');
     return (
         <Stack gap={4}>
             <Text size="xs" c="dimmed">{t('webhookVariables')}</Text>
             <Group gap={4}>
-                {WEBHOOK_TEMPLATE_VARIABLES.map((variable) => <Code key={variable}>{tag(variable)}</Code>)}
+                {variables.map((variable) => <Code key={variable}>{tag(variable)}</Code>)}
             </Group>
         </Stack>
     );
@@ -254,30 +247,16 @@ function CopyValue({ value, label }: { value: string; label: string }) {
     );
 }
 
-/** The sender's setup steps for the preset and auth mode. */
-function ConnectSteps({ preset, auth, headerName }: { preset: WebhookPreset; auth: WebhookAuth; headerName: string }) {
+/** The sender's setup steps for the auth mode. */
+function ConnectSteps({ auth, headerName }: { auth: WebhookAuth; headerName: string }) {
     const t = useTranslations('agents.triggers');
     const steps: Array<{ text: string; strong?: boolean }> = [];
-    switch (preset) {
-        case 'github':
-            steps.push({ text: t('connectGithub1') }, { text: t('connectGithub2') }, { text: t('connectGithubContentType'), strong: true }, { text: t('connectGithub3') }, { text: t('connectGithub4') });
-            break;
-        case 'gitlab':
-            steps.push({ text: t('connectGitlab1') }, { text: t('connectGitlab2') });
-            steps.push({ text: t(auth === 'standard_webhooks' ? 'connectGitlabSigning' : 'connectGitlabToken') }, { text: t('connectGitlab3') });
-            break;
-        case 'azure_devops':
-            steps.push({ text: t('connectAzure1') }, { text: t('connectAzure2') }, { text: t('connectAzureResource'), strong: true });
-            steps.push({ text: auth === 'basic' ? t('connectAzureBasic') : t('connectAzureHeader', { header: headerName }) });
-            break;
-        default:
-            steps.push({ text: t('connectGenericJson') });
-            if (auth === 'bearer') steps.push({ text: t('connectGenericBearer') });
-            else if (auth === 'signature') steps.push({ text: t('connectGenericSignature') });
-            else if (auth === 'header') steps.push({ text: t('connectGenericHeader', { header: headerName }) });
-            else steps.push({ text: t('connectGenericStandard') });
-            steps.push({ text: t('connectGenericDedup') });
-    }
+    steps.push({ text: t('connectGenericJson') });
+    if (auth === 'bearer') steps.push({ text: t('connectGenericBearer') });
+    else if (auth === 'signature') steps.push({ text: t('connectGenericSignature') });
+    else if (auth === 'header') steps.push({ text: t('connectGenericHeader', { header: headerName }) });
+    else steps.push({ text: t('connectGenericStandard') });
+    steps.push({ text: t('connectGenericDedup') });
     return (
         <List type="ordered" size="sm" spacing={4}>
             {steps.map((step) => (
@@ -361,7 +340,7 @@ export function WebhookConnectCard({ agentId, triggerId, webhook, revealedSecret
                 {previousUntil ? (
                     <Text size="xs" c="dimmed">{t('connectPreviousUntil', { time: new Date(previousUntil * 1000).toLocaleString(locale) })}</Text>
                 ) : null}
-                <ConnectSteps preset={preset} auth={auth} headerName={webhook.header_name ?? ''} />
+                <ConnectSteps auth={auth} headerName={webhook.header_name ?? ''} />
 
                 <Stack gap={6}>
                     <Text size="sm" fw={500}>{t('rotate')}</Text>
@@ -388,7 +367,7 @@ export function WebhookConnectCard({ agentId, triggerId, webhook, revealedSecret
 
 // ── Test tab ─────────────────────────────────────────────────────────────
 
-interface DryRun {
+export interface DryRun {
     matched: boolean;
     reason: string | null;
     event: string | null;
@@ -398,13 +377,33 @@ interface DryRun {
     errors: Array<{ field: string; message: string }>;
 }
 
-function parseJsonObject(text: string): Record<string, unknown> | null {
+export function parseJsonObject(text: string): Record<string, unknown> | null {
     try {
         const value = JSON.parse(text) as unknown;
         return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
     } catch {
         return null;
     }
+}
+
+/** What a dry run said: whether the sample would start a run, and the prompt and variables it would send. */
+export function DryRunCard({ result }: { result: DryRun }) {
+    const t = useTranslations('agents.triggers');
+    return (
+        <Card withBorder radius="md" padding="sm">
+            <Stack gap={6}>
+                <Group gap="xs">
+                    <Badge color={result.matched ? 'teal' : 'gray'} variant="light">{t(result.matched ? 'testMatched' : 'testNotMatched')}</Badge>
+                    {result.event ? <Text size="xs">{t('testEvent', { event: result.event })}</Text> : null}
+                    {result.delivery_id ? <Text size="xs" c="dimmed">{t('testDelivery', { id: result.delivery_id })}</Text> : null}
+                </Group>
+                {result.reason ? <Text size="xs" c="dimmed">{result.reason}</Text> : null}
+                {result.errors.map((issue) => <Text key={`${issue.field}:${issue.message}`} size="xs" c="red">{issue.field}: {issue.message}</Text>)}
+                {result.variables ? <Code block>{JSON.stringify(result.variables, null, 2)}</Code> : null}
+                {result.prompt !== null ? <Code block style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{result.prompt}</Code> : null}
+            </Stack>
+        </Card>
+    );
 }
 
 export function WebhookTestPanel({ agentId, triggerId, preset }: { agentId: string; triggerId: string; preset: WebhookPreset }) {
@@ -451,21 +450,7 @@ export function WebhookTestPanel({ agentId, triggerId, preset }: { agentId: stri
                     {t('testReset')}
                 </Button>
             </Group>
-            {result ? (
-                <Card withBorder radius="md" padding="sm">
-                    <Stack gap={6}>
-                        <Group gap="xs">
-                            <Badge color={result.matched ? 'teal' : 'gray'} variant="light">{t(result.matched ? 'testMatched' : 'testNotMatched')}</Badge>
-                            {result.event ? <Text size="xs">{t('testEvent', { event: result.event })}</Text> : null}
-                            {result.delivery_id ? <Text size="xs" c="dimmed">{t('testDelivery', { id: result.delivery_id })}</Text> : null}
-                        </Group>
-                        {result.reason ? <Text size="xs" c="dimmed">{result.reason}</Text> : null}
-                        {result.errors.map((issue) => <Text key={`${issue.field}:${issue.message}`} size="xs" c="red">{issue.field}: {issue.message}</Text>)}
-                        {result.variables ? <Code block>{JSON.stringify(result.variables, null, 2)}</Code> : null}
-                        {result.prompt !== null ? <Code block style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{result.prompt}</Code> : null}
-                    </Stack>
-                </Card>
-            ) : null}
+            {result ? <DryRunCard result={result} /> : null}
         </Stack>
     );
 }
@@ -498,7 +483,7 @@ function OutcomeLabel({ outcome, label }: { outcome: string; label: string }) {
     );
 }
 
-export function WebhookDeliveriesPanel({ agentId, triggerId, onShowRuns }: { agentId: string; triggerId: string; onShowRuns: () => void }) {
+export function WebhookDeliveriesPanel({ agentId, triggerId, onShowRuns, connector = false }: { agentId: string; triggerId: string; onShowRuns: () => void; connector?: boolean }) {
     const t = useTranslations('agents.triggers');
     const locale = useLocale();
     const [rows, setRows] = useState<DeliveryRow[] | null>(null);
@@ -530,7 +515,7 @@ export function WebhookDeliveriesPanel({ agentId, triggerId, onShowRuns }: { age
     return (
         <Stack gap="sm">
             <Group justify="space-between">
-                <Text size="sm" c="dimmed">{t('deliveriesHint')}</Text>
+                <Text size="sm" c="dimmed">{t(connector ? 'deliveriesHintConnector' : 'deliveriesHint')}</Text>
                 <Button size="xs" variant="subtle" leftSection={<IconRefresh size={14} />} loading={loading && rows !== null} onClick={() => void load()}>{t('refresh')}</Button>
             </Group>
             {loadFailed ? (

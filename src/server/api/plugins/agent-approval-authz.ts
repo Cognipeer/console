@@ -48,17 +48,19 @@ import {
 } from '@/lib/services/agents/agentActionResolution';
 import { resolveHitlConfig, type ResolvedHitlConfig } from '@/lib/services/agents/agentHumanInTheLoop';
 import { runWithTenantDb } from '@/lib/services/agents/agentRunService';
-import { authorizationRefusalOf, authorizeResourceForRequest } from '../fastify-utils';
-import { decideSessionAccess, sessionActorOf, type SessionActor } from './agent-session-access';
+import { restrictedKnowledgeTagsOf } from '@/lib/services/rag/access/exposure';
+import { authorizationRefusalOf, authorizeResourceForRequest, authorizeServiceForRequest } from '../fastify-utils';
+import { restrictedKnowledgeReaderFor } from '../restrictedKnowledgeRequest';
+import { SESSION_RESTRICTED_MESSAGE, decideSessionAccess, sessionActorOf, type SessionActor } from './agent-session-access';
 
 interface ApprovalQuestion {
   tenantDbName: string;
-  conversation: Pick<IAgentConversation, 'agentKey' | 'projectId' | 'createdBy'>;
+  conversation: Pick<IAgentConversation, 'agentKey' | 'projectId' | 'createdBy' | 'kbRestricted'>;
   /** The people whose turn raised the open requests (`action.createdBy`), besides the session's own creator. */
   raisedBy?: ReadonlyArray<string | null | undefined>;
   approvers: ResolvedHitlConfig['approvers'];
   /** The agent, when the caller has it; read by key otherwise (a deleted agent is asked about by its key). */
-  agent?: Pick<IAgent, '_id' | 'key'> | null;
+  agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
   /** A "no" shapes a screen rather than refuses a request (nothing is logged or audited). */
   quiet?: boolean;
   /** The caller's identity and project, when the route already resolved them. */
@@ -70,14 +72,44 @@ async function agentResourceId(question: ApprovalQuestion): Promise<string> {
   const { conversation } = question;
   const agent = question.agent !== undefined
     ? question.agent
-    : await getAgentByKey(question.tenantDbName, conversation.agentKey, conversation.projectId);
+    : await getAgentByKey(question.tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
   return agent?._id ? String(agent._id) : conversation.agentKey;
 }
 
-/** The engine's answer to "may this caller approve?", as a verdict - an outage is `unavailable`, not an exception. */
-async function askToApprove(request: FastifyRequest, question: ApprovalQuestion): Promise<ApprovalVerdict & { policyIds?: string[] }> {
+/**
+ * A session that holds passages not everyone may read: the run goes on and its reply comes back to whoever answers,
+ * so only its owner (and the people whose turn raised the request) and the administrators of every knowledge base
+ * the passages came from may answer. Null when that is not what stops the caller.
+ */
+async function restrictedRefusal(request: FastifyRequest, question: ApprovalQuestion): Promise<(ApprovalVerdict & { restricted?: true }) | null> {
   const { conversation } = question;
+  if (restrictedKnowledgeTagsOf(conversation.kbRestricted).length === 0) return null;
   try {
+    const actor = question.actor ?? await sessionActorOf(request);
+    const mayRead = await restrictedKnowledgeReaderFor(request, { tenantDbName: question.tenantDbName, viewerUserId: actor.userId })
+      .mayRead(conversation.kbRestricted, [conversation.createdBy, ...(question.raisedBy ?? [])]);
+    return mayRead ? null : { allowed: false, restricted: true, message: SESSION_RESTRICTED_MESSAGE };
+  } catch (error) {
+    const refusal = authorizationRefusalOf(error);
+    if (refusal?.status !== 503) throw error;
+    return { allowed: false, unavailable: true, ...(refusal.decisionId ? { decisionId: refusal.decisionId } : {}) };
+  }
+}
+
+/** The engine's answer to "may this caller approve?", as a verdict - an outage is `unavailable`, not an exception. */
+async function askToApprove(request: FastifyRequest, question: ApprovalQuestion): Promise<ApprovalVerdict & { policyIds?: string[]; restricted?: true }> {
+  const { conversation } = question;
+  const restricted = await restrictedRefusal(request, question);
+  if (restricted) return restricted;
+  try {
+    // A hidden agent a flow owns is approved by whoever may change the flow (`flows` write), not by the agents rules.
+    const agent = question.agent !== undefined
+      ? question.agent
+      : await getAgentByKey(question.tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
+    if (agent?.owner) {
+      const flows = await authorizeServiceForRequest(request, 'flows', { level: 'write' });
+      return flows.allowed ? { allowed: true } : { allowed: false, ...(flows.decisionId ? { decisionId: flows.decisionId } : {}) };
+    }
     const result = await authorizeResourceForRequest(request, {
       action: 'agent.approve',
       resource: agentSessionResource({
@@ -106,7 +138,7 @@ async function askToApprove(request: FastifyRequest, question: ApprovalQuestion)
  * Answering a QUESTION is acting on the session: its owner always may, anybody else needs
  * `agent.session_manage_others` - and `agent.session_view_others`, since the run goes on and its reply comes back to the answerer.
  */
-async function askToAnswer(request: FastifyRequest, question: ApprovalQuestion): Promise<ApprovalVerdict> {
+async function askToAnswer(request: FastifyRequest, question: ApprovalQuestion): Promise<ApprovalVerdict & { restricted?: true }> {
   const decision = await decideSessionAccess(request, question.conversation, {
     need: 'continue',
     agent: question.agent,
@@ -115,13 +147,13 @@ async function askToAnswer(request: FastifyRequest, question: ApprovalQuestion):
     ...(question.actor ? { actor: question.actor } : {}),
   });
   if (decision.ok) return { allowed: true };
-  return decision.status === 503
-    ? { allowed: false, unavailable: true, ...(decision.decisionId ? { decisionId: decision.decisionId } : {}) }
-    : {
-      allowed: false,
-      message: 'This question was asked in a session somebody else started, and you are not allowed to answer it.',
-      ...(decision.decisionId ? { decisionId: decision.decisionId } : {}),
-    };
+  if (decision.status === 503) return { allowed: false, unavailable: true, ...(decision.decisionId ? { decisionId: decision.decisionId } : {}) };
+  if (decision.reason === 'restricted') return { allowed: false, restricted: true, message: SESSION_RESTRICTED_MESSAGE };
+  return {
+    allowed: false,
+    message: 'This question was asked in a session somebody else started, and you are not allowed to answer it.',
+    ...(decision.decisionId ? { decisionId: decision.decisionId } : {}),
+  };
 }
 
 /** The authorizer a route hands to `resolveAgentPendingAction` / `checkAgentPendingActionResolution`. */
@@ -146,6 +178,8 @@ export type AnswerBlockedReason =
   | 'session_owner'
   /** A rule of the workspace stops the caller. */
   | 'policy'
+  /** The session holds passages not everyone may read: only its owner and those knowledge bases' administrators answer. */
+  | 'restricted'
   /** The engine could not decide right now. */
   | 'unavailable';
 
@@ -171,9 +205,9 @@ export async function describeAnswerAbility(
   request: FastifyRequest,
   input: {
     tenantDbName: string;
-    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'kbRestricted'>;
     actions: ReadonlyArray<Pick<IAgentPendingAction, '_id' | 'kind' | 'status' | 'createdBy' | 'agentKey' | 'projectId' | 'agentVersion'>>;
-    agent?: Pick<IAgent, '_id' | 'key'> | null;
+    agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
     /** The caller's identity and project, when the route already resolved them (saves resolving them per request). */
     actor?: SessionActor;
   },
@@ -205,10 +239,10 @@ async function abilityOf(
   userId: string,
   input: {
     tenantDbName: string;
-    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'kbRestricted'>;
     action: Pick<IAgentPendingAction, 'kind' | 'createdBy'>;
     approvers: ResolvedHitlConfig['approvers'];
-    agent?: Pick<IAgent, '_id' | 'key'> | null;
+    agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
     actor?: SessionActor;
   },
 ): Promise<AnswerAbility> {
@@ -227,11 +261,12 @@ async function abilityOf(
     if (owns) return { canResolve: true };
     const verdict = await askToAnswer(request, question);
     if (verdict.allowed) return { canResolve: true };
-    return { canResolve: false, reason: verdict.unavailable ? 'unavailable' : 'session_owner' };
+    return { canResolve: false, reason: verdict.unavailable ? 'unavailable' : verdict.restricted ? 'restricted' : 'session_owner' };
   }
   const verdict = await askToApprove(request, question);
   if (verdict.allowed) return { canResolve: true };
   if (verdict.unavailable) return { canResolve: false, reason: 'unavailable' };
+  if (verdict.restricted) return { canResolve: false, reason: 'restricted' };
   // A rule of the workspace blocked them (a deny rule names itself); otherwise nothing appointed them.
   const policy = (verdict as { policyIds?: string[] }).policyIds ?? [];
   return { canResolve: false, reason: policy.length > 0 ? 'policy' : REASON_OF_APPROVERS[approvers] };
@@ -270,8 +305,8 @@ export async function authorizeEndingOpenRequests(
   request: FastifyRequest,
   input: {
     tenantDbName: string;
-    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus'>;
-    agent?: (Pick<IAgent, '_id' | 'key'> & { config?: IAgentConfig }) | null;
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus' | 'kbRestricted'>;
+    agent?: (Pick<IAgent, '_id' | 'key' | 'owner'> & { config?: IAgentConfig }) | null;
   },
 ): Promise<ApprovalVerdict> {
   const { tenantDbName, conversation } = input;
@@ -280,7 +315,7 @@ export async function authorizeEndingOpenRequests(
   if (open.length === 0) return { allowed: true };
   const agent = input.agent !== undefined
     ? input.agent
-    : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
+    : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
   return askToApprove(request, {
     tenantDbName,
     conversation,
@@ -300,8 +335,8 @@ export async function refuseCancelPending(
   request: FastifyRequest,
   input: {
     tenantDbName: string;
-    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus'> | null | undefined;
-    agent: Pick<IAgent, '_id' | 'key'> & { config?: IAgentConfig };
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy' | 'runtimeStatus' | 'kbRestricted'> | null | undefined;
+    agent: Pick<IAgent, '_id' | 'key' | 'owner'> & { config?: IAgentConfig };
   },
 ): Promise<{ decisionId?: string; unavailable?: boolean } | null> {
   const { conversation, agent } = input;

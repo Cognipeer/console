@@ -103,8 +103,13 @@ import type {
   IProject,
   IProviderRecord,
   IQuotaPolicy,
+  IRagAclEntry,
   IRagChunk,
   IRagDocument,
+  IRagFolder,
+  IRagIdentityDomain,
+  IRagIdentityLink,
+  IRagIdentityUser,
   IRagModule,
   IRagQueryLog,
   IRagReindexRun,
@@ -173,6 +178,7 @@ import type {
   ModelCategory,
   ModelProviderType,
   ProviderDomain,
+  RagAclNodeType,
   RagDocumentListFilters,
   RagDocumentStatus,
   ToolSourceType,
@@ -1253,6 +1259,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<boolean>;
   /** The trigger whose `webhook` has this hook id (tenant DB), or null. */
   findAgentTriggerByHookId(hookId: string): Promise<IAgentTrigger | null>;
+  /** The connector triggers bound to a subscription (tenant DB), oldest first. */
+  listAgentTriggersBySubscription(subscriptionId: string): Promise<IAgentTrigger[]>;
+  /** How many connector triggers are bound to a subscription; `enabledOnly` counts the enabled ones. */
+  countAgentTriggersBySubscription(subscriptionId: string, opts?: { enabledOnly?: boolean }): Promise<number>;
 
   // ── Agent trigger webhook deliveries (tenant-specific) ──
   recordAgentTriggerDelivery(record: Omit<IAgentTriggerDelivery, '_id'>): Promise<IAgentTriggerDelivery>;
@@ -1383,6 +1393,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     fileName: string,
     projectId?: string,
   ): Promise<IRagDocument | null>;
+  /** Every document of the module with exactly this name, newest first (the project scope of findRagDocumentByFileName). */
+  listRagDocumentsByFileName(
+    ragModuleKey: string,
+    fileName: string,
+    projectId?: string,
+  ): Promise<IRagDocument[]>;
   listRagDocuments(
     ragModuleKey: string,
     filters?: RagDocumentListFilters,
@@ -1390,8 +1406,28 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   countRagDocuments(
     ragModuleKey: string,
     projectId?: string,
-    filters?: Pick<RagDocumentListFilters, 'status' | 'search'>,
+    filters?: Pick<
+      RagDocumentListFilters,
+      'status' | 'search' | 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged' | 'withUnscoped'
+    >,
   ): Promise<number>;
+  /**
+   * Documents per folder: `folderId` → how many, with the key `''` for the top level (a document with no folder, or
+   * an empty one). Counts exactly the documents `countRagDocuments` counts for the same `projectId` and filters, so
+   * an `access` filter counts what that caller can list. A folder without documents is absent.
+   */
+  countRagDocumentsByFolder(
+    ragModuleKey: string,
+    projectId: string | undefined,
+    filters?: Pick<RagDocumentListFilters, 'access' | 'withUnscoped'>,
+  ): Promise<Record<string, number>>;
+  /** Ids only, newest first — for access filters that name documents. `limit` is required. */
+  listRagDocumentIds(
+    ragModuleKey: string,
+    filters: RagDocumentListFilters & { limit: number },
+  ): Promise<string[]>;
+  /** Several documents at once, without `sourceText`. Ids that do not exist are skipped. */
+  findRagDocumentsByIds(ids: string[]): Promise<IRagDocument[]>;
 
   // ── RAG Chunk operations (tenant-specific) ──
   bulkInsertRagChunks(
@@ -1494,6 +1530,142 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Give the claim up, only if we still hold it. */
   releaseRagReindexRunClaim(key: string, ownerId: string): Promise<void>;
 
+  // ── Knowledge Engine folders (tenant-specific) ──
+  /** Atomically add one to the module's `aclRevision` (absent counts as 0). */
+  bumpRagModuleAclRevision(ragModuleKey: string, projectId?: string): Promise<void>;
+  createRagFolder(
+    folder: Omit<IRagFolder, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagFolder>;
+  /** `undefined` in `data` for parentId / ancestorIds / aclMode / aclManaged / source clears the field. */
+  updateRagFolder(
+    id: string,
+    data: Partial<Pick<IRagFolder, 'name' | 'parentId' | 'ancestorIds' | 'aclMode' | 'aclManaged' | 'source' | 'updatedBy'>>,
+  ): Promise<IRagFolder | null>;
+  findRagFolderById(id: string): Promise<IRagFolder | null>;
+  findRagFolderBySource(
+    ragModuleKey: string,
+    sourceId: string,
+    externalId: string,
+    projectId?: string,
+  ): Promise<IRagFolder | null>;
+  /**
+   * Folders of a module. `parentId: null` = top-level folders only; `ancestorId`
+   * = every folder below that one (its whole subtree, the folder itself excluded).
+   */
+  listRagFolders(
+    ragModuleKey: string,
+    filters?: { projectId?: string; parentId?: string | null; ancestorId?: string; ids?: string[]; sourceId?: string },
+  ): Promise<IRagFolder[]>;
+  deleteRagFolder(id: string): Promise<boolean>;
+  deleteRagFoldersByModuleKey(ragModuleKey: string, projectId?: string): Promise<number>;
+
+  // ── Knowledge Engine permissions (tenant-specific) ──
+  listRagAclEntries(
+    ragModuleKey: string,
+    filters?: {
+      projectId?: string;
+      nodeType?: IRagAclEntry['nodeType'];
+      nodeId?: string;
+      nodeIds?: string[];
+      principals?: string[];
+    },
+  ): Promise<IRagAclEntry[]>;
+  /** Distinct nodes holding at least one of `principals` (one indexed read per query). */
+  listRagAclNodesForPrincipals(
+    ragModuleKey: string,
+    principals: string[],
+    projectId?: string,
+  ): Promise<Array<{ nodeType: IRagAclEntry['nodeType']; nodeId: string }>>;
+  /** Whether the node has any entry at all. */
+  hasRagAclEntries(
+    ragModuleKey: string,
+    nodeType: IRagAclEntry['nodeType'],
+    nodeId: string,
+    projectId?: string,
+  ): Promise<boolean>;
+  /**
+   * How many entries each of `nodeIds` holds: node id → count. A node without entries is absent from the record.
+   * Built for pages of at most 1000 ids.
+   */
+  countRagAclEntriesByNode(
+    ragModuleKey: string,
+    filter: { projectId?: string; nodeType: RagAclNodeType; nodeIds: string[] },
+  ): Promise<Record<string, number>>;
+  /**
+   * How many DISTINCT nodes of that type hold at least one entry. With `principalPrefix`, only entries whose
+   * principal starts with it count (a literal prefix: no wildcard, case-sensitive). A prefix no principal can start
+   * with (an empty one, or one with a control character) matches nothing; leave it out to count every entry.
+   */
+  countRagAclNodes(
+    ragModuleKey: string,
+    filter: { projectId?: string; nodeType: RagAclNodeType; principalPrefix?: string },
+  ): Promise<number>;
+  /** Replace every entry of one node with `entries` (an empty list removes them all). */
+  replaceRagAclEntries(
+    ragModuleKey: string,
+    node: { type: IRagAclEntry['nodeType']; id: string },
+    entries: Array<Omit<IRagAclEntry, '_id' | 'ragModuleKey' | 'nodeType' | 'nodeId' | 'createdAt'>>,
+    projectId?: string,
+  ): Promise<void>;
+  deleteRagAclEntriesByModuleKey(ragModuleKey: string, projectId?: string): Promise<number>;
+  /**
+   * Remove every entry of the tenant, whatever its module, project or node, whose principal starts with
+   * `prefix`. The prefix is a literal string: no wildcard, case-sensitive. An empty prefix removes
+   * nothing. Returns how many entries were removed.
+   */
+  deleteRagAclEntriesByPrincipalPrefix(prefix: string): Promise<number>;
+  /**
+   * The display names entries carry, tenant-wide (every module and project): the distinct principals that start with
+   * `principalPrefix` (literal, case-sensitive; an empty one matches nothing) and have a non-empty `label`, one label
+   * each, ordered by principal: the label of an entry a connected source wrote (`managed: 'sync'`) wins over one written
+   * in the console, and the greatest wins among equals. Default `limit` 5000, at most 20000.
+   */
+  listRagAclPrincipalLabels(
+    principalPrefix: string,
+    options?: { limit?: number },
+  ): Promise<Array<{ principal: string; label: string }>>;
+
+  // ── Knowledge Engine identity directories (tenant-specific) ──
+  upsertRagIdentityDomain(
+    domain: Omit<IRagIdentityDomain, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IRagIdentityDomain>;
+  findRagIdentityDomain(key: string): Promise<IRagIdentityDomain | null>;
+  listRagIdentityDomains(): Promise<IRagIdentityDomain[]>;
+  /** Deletes the domain, its users and its links. */
+  deleteRagIdentityDomain(key: string): Promise<boolean>;
+  /** Insert or replace users by (domain, extId). */
+  upsertRagIdentityUsers(
+    domain: string,
+    users: Array<Omit<IRagIdentityUser, '_id' | 'domain'>>,
+  ): Promise<number>;
+  /** Delete the domain's users whose syncRunId differs from `keepRunId`. */
+  pruneRagIdentityUsers(domain: string, keepRunId: string): Promise<number>;
+  /** Users of a domain whose `field` equals one of `values` (values compared lower-cased, except extId). */
+  findRagIdentityUsers(
+    domain: string,
+    field: 'extId' | 'email' | 'upn' | `attr:${string}`,
+    values: string[],
+  ): Promise<IRagIdentityUser[]>;
+  /**
+   * `extIds` keeps only these users (an empty list: none) and `excludeExtIds` leaves these out; ids are compared as
+   * given and `total` counts what remains. Each list is meant for at most 50000 ids.
+   */
+  listRagIdentityUsers(
+    domain: string,
+    options?: { search?: string; limit?: number; offset?: number; extIds?: string[]; excludeExtIds?: string[] },
+  ): Promise<{ users: IRagIdentityUser[]; total: number }>;
+  /** Every group id found in the `groups` of the domain's users, with how many users hold it, ordered by id. */
+  listRagIdentityGroupCounts(domain: string): Promise<Array<{ id: string; users: number }>>;
+  listRagIdentityLinks(filters?: {
+    domain?: string;
+    consoleKind?: IRagIdentityLink['consoleKind'];
+    consoleIds?: string[];
+  }): Promise<IRagIdentityLink[]>;
+  createRagIdentityLink(
+    link: Omit<IRagIdentityLink, '_id' | 'createdAt'>,
+  ): Promise<IRagIdentityLink>;
+  deleteRagIdentityLink(id: string): Promise<boolean>;
+
   // ── Reranker operations (tenant-specific) ──
   createReranker(
     reranker: Omit<IReranker, '_id' | 'createdAt' | 'updatedAt'>,
@@ -1514,9 +1686,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   createRerankerRunLog(
     log: Omit<IRerankerRunLog, '_id' | 'createdAt'>,
   ): Promise<IRerankerRunLog>;
+  /** `projectId`: only that project's rows (tenant-wide ones when it is empty). */
   listRerankerRunLogs(
     rerankerKey: string,
-    options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+    options?: { limit?: number; skip?: number; from?: Date; to?: Date; projectId?: string },
   ): Promise<IRerankerRunLog[]>;
 
   // ── Web Search operations (tenant-specific) ──
@@ -1685,12 +1858,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   deleteAgent(id: string): Promise<boolean>;
   findAgentById(id: string): Promise<IAgent | null>;
   findAgentByKey(key: string, projectId?: string): Promise<IAgent | null>;
+  /**
+   * Lists the agents users manage. Hidden agents owned by a flow node (`owner`)
+   * are EXCLUDED unless `owned` opts in: `'include'` lists both, `'only'` just
+   * the owned ones. `ownerFlowId` narrows to one flow's agents (and implies
+   * `'only'`).
+   */
   listAgents(filters?: {
     projectId?: string;
     status?: AgentStatus;
     search?: string;
+    owned?: 'include' | 'only';
+    ownerFlowId?: string;
   }): Promise<IAgent[]>;
-  countAgents(projectId?: string): Promise<number>;
+  /** Counts the agents users manage; owned (flow-hidden) agents are excluded unless `owned: 'include'`. */
+  countAgents(projectId?: string, options?: { owned?: 'include' }): Promise<number>;
+  /** The keys of the hidden agents flows own (of one project, or all): what the session and run lists leave out. */
+  listOwnedAgentKeys(projectId?: string): Promise<string[]>;
 
   // ── Agent Version operations (tenant-specific) ──
   createAgentVersion(
@@ -1744,6 +1928,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * writer erase the other's. Never lowers the total.
    */
   addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
+  /**
+   * Atomically adds knowledge base tags to the session's `kbRestricted` (a set: a tag already there is not added
+   * twice). Never removes one and does not touch `updatedAt`.
+   */
+  addAgentConversationRestriction(id: string, tags: string[]): Promise<void>;
+  /**
+   * Of the sessions `ids`, those with knowledge base tags (`kbRestricted` not empty): who started each and its tags,
+   * nothing else. An id that names no session, or one without tags, is left out.
+   */
+  findRestrictedAgentConversations(ids: string[]): Promise<Array<Pick<IAgentConversation, '_id' | 'createdBy' | 'kbRestricted'>>>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   /**
@@ -1792,6 +1986,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     runtimeStatus?: AgentSessionRuntimeStatus;
     limit: number;
     after?: { createdAt: Date; id: string };
+    /** Leave out the sessions of these agents (the hidden agents a flow owns). */
+    excludeAgentKeys?: string[];
     /**
      * The caller may view other people's sessions of only some agents (`viewableAgentKeys`; none when absent):
      * a row is returned when `userId` started it or its agent is one of those; a row of any other agent - one
@@ -1812,6 +2008,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     projectId: string;
     runtimeStatuses?: AgentSessionRuntimeStatus[];
     ids?: string[];
+    /** Leave out the sessions of these agents (the hidden agents a flow owns). */
+    excludeAgentKeys?: string[];
     ownOnly?: { userId: string; viewableAgentKeys?: string[] };
     before?: { updatedAt: Date; id: string };
     limit: number;
@@ -2364,6 +2562,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     cursor?: string;
     /** Only the runs this user queued (the list of a caller who may not see other people's). */
     userId?: string;
+    /** Leave out the runs of these agents (the hidden agents a flow owns). */
+    excludeAgentKeys?: string[];
     limit?: number;
   }): Promise<IAgentRun[]>;
   /**

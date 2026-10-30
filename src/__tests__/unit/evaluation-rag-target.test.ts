@@ -5,6 +5,8 @@
  * item's user message drives the query, the target's topK / minScore reach
  * queryRag, the ranked matches survive onto TargetOutput.retrieved with their
  * rank, and a target with no module fails loudly instead of retrieving nothing.
+ * Retrieval reads as the person who ran the suite; an actor that is not a user
+ * row (the evaluation placeholder, the system, an agent) reads as no one.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -77,10 +79,34 @@ describe('rag evaluation target', () => {
       topK: 8,
       minScore: 0.4,
       includeContent: true,
-    });
+    }, { caller: { kind: 'anonymous', reason: 'synthetic' } });
     expect(output.retrieved).toEqual([]);
     expect(output.text).toBe('');
     expect(output.latencyMs).toBe(12);
+  });
+
+  describe('who retrieval reads as', () => {
+    const callerOf = async (ctx: EvaluationModelContext) => {
+      h.queryRag.mockResolvedValue({ matches: [], query: 'q', ragModuleKey: 'support-kb', latencyMs: 1 });
+      await buildTargetInvoker(ragTarget(), ctx)(ITEM);
+      return h.queryRag.mock.calls[0][4];
+    };
+
+    it('reads as the person who ran the suite', async () => {
+      await expect(callerOf({ ...CTX, userId: 'u-123' })).resolves.toEqual({ caller: { kind: 'person', userId: 'u-123' } });
+    });
+
+    it.each([
+      ['no actor', undefined],
+      ['a blank actor', '  '],
+      ['the evaluation placeholder', 'evaluation'],
+      ['the system', 'system'],
+      ['a system actor', 'system:scheduler'],
+      ['an agent actor', 'agent:support-bot'],
+      ['the public A2A caller', 'a2a-public'],
+    ])('reads as no one for %s', async (_name, userId) => {
+      await expect(callerOf({ ...CTX, userId })).resolves.toEqual({ caller: { kind: 'anonymous', reason: 'synthetic' } });
+    });
   });
 
   it('returns the ranked matches alongside their concatenation', async () => {

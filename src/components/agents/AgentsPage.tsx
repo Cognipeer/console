@@ -27,6 +27,8 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateAgentModal from './CreateAgentModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import ImportAgentShell from './ImportAgentShell';
+import { withoutOwnedAgents } from '@/lib/utils/ownedAgents';
+import { FlowDrivenLabel, FlowKindBadge, useFlowKindFilterOptions } from '@/components/enterprise/EnterpriseFlowAgentUi';
 
 /** The main model and the additional ones an agent offers. */
 function agentModelKeys(config: { modelKey?: string; additionalModels?: Array<{ modelKey: string }> }): string[] {
@@ -41,7 +43,7 @@ interface Agent {
   config: {
     modelKey?: string;
     additionalModels?: Array<{ modelKey: string }>;
-    kind?: 'native' | 'external';
+    kind?: 'native' | 'external' | 'flow';
     connection?: { protocol?: string };
     toolBindings?: Array<{ toolNames?: string[] }>;
     knowledgeEngineKey?: string;
@@ -55,7 +57,14 @@ interface Agent {
 }
 
 type StatusFilter = 'all' | 'active' | 'inactive' | 'draft';
-type KindFilter = 'all' | 'native' | 'external';
+/** The stored `config.kind` values (`flow` only where Flows are available). */
+type KindFilter = 'all' | 'native' | 'external' | 'flow';
+
+/** A missing or unknown kind is a native (Smart) agent. */
+function matchesKindFilter(filter: KindFilter, config?: { kind?: string } | null): boolean {
+  if (filter === 'all') return true;
+  return (config?.kind === 'external' || config?.kind === 'flow' ? config.kind : 'native') === filter;
+}
 type PublishFilter = 'all' | 'published' | 'unpublished';
 
 /** Tools the agent can call by name — the bound ones; knowledge/memory are shown as capability chips. */
@@ -93,6 +102,7 @@ interface Provider {
 export default function AgentsPage() {
   const router = useRouter();
   const t = useTranslations('agents');
+  const flowKindOptions = useFlowKindFilterOptions();
   const tTemplates = useTranslations('agentTemplates');
   const tConfirm = useTranslations('common.confirm');
   const tFeedback = useTranslations('navigationFeedback');
@@ -116,7 +126,8 @@ export default function AgentsPage() {
       const res = await fetch('/api/agents', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setAgents(data.agents ?? []);
+      // Agents a flow owns are never listed (the API already leaves them out).
+      setAgents(withoutOwnedAgents<Agent>(data.agents ?? []));
     } catch (err) {
       console.error('Failed to load agents', err);
       // An empty list would read as "none yet"; say the load failed instead.
@@ -156,11 +167,14 @@ export default function AgentsPage() {
     void loadProviders();
   }, [loadAgents]);
 
-  const handleCreated = (agentId: string) => {
+  const handleCreated = (agentId: string, created?: { flowId?: string }) => {
     setCreateModalOpen(false);
     setConnectModalOpen(false);
     setImportOpen(false);
-    router.push(`/dashboard/agents/${agentId}`);
+    // A new FlowBase agent starts in its flow editor: the flow is what the agent is.
+    router.push(created?.flowId
+      ? `/dashboard/agents/${agentId}/flows/${created.flowId}?edit=1`
+      : `/dashboard/agents/${agentId}`);
   };
 
   const handleDelete = async (target: Agent) => {
@@ -210,8 +224,7 @@ export default function AgentsPage() {
       if (!hit) return false;
     }
     if (statusFilter !== 'all' && a.status !== statusFilter) return false;
-    const kind = a.config.kind === 'external' ? 'external' : 'native';
-    if (kindFilter !== 'all' && kind !== kindFilter) return false;
+    if (!matchesKindFilter(kindFilter, a.config)) return false;
     // API channels run the PUBLISHED version, so "never published" is the
     // set of agents no external caller can actually reach yet.
     if (publishFilter === 'published' && !a.publishedVersion) return false;
@@ -242,6 +255,7 @@ export default function AgentsPage() {
                 {t('connectedBadge')}
               </Badge>
             ) : null}
+            {agent.config.kind === 'flow' ? <FlowKindBadge /> : null}
           </Group>
           {agent.description ? (
             <span
@@ -267,7 +281,9 @@ export default function AgentsPage() {
         <span className="ds-mono" style={{ fontSize: 12 }}>
           {agent.config.kind === 'external'
             ? (agent.config.connection?.protocol ?? 'external')
-            : (agent.config.modelKey ?? '—')}
+            : agent.config.kind === 'flow'
+              ? <FlowDrivenLabel />
+              : (agent.config.modelKey ?? '—')}
           {agent.config.kind !== 'external' && agent.config.additionalModels?.length ? (
             <span className="ds-muted" title={agent.config.additionalModels.map((m) => m.modelKey).join(', ')}>
               {' '}+{agent.config.additionalModels.length}
@@ -427,8 +443,9 @@ export default function AgentsPage() {
             width: 130,
             options: [
               { value: 'all', label: 'All kinds' },
-              { value: 'native', label: 'Built here' },
-              { value: 'external', label: 'Connected' },
+              { value: 'native', label: t('kindSmart') },
+              { value: 'external', label: t('kindConnected') },
+              ...flowKindOptions,
             ],
           },
           {

@@ -31,6 +31,7 @@ export function assertAgentsEnabled(scope: ServiceScope): Promise<void> {
 export function bindingServiceOf(binding: Pick<IAgentToolBinding, 'source' | 'sourceKey'>): string | null {
   if (binding.source === 'tool') return 'tools';
   if (binding.source === 'mcp') return 'mcp';
+  if (binding.source === 'flow') return 'flows';
   if (binding.source === 'system') {
     if (binding.sourceKey === 'browser_use') return 'browser';
     if (binding.sourceKey === 'web_search') return 'websearch';

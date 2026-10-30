@@ -749,6 +749,16 @@ export function resolveVectorFilter(
   return parsed;
 }
 
+/** The filter operators a driver can push down (empty when it declares none or is unknown). */
+export function vectorFilterOperatorsOf(driver: string): VectorFilterOperator[] {
+  try {
+    const operators = providerRegistry.getContract(driver).capabilities?.['vector.filterOperators'];
+    return Array.isArray(operators) ? (operators as VectorFilterOperator[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Whether a driver can run the keyword channel of a hybrid search.
  *

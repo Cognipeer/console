@@ -37,6 +37,13 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/reports/dashboard')).toBe('reports');
   });
 
+  it('gates the connectors API, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/connectors')).toBe('connectors');
+    expect(getEnterpriseModuleForPath('/api/connectors/abc/accounts')).toBe('connectors');
+    expect(getEnterpriseModuleForPath('/api/connectors/oauth/callback')).toBe('connectors');
+    expect(getEnterpriseModuleForPath('/api/connectorsx')).toBeNull();
+  });
+
   it('gates the portal admin API and the end-user runtime, bare collection path included', () => {
     expect(getEnterpriseModuleForPath('/api/portals')).toBe('portals');
     expect(getEnterpriseModuleForPath('/api/portals/abc123/stats')).toBe('portals');
@@ -67,6 +74,15 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/entity-healthx')).toBeNull();
     expect(checkEnterpriseApiAccess('/api/entity-health/summary', 'FREE')?.body.module).toBe('health');
     expect(checkEnterpriseApiAccess('/api/entity-health/summary', 'ENTERPRISE')).toBeNull();
+  });
+
+  it('gates the Flows API, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/flows')).toBe('flows');
+    expect(getEnterpriseModuleForPath('/api/flows/runs/abc')).toBe('flows');
+    expect(getEnterpriseModuleForPath('/api/client/v1/flows/my-flow/runs')).toBe('flows');
+    expect(getEnterpriseModuleForPath('/api/flowsx')).toBeNull();
+    expect(checkEnterpriseApiAccess('/api/flows', 'FREE')?.body.module).toBe('flows');
+    expect(checkEnterpriseApiAccess('/api/flows/abc', 'ENTERPRISE')).toBeNull();
   });
 
   it('does not gate community paths', () => {

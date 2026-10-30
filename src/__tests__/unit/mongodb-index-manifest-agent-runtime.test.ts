@@ -18,6 +18,8 @@ describe('index manifest: agent runtime collections', () => {
     ['agent_triggers', [{ tenantId: 1, projectId: 1, agentKey: 1 }, { enabled: 1, nextFireAt: 1 }]],
     // An incoming webhook finds its trigger by hook id; the delivery log is read per trigger and swept by expiresAt.
     ['agent_triggers', [{ 'webhook.hookId': 1 }]],
+    // A connector trigger is found by its subscription (the Connectors module counts and lists the triggers bound to one).
+    ['agent_triggers', [{ 'connector.subscriptionId': 1 }]],
     ['agent_trigger_deliveries', [{ tenantId: 1, triggerId: 1, receivedAt: -1 }, { expiresAt: 1 }]],
   ])('%s has the indexes its queries need', (collection, wanted) => {
     for (const key of wanted) expect(keysOf(collection)).toContain(JSON.stringify(key));

@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { agentTemplatesEn } from '@/lib/i18n/messages/agentTemplates.en';
-import { parseInstantiateInput, AgentTemplateError } from '@/lib/services/agents/templates/agentTemplateService';
+import { AgentTemplateError, connectorRefusal, parseInstantiateInput } from '@/lib/services/agents/templates/agentTemplateService';
 import { findAgentTemplate } from '@/lib/services/agents/templates/catalog';
 import { computeTemplateAvailability, type TemplateFacts } from '@/lib/services/agents/templates/templateAvailability';
 import {
@@ -17,6 +17,7 @@ import {
   agentKeyCandidate,
   buildTemplateConfig,
   buildTriggerBody,
+  givenConnectorParams,
 } from '@/lib/services/agents/templates/templateConfig';
 import { buildSetupItems, type TemplateSetupFacts } from '@/lib/services/agents/templates/templateSetup';
 import type { AgentTemplate, AgentTemplateTrigger } from '@/lib/services/agents/templates/types';
@@ -243,12 +244,12 @@ describe('buildTemplateConfig', () => {
 
 describe('buildTriggerBody', () => {
   const webhook: AgentTemplateTrigger = {
-    name: 'On push', type: 'webhook', webhook: { preset: 'github', events: ['push'], include_payload: true }, prompt: 'Review {{payload.after}}.', variables: { sha: '{{payload.after}}' },
+    name: 'On push', type: 'webhook', webhook: { preset: 'generic', events: ['push'], include_payload: true }, prompt: 'Review {{payload.after}}.', variables: { sha: '{{payload.after}}' },
   };
 
   it('is the body POST /agents/:id/triggers takes: disabled, unpinned, with the type\'s one settings object', () => {
     expect(buildTriggerBody(webhook, 'UTC')).toEqual({
-      name: 'On push', type: 'webhook', webhook: { preset: 'github', events: ['push'], include_payload: true },
+      name: 'On push', type: 'webhook', webhook: { preset: 'generic', events: ['push'], include_payload: true },
       prompt: 'Review {{payload.after}}.', variables: { sha: '{{payload.after}}' }, enabled: false, version: null,
     });
   });
@@ -265,12 +266,113 @@ describe('buildTriggerBody', () => {
     expect(body).toEqual({ name: 'Run now', type: 'manual', prompt: 'Go.', enabled: false, version: null });
   });
 
+  it('a connector trigger carries the picked connector, its trigger and the narrowing, and copies them', () => {
+    const connector: AgentTemplateTrigger = {
+      name: 'On PR', type: 'connector', prompt: 'Review {{payload.number}}.',
+      connector: { package: 'cognipeer.github', trigger: 'pull_request', params: { labels: ['a'] }, events: ['pull_request.opened'], filter: [{ path: 'payload.action', op: 'eq', value: 'opened' }], includePayload: true },
+    };
+    const body = buildTriggerBody(connector, 'UTC', 'conn-1') as { connector: { events: string[]; params: { labels: string[] } } };
+    expect(body).toEqual({
+      name: 'On PR', type: 'connector', prompt: 'Review {{payload.number}}.', enabled: false, version: null,
+      connector: {
+        connector_id: 'conn-1', trigger: 'pull_request', params: { labels: ['a'] }, events: ['pull_request.opened'],
+        filter: [{ path: 'payload.action', op: 'eq', value: 'opened' }], include_payload: true,
+      },
+    });
+    body.connector.events.push('x');
+    body.connector.params.labels.push('b');
+    expect(connector.connector!.events).toEqual(['pull_request.opened']);
+    expect(connector.connector!.params).toEqual({ labels: ['a'] });
+  });
+
+  it('a connector trigger takes the given parameters over its own, and drops the ones a form left empty', () => {
+    const connector: AgentTemplateTrigger = {
+      name: 'On PR', type: 'connector', prompt: 'Review.',
+      connector: { package: 'cognipeer.github', trigger: 'pull_request', params: { labels: ['a'], repository: 'template/default' }, includePayload: true },
+    };
+    const params = (body: Record<string, unknown>) => (body.connector as { params: Record<string, unknown> }).params;
+    expect(params(buildTriggerBody(connector, 'UTC', 'conn-1', { repository: 'acme/api' }))).toEqual({ labels: ['a'], repository: 'acme/api' });
+    expect(params(buildTriggerBody(connector, 'UTC', 'conn-1', { repository: '', labels: [], note: null }))).toEqual({ labels: ['a'], repository: 'template/default' });
+    expect(params(buildTriggerBody(connector, 'UTC', 'conn-1'))).toEqual({ labels: ['a'], repository: 'template/default' });
+    // Not a connector trigger: nothing to give.
+    expect(buildTriggerBody(webhook, 'UTC', undefined, { repository: 'acme/api' })).not.toHaveProperty('connector');
+  });
+
+  it('copies the given parameters too: changing the body never changes what the caller passed', () => {
+    const connector: AgentTemplateTrigger = {
+      name: 'On PR', type: 'connector', prompt: 'Review.',
+      connector: { package: 'cognipeer.github', trigger: 'pull_request', includePayload: true },
+    };
+    const given = { labels: ['a'] };
+    const body = buildTriggerBody(connector, 'UTC', 'conn-1', given) as { connector: { params: { labels: string[] } } };
+    body.connector.params.labels.push('b');
+    expect(given.labels).toEqual(['a']);
+  });
+
   it('copies what it hands over: changing the body never changes the template', () => {
     const body = buildTriggerBody(webhook, 'UTC') as { webhook: { events: string[] }; variables: Record<string, unknown> };
     body.webhook.events.push('release');
     body.variables.extra = 1;
     expect(webhook.webhook!.events).toEqual(['push']);
     expect(webhook.variables).toEqual({ sha: '{{payload.after}}' });
+  });
+});
+
+describe('givenConnectorParams', () => {
+  it('keeps what was filled in and drops nothing, null, empty text and empty lists', () => {
+    expect(givenConnectorParams({ repository: 'acme/api', labels: ['bug'], draft: false, count: 0 })).toEqual({ repository: 'acme/api', labels: ['bug'], draft: false, count: 0 });
+    expect(givenConnectorParams({ a: '', b: null, c: undefined, d: [] })).toEqual({});
+    expect(givenConnectorParams(undefined)).toEqual({});
+    expect(givenConnectorParams(null)).toEqual({});
+  });
+
+  it('does not touch what it is given, and keeps an own key that looks like a built-in', () => {
+    const given = { a: '', b: 'x' };
+    givenConnectorParams(given);
+    expect(given).toEqual({ a: '', b: 'x' });
+    const tricky = givenConnectorParams(JSON.parse('{"__proto__":{"polluted":true},"b":1}'));
+    expect(Object.keys(tricky).sort()).toEqual(['__proto__', 'b']);
+    expect(Object.getPrototypeOf(tricky)).toBe(Object.prototype);
+  });
+});
+
+describe('connectorRefusal: which refusals of a suggested connector trigger leave it out', () => {
+  const field = (name: string, message = 'x') => ({ field: name, message });
+
+  it('a connector that is missing, of another package or without the trigger is connector_required, whatever else was said', () => {
+    expect(connectorRefusal([field('type')], false)).toEqual({ reason: 'connector_required' });
+    expect(connectorRefusal([field('connector.connector_id')], true)).toEqual({ reason: 'connector_required' });
+    expect(connectorRefusal([field('connector.trigger')], false)).toEqual({ reason: 'connector_required' });
+    expect(connectorRefusal([field('connector.params.repository'), field('connector.connector_id')], false)).toEqual({ reason: 'connector_required' });
+  });
+
+  it('parameters that were not given are params_required, with the field errors', () => {
+    const errors = [field('connector.params.repository', 'repository is required'), field('connector.params.branch', 'branch is required')];
+    expect(connectorRefusal(errors, false)).toEqual({ reason: 'params_required', errors });
+    expect(connectorRefusal([field('connector.params', 'params must be an object')], false)).toMatchObject({ reason: 'params_required' });
+  });
+
+  it('parameters that were given and refused, and events or a schedule the package does not take, are invalid_params', () => {
+    const errors = [field('connector.params.repository', 'repository is not a parameter of this trigger')];
+    expect(connectorRefusal(errors, true)).toEqual({ reason: 'invalid_params', errors });
+    expect(connectorRefusal([field('connector.events', 'Not an event of this trigger: x')], false)).toMatchObject({ reason: 'invalid_params' });
+    expect(connectorRefusal([field('connector.schedule.cron', 'too often')], false)).toMatchObject({ reason: 'invalid_params' });
+    // Parameters missing next to a refused event are not only a missing parameter.
+    expect(connectorRefusal([field('connector.params.repository'), field('connector.events')], false)).toMatchObject({ reason: 'invalid_params' });
+  });
+
+  it('a refusal about the template itself is not a reason to leave the trigger out', () => {
+    for (const other of ['name', 'prompt', 'variables', 'connector.filter.0.path', 'connector.include_payload', 'enabled']) {
+      expect(connectorRefusal([field(other)], false), other).toBeNull();
+      expect(connectorRefusal([field('connector.params.repository'), field(other)], true), other).toBeNull();
+    }
+    // A refusal that says nothing is not understood either.
+    expect(connectorRefusal([], false)).toBeNull();
+  });
+
+  it('lists at most ten field errors', () => {
+    const many = Array.from({ length: 14 }, (_, index) => field(`connector.params.p${index}`));
+    expect(connectorRefusal(many, false)!.errors).toHaveLength(10);
   });
 });
 
@@ -303,7 +405,7 @@ describe('parseInstantiateInput', () => {
 
   it('needs only the model, and gives everything else its default', () => {
     expect(parseInstantiateInput({ modelKey: 'main' })).toEqual({
-      modelKey: 'main', knowledgeKeys: [], guardrailKeys: [], createTriggers: true, timezone: 'UTC', publish: false,
+      modelKey: 'main', knowledgeKeys: [], guardrailKeys: [], connectorIds: {}, connectorParams: {}, createTriggers: true, timezone: 'UTC', publish: false,
     });
   });
 
@@ -313,13 +415,43 @@ describe('parseInstantiateInput', () => {
       createTriggers: false, timezone: 'Europe/Istanbul', publish: true,
     })).toEqual({
       modelKey: 'main', name: 'My agent', description: 'Does things', key: 'my-agent', knowledgeKeys: ['a'], guardrailKeys: ['g'], sandboxTemplateKey: 'python',
-      createTriggers: false, timezone: 'Europe/Istanbul', publish: true,
+      connectorIds: {}, connectorParams: {}, createTriggers: false, timezone: 'Europe/Istanbul', publish: true,
     });
     expect(parseInstantiateInput({ modelKey: 'm', name: null, description: null, key: null, knowledgeKeys: null, guardrailKeys: null, timezone: null, createTriggers: null, publish: null })).toEqual({
-      modelKey: 'm', knowledgeKeys: [], guardrailKeys: [], createTriggers: true, timezone: 'UTC', publish: false,
+      modelKey: 'm', knowledgeKeys: [], guardrailKeys: [], connectorIds: {}, connectorParams: {}, createTriggers: true, timezone: 'UTC', publish: false,
     });
     expect(parseInstantiateInput({ modelKey: 'm', name: '   ', description: '  ' })).not.toHaveProperty('name');
     expect(parseInstantiateInput({ modelKey: 'm', name: '   ', description: '  ' })).not.toHaveProperty('description');
+  });
+
+  it('reads connector_id and connector_ids (by trigger name)', () => {
+    expect(parseInstantiateInput({ modelKey: 'm', connector_id: ' c1 ', connector_ids: { 'On PR': ' c2 ' } })).toMatchObject({ connectorId: 'c1', connectorIds: { 'On PR': 'c2' } });
+    expect(parseInstantiateInput({ modelKey: 'm', connector_id: null })).not.toHaveProperty('connectorId');
+    expect(refusal({ modelKey: 'm', connector_id: 7 }).status).toBe(400);
+    expect(refusal({ modelKey: 'm', connector_ids: ['c1'] }).status).toBe(400);
+    expect(refusal({ modelKey: 'm', connector_ids: { a: 3 } }).status).toBe(400);
+  });
+
+  it('reads connector_params: the parameters of each connector trigger, by its name', () => {
+    expect(parseInstantiateInput({ modelKey: 'm', connector_params: { 'On PR': { repository: 'acme/api' }, Other: {} } }).connectorParams)
+      .toEqual({ 'On PR': { repository: 'acme/api' }, Other: {} });
+    expect(parseInstantiateInput({ modelKey: 'm', connector_params: null }).connectorParams).toEqual({});
+    // A name that looks like a built-in is a plain key of the record, never its prototype.
+    const tricky = parseInstantiateInput({ modelKey: 'm', connector_params: JSON.parse('{"__proto__":{"repository":"x"},"constructor":{"a":1}}') }).connectorParams;
+    expect(Object.keys(tricky).sort()).toEqual(['__proto__', 'constructor']);
+    expect(Object.getPrototypeOf(tricky)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).repository).toBeUndefined();
+  });
+
+  it('refuses connector_params that are not an object of objects, or name more than ten triggers', () => {
+    for (const bad of [['x'], 'x', 5, { a: 'x' }, { a: ['x'] }, { a: null }, { a: 3 }]) {
+      const error = refusal({ modelKey: 'm', connector_params: bad });
+      expect(error.status, JSON.stringify(bad)).toBe(400);
+      expect(error.code, JSON.stringify(bad)).toBe('invalid_request');
+      expect(error.message).toContain('connector_params');
+    }
+    const eleven = Object.fromEntries(Array.from({ length: 11 }, (_, index) => [`t${index}`, {}]));
+    expect(refusal({ modelKey: 'm', connector_params: eleven }).message).toContain('at most 10');
   });
 
   it('refuses with a 400 and a code the caller can branch on', () => {

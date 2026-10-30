@@ -5,6 +5,8 @@ import { Tooltip } from '@mantine/core';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import { useTranslations } from '@/lib/i18n';
+import FlowAttributionLink from './FlowAttributionLink';
+import { hasFlowAttribution, type TracingFlowBlock } from './flowAttribution';
 import SessionStatusBadge from './SessionStatusBadge';
 import {
   formatDuration,
@@ -16,6 +18,8 @@ interface Session {
   sessionId: string;
   threadId?: string;
   agentName?: string;
+  /** Set when the session belongs to an agent a flow owns: shown under the flow, not as an agent. */
+  flow?: TracingFlowBlock | null;
   status?: string;
   startedAt?: Date | string;
   durationMs?: number;
@@ -76,6 +80,9 @@ export default function SessionTable({
               onClick={onRowClick ? () => onRowClick(session.sessionId) : undefined}
             >
               <td>
+                {hasFlowAttribution(session) ? (
+                  <FlowAttributionLink flow={session.flow} />
+                ) : (
                 <Tooltip label={session.agentName || session.sessionId} withArrow>
                   <span
                     style={{
@@ -91,6 +98,7 @@ export default function SessionTable({
                     {session.agentName || '—'}
                   </span>
                 </Tooltip>
+                )}
               </td>
               <td>
                 <Tooltip label={session.sessionId} withArrow>

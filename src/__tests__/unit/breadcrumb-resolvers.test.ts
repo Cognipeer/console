@@ -163,3 +163,83 @@ describe('the breadcrumb of a portal page', () => {
     expect(text()).not.toContain('Portals');
   });
 });
+
+describe('the connectors resolver', () => {
+  const CONNECTOR_ID = '66f1c0de5e1a2b3c4d5e6f70';
+  const CONNECTOR_URL = `/api/connectors/${CONNECTOR_ID}`;
+
+  const connectorsResolver = () => {
+    const found = BREADCRUMB_RESOLVERS.find((r) => r.id === 'standard:connectors');
+    if (!found) throw new Error('no resolver for the connectors pages');
+    return found;
+  };
+
+  it('names the connector of /dashboard/connectors/:id', async () => {
+    answers[CONNECTOR_URL] = { ok: true, body: { connector: { id: CONNECTOR_ID, key: 'support-desk', name: 'Support desk' } } };
+    expect(await connectorsResolver().resolve(contextFor(`/dashboard/connectors/${CONNECTOR_ID}`))).toEqual([{ index: 2, label: 'Support desk' }]);
+    expect(fetched).toEqual([CONNECTOR_URL]);
+  });
+
+  it('leaves the OAuth apps page alone and asks for nothing', async () => {
+    expect(await connectorsResolver().resolve(contextFor('/dashboard/connectors/oauth-apps'))).toEqual([]);
+    expect(fetched).toEqual([]);
+  });
+
+  it('leaves the Catalog page alone and asks for nothing', async () => {
+    expect(await connectorsResolver().resolve(contextFor('/dashboard/connectors/catalog'))).toEqual([]);
+    expect(fetched).toEqual([]);
+  });
+
+  it('gives no label - so the segment stays as it is - when the connector cannot be fetched', async () => {
+    const ctx = () => contextFor(`/dashboard/connectors/${CONNECTOR_ID}`);
+    answers[CONNECTOR_URL] = { ok: false, status: 404 };
+    expect(await connectorsResolver().resolve(ctx())).toEqual([]);
+    answers[CONNECTOR_URL] = { ok: true, body: {} };
+    expect(await connectorsResolver().resolve(ctx())).toEqual([]);
+  });
+
+  it('keeps to its own pages', async () => {
+    for (const path of ['/dashboard/connectors', '/dashboard/agents/abc', '/dashboard', '/connectors/abc']) {
+      expect(await connectorsResolver().resolve(contextFor(path)), path).toEqual([]);
+    }
+    expect(fetched).toEqual([]);
+  });
+});
+
+describe('the breadcrumb of a connectors page', () => {
+  const CONNECTOR_ID = '66f1c0de5e1a2b3c4d5e6f70';
+  let mounted: Mounted;
+  afterEach(async () => {
+    await mounted?.unmount();
+  });
+
+  const render = async (path: string, locale = 'en') => {
+    nav.pathname = path;
+    mounted = await mount(createElement(DashboardBreadcrumbs), locale);
+    await settle(50);
+  };
+
+  it('shows the name of the connector, in the crumb and in the browser tab title', async () => {
+    answers[`/api/connectors/${CONNECTOR_ID}`] = { ok: true, body: { connector: { name: 'Support desk' } } };
+    await render(`/dashboard/connectors/${CONNECTOR_ID}`);
+    expect(text()).toContain('Connectors');
+    expect(text()).toContain('Support desk');
+    expect(document.title).toBe('Support desk · Connectors - Cognipeer Console');
+  });
+
+  it('shows the translated "Connectors" crumb', async () => {
+    answers[`/api/connectors/${CONNECTOR_ID}`] = { ok: true, body: { connector: { name: 'Destek masası' } } };
+    await render(`/dashboard/connectors/${CONNECTOR_ID}`, 'tr');
+    expect(text()).toContain('Bağlayıcılar');
+    expect(text()).toContain('Destek masası');
+    expect(document.title).toBe('Destek masası · Bağlayıcılar - Cognipeer Console');
+  });
+
+  it('names the OAuth apps page properly, without looking for a connector', async () => {
+    await render('/dashboard/connectors/oauth-apps');
+    expect(text()).toContain('OAuth Apps');
+    expect(text()).not.toContain('Oauth Apps');
+    expect(document.title).toBe('OAuth Apps · Connectors - Cognipeer Console');
+    expect(fetched).toEqual([]);
+  });
+});

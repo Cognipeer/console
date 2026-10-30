@@ -780,7 +780,7 @@ export default function IncidentsPage() {
 
   const assigneeValue = filters.assignee === 'me' || filters.assignee === 'unassigned' || filters.assignee === '' ? filters.assignee : 'user';
   const toolbarSelect = (props: { value: string; onChange: (value: string) => void; label: string; options: Array<{ value: string; label: string }>; width?: number }) => (
-    <select className="ds-select" aria-label={props.label} value={props.value} onChange={(event) => props.onChange(event.currentTarget.value)} style={{ width: props.width }}>
+    <select className="ds-select" aria-label={props.label} value={props.value} onChange={(event) => props.onChange(event.currentTarget.value)} style={{ minWidth: props.width }}>
       {props.options.map((option) => (
         <option key={option.value} value={option.value}>
           {option.label}

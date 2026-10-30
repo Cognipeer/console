@@ -35,6 +35,7 @@ import {
 import { useTranslations } from '@/lib/i18n';
 import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 import { useOptionalLauncher } from './launcher/LauncherContext';
+import { withoutOwnedAgents } from '@/lib/utils/ownedAgents';
 
 /* ──────────────────────────────────────────────────────────────────────
    Public API: <CommandPalette /> mounted globally + openCommandPalette()
@@ -164,7 +165,7 @@ const FETCH_SOURCES: FetchSource<any>[] = [
   {
     group: 'agents',
     url: '/api/agents',
-    pick: (d) => d?.agents ?? [],
+    pick: (d) => withoutOwnedAgents(d?.agents ?? []),
     toItem: (a) => ({
       id: `agent:${a._id}`,
       group: 'agents',

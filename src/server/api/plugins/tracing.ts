@@ -22,7 +22,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { offsetPageOf, pageOfVisibleRows, refuseTracingThread, sendSessionRefusal } from './agent-session-access';
+import { offsetPageOf, pageOfVisibleRows, refuseTracingSession, refuseTracingThread, sendSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:tracing');
 
@@ -356,6 +356,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
             // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
             // response somewhere in the session).
             truncated: query.truncated === 'true' ? true : undefined,
+            // Only the sessions that ran under one flow (a hidden agent a flow owns, or an agent one of its steps ran).
+            ...(query.flowId?.trim() ? { flowId: query.flowId.trim() } : {}),
             ...metadataFilter,
           });
           const total = latest.total;
@@ -382,6 +384,12 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { sessionId } = request.params as { sessionId: string };
       const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const facts = await AgentTracingService.getSessionAccessFacts(session.tenantDbName, projectId, sessionId);
+      if (!facts) {
+        return reply.code(404).send({ error: 'Session not found' });
+      }
+      const refusal = await refuseTracingSession(request, facts, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getSessionDetail(
         session.tenantDbName,
         projectId,
@@ -394,8 +402,6 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if (!result) {
         return reply.code(404).send({ error: 'Session not found' });
       }
-      const refusal = await refuseTracingThread(request, result.session.threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      if (refusal) return sendSessionRefusal(reply, request, refusal);
 
       return reply.code(200).send(result);
     } catch (error) {
@@ -411,7 +417,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { eventId, sessionId } = request.params as { eventId: string; sessionId: string };
-      const refusal = await refuseTracingThread(request, await AgentTracingService.getSessionThreadId(session.tenantDbName, projectId, sessionId), { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      const refusal = await refuseTracingSession(request, await AgentTracingService.getSessionAccessFacts(session.tenantDbName, projectId, sessionId), { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
       if (refusal) return sendSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getSessionEventDetail(
         session.tenantDbName,
@@ -459,6 +465,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
             status: query.status,
             threadId: query.threadId,
             to: query.to,
+            ...(query.flowId?.trim() ? { flowId: query.flowId.trim() } : {}),
             ...metadataFilter,
           });
           const total = latest.total;

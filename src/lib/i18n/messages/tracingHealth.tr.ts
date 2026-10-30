@@ -250,7 +250,13 @@ export const tracingHealthTr: typeof tracingHealthEn = {
     events: 'Olay',
     tokens: 'Token',
   },
+  flowAttribution: {
+    prefix: 'Akış',
+    openRun: 'Akış çalıştırmasını aç',
+  },
   sessions: {
+    flowFilter: 'Akışa göre filtrele',
+    flowAll: 'Tüm akışlar ve ajanlar',
     statusAll: 'Tüm durumlar',
     statusFilter: 'Duruma göre filtrele',
     latestStatusFilter: 'Son duruma göre filtrele',

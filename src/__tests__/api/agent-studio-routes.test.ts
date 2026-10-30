@@ -21,7 +21,11 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     };
 });
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => ({
+    getDatabase: vi.fn(),
+    // The run lists ask which sessions drew on restricted knowledge base documents: none here.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn({ findRestrictedAgentConversations: async () => [] }),
+}));
 vi.mock('@/server/api/plugins/sandbox-permission', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/server/api/plugins/sandbox-permission')>()),
     requestHasSandboxRead: vi.fn(async () => false),

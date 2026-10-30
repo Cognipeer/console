@@ -15,6 +15,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawler } from '@/lib/database';
 import { crawl } from './engine';
+import { crawlerExtractionDeps } from './ocrExtractor';
 import { getHostname, isSameOrSubdomain, matchesAny } from './engine/normalize';
 import { loadCrawler, snapshotCrawlerPlan, withTenantDb } from './crawlerService';
 import { snapshotToPlan } from './crawlerJobService';
@@ -101,7 +102,12 @@ export async function fetchPageWithCrawler(
     autoCrawl: false,
   };
 
-  for await (const page of crawl(plan, { logger, signal })) {
+  for await (const page of crawl(plan, {
+    logger,
+    signal,
+    // An agent is waiting on this page: the inline OCR budget applies.
+    ...crawlerExtractionDeps(ctx, plan.markdownOptions, 'inline'),
+  })) {
     if (page.type === 'error') throw new Error(page.errorMessage ?? 'Fetch failed');
     const cap = (plan.markdownOptions?.maxBodyChars ?? 0) > 0
       ? plan.markdownOptions!.maxBodyChars!

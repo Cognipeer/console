@@ -344,6 +344,12 @@ export interface RunItemResult {
   /** Token / cost usage for this item's target invocation, when reported. */
   usage?: EvalUsage;
   error?: string;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the item's work handed on
+   * (rag/access/exposure.ts): its output, details and error are shown only to the run's starter and to those who read
+   * all of them through the admin exception.
+   */
+  kbRestricted?: string[];
 }
 
 export interface RunAggregate {

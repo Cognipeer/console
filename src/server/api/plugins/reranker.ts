@@ -17,6 +17,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { rowsWithHiddenContent } from '../restrictedKnowledgeRequest';
 
 const logger = createLogger('api:reranker');
 
@@ -269,15 +270,25 @@ export const rerankerApiPlugin: FastifyPluginAsync = async (app) => {
     '/reranker/:key/runs',
     withApiRequestContext(async (request, reply) => {
       try {
-        const { session } = await requireProjectContextForRequest(request);
+        const { projectId, session } = await requireProjectContextForRequest(request);
         const { key } = request.params as { key: string };
         const query = (request.query ?? {}) as { from?: string; to?: string; limit?: string };
         const logs = await listRerankerRunLogs(session.tenantDbName, key, {
           from: query.from ? new Date(query.from) : undefined,
           to: query.to ? new Date(query.to) : undefined,
           limit: query.limit ? Number(query.limit) : 50,
+          projectId,
         });
-        return reply.code(200).send({ logs });
+        // A run over passages of knowledge base documents not open to everyone: its numbers, not what was asked.
+        const hidden = await rowsWithHiddenContent(
+          request,
+          { tenantDbName: session.tenantDbName, viewerUserId: session.userId },
+          logs,
+          (log) => ({ tags: log.metadata?.kbRestricted, askers: [log.userId] }),
+        );
+        return reply.code(200).send({
+          logs: logs.map((log) => (hidden.has(log) ? { ...log, query: '', errorMessage: undefined, restricted: true } : log)),
+        });
       } catch (error) {
         logger.error('List reranker run logs error', { error });
         return (

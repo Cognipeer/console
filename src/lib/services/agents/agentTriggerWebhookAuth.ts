@@ -1,9 +1,11 @@
 /**
- * How a trigger's webhook checks and reads one delivery, per sender
- * preset: the auth check (header modes before the body is read, signature
- * modes over the raw body), the event name and delivery id (normalized before
- * anything shows or stores them), the headers a filter or template may read
- * (an allow-list per preset) and the material de-duplication keys on.
+ * How a trigger's generic webhook checks and reads one delivery: the auth check
+ * (header modes before the body is read, signature modes over the raw body),
+ * the event name and delivery id (normalized before anything shows or stores
+ * them), the headers a filter or template may read (an allow-list) and the
+ * material de-duplication keys on. Vendor webhooks (GitHub, GitLab, Azure
+ * DevOps) are connector triggers; their old presets only survive as retired,
+ * read-only values (`isRetiredWebhook`).
  *
  * Every secret comparison hashes both sides and compares the digests with
  * `timingSafeEqual`, so neither the length nor the content of a guess shows in
@@ -11,19 +13,32 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import type { AgentTriggerWebhookAuth, AgentTriggerWebhookPreset } from '@/lib/database';
+import type {
+  AgentTriggerWebhook,
+  AgentTriggerWebhookAuth,
+  AgentTriggerWebhookPreset,
+  RetiredAgentTriggerWebhookAuth,
+  RetiredAgentTriggerWebhookPreset,
+} from '@/lib/database';
 
-export const WEBHOOK_PRESETS: readonly AgentTriggerWebhookPreset[] = ['github', 'gitlab', 'azure_devops', 'generic'];
+export const WEBHOOK_PRESETS: readonly AgentTriggerWebhookPreset[] = ['generic'];
 
 /** The auth modes each preset offers; the first is its default. */
 export const WEBHOOK_PRESET_AUTH: Record<AgentTriggerWebhookPreset, readonly AgentTriggerWebhookAuth[]> = {
-  github: ['github_signature'],
-  gitlab: ['gitlab_token', 'standard_webhooks'],
-  azure_devops: ['basic', 'header'],
   generic: ['bearer', 'signature', 'header', 'standard_webhooks'],
 };
 
-const HEADER_AUTH: ReadonlySet<AgentTriggerWebhookAuth> = new Set(['gitlab_token', 'bearer', 'basic', 'header']);
+/** Vendor presets and auth modes older triggers were stored with; they can no longer be written or delivered to. */
+export const RETIRED_WEBHOOK_PRESETS: readonly RetiredAgentTriggerWebhookPreset[] = ['github', 'gitlab', 'azure_devops'];
+export const RETIRED_WEBHOOK_AUTH: readonly RetiredAgentTriggerWebhookAuth[] = ['github_signature', 'gitlab_token', 'basic'];
+
+/** A stored webhook with a retired preset or auth mode: it no longer receives deliveries (convert it to a connector or generic trigger). */
+export function isRetiredWebhook(webhook: Pick<AgentTriggerWebhook, 'preset' | 'auth'>): boolean {
+  return (RETIRED_WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset)
+    || (RETIRED_WEBHOOK_AUTH as readonly string[]).includes(webhook.auth);
+}
+
+const HEADER_AUTH: ReadonlySet<AgentTriggerWebhookAuth> = new Set(['bearer', 'header']);
 
 /** Checked from the headers alone, before the body is read. */
 export function isHeaderAuth(auth: AgentTriggerWebhookAuth): boolean {
@@ -81,26 +96,18 @@ export function headerValue(headers: HeaderBag, name: string): string | undefine
   return Array.isArray(value) ? value.join(', ') : value;
 }
 
-const HEADER_ALLOW_LIST: Record<AgentTriggerWebhookPreset, readonly string[]> = {
-  github: [
-    'x-github-event', 'x-github-delivery', 'x-github-hook-id', 'x-github-hook-installation-target-type',
-    'x-github-hook-installation-target-id', 'user-agent',
-  ],
-  gitlab: ['x-gitlab-event', 'x-gitlab-instance', 'x-gitlab-webhook-uuid', 'x-gitlab-event-uuid', 'idempotency-key', 'webhook-id', 'user-agent'],
-  azure_devops: ['user-agent'],
-  generic: ['x-cognipeer-event', 'x-cognipeer-event-id', 'webhook-id', 'idempotency-key', 'user-agent'],
-};
+const HEADER_ALLOW_LIST: readonly string[] = ['x-cognipeer-event', 'x-cognipeer-event-id', 'webhook-id', 'idempotency-key', 'user-agent'];
 
 /**
- * The headers a filter or template may read: the preset's allow-list only,
+ * The headers a filter or template may read: the allow-list only,
  * lower-cased; a header whose value contains one of the trigger's secrets is
  * left out as well. A null-prototype object.
  */
-export function allowedHeaders(preset: AgentTriggerWebhookPreset, headers: HeaderBag, secrets: readonly string[]): Record<string, string> {
+export function allowedHeaders(headers: HeaderBag, secrets: readonly string[]): Record<string, string> {
   const out = Object.create(null) as Record<string, string>;
   const lower = Object.create(null) as HeaderBag;
   for (const [name, value] of Object.entries(headers)) lower[name.toLowerCase()] = value;
-  for (const name of HEADER_ALLOW_LIST[preset]) {
+  for (const name of HEADER_ALLOW_LIST) {
     const value = headerValue(lower, name);
     if (value === undefined) continue;
     if (secrets.some((secret) => secret.length > 0 && value.includes(secret))) continue;
@@ -123,28 +130,18 @@ const OUTSIDE_WINDOW: AuthCheck = { ok: false, reason: 'timestamp outside the 5 
 /** The token a header mode carries, or null when the header is absent or malformed. */
 function presentedToken(auth: AgentTriggerWebhookAuth, headers: HeaderBag, headerName: string | null | undefined): string | null {
   switch (auth) {
-    case 'gitlab_token':
-      return headerValue(headers, 'x-gitlab-token') ?? null;
     case 'header':
       return headerValue(headers, headerName || DEFAULT_WEBHOOK_HEADER_NAME) ?? null;
     case 'bearer': {
       const match = /^bearer[ \t]+(\S+)[ \t]*$/i.exec(headerValue(headers, 'authorization') ?? '');
       return match ? match[1] : null;
     }
-    case 'basic': {
-      const match = /^basic[ \t]+([A-Za-z0-9+/]+={0,2})[ \t]*$/i.exec(headerValue(headers, 'authorization') ?? '');
-      if (!match) return null;
-      const decoded = Buffer.from(match[1], 'base64').toString('utf8');
-      const colon = decoded.indexOf(':');
-      // Any user name: the password is the secret.
-      return colon >= 0 ? decoded.slice(colon + 1) : null;
-    }
     default:
       return null;
   }
 }
 
-/** A header mode (`gitlab_token`, `bearer`, `basic`, `header`): the secret in a header, against each accepted secret. */
+/** A header mode (`bearer`, `header`): the secret in a header, against each accepted secret. */
 export function verifyHeaderAuth(
   auth: AgentTriggerWebhookAuth,
   headers: HeaderBag,
@@ -167,7 +164,7 @@ function hmac(key: string | Buffer, parts: Array<string | Buffer>): Buffer {
 
 const withinWindow = (seconds: number, nowMs: number) => Math.abs(nowMs / 1000 - seconds) <= SIGNATURE_WINDOW_SECONDS;
 
-/** A body mode (`github_signature`, `signature`, `standard_webhooks`) over the exact bytes received. */
+/** A body mode (`signature`, `standard_webhooks`) over the exact bytes received. */
 export function verifyBodyAuth(
   auth: AgentTriggerWebhookAuth,
   headers: HeaderBag,
@@ -176,16 +173,6 @@ export function verifyBodyAuth(
   nowMs = Date.now(),
 ): AuthCheck {
   switch (auth) {
-    case 'github_signature': {
-      const header = headerValue(headers, 'x-hub-signature-256');
-      if (!header) return MISSING_SIGNATURE;
-      const match = /^sha256=([0-9a-fA-F]{64})$/.exec(header.trim());
-      if (!match) return SIGNATURE_MISMATCH;
-      const given = match[1].toLowerCase();
-      let matched = false;
-      for (const secret of secrets) matched = constantTimeEqual(hmac(secret, [body]).toString('hex'), given) || matched;
-      return matched ? { ok: true } : SIGNATURE_MISMATCH;
-    }
     case 'signature': {
       const header = headerValue(headers, 'x-cognipeer-signature');
       if (!header) return MISSING_SIGNATURE;
@@ -255,89 +242,43 @@ export interface DeliveryIdentity {
   rawDeliveryHeader?: string;
 }
 
-/** The event name and delivery id of a delivery, per preset (SPEC W3). */
-export function deliveryIdentity(preset: AgentTriggerWebhookPreset, headers: HeaderBag, payload: unknown): DeliveryIdentity {
-  let event: string | undefined;
-  let deliveryHeader: string | undefined;
-  let deliveryValue: string | undefined;
-  switch (preset) {
-    case 'github':
-      event = headerValue(headers, 'x-github-event');
-      deliveryValue = deliveryHeader = headerValue(headers, 'x-github-delivery');
-      break;
-    case 'gitlab':
-      event = asString(field(payload, 'object_kind')) ?? asString(field(payload, 'event_name')) ?? headerValue(headers, 'x-gitlab-event');
-      deliveryValue = deliveryHeader = headerValue(headers, 'webhook-id') ?? headerValue(headers, 'idempotency-key');
-      break;
-    case 'azure_devops':
-      event = asString(field(payload, 'eventType'));
-      deliveryValue = asString(field(payload, 'id'));
-      break;
-    default:
-      event = asString(field(payload, 'event')) ?? asString(field(payload, 'type')) ?? headerValue(headers, 'x-cognipeer-event');
-      deliveryValue = deliveryHeader = headerValue(headers, 'x-cognipeer-event-id') ?? headerValue(headers, 'webhook-id') ?? headerValue(headers, 'idempotency-key');
-      break;
-  }
+/** The event name and delivery id of a delivery (SPEC W3). */
+export function deliveryIdentity(headers: HeaderBag, payload: unknown): DeliveryIdentity {
+  const event = asString(field(payload, 'event')) ?? asString(field(payload, 'type')) ?? headerValue(headers, 'x-cognipeer-event');
+  const deliveryHeader = headerValue(headers, 'x-cognipeer-event-id') ?? headerValue(headers, 'webhook-id') ?? headerValue(headers, 'idempotency-key');
   const normalizedEvent = event !== undefined && EVENT_RE.test(event) ? event : undefined;
   return {
     ...(normalizedEvent ? { event: normalizedEvent } : {}),
-    ...(deliveryValue !== undefined && DELIVERY_ID_RE.test(deliveryValue) ? { deliveryId: deliveryValue } : {}),
+    ...(deliveryHeader !== undefined && DELIVERY_ID_RE.test(deliveryHeader) ? { deliveryId: deliveryHeader } : {}),
     invalidEvent: event !== undefined && !normalizedEvent,
     ...(deliveryHeader !== undefined ? { rawDeliveryHeader: deliveryHeader } : {}),
   };
-}
-
-const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NIL_GUID = '00000000-0000-0000-0000-000000000000';
-const isNilGuid = (value: unknown) => value === NIL_GUID;
-
-/**
- * Azure DevOps' "Test" notification: the nil GUID as its id, or notification 1
- * with no (or the nil) subscription. Written from Microsoft's sample payload.
- */
-export function isAzureDevOpsTest(payload: unknown): boolean {
-  if (isNilGuid(field(payload, 'id'))) return true;
-  const subscription = field(payload, 'subscriptionId');
-  return field(payload, 'notificationId') === 1 && (subscription === undefined || subscription === null || isNilGuid(subscription));
 }
 
 // ── De-duplication ───────────────────────────────────────────────────────
 
 /**
  * What identifies "the same delivery" for this auth mode (raw values), or null
- * when the delivery cannot be told apart from an intended repeat (a generic
- * sender without a delivery id: no de-duplication).
+ * when the delivery cannot be told apart from an intended repeat (a sender
+ * without a delivery id: no de-duplication).
  */
-export function dedupMaterial(
-  preset: AgentTriggerWebhookPreset,
-  auth: AgentTriggerWebhookAuth,
-  headers: HeaderBag,
-  body: Buffer,
-  payload: unknown,
-): string | null {
-  switch (auth) {
-    case 'github_signature':
-      // A redelivery re-sends the same bytes, so a replay with a fresh delivery header is still caught.
-      return sha256Hex(body);
-    case 'standard_webhooks':
-      // Signed, so the sender's id is trustworthy.
-      return headerValue(headers, 'webhook-id') ?? sha256Hex(body);
-    case 'gitlab_token':
-      return headerValue(headers, 'webhook-id') ?? headerValue(headers, 'idempotency-key') ?? sha256Hex(body);
-    default: {
-      if (preset === 'azure_devops') {
-        const id = field(payload, 'id');
-        return typeof id === 'string' && GUID_RE.test(id) && !isNilGuid(id) ? id : sha256Hex(body);
-      }
-      const deliveryId = headerValue(headers, 'x-cognipeer-event-id') ?? headerValue(headers, 'webhook-id') ?? headerValue(headers, 'idempotency-key');
-      return deliveryId ? `${deliveryId}\n${sha256Hex(body)}` : null;
-    }
+export function dedupMaterial(auth: AgentTriggerWebhookAuth, headers: HeaderBag, body: Buffer): string | null {
+  if (auth === 'standard_webhooks') {
+    // Signed, so the sender's id is trustworthy.
+    return headerValue(headers, 'webhook-id') ?? sha256Hex(body);
   }
+  const deliveryId = headerValue(headers, 'x-cognipeer-event-id') ?? headerValue(headers, 'webhook-id') ?? headerValue(headers, 'idempotency-key');
+  return deliveryId ? `${deliveryId}\n${sha256Hex(body)}` : null;
 }
 
 /** The idempotency key of a delivery's first attempt: `hook:<triggerId>:<40 hex>`. */
 export function deliveryKeyBase(triggerId: string, material: string): string {
   return `hook:${triggerId}:${sha256Hex(material).slice(0, 40)}`;
+}
+
+/** The same for a connector event: `ctrig:<triggerId>:<40 hex of the subscription id and the event's material>`. */
+export function connectorDeliveryKeyBase(triggerId: string, subscriptionId: string, material: string): string {
+  return `ctrig:${triggerId}:${sha256Hex(`${subscriptionId}\n${material}`).slice(0, 40)}`;
 }
 
 /** First attempt, then `:r2` … `:r5`: a redelivery of a failed delivery runs again, at most five times. */

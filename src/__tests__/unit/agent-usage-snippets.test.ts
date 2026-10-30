@@ -1517,7 +1517,7 @@ describe('the Usage tab', () => {
     const page = sourceOf('components/agents/AgentDetailPage.tsx');
     expect(page).toContain("import AgentUsagePanel from './AgentUsagePanel';");
     expect(page).toMatch(
-      /<Tabs\.Panel value="usage">\s*\{activeTab === 'usage' \? \(\s*<AgentUsagePanel\s+agentName=\{agent\.name\}\s+agentKey=\{agent\.key\}\s+publishedVersion=\{agent\.publishedVersion\}\s+variables=\{callVariables\}\s+variablesLoading=\{variablesLoading\}\s+origin=\{origin\}\s+a2aEnabled=\{a2aEnabled\}\s+a2aEndpointUrl=\{a2aEndpointUrl\}\s+a2aIsPublic=\{a2aIsPublic\}\s*\/>/,
+      /<Tabs\.Panel value="usage">\s*\{activeTab === 'usage'(?: && !ownedByFlow)? \? \(\s*<AgentUsagePanel\s+agentName=\{agent\.name\}\s+agentKey=\{agent\.key\}\s+publishedVersion=\{agent\.publishedVersion\}\s+variables=\{callVariables\}\s+variablesLoading=\{variablesLoading\}\s+origin=\{origin\}\s+a2aEnabled=\{a2aEnabled\}\s+a2aEndpointUrl=\{a2aEndpointUrl\}\s+a2aIsPublic=\{a2aIsPublic\}\s*\/>/,
     );
     // The variables are those of the version a call runs (the published snapshot), and the Overview gets the same ones.
     expect(page).toMatch(

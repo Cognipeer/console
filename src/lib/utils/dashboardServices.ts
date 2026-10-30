@@ -19,12 +19,15 @@ import {
   IconHeadset,
   IconKey,
   IconLayoutDashboard,
+  IconLayoutGrid,
   IconLock,
   IconMessageChatbot,
   IconPlug,
+  IconPlugConnected,
   IconReportAnalytics,
   IconRobot,
   IconServerBolt,
+  IconRoute,
   IconSettings,
   IconShield,
   IconSparkles,
@@ -77,6 +80,7 @@ const ICON_REGISTRY = {
   IconLock,
   IconMessageChatbot,
   IconPlug,
+  IconPlugConnected,
   IconReportAnalytics,
   IconRobot,
   IconServerBolt,
@@ -323,6 +327,40 @@ export const DASHBOARD_SUBPAGES: ReadonlyArray<DashboardSubpage> = [
     tags: ['webhooks', 'events', 'notifications', 'agents'],
     searchKeywords: ['webhook', 'event', 'callback', 'notification', 'olay', 'bildirim'],
   },
+  {
+    id: 'connectors-catalog',
+    parent: 'connectors',
+    service: 'connectors',
+    href: '/dashboard/connectors/catalog',
+    icon: IconLayoutGrid,
+    navLabelKey: 'connectorsCatalog',
+    navDescriptionKey: 'connectorsCatalogDescription',
+    tags: ['connectors', 'catalog', 'integrations'],
+    searchKeywords: ['connector catalog', 'add connector', 'integration', 'katalog', 'bağlayıcı ekle', 'entegrasyon'],
+  },
+  {
+    id: 'connectors-oauth-apps',
+    parent: 'connectors',
+    service: 'connectors',
+    href: '/dashboard/connectors/oauth-apps',
+    icon: IconKey,
+    navLabelKey: 'connectorsOauthApps',
+    navDescriptionKey: 'connectorsOauthAppsDescription',
+    tags: ['connectors', 'oauth', 'sign-in'],
+    searchKeywords: ['oauth app', 'client id', 'client secret', 'oauth uygulaması', 'istemci kimliği'],
+  },
+  {
+    // Runs of the project's flows, next to sessions and threads in Agent Observability.
+    id: 'flow-runs',
+    parent: 'tracing',
+    service: 'flows',
+    href: '/dashboard/tracing/flows',
+    icon: IconRoute,
+    navLabelKey: 'flowRuns',
+    navDescriptionKey: 'flowRunsDescription',
+    tags: ['flows', 'runs', 'observability', 'tracing'],
+    searchKeywords: ['flow run', 'flow runs', 'workflow run', 'akış', 'akış çalıştırmaları', 'çalıştırma'],
+  },
 ];
 
 /** All known service definitions (does not honor permissions). */
@@ -333,7 +371,11 @@ export const ALL_DASHBOARD_SERVICES: ReadonlyArray<DashboardServiceDefinition> =
  * Enterprise pages that sit outside their module's service href, with the module whose upsell they
  * show (Abacus is the cost module's recommendation engine; its API is the `abacus` module).
  */
-const ENTERPRISE_PAGES_OUTSIDE_SERVICE: ReadonlyArray<readonly [string, string]> = [['/dashboard/abacus', 'cost']];
+const ENTERPRISE_PAGES_OUTSIDE_SERVICE: ReadonlyArray<readonly [string, string]> = [
+  ['/dashboard/abacus', 'cost'],
+  // Flow runs sit under Agent Observability; the Flows module is Enterprise.
+  ['/dashboard/tracing/flows', 'flows'],
+];
 
 /** The enterprise module that owns a dashboard page, if any (the service with `enterpriseModule` it lives under). */
 export function enterpriseModuleForPath(pathname: string): string | undefined {

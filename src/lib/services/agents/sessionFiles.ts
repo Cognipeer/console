@@ -54,6 +54,7 @@ import {
     replaceFileContent,
     uploadFile,
 } from '@/lib/services/files';
+import { isImageFile } from '@/lib/services/extraction/settings';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
@@ -67,6 +68,8 @@ import {
     SESSION_FILES_VIEW_IMAGE_TOOL,
     agentTakesAttachments,
     attachmentsAvailability,
+    attachmentsOcrActive,
+    attachmentsOcrReadsImages,
     attachmentsUnavailableMessage,
     fileTooLargeMessage,
     isImageMime,
@@ -336,6 +339,8 @@ export interface UploadSessionFileInput {
     /** The file's bytes, or the same as base64 / a `data:` URL. */
     data: Buffer | string;
     actor: SessionFileActor;
+    /** Stops an OCR run that is still going when the caller has gone. */
+    signal?: AbortSignal;
 }
 
 /**
@@ -389,8 +394,15 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
         contentType: mimeType,
         data: buffer,
         createdBy: actor.userId,
-        // An image has no text to convert; the model reads the original.
-        convertToMarkdown: !isImageMime(mimeType),
+        ...(input.signal ? { signal: input.signal } : {}),
+        // An image has no text to convert; the model reads the original. With OCR on pictures it is also read as
+        // text (a model without vision, or a format no provider takes, then has something to work from).
+        convertToMarkdown: !isImageMime(mimeType) || (attachmentsOcrReadsImages(cfg) && isImageFile(input.fileName, mimeType)),
+        // The text goes to a model: pictures inside documents become placeholders, not base64. OCR only when the agent asked.
+        extraction: {
+            ...(attachmentsOcrActive(cfg) ? { ocr: cfg.ocr! } : {}),
+            images: 'placeholder',
+        },
         // <folder>/<agentKey>/<sessionId>/<unique name>; the file service puts the bucket's own prefix in front.
         keyHint: sessionFileObjectKey({
             folder: cfg.folder,
@@ -835,7 +847,8 @@ export async function readSessionFileContent(
 
 /** The file as text: its markdown when converted, else the bytes of a plain-text file, else null. */
 export async function readFileText(scope: SessionFileScope, record: IFileRecord): Promise<string | null> {
-    if (isImageMime(record.contentType)) return null;
+    // A picture has text only when OCR read it at upload (its markdown copy); otherwise the model reads the original.
+    if (isImageMime(record.contentType) && !(record.markdownStatus === 'succeeded' && record.markdownKey)) return null;
     if (record.markdownStatus === 'succeeded' && record.markdownKey) {
         const markdown = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, { variant: 'markdown' });
         return markdown.data.toString('utf8');
@@ -955,9 +968,32 @@ export async function assembleTurnAttachments(input: {
     const images: ImagePart[] = [];
     const documents: Array<{ record: IFileRecord; id: string; text: string | null }> = [];
 
+    // The text OCR read from a picture at upload; null when OCR did not run, found nothing, or cannot be read now.
+    const readPictureText = async (record: IFileRecord, id: string): Promise<string | null> => {
+        if (!(record.markdownStatus === 'succeeded' && record.markdownKey)) return null;
+        try {
+            const text = await readFileText(scope, record);
+            return text && text.trim().length > 0 ? text : null;
+        } catch (error) {
+            warnings.push(`File "${record.name}" could not be read.`);
+            logger.warn('Could not read a session file', { fileId: id, error: error instanceof Error ? error.message : String(error) });
+            return null;
+        }
+    };
+
     for (const record of records) {
         const id = String(record._id);
         if (isSendableImageMime(record.contentType)) {
+            // A model that takes images is shown the picture itself (no second copy as OCR text), unless it is too big for
+            // one request; any other model gets the text OCR read from it, when there is any.
+            const tooBigToShow = typeof record.size === 'number' && record.size > cfg.maxBytes;
+            if (!input.supportsVision || tooBigToShow) {
+                const pictureText = await readPictureText(record, id);
+                if (pictureText !== null) {
+                    documents.push({ record, id, text: pictureText });
+                    continue;
+                }
+            }
             if (!input.supportsVision) {
                 imageNotes.push(`[Image "${escapeAttribute(record.name)}" (id ${id}) is attached, but this model cannot read images.]`);
                 continue;
@@ -966,7 +1002,12 @@ export async function assembleTurnAttachments(input: {
             continue;
         }
         if (isImageMime(record.contentType)) {
-            // A picture in a format no provider takes (tiff, svg, heic, ...): kept as a file with no text.
+            // A picture in a format no provider takes (tiff, svg, heic, ...): its OCR text when there is one, else a file with no text.
+            const pictureText = await readPictureText(record, id);
+            if (pictureText !== null) {
+                documents.push({ record, id, text: pictureText });
+                continue;
+            }
             unsupportedNotes.push(unsupportedImageNote({ name: record.name, fileId: id, mimeType: record.contentType ?? 'image' }));
             continue;
         }
@@ -1074,7 +1115,8 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
                     name: file.name,
                     mimeType: file.mimeType,
                     size: file.size,
-                    readable: file.conversionStatus === 'succeeded' && !isImageMime(file.mimeType),
+                    // A picture is readable as text only when OCR read it at upload (a converted copy exists).
+                    readable: file.conversionStatus === 'succeeded',
                     ...(isSendableImageMime(file.mimeType) ? { image: true } : {}),
                 })));
             },

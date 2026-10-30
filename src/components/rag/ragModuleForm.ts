@@ -8,6 +8,8 @@
  * here now, so the screens can only drift apart by editing this file.
  */
 
+import { englishOcrText } from '@/components/extraction/ocrEnglish';
+import { compactOcr, ocrResultLabel, type OcrSettings } from '@/components/extraction/ocrForm';
 import type { IRagChunkConfig, RagChunkStrategy } from '@/lib/database';
 
 /* ── Chunk strategies ────────────────────────────────────────────────── */
@@ -377,4 +379,51 @@ export type RagModuleFormMode = 'create' | 'update';
  */
 export function clearedValue(mode: RagModuleFormMode): null | undefined {
   return mode === 'create' ? undefined : null;
+}
+
+/* ── Extraction (OCR) ─────────────────────────────────────────────────── */
+
+/**
+ * The `extraction` field of a module save. Create sends it only when OCR is on. Update sends it when OCR is on, and
+ * an explicit `null` when it was switched off on a module that had a setting (updateRagModule reads `undefined` as
+ * "leave this alone"); a module that never had one sends nothing.
+ */
+export function buildExtraction(
+  ocr: OcrSettings | undefined,
+  mode: RagModuleFormMode,
+  hadExtraction = false,
+): { extraction?: { ocr: OcrSettings } | null } {
+  const compact = compactOcr(ocr);
+  if (compact) return { extraction: { ocr: compact } };
+  return mode === 'update' && hadExtraction ? { extraction: null } : {};
+}
+
+/** The OCR setting a stored module carries, as the form edits it. */
+export function extractionFormValue(extraction: { ocr?: OcrSettings | null } | null | undefined): OcrSettings | undefined {
+  return compactOcr(extraction?.ocr);
+}
+
+/** What a document row says about its text extraction: where a run in flight stands, else what the finished run read. */
+export function documentExtractionNote(
+  extraction:
+    | {
+        sourceType?: string;
+        pageCount?: number;
+        ocrPages?: number;
+        ocrImages?: number;
+        stage?: 'queued' | 'running';
+        progress?: { completed: number; total: number };
+      }
+    | null
+    | undefined,
+): string | undefined {
+  if (!extraction) return undefined;
+  if (extraction.stage === 'queued') return 'Waiting to read the file…';
+  if (extraction.stage === 'running') {
+    const progress = extraction.progress;
+    return progress && progress.total > 0
+      ? `Reading the file… ${progress.completed}/${progress.total} pages`
+      : 'Reading the file…';
+  }
+  return ocrResultLabel(englishOcrText, extraction);
 }

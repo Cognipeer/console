@@ -23,6 +23,7 @@ import { disconnectDatabase, getDatabase } from '@/lib/database';
 import { createCampaign, getCampaign, updateCampaign, runCampaign } from '@/lib/services/redteam/service';
 import { buildComplianceReport } from '@/lib/services/redteam/compliance/report';
 import type { RedTeamMessage } from '@/lib/services/redteam/types';
+import { noteRestrictedKnowledge } from '@/lib/services/rag/access/exposure';
 
 const TENANT_DB_NAME = 'redteam_compliance_tenant';
 const TENANT_ID = 'tenant-compliance';
@@ -112,6 +113,37 @@ describe('EU AI Act compliance report — full vertical (SQLite)', () => {
     expect(report.coverageGaps.some((g) => g.owaspCategory === 'LLM06-sensitive-information-disclosure')).toBe(true);
     expect(report.regulatoryBasis.length).toBeGreaterThan(0);
     expect(report.disclaimers.length).toBeGreaterThan(0);
+  });
+
+  it('marks an attempt whose answer drew on restricted knowledge base passages, and keeps its text out of the evidence', async () => {
+    // The target is an agent that read a document not open to everyone while answering (what its knowledge tools
+    // note on the work they run in): the attempt is marked, its finding still counts, its transcript is no evidence.
+    const restrictedTarget = () => async (messages: RedTeamMessage[]) => {
+      await noteRestrictedKnowledge(['proj-restricted:handbook']);
+      return { text: messages.filter((m) => m.role === 'system').map((m) => `handbook says: ${m.content}`).join('\n') || 'sure thing' };
+    };
+    const campaign = await createCampaign(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Restricted Leak Scan',
+      targetKind: 'model',
+      modelKey: 'gpt-support',
+      probeKeys: ['system-prompt-leakage'],
+      projectId: 'proj-restricted',
+    });
+    const run = await runCampaign(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, projectId: 'proj-restricted', createdBy: ACTOR, campaignKey: campaign.key },
+      { buildTargetInvoker: restrictedTarget },
+    );
+    expect(run.attempts.length).toBeGreaterThan(0);
+    for (const attempt of run.attempts) expect(attempt.kbRestricted).toEqual(['proj-restricted:handbook']);
+
+    const report = await buildComplianceReport(TENANT_DB_NAME, new Date('2026-07-19T00:00:00Z'), { projectId: 'proj-restricted' });
+    expect(report.scope.runsConsidered).toBe(1);
+    expect(report.posture.vulnerable).toBeGreaterThan(0);
+    const finding = report.findings.find((f) => f.probeKey === 'system-prompt-leakage');
+    expect(finding).toBeDefined();
+    expect(finding!.euCategories).toContain('sensitive-data-disclosure');
+    expect(finding!.example).toBeUndefined();
+    expect(JSON.stringify(report)).not.toContain('handbook says');
   });
 
   it('merges compliance metadata on update without dropping other metadata', async () => {

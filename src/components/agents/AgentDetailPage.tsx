@@ -42,6 +42,8 @@ import {
   IconLayoutDashboard,
   IconPlus,
   IconArrowsLeftRight,
+  IconRoute,
+  IconTopologyStar3,
   IconX,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
@@ -63,6 +65,13 @@ import { a2aSendCurl, sampleVariables, variablesOfRunVersion } from './agentUsag
 import CopyableCode from './CopyableCode';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
+import {
+  AgentFlowsPanel,
+  FlowAgentCard,
+  useFlowDetailTexts,
+  useFlowsAccess,
+} from '@/components/enterprise/EnterpriseFlowAgentUi';
+import { withoutOwnedAgents } from '@/lib/utils/ownedAgents';
 import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
 import AgentRemindersSettings from './studio/AgentRemindersSettings';
 import AgentRemindersTable from './studio/AgentRemindersTable';
@@ -85,6 +94,7 @@ import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig
 import AgentClientToolsPanel from './studio/AgentClientToolsPanel';
 import { normalizeClientTools } from './studio/clientToolsSettings';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
+import { boundToolKinds, type KindSourceRecord } from './studio/hitlSettings';
 import ClientToolsSurfaces from './studio/ClientToolsSurfaces';
 import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
@@ -238,6 +248,8 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   clienttools: { top: 'configure', sub: 'clienttools' },
   'client-tools': { top: 'configure', sub: 'clienttools' },
   feedback: { top: 'feedback' },
+  // Flows of the agent: the entry flow of a FlowBase agent, or the flows a Smart Agent calls as tools.
+  flows: { top: 'flows' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   variables: { top: 'configure', sub: 'variables' },
@@ -255,6 +267,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   api: { top: 'usage' },
 };
 
+/** Build sections that make no sense for a flow-owned agent: it is never called by URL, callback or a chat client. */
+const OWNED_HIDDEN_SECTIONS: ReadonlySet<string> = new Set(['callback', 'clienttools']);
+
 function resolveTabFromQuery(raw: string | null): string {
   return TAB_ALIASES[raw ?? '']?.top ?? 'overview';
 }
@@ -265,13 +280,30 @@ function resolveSubTabFromQuery(raw: string | null, group: string, fallback: str
   return alias?.top === group && alias.sub ? alias.sub : fallback;
 }
 
-export default function AgentDetailPage() {
+export interface AgentDetailPageProps {
+  /** The agent to edit. Without it the id comes from the route (`/dashboard/agents/[agentId]`). */
+  agentId?: string;
+  /**
+   * The agent is owned by a flow (a hidden, ad-hoc agent) and the editor is embedded in the flow editor:
+   * only Sessions and Build remain; publishing, versions, deploy, usage and the deep-link/URL handling are off,
+   * and sessions open in a new tab so the flow editor stays where it is.
+   */
+  ownedByFlow?: boolean;
+  /** Traces link for the Sessions list; defaults to the tracing page filtered by the agent name. */
+  tracesHref?: string;
+  /** Viewing only: the save bar is not rendered (the host also disables the controls). */
+  readOnly?: boolean;
+}
+
+export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = false, tracesHref, readOnly = false }: AgentDetailPageProps = {}) {
   const params = useParams()!;
   const router = useRouter();
   const searchParams = useSearchParams()!;
-  const agentId = params.agentId as string;
+  const agentId = agentIdProp ?? (params.agentId as string);
   const t = useTranslations('agents');
   const tIdentity = useTranslations('consoleIdentity');
+  const flowTexts = useFlowDetailTexts();
+  const flowsPermission = useFlowsAccess();
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
@@ -293,12 +325,12 @@ export default function AgentDetailPage() {
   // agent healthy and what has it been doing", which is a better first thing
   // to see than a blank chat box. A deep link (Sessions' "back to agent",
   // a bookmark) can still land on any tab via `?tab=`.
-  const [activeTab, setActiveTab] = useState<string | null>(() => resolveTabFromQuery(searchParams.get('tab')));
+  const [activeTab, setActiveTab] = useState<string | null>(() => (ownedByFlow ? 'configure' : resolveTabFromQuery(searchParams.get('tab'))));
   // Configure has no rail any more, so this is no longer "which pane is
   // showing" — it is "which section a deep link asked for", and the effect
   // below scrolls to it.
   const [configureTab, setConfigureTab] = useState<string | null>(
-    () => resolveSubTabFromQuery(searchParams.get('tab'), 'configure', 'basic'),
+    () => (ownedByFlow ? 'basic' : resolveSubTabFromQuery(searchParams.get('tab'), 'configure', 'basic')),
   );
   const [deployTab, setDeployTab] = useState<string | null>(
     () => resolveSubTabFromQuery(searchParams.get('tab'), 'deploy', 'versions'),
@@ -329,6 +361,8 @@ export default function AgentDetailPage() {
   const [callbackConfig, setCallbackConfig] = useState<IAgentCallbackConfig | undefined>(undefined);
   const [budgetConfig, setBudgetConfig] = useState<IAgentConfig['budget']>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
+  // The records behind the bound tools: the approvals table reads what each tool does (reads / writes…) from them.
+  const [toolRecords, setToolRecords] = useState<{ tools: KindSourceRecord[]; mcp: KindSourceRecord[] }>({ tools: [], mcp: [] });
   const [remindersConfig, setRemindersConfig] = useState<IAgentRemindersConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
   const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
@@ -537,9 +571,14 @@ export default function AgentDetailPage() {
    * gone: a Session always runs a real config (the draft, or a version pinned
    * on the session page), so there is nothing here that needs saving first.
    */
+  /** Opens the session page. Embedded in the flow editor it opens in a new tab: leaving would drop the editor. */
+  const openSessionPage = (sessionId: string, query = '') => {
+    const href = `/dashboard/agents/${agentId}/sessions/${sessionId}${query}`;
+    if (ownedByFlow) window.open(href, '_blank', 'noopener');
+    else router.push(href);
+  };
   const handleSessionStarted = (sessionId: string, pinnedVersion: string) => {
-    const query = pinnedVersion ? `?version=${encodeURIComponent(pinnedVersion)}` : '';
-    router.push(`/dashboard/agents/${agentId}/sessions/${sessionId}${query}`);
+    openSessionPage(sessionId, pinnedVersion ? `?version=${encodeURIComponent(pinnedVersion)}` : '');
   };
 
   const handlePublish = async () => {
@@ -601,8 +640,8 @@ export default function AgentDetailPage() {
         // would only produce a binding that silently drops at run time.
         loadList(
           '/api/agents',
-          (d) => ((d.agents ?? []) as Agent[])
-            .filter((entry) => entry.config?.kind !== 'external')
+          (d) => withoutOwnedAgents((d.agents ?? []) as Agent[])
+            .filter((entry) => entry.config?.kind !== 'external' && entry.config?.kind !== 'flow')
             .map((entry) => ({ key: entry.key, name: entry.name, publishedVersion: entry.publishedVersion ?? null })),
           setProjectAgents,
           'project agents',
@@ -641,7 +680,7 @@ export default function AgentDetailPage() {
   // `?session=` opens that session's inspector (the Sessions lists link here), on arrival and whenever the link changes.
   // The value ends up in API paths, so anything but a plain id is ignored.
   const rawLinkedSession = searchParams.get(SESSION_QUERY_PARAM);
-  const linkedSessionId = rawLinkedSession && /^[A-Za-z0-9_-]{1,128}$/.test(rawLinkedSession) ? rawLinkedSession : null;
+  const linkedSessionId = !ownedByFlow && rawLinkedSession && /^[A-Za-z0-9_-]{1,128}$/.test(rawLinkedSession) ? rawLinkedSession : null;
   useEffect(() => {
     if (!linkedSessionId) return;
     setActiveTab('sessions');
@@ -679,6 +718,38 @@ export default function AgentDetailPage() {
     return () => cancelAnimationFrame(frame);
   }, [activeTab, configureTab, deployTab, agent]);
 
+  // Records of the bound tools, loaded once per set of bound sources (a refresh failing leaves "no hints", which asks).
+  const boundSourceKeys = toolBindings
+    .filter((binding) => binding.source === 'tool' || binding.source === 'mcp')
+    .map((binding) => `${binding.source}:${binding.sourceKey}`)
+    .sort()
+    .join('|');
+  useEffect(() => {
+    if (!boundSourceKeys) {
+      setToolRecords({ tools: [], mcp: [] });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [toolsRes, mcpRes] = await Promise.all([
+          fetch('/api/tools', { cache: 'no-store' }),
+          fetch('/api/mcp', { cache: 'no-store' }),
+        ]);
+        const toolsData = toolsRes.ok ? await toolsRes.json() : {};
+        const mcpData = mcpRes.ok ? await mcpRes.json() : {};
+        if (!cancelled) setToolRecords({ tools: toolsData.tools ?? [], mcp: mcpData.servers ?? [] });
+      } catch {
+        // Keep what is shown: the table then reads those tools as "no hints".
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [boundSourceKeys]);
+  const toolKinds = useMemo(
+    () => boundToolKinds(toolBindings, toolRecords.tools, toolRecords.mcp),
+    [toolBindings, toolRecords],
+  );
+
   const publishedVersionNumber = agent?.publishedVersion ?? null;
   useEffect(() => {
     let cancelled = false;
@@ -709,7 +780,7 @@ export default function AgentDetailPage() {
   const sectionVisible = (id: string) => !onlyChanged || changedSections.has(id);
   // The divider above a section is skipped for the first one SHOWN — with
   // "only changed" on, that is not always General.
-  const firstVisibleSection = (agent?.config?.kind === 'external' ? ['basic'] : Object.keys(CONFIG_SECTION_KEYS)).find(sectionVisible);
+  const firstVisibleSection = (agent?.config?.kind === 'external' || agent?.config?.kind === 'flow' ? ['basic'] : Object.keys(CONFIG_SECTION_KEYS)).find(sectionVisible);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
@@ -799,7 +870,10 @@ export default function AgentDetailPage() {
     code === 'bucket_required' ? t('attachments.bucketRequired')
       : code === 'invalid_chars' ? t('attachments.folderInvalidChars')
         : code === 'dot_dot' ? t('attachments.folderDotDot')
-          : t('attachments.folderTooLong', { max: MAX_FOLDER_LENGTH });
+          : code === 'ocr_model' ? t('attachments.ocrModelInvalid')
+            : code === 'ocr_languages' ? t('attachments.ocrLanguagesInvalid')
+              : code === 'ocr_pages' ? t('attachments.ocrPagesInvalid')
+                : t('attachments.folderTooLong', { max: MAX_FOLDER_LENGTH });
 
   /** An edit in Files. Once the problem that refused the last save is fixed, its message goes away with it. */
   const handleFilesChange = (next: AttachmentsSettings | undefined) => {
@@ -928,6 +1002,17 @@ export default function AgentDetailPage() {
     }
   };
 
+  /** Flows tab: save the agent's tool bindings and say so (by throwing) when the server refused them. */
+  const handleFlowBindingsChange = async (bindings: ToolBinding[]) => {
+    const previous = toolBindings;
+    setToolBindings(bindings);
+    const saved = await saveAgentConfig({ notify: false, bindings });
+    if (!saved) {
+      setToolBindings(previous);
+      throw new Error(flowTexts.exposeFailed);
+    }
+  };
+
   const handleToolBindingsChange = async (bindings: ToolBinding[]) => {
     setToolBindings(bindings);
     const saved = await saveAgentConfig({ notify: false, bindings });
@@ -960,6 +1045,13 @@ export default function AgentDetailPage() {
   }
 
   const isConnected = agent.config?.kind === 'external';
+  // A FlowBase agent: a flow answers every turn, so the model, prompt and tool sections do not apply.
+  const isFlow = agent.config?.kind === 'flow';
+  const showFlowsTab = flowsPermission.read && !isConnected && !ownedByFlow;
+  // An owned agent has Sessions (to test it) and Build only.
+  const visibleTab = ownedByFlow
+    ? (activeTab === 'sessions' ? 'sessions' : 'configure')
+    : activeTab === 'flows' && !showFlowsTab ? 'overview' : activeTab;
   const connection = agent.config?.connection;
 
   // ── A2A publish state ────────────────────────────────────────
@@ -1040,6 +1132,13 @@ export default function AgentDetailPage() {
           {t('connectModal.editButton')}
         </Button>
       </Stack>
+    ) : isFlow ? (
+      <FlowAgentCard
+        agentId={String(agent._id)}
+        config={agent.config}
+        canWrite={flowsPermission.write}
+        onSaved={() => void loadAgent()}
+      />
     ) : (
       <Stack gap="xl">
         <Group align="flex-end" gap="sm" wrap="wrap">
@@ -1177,7 +1276,7 @@ export default function AgentDetailPage() {
   });
 
   const buildSection = (id: string, description: string, body: ReactNode, meta?: ReactNode) =>
-    (id === 'basic' || !isConnected) && sectionVisible(id) ? (
+    (id === 'basic' || !(isConnected || isFlow)) && !(ownedByFlow && OWNED_HIDDEN_SECTIONS.has(id)) && sectionVisible(id) ? (
       <ConfigSection
         id={id}
         title={configSectionTitle(id, t)}
@@ -1193,12 +1292,12 @@ export default function AgentDetailPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow={isConnected ? 'Build · Connected Agent' : 'Build · Agent'}
+        eyebrow={ownedByFlow ? flowTexts.ownedEyebrow : isConnected ? 'Build · Connected Agent' : isFlow ? flowTexts.flowEyebrow : 'Build · Agent'}
         title={agent.name}
-        subtitle={agent.description || agent.key}
+        subtitle={ownedByFlow ? agent.description || undefined : agent.description || agent.key}
         actions={
           <Group gap="sm">
-            {!isConnected && (agent.latestVersion ?? 0) > 0 ? (
+            {!isConnected && !isFlow && !ownedByFlow && (agent.latestVersion ?? 0) > 0 ? (
               <Button
                 size="xs"
                 variant="default"
@@ -1216,7 +1315,7 @@ export default function AgentDetailPage() {
             >
               Start session
             </Button>
-            {isConnected ? (
+            {ownedByFlow ? null : isConnected ? (
               <Badge size="sm" variant="light" color="violet" leftSection={<IconPlugConnected size={12} />}>
                 {connection?.protocol ?? t('connectedBadge')}
               </Badge>
@@ -1244,11 +1343,13 @@ export default function AgentDetailPage() {
         }
       />
 
-      <Tabs value={activeTab} onChange={setActiveTab}>
+      <Tabs value={visibleTab} onChange={setActiveTab}>
         <Tabs.List mb="md">
-          <Tabs.Tab value="overview" leftSection={<IconLayoutDashboard size={14} />}>
-            Overview
-          </Tabs.Tab>
+          {ownedByFlow ? null : (
+            <Tabs.Tab value="overview" leftSection={<IconLayoutDashboard size={14} />}>
+              Overview
+            </Tabs.Tab>
+          )}
           <Tabs.Tab value="sessions" leftSection={<IconMessageCircle size={14} />}>
             Sessions
             {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
@@ -1266,20 +1367,30 @@ export default function AgentDetailPage() {
               </Tooltip>
             ) : null}
           </Tabs.Tab>
-          <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
-            Ship
-          </Tabs.Tab>
-          {!isConnected ? (
+          {showFlowsTab ? (
+            <Tabs.Tab value="flows" leftSection={isFlow ? <IconTopologyStar3 size={14} /> : <IconRoute size={14} />}>
+              {flowTexts.flowsTab}
+            </Tabs.Tab>
+          ) : null}
+          {ownedByFlow ? null : (
+            <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
+              Ship
+            </Tabs.Tab>
+          )}
+          {!isConnected && !ownedByFlow ? (
             <Tabs.Tab value="feedback" leftSection={<IconThumbUp size={14} />}>
               {t('tabs.feedback')}
             </Tabs.Tab>
           ) : null}
-          <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
-            {t('tabs.usage')}
-          </Tabs.Tab>
+          {ownedByFlow ? null : (
+            <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
+              {t('tabs.usage')}
+            </Tabs.Tab>
+          )}
         </Tabs.List>
 
         {/* ── Overview ────────────────────────────────────────── */}
+        {ownedByFlow ? null : (
         <Tabs.Panel value="overview">
           <AgentOverviewPanel
             agent={agent}
@@ -1304,6 +1415,7 @@ export default function AgentDetailPage() {
             <ResourceUsageSection type="agent" id={String(agent._id)} showUses />
           </Paper>
         </Tabs.Panel>
+        )}
 
         {/* ── Sessions ────────────────────────────────────────── */}
         <Tabs.Panel value="sessions">
@@ -1351,12 +1463,12 @@ export default function AgentDetailPage() {
                 ownOnly={sessionsOwnOnly}
                 loading={sessionsLoading}
                 onOpen={(id) => setViewedSessionId(id)}
-                onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+                onContinue={(id) => openSessionPage(id)}
                 onStart={() => setStartSessionOpen(true)}
                 onRefresh={() => void loadSessions()}
                 onRunStopped={() => void loadSessions(true)}
                 refreshing={sessionsLoading}
-                tracesHref={`/dashboard/tracing/sessions?agent=${encodeURIComponent(agent.name)}`}
+                tracesHref={tracesHref ?? `/dashboard/tracing/sessions?agent=${encodeURIComponent(agent.name)}`}
               />
             )}
             <SessionDetailDrawer
@@ -1365,7 +1477,7 @@ export default function AgentDetailPage() {
                 ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId }
                 : null}
               onClose={closeSession}
-              onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+              onContinue={(id) => openSessionPage(id)}
               onResolved={() => void loadSessions()}
               onSessionChanged={() => void loadSessions(true)}
             />
@@ -1384,12 +1496,14 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="configure">
           <Group justify="space-between" mb="sm">
             <Text size="sm" c="dimmed">
-              {isConnected ? 1 : Object.keys(CONFIG_SECTION_KEYS).length} sections
-              {agent.publishedVersion
-                ? ` · ${changedSections.size} changed since v${agent.publishedVersion}`
-                : ' · never published'}
+              {isConnected || isFlow ? 1 : Object.keys(CONFIG_SECTION_KEYS).length} sections
+              {ownedByFlow
+                ? ''
+                : agent.publishedVersion
+                  ? ` · ${changedSections.size} changed since v${agent.publishedVersion}`
+                  : ' · never published'}
             </Text>
-            {agent.publishedVersion ? (
+            {agent.publishedVersion && !ownedByFlow ? (
               <Button
                 size="compact-sm"
                 variant={onlyChanged ? 'light' : 'subtle'}
@@ -1404,7 +1518,7 @@ export default function AgentDetailPage() {
           <Paper withBorder radius="md" p="xl">
             {buildSection(
               'basic',
-              'What this agent is, which model answers, and the tools it can call.',
+              isFlow ? flowTexts.flowBuildDescription : 'What this agent is, which model answers, and the tools it can call.',
               renderBasicSettings(),
             )}
             {buildSection(
@@ -1528,6 +1642,7 @@ export default function AgentDetailPage() {
                 value={hitlConfig}
                 onChange={setHitlConfig}
                 clientTools={clientToolsConfig}
+                toolKinds={toolKinds}
                 toolConfig={{
                   toolBindings,
                   knowledgeBindings: configForm.values.knowledgeBindings.filter((b) => b.key),
@@ -1538,9 +1653,9 @@ export default function AgentDetailPage() {
                   sandbox: sandboxConfig,
                 }}
               />,
-              hitlConfig?.toolApproval?.enabled || hitlConfig?.askUser?.enabled ? (
+              hitlConfig?.toolApproval?.enabled !== false || hitlConfig?.askUser?.enabled ? (
                 <Badge size="xs" color="orange" variant="light" w="fit-content">
-                  {[hitlConfig?.toolApproval?.enabled ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
+                  {[hitlConfig?.toolApproval?.enabled !== false ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
                     .filter(Boolean).join(' + ')}
                 </Badge>
               ) : null,
@@ -1615,16 +1730,34 @@ export default function AgentDetailPage() {
               </Stack>
             </Alert>
           ) : null}
-          <Group justify="flex-end" className={classes.configSaveBar}>
-            <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
-          </Group>
+          {/* A FlowBase agent saves from its own card: the form here describes a model loop. */}
+          {isFlow || readOnly ? null : (
+            <Group justify="flex-end" className={classes.configSaveBar}>
+              <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
+            </Group>
+          )}
         </Tabs.Panel>
+
+        {/* ── Flows ───────────────────────────────────────────── */}
+        {showFlowsTab ? (
+          <Tabs.Panel value="flows">
+            <AgentFlowsPanel
+              agentId={String(agent._id)}
+              agentKey={agent.key}
+              config={agent.config}
+              access={flowsPermission}
+              onToolBindingsChange={handleFlowBindingsChange}
+              onAgentChanged={() => void loadAgent()}
+            />
+          </Tabs.Panel>
+        ) : null}
 
         {/*
           Deploy — the lifecycle of a config that is already written:
           freeze it (Versions), expose it (Publish), start it on its own
           (Triggers), or take it out of the console entirely (Export).
         */}
+        {ownedByFlow ? null : (
         <Tabs.Panel value="deploy">
           {/*
             One page, like Configure — the four things you do with a config
@@ -1853,6 +1986,7 @@ export default function AgentDetailPage() {
             </ConfigSection>
           </Paper>
         </Tabs.Panel>
+        )}
 
         {/*
           Usage — how to call this agent from outside the console. Its own
@@ -1861,12 +1995,12 @@ export default function AgentDetailPage() {
         */}
         {/* ── Feedback ────────────────────────────────────────── */}
         <Tabs.Panel value="feedback">
-          {activeTab === 'feedback' ? <AgentFeedbackPanel agentId={agentId} /> : null}
+          {activeTab === 'feedback' && !ownedByFlow ? <AgentFeedbackPanel agentId={agentId} /> : null}
         </Tabs.Panel>
 
         {/* ── Usage ───────────────────────────────────────────── */}
         <Tabs.Panel value="usage">
-          {activeTab === 'usage' ? (
+          {activeTab === 'usage' && !ownedByFlow ? (
             <AgentUsagePanel
               agentName={agent.name}
               agentKey={agent.key}
@@ -1884,7 +2018,7 @@ export default function AgentDetailPage() {
 
       {/* ── Publish Modal ──────────────────────────────────────── */}
       <Modal
-        opened={publishModalOpen}
+        opened={publishModalOpen && !ownedByFlow}
         onClose={() => setPublishModalOpen(false)}
         title={t('publish.modalTitle')}
         size="md"
@@ -1933,7 +2067,7 @@ export default function AgentDetailPage() {
       </Modal>
 
       <CompareVersionsDrawer
-        opened={compareOpen}
+        opened={compareOpen && !ownedByFlow}
         onClose={() => setCompareOpen(false)}
         agentId={agentId}
         publishedVersion={agent.publishedVersion ?? null}

@@ -9,7 +9,8 @@
  * The rule under test: content that came from outside (a webhook delivery) never
  * reaches the system prompt, whose `{{variables.*}}` read the agent's declared
  * defaults plus the values the trigger wrote itself; the event's own values reach
- * the model only in the message. A schedule trigger and a runs-API call have no
+ * the model only in the message. The same holds for a connector event handed to
+ * `dispatchTriggerEvent`. A schedule trigger and a runs-API call have no
  * outside content, so every variable fills the prompt as it always did.
  */
 
@@ -50,6 +51,7 @@ import { reloadConfig } from '@/lib/core/config';
 import { createAgentTrigger, resetTriggerEventThrottle } from '@/lib/services/agents/agentTriggers';
 import { tickAgentTriggers } from '@/lib/services/agents/agentTriggerScheduler';
 import { resetDeliveryRecording } from '@/lib/services/agents/agentTriggerWebhookDelivery';
+import { dispatchTriggerEvent } from '@/lib/services/agents/agentTriggerEventDispatch';
 import { parseWebhookWrite } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { runAgentJobLocal } from '@/lib/services/agents/agentRunService';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
@@ -218,6 +220,32 @@ describe('a webhook trigger: the prompt reads what the trigger wrote, never what
       expect(systemText()).not.toContain(value);
       expect(userText()).toContain(value);
     }
+  });
+});
+
+describe('a connector trigger: same rule, the event\'s values stay in the message', () => {
+  it('the fixed value and the default fill the prompt; the event\'s value is data in the message', async () => {
+    const trigger = await createAgentTrigger(scope(), AGENT_KEY, {
+      name: 'On event', type: 'connector',
+      connector: { connectorId: 'conn-1', trigger: 'pull_request', params: {}, schedule: null, events: [], filter: [], includePayload: true, subscriptionId: 'sub_1', packageId: 'cognipeer.github', kind: 'webhook', label: 'GitHub' },
+      prompt: 'Handle {{event}}.', variables: { region: '{{payload.region}}', team: 'platform' },
+    }, 'user-1');
+    const answer = await dispatchTriggerEvent(db, trigger, { tenantId, tenantDbName: DB_NAME }, {
+      source: 'connector', event: 'pull_request.opened', deliveryId: 'e1', dedupMaterial: 'e1', payload: { region: FROM_EVENT },
+      headers: {}, receivedAt: new Date(),
+      connector: { id: 'conn-1', key: 'gh', name: 'GitHub', packageId: 'cognipeer.github', packageName: 'GitHub', trigger: 'pull_request', triggerTitle: 'Pull request', kind: 'webhook', subscriptionId: 'sub_1' },
+    });
+    expect(answer.status).toBe(202);
+
+    const [queued] = await runsOf(String(trigger._id));
+    expect(queued).toMatchObject({ trigger: 'connector', externalContent: true, variables: { region: FROM_EVENT, team: 'platform', mode: 'careful' } });
+    expect([...(queued.literalVariables ?? [])].sort()).toEqual(['mode', 'team']);
+
+    await work(queued);
+    expect(systemText()).toContain('Serve region  for platform in careful mode.');
+    expect(systemText()).not.toContain(FROM_EVENT);
+    expect(userText()).toContain(FROM_EVENT);
+    expect(userText()).toContain('End of external data.');
   });
 });
 

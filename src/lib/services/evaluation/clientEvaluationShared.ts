@@ -78,6 +78,7 @@ export function toRunView(run: WithId<IEvaluationRun>): Record<string, unknown> 
       latency_ms: it.latencyMs,
       output_text: it.output?.text,
       error: it.error,
+      ...(it.restricted ? { restricted: true } : {}),
       scores: it.scores.map((s) => ({
         scorer_type: s.scorerType,
         score: s.score,

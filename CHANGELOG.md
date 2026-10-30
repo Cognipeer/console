@@ -83,6 +83,26 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   its scope, so a CI token without the Agents scope now gets `403` (`service: "agents"`, `required: "write"`) on agent
   suites and agent campaigns: add the scope to it. Tests of a model, a Knowledge Engine module or an external endpoint
   are not affected. See [Calls that need a second service](docs/guide/authorization.md#calls-that-need-a-second-service).
+- **The GitHub, GitLab and Azure DevOps webhook presets are retired.** A webhook trigger takes the `generic` preset
+  only, with the authentication modes `bearer`, `header`, `signature` and `standard_webhooks`; a write that names
+  `github`, `gitlab` or `azure_devops`, or the modes `github_signature`, `gitlab_token` or `basic`, is `400`. A trigger
+  saved with one of them stays in the list, read-only (`webhook.retired: true`), and receives nothing: its hook URL,
+  **Run now** and `…/webhook/rotate-secret` answer `410 webhook_preset_retired`. Convert it by changing its type to
+  `connector` (Studio: **Convert to connector trigger**; it needs the Connectors module and a connector of the vendor's
+  package) or to a generic webhook, which gets a new URL and secret. See [Vendor presets were
+  retired](docs/guide/agent-triggers.md#vendor-presets-were-retired).
+- **Agents without an approval setting now ask before a tool that is not read-only.** An agent created through the API
+  without a `humanInTheLoop` setting used to run every tool without asking. Now a tool of any source (MCP server,
+  OpenAPI tool, managed tool such as a connector action, Console's own tool) asks unless it is marked read-only. An
+  attended session run pauses for an approver. A run with nobody to answer (schedules, webhooks and other triggers,
+  channels, API calls without a session, evaluations) refuses the call, and the message names the fix: set the tool to
+  *Never ask*, or send `humanInTheLoop.toolApproval.tools` with `"never"`. Agents whose owner switched approval off
+  (`toolApproval.enabled: false`) keep running tools without asking, read-only tools no longer ask by default (an
+  explicit per-tool *Always ask* still wins), and client tools are unchanged. See [Which tools
+  ask](docs/guide/agent-approvals.md#which-tools-ask) and [Unattended
+  runs](docs/guide/agent-approvals.md#unattended-runs).
+- The document metadata key `_crawlerKey` is reserved. A crawler stores its key there on the pages it sends to the
+  Knowledge Engine, and the key is dropped from the metadata of every other ingest.
 
 ### Agent runs and run classes
 
@@ -223,12 +243,24 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the trigger's last
   updater (its creator until someone changes it); **Run now** counts against the person and API token that pressed it.
 - **Incoming webhooks**: a trigger of type `webhook` starts when something posts to
-  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). Presets for
-  GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
-  event-derived variables, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
-  with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
-  the message, marked as external data, never in the system prompt. The instructions still read the declared defaults and
-  the variables the trigger sets to a fixed value (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
+  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). A generic
+  sender with four ways to prove the secret (`bearer`, `header`, `signature` and `standard_webhooks`), an event
+  allow-list and payload filters, a Mustache prompt template, event-derived variables, de-duplication, a per-trigger run
+  rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation with a grace period, **Run with this payload** (with
+  `dry_run`) and a delivery log. Event text reaches the model only in the message, marked as external data, never in the
+  system prompt. The instructions still read the declared defaults and the variables the trigger sets to a fixed value
+  (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
+- **Connector triggers** (Enterprise Connectors module): a trigger of type `connector` starts an agent when a connector
+  reports an event, such as a pull request opened, an issue changed or a new row in a table. The connector's package
+  declares its triggers. A `webhook` trigger is registered at the service for you (when that cannot be done it shows a
+  callback URL, a secret and the steps to set the hook up by hand), and a `poll` trigger checks the service on a cron
+  `schedule` and reports what is new. Triggers that listen to the same connector, trigger and parameters share one
+  subscription. The event is the package's own flat data (`payload.draft`, not the vendor's request body), and it goes
+  through the same event list, filter, prompt template, de-duplication and run limits as a webhook trigger. New:
+  `type: "connector"` with a `connector` object, `connector_subscription` on the trigger, `POST …/connector/retry`, and
+  the **Connector** option in Studio under Ship → Triggers. The PR Reviewer and CI Failure Triage templates use the
+  GitHub connector. Without the module a stored connector trigger can be read but not created. See [Connector
+  triggers](docs/guide/agent-triggers.md#connector-triggers).
 - Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
   replicas.
 
@@ -242,8 +274,57 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
   breaks).
 
+### Text recognition (OCR) screens
+
+- The OCR settings have screens: a shared form (off, scanned pages only, or every page; the project's OCR or vision
+  model or the local engine; languages; page cap; also read images) in the Document Store upload and the Markdown tab
+  of a file ("Convert again with text recognition"), the Knowledge Engine create and edit screens (an Extraction
+  section after Chunking), the agent's Files settings (Text extraction (OCR)) and the crawler's Content extraction.
+  A converted file shows how many pages were read ("OCR · 3/5 pages"), a Knowledge Engine document shows the progress
+  of a file that is still being read, and a document with a stored original has a Re-extract action.
+- Saving a crawler's HTTP settings no longer drops an OCR option that was set through the API.
+
+### Knowledge Engine
+
+- **OCR per knowledge base.** A module gets an optional `extraction.ocr` setting (`mode` `auto` or `always`, an optional
+  OCR or vision `modelKey`, `languages`, `maxPages`, `images`; `null` clears it), and an upload may carry its own
+  `extraction` or switch it off. Scanned PDF pages and images are read by the project's model or by the server's
+  built-in offline engine. With `async: true` (and a module that keeps files in a bucket) the pages are read by the
+  ingest job: the document stays `pending` with `extraction.stage` and `extraction.progress`. A document read with OCR
+  carries `extraction` (`sourceType`, `ocrPages`, `pageCount`, ...). A re-index never reads pages again; re-ingest with
+  `reextract: true` does, with the module's current settings. Without `extraction` nothing changes.
+- Files uploaded to a Knowledge Engine module now go through the same zip-bomb and PowerPoint working-file guard as the
+  Document Store, and pictures in Word and HTML files become short placeholders instead of base64 data URIs in the
+  indexed text.
+- A scanned file whose OCR could not run or finish (budget used up, model removed, out of time) is now reported as
+  such, not as an unsupported format, and the cause is kept on a failed document. A re-extract that cannot finish its
+  OCR answers 409 and keeps the previous text, and runs with the longer budget of a job. A request-level OCR setting
+  is ignored (no pages are read) when the module does not exist or is not active.
+- An upload whose scan or image OCR could not read answers `422` with `code: "ocr_incomplete"` (the async upload's
+  document is `failed` with the reason). An image read with OCR is its text alone, without the size and format lines
+  or an "Extracted Text" heading.
+- A folder or permission entry that is refused fails the upload before any page is read, and a refused re-extract
+  leaves the document's folder and permissions as they were. A document deleted while its pages are read or embedded
+  is not indexed, and what the job had written for it is removed; a re-ingest of a document deleted while it runs
+  answers 404, and one whose permissions change meanwhile applies its own to the row as it is then.
+
+### Agent attachments and crawler
+
+- **Agent attachments**: the Markdown copy of an attachment now always turns pictures inside documents into
+  placeholders (it used to carry them as inline base64 images), and every attachment record may carry a
+  `markdownExtraction` value. Pictures are read as text by OCR only when the agent turns that on.
+- **Crawler**: a crawler with OCR on reads its file attachments through the shared extraction engine (the bundled
+  offline engine, or the project's OCR model when one is set) instead of the CDN-loaded Tesseract, and the zip-bomb
+  guard now applies to its attachments too. With a converter library older than 3.6 the crawler keeps its previous
+  direct OCR call.
+
 ### File storage
 
+- **OCR for Markdown copies.** `POST /client/v1/files/buckets/:bucketKey/objects` (and the Document Store's upload and
+  Convert action) accept an optional `ocr` setting (`mode` `auto` or `always`, an optional OCR or vision `modelKey`,
+  `languages`, `maxPages`, `images`) and an `images` policy (`inline`, `placeholder`, `omit`). Scanned PDF pages and
+  images are read by the project's model or by the server's built-in offline engine; the file record gains an optional
+  `markdownExtraction` with the settings and the result. Without `ocr` nothing changes.
 - **S3-compatible storage and Azure Blob Storage** are new file providers. `s3-compatible-files` serves MinIO, Ceph RGW,
   SeaweedFS, Garage, Cloudflare R2, Backblaze B2, Wasabi and other stores with an S3 API at their own endpoint:
   path-style addressing is on by default, the region is optional, request checksums are sent only where an operation
@@ -723,3 +804,97 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   probe stored `null` for every field it left out; now only an explicit `null` clears a field that may be
   empty. A custom-probe PATCH without `detectors` keeps the stored detectors instead of resetting them. Moving a target
   or a campaign to another agent without a version drops its pinned version.
+
+### Knowledge base access control
+
+- A knowledge base can decide who reads each of its documents. [Access control](docs/guide/rag.md#access-control) is
+  off by default and switched on per knowledge base (`access.enabled` on the module; changing `access` needs Knowledge
+  Engine `admin`). A knowledge base that leaves it off, its documents and its API behave as before, and switching it on
+  hides nothing by itself: the top level stays open to everyone until its permissions are changed.
+- Documents can be put in **folders**, with access control on or off: an ingest takes a `folderId`, or a `folderPath`
+  that is created as needed, and dashboard routes create, rename, move and delete folders and move documents. With
+  access control on, only the knowledge base's administrators change folders and move documents.
+- Permissions are set on the knowledge base, a folder or a document, for everyone, people, groups, e-mail addresses,
+  API tokens, and the people and groups of an external directory (`GET` and `PUT /rag/modules/:key/acl`, or `acl` on
+  an ingest, with Knowledge Engine `admin`). A folder's permissions apply to what it holds unless an item sets its own.
+- Reads follow the permissions of the person asking: the query, search and answer endpoints, the client API, agent
+  knowledge tools, the knowledge base MCP tools, and document detail, content, lines and export. A document the caller
+  may not read is left out of lists and answers `404`, like a missing one.
+- A call with no person behind it, such as an API token or a trigger, reads the documents open to everyone and those
+  granted to its token; a delegated call reads what the person it acts for may read. A flow's agent steps, and the tools
+  they call, read as no one in particular; the flow editor's playground reads as the person at the screen. A reminder
+  that an agent sets wakes reading no more than the turn that set it: one set by a flow's agent step, in a shared
+  channel, or in a turn that someone else continued reads as no one.
+- The administrators of a knowledge base read every document, unless the knowledge base turns that off
+  (`access.adminBypass: false`). The management views always show them every document, so they can set permissions.
+  `GET /rag/modules/:key/access/explain` tells them whether a person of the project can read a document, and which
+  permission decides.
+- [External directories](docs/guide/rag.md#external-directories) map the people and groups of another system to
+  console people. A person is matched by e-mail address (against the directory's e-mail, then its sign-in name) or by
+  another field, such as the person's external id or a directory attribute; a console group whose external id is a
+  directory group's id stands for that group, and a person can also be linked by hand. Dashboard routes under
+  `/rag/identity` list and edit the directories, their people and the links.
+- What is left behind by work that used documents not open to everyone is shown in full only to the person who asked
+  and the administrators of those knowledge bases: sessions, background runs, reminders, traces, model logs, and
+  evaluation, red-team and analysis results. Others see such a row without its content, opening it answers `403`
+  (`session_restricted`), and only those people answer its pending approvals. With `adminBypass: false` it is the
+  person who asked alone, and an API token never counts as an administrator. Snapshots leave such sessions out, and
+  the EU AI Act compliance report leaves out such red-team attempts.
+- While an agent works with such documents, it writes no memory that other people share.
+- An evaluation run on a RAG target reads as the person who started it. Generating a dataset from a knowledge base
+  uses only documents open to everyone.
+- A module with access control is listed without `totalDocuments` and `totalChunks` for a caller whose reads are
+  checked (an API token always is); the console shows `—` for them.
+- A crawler sends pages into a knowledge base with access control only when one of its administrators sets the crawler
+  up (`403 kb_access_controlled` otherwise). There a page replaces only a page the same crawler sent.
+- The stored files and the vector index of a knowledge base with access control are read through the knowledge base.
+  The file routes serve its files, and the vector routes query and copy its index, only to its administrators while
+  the admin exception is on, and never to an API token; anyone else gets `404` for a file and
+  `403 kb_access_controlled` for the index. Another knowledge base cannot be put on that index.
+- **Screens.** The Documents tab of a knowledge base lists folders and documents together, with a path bar, creating,
+  renaming, moving and deleting folders, moving documents, and a search across folders that shows where each match is.
+  An Access column shows who can read each folder and document. A full-screen permission editor sets the permissions
+  of the knowledge base, a folder or a document, its own or inherited, for people, groups, API tokens, e-mail
+  addresses and connected directories, and shows the permissions a connector brings read-only.
+- An **Access** tab for the knowledge base's administrators switches access control and the admin exception, sets the
+  default access, and shows the counts, what nobody can read, the directories in use, and whether a person can read a
+  document and why. The page header shows them whether access control is on.
+- A member sees a folder they cannot read only as part of the path to one they can (`pathOnly` in the folder list).
+- Readers no longer see write controls on the knowledge base page. With access control on, changes to the folder
+  structure, import and export are for its administrators.
+- New dashboard reads behind these screens, all with Knowledge Engine `admin`: `GET /rag/modules/:key/access/summary`,
+  `POST /rag/modules/:key/access/nodes`, `POST /rag/modules/:key/access/audience`,
+  `GET /rag/modules/:key/access/principals`, `GET /rag/identity/console-people`,
+  `GET /rag/identity/domains/:domainKey/people`, `…/groups` and `…/links`, and
+  `POST /rag/identity/domains/:domainKey/preview`. See [Views of the Access
+  tab](docs/guide/rag.md#views-of-the-access-tab).
+
+### Knowledge base access control from connectors (Enterprise)
+
+- A SharePoint source can bring the permissions of its files (**Read permissions**, off by default, on an app-only
+  connection). Its libraries and folders become folders of the knowledge base with their own permissions, and the
+  people and named groups of the directory come along, each source with its own directory, matched to console people
+  by e-mail address or sign-in name. SharePoint's Everyone groups stand for the directory's members, not its guests.
+- A file whose permissions cannot be read is open only to the administrators until a later run reads them. A change
+  of permissions alone is picked up by the full listing that such a source makes once a day. Permissions given to
+  SharePoint site groups are not followed yet.
+- A source that sends the permissions of its files into a knowledge base with access control needs no confirmation. One
+  that sends none, that stops sending them, or whose knowledge base has access control off (which keeps the permissions
+  without applying them) first asks to confirm that everyone with access to the knowledge base will see every document
+  it adds (`aclAcknowledged`, once); the sources list marks a source whose permissions are not applied. Switching a
+  knowledge base's access control off later asks nothing: its sources go on adding documents, with their permissions
+  kept and not applied until it is switched back on, and the sources list marks them.
+- A connector with a source that sends permissions into a knowledge base with access control offers agents none of its
+  read actions and not its MCP server, and flows none of its read nodes, since its own account reads every file. Its
+  other actions stay and still ask before they run, and the connector's **Tools** tab says why. A flow that already
+  holds such a read node fails that step with `connector_reads_off`. Its tools follow when that knowledge base's access
+  control is switched on or off, or the knowledge base is deleted.
+- In Slack and Teams an agent reads only knowledge open to everyone when it answers in a shared channel, what the
+  person may read in a direct message, and as no one with the identity mode **none**.
+- A portal's conversation history lists a conversation that used documents not open to everyone without its title;
+  only the person who started it and the administrators of those knowledge bases can open it.
+- A connector whose source reads permissions has a **People** tab: the directory's users and groups, the console
+  person or group each one is matched to and how (by which rule or by a link), and the links made by hand, with
+  **Link…** for someone no rule matches. A full-screen form sets whether permissions are read, up to 8 matching rules
+  in order and group matching by external id, and previews what the rules match before they are saved
+  (`GET` and `PUT /connectors/:id/sources/:sourceId/identity`).

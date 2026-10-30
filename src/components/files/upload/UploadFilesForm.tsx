@@ -5,6 +5,8 @@ import { Alert, TextInput, VisuallyHidden } from '@mantine/core';
 import { IconAlertTriangle, IconFolder, IconUpload } from '@tabler/icons-react';
 import { useConfirm } from '@/components/common/confirm';
 import FormShell, { Checklist, FormSection, SummaryGroup, SummaryKV, ToggleList, ToggleRow } from '@/components/common/ui/FormShell';
+import OcrSettingsFields from '@/components/extraction/OcrSettingsFields';
+import { compactOcr, describeOcr, type OcrSettings } from '@/components/extraction/ocrForm';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { FileBucketView, FileRecordView } from '@/lib/services/files';
 import { isFilesApiError } from '../filesApi';
@@ -67,6 +69,7 @@ export function UploadFilesForm(props: UploadFilesFormProps) {
 function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploaded }: UploadFilesFormProps) {
   const t = useTranslations('files.upload');
   const tc = useTranslations('files.common');
+  const tOcr = useTranslations('ocrSettings');
   const locale = useLocale();
   const { canWrite } = useFilesAccess();
   const { confirm } = useConfirm();
@@ -80,6 +83,7 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
   const browseRef = useRef<HTMLButtonElement>(null);
   const [folderText, setFolderText] = useState(initialFolder);
   const [convert, setConvert] = useState(true);
+  const [ocr, setOcr] = useState<OcrSettings | undefined>(undefined);
   const [notices, setNotices] = useState<Notices>(NO_NOTICES);
 
   const queue = useUploadQueue({
@@ -159,7 +163,8 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
     setNotices({ overflow: result.overflow, folders, duplicates: result.duplicates });
   };
 
-  const settings = { folder: parsed.folder, convertToMarkdown: convert };
+  const ocrSettings = convert ? compactOcr(ocr) : undefined;
+  const settings = { folder: parsed.folder, convertToMarkdown: convert, ...(ocrSettings ? { ocr: ocrSettings } : {}) };
 
   const submit = () => {
     if (queue.busy) return;
@@ -243,6 +248,7 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
         <SummaryKV label={t('summary.totalSize')} value={formatBytes(summary.sendableBytes)} />
         <SummaryKV label={t('summary.destination')} value={parsed.folder || t('destination.root')} mono />
         <SummaryKV label={t('summary.markdown')} value={convert ? t('summary.on') : t('summary.off')} />
+        {ocrSettings ? <SummaryKV label={t('summary.ocr')} value={describeOcr(tOcr, ocrSettings)} /> : null}
       </SummaryGroup>
       <SummaryGroup title={t('summary.preflight')}>
         <Checklist items={checks} />
@@ -346,6 +352,12 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
               onChange={setConvert}
             />
           </ToggleList>
+          {convert ? (
+            <div className={styles.ocr}>
+              <OcrSettingsFields value={ocr} onChange={setOcr} showImages disabled={queue.busy} />
+              <p className={styles.note}>{t('processing.ocrHint')}</p>
+            </div>
+          ) : null}
           {only && (only.status === 'queued' || only.status === 'failed') && !only.waiting ? (
             <details className={styles.advanced}>
               <summary>{t('processing.advanced')}</summary>

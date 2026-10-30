@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { IAgentConfig } from '@/lib/database/provider/types.domain';
-import { collectManifestDependencies, validateAgentManifest } from '@/lib/services/agents/agentManifest';
+import { buildAgentManifest, collectManifestDependencies, parseAgentManifest, serializeAgentManifest, validateAgentManifest } from '@/lib/services/agents/agentManifest';
 import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValidation';
 import { subagentConfigIssues } from '@/lib/services/agents/subagentConfigRules';
 
@@ -70,5 +70,25 @@ describe('delegation settings are validated (CON-11)', () => {
       spec: { ...base, subagentPolicy: { maxParallel: 99 } },
     };
     expect(validateAgentManifest(manifest).some((issue) => issue.includes('spec.subagentPolicy.maxParallel'))).toBe(true);
+  });
+});
+
+describe('collectManifestDependencies: attachments.ocr', () => {
+  it('names the OCR model of the uploads, so an import into a project without it is warned', () => {
+    const ids = (spec: Parameters<typeof collectManifestDependencies>[0]) => collectManifestDependencies(spec).map((d) => `${d.type}:${d.key}`);
+    expect(ids({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'docs', ocr: { mode: 'auto', modelKey: ' ocr-1 ' } } }))
+      .toEqual(['model:main', 'model:ocr-1']);
+    expect(collectManifestDependencies({ modelKey: 'main', attachments: { ocr: { mode: 'auto', modelKey: 'ocr-1' } } })[1])
+      .toMatchObject({ usedBy: 'spec.attachments.ocr.modelKey' });
+    // The local engine names no model; the same key as the main model is listed once.
+    expect(ids({ modelKey: 'main', attachments: { ocr: { mode: 'auto' } } })).toEqual(['model:main']);
+    expect(ids({ modelKey: 'main', attachments: { ocr: { mode: 'auto', modelKey: 'main' } } })).toEqual(['model:main']);
+  });
+
+  it('survives export and parse with the setting intact', () => {
+    const manifest = buildAgentManifest({ key: 'a', name: 'A', status: 'active' } as never, { modelKey: 'main', attachments: { enabled: true, bucketKey: 'docs', ocr: { mode: 'always', modelKey: 'ocr-1', languages: ['tr'], images: true } } });
+    const restored = parseAgentManifest(serializeAgentManifest(manifest, 'yaml'));
+    expect(restored.spec.attachments?.ocr).toEqual({ mode: 'always', modelKey: 'ocr-1', languages: ['tr'], images: true });
+    expect(restored.dependencies.map((d) => d.key)).toContain('ocr-1');
   });
 });

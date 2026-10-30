@@ -28,7 +28,9 @@ const MODULE_LABELS: Record<string, string> = {
   ldap: 'LDAP Directory',
   portals: 'Portals',
   channels: 'Channels',
+  connectors: 'Connectors',
   health: 'Entity Health',
+  flows: 'Flows',
   cost: 'Cost & Optimization',
   'data-retention': 'Data Retention',
 };

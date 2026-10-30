@@ -27,15 +27,15 @@ The **Use template** form is a full-screen form. You pick:
 - **Knowledge bases** for templates that use them. The agent is created without one if you pick none, and says so in the setup notes.
 - **Guardrails**, recommended for templates that handle personal data.
 - **Sandbox template**, for templates that need the sandbox (the default is `multi-base` when your tenant has it).
-- **Create the suggested triggers**, and the **timezone** their schedules use (your browser's timezone by default).
+- **Create the suggested triggers**, and the **timezone** their schedules use (your browser's timezone by default). A template with connector triggers also asks for the **connector** they listen to (see [below](#connector-triggered-templates)).
 - **Publish version 1** right away. Off by default.
 
 Creating is all-or-nothing. The console creates:
 
 1. A **draft agent**, with the instructions, tools, variables and structured output of the template, your model and picks, and a small mark of which template and version it came from.
 2. The template's **skills**, if it has any, under keys that start with `tpl-` (for example `tpl-support-tone`). A skill that already exists under that key is reused as it is, so edits you made to it are kept; a missing one is created.
-3. The template's suggested **[triggers](/guide/agent-triggers)**, if you left that on. They are always created **disabled** (a schedule does not run and a webhook does not accept deliveries until you enable them). Schedules use the timezone you chose.
-4. For a **webhook** trigger, the URL and the **signing secret**. The secret is shown **once**, on the result screen; afterwards only its last four characters are visible (you can rotate it on the trigger).
+3. The template's suggested **[triggers](/guide/agent-triggers)**, if you left that on. They are always created **disabled** (a schedule does not run and a webhook does not accept deliveries until you enable them). Schedules use the timezone you chose. A connector trigger that has no connector to listen to is left out ([below](#connector-triggered-templates)).
+4. For a **webhook** trigger, the URL and the **signing secret**. The secret is shown **once**, on the result screen; afterwards only its last four characters are visible (you can rotate it on the trigger). The same goes for a connector trigger whose hook has to be set up by hand at the service: its callback URL and secret.
 
 If any step fails, the agent, triggers and skills this call created are removed again and nothing is left behind. Publishing is the last step, so a failed publish also leaves nothing behind.
 
@@ -49,6 +49,17 @@ Some templates (Customer Support, IT Helpdesk, Refund Approval) declare **client
 
 Webhook templates (PR Reviewer, CI Failure Triage, Support Ticket Triage, Lead Qualifier, Email Triage) read the event from the message the trigger builds. Values taken from a webhook delivery reach the model only in the message, marked as external data; they are not placed in the system prompt.
 
+### Connector-triggered templates
+
+PR Reviewer and CI Failure Triage listen to GitHub through the **GitHub connector** (package `cognipeer.github`): a pull request opened, reopened, updated or marked ready for review, or a workflow run that completed. They replace the GitHub webhook preset of earlier releases (see [agent triggers](/guide/agent-triggers#vendor-presets-were-retired)). A connector trigger needs the Enterprise **Connectors** module and a connector of that package in the project.
+
+- The form lists the project's active connectors of the package. With exactly one, it is picked for you; with several, you choose; you can also clear it.
+- Under the connector the form asks for what the package's trigger needs and no template can know: the GitHub triggers need the **repository** to listen to (`owner/name`, chosen from the connector's repositories). While the connector has no working account the list is not read: the field says *Connect an account to pick from a list, or type the value.* and takes `owner/name` as typed. Leave a required setting empty and that trigger is **not created**.
+- The templates filter and read the event on the package's own event data (`payload.draft`, `payload.number`, `payload.repository` as `owner/name` ...), not GitHub's raw webhook body; the data of the events is in [agent triggers](/guide/agent-triggers#connector-triggers).
+- With no connector (or without the module) the form says so, and the connector triggers are **not created**. The agent is still created, and the result screen names the triggers that were left out and why: no connector (or one of another package), a setting the trigger still needs, or a setting the connector refused. Add a connector or the missing setting, then add the trigger from the agent's Triggers tab, or use the template again.
+- Created connector triggers are disabled like the others. Enable them after checking the connector's subscription on the trigger.
+- The capability chip **Webhook** in the gallery stands for generic webhooks and connector events alike.
+
 ## The catalog
 
 `*` marks a featured template.
@@ -61,8 +72,8 @@ Webhook templates (PR Reviewer, CI Failure Triage, Support Ticket Triage, Lead Q
 | Refund Approval Assistant | `refund-approval` | Support | Client tools, Approval, Variables | - | - |
 | Knowledge Q&A * | `knowledge-qa` | Knowledge | Knowledge, Variables | knowledge (required) | - |
 | HR Policy Assistant | `hr-policy-assistant` | Knowledge | Knowledge, Guardrails, Variables | knowledge (required), guardrails (recommended) | - |
-| Pull Request Reviewer * | `pr-reviewer` | Engineering | Webhook, Structured output, Skills, Variables | - | webhook (github) |
-| CI Failure Triage | `ci-failure-triage` | Engineering | Webhook, Structured output | - | webhook (github), webhook (generic) |
+| Pull Request Reviewer * | `pr-reviewer` | Engineering | Webhook, Structured output, Skills, Variables | - | connector (GitHub `pull_request`) |
+| CI Failure Triage | `ci-failure-triage` | Engineering | Webhook, Structured output | - | connector (GitHub `workflow_run`), webhook (generic) |
 | Release Notes Writer | `release-notes-writer` | Engineering | Variables | - | - |
 | Incident Postmortem | `incident-postmortem` | Engineering | Variables | - | - |
 | SQL Assistant | `sql-assistant` | Engineering | Variables | - | - |
@@ -101,9 +112,9 @@ The dashboard API (session authentication, in the active project) has three rout
 |---|---|---|
 | `GET /api/agents/templates` | `agents` read | The catalog with the availability of each template in the project |
 | `GET /api/agents/templates/{templateKey}` | `agents` read | One template in full: spec, skills, suggested triggers, first message |
-| `POST /api/agents/templates/{templateKey}/instantiate` | `agents` write | Create the agent. Body: `modelKey` (required), `name`, `description`, `key`, `knowledgeKeys`, `guardrailKeys`, `sandboxTemplateKey`, `createTriggers` (default `true`), `timezone` (IANA, default `UTC`), `publish` (default `false`) |
+| `POST /api/agents/templates/{templateKey}/instantiate` | `agents` write | Create the agent. Body: `modelKey` (required), `name`, `description`, `key`, `knowledgeKeys`, `guardrailKeys`, `sandboxTemplateKey`, `createTriggers` (default `true`), `timezone` (IANA, default `UTC`), `publish` (default `false`), `connector_id` (the connector every connector trigger of the template listens to), `connector_ids` (a connector per suggested trigger, by the trigger's name in the template; wins over `connector_id`), `connector_params` (the parameters of each connector trigger, by the trigger's name: `{ "Review pull requests": { "repository": "acme/api" } }`; empty values count as not given, a name that is not a connector trigger of the template is ignored). Query: `locale` (`tr` or `en`), the language the Connectors module writes the setup steps of a connector trigger's subscription it creates in (the `reason` of a subscription is one English sentence with a `reason_code` to put into your own words, and the label of the trigger is English whatever `locale` says) |
 
-`instantiate` answers `201` with `agent`, `template` (`key`, `version`, `catalogVersion`), `triggers` (disabled; a webhook trigger carries `webhook.url` and `webhook.secret` once), `setup` (what is left to do) and `warnings` (the notes a Studio save would show). Errors use the usual `{ error, code }` shape: `template_not_found` (404), `invalid_model`, `knowledge_not_found`, `knowledge_not_supported`, `guardrail_not_found`, `invalid_timezone`, `invalid_key`, `invalid_template_config` (400), `agent_key_conflict` and `sandbox_unavailable` (409).
+`instantiate` answers `201` with `agent`, `template` (`key`, `version`, `catalogVersion`), `triggers` (disabled; a webhook trigger carries `webhook.url` and `webhook.secret` once; a connector trigger carries `connector: { connectorId, trigger, subscription }`, the subscription holding the callback URL and, once, the secret when the hook is set up by hand), `skipped_triggers` (`[{ name, reason, package, errors? }]`: connector triggers left out. `reason` is `connector_required` (no usable connector was given, the one given is of another package than the trigger's, or the Connectors module is absent), `params_required` (a connector was given but the trigger needs parameters, such as a `repository`, that were not) or `invalid_params` (the connector refused the parameters, events or schedule); for the last two `errors` lists the connector's field errors, for example `{ "field": "connector.params.repository", "message": "repository is required" }`. A refusal about the template's own trigger (its prompt, variables or filter) is not skipped: it fails the create with `invalid_template_trigger` and nothing is made), `setup` (what is left to do) and `warnings` (the notes a Studio save would show). Errors use the usual `{ error, code }` shape: `template_not_found` (404), `invalid_model`, `knowledge_not_found`, `knowledge_not_supported`, `guardrail_not_found`, `invalid_timezone`, `invalid_key`, `invalid_template_config`, `invalid_template_trigger` (400), `agent_key_conflict` and `sandbox_unavailable` (409).
 
 ## Related
 

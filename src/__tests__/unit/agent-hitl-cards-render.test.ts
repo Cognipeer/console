@@ -100,12 +100,19 @@ describe('AgentHumanInTheLoopPanel', () => {
   const panel = (value: Parameters<typeof AgentHumanInTheLoopPanel>[0]['value']) =>
     render(h(AgentHumanInTheLoopPanel, { value, onChange: noop, toolConfig }));
 
-  it('shows only the switches for an agent that never pauses', () => {
-    const html = panel(undefined);
+  it('shows only the switches for an agent that switched approval off', () => {
+    const html = panel({ toolApproval: { enabled: false } });
     expect(html).toContain('Ask before tools run');
     expect(html).toContain('Let the agent ask the user questions');
     expect(html).not.toContain('Per-tool settings');
     expect(html).not.toContain('Open requests');
+  });
+
+  it('an agent with no stored setting shows the table: it asks by default', () => {
+    const html = panel(undefined);
+    expect(html).toContain('Per-tool settings');
+    expect(html).toContain('create_issue');
+    expect(html).toContain('Open requests');
   });
 
   it('lists the tools and every request setting once approvals are on', () => {
@@ -113,7 +120,12 @@ describe('AgentHumanInTheLoopPanel', () => {
     expect(html).toContain('Per-tool settings');
     expect(html).toContain('create_issue');
     expect(html).toContain('sandbox_exec');
-    expect(html).toContain('Read-only, not asked by default');
+    // Type column: an MCP tool without markings, a built-in that writes, a built-in that reads.
+    expect(html).toContain('no hints');
+    expect(html).toContain('>writes<');
+    expect(html).toContain('>reads<');
+    expect(html).toContain('does not ask');
+    expect(html).toContain('Ask (default)');
     expect(html).toContain('Wait for an answer (minutes)');
     expect(html).toContain('When time runs out');
     expect(html).toContain('Who can answer');
@@ -140,7 +152,30 @@ describe('AgentHumanInTheLoopPanel', () => {
     expect(html).toContain('>Add<');
   });
 
+  it('shows each bound tool with its source and type, and "Never ask" only for tools that are not read-only', () => {
+    const html = render(h(AgentHumanInTheLoopPanel, {
+      value: undefined,
+      onChange: noop,
+      toolConfig: {
+        toolBindings: [
+          { source: 'tool', sourceKey: 'notion', toolNames: ['delete_page'] },
+          { source: 'tool', sourceKey: 'github', toolNames: ['search_code'] },
+          { source: 'mcp', sourceKey: 'web', toolNames: ['fetch'] },
+        ],
+      },
+      toolKinds: { delete_page: 'destructive', search_code: 'reads' },
+    }));
+    expect(html).toContain('>destructive<');
+    expect(html).toContain('>reads<');
+    expect(html).toContain('>no hints<');
+    expect(html).toContain('tool · notion');
+    // Two rows with the control (destructive, no hints); the read-only row says it does not ask.
+    expect(html.match(/aria-label="(delete_page|fetch)"/g)).toHaveLength(2);
+    expect(html).not.toContain('aria-label="search_code"');
+    expect(html).toContain('does not ask');
+  });
+
   it('does not show the unattended policy when there is nothing that can pause', () => {
-    expect(panel(undefined)).not.toContain('When nobody can answer');
+    expect(panel({ toolApproval: { enabled: false } })).not.toContain('When nobody can answer');
   });
 });

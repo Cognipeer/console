@@ -287,9 +287,10 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
         ? visibleSubNavItems(
             SUBNAV_CONFIG[activeService.id],
             (service) => canUseService(service),
+            isTenantAdmin,
           )
         : undefined,
-    [activeService, isSettingsActive, canUseService],
+    [activeService, isSettingsActive, canUseService, isTenantAdmin],
   );
   const hasSubnav = Boolean(
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),

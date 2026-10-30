@@ -5,6 +5,8 @@
  * Uses agent-sdk for runtime execution with automatic tracing.
  */
 
+import { getFlowsHost, FlowsUnavailableError, type FlowAgentTurnActivity } from '@/enterprise/flows';
+import type { AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 import { channelFromSource, getRoutingCaller, noteRoutingRun, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 import { randomUUID } from 'node:crypto';
 
@@ -60,6 +62,23 @@ import {
     queryRag,
 } from '@/lib/services/rag/ragService';
 import {
+    anonymousKbCaller,
+    KnowledgeExposure,
+    currentKnowledgeExposure,
+    currentRestrictedKnowledgeTags,
+    kbCallerFromIdentity,
+    kbCallerFromRuntime,
+    kbReaderOfFollowUp,
+    noteRestrictedDocuments,
+    noteRestrictedKnowledge,
+    restrictedKnowledgeTagsOf,
+    runWithKnowledgeExposure,
+    resolveRagAccess,
+    type KbCaller,
+    type RagAccessModule,
+    type RagAccessScope,
+} from '@/lib/services/rag/access';
+import {
     GUARDRAIL_CONTRACT_VERSION,
     GuardrailEnforcementError,
     evaluateGuardrail,
@@ -91,9 +110,10 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
-import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
+import { getToolAnnotationOverrides, resolveMcpGuardrailBinding, resolveSourceType } from '@/lib/services/mcp/mcpService';
+import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { currentTurnSignal, runWithTurnSignal } from '@/lib/core/turnSignal';
-import { executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
+import { addSecretValues, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import {
     resolveAgentBindingMcpServer,
     resolveAgentBindingTool,
@@ -135,7 +155,9 @@ import {
 } from './toolMedia';
 import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
 import { isToolOutput } from '@/lib/services/tools/toolOutput';
+import { effectiveActionAnnotations, mcpToolMarkings } from '@/lib/services/tools/actionAnnotations';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
+import { detachConnectorTriggers } from './agentTriggerConnectorHost';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
 import {
@@ -228,6 +250,8 @@ import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
     applyToolBlocks,
+    classifyTool,
+    clientApprovalConfig,
     denyUnattendedTools,
     gateChildTools,
     resolveHitlConfig,
@@ -1156,6 +1180,72 @@ function warnUnservableExternalBindings(config: GuardrailBindingSource, agentKey
 }
 
 /**
+ * Who a run's knowledge tools read for: the person a continued pause is for
+ * (not whoever answered it), else the caller its server-stamped runtime context
+ * names. A run without either is an unknown caller, who reads only what a
+ * knowledge base with access control opens to everyone.
+ */
+export function knowledgeCallerOf(input: {
+    identity?: ConsoleIdentityPerson;
+    runtimeContext?: AgentRuntimeContext;
+}): KbCaller {
+    return input.identity ? kbCallerFromIdentity(input.identity) : kbCallerFromRuntime(input.runtimeContext);
+}
+
+/**
+ * Ties the turn's knowledge exposure (opened by the turn's entry) to its session: what the session already holds
+ * marks every stored copy of the turn from its first model call, and a new mark is written to the session before
+ * the passage that caused it goes back to the model (see rag/access/exposure.ts).
+ */
+async function bindKnowledgeExposure(
+    db: DatabaseProvider,
+    conversation: Pick<IAgentConversation, '_id' | 'kbRestricted'>,
+): Promise<void> {
+    const exposure = currentKnowledgeExposure();
+    if (!exposure || !conversation._id) return;
+    const conversationId = String(conversation._id);
+    await exposure.bind({
+        seed: conversation.kbRestricted,
+        onRestricted: (added) => db.addAgentConversationRestriction(conversationId, added),
+    });
+}
+
+/**
+ * What one build of knowledge tools knows about who it reads for: the caller,
+ * and that caller's scope in each knowledge base with access control. A scope
+ * is resolved the first time a tool needs it and kept for the tools of the
+ * build; a knowledge base without access control resolves nothing.
+ */
+interface KnowledgeAccess {
+    readonly caller: KbCaller;
+    /** The caller's scope in `ragModule`; undefined when the knowledge base has no access control. */
+    scopeOf(ragModule: RagAccessModule): Promise<RagAccessScope | undefined>;
+}
+
+function createKnowledgeAccess(tenantDbName: string, tenantId: string, caller?: KbCaller): KnowledgeAccess {
+    const reader = caller ?? anonymousKbCaller('unknown');
+    const scopes = new Map<string, Promise<RagAccessScope>>();
+    return {
+        caller: reader,
+        async scopeOf(ragModule) {
+            if (ragModule.access?.enabled !== true) return undefined;
+            const key = ragModule.key;
+            let pending = scopes.get(key);
+            if (!pending) {
+                const resolving = resolveRagAccess({ tenantDbName, tenantId, module: ragModule, caller: reader });
+                pending = resolving;
+                scopes.set(key, resolving);
+                // A failed lookup is not kept: the next call asks again.
+                resolving.catch(() => {
+                    if (scopes.get(key) === resolving) scopes.delete(key);
+                });
+            }
+            return pending;
+        },
+    };
+}
+
+/**
  * The three Knowledge Engine tools an agent gets when it has a knowledgeEngineKey
  * configured: search, then two ways to read a match's source document further
  * than the matched passage. Shared by the live chat and playground chat paths,
@@ -1196,6 +1286,9 @@ async function buildKnowledgeTools(
     // found in keeps those reads on this same row ('' = tenant-wide only).
     const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
     const filterableFields = knowledgeModule.filterableFields ?? [];
+    const kbAccess = opts.access ?? createKnowledgeAccess(tenantDbName, tenantId);
+    const boundModule: RagAccessModule = knowledgeModule;
+    const accessScope = () => kbAccess.scopeOf(boundModule);
 
     const searchTool = createTool({
         name: searchName,
@@ -1210,6 +1303,7 @@ async function buildKnowledgeTools(
         func: guard.protect(
             { name: agentToolPolicyName('knowledge', 'search'), requestedName: searchName },
             async (args: { query: string; filter?: Record<string, unknown> }) => {
+                const access = await accessScope();
                 const result = await queryRag(tenantDbName, tenantId, moduleScope, {
                     ragModuleKey,
                     query: args.query,
@@ -1219,7 +1313,7 @@ async function buildKnowledgeTools(
                     // The model fills `args.filter`; it may not send provider-native filters.
                     // The binding's own filter alone stays trusted.
                     ...(args.filter && Object.keys(args.filter).length > 0 ? { filterSource: 'untrusted' as const } : {}),
-                }, { signal: currentTurnSignal() });
+                }, { signal: currentTurnSignal(), caller: kbAccess.caller, ...(access ? { access } : {}) });
                 return result.matches
                     .filter((m) => m.content)
                     .map((m) => {
@@ -1240,6 +1334,11 @@ async function buildKnowledgeTools(
         const document = await getRagDocument(tenantDbName, documentId);
         if (!document || document.ragModuleKey !== ragModuleKey) return undefined;
         if (moduleScope && document.projectId && String(document.projectId) !== moduleScope) return undefined;
+        // A document the caller may not read is reported like one that does not exist.
+        const access = await accessScope();
+        if (access?.enforced && !access.canReadDocument(document)) return undefined;
+        // Its text is about to go to the model: the run's stored copies must know what they hold first.
+        await noteRestrictedDocuments({ tenantDbName, tenantId, module: boundModule, documents: [document] });
         return document;
     }
 
@@ -1317,6 +1416,8 @@ interface KnowledgeToolOptions {
     topK?: number;
     minScore?: number;
     filter?: Record<string, unknown>;
+    /** Who the tools read for. Unset = an unknown caller. */
+    access?: KnowledgeAccess;
 }
 
 function withDirective(base: string, description?: string): string {
@@ -1345,13 +1446,16 @@ export async function buildAgentKnowledgeTools(
     projectId: string,
     source: KnowledgeBindingSource,
     guard: AgentToolGuard,
+    /** `caller`: who the tools read for. Unset = an unknown caller. */
+    options: { caller?: KbCaller } = {},
 ): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
     const bindings = normalizeKnowledgeBindings(source);
     if (bindings.length === 0) return { tools: [], toolDefinitions: [] };
+    const access = createKnowledgeAccess(tenantDbName, tenantId, options.caller);
     const plain = bindings[0];
     if (bindings.length === 1 && !plain.description && plain.topK === undefined
         && plain.minScore === undefined && !plain.filter) {
-        return buildKnowledgeTools(tenantDbName, tenantId, projectId, plain.key, guard);
+        return buildKnowledgeTools(tenantDbName, tenantId, projectId, plain.key, guard, { access });
     }
     if (source.knowledgeToolMode === 'separate') {
         const tools: AgentSdkToolInterface[] = [];
@@ -1363,13 +1467,14 @@ export async function buildAgentKnowledgeTools(
                 topK: binding.topK,
                 minScore: binding.minScore,
                 filter: binding.filter,
+                access,
             });
             tools.push(...built.tools);
             toolDefinitions.push(...built.toolDefinitions);
         }
         return { tools, toolDefinitions };
     }
-    return buildCombinedKnowledgeTools(tenantDbName, tenantId, projectId, bindings, guard);
+    return buildCombinedKnowledgeTools(tenantDbName, tenantId, projectId, bindings, guard, { access });
 }
 
 async function buildCombinedKnowledgeTools(
@@ -1378,11 +1483,13 @@ async function buildCombinedKnowledgeTools(
     projectId: string,
     bindings: IAgentKnowledgeBinding[],
     guard: AgentToolGuard,
+    opts: Pick<KnowledgeToolOptions, 'access'> = {},
 ): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
     const { createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
+    const kbAccess = opts.access ?? createKnowledgeAccess(tenantDbName, tenantId);
 
-    const visible: Array<{ binding: IAgentKnowledgeBinding; scope: string }> = [];
+    const visible: Array<{ binding: IAgentKnowledgeBinding; scope: string; ragModule: RagAccessModule }> = [];
     for (const binding of bindings) {
         const mod = await resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId);
         if (!mod) {
@@ -1393,7 +1500,7 @@ async function buildCombinedKnowledgeTools(
             logger.warn('Skipping knowledge engine that is switched off', { key: binding.key, projectId });
             continue;
         }
-        visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '' });
+        visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '', ragModule: mod });
     }
     if (visible.length === 0) return { tools: [], toolDefinitions: [] };
     const byKey = new Map(visible.map((v) => [v.binding.key, v]));
@@ -1416,6 +1523,11 @@ async function buildCombinedKnowledgeTools(
         const owner = candidates.find((c) => c.binding.key === document.ragModuleKey
             && !(c.scope && document.projectId && String(document.projectId) !== c.scope));
         if (!owner) return { error: 'Document not found in the bound knowledge bases.' };
+        // A document the caller may not read is reported like one that does not exist.
+        const access = await kbAccess.scopeOf(owner.ragModule);
+        if (access?.enforced && !access.canReadDocument(document)) return { error: 'Document not found in the bound knowledge bases.' };
+        // Its text is about to go to the model: the run's stored copies must know what they hold first.
+        await noteRestrictedDocuments({ tenantDbName, tenantId, module: owner.ragModule, documents: [document] });
         return { document, scope: owner.scope };
     }
 
@@ -1426,14 +1538,15 @@ async function buildCombinedKnowledgeTools(
         func: guard.protect(
             { name: agentToolPolicyName('knowledge', 'search'), requestedName: 'knowledge_search' },
             async (args: { query: string }) => {
-                const lists = await Promise.all(visible.map(async ({ binding, scope }) => {
+                const lists = await Promise.all(visible.map(async ({ binding, scope, ragModule }) => {
+                    const access = await kbAccess.scopeOf(ragModule);
                     const result = await queryRag(tenantDbName, tenantId, scope, {
                         ragModuleKey: binding.key,
                         query: args.query,
                         topK: binding.topK,
                         ...(binding.minScore !== undefined ? { minScore: binding.minScore } : {}),
                         filter: binding.filter,
-                    }, { signal: currentTurnSignal() });
+                    }, { signal: currentTurnSignal(), caller: kbAccess.caller, ...(access ? { access } : {}) });
                     return result.matches.filter((m) => m.content).map((m): KnowledgeHit => ({
                         kb: binding.key,
                         documentId: m.documentId,
@@ -1784,12 +1897,43 @@ export function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undef
         out.triggerId = runtimeContext.trigger.id;
         out.trigger = runtimeContext.trigger.type;
     }
+    // A turn a flow step started: filter and group the traces by flow (`metadataKey=flowId`).
+    if (runtimeContext.flow) {
+        out.flowId = runtimeContext.flow.id;
+        out.flowKey = runtimeContext.flow.key;
+        out.flowName = runtimeContext.flow.name;
+        out.flowRunId = runtimeContext.flow.runId;
+        out.flowNodeKey = runtimeContext.flow.nodeKey;
+    }
     const meta = runtimeContext.metadata;
     for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
         const value = meta?.[key];
         if (typeof value === 'string' && value) out[key] = value;
     }
     return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * A hidden agent a flow owns runs only for the flow that owns it (`source: 'flow'`) and for the editor's playground
+ * (`source: 'playground'`): the client API, A2A, portals, channels and every other surface see it as missing.
+ * `source` is stamped by the server, never taken from a caller.
+ */
+export function assertOwnedAgentReachable(agent: Pick<IAgent, 'key' | 'owner'>, runtimeContext: AgentRuntimeContext | undefined): void {
+    if (!agent.owner) return;
+    if (runtimeContext?.source === 'flow' || runtimeContext?.source === 'playground') return;
+    throw new Error(`Agent "${agent.key}" not found`);
+}
+
+/** The `flowId` / `flowKey` / `flowName` trace tags of an agent a flow owns (the flow row is read; missing = no tags). */
+async function ownedAgentFlowTags(tenantDbName: string, agent: Pick<IAgent, 'owner' | 'tenantId' | 'projectId'>): Promise<Record<string, string> | undefined> {
+    if (!agent.owner) return undefined;
+    const flow = await getFlowsHost()
+        ?.describeFlow({ tenantDbName, tenantId: agent.tenantId, projectId: agent.projectId }, { id: agent.owner.flowId })
+        .catch(() => null);
+    return {
+        flowId: agent.owner.flowId,
+        ...(flow ? { flowKey: flow.key, flowName: flow.name } : {}),
+    };
 }
 
 /**
@@ -1878,6 +2022,8 @@ type BuildSubagentsInput = {
     runtimeContext?: AgentRuntimeContext;
     /** Who the run is for (Console identity); a referenced child acts under its own agent key. */
     identity?: ConsoleIdentityCaller;
+    /** Who a child's knowledge tools read for: the parent run's caller (default: from `runtimeContext`). */
+    kbCaller?: KbCaller;
     /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
@@ -2010,6 +2156,8 @@ export async function buildAgentSubagents(
                 input.projectId,
                 knowledgeSource,
                 input.guard,
+                // A child reads for the same caller as the run that delegated to it.
+                { caller: input.kbCaller ?? kbCallerFromRuntime(input.runtimeContext) },
             );
             childTools.push(...knowledge.tools);
         }
@@ -2232,6 +2380,8 @@ export async function buildBoundTools(
     runtimeContext?: AgentRuntimeContext,
     /** Who the run is for, as MCP servers set up for Console identity are told (default: from `runtimeContext`). */
     identity?: ConsoleIdentityCaller,
+    /** What a Flow tool (`source: 'flow'`) copies onto its run: the Session it belongs to, and whether anyone is there to answer. */
+    flowCaller?: { conversationId?: string; unattended?: boolean; accountableUserId?: string },
 ): Promise<{
     cleanupTasks: Array<() => Promise<void>>;
     tools: AgentSdkToolInterface[];
@@ -2313,6 +2463,7 @@ export async function buildBoundTools(
                             try {
                                 const { result, latencyMs, isError } = await executeToolAction(
                                     toolRecord, action.key, args, toolRuntimeHeaders,
+                                    { onSecrets: (values) => addSecretValues(toolSecretValues, values) },
                                 );
                                 // An MCP `isError` result is a failed call: logged as one, the text still reaches the model.
                                 log(
@@ -2331,7 +2482,8 @@ export async function buildBoundTools(
                         },
                     ),
                 });
-                tools.push(tool);
+                // Whether the call asks for approval is decided from the action's markings (`classifyTool`).
+                tools.push(Object.assign(tool, { hitlKind: classifyTool(action.name, effectiveActionAnnotations(action)) }));
                 definitions.push({ name: action.name, description, parameters: action.inputSchema });
             }
         } else if (binding.source === 'mcp') {
@@ -2364,6 +2516,8 @@ export async function buildBoundTools(
             // either layer. `guard` is the no-op when the agent binds nothing.
             const mcpBinding = resolveMcpGuardrailBinding(server);
             const guardAtAgent = mcpBinding.mode === 'off';
+            const annotationOverrides = getToolAnnotationOverrides(server);
+            const sourceAnnotations = defaultAnnotationsForSource(resolveSourceType(server));
 
             for (const toolName of binding.toolNames) {
                 const mcpToolDef = server.tools.find((t) => t.name === toolName);
@@ -2383,7 +2537,9 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    const { result, logSummary } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    // A knowledge base tool that ran on another node marked only its own work: mark the run's here.
+                    await noteRestrictedKnowledge(restrictedKnowledgeTagsOf(logSummary?.restrictedKnowledge));
                     if (isToolOutput(result)) return result;
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
@@ -2403,7 +2559,12 @@ export async function buildBoundTools(
                         )
                         : dispatch,
                 });
-                tools.push(tool);
+                const markings = mcpToolMarkings(
+                    mcpToolDef,
+                    Object.hasOwn(annotationOverrides, toolName) ? annotationOverrides[toolName] : undefined,
+                    sourceAnnotations,
+                );
+                tools.push(Object.assign(tool, { hitlKind: classifyTool(mcpToolDef.name, markings) }));
                 definitions.push({ name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema });
             }
         } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
@@ -2487,6 +2648,33 @@ export async function buildBoundTools(
             }));
             tools.push(...webFetchTools.tools);
             definitions.push(...webFetchTools.definitions);
+        } else if (binding.source === 'flow') {
+            // ── Flow as a tool ──────────────────────────────────
+            // The tool name is what the HITL policy is keyed by, and the call is guarded under
+            // `agent.flow.<flowKey>` like any other tool. A binding whose flow is gone is skipped.
+            const flowsHost = getFlowsHost();
+            if (!flowsHost) {
+                logger.warn('flow tool binding skipped: Flows are not part of this edition', { flow: binding.sourceKey });
+                continue;
+            }
+            const flowTools = await flowsHost.buildToolBindings({
+                tenantDbName,
+                tenantId,
+                projectId,
+                binding: { sourceKey: binding.sourceKey, toolNames: binding.toolNames, config: binding.config },
+                buildTool: (definition) => createToolFn(definition as Parameters<typeof createToolFn>[0]),
+                guard,
+                caller: {
+                    ...(mcpIdentity.agentKey ? { agentKey: mcpIdentity.agentKey } : {}),
+                    ...(mcpIdentity.userId ? { userId: mcpIdentity.userId } : {}),
+                    ...(mcpIdentity.tokenId ? { tokenId: mcpIdentity.tokenId } : {}),
+                    ...(flowCaller?.accountableUserId ? { accountableUserId: flowCaller.accountableUserId } : {}),
+                    ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId, sessionId: flowCaller.conversationId } : {}),
+                    ...(flowCaller?.unattended !== undefined ? { unattended: flowCaller.unattended } : {}),
+                },
+            });
+            tools.push(...(flowTools.tools as AgentSdkToolInterface[]));
+            definitions.push(...(flowTools.definitions as TraceToolDefinition[]));
         }
     }
 
@@ -2837,7 +3025,7 @@ export async function createInternalTracingSink(
                 toolsUsed: doc.toolName ? [doc.toolName] : [],
             }, projectId);
             // Hosted runs feed agent health only; the end-of-run booking knows these were counted here.
-            await recordTraceEventMetrics({ tenantDbName, tenantId, projectId, agentName: seed?.agent?.name, events: [doc], source: 'hosted' });
+            await recordTraceEventMetrics({ tenantDbName, tenantId, projectId, agentName: seed?.metadata?.flowOwned === 'true' ? undefined : seed?.agent?.name, events: [doc], source: 'hosted' });
         });
     };
 
@@ -2930,6 +3118,9 @@ export async function createInternalTracingSink(
                 // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
                 const cancelledByCaller = currentTurnSignal()?.aborted === true
                     && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
+                // What the traced work drew from documents not open to everyone (the sink runs inside the turn's
+                // exposure), with what an earlier part of the session already held.
+                const kbRestricted = restrictedKnowledgeTagsOf([...(existing?.kbRestricted ?? []), ...currentRestrictedKnowledgeTags()]);
 
                 const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
                     && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
@@ -2969,6 +3160,7 @@ export async function createInternalTracingSink(
                     truncatedEvents,
                     totalBytesIn: session.summary?.totalBytesIn ?? undefined,
                     totalBytesOut: session.summary?.totalBytesOut ?? undefined,
+                    ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
                 };
 
                 // The counters above already cover the stored events; what carries over from an earlier
@@ -3006,14 +3198,15 @@ export async function createInternalTracingSink(
                 // (subtracted below), or the events this part streamed, booked as they were written.
                 const partStart = continuation?.firstSequence ?? 0;
                 const partStored = appending ? stored.filter((doc) => (doc.sequence ?? 0) >= partStart) : [];
-                const bookedWhileStreaming = streamed && Boolean(seed?.agent?.name);
+                const bookedWhileStreaming = streamed && Boolean(seed?.agent?.name) && seed?.metadata?.flowOwned !== 'true';
 
                 // Hosted runs feed agent health only: their model and tool calls are counted where they execute.
                 await recordTraceEventMetrics({
                     tenantDbName,
                     tenantId,
                     projectId,
-                    agentName: sessionDoc.agentName,
+                    // A hidden agent a flow owns is not an agent of its own in the health views.
+                    agentName: seed?.metadata?.flowOwned === 'true' ? undefined : sessionDoc.agentName,
                     events: appending ? [...partStored, ...eventDocs] : eventDocs,
                     previousEvents: appending ? (bookedWhileStreaming ? partStored : []) : stored,
                     source: 'hosted',
@@ -3115,6 +3308,8 @@ export async function createAgentRecord(
         key?: string;
         /** Where the agent came from (`metadata.template` for an agent made from a template). */
         metadata?: IAgent['metadata'];
+        /** Makes it a hidden agent owned by a flow node (never listed; see `flows/ownedAgents.ts`). */
+        owner?: IAgent['owner'];
     },
 ): Promise<IAgent> {
     const db = await getDatabase();
@@ -3139,6 +3334,7 @@ export async function createAgentRecord(
         config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
         status: data.status || 'active',
         ...(data.metadata ? { metadata: data.metadata } : {}),
+        ...(data.owner ? { owner: data.owner } : {}),
         createdBy: userId,
     });
 
@@ -3181,6 +3377,8 @@ export async function deleteAgentRecord(
         // Its triggers (and their webhook delivery logs) go with it: nothing could fire them any more.
         if (deleted && agent) {
             const triggers = await db.listAgentTriggers({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            // A connector trigger gives up its subscription while its row still exists.
+            await detachConnectorTriggers({ tenantId: agent.tenantId, tenantDbName }, triggers);
             for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
             await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
         }
@@ -3197,14 +3395,23 @@ export async function getAgentById(
     return withMigratedReasoning(await db.findAgentById(agentId));
 }
 
+/**
+ * An agent by key, for the API surfaces that look agents up by name (the client API, A2A, the OpenAI
+ * bridge, triggers, analysis...). A hidden agent owned by a flow node is NOT found here - it is not
+ * addressable from outside its flow - unless the caller is the machinery behind the owning flow
+ * (`includeOwned`: trace sessions, approval and session access checks).
+ */
 export async function getAgentByKey(
     tenantDbName: string,
     key: string,
     projectId?: string,
+    options: { includeOwned?: boolean } = {},
 ): Promise<IAgent | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return withMigratedReasoning(await db.findAgentByKey(key, projectId));
+    const agent = await db.findAgentByKey(key, projectId);
+    if (agent?.owner && !options.includeOwned) return null;
+    return withMigratedReasoning(agent);
 }
 
 /** Read-side half of the `runtime.reasoning` migration (the save side is in create/update). */
@@ -3216,7 +3423,8 @@ function withMigratedReasoning(agent: IAgent | null): IAgent | null {
 
 export async function listAgents(
     tenantDbName: string,
-    filters?: { projectId?: string; status?: IAgent['status']; search?: string },
+    // Hidden agents owned by a flow node are left out unless `owned` asks for them (see the provider's `listAgents`).
+    filters?: { projectId?: string; status?: IAgent['status']; search?: string; owned?: 'include' | 'only'; ownerFlowId?: string },
 ): Promise<IAgent[]> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -3721,6 +3929,8 @@ export interface AgentChatRequest {
      * block is closed with a line saying where the external data ends.
      */
     externalContent?: boolean;
+    /** The event behind a webhook / connector trigger fire (`IAgentRun.triggerData`); a FlowBase agent hands it to its flow. */
+    triggerData?: Record<string, unknown>;
     /**
      * Incremental answer text — internal agents (model token stream) and
      * connected agents (SSE) alike. Functions cannot cross the job queue, so
@@ -4232,6 +4442,109 @@ async function runExternalAgentTurn(input: {
 }
 
 /**
+ * One turn of a FlowBase agent (`kind: 'flow'`): the agent's flow answers, no model loop runs.
+ *
+ * Like a connected agent it has no model call of its own, so the user turn and the answer go
+ * through the bound `input.pre` / `output.pre` guardrails here. The flow's tools are the flow's
+ * business: they run as flow nodes (`flowRunService`), not through `createAgentToolGuard`.
+ * `meta` is the run behind the reply (stored as `metadata.flow`), which the next turn reads
+ * back to resume a waiting run and to deliver messages the run emitted since. `activity` is what
+ * the flow did, stored with the reply (see `flowActivityFields`).
+ *
+ * Throws what the flows service throws (flow missing, not published, invalid input).
+ */
+async function runFlowAgentTurn(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    config: IAgentConfig;
+    userMessage: string;
+    /** Absent for a stateless playground call: every turn then starts the entry flow. */
+    conversationId?: string;
+    /** The Session's messages before this turn (the previous reply names the run to continue). */
+    priorMessages?: ReadonlyArray<{ role: string; metadata?: { flow?: { runId: string; eventSeq?: number } } }>;
+    runtimeContext?: AgentRuntimeContext;
+    /** The signed-in person (default: the runtime context's caller). */
+    userId?: string;
+    accountableUserId?: string;
+    unattended?: boolean;
+    /** The trigger event behind the run (`AgentChatRequest.triggerData`). */
+    triggerData?: Record<string, unknown>;
+    source: 'agent' | 'agent-playground';
+    onTextChunk?: (text: string) => void;
+}): Promise<{
+    userMessage: string;
+    sentAt: Date;
+    content: string;
+    meta?: AgentFlowReplyMeta;
+    activity?: FlowAgentTurnActivity;
+}> {
+    const { tenantDbName, tenantId, projectId, agentKey, config, source } = input;
+    if (!config.flow?.entryFlowId) throw new Error('This FlowBase agent has no flow configured');
+
+    const userMessage = await evaluateBoundGuardrails({
+        tenantDbName, tenantId, projectId, config, hook: 'input.pre', text: input.userMessage, source,
+    });
+    const sentAt = new Date();
+    const lastReply = [...(input.priorMessages ?? [])].reverse().find((message) => message.role === 'assistant');
+    const previousFlow = lastReply?.metadata?.flow;
+    const callerUserId = input.userId ?? input.runtimeContext?.userId;
+    const flowsHost = getFlowsHost();
+    if (!flowsHost) throw new FlowsUnavailableError('edition');
+    const turn = await flowsHost.runAgentTurn({
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        flow: config.flow,
+        message: userMessage,
+        ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+        ...(callerUserId ? { userId: callerUserId } : {}),
+        ...(input.runtimeContext?.tokenId ? { tokenId: input.runtimeContext.tokenId } : {}),
+        ...(input.accountableUserId ? { accountableUserId: input.accountableUserId } : {}),
+        ...(input.unattended !== undefined ? { unattended: input.unattended } : {}),
+        ...(input.triggerData ? { triggerData: input.triggerData } : {}),
+        ...(previousFlow ? { previous: { runId: previousFlow.runId, ...(previousFlow.eventSeq !== undefined ? { eventSeq: previousFlow.eventSeq } : {}) } } : {}),
+    });
+    const content = await evaluateBoundGuardrails({
+        tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: turn.content, source,
+    });
+    if (input.onTextChunk && content) {
+        try {
+            input.onTextChunk(content);
+        } catch (callbackError) {
+            logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+        }
+    }
+    return {
+        userMessage,
+        sentAt,
+        content,
+        ...(turn.meta ? { meta: turn.meta } : {}),
+        ...(turn.activity ? { activity: turn.activity } : {}),
+    };
+}
+
+/**
+ * A FlowBase turn's activity as fields of its assistant message: agent steps as sub-agent runs,
+ * the other steps as tool calls. The reasoning comes from the step agents (each one's own Show
+ * reasoning already applied); `showReasoning` is the FlowBase agent's own, which can only hide it.
+ */
+function flowActivityFields(
+    activity: FlowAgentTurnActivity | undefined,
+    showReasoning: boolean,
+): Pick<IAgentConversationMessage, 'reasoning' | 'steps' | 'subagentRuns' | 'subagentRunsDropped'> {
+    if (!activity) return {};
+    return {
+        ...(showReasoning && activity.reasoning ? { reasoning: activity.reasoning } : {}),
+        ...(activity.steps?.length ? { steps: activity.steps } : {}),
+        ...(activity.subagentRuns?.length ? { subagentRuns: activity.subagentRuns } : {}),
+        ...(activity.subagentRunsDropped ? { subagentRunsDropped: activity.subagentRunsDropped } : {}),
+    };
+}
+
+/**
  * Everything a local agent turn needs before `invoke()`: the model, the
  * rendered system prompt, the guardrail plugins, every tool, and the SDK agent
  * itself. ONE builder for the live chat and the playground, on purpose: an
@@ -4319,6 +4632,8 @@ async function buildLocalAgentRun(input: {
     const identity: ConsoleIdentityCaller = input.identity
         ? { ...input.identity, agentKey, projectId }
         : consoleIdentityCallerOf(runtimeContext, { agentKey, projectId, accountableUserId: input.accountableUserId });
+    // Who the knowledge tools of this run, and of its sub-agents, read for.
+    const kbCaller = knowledgeCallerOf({ identity: input.identity, runtimeContext });
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
     // published snapshot may still carry it).
     // Bindings of a switched-off service (knowledge engine, MCP, tools, browser, web search, memory,
@@ -4413,7 +4728,7 @@ async function buildLocalAgentRun(input: {
     const toolDefinitions: TraceToolDefinition[] = [];
     if (hasKnowledgeConfigured(config)) {
         const knowledgeTools = await buildAgentKnowledgeTools(
-            tenantDbName, tenantId, projectId, config, toolGuard,
+            tenantDbName, tenantId, projectId, config, toolGuard, { caller: kbCaller },
         );
         tools.push(...knowledgeTools.tools);
         toolDefinitions.push(...knowledgeTools.toolDefinitions);
@@ -4433,6 +4748,11 @@ async function buildLocalAgentRun(input: {
         toolGuard,
         runtimeContext,
         identity,
+        {
+            ...(input.conversation?._id ? { conversationId: String(input.conversation._id) } : {}),
+            ...(input.unattended !== undefined ? { unattended: input.unattended } : {}),
+            ...(input.accountableUserId ? { accountableUserId: input.accountableUserId } : {}),
+        },
     );
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
@@ -4554,7 +4874,7 @@ async function buildLocalAgentRun(input: {
     cleanupTasks.push(sandboxTools.cleanup);
     // `read`: one tool for the sandbox's files and the conversation's (images, PDFs, video included).
     const readSession = input.conversation && sessionFacts.any
-        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars }
+        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars, maxImageBytes: filesCfg.maxBytes }
         : undefined;
     const readTool = buildReadTool({
         createToolFn: createTool,
@@ -4599,6 +4919,8 @@ async function buildLocalAgentRun(input: {
     const remindersOn = resolveRemindersConfig(config.reminders, getConfig().agent.reminders);
     // A wake turn runs as a person (the owner checks need one): never offered to a run without one.
     if (input.conversation && remindersOn.available && input.userId) {
+        // The wake reads no more than this turn: as no one, unless its own context reads as this turn's caller.
+        const wakeReader = kbReaderOfFollowUp(kbCaller, { userId: input.userId, tokenId: runtimeContext?.tokenId, via: runtimeContext?.via });
         reminderTools = buildReminderTools({
             createToolFn: createTool,
             zod: z,
@@ -4613,6 +4935,7 @@ async function buildLocalAgentRun(input: {
                 ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
                 ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
                 ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
+                ...(wakeReader ? { kbReader: wakeReader } : {}),
                 ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
                 ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
                 ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),
@@ -4648,6 +4971,8 @@ async function buildLocalAgentRun(input: {
         ? (config.clientTools ?? []).filter((tool) => tool.enabled !== false).map(({ enabled: _enabled, ...tool }) => tool as Omit<typeof tool, 'needsApproval'>)
         : [];
     const declaredClientTools = [...ownClientTools, ...(input.embedded?.clientTools ?? [])];
+    // A caller's own tools are not covered by the "no choice made means ask" rule: only an explicit switch asks about them.
+    const clientApprovalPolicy = clientApprovalConfig(hitl);
     if (declaredClientTools.length > 0) {
         if (input.canPause === false || (input.unattended && !input.answersClientTools) || !input.conversation) {
             logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
@@ -4670,7 +4995,7 @@ async function buildLocalAgentRun(input: {
             // unattended runs may go ahead (`allow`), and then without asking.
             const offered = declaredClientTools.filter((tool) => {
                 if (taken.has(tool.name) || seen.has(tool.name)) return false;
-                if (input.unattended && clientToolNeedsApproval(tool, hitl) && hitl.unattended !== 'allow') {
+                if (input.unattended && clientToolNeedsApproval(tool, clientApprovalPolicy) && hitl.unattended !== 'allow') {
                     warnings.add(`Client tool "${tool.name}" was not offered: it needs approval and this caller cannot answer one.`);
                     return false;
                 }
@@ -4688,7 +5013,7 @@ async function buildLocalAgentRun(input: {
                     guard: toolGuard,
                     allowedTools,
                     // Nobody can be asked on an unattended run: what got this far was allowed to go ahead.
-                    approvalPolicy: input.unattended ? { ...hitl, toolApprovalEnabled: false } : hitl,
+                    approvalPolicy: input.unattended ? { ...hitl, toolApprovalEnabled: false } : clientApprovalPolicy,
                     exceptions: hitl.toolApprovalEnabled ? { byTool: hitl.toolExceptions, log: hitlLog } : undefined,
                 });
                 clientTools = built.tools;
@@ -4718,6 +5043,7 @@ async function buildLocalAgentRun(input: {
         guard: toolGuard,
         runtimeContext,
         identity,
+        kbCaller,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
         toolMedia,
@@ -4748,9 +5074,15 @@ async function buildLocalAgentRun(input: {
     const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
     const outputSchema = resolveTurnOutputSchema(config, input.responseFormat);
     const skillPolicy = resolveAgentSkillPolicy(config);
-    const tracingMetadata = input.modelChoice
-        ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
+    // A hidden agent a flow owns is traced under its flow even when no flow run started the turn (the Build editor's playground).
+    const ownerTags = !runtimeContext?.flow && agent.owner ? await ownedAgentFlowTags(tenantDbName, agent) : undefined;
+    const baseTracingMetadata = ownerTags || agent.owner
+        // `flowOwned` marks the session as one of a hidden agent: it is listed under its flow, never as an agent of its own.
+        ? { ...buildTracingMetadata(runtimeContext), ...ownerTags, ...(agent.owner ? { flowOwned: 'true' } : {}) }
         : buildTracingMetadata(runtimeContext);
+    const tracingMetadata = input.modelChoice
+        ? { ...baseTracingMetadata, agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
+        : baseTracingMetadata;
     // The sink opens the trace session on the run's first event, so it is told what the SDK's session
     // file will say about the run: the session shows the agent, version and thread while the run is going.
     const tracingSink = await createInternalTracingSink(
@@ -5378,7 +5710,7 @@ export async function executeAgentChatLocal(
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
+        return await runWithRoutingCaller(routingCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentChatTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -5440,6 +5772,7 @@ async function runAgentChatTurn(
         agent = foundAgent;
         config = foundAgent.config;
     }
+    assertOwnedAgentReachable(agent, request.runtimeContext);
 
     // 2. Load conversation
     let conversation = await db.findAgentConversationById(conversationId);
@@ -5457,7 +5790,7 @@ async function runAgentChatTurn(
 
     // Which model this turn runs on (the agent's additional models). Recorded only for agents that offer
     // some; the config the rest of the turn reads then names that model as its own.
-    const offersModels = config.kind !== 'external' && additionalModelKeys(config).length > 0;
+    const offersModels = config.kind !== 'external' && config.kind !== 'flow' && additionalModelKeys(config).length > 0;
     const modelChoice: AgentModelChoice | undefined = offersModels
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: conversation.metadata, background: Boolean(request.runId) })
         : undefined;
@@ -5483,7 +5816,7 @@ async function runAgentChatTurn(
     // The session's own budget and the tenant's spend limit, for a turn that
     // calls a model (a connected agent spends nothing here). Refused before the
     // event log opens, like the check above.
-    const callsModel = !(config.kind === 'external' && config.connection);
+    const callsModel = !(config.kind === 'external' && config.connection) && config.kind !== 'flow';
     const budgetPlan = callsModel ? planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd) : null;
     // Every turn adds its spend to the session's total — with a budget or without one.
     const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
@@ -5512,6 +5845,7 @@ async function runAgentChatTurn(
     });
     scope.events = turnEvents;
     noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
+    await bindKnowledgeExposure(db, conversation);
     if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
         await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
@@ -5592,6 +5926,61 @@ async function runAgentChatTurn(
             content: turn.content,
             messages: updatedMessages,
             ...(externalOutcome ? { outcome: externalOutcome } : {}),
+        });
+    }
+
+    // 2c. FlowBase agent — see `runFlowAgentTurn`. No model loop: the agent's flow answers, and its
+    // reply is stored with the run behind it (`metadata.flow`) so the next message can resume it.
+    if (config.kind === 'flow') {
+        const flowTurn = await runFlowAgentTurn({
+            tenantDbName,
+            tenantId,
+            projectId,
+            agentKey,
+            config,
+            userMessage,
+            conversationId,
+            priorMessages: conversation.messages || [],
+            runtimeContext: turnRuntimeContext,
+            userId: request.userId,
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            unattended: request.unattended,
+            ...(request.triggerData ? { triggerData: request.triggerData } : {}),
+            source: 'agent',
+            onTextChunk,
+        });
+        const flowMessages: IAgentConversation['messages'] = [
+            ...(conversation.messages || []),
+            { role: 'user', content: flowTurn.userMessage, timestamp: flowTurn.sentAt },
+            {
+                role: 'assistant',
+                content: flowTurn.content,
+                ...flowActivityFields(flowTurn.activity, agentShowsReasoning(config)),
+                ...(flowTurn.meta ? { metadata: { flow: flowTurn.meta } } : {}),
+                timestamp: new Date(),
+            },
+        ];
+        const flowSuperseded = isCancellationCellTripped(request.cancellationCell);
+        if (!flowSuperseded) {
+            await db.updateAgentConversation(conversationId, {
+                messages: flowMessages,
+                title: firstTurnTitle(conversation, flowMessages.length, flowTurn.userMessage),
+            });
+        }
+        await turnEvents.finish({
+            stopReason: toSessionStopReason(flowSuperseded ? 'cancelled' : 'completed'),
+            content: flowTurn.content,
+            messageIndex: flowMessages.length - 1,
+            userMessage: flowTurn.userMessage,
+        });
+
+        return toAgentChatResponse({
+            conversationId,
+            priorMessageCount: conversation.messages?.length ?? 0,
+            agentName: agent.name,
+            version: resolvedVersion,
+            content: flowTurn.content,
+            messages: flowMessages,
         });
     }
 
@@ -5940,7 +6329,6 @@ export async function executePlaygroundChat(
     return result;
 }
 
-
 /**
  * Flattens the SDK's tool history into the playground's step list.
  *
@@ -6218,7 +6606,7 @@ export async function executePlaygroundChatLocal(
             ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
             run: {},
         };
-        return await runWithRoutingCaller(caller, () => runPlaygroundChatTurn(request, scope));
+        return await runWithRoutingCaller(caller, () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runPlaygroundChatTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -6236,6 +6624,7 @@ async function runPlaygroundChatTurn(
 
     const agent = await db.findAgentByKey(agentKey, projectId);
     if (!agent) throw new Error(`Agent "${agentKey}" not found`);
+    assertOwnedAgentReachable(agent, request.runtimeContext);
 
     // A real Session: load its history from storage rather than trusting
     // whatever the caller sent, and remember the row so the exchange can be
@@ -6259,7 +6648,7 @@ async function runPlaygroundChatTurn(
         config = snapshot.snapshot.config;
         ranVersion = request.version;
     }
-    const offersModels = config.kind !== 'external' && additionalModelKeys(config).length > 0;
+    const offersModels = config.kind !== 'external' && config.kind !== 'flow' && additionalModelKeys(config).length > 0;
     const modelChoice: AgentModelChoice | undefined = offersModels
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: sessionConversation?.metadata })
         : undefined;
@@ -6282,7 +6671,7 @@ async function runPlaygroundChatTurn(
     // The session's own budget (a Session only — a stateless call has none) and
     // the tenant's spend limit, for a turn that calls a model. Refused before the
     // event log opens, like the check above.
-    const callsModel = !(config.kind === 'external' && config.connection);
+    const callsModel = !(config.kind === 'external' && config.connection) && config.kind !== 'flow';
     const budgetPlan = callsModel && sessionConversation
         ? planSessionBudget(sessionConversation, config.runtime?.limits?.maxCostUsd)
         : null;
@@ -6319,6 +6708,7 @@ async function runPlaygroundChatTurn(
         : undefined;
     scope.events = turnEvents;
     if (turnEvents && sessionConversation) noteRoutingRun({ conversationId: String(sessionConversation._id), turnId: turnEvents.turnId });
+    if (sessionConversation) await bindKnowledgeExposure(db, sessionConversation);
     if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
         && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
@@ -6388,6 +6778,45 @@ async function runPlaygroundChatTurn(
 
         logger.info('Connected agent playground chat completed', { agentKey });
         return externalResult;
+    }
+
+    // FlowBase agent — see `runFlowAgentTurn`. The reply carries the run behind it as `metadata.flow`,
+    // which a Session stores so the next message resumes a waiting run.
+    if (config.kind === 'flow') {
+        const flowStartedAt = Date.now();
+        const flowTurn = await runFlowAgentTurn({
+            tenantDbName,
+            tenantId,
+            projectId,
+            agentKey,
+            config,
+            userMessage,
+            ...(sessionConversation ? { conversationId: String(sessionConversation._id) } : {}),
+            priorMessages: sessionConversation?.messages ?? [],
+            runtimeContext,
+            source: 'agent-playground',
+            onTextChunk,
+        });
+        // The operator's view gets the step agents' reasoning; the Session stores it only when this agent shows it.
+        const flowResult: AgentPlaygroundChatResult = {
+            content: flowTurn.content,
+            version: ranVersion,
+            latencyMs: Date.now() - flowStartedAt,
+            ...flowActivityFields(flowTurn.activity, true),
+            ...(flowTurn.meta ? { metadata: { flow: flowTurn.meta } } : {}),
+        };
+        if (sessionConversation) {
+            const stored = agentShowsReasoning(config) ? flowResult : { ...flowResult, reasoning: undefined };
+            const messageCount = await persistSessionTurn(db, sessionConversation, flowTurn.userMessage, stored);
+            await turnEvents?.finish({
+                stopReason: toSessionStopReason('completed'),
+                content: flowTurn.content,
+                ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+            });
+        }
+
+        logger.info('FlowBase agent playground chat completed', { agentKey });
+        return flowResult;
     }
 
     const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
@@ -6942,7 +7371,7 @@ export async function executeAgentResumeLocal(request: AgentResumeRequest): Prom
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runWithRoutingCaller(resumeCallerOf(request), () => runAgentResumeTurn(request, scope));
+        return await runWithRoutingCaller(resumeCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentResumeTurn(request, scope)));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -7103,6 +7532,7 @@ async function runAgentResumeTurn(
         });
         scope.events = turnEvents;
         noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
+        await bindKnowledgeExposure(db, conversation);
         const onTextChunk = request.onTextChunk
             ? (text: string) => {
                 turnEvents.onText(text);
