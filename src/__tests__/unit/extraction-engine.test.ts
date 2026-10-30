@@ -380,10 +380,14 @@ describe('with OCR on and a project model', () => {
     expect(hoisted.handleOcrRequest).toHaveBeenCalledWith(
       expect.objectContaining({
         input: { document: { kind: 'bytes', data: PDF, contentType: 'application/pdf', fileName: 'scan.pdf' }, pages: [2, 5], language: 'tr' },
-        resilience: { timeoutMs: 900_000, retry: { enabled: false } },
+        resilience: { timeoutMs: expect.any(Number), retry: { enabled: false } },
         logErrors: true,
       }),
     );
+    // What is left of the background budget's 15 minutes: a slow runner may have spent a few milliseconds of it.
+    const { timeoutMs } = hoisted.handleOcrRequest.mock.calls[0][0].resilience;
+    expect(timeoutMs).toBeLessThanOrEqual(900_000);
+    expect(timeoutMs).toBeGreaterThan(890_000);
   });
 
   it('numbers the pages of a document-level answer that carries no page numbers', async () => {
