@@ -108,6 +108,31 @@ export function estimateTokensFromText(text: string): number {
 }
 
 /**
+ * The usage of a stream that stopped short of its terminal chunk (a hang-up, a failure, a guardrail block).
+ *
+ * A provider's usage chunks are cumulative and an early one holds the exact prompt side with almost no output
+ * (Anthropic's `message_start`: `output_tokens` about 1), so what it reports is only a FLOOR for the output the
+ * provider generated and bills. The booked output is the larger of that floor and the estimate from what was
+ * streamed (`estimatedOutputTokens`, the same chars/4 rule `estimatedUsage` uses). The prompt, cache and
+ * reasoning counts stay the provider's; `estimated` is true only when the estimate won, so a measured count
+ * and a guessed one stay distinguishable downstream.
+ */
+export function floorOutputAtEstimate(
+  usage: TokenUsage,
+  estimatedOutputTokens: number,
+): { usage: TokenUsage; estimated: boolean } {
+  if (estimatedOutputTokens <= (usage.outputTokens ?? 0)) return { usage, estimated: false };
+  return {
+    usage: {
+      ...usage,
+      outputTokens: estimatedOutputTokens,
+      totalTokens: (usage.inputTokens ?? 0) + estimatedOutputTokens,
+    },
+    estimated: true,
+  };
+}
+
+/**
  * chars/4 over an OpenAI-shaped prompt: every message's text (string content and
  * text parts), the assistant tool-call arguments, and the tool definitions. Images
  * and other binary parts are not counted. For a call the provider billed but never

@@ -429,7 +429,7 @@ describe('state persistence helpers', () => {
         const pricing = { inputTokenPer1M: 1, outputTokenPer1M: 1 } as never;
         const estimator = buildCostEstimator([{ names: ['m'], pricing }], pricing, calc as never)!;
         estimator({ modelName: 'm', inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, cacheWriteTokens: 30 });
-        expect(calc).toHaveBeenCalledWith(pricing, { inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, cachedWriteTokens: 30 });
+        expect(calc).toHaveBeenCalledWith(pricing, { inputTokens: 550, outputTokens: 5, cachedInputTokens: 500, cachedWriteTokens: 30 }, undefined);
     });
 
     it('prices a cache-heavy request with the shared rule: read and write slices at their own rate, a blank price at the input rate', async () => {

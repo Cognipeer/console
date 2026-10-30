@@ -35,8 +35,9 @@ const OPENAI_FINISH_REASONS: ReadonlySet<string> = new Set([
  * clients and the usage rows have always seen exactly what the upstream said. A
  * provider with its own vocabulary (Anthropic `end_turn` / `tool_use` /
  * `max_tokens`, Bedrock, Gemini) cannot put its words on this wire: its reason is
- * the SDK's OpenAI-vocabulary one, and the SDK's `error` (not an OpenAI value) is
- * a plain `stop`.
+ * the SDK's OpenAI-vocabulary one. The SDK's `error` (not an OpenAI value) never
+ * gets here from a call: the core fails it first (`isProviderErrorFinish`), so only
+ * a bare mapping call reads it as a plain `stop`.
  */
 export function wireFinishReason(
   driver: string | undefined,
@@ -62,6 +63,29 @@ export function wireFinishReason(
 export function finishWithToolCalls(driver: string | undefined, finish: string, hasToolCalls: boolean): string {
   if (!hasToolCalls || finish !== 'stop') return finish;
   return driver && OPENAI_SCHEMA_DRIVERS.has(driver) ? finish : 'tool_calls';
+}
+
+/**
+ * Raw stop reasons that say the provider's own output was broken, a tool call it could not form: Gemini's
+ * `MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL`, Bedrock's `malformed_model_output` / `malformed_tool_use`.
+ * agent-sdk >= 0.21 normalizes Gemini's to `error` and 0.22 will do the same for Bedrock's; until then a Bedrock
+ * one reaches the gateway as a plain `stop` with its raw reason kept, so the raw value is judged too.
+ */
+const BROKEN_OUTPUT_FINISH_REASONS: ReadonlySet<string> = new Set([
+  'malformed_function_call',
+  'unexpected_tool_call',
+  'malformed_model_output',
+  'malformed_tool_use',
+]);
+
+/**
+ * True when the provider ended the call in its own error finish: the SDK's normalized `error`, or a raw stop
+ * reason that names broken output. Such a call FAILS (`UpstreamFinishError`): there is no OpenAI `finish_reason`
+ * for it, and a `stop` would hand the caller a broken tool call as a finished answer.
+ */
+export function isProviderErrorFinish(raw: string | undefined, normalized: FinishReason | undefined): boolean {
+  if (normalized === 'error') return true;
+  return typeof raw === 'string' && BROKEN_OUTPUT_FINISH_REASONS.has(raw.trim().toLowerCase());
 }
 
 const PROVIDER_FINISH_REASONS: Readonly<Record<string, string>> = {

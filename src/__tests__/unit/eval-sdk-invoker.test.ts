@@ -123,7 +123,7 @@ beforeEach(() => {
   h.getDatabase.mockResolvedValue({
     switchToTenant: vi.fn(),
     listModels: vi.fn().mockResolvedValue([
-      { key: 'gpt-4o', pricing: { inputTokenPer1M: 5, outputTokenPer1M: 15 } },
+      { key: 'gpt-4o', providerDriver: 'openai', modelId: 'gpt-4o', pricing: { inputTokenPer1M: 5, outputTokenPer1M: 15 } },
     ]),
   });
 });
@@ -219,6 +219,7 @@ describe('resolveSdkProviderConfig — driver mapping table', () => {
       provider: 'openai',
       apiKey: 'sk-test',
       organization: 'org-1',
+      api: 'chat',
     });
   });
 
@@ -252,6 +253,7 @@ describe('resolveSdkProviderConfig — driver mapping table', () => {
       endpoint: 'https://my-res.openai.azure.com',
       deploymentName: 'gpt4o-dep',
       apiVersion: '2024-08-01-preview',
+      api: 'chat',
     });
   });
 
@@ -401,6 +403,8 @@ describe('adapter wiring — buildTargetInvoker (model targets)', () => {
     expect(h.calculateCost).toHaveBeenCalledWith(
       { inputTokenPer1M: 5, outputTokenPer1M: 15 },
       { inputTokens: 10, outputTokens: 5, cachedInputTokens: 2 },
+      // The model's driver + id ride along, so a Claude cache write is priced at its assumed rate.
+      { providerDriver: 'openai', modelId: 'gpt-4o' },
     );
   });
 

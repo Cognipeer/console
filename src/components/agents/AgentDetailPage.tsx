@@ -313,6 +313,8 @@ export default function AgentDetailPage() {
   // them. Absent stays absent — an untouched agent must serialize the same
   // config it had before these sections existed.
   const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
+  // Per-call output limit (`config.maxTokens` -> `max_tokens` on every model call). Blank = the model's own default.
+  const [maxTokens, setMaxTokens] = useState<number | undefined>(undefined);
   const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
   const [variablesConfig, setVariablesConfig] = useState<IAgentConfig['variables']>(undefined);
   const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
@@ -439,6 +441,7 @@ export default function AgentDetailPage() {
         });
         setShowReasoning(migrated.showReasoning !== false);
         setRuntimeConfig(migrated.runtime ?? {});
+        setMaxTokens(typeof cfg.maxTokens === 'number' && cfg.maxTokens > 0 ? cfg.maxTokens : undefined);
         setStructuredOutput(cfg.structuredOutput);
         setVariablesConfig(cfg.variables);
         setSubagents(cfg.subagents ?? []);
@@ -722,12 +725,15 @@ export default function AgentDetailPage() {
         ? mainReasoning.reasoningBudgetTokens
         : undefined,
       showReasoning: showReasoning ? undefined : false,
-      // No temperature / maxTokens. The form used to send 0.7 and 4096 on
-      // every save, so every agent was silently capped at 4096 output tokens
-      // and pinned to a temperature — settings nobody chose and, once the
-      // fields were removed, nobody could see. Leaving them out lets the
-      // model record's own settings govern; the next save clears any value
-      // an older save wrote. topP went the same way.
+      // No temperature. The form used to send 0.7 and 4096 on every save, so
+      // every agent was silently capped at 4096 output tokens and pinned to a
+      // temperature — settings nobody chose and, once the fields were removed,
+      // nobody could see. Leaving them out lets the model record's own
+      // settings govern; the next save clears any value an older save wrote.
+      // topP went the same way. maxTokens is back ONLY as an explicit field
+      // (Advanced > Max output tokens per call): blank stays absent, so the
+      // model's own default governs; a value is somebody's choice.
+      maxTokens,
       // Legacy single key is migrated into bindings on save.
       knowledgeEngineKey: undefined,
       knowledgeBindings: values.knowledgeBindings.filter((b) => b.key).length > 0
@@ -1547,6 +1553,13 @@ export default function AgentDetailPage() {
                 value={runtimeConfig}
                 onChange={setRuntimeConfig}
                 toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+                maxTokens={maxTokens}
+                onMaxTokensChange={(next) => setMaxTokens(next !== undefined && next > 0 ? Math.floor(next) : undefined)}
+                maxTokensLabels={{
+                  label: t('config.maxTokensPerCall'),
+                  description: t('config.maxTokensPerCallDescription'),
+                  placeholder: t('config.maxTokensPerCallPlaceholder'),
+                }}
               />
               <AgentRemindersSettings
                 value={remindersConfig}

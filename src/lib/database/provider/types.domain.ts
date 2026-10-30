@@ -1231,6 +1231,10 @@ export interface IRedTeamAggregate {
   bySeverity: Record<string, number>;
   byCategory: Record<string, IRedTeamCategoryBreakdown>;
   avgLatencyMs: number | null;
+  /** Attempts whose llm-judge detector errored: counted apart, never folded into "not hit". Absent on runs recorded before it existed. */
+  judgeErrors?: number;
+  /** Judge errors exceeded 20% of the judged attempts: the attack-success rate cannot be trusted. */
+  inconclusive?: boolean;
 }
 
 export interface IRedTeamRun {
@@ -1979,6 +1983,8 @@ export interface IRerankerConfig {
   batchSize?: number;
   /** Temperature for LLM strategies. */
   temperature?: number;
+  /** Output token limit of one LLM scoring call (llm-judge / llm-listwise). Default 32 for llm-judge, 1024 for llm-listwise. */
+  maxTokens?: number;
   /** Custom prompt template (llm-judge / llm-listwise). Supports {{query}} and {{document}} placeholders. */
   promptTemplate?: string;
   /** Score normalization — 'minmax' rescales scores to [0,1]. */
@@ -2120,6 +2126,8 @@ export type AlertMetric =
   | 'appgw_block_rate'
   | 'appgw_error_rate'
   | 'appgw_requests_per_user'
+  | 'appgw_output_limit_turns'
+  | 'appgw_output_limit_rate'
   // agents (entity_metrics; traced + hosted agents)
   | 'agent_sessions'
   | 'agent_error_rate'

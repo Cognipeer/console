@@ -39,6 +39,15 @@ export interface AgentAdvancedSettingsProps {
     onChange: (next: IAgentRuntimeConfig) => void;
     /** Tool names available to this agent, offered as ContextPilot exclusions. */
     toolNames?: string[];
+    /**
+     * The agent's per-call output limit (`config.maxTokens`, sent as `max_tokens` on every model call). It lives
+     * beside the runtime config, not in it, so it comes in on its own props; the field shows only when
+     * `onMaxTokensChange` is given. Blank = `undefined` = the model's own default. The labels come from the page
+     * (translated), this component keeps its English.
+     */
+    maxTokens?: number;
+    onMaxTokensChange?: (next: number | undefined) => void;
+    maxTokensLabels?: { label: string; description: string; placeholder: string };
 }
 
 const PROFILE_OPTIONS: DescribedSelectOption[] = [
@@ -155,6 +164,9 @@ export default function AgentAdvancedSettings({
     value,
     onChange,
     toolNames = [],
+    maxTokens,
+    onMaxTokensChange,
+    maxTokensLabels,
 }: AgentAdvancedSettingsProps) {
     const patch = (next: Partial<IAgentRuntimeConfig>) => onChange({ ...value, ...next });
 
@@ -280,6 +292,21 @@ export default function AgentAdvancedSettings({
                         }
                     />
                 </Group>
+                {onMaxTokensChange ? (
+                    <Group grow>
+                        <NumberInput
+                            label={maxTokensLabels?.label ?? 'Max output tokens per call'}
+                            description={maxTokensLabels?.description}
+                            placeholder={maxTokensLabels?.placeholder ?? 'Model default'}
+                            min={1}
+                            step={1024}
+                            allowDecimal={false}
+                            thousandSeparator=","
+                            value={maxTokens ?? ''}
+                            onChange={(next) => onMaxTokensChange(numberValue(next))}
+                        />
+                    </Group>
+                ) : null}
                 <Group grow>
                     <NumberInput
                         label="Max wall clock (ms)"

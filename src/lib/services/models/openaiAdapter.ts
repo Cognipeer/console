@@ -125,6 +125,21 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
+/**
+ * The prompt-cache breakpoint a client put on a content part (`cache_control`, the Anthropic / OpenRouter spelling,
+ * or the unified `cacheControl`). Only the ephemeral kind exists; anything else is not a breakpoint.
+ */
+function clientCacheControl(item: AnyRecord): { type: 'ephemeral'; ttl?: '5m' | '1h' } | undefined {
+  const raw = item.cache_control ?? item.cacheControl;
+  if (!isRecord(raw) || raw.type !== 'ephemeral') return undefined;
+  return raw.ttl === '5m' || raw.ttl === '1h' ? { type: 'ephemeral', ttl: raw.ttl } : { type: 'ephemeral' };
+}
+
+function textPart(text: string, item: AnyRecord): ContentPart {
+  const cacheControl = clientCacheControl(item);
+  return cacheControl ? { type: 'text', text, cacheControl } : { type: 'text', text };
+}
+
 function contentPartsToNative(content: unknown[], messageIndex: number): ContentPart[] {
   const parts: ContentPart[] = [];
   content.forEach((item, partIndex) => {
@@ -136,7 +151,7 @@ function contentPartsToNative(content: unknown[], messageIndex: number): Content
     const type = typeof item.type === 'string' ? item.type : undefined;
 
     if (type === 'text' && typeof item.text === 'string') {
-      parts.push({ type: 'text', text: item.text });
+      parts.push(textPart(item.text, item));
       return;
     }
 
@@ -180,7 +195,7 @@ function contentPartsToNative(content: unknown[], messageIndex: number): Content
     }
 
     if (typeof item.text === 'string') {
-      parts.push({ type: 'text', text: item.text });
+      parts.push(textPart(item.text, item));
       return;
     }
     // A part type this gateway does not know (a newer OpenAI type): kept as the
@@ -200,6 +215,18 @@ function contentToNative(content: unknown, messageIndex: number): string | Conte
   if (Array.isArray(content)) return contentPartsToNative(content, messageIndex);
   if (content === null || content === undefined) return '';
   return String(content);
+}
+
+/**
+ * The text parts of a system / tool message when a client marked one of them as a cache breakpoint, else undefined
+ * (the message is then flattened to a string as before). Keeping the parts is what lets the breakpoint reach the
+ * provider; the flattened text has nowhere to carry it.
+ */
+function markedTextParts(content: unknown, messageIndex: number): ContentPart[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const parts = contentPartsToNative(content, messageIndex);
+  if (!parts.some((part) => part.type === 'text' && part.cacheControl)) return undefined;
+  return parts.filter((part) => part.type === 'text');
 }
 
 function contentAsText(content: unknown, messageIndex: number): string {
@@ -247,7 +274,7 @@ export function openAiMessagesToNative(messages: OpenAIMessage[]): UnifiedMessag
     switch (message.role) {
       case 'system':
       case 'developer':
-        return { role: 'system', content: contentAsText(message.content, messageIndex) };
+        return { role: 'system', content: markedTextParts(message.content, messageIndex) ?? contentAsText(message.content, messageIndex) };
       case 'assistant': {
         const content = contentToNative(message.content, messageIndex);
         const toolCalls = incomingToolCalls(message.tool_calls);
@@ -261,7 +288,7 @@ export function openAiMessagesToNative(messages: OpenAIMessage[]): UnifiedMessag
       case 'tool':
         return {
           role: 'tool',
-          content: contentAsText(message.content, messageIndex),
+          content: markedTextParts(message.content, messageIndex) ?? contentAsText(message.content, messageIndex),
           toolCallId: message.tool_call_id || message.name || 'tool-call',
           ...(message.name ? { name: message.name } : {}),
         };

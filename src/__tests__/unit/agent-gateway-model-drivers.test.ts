@@ -296,7 +296,8 @@ describe('azure', () => {
     const model = await build({ modelId: 'gpt-5', settings: { maxTokens: 90 } }, { fetch, reasoning: { effort: 'medium' } });
     await model.invoke(USER);
     expect(calls[0].url).toContain('/openai/deployments/gpt-5/chat/completions');
-    expect(calls[0].body.max_completion_tokens).toBe(90);
+    // The model's small 90 is raised to the table value of effort medium (reasoning tokens count against the limit).
+    expect(calls[0].body.max_completion_tokens).toBe(16384);
     expect(calls[0].body.reasoning_effort).toBe('medium');
   });
 
@@ -372,7 +373,7 @@ describe('anthropic', () => {
     usage: { input_tokens: 10, output_tokens: 5, ...usage },
   });
 
-  it('sends Messages-API wire: key header, a max_tokens floor, tools as input_schema', async () => {
+  it('sends Messages-API wire: key header, the capped default max_tokens, tools as input_schema', async () => {
     const { calls, fetch } = recorder(() => json(messageResponse(
       [{ type: 'text', text: 'Hi' }, { type: 'tool_use', id: 'tu1', name: 'lookup', input: { q: 'x' } }],
       { cache_read_input_tokens: 7 },
@@ -384,7 +385,9 @@ describe('anthropic', () => {
     expect(calls[0].headers['x-api-key']).toBe('sk-ant');
     expect(calls[0].headers['anthropic-version']).toBeTruthy();
     expect(calls[0].body).toMatchObject({
-      model: 'claude-sonnet-4-5', max_tokens: 8192, temperature: 0.2, system: 'be brief',
+      model: 'claude-sonnet-4-5', max_tokens: 21333, temperature: 0.2,
+      // Prompt caching is on by default for Claude: the system prompt goes out as a block carrying the ephemeral marker.
+      system: [{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }],
       tools: [{ name: 'lookup', description: 'Find a thing', input_schema: { type: 'object' } }],
     });
     expect(reply.content).toBe('Hi');
@@ -551,7 +554,8 @@ describe('bedrock', () => {
     expect(calls[0].body).toMatchObject({
       inferenceConfig: { maxTokens: 700, temperature: 0.1, topP: 0.8 },
       additionalModelRequestFields: { top_k: 40 },
-      toolConfig: { tools: [{ toolSpec: { name: 'lookup' } }] },
+      // Prompt caching is on by default for Bedrock Claude: a cache checkpoint follows the tool specs.
+      toolConfig: { tools: [{ toolSpec: { name: 'lookup' } }, { cachePoint: { type: 'default' } }] },
     });
     expect(reply.content).toBe('Hi');
     expect(reply.tool_calls).toMatchObject([{ id: 'tu1', function: { name: 'lookup', arguments: '{"q":"x"}' } }]);
@@ -662,7 +666,8 @@ describe('vertex', () => {
     const bodies = calls.filter((c) => c.url.includes('generateContent')).map((c) => c.body.generationConfig?.thinkingConfig);
     expect(bodies[0]).toMatchObject({ includeThoughts: true });
     expect(bodies[0].thinkingBudget).toBeGreaterThan(0);
-    expect(bodies[1]).toMatchObject({ thinkingBudget: 0 });
+    // SDK 0.22: gemini-2.5-pro cannot turn thinking off, so "none" is clamped to the model's minimum budget (128).
+    expect(bodies[1]).toMatchObject({ thinkingBudget: 128 });
   });
 });
 

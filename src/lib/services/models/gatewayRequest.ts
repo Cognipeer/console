@@ -5,8 +5,10 @@
  * described for the logs.
  */
 
-import { AGENT_REASONING_OVERRIDE, normalizeReasoning, resolveGatewayReasoning } from '@/lib/services/models/reasoning';
+import { AGENT_REASONING_OVERRIDE, hasExplicitThinking, normalizeReasoning, resolveGatewayReasoning } from '@/lib/services/models/reasoning';
+import { computeOutputTokenLimit, modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { createLogger } from '@/lib/core/logger';
+import { PROMPT_CACHING_OPENAI_DRIVERS } from '@/lib/services/models/promptCaching';
 import type { IModel } from '@/lib/database';
 import { requestReasoningEffortAccepted, resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
 import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
@@ -294,6 +296,25 @@ function buildChatModelSettings(
     settings.maxCompletionTokens = overrides.max_completion_tokens;
   }
 
+  // The request's limit (any of the three names a caller may use) is THE limit of this call: it replaces
+  // both of the model's, so the native client - which reads `maxCompletionTokens` before `maxTokens` -
+  // sends the value `resolveOutputTokenLimit` reports, not a model-level `maxCompletionTokens` that the
+  // request's `max_tokens` was meant to override.
+  const requested = firstPositiveNumber(
+    overrides.max_completion_tokens,
+    overrides.max_tokens,
+    overrides.max_output_tokens,
+  );
+  if (requested !== undefined) {
+    settings.maxTokens = requested;
+    settings.maxCompletionTokens = requested;
+    // Marks the limit as the caller's: a hard cap the thinking headroom never raises (outputLimits.ts).
+    settings.requestMaxTokens = requested;
+  } else {
+    // Call-scoped: never read from a stored model record.
+    delete settings.requestMaxTokens;
+  }
+
   // Model Hub default > request value > nothing. The request only fills the
   // gap when the operator left the model's reasoning unset; it never overrides
   // what the UI pinned (see `resolveGatewayReasoning`).
@@ -320,103 +341,62 @@ function buildChatModelSettings(
   return settings;
 }
 
-function normalizeStrictJsonSchema(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(normalizeStrictJsonSchema);
-  }
-
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-
-  const schema = Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
-      key,
-      normalizeStrictJsonSchema(nestedValue),
-    ]),
-  );
-
-  if (schema.type === 'object' || schema.properties) {
-    schema.additionalProperties = false;
-  }
-
-  return schema;
+function firstPositiveNumber(...values: unknown[]): number | undefined {
+  return values.find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
 }
 
-function normalizeTools(tools: unknown, strictOverride: unknown): unknown {
-  if (!Array.isArray(tools)) {
-    return tools;
-  }
+/** What a call's output limit depends on besides the request and the model's settings. */
+export type OutputLimitContext = {
+  /** The provider driver; defaults to the model's own. */
+  driver?: string;
+  /** The model record: its declared maximum output beats the built-in table by model id. */
+  model?: IModel;
+  /** A streaming call; a non-streaming default is capped (outputLimits.ts). */
+  stream?: boolean;
+  /**
+   * What the native client derives thinking from for this call: the normalized reasoning of the call's
+   * settings (`{ effort?, budgetTokens?, includeThoughts? }`, any shape `normalizeReasoning` reads).
+   * Pass undefined for a call that runs without thinking (a tool loop whose signed thinking blocks were
+   * lost, see `hasUnreplayableToolTurn`).
+   */
+  reasoning?: unknown;
+};
 
-  return tools.map((tool) => {
-    if (!tool || typeof tool !== 'object') {
-      return tool;
-    }
-
-    const normalizedTool = { ...(tool as Record<string, unknown>) };
-    if (!normalizedTool.function || typeof normalizedTool.function !== 'object') {
-      return normalizedTool;
-    }
-
-    const fn = { ...(normalizedTool.function as Record<string, unknown>) };
-    const strict = typeof strictOverride === 'boolean' ? strictOverride : fn.strict;
-    if (strict === true) {
-      fn.strict = true;
-      if (fn.parameters !== undefined) {
-        fn.parameters = normalizeStrictJsonSchema(fn.parameters);
-      }
-    }
-
-    normalizedTool.function = fn;
-    return normalizedTool;
-  });
-}
-
-function buildChatCallOptions(overrides: Record<string, unknown>) {
-  const options: Record<string, unknown> = {};
-
-  if (overrides.stop !== undefined) options.stop = overrides.stop;
-  if (overrides.tools !== undefined) {
-    options.tools = normalizeTools(overrides.tools, overrides.strict);
-  }
-  if (overrides.tool_choice !== undefined) options.tool_choice = overrides.tool_choice;
-  if (overrides.parallel_tool_calls !== undefined) {
-    options.parallel_tool_calls = overrides.parallel_tool_calls;
-  }
-  if (overrides.strict !== undefined) options.strict = overrides.strict;
-  if (overrides.stream_options !== undefined) {
-    options.stream_options = overrides.stream_options;
-  }
-  if (overrides.response_format !== undefined) {
-    options.response_format = overrides.response_format;
-  }
-  if (overrides.seed !== undefined) options.seed = overrides.seed;
-  if (overrides.modality !== undefined) {
-    options.modalities = Array.isArray(overrides.modality)
-      ? overrides.modality
-      : [overrides.modality];
-  }
-  if (overrides.max_output_tokens !== undefined) {
-    options.max_output_tokens = overrides.max_output_tokens;
-  }
-
-  return options;
-}
-
+/**
+ * The output limit of a call: the first positive of the caller / retry override (`max_completion_tokens`,
+ * `max_tokens`, `max_output_tokens`), the model's `maxCompletionTokens`, then its `maxTokens`.
+ *
+ * Without a context that is all it is. With a context it is EXACTLY the `max_tokens` the native client sends
+ * (the same `computeOutputTokenLimit` decides both): the driver default (anthropic: the model maximum, else
+ * 8192; a non-streaming default capped), then the thinking headroom, then capped by the model maximum when
+ * the value is a default or a raise. undefined = no limit is sent (the provider's maximum applies).
+ */
 export function resolveOutputTokenLimit(
   overrides: Record<string, unknown>,
   modelSettings: Record<string, unknown>,
+  context?: OutputLimitContext,
 ): number | undefined {
-  const candidates = [
+  const override = firstPositiveNumber(
     overrides.max_completion_tokens,
     overrides.max_tokens,
-    modelSettings.maxCompletionTokens,
-    modelSettings.maxTokens,
-  ];
-
-  return candidates.find(
-    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+    overrides.max_output_tokens,
+    modelSettings.requestMaxTokens,
   );
+  const configured = firstPositiveNumber(modelSettings.maxCompletionTokens, modelSettings.maxTokens);
+  if (!context) return override ?? configured;
+
+  return computeOutputTokenLimit({
+    driver: context.driver ?? context.model?.providerDriver,
+    modelId: context.model?.modelId,
+    modelMax: context.model
+      ? modelMaxOutputTokens(context.model)
+      : firstPositiveNumber(modelSettings.maxOutputTokens, modelSettings.max_output_tokens),
+    override,
+    configured,
+    stream: context.stream,
+    reasoning: context.reasoning,
+    explicitThinking: hasExplicitThinking(modelSettings.extraBody),
+  });
 }
 
 /**
@@ -430,12 +410,28 @@ export function resolveOutputTokenLimit(
  * deep so a caller's `chat_template_kwargs: { enable_thinking: true }` does not
  * erase a sibling key the operator set on the model.
  */
+/**
+ * OpenAI's prompt-cache request fields: a routing key, the retention (`in_memory` | `24h`, before GPT-5.6) and the
+ * options object (`{ ttl: '30m' | '12h', mode? }`, GPT-5.6 and later). They go to OpenAI and Azure OpenAI as the
+ * caller wrote them, with or without the model's "Allow extra parameters" switch; to an OpenAI-compatible or Together
+ * upstream (which may be a server that rejects them) only when that switch is on; and to no other provider:
+ * Anthropic, Bedrock and Vertex would answer a field they do not know with a 400.
+ */
+export const OPENAI_PROMPT_CACHE_FIELDS: readonly string[] = ['prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options'];
+
 export function buildPassthroughBody(
   modelSettings: unknown,
   body: Record<string, unknown>,
   blockedNames: Set<string>,
+  driver?: string,
 ): Record<string, unknown> | undefined {
   const settings = asRecord(modelSettings);
+  const bedrock = driver === 'bedrock';
+  const cacheFieldsUpstream = driver !== undefined && PROMPT_CACHING_OPENAI_DRIVERS.has(driver);
+  // OpenAI and Azure know the fields for certain; a compatible server is only sent them when the operator opted into passthrough.
+  const cacheFieldsAlways = driver === 'openai' || driver === 'azure';
+  // Bedrock: the caller's fields are collected apart and land only in `additionalModelRequestFields` (below).
+  const callerFields: Record<string, unknown> = {};
   const defaults = asRecord(settings.requestDefaults);
   const explicit = asRecord(settings.extraBody);
   const merged: Record<string, unknown> = { ...defaults, ...explicit };
@@ -456,9 +452,26 @@ export function buildPassthroughBody(
     const accept = (key: string) =>
       !KNOWN_REQUEST_FIELDS.has(key)
       && !PASSTHROUGH_DENYLIST.has(key.toLowerCase())
-      && !blockedNames.has(key.toLowerCase());
+      && !blockedNames.has(key.toLowerCase())
+      && (cacheFieldsUpstream || !OPENAI_PROMPT_CACHE_FIELDS.includes(key));
 
     const mergeField = (key: string, value: unknown) => {
+      if (bedrock) {
+        // Converse's own top-level fields (`guardrailConfig`, `serviceTier` ...) belong to the operator's model
+        // record: a caller's extra field is model-specific data and goes under `additionalModelRequestFields`.
+        if (key.startsWith('__') || BEDROCK_REQUEST_OWNED_FIELDS.has(key)) return;
+        if (key === 'additionalModelRequestFields') {
+          if (isPlainObject(value)) {
+            for (const [k, v] of Object.entries(value)) {
+              if (!k.startsWith('__')) callerFields[k] = v;
+            }
+          }
+          return;
+        }
+        const existing = callerFields[key];
+        callerFields[key] = isPlainObject(existing) && isPlainObject(value) ? { ...existing, ...value } : value;
+        return;
+      }
       const existing = merged[key];
       merged[key] = isPlainObject(existing) && isPlainObject(value)
         ? { ...existing, ...value }
@@ -480,8 +493,22 @@ export function buildPassthroughBody(
     }
   }
 
+  if (cacheFieldsAlways) {
+    for (const key of OPENAI_PROMPT_CACHE_FIELDS) {
+      if (body[key] !== undefined && body[key] !== null && !blockedNames.has(key)) merged[key] = body[key];
+    }
+  }
+
+  if (bedrock && Object.keys(callerFields).length > 0) {
+    const operatorFields = asRecord(merged.additionalModelRequestFields);
+    merged.additionalModelRequestFields = { ...operatorFields, ...callerFields };
+  }
+
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
+
+/** Converse request fields the gateway builds itself; a caller's passthrough never carries them on Bedrock. */
+const BEDROCK_REQUEST_OWNED_FIELDS: ReadonlySet<string> = new Set(['messages', 'system', 'inferenceConfig', 'toolConfig']);
 
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -499,11 +526,10 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
  * settings object keeps that single strip point authoritative.
  */
 export function resolveModelInvocationConfig(
-  model: Pick<IModel, 'settings'> & Partial<Pick<IModel, 'modelId' | 'providerDriver'>>,
+  model: Pick<IModel, 'settings'> & Partial<Pick<IModel, 'modelId' | 'providerDriver' | 'metadata'>>,
   body: Record<string, unknown>,
 ): {
   modelSettings: Record<string, unknown>;
-  callOptions: Record<string, unknown>;
   overrides: Record<string, unknown>;
   extraBody?: Record<string, unknown>;
   unsupportedParams: string[];
@@ -532,11 +558,16 @@ export function resolveModelInvocationConfig(
     (body as { [AGENT_REASONING_OVERRIDE]?: unknown })[AGENT_REASONING_OVERRIDE],
     { driver: model.providerDriver, modelId: model.modelId },
   );
-  const extraBody = buildPassthroughBody(model.settings, body, blockedLower);
+  const extraBody = buildPassthroughBody(model.settings, body, blockedLower, model.providerDriver);
 
   if (extraBody) {
     modelSettings.extraBody = extraBody;
   }
+
+  // The model's declared maximum output rides along so the native client, which never sees the record,
+  // caps defaults and raises at the same number `resolveOutputTokenLimit` does.
+  const maxOutput = modelMaxOutputTokens(model as IModel);
+  if (maxOutput !== undefined) modelSettings.maxOutputTokens = maxOutput;
 
   // `reasoning`/`reasoning_effort` is a call-level field the constructor
   // wiring (openAiChatOverrides) always forwards, so — unlike the other
@@ -574,7 +605,6 @@ export function resolveModelInvocationConfig(
 
   return {
     modelSettings,
-    callOptions: buildChatCallOptions(overrides),
     overrides,
     extraBody,
     unsupportedParams,

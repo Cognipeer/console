@@ -116,7 +116,8 @@ describe('openai native client', () => {
     const client = await (await make()).createNativeChatClient!(config('gpt-5.2', { temperature: 0.4, topP: 0.9, maxTokens: 500 }), { fetch });
     await client.complete({ ...USER, reasoning: { effort: 'high' } });
     expect(calls[0].url).toBe('https://api.openai.com/v1/chat/completions');
-    expect(calls[0].body).toMatchObject({ max_completion_tokens: 500, reasoning_effort: 'high' });
+    // Reasoning tokens count against the limit: the model's small 500 is raised to the table value of effort high.
+    expect(calls[0].body).toMatchObject({ max_completion_tokens: 32768, reasoning_effort: 'high' });
     expect(calls[0].body.max_tokens).toBeUndefined();
     expect(calls[0].body.temperature).toBeUndefined();
     expect(calls[0].body.top_p).toBeUndefined();
@@ -220,7 +221,8 @@ describe('azure native client', () => {
     const client = await (await make()).createNativeChatClient!(config('gpt-5', { maxTokens: 90 }), { fetch });
     await client.complete({ ...USER, reasoning: { effort: 'medium' } });
     expect(calls[0].url).toContain('/openai/deployments/gpt-5/chat/completions');
-    expect(calls[0].body).toMatchObject({ max_completion_tokens: 90, reasoning_effort: 'medium' });
+    // The model's small 90 is raised to the table value of effort medium.
+    expect(calls[0].body).toMatchObject({ max_completion_tokens: 16384, reasoning_effort: 'medium' });
   });
 
   it('embeds against the embedding DEPLOYMENT, not the chat one', async () => {
@@ -300,7 +302,7 @@ describe('anthropic native client', () => {
     usage: { input_tokens: 10, output_tokens: 5, ...usage },
   });
 
-  it('Messages wire: key header, a max_tokens floor, system, tools as input_schema; parsed output', async () => {
+  it('Messages wire: key header, the capped default max_tokens, system, tools as input_schema; parsed output', async () => {
     const { calls, fetch } = recorder(() => json(messageResponse(
       [{ type: 'text', text: 'Hi' }, { type: 'tool_use', id: 'tu1', name: 'lookup', input: { q: 'x' } }], { cache_read_input_tokens: 7 })));
     const client = await (await make()).createNativeChatClient!(config('claude-sonnet-4-5', { temperature: 0.2 }), { fetch });
@@ -308,7 +310,9 @@ describe('anthropic native client', () => {
     expect(calls[0].url).toBe('https://api.anthropic.com/v1/messages');
     expect(calls[0].headers['x-api-key']).toBe('sk-ant');
     expect(calls[0].body).toMatchObject({
-      model: 'claude-sonnet-4-5', max_tokens: 8192, temperature: 0.2, system: 'be brief',
+      model: 'claude-sonnet-4-5', max_tokens: 21333, temperature: 0.2,
+      // Prompt caching is on by default for Claude, so the SDK marks the system prompt.
+      system: [{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }],
       tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
     });
     expect(res.content).toBe('Hi');
@@ -317,7 +321,28 @@ describe('anthropic native client', () => {
     expect(res.rawFinishReason).toBe('end_turn');
   });
 
-  it('a configured limit wins over the floor; a custom base URL is honoured', async () => {
+  it('an unset limit is the model maximum when streaming, the capped default otherwise, the 8192 floor for an unknown model', async () => {
+    const event = (type: string, data: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const stream = [
+      event('message_start', { message: { id: 'msg_1', model: 'claude-sonnet-4-5', usage: { input_tokens: 1, output_tokens: 1 } } }),
+      event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }),
+      event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Hi' } }),
+      event('content_block_stop', { index: 0 }),
+      event('message_delta', { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } }),
+      event('message_stop', {}),
+    ].join('');
+    const streaming = recorder(() => new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    const known = await (await make()).createNativeChatClient!(config('claude-sonnet-4-5', {}), { fetch: streaming.fetch });
+    for await (const chunk of known.stream(USER)) void chunk;
+    expect(streaming.calls[0].body.max_tokens).toBe(64000);
+
+    const plain = recorder(() => json(messageResponse([{ type: 'text', text: 'ok' }])));
+    const unknown = await (await make()).createNativeChatClient!(config('claude-3-7-sonnet-20250219', {}), { fetch: plain.fetch });
+    await unknown.complete(USER);
+    expect(plain.calls[0].body.max_tokens).toBe(8192);
+  });
+
+  it('a configured limit wins over the default; a custom base URL is honoured', async () => {
     const { calls, fetch } = recorder(() => json(messageResponse([{ type: 'text', text: 'ok' }])));
     const client = await (await make({ baseUrl: 'https://claude-proxy.example' })).createNativeChatClient!(config('claude-sonnet-4-5', { maxTokens: 321 }), { fetch });
     await client.complete(USER);
@@ -415,7 +440,8 @@ describe('vertex native client', () => {
     const call = calls.find((c) => c.url.includes('generateContent'))!;
     expect(call.url).toContain('/projects/proj-1/locations/europe-west4/publishers/google/models/gemini-2.5-pro:generateContent');
     expect(call.headers.authorization).toBe('Bearer ya29.token');
-    expect(call.body.generationConfig).toMatchObject({ temperature: 0.3, maxOutputTokens: 400 });
+    // effort 'high' (budget 16384) raises the small 400 limit to budget + 2048 so thinking leaves room for the answer
+    expect(call.body.generationConfig).toMatchObject({ temperature: 0.3, maxOutputTokens: 18432 });
     expect(call.body.generationConfig.thinkingConfig).toMatchObject({ includeThoughts: true });
     expect(call.body.tools[0].functionDeclarations[0].name).toBe('lookup');
     expect(call.body.top_k).toBeUndefined();
@@ -423,11 +449,16 @@ describe('vertex native client', () => {
     expect(res.usage).toMatchObject({ inputTokens: 12, totalTokens: 15 });
   });
 
-  it('"none" is a zero thinking budget', async () => {
-    const { calls, fetch } = recorder(generate);
-    const client = await (await make()).createNativeChatClient!(config('gemini-2.5-pro'), { fetch });
-    await client.complete({ ...USER, reasoning: { effort: 'none' } });
-    expect(calls.find((c) => c.url.includes('generateContent'))!.body.generationConfig.thinkingConfig).toMatchObject({ thinkingBudget: 0 });
+  it('"none" is a zero thinking budget, or the minimum on a model that cannot turn thinking off', async () => {
+    const budgetFor = async (model: string) => {
+      const { calls, fetch } = recorder(generate);
+      const client = await (await make()).createNativeChatClient!(config(model), { fetch });
+      await client.complete({ ...USER, reasoning: { effort: 'none' } });
+      return calls.find((c) => c.url.includes('generateContent'))!.body.generationConfig.thinkingConfig;
+    };
+    expect(await budgetFor('gemini-2.5-flash')).toMatchObject({ thinkingBudget: 0 });
+    // Gemini 2.5 Pro always thinks (budget 128-32768), so "none" is its smallest budget.
+    expect(await budgetFor('gemini-2.5-pro')).toMatchObject({ thinkingBudget: 128 });
   });
 
   it('embeds through the :predict endpoint', async () => {

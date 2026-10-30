@@ -61,7 +61,8 @@ describe('reminder rules', () => {
   });
 
   it('keeps Runtime owning the reminders config key', () => {
-    expect(CONFIG_SECTION_KEYS.advanced).toEqual(['runtime', 'reminders']);
+    // `maxTokens` is the section's "Max output tokens per call".
+    expect(CONFIG_SECTION_KEYS.advanced).toEqual(['runtime', 'reminders', 'maxTokens']);
   });
 
   it('watches for a wake while one is still to come, fired or not', () => {

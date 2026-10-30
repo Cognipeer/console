@@ -24,6 +24,13 @@
  * toolCalls, or `extractToolCalls` on the gateway path), never executed.
  * Model targets also surface provider token usage and price it with the
  * target model's hub pricing (`calculateCost`) into `TargetOutput.usage`.
+ *
+ * Output limits: a call that was cut off at its output limit is never scored as
+ * a normal answer. With nothing to show (no visible text, no tool call - a
+ * reasoning model that spent the whole budget thinking) it is the item's error,
+ * naming the limit; with text it is returned flagged `truncated`. The gateway
+ * fallback gets the same verdicts from the gateway itself (it throws the first
+ * case) and from the finish reason of the response (the second).
  */
 
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
@@ -32,11 +39,16 @@ import {
   prepareSdkInvocation,
   SdkProviderMappingError,
   type PreparedSdkInvocation,
+  type SdkChatResult,
 } from './sdkInvoker';
 import { calculateCost } from '@/lib/services/models/usageLogger';
+import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
+import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationTarget, IModelPricing } from '@/lib/database';
 import { selectorForStoredDefault, type AgentRunSelector } from '@/lib/services/agents/agentRevision';
+import { sideCallReasoning } from '@/lib/services/agents/agentReasoning';
 import type {
   DatasetItem,
   EmbedInvoker,
@@ -58,6 +70,7 @@ export interface EvaluationModelContext {
 
 interface ChatLikeResponse {
   choices?: Array<{
+    finish_reason?: unknown;
     message?: {
       content?: unknown;
       tool_calls?: Array<{ function?: { name?: unknown; arguments?: unknown } }>;
@@ -72,6 +85,35 @@ export function extractAssistantText(response: unknown): string {
   if (content === null || content === undefined) return '';
   return JSON.stringify(content);
 }
+
+/** The first choice's finish reason of an OpenAI-shaped chat completion response, normalized. */
+function extractFinishReason(response: unknown): string | undefined {
+  return normalizeFinishReason((response as ChatLikeResponse | null | undefined)?.choices?.[0]?.finish_reason);
+}
+
+/**
+ * The SDK path's counterpart of the gateway's output-limit verdict (`completeOnce`): a `length` finish with
+ * nothing to show - no visible text (an unterminated `<think>` block is not an answer) and no tool call - is
+ * the item's error, carrying the limit the call was sent with and what it burned. A `length` finish WITH text
+ * or a tool call is returned to the caller, which flags it `truncated`.
+ */
+function assertAnswered(result: SdkChatResult): void {
+  if (result.finishReason !== 'length') return;
+  if (result.toolCalls.length > 0) return;
+  if (stripInlineReasoning(result.text).trim() !== '') return;
+  throw new OutputTokenLimitError(result.outputTokenLimit, {
+    ...(result.usage ? { usage: result.usage } : {}),
+    ...(result.rawFinishReason ? { rawFinishReason: result.rawFinishReason } : {}),
+  });
+}
+
+/**
+ * Output limit of an LLM-judge call when neither the judge model's record ("Default max tokens") nor anything
+ * else sets one: a verdict is a short JSON object, and every chat model - including a small self-hosted one -
+ * takes this much. A limit the judge model's record sets wins (and, like any limit a model record sets, may get
+ * thinking headroom).
+ */
+const JUDGE_DEFAULT_MAX_TOKENS = 4096;
 
 /**
  * Pull tool calls out of a provider response, normalised to {name, args}.
@@ -129,10 +171,13 @@ interface EvalCanonicalUsage {
   reasoningTokens?: number;
 }
 
+/** A model's pricing with the driver + id its cache-write rate follows. */
+interface EvalPricedModel { pricing: IModelPricing; providerDriver?: string; modelId?: string }
+
 /** Map the inference layer's TokenUsage onto the engine's EvalUsage. */
 function toEvalUsage(
   usage: EvalCanonicalUsage | undefined,
-  pricing: IModelPricing | null,
+  priced: EvalPricedModel | null,
 ): EvalUsage | undefined {
   if (!usage) return undefined;
   const evalUsage: EvalUsage = {
@@ -143,14 +188,14 @@ function toEvalUsage(
     ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
     ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
   };
-  if (pricing) {
-    evalUsage.costUsd = calculateCost(pricing, {
+  if (priced) {
+    evalUsage.costUsd = calculateCost(priced.pricing, {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cachedInputTokens: usage.cachedInputTokens,
       cachedWriteTokens: usage.cachedWriteTokens,
       reasoningTokens: usage.reasoningTokens,
-    }).totalCost;
+    }, { providerDriver: priced.providerDriver, modelId: priced.modelId }).totalCost;
   }
   return evalUsage;
 }
@@ -262,23 +307,30 @@ async function invokeModel(
   latencyMs?: number;
   raw: unknown;
   usage?: EvalCanonicalUsage;
+  /** The first choice's finish reason (`length` = cut off at the output limit). */
+  finishReason?: string;
 }> {
   const result = (await handleChatCompletion({
     tenantDbName: ctx.tenantDbName,
     tenantId: ctx.tenantId,
     modelKey,
     projectId: ctx.projectId,
+    // Its own route: an evaluation call is not production traffic (the gateway keeps such routes out of
+    // the semantic cache - a cached answer would grade the cache, not the model).
+    route: 'evaluation',
     body: { messages, ...extraBody },
   })) as {
     response?: unknown;
     latencyMs?: number;
     usage?: EvalCanonicalUsage;
   };
+  const finishReason = extractFinishReason(result.response);
   return {
     text: extractAssistantText(result.response),
     latencyMs: result.latencyMs,
     raw: result.response,
     usage: result.usage,
+    ...(finishReason ? { finishReason } : {}),
   };
 }
 
@@ -307,15 +359,16 @@ function toUserMessage(item: DatasetItem): string {
  * can be computed without a DB round-trip per invocation. Resolution failures
  * degrade to "no pricing" — the run must never fail over cost bookkeeping.
  */
-function buildPricingResolver(ctx: EvaluationModelContext, modelKey: string): () => Promise<IModelPricing | null> {
-  let cached: Promise<IModelPricing | null> | undefined;
+function buildPricingResolver(ctx: EvaluationModelContext, modelKey: string): () => Promise<EvalPricedModel | null> {
+  let cached: Promise<EvalPricedModel | null> | undefined;
   return () => {
     cached ??= (async () => {
       try {
         const db = await getDatabase();
         await db.switchToTenant(ctx.tenantDbName);
         const models = await db.listModels(ctx.projectId ? { projectId: ctx.projectId } : undefined);
-        return models.find((m) => m.key === modelKey)?.pricing ?? null;
+        const found = models.find((m) => m.key === modelKey);
+        return found?.pricing ? { pricing: found.pricing, providerDriver: found.providerDriver, modelId: found.modelId } : null;
       } catch {
         return null;
       }
@@ -428,7 +481,7 @@ export function buildTargetInvoker(
 ): TargetInvoker {
   const resolvePricing = target.kind === 'model' && target.modelKey
     ? buildPricingResolver(ctx, target.modelKey)
-    : () => Promise.resolve(null);
+    : () => Promise.resolve<EvalPricedModel | null>(null);
   const resolveInvocationPath = target.kind === 'model' && target.modelKey
     ? buildInvocationPathResolver(ctx, target.modelKey)
     : undefined;
@@ -459,13 +512,16 @@ export function buildTargetInvoker(
             maxTokens: target.maxTokens,
           },
         );
-        return {
+        assertAnswered(result);
+        const output: TargetOutput = {
           text: result.text,
           latencyMs: result.latencyMs,
           raw: result.raw,
           toolCalls: result.toolCalls,
           usage: toEvalUsage(result.usage, await resolvePricing()),
+          ...(result.finishReason === 'length' ? { truncated: true } : {}),
         };
+        return output;
       }
       // Gateway fallback — single-step trajectory test: expose the item's
       // tools so the model can *decide* to call them, but never execute
@@ -483,14 +539,16 @@ export function buildTargetInvoker(
         }));
         extraBody.tool_choice = 'auto';
       }
-      const { text, latencyMs, raw, usage } = await invokeModel(ctx, target.modelKey, messages, extraBody);
-      return {
+      const { text, latencyMs, raw, usage, finishReason } = await invokeModel(ctx, target.modelKey, messages, extraBody);
+      const output: TargetOutput = {
         text,
         latencyMs,
         raw,
         toolCalls: extractToolCalls(raw),
         usage: toEvalUsage(usage, await resolvePricing()),
+        ...(isTruncatedFinishReason(finishReason) ? { truncated: true } : {}),
       };
+      return output;
     }
     if (target.kind === 'agent') {
       if (!target.agentKey) throw new Error(`Evaluation target "${target.key}" has no agentKey configured`);
@@ -617,14 +675,23 @@ export function buildJudgeInvoker(judgeModelKey: string | undefined, ctx: Evalua
     const wire = messages.map((m) => ({ role: m.role, content: m.content }));
     const path = await resolveInvocationPath();
     if (path.mode === 'sdk') {
-      const { text } = await invokeChatViaSdk(
+      const result = await invokeChatViaSdk(
         { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },
         path.prepared.model,
         wire,
-        { config: path.prepared.config },
+        {
+          config: path.prepared.config,
+          // The verdict shares its limit with the thinking: the lowest thinking the model allows, and the 4096 only as
+          // the MODEL-level default (it then gets thinking headroom for any effort that remains).
+          defaultMaxTokens: JUDGE_DEFAULT_MAX_TOKENS,
+          reasoning: sideCallReasoning(path.prepared.model),
+        },
       );
-      return text;
+      assertAnswered(result);
+      return result.text;
     }
+    // The gateway resolves the judge's output limit itself (the model's own setting, else the driver default):
+    // a limit in the body would be a CALLER's cap and beat the "Default max tokens" the operator configured.
     const { text } = await invokeModel(ctx, judgeModelKey, wire);
     return text;
   };

@@ -5,7 +5,10 @@
  *
  * Queries the model price catalog (`/api/model-price-catalog/suggest`) with
  * the model id the user has entered and hands the matched per-1M prices back
- * through `onApply` so the caller can populate its pricing fields. No match
+ * through `onApply` so the caller can populate its pricing fields. The match's
+ * token limits (max input / max output, when the catalog has them) ride along
+ * in `meta` so the caller can fill an EMPTY context window / maximum output
+ * tokens field too. No match
  * (or an ambiguous one — the API never guesses) surfaces as an informational
  * notification instead of touching the form.
  */
@@ -24,11 +27,24 @@ export interface CatalogPricingFill {
   cacheWriteTokenPer1M: number;
 }
 
+export interface CatalogFillMeta {
+  catalogKey: string;
+  confidence: string;
+  /** The catalog entry's `max_input_tokens` (the context window); absent when the feed has none. */
+  maxInputTokens?: number;
+  /** The catalog entry's `max_output_tokens` (the model maximum); absent when the feed has none. */
+  maxOutputTokens?: number;
+}
+
 interface CatalogPriceFillProps {
   /** Model id (or key/name) to look up; matching is the server's concern. */
   modelId: string;
-  onApply: (pricing: CatalogPricingFill, meta: { catalogKey: string; confidence: string }) => void;
+  onApply: (pricing: CatalogPricingFill, meta: CatalogFillMeta) => void;
   size?: string;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 export default function CatalogPriceFill({ modelId, onApply, size = 'compact-xs' }: CatalogPriceFillProps) {
@@ -68,7 +84,12 @@ export default function CatalogPriceFill({ modelId, onApply, size = 'compact-xs'
           cachedTokenPer1M: Number(match.pricing?.cachedTokenPer1M) || 0,
           cacheWriteTokenPer1M: Number(match.pricing?.cacheWriteTokenPer1M) || 0,
         },
-        { catalogKey: match.catalogKey, confidence: match.confidence },
+        {
+          catalogKey: match.catalogKey,
+          confidence: match.confidence,
+          ...(positiveInt(match.maxInputTokens) ? { maxInputTokens: positiveInt(match.maxInputTokens) } : {}),
+          ...(positiveInt(match.maxOutputTokens) ? { maxOutputTokens: positiveInt(match.maxOutputTokens) } : {}),
+        },
       );
       notifications.show({
         color: 'teal',

@@ -169,6 +169,8 @@ export const alertsTr: typeof alertsEn = {
     appgw_block_rate: 'AI App Gateway Engelleme Oranı',
     appgw_error_rate: 'AI App Gateway Hata Oranı',
     appgw_requests_per_user: 'AI App Gateway En Yoğun Kullanıcı (istek)',
+    appgw_output_limit_turns: 'AI App Gateway Çıktı Sınırında Biten Turlar',
+    appgw_output_limit_rate: 'AI App Gateway Çıktı Sınırı Oranı',
     agent_sessions: 'Ajan Oturumları',
     agent_error_rate: 'Ajan Hata Oranı',
     agent_error_events: 'Ajan Hata Olayları',

@@ -168,6 +168,8 @@ export const alertsEn = {
     appgw_block_rate: 'AI App Gateway Block Rate',
     appgw_error_rate: 'AI App Gateway Error Rate',
     appgw_requests_per_user: 'AI App Gateway Busiest User (requests)',
+    appgw_output_limit_turns: 'AI App Gateway Output-Limit Turns',
+    appgw_output_limit_rate: 'AI App Gateway Output-Limit Rate',
     agent_sessions: 'Agent Sessions',
     agent_error_rate: 'Agent Error Rate',
     agent_error_events: 'Agent Error Events',

@@ -140,6 +140,8 @@ export const ALERT_METRIC_CATALOG: AlertMetricDef[] = [
   legacy('appgw_block_rate', 'ai-app-gateway', 'AI App Gateway Block Rate', '%', 'down'),
   legacy('appgw_error_rate', 'ai-app-gateway', 'AI App Gateway Error Rate', '%', 'down'),
   legacy('appgw_requests_per_user', 'ai-app-gateway', 'AI App Gateway Busiest User (requests)', '', 'up'),
+  legacy('appgw_output_limit_turns', 'ai-app-gateway', 'AI App Gateway Output-Limit Turns', '', 'down'),
+  legacy('appgw_output_limit_rate', 'ai-app-gateway', 'AI App Gateway Output-Limit Rate', '%', 'down'),
 
   // ── agents (entity_metrics; traced and hosted agents) ──────────────────
   entity('agent_sessions', 'agents', 'agent', 'Agent Sessions', 'count', 'up', { zeroWhenEmpty: true }),

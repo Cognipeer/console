@@ -441,9 +441,11 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   // through handleDecisionRequest (guardrails, usage log, cost).
   // @test-skip: a thin adapter over handleDecisionRequest, which client-decisions-fastify.test.ts covers; there is no dashboard-session API harness yet.
   app.post('/dashboard/playground/decisions', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
+    let burned: { tenantDbName: string; projectId: string; modelKey: string; startedAt: number } | undefined;
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const parsed = parseDecisionRequest(readJsonBody<unknown>(request));
+      burned = { tenantDbName: session.tenantDbName, projectId, modelKey: parsed.model, startedAt: Date.now() };
 
       const outcome = await handleDecisionRequest({
         tenantDbName: session.tenantDbName,
@@ -476,6 +478,26 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
       const projectError = sendProjectContextError(reply, error);
       if (projectError) return projectError;
       if (error instanceof DecisionBackendError) {
+        // The cut-off calls were billed: book the burned tokens once (the success path books in handleDecisionRequest).
+        if (burned && error.usage) {
+          try {
+            const model = await getModelByKey(burned.tenantDbName, burned.modelKey, burned.projectId);
+            if (model) {
+              await logModelUsage(burned.tenantDbName, model, {
+                errorMessage: error.message,
+                latencyMs: Date.now() - burned.startedAt,
+                providerRequest: { model: burned.modelKey },
+                providerResponse: { error: error.message },
+                requestId: crypto.randomUUID(),
+                route: 'decisions',
+                status: 'error',
+                usage: error.usage,
+              });
+            }
+          } catch (logError) {
+            logger.error('Failed to log playground decision error', { error: logError });
+          }
+        }
         return reply.code(502).send({ error: error.message });
       }
       const normalized = normalizeInferenceError(error);

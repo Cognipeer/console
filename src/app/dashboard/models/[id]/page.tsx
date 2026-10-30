@@ -1,5 +1,6 @@
 'use client';
 
+import PromptCachingSummary from '@/components/models/PromptCachingSummary';
 import ReasoningSummary from '@/components/models/ReasoningSummary';
 import UpstreamApiSummary from '@/components/models/UpstreamApiSummary';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -484,7 +485,7 @@ export default function ModelDetailPage() {
   const searchParams = useSearchParams()!;
   const [editOpen, setEditOpen] = useState(searchParams.get('edit') === '1');
   // Which section the edit overlay opens at (the Reasoning "Edit" shortcut); the top otherwise.
-  const [editSection, setEditSection] = useState<'reasoning' | undefined>(undefined);
+  const [editSection, setEditSection] = useState<'reasoning' | 'promptCaching' | undefined>(undefined);
   const [routerCandidates, setRouterCandidates] = useState<{ llm: CandidateModel[]; decision: CandidateModel[] }>({
     llm: [],
     decision: [],
@@ -1046,6 +1047,14 @@ export default function ModelDetailPage() {
             void fetchDetail(true);
             void fetchLogs();
           }}
+          onEditPromptCaching={
+            isDynamic
+              ? undefined
+              : () => {
+                setEditSection('promptCaching');
+                setEditOpen(true);
+              }
+          }
           onEditReasoning={
             isDynamic
               ? undefined
@@ -1354,6 +1363,7 @@ interface OverviewTabProps {
   onRefresh: () => void;
   /** Opens the edit overlay at its Reasoning section; undefined for a model with no such editor (Dynamic LLM). */
   onEditReasoning?: () => void;
+  onEditPromptCaching?: () => void;
   onOpenLog: (l: UsageLogDto) => void;
 }
 
@@ -1373,6 +1383,7 @@ function OverviewTab({
   refreshing,
   onRefresh,
   onEditReasoning,
+  onEditPromptCaching,
   onOpenLog,
 }: OverviewTabProps) {
   const periods: Array<{ id: 'last_day' | 'last_7_days' | 'last_30_days' | 'total'; label: string }> = [
@@ -1686,6 +1697,15 @@ function OverviewTab({
             driver={model.providerDriver}
             modelId={model.modelId}
             onEdit={onEditReasoning}
+          />
+        ) : null}
+
+        {model.category === 'llm' && onEditPromptCaching ? (
+          <PromptCachingSummary
+            settings={model.settings}
+            driver={model.providerDriver}
+            modelId={model.modelId}
+            onEdit={onEditPromptCaching}
           />
         ) : null}
 

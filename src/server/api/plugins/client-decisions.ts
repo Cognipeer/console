@@ -187,7 +187,8 @@ export const clientDecisionsApiPlugin: FastifyPluginAsync = async (app) => {
               requestId: crypto.randomUUID(),
               route: 'decisions',
               status: 'error',
-              usage: {},
+              // A decision cut off twice still billed both calls: book what was burned, once (gateway usage contract).
+              usage: error instanceof DecisionBackendError && error.usage ? error.usage : {},
             });
           }
         } catch (logError) {

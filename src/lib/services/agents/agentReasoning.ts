@@ -16,8 +16,10 @@
  * accounting never changes.
  */
 
+import type { IModel } from '@/lib/database';
 import type { IAgentConfig, IAgentRuntimeConfig } from '@/lib/database/provider/types.domain';
 import { effortsOfRule, resolveRuleForDriver } from '@/lib/services/models/modelRules';
+import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import {
   normalizeReasoning,
   readModelReasoning,
@@ -199,41 +201,143 @@ export function reasoningConfigIssues(config: IAgentConfig): Array<{ field: stri
  * otherwise 'minimal' (OpenAI-family models that predate 'none' accept it);
  * unknown / Dynamic drivers get 'none' and the routed model translates.
  */
-export function titleReasoning(driver?: string): NormalizedReasoning {
-  const control = reasoningControlForDriver(driver);
+export function titleReasoning(driver?: string, modelId?: string): NormalizedReasoning {
+  // The model id lets a driver say "no control" for a model of its own that has none (a Bedrock non-Claude model).
+  const control = reasoningControlForDriver(driver, modelId);
   if (control.efforts.length === 0 || control.efforts.includes('none')) return { effort: 'none' };
   return { effort: 'minimal' };
 }
 
 const OPENAI_FAMILY_DRIVERS: ReadonlySet<string> = new Set(['openai', 'azure', 'openai-compatible', 'together']);
+/** Drivers whose Claude models are driven by adaptive thinking (`thinking: {type:'adaptive'}` + `output_config.effort`). */
+const CLAUDE_DRIVERS: ReadonlySet<string> = new Set(['anthropic', 'bedrock']);
 
 /**
- * What a title call sends for reasoning, for THIS model - or nothing.
+ * What a short side call (a title, a rerank score, a judge verdict, a decision, an attacker turn) sends
+ * for reasoning, for THIS model - or nothing. Its small output limit is shared with the thinking, so a
+ * model that thinks by default spends the limit before it answers.
  *
  * Forcing `none` on every model is wrong: `reasoning_effort` is a 400 on a chat
- * model (gpt-4o, gpt-4.1, anything on a compatible endpoint), and the title is
- * best-effort, so the failure was swallowed and the agent simply never got a
- * generated title. The value is sent only where the model reasons by default or
- * the operator gave it a reasoning control, and it is the lowest value that
- * model family accepts (the o-series has no `minimal`/`none`, the first GPT-5 has
- * no `none`). A Dynamic LLM is routed to models this cannot know: nothing.
+ * model (gpt-4o, gpt-4.1, anything on a compatible endpoint), and a side call is
+ * best-effort, so the failure was swallowed and the caller simply got nothing back.
+ * The value is the LOWEST thinking the model's rule (agent-sdk table) allows:
+ *  - OpenAI-schema reasoning models: the lowest effort of the family (the o-series has no
+ *    `minimal`/`none`, the first GPT-5 has no `none`).
+ *  - adaptive Claude (4.6+, 5.x): `none` where the rule has a way to turn thinking off
+ *    (`disabled` or `between_tools`; the SDK picks the right one), else its lowest effort (a
+ *    model that cannot be switched off still thinks at `low`). Without a value these think
+ *    adaptively by default.
+ *  - budget-style Claude and chat models: nothing (thinking is opt-in there), unless the operator gave
+ *    the model a reasoning default, which is then turned off.
+ * A Dynamic LLM is routed to models this cannot know: nothing.
  */
-export function titleReasoningForModel(
+export function sideCallReasoning(
   model: { modelId?: string; providerDriver?: string; settings?: unknown },
   options: { dynamic?: boolean } = {},
 ): NormalizedReasoning | undefined {
   if (options.dynamic) return undefined;
   const driver = model.providerDriver;
   const id = (model.modelId ?? '').toLowerCase();
-  if (driver && OPENAI_FAMILY_DRIVERS.has(driver)) {
-    // The lowest level the model's rule (agent-sdk table) takes: none, minimal or low. A model only a
-    // permissive default matched is left to the configured-reasoning rule below.
-    const rule = resolveRuleForDriver(driver, id);
-    if (rule && !rule.isDefault && rule.reasoning.style === 'effort') return { effort: effortsOfRule(rule)[0] };
+  const rule = driver ? resolveRuleForDriver(driver, id) : undefined;
+  // A model only a permissive default matched is left to the configured-reasoning rule below.
+  if (driver && rule && !rule.isDefault) {
+    const { style } = rule.reasoning;
+    const sendsLowest = (style === 'effort' && OPENAI_FAMILY_DRIVERS.has(driver))
+      || (style === 'adaptive' && CLAUDE_DRIVERS.has(driver));
+    const lowest = sendsLowest ? effortsOfRule(rule)[0] : undefined;
+    if (lowest) return { effort: lowest };
   }
   const configured = readModelReasoning(model.settings);
-  if (configured?.effort || configured?.budgetTokens) return titleReasoning(driver);
+  if (configured?.effort || configured?.budgetTokens) return titleReasoning(driver, model.modelId);
   return undefined;
+}
+
+/** What a title call sends for reasoning: the side-call rule (`sideCallReasoning`). */
+export function titleReasoningForModel(
+  model: { modelId?: string; providerDriver?: string; settings?: unknown },
+  options: { dynamic?: boolean } = {},
+): NormalizedReasoning | undefined {
+  return sideCallReasoning(model, options);
+}
+
+/**
+ * The limit of the ONE retry of a side call that stopped at its output limit: the sent limit doubled,
+ * capped by the model maximum. undefined when no larger limit is available (already at the maximum).
+ */
+export function raisedSideCallLimit(sent: number, modelMax?: number): number | undefined {
+  if (!Number.isFinite(sent) || sent <= 0) return undefined;
+  const next = Math.floor(modelMax !== undefined && modelMax > 0 ? Math.min(sent * 2, modelMax) : sent * 2);
+  return next > sent ? next : undefined;
+}
+
+function positiveNumber(...values: unknown[]): number | undefined {
+  return values.find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+}
+
+/**
+ * Whether a short side call is stuck with the model's thinking: the model thinks by default (or may) and
+ * `sideCallReasoning` has no way to switch it off or down - Vertex Gemini (thinks dynamically, the thinking counts
+ * against the output limit, and no effort is sent for it here), or a reasoning model whose rule gives no
+ * off/low mechanism from this side. A small explicit cap would be spent on the thinking, so such a call is sent
+ * no cap at first (see `sideCallLimits`). Budget-style Claude is opt-in (thinking is off unless asked), so it is
+ * not stuck; neither is a Dynamic LLM (routed to models this cannot know) or a model no rule recognises.
+ */
+export function sideCallThinkingUncontrolled(
+  model: { modelId?: string; providerDriver?: string; settings?: unknown },
+  options: { dynamic?: boolean } = {},
+): boolean {
+  if (options.dynamic) return false;
+  const driver = model.providerDriver;
+  if (!driver) return false;
+  const rule = resolveRuleForDriver(driver, (model.modelId ?? '').toLowerCase());
+  if (!rule || rule.isDefault || rule.reasoning.style === 'none') return false;
+  if (driver === 'vertex') return true;
+  if (sideCallReasoning(model, options)) return false;
+  return rule.reasoning.style !== 'budget';
+}
+
+/**
+ * The output limits of a short side call. It starts at `floor` (capped by the model maximum like any
+ * default), or at the model's own "Default max tokens" when that is larger, so a call that already had
+ * a roomy limit is not squeezed. `retry` is the raised limit of its one retry (`raisedSideCallLimit`).
+ */
+export function sideCallLimits(
+  model: { modelId?: string; settings?: unknown; metadata?: unknown },
+  floor: number,
+): { limit: number; retry?: number } {
+  const settings: Record<string, unknown> = model.settings && typeof model.settings === 'object'
+    ? (model.settings as Record<string, unknown>)
+    : {};
+  const modelMax = modelMaxOutputTokens(model as IModel);
+  const configured = positiveNumber(settings.maxCompletionTokens, settings.maxTokens);
+  const limit = Math.max(modelMax !== undefined ? Math.min(floor, modelMax) : floor, configured ?? 0);
+  return { limit, retry: raisedSideCallLimit(limit, modelMax) };
+}
+
+/**
+ * The limits of ONE side call, by what its model allows (`sideCallLimits` plus the thinking rule).
+ *
+ * Where thinking cannot be switched off from here (`sideCallThinkingUncontrolled`) there is NO first limit
+ * (`limit` undefined: the model default applies - an explicit small cap would be a hard cap its thinking spends).
+ * The cut-off retry stays: `retryAfter(observedOutputTokens)` is the limit of the one retry - the sent limit
+ * doubled (capped by the model maximum) or, for a call sent none, the observed output doubled, else the model
+ * maximum. Everywhere else `limit` / `retryAfter()` are `sideCallLimits`'.
+ */
+export function sideCallPlan(
+  model: { modelId?: string; providerDriver?: string; settings?: unknown; metadata?: unknown },
+  floor: number,
+  options: { dynamic?: boolean } = {},
+): { limit?: number; retryAfter: (observedOutputTokens?: number) => number | undefined } {
+  if (!sideCallThinkingUncontrolled(model, options)) {
+    const { limit, retry } = sideCallLimits(model, floor);
+    return { limit, retryAfter: () => retry };
+  }
+  const modelMax = modelMaxOutputTokens(model as IModel);
+  return {
+    retryAfter: (observed) => (observed !== undefined && Number.isFinite(observed) && observed > 0
+      ? raisedSideCallLimit(observed, modelMax)
+      : modelMax),
+  };
 }
 
 /** Re-exported so callers need one import. */

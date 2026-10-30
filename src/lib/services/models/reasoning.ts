@@ -151,24 +151,42 @@ export function shouldReturnReasoning(modelSettings: unknown, body?: unknown): b
  * The reasoning a call is sent upstream with, given whether its text will be shown.
  * Hidden: the provider is told not to produce thought text (`includeThoughts: false`),
  * so a Claude model does not spend output tokens summarizing thoughts nobody sees; the
- * thinking itself still runs. Visible: Claude (Anthropic, Bedrock) and OpenAI-schema
- * models on the Responses upstream (the only OpenAI API that returns a reasoning
- * summary) are asked for them explicitly unless the Model Hub record already decided.
- * Nothing is added when the call has no reasoning at all.
+ * thinking itself still runs. Visible: Claude (Anthropic, Bedrock), Vertex Gemini with a
+ * thinking budget (it returns thought summaries only when asked) and OpenAI-schema models
+ * on the Responses upstream (the only OpenAI API that returns a reasoning summary) are
+ * asked for them explicitly unless the Model Hub record already decided.
+ *
+ * A call with no reasoning at all gets nothing added, except for an adaptive Claude (5.x,
+ * 4.6+): it thinks by default and returns the thinking text empty unless a summary is asked
+ * for, so a visible call asks even with no effort configured. Only the ask is added: no
+ * effort and no output-limit headroom (the model keeps its own default effort).
+ * `modelId` is what tells the two Claude generations apart.
  */
 export function withReasoningVisibility<T extends { includeThoughts?: boolean }>(
   reasoning: T | undefined,
   visible: boolean,
   driver?: string,
   upstreamApi?: string,
+  modelId?: string,
 ): T | undefined {
-  if (!reasoning) return reasoning;
+  if (!reasoning) {
+    return visible && thinksAdaptivelyByDefault(driver, modelId) ? ({ includeThoughts: true } as T) : reasoning;
+  }
   if (!visible) return reasoning.includeThoughts === false ? reasoning : { ...reasoning, includeThoughts: false };
-  const asksForThoughts = driver === 'anthropic' || driver === 'bedrock' || upstreamApi === 'responses';
+  const asksForThoughts = driver === 'anthropic' || driver === 'bedrock' || upstreamApi === 'responses'
+    // Gemini sends thought summaries only with `thinkingConfig.includeThoughts`, and only thinks on a budget:
+    // effort none (budget 0) or no budget at all leaves nothing to show.
+    || (driver === 'vertex' && (reasoningBudget(normalizeReasoning(reasoning)) ?? 0) > 0);
   if (reasoning.includeThoughts === undefined && asksForThoughts) {
     return { ...reasoning, includeThoughts: true };
   }
   return reasoning;
+}
+
+/** Claude 4.6+/5.x on the Messages API or Bedrock: thinks adaptively when sent no thinking setting at all. */
+function thinksAdaptivelyByDefault(driver: string | undefined, modelId: string | undefined): boolean {
+  if (driver !== 'anthropic' && !(driver === 'bedrock' && bedrockCarriesThinking(modelId))) return false;
+  return supportsAdaptiveThinking(modelId);
 }
 
 // ─── Provider translation (pure; contracts apply the result) ────────────────
@@ -177,10 +195,54 @@ export function withReasoningVisibility<T extends { includeThoughts?: boolean }>
 export const ANTHROPIC_MIN_THINKING_BUDGET = 1024;
 /** Room kept for the visible answer above the thinking budget. */
 export const THINKING_ANSWER_HEADROOM = 4096;
+/** Gemini: output limit above the thinking budget (same rule as the agent-sdk Gemini reasoning mapping). */
+export const GEMINI_ANSWER_HEADROOM = 2048;
+/**
+ * The agent-sdk's own guard rails for budget thinking (`THINKING_OUTPUT_RESERVE` / `THINKING_MIN_MAX_TOKENS` in
+ * providers/utils/reasoning.ts; the SDK does not export them): it raises `max_tokens` to at least
+ * `max(SDK_THINKING_MIN_MAX_TOKENS, budget + SDK_THINKING_OUTPUT_RESERVE)` itself. A call whose limit is fixed
+ * (a caller's cap) must be handed a budget that already fits, or the SDK silently raises the cap.
+ */
+export const SDK_THINKING_OUTPUT_RESERVE = 1024;
+export const SDK_THINKING_MIN_MAX_TOKENS = 4096;
 
 const EFFORT_BUDGET = EFFORT_BUDGETS;
 /** Vertex Gemini thinks up to this many tokens; xhigh / max map to the largest budget. */
 const VERTEX_MAX_THINKING_BUDGET = GEMINI_EFFORT_BUDGETS.max;
+
+/**
+ * Drivers whose wire format is OpenAI Chat Completions / Responses. Their SDK providers read the reasoning
+ * EFFORT only (there is no token-budget field), and reasoning tokens count against `max_(completion_)tokens`.
+ */
+export const OPENAI_SCHEMA_DRIVERS: ReadonlySet<string> = new Set(['openai', 'openai-compatible', 'azure', 'together']);
+
+/**
+ * Bedrock extended thinking is a Claude feature; the other Converse families (Nova, Llama, gpt-oss ...) carry their own
+ * reasoning envelope, so the client leaves reasoning off their wire. Decided by name: an ARN (an application inference
+ * profile hides its model) can only be told when it spells the model out.
+ */
+export function bedrockCarriesThinking(modelId: string | undefined): boolean {
+  return /anthropic|claude/i.test(modelId ?? '');
+}
+
+/**
+ * The effort a token budget stands for, with the thresholds the agent-sdk uses for adaptive Claude (`applyAdaptiveThinking`):
+ * up to the `low` budget is low, up to the `medium` budget is medium, anything above is high.
+ */
+export function effortForBudget(budget: number): 'low' | 'medium' | 'high' {
+  return budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high';
+}
+
+/**
+ * The budget to hand the SDK under a limit that cannot move, so that it never raises it, or undefined when no budget fits
+ * (the call then runs without thinking). The SDK needs `max_tokens` >= its own floor and >= budget + its reserve; the budget
+ * is shrunk to what fits and never goes under Anthropic's minimum.
+ */
+export function fitThinkingBudget(budget: number, limit: number): number | undefined {
+  const room = limit - SDK_THINKING_OUTPUT_RESERVE;
+  if (limit < SDK_THINKING_MIN_MAX_TOKENS || room < ANTHROPIC_MIN_THINKING_BUDGET) return undefined;
+  return Math.min(Math.max(budget, ANTHROPIC_MIN_THINKING_BUDGET), room);
+}
 
 /** Effort -> token budget for engines that think in tokens. 0 = thinking off. */
 export function reasoningBudget(reasoning: NormalizedReasoning | undefined): number | undefined {
@@ -195,7 +257,7 @@ export interface ThinkingTranslation {
   thinking: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive' } | { type: 'disabled' };
   /** `output_config` fragment: adaptive thinking carries its level here. */
   outputConfig?: { effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' };
-  /** max_tokens to send: always above the budget when thinking is on. */
+  /** max_tokens to send: budget + THINKING_ANSWER_HEADROOM at least when budget thinking is on. */
   maxTokens?: number;
   /** Thinking forbids temperature / top_p. */
   dropSampling: boolean;
@@ -213,6 +275,10 @@ export function supportsAdaptiveThinking(modelId: string | undefined): boolean {
  * Anthropic (and Bedrock-Claude) extended thinking. `undefined` = send nothing.
  * An explicit `thinking` in the operator's extra body is the caller's job to
  * respect (see `hasExplicitThinking`).
+ *
+ * `maxTokens` is the budget-style floor only; the adaptive effort headroom (ADAPTIVE_MIN_OUTPUT_TOKENS) and
+ * the model-maximum cap are applied by `computeOutputTokenLimit` (outputLimits.ts), the one place the sent
+ * limit is decided.
  */
 export function translateAnthropicThinking(
   reasoning: NormalizedReasoning | undefined,
@@ -222,14 +288,16 @@ export function translateAnthropicThinking(
   const budget = reasoningBudget(reasoning);
   if (budget === undefined) return undefined;
   if (budget === 0) {
-    // `none` on an adaptive model sends no thinking at all (the SDK does the same).
+    // `none` on an adaptive model is not "no thinking setting": the SDK sends the rule's off switch
+    // (`thinking: {type: rule.off}` - between_tools on Sonnet 5.x, disabled on Haiku 5.5 / 4.6 / 4.7) or, for a model whose
+    // rule has none (Opus 5, Fable), its lowest effort. Either way there is no effort to size a limit for, so nothing is
+    // translated and the limit gets no thinking headroom. A budget-style model takes `disabled`.
     return supportsAdaptiveThinking(modelId)
       ? undefined
       : { thinking: { type: 'disabled' }, maxTokens: currentMaxTokens, dropSampling: false };
   }
   if (supportsAdaptiveThinking(modelId)) {
-    const asked: ReasoningEffort = reasoning?.effort
-      ?? (budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high');
+    const asked: ReasoningEffort = reasoning?.effort ?? effortForBudget(budget);
     // The model's rule decides what it takes (4.6 tops out at max, 4.7+ adds xhigh; 'minimal' is not offered).
     const rule = resolveRuleForDriver('anthropic', modelId);
     const mapped = rule ? mapReasoningEffort(rule, asked).effort : undefined;
@@ -239,7 +307,9 @@ export function translateAnthropicThinking(
 
   const budgetTokens = Math.max(budget, ANTHROPIC_MIN_THINKING_BUDGET);
   const floor = budgetTokens + THINKING_ANSWER_HEADROOM;
-  const maxTokens = currentMaxTokens !== undefined && currentMaxTokens > budgetTokens
+  // A limit only above the budget leaves the answer less than the headroom (cap 20000, budget 16384: 3616): it is kept
+  // only when it already holds budget + headroom.
+  const maxTokens = currentMaxTokens !== undefined && currentMaxTokens >= floor
     ? currentMaxTokens
     : floor;
   return {
@@ -290,16 +360,24 @@ export interface ReasoningControl {
  * exactly the rule's efforts (+ Off when the rule can turn reasoning off). A model that only
  * matched a family's permissive default is offered the whole ladder - the SDK maps at request time.
  * Budget-style engines (older Claude, Gemini) also take a token budget.
+ *
+ * A Bedrock model that is not Claude (Nova, Llama, gpt-oss ...) has no control: the client leaves reasoning off its
+ * wire, so a setting offered here would be silently dropped. That is decided by the id, so it needs `modelId`; an ARN
+ * (an application inference profile hides its model) and a missing id keep the control, as the id cannot tell.
  */
 export function reasoningControlForDriver(driver: string | undefined, modelId?: string): ReasoningControl {
+  const noControl = (): ReasoningControl => ({ kind: 'none', efforts: [], budget: false, includeThoughts: false });
+  const id = modelId?.trim();
+  if (driver === 'bedrock' && id && !/^arn:/i.test(id) && !bedrockCarriesThinking(id)) return noControl();
   const rule = resolveRuleForDriver(driver, modelId);
-  if (!rule) return { kind: 'none', efforts: [], budget: false, includeThoughts: false };
+  if (!rule) return noControl();
   const efforts = effortsOfRule(rule);
   const { style } = rule.reasoning;
-  if (style === 'none' || efforts.length === 0) return { kind: 'none', efforts: [], budget: false, includeThoughts: false };
-  // The Vertex client derives includeThoughts from the budget itself (on whenever the
-  // budget is above 0), so there is no separate switch to offer. Adaptive thinking has no token budget.
-  if (style === 'budget') return { kind: 'budget', efforts, budget: true, includeThoughts: false };
+  if (style === 'none' || efforts.length === 0) return noControl();
+  // Vertex Gemini sends thought summaries only when asked (`thinkingConfig.includeThoughts`): its form offers the
+  // "show thoughts" switch. The Claude drivers have none: a visible call asks by itself (withReasoningVisibility).
+  // Adaptive thinking has no token budget.
+  if (style === 'budget') return { kind: 'budget', efforts, budget: true, includeThoughts: driver === 'vertex' };
   if (style === 'adaptive') return { kind: 'budget', efforts, budget: false, includeThoughts: false };
   if (style === 'toggle') return { kind: 'toggle', efforts, budget: false, includeThoughts: false };
   return { kind: 'effort', efforts, budget: false, includeThoughts: false };

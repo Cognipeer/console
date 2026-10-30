@@ -49,6 +49,8 @@ export interface OcrPageResult {
   language?: string;
   width?: number;
   height?: number;
+  /** The page's reply was cut off at the output limit (VLM extraction): its text is partial. */
+  truncated?: boolean;
 }
 
 export interface OcrTableCell {

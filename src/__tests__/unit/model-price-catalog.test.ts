@@ -210,6 +210,16 @@ describe('suggestPricing', () => {
     expect(suggestion.match?.pricing.inputTokenPer1M).toBe(2.5);
   });
 
+  it('carries the entry token limits on the match (max input = context window, max output)', async () => {
+    const [withLimits, withoutLimits] = await suggestPricing(['gpt-4o', 'azure/gpt-4o']);
+    expect(withLimits.match?.maxInputTokens).toBe(128000);
+    expect(withLimits.match?.maxOutputTokens).toBe(16384);
+    // The feed has no limits for this entry: the keys are absent, not undefined/0.
+    expect(withoutLimits.match).toBeDefined();
+    expect(withoutLimits.match).not.toHaveProperty('maxInputTokens');
+    expect(withoutLimits.match).not.toHaveProperty('maxOutputTokens');
+  });
+
   it('matches provider-prefixed names as normalized, preferring the bare key', async () => {
     const [suggestion] = await suggestPricing(['openai/gpt-4o']);
     expect(suggestion.match?.confidence).toBe('normalized');
