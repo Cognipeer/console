@@ -65,9 +65,15 @@ export interface ImportAgentShellProps {
     opened: boolean;
     onClose: () => void;
     onImported: (agentId: string) => void;
+    /**
+     * Update mode: the document replaces the config of this existing agent
+     * instead of creating a new one. The key is fixed to the target's.
+     */
+    target?: { key: string; name: string };
 }
 
-export default function ImportAgentShell({ opened, onClose, onImported }: ImportAgentShellProps) {
+export default function ImportAgentShell({ opened, onClose, onImported, target }: ImportAgentShellProps) {
+    const updating = Boolean(target);
     const [content, setContent] = useState('');
     const [fileName, setFileName] = useState<string | null>(null);
     const [format, setFormat] = useState<string>('auto');
@@ -110,8 +116,8 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
             if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
             const next = data as Preview;
             setPreview(next);
-            setName(next.agent?.name ?? '');
-            setKey(next.agent?.key ?? '');
+            setName(next.agent?.name ?? target?.name ?? '');
+            setKey(target?.key ?? next.agent?.key ?? '');
             setModelKey(next.model?.suggestedKey ?? null);
             setMcp(Object.fromEntries(next.mcpServers.map((server) => [server.ref, {
                 action: server.existing ? 'reuse' : 'create',
@@ -171,8 +177,9 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                 body: JSON.stringify({
                     content,
                     format: preview.format.id,
-                    key: key.trim() || undefined,
+                    key: (target?.key ?? key).trim() || undefined,
                     name: name.trim() || undefined,
+                    ...(updating ? { overwrite: true } : {}),
                     modelKey,
                     mcp: Object.fromEntries(Object.entries(mcp).map(([ref, choice]) => [ref,
                         choice.action === 'reuse' ? { action: 'reuse', key: choice.key }
@@ -224,7 +231,7 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                 <SummaryKV label="Envelope" value={preview?.envelope.toUpperCase() ?? '—'} />
             </SummaryGroup>
             {preview?.format.id ? (
-                <SummaryGroup title="Will create">
+                <SummaryGroup title={updating ? 'Will update' : 'Will create'}>
                     <SummaryKV label="Agent" value={key || '—'} />
                     <SummaryKV label="MCP servers" value={String(Object.values(mcp).filter((c) => c.action === 'create').length)} />
                     <SummaryKV label="Skills" value={String(Object.values(skills).filter((c) => c.action === 'create').length)} />
@@ -241,12 +248,14 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
             open={opened}
             onClose={close}
             icon={<IconFileImport size={16} />}
-            title="Import agent"
-            subtitle="From a Claude Managed Agent definition or a console agent manifest — JSON, YAML or Markdown with front-matter."
+            title={updating ? `Update “${target?.name}” from file` : 'Import agent'}
+            subtitle={updating
+                ? 'Replaces this agent’s configuration with the document — Claude Managed Agent or console manifest (JSON, YAML or Markdown). Published versions are not touched.'
+                : 'From a Claude Managed Agent definition or a console agent manifest — JSON, YAML or Markdown with front-matter.'}
             summary={summary}
-            footerStatus={preview ? (blockers.length === 0 ? 'Ready to import' : blockers[0]) : 'Paste or upload a document'}
+            footerStatus={preview ? (blockers.length === 0 ? updating ? 'Ready to update' : 'Ready to import' : blockers[0]) : 'Paste or upload a document'}
             primaryAction={{
-                label: 'Import agent',
+                label: updating ? 'Update agent' : 'Import agent',
                 color: 'teal',
                 loading: importing,
                 disabled: !preview || blockers.length > 0,
@@ -314,8 +323,8 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                             <FormField label="Name" required>
                                 <TextInput value={name} onChange={(event) => setName(event.currentTarget.value)} />
                             </FormField>
-                            <FormField label="Key" required hint={preview.agent?.exists ? 'An agent with this key already exists — choose another.' : undefined}>
-                                <TextInput value={key} onChange={(event) => setKey(event.currentTarget.value)} error={preview.agent?.exists && key === preview.agent.key ? true : undefined} />
+                            <FormField label="Key" required hint={updating ? 'Fixed — this is the agent being updated.' : preview.agent?.exists ? 'An agent with this key already exists — choose another.' : undefined}>
+                                <TextInput value={key} disabled={updating} onChange={(event) => setKey(event.currentTarget.value)} error={!updating && preview.agent?.exists && key === preview.agent.key ? true : undefined} />
                             </FormField>
                         </FormRow>
                         <FormField
