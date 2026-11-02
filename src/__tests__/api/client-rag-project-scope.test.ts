@@ -41,7 +41,8 @@ vi.mock('@/lib/core/lifecycle', () => ({
 vi.mock('@/lib/services/rag/ragService', () => ({
   createRagModule: vi.fn(),
   deleteRagModule: vi.fn(),
-  getRagModule: vi.fn(),
+  // A module without access control: the routes answer 404 for a module that is not there.
+  getRagModule: vi.fn(async () => ({ key: 'kb' })),
   listRagModules: vi.fn(),
   getRagDocumentFullText: vi.fn(),
   getRagDocumentTextLines: vi.fn(),

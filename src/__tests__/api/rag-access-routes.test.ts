@@ -254,6 +254,51 @@ describe('folders', () => {
     expect(body(foreign).code).toBe('folder_not_found');
   });
 
+  it('refuses a folder name with a C1 control character, and a parentId of the wrong type', async () => {
+    const control = await send('admin', 'POST', `/rag/modules/${MODULE_KEY}/folders`, { name: `a${String.fromCharCode(0x85)}b` });
+    expect(control.statusCode).toBe(400);
+    expect(body(control).code).toBe('folder_name_invalid');
+
+    for (const parentId of [7, true, {}, ['x']]) {
+      const res = await send('admin', 'POST', `/rag/modules/${MODULE_KEY}/folders`, { name: 'Typed', parentId });
+      expect(res.statusCode, JSON.stringify(parentId)).toBe(400);
+    }
+    const listed = await send('admin', 'GET', `/rag/modules/${MODULE_KEY}/folders`);
+    expect((body(listed).folders as Array<{ name: string }>).map((f) => f.name)).not.toContain('Typed');
+  });
+
+  it('answers 400, never 500, for a body that is empty, not JSON or null', async () => {
+    const urls: Array<['POST' | 'PUT' | 'PATCH', string]> = [
+      ['POST', `/rag/modules/${MODULE_KEY}/folders`],
+      ['PUT', `/rag/modules/${MODULE_KEY}/acl`],
+      ['POST', `/rag/modules/${MODULE_KEY}/documents/move`],
+      ['POST', `/rag/modules/${MODULE_KEY}/documents`],
+      ['POST', `/rag/modules/${MODULE_KEY}/query`],
+      ['PATCH', `/rag/modules/${MODULE_KEY}`],
+      ['PUT', '/rag/identity/domains/bad-body'],
+      ['POST', '/rag/identity/links'],
+    ];
+    for (const [method, url] of urls) {
+      for (const payload of ['', '{not json', 'null']) {
+        const res = await app.inject({ method, url: `/api${url}`, headers: headersOf('admin', true), payload });
+        expect(res.statusCode, `${method} ${url} with ${JSON.stringify(payload)}: ${res.body}`).toBe(400);
+        // The test app's parser may refuse an empty or malformed body itself, with its own code; `null` always reaches the route.
+        if (payload === 'null') expect(body(res).code).toBe('invalid_body');
+      }
+    }
+  });
+
+  it('answers 404 for a query, an answer and an ingest on a knowledge base that is not there', async () => {
+    for (const [url, payload] of [
+      ['/rag/modules/missing-module/query', { query: 'x' }],
+      ['/rag/modules/missing-module/answer', { question: 'x', answerModelKey: 'm' }],
+      ['/rag/modules/missing-module/documents', { fileName: 'a.txt', content: 'a' }],
+    ] as const) {
+      const res = await send('admin', 'POST', url, payload);
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(404);
+    }
+  });
+
   it('a refused rename-and-move leaves the folder as it was; so does a move that cannot happen', async () => {
     const folderUrl = `/rag/modules/${MODULE_KEY}/folders`;
     const child = body(await send('admin', 'POST', folderUrl, { name: 'Inner', parentId: financeFolderId })).folder._id as string;
@@ -425,6 +470,12 @@ describe('permissions', () => {
 
     const root = await send('admin', 'GET', `/rag/modules/${MODULE_KEY}/acl`);
     expect(body(root).acl).toMatchObject({ node: { type: 'module' }, mode: 'own', effective: { openToEveryone: true } });
+  });
+
+  it('names the code node_invalid for a mode that is neither own nor inherit', async () => {
+    const res = await send('admin', 'PUT', `/rag/modules/${MODULE_KEY}/acl`, { node: 'module', mode: 'everyone' });
+    expect(res.statusCode).toBe(400);
+    expect(body(res).code).toBe('node_invalid');
   });
 
   it('the module root cannot inherit', async () => {

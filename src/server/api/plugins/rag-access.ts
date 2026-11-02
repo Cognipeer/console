@@ -51,14 +51,13 @@ import {
   type RagAccessContext,
 } from '@/lib/services/rag/ragAccessService';
 import {
-  readJsonBody,
   readJsonObjectBody,
   requireProjectContextForRequest,
   sendProjectContextError,
   serviceActionAllowedForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
-import { ragAccessForRequest, sendRagAccessError } from '../ragAccessRequest';
+import { ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAccessRequest';
 
 const logger = createLogger('api:rag-access');
 
@@ -67,7 +66,7 @@ const WRITE = { config: authz.service('rag', 'write') } as const;
 const ADMIN = { config: authz.service('rag', 'admin') } as const;
 
 function fail(reply: FastifyReply, error: unknown, what: string) {
-  const known = sendRagAccessError(reply, error);
+  const known = sendRagAccessError(reply, error) ?? sendBadBody(reply, error);
   if (known) return known;
   logger.error(`${what} error`, { error });
   return sendProjectContextError(reply, error)
@@ -137,7 +136,10 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await contextFor(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
+      if (body.parentId !== undefined && body.parentId !== null && typeof body.parentId !== 'string') {
+        return reply.code(400).send({ error: 'parentId must be a folder id or null' });
+      }
       const access = await ragAccessForRequest(request, { ...ctx, ragModuleKey: key });
       if (!access.module) return reply.code(404).send({ error: 'Knowledge Engine module not found' });
       const folder = await createRagModuleFolder(ctx, {
@@ -156,7 +158,7 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await contextFor(request);
       const { key, folderId } = request.params as { key: string; folderId: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       const access = await ragAccessForRequest(request, { ...ctx, ragModuleKey: key });
       if (!access.module) return reply.code(404).send({ error: 'Knowledge Engine module not found' });
       if (body.parentId !== undefined && body.parentId !== null && typeof body.parentId !== 'string') {
@@ -194,7 +196,7 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await contextFor(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       if (!Array.isArray(body.documentIds) || body.documentIds.some((id) => typeof id !== 'string')) {
         return reply.code(400).send({ error: 'documentIds must be an array of document ids' });
       }
@@ -219,7 +221,7 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await contextFor(request);
       const { key, documentId } = request.params as { key: string; documentId: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       if (body.folderId === undefined) return reply.code(400).send({ error: 'folderId is required (a folder id or null)' });
       if (body.folderId !== null && typeof body.folderId !== 'string') {
         return reply.code(400).send({ error: 'folderId must be a folder id or null' });
@@ -256,9 +258,9 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await contextFor(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       if (body.mode !== 'own' && body.mode !== 'inherit') {
-        return reply.code(400).send({ error: 'mode must be "own" or "inherit"' });
+        return reply.code(400).send({ error: 'mode must be "own" or "inherit"', code: 'node_invalid' });
       }
       const acl = await setRagNodeAclFromConsole(ctx, {
         ragModuleKey: key,
@@ -382,7 +384,7 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await contextFor(request);
       if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
       const { domainKey } = request.params as { domainKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       if (body.matchGroupsByExternalId !== undefined && typeof body.matchGroupsByExternalId !== 'boolean') {
         return reply.code(400).send({ error: 'matchGroupsByExternalId must be a boolean' });
       }
@@ -544,7 +546,7 @@ export const ragAccessApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await contextFor(request);
       if (!(await requireWorkspaceRagAdmin(request, reply))) return reply;
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       const link = await createRagIdentityLinkFor(ctx, {
         domain: String(body.domain ?? ''),
         externalKind: body.externalKind as 'user' | 'group',
