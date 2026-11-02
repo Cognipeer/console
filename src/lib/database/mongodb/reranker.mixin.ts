@@ -114,10 +114,11 @@ export function RerankerMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
 
     async listRerankerRunLogs(
       rerankerKey: string,
-      options?: { limit?: number; skip?: number; from?: Date; to?: Date },
+      options?: { limit?: number; skip?: number; from?: Date; to?: Date; projectId?: string },
     ): Promise<IRerankerRunLog[]> {
       const db = this.getTenantDb();
       const query: Record<string, unknown> = { rerankerKey };
+      if (options?.projectId !== undefined) Object.assign(query, this.buildProjectScopeFilter(options.projectId));
       if (options?.from || options?.to) {
         const dateFilter: Record<string, Date> = {};
         if (options.from) dateFilter.$gte = options.from;

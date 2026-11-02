@@ -11,6 +11,7 @@ import { createLogger } from '@/lib/core/logger';
 import { ingestDocument, reingestDocument } from '@/lib/services/rag';
 import { getDatabase } from '@/lib/database';
 import type { ICrawlerRagBinding } from '@/lib/database';
+import { isPageOfCrawler } from '@/lib/services/rag/crawlerMark';
 
 const log = createLogger('crawler:rag-bridge');
 
@@ -57,11 +58,22 @@ export async function ingestCrawlPage(input: IngestPageInput): Promise<IngestPag
     // chunks/vectors rather than piling up duplicate copies alongside them.
     const db = await getDatabase();
     await db.switchToTenant(input.tenantDbName);
-    const existing = await db.findRagDocumentByFileName(
+    let existing = await db.findRagDocumentByFileName(
       input.rag.ragModuleKey,
       input.url,
       input.projectId,
     );
+    // In a knowledge base with access control a page replaces only a page this crawler sent, wherever a manager put it:
+    // a document of the same name from anywhere else may sit in a folder whose readers never asked for the crawled
+    // text, and the newest of that name need not be the crawler's. With none of its own, the page is a new document.
+    if (existing && !isPageOfCrawler(existing.metadata, input.crawlerKey)) {
+      const ragModule = await db.findRagModuleByKey(input.rag.ragModuleKey, input.projectId);
+      if (ragModule?.access?.enabled === true) {
+        const named = await db.listRagDocumentsByFileName(input.rag.ragModuleKey, input.url, input.projectId);
+        existing = named.find((doc) => isPageOfCrawler(doc.metadata, input.crawlerKey)) ?? null;
+      }
+    }
+    const sentByCrawler = { crawlerKey: input.crawlerKey };
 
     const doc = existing
       ? await reingestDocument(
@@ -75,6 +87,7 @@ export async function ingestCrawlPage(input: IngestPageInput): Promise<IngestPag
             fileName: input.url,
             contentType: 'text/markdown',
             metadata,
+            sentByCrawler,
             updatedBy: input.createdBy,
           },
         )
@@ -88,6 +101,7 @@ export async function ingestCrawlPage(input: IngestPageInput): Promise<IngestPag
             content: input.bodyMarkdown,
             contentType: 'text/markdown',
             metadata,
+            sentByCrawler,
             createdBy: input.createdBy,
           },
         );

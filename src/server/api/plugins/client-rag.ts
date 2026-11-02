@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type { IRagChunkConfig } from '@/lib/database';
+import type { OcrSettings } from '@/lib/services/extraction';
 import { createLogger } from '@/lib/core/logger';
 import {
   createRagModule,
@@ -18,7 +19,8 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
-import { RagModuleInactiveError } from '@/lib/services/rag/errors';
+import { clientGone } from '../clientGone';
+import { RagDocumentGoneError, RagModuleInactiveError, RagOcrIncompleteError, RagOriginalMissingError, RagReextractIncompleteError, RagStoredTextUnavailableError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
@@ -28,13 +30,20 @@ import {
 // The module write payloads are read by the same code as the dashboard's, so
 // the two surfaces cannot drift apart again the way responseDetail did.
 import {
+  documentHiddenFor,
   documentInProjectScope,
+  moduleAsCallerSees,
   readDocumentChunkConfig,
+  readDocumentPlacement,
   readRagModuleCreateFields,
   readRagModuleUpdateFields,
+  refuseAccessChange,
   sendInvalidRequest,
   withoutSourceText,
 } from './rag';
+import { ragAccessForRequest, sendRagAccessError } from '../ragAccessRequest';
+import { kbIndexShareRefusal } from '../ragOwnedResources';
+import { ocrModelProblem, readDocumentExtraction } from '../ragExtraction';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-rag');
@@ -55,7 +64,10 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const modules = await listRagModules(ctx.tenantDbName, { projectId: ctx.projectId });
-      return reply.code(200).send({ modules });
+      const where = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId };
+      return reply.code(200).send({
+        modules: await Promise.all(modules.map((ragModule) => moduleAsCallerSees(request, where, ragModule))),
+      });
     } catch (error) {
       logger.error('List client RAG modules error', { error });
       return reply.code(500).send({
@@ -76,6 +88,15 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      // A knowledge base on the index of one with access control would read its vectors unchecked.
+      const refusal = await kbIndexShareRefusal(
+        request,
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        { providerKey: fields.vectorProviderKey, indexKey: fields.vectorIndexKey },
+      );
+      if (refusal) return reply.code(403).send(refusal);
+      const modelProblem = await ocrModelProblem(ctx, fields.extraction?.ocr);
+      if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
       const ragModule = await createRagModule(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         ...fields,
@@ -104,7 +125,13 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
 
-      return reply.code(200).send({ module: ragModule });
+      return reply.code(200).send({
+        module: await moduleAsCallerSees(
+          request,
+          { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+          ragModule,
+        ),
+      });
     } catch (error) {
       logger.error('Get client RAG module error', { error });
       return reply.code(500).send({
@@ -132,6 +159,23 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
+      if (fields.access !== undefined) {
+        if (await refuseAccessChange(request, reply)) return reply;
+      }
+      // Moving the module onto an index of a knowledge base with access control is refused; leaving it where it is is not.
+      const where = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId };
+      const refusal = await kbIndexShareRefusal(
+        request,
+        where,
+        {
+          providerKey: fields.vectorProviderKey ?? existing.vectorProviderKey,
+          indexKey: fields.vectorIndexKey ?? existing.vectorIndexKey,
+        },
+        { providerKey: existing.vectorProviderKey, indexKey: existing.vectorIndexKey },
+      );
+      if (refusal) return reply.code(403).send(refusal);
+      const modelProblem = await ocrModelProblem(ctx, fields.extraction?.ocr);
+      if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
       const ragModule = await updateRagModule(ctx.tenantDbName, String(existing._id), {
         ...fields,
@@ -141,7 +185,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (!ragModule) {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
-      return reply.code(200).send({ module: ragModule });
+      return reply.code(200).send({ module: await moduleAsCallerSees(request, where, ragModule) });
     } catch (error) {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
@@ -186,7 +230,15 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
-      const documents = await listRagDocuments(ctx.tenantDbName, key, { projectId: ctx.projectId });
+      // With access control on, a client lists only the documents its caller may read.
+      const { scope } = await ragAccessForRequest(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      });
+      const access = scope?.managementFilter();
+      const documents = await listRagDocuments(ctx.tenantDbName, key, {
+        projectId: ctx.projectId,
+        ...(access ? { access } : {}),
+      });
       return reply.code(200).send({ documents });
     } catch (error) {
       logger.error('List client RAG documents error', { error });
@@ -207,8 +259,10 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       let chunkConfig: IRagChunkConfig | undefined;
+      let extraction: { ocr?: OcrSettings | null } | undefined;
       try {
         chunkConfig = readDocumentChunkConfig(body);
+        extraction = readDocumentExtraction(body);
       } catch (error) {
         return sendInvalidRequest(reply, error);
       }
@@ -220,9 +274,21 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const deferIndexing = body.async === true;
       const statusCode = deferIndexing ? 202 : 201;
 
+      const { scope } = await ragAccessForRequest(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      });
+      const { placement, refused } = await readDocumentPlacement(request, reply, body, scope);
+      if (refused) return refused;
+
       if (typeof body.data === 'string') {
+        const modelProblem = await ocrModelProblem(ctx, extraction?.ocr);
+        if (modelProblem) return reply.code(400).send({ error: modelProblem });
+
+        // `async: true` defers the extraction of a scanned file to the ingest queue as well as the indexing.
         const document = await ingestFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
           chunkConfig,
+          ...(extraction ? { extraction } : {}),
+          signal: clientGone(reply),
           contentType: body.contentType as string | undefined,
           createdBy: ctx.tokenRecord.userId,
         force: body.force === true,
@@ -231,6 +297,8 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
           fileName: body.fileName,
           metadata: body.metadata as Record<string, unknown> | undefined,
           ragModuleKey: key,
+          ...(scope ? { access: scope } : {}),
+          ...(placement ? { placement } : {}),
         });
 
         return reply.code(statusCode).send({ document: withoutSourceText(document) });
@@ -252,6 +320,8 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         fileName: body.fileName,
         metadata: body.metadata as Record<string, unknown> | undefined,
         ragModuleKey: key,
+        ...(scope ? { access: scope } : {}),
+        ...(placement ? { placement } : {}),
       });
 
       return reply.code(statusCode).send({ document: withoutSourceText(document) });
@@ -259,6 +329,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      if (error instanceof RagOcrIncompleteError) {
+        return reply.code(error.statusCode).send({ error: error.message, code: error.code });
+      }
+      const accessRefusal = sendRagAccessError(reply, error);
+      if (accessRefusal) return accessRefusal;
       logger.error('Ingest client RAG document error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -280,6 +355,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (!document) {
         return reply.code(404).send({ error: 'Document not found' });
       }
+      if (await documentHiddenFor(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      }, document, 'manage')) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
@@ -297,6 +377,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const document = await documentInProjectScope(ctx.tenantDbName, documentId, key, ctx.projectId);
 
       if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+      if (await documentHiddenFor(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      }, document, 'retrieve')) {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
@@ -321,6 +406,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const document = await documentInProjectScope(ctx.tenantDbName, documentId, key, ctx.projectId);
 
       if (!document) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+      if (await documentHiddenFor(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      }, document, 'retrieve')) {
         return reply.code(404).send({ error: 'Document not found' });
       }
 
@@ -359,6 +449,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (!document) {
         return reply.code(404).send({ error: 'Document not found' });
       }
+      if (await documentHiddenFor(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      }, document, 'manage')) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
 
       await deleteRagDocument(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         documentId,
@@ -387,8 +482,17 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (!existing) {
         return reply.code(404).send({ error: 'Document not found' });
       }
+      const accessInput = {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      };
+      if (await documentHiddenFor(request, accessInput, existing, 'manage')) {
+        return reply.code(404).send({ error: 'Document not found' });
+      }
+      const { scope } = await ragAccessForRequest(request, accessInput);
 
       const body = readJsonBody<Record<string, unknown>>(request);
+      const { placement, refused } = await readDocumentPlacement(request, reply, body, scope);
+      if (refused) return refused;
       const encodedData = typeof body.data === 'string'
         ? body.data
         : (typeof body.base64 === 'string' ? body.base64 : undefined);
@@ -402,6 +506,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       const document = await reingestDocument(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         chunkConfig,
+        ...(body.reextract === true ? { reextract: true } : {}),
         content: typeof body.content === 'string' ? body.content : undefined,
         contentType: typeof body.contentType === 'string' ? body.contentType : undefined,
         documentId,
@@ -411,14 +516,23 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
           ? body.metadata as Record<string, unknown>
           : undefined,
         ragModuleKey: key,
+        ...(placement ? { placement } : {}),
         updatedBy: ctx.tokenRecord.userId,
       });
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
-      if (error instanceof RagModuleInactiveError) {
+      if (
+        error instanceof RagModuleInactiveError
+        || error instanceof RagOriginalMissingError
+        || error instanceof RagStoredTextUnavailableError
+        || error instanceof RagReextractIncompleteError
+        || error instanceof RagDocumentGoneError
+      ) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      const accessRefusal = sendRagAccessError(reply, error);
+      if (accessRefusal) return accessRefusal;
       logger.error('Reingest client RAG document error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -436,13 +550,16 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'query is required' });
       }
 
+      const { scope, caller } = await ragAccessForRequest(request, {
+        tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
+      });
       const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
         ragModuleKey: key,
         topK: body.topK as number | undefined,
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
-      });
+      }, { caller, ...(scope ? { access: scope } : {}) });
 
       return reply.code(200).send({ result: shapeRagQueryResponse(result) });
     } catch (error) {

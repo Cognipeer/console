@@ -8,6 +8,7 @@
  * testable without rendering — the server enforces the same ones on save.
  */
 
+import { cleanLanguages, compactOcr, invalidLanguages, ocrIsOn, type OcrSettings } from '@/components/extraction/ocrForm';
 import type { IAgentAttachmentsConfig } from '@/lib/database/provider/types.domain';
 import {
     normalizeAttachmentsFolder,
@@ -89,6 +90,41 @@ export function patchOutputs(
     const merged: Record<string, unknown> = { ...(current?.outputs ?? {}), ...patch };
     for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
     return patchAttachments(current, { outputs: Object.keys(merged).length > 0 ? merged : undefined });
+}
+
+/** OCR for uploads is on (mode auto / always). Absent = off. */
+export function ocrEnabled(value: AttachmentsSettings | undefined): boolean {
+    return ocrIsOn(value?.ocr);
+}
+
+/**
+ * Replaces `attachments.ocr` with what the OCR fields hand back (`undefined` = off, the key is dropped), the way
+ * `patchOutputs` merges `outputs`. The fields emit the whole setting, so a key the person removed (the page cap) goes
+ * with it instead of surviving a merge.
+ */
+export function patchOcr(
+    current: AttachmentsSettings | undefined,
+    next: OcrSettings | undefined,
+): AttachmentsSettings | undefined {
+    const rest: AttachmentsSettings = { ...(current ?? {}) };
+    delete rest.ocr;
+    return patchAttachments(rest, { ocr: compactOcr(next) });
+}
+
+export type OcrIssue = 'model' | 'languages' | 'pages';
+
+/**
+ * What the server would refuse in an OCR setting that is on, or null. Whether the model exists in the project is the
+ * server's to say (and the model picker shows it as soon as the list is loaded); this only catches what is wrong
+ * with the setting itself.
+ */
+export function ocrIssue(value: AttachmentsSettings | undefined): OcrIssue | null {
+    const ocr = value?.ocr;
+    if (!ocrIsOn(ocr)) return null;
+    if (ocr.modelKey !== undefined && (typeof ocr.modelKey !== 'string' || !ocr.modelKey.trim() || ocr.modelKey.length > 120)) return 'model';
+    if (ocr.languages && (ocr.languages.length > 8 || invalidLanguages(cleanLanguages(ocr.languages)).length > 0)) return 'languages';
+    if (ocr.maxPages !== undefined && (!Number.isInteger(ocr.maxPages) || ocr.maxPages < 1)) return 'pages';
+    return null;
 }
 
 export type FolderIssue = 'invalid_chars' | 'dot_dot' | 'too_long';
@@ -226,8 +262,8 @@ export function bucketProblem(
 
 export interface FilesSaveError {
     /** The config field the server reports the same problem under. */
-    field: 'attachments.bucketKey' | 'attachments.folder';
-    code: 'bucket_required' | FolderIssue;
+    field: 'attachments.bucketKey' | 'attachments.folder' | 'attachments.ocr';
+    code: 'bucket_required' | FolderIssue | 'ocr_model' | 'ocr_languages' | 'ocr_pages';
 }
 
 /**
@@ -241,6 +277,9 @@ export function filesSaveErrors(value: AttachmentsSettings | undefined): FilesSa
     if (bucketProblem(value, null) === 'required') errors.push({ field: 'attachments.bucketKey', code: 'bucket_required' });
     const issue = filesNeedBucket(value) ? folderIssue(value?.folder) : null;
     if (issue) errors.push({ field: 'attachments.folder', code: issue });
+    // OCR is read only while uploads are on: a setting left behind on an agent that no longer takes files blocks nothing.
+    const ocr = filesEnabled(value) ? ocrIssue(value) : null;
+    if (ocr) errors.push({ field: 'attachments.ocr', code: `ocr_${ocr}` });
     return errors;
 }
 

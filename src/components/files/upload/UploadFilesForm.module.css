@@ -190,6 +190,14 @@
 
 /* ── Processing ────────────────────────────────────────────────────────── */
 
+.ocr {
+  margin-top: 14px;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .advanced {
   margin-top: 12px;
   font-size: 13px;

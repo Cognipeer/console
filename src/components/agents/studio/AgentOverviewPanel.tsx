@@ -11,6 +11,7 @@
  * session list here made an agent serving thousands of API calls look idle.
  */
 
+import { FlowOverviewBadge } from '@/components/enterprise/EnterpriseFlowAgentUi';
 import { useEffect, useMemo, useState } from 'react';
 import {
     ActionIcon,
@@ -56,7 +57,7 @@ interface OverviewAgent {
     publishedVersion?: number | null;
     config?: {
         modelKey?: string;
-        kind?: 'native' | 'external';
+        kind?: 'native' | 'external' | 'flow';
         toolBindings?: Array<{ toolNames?: string[] }>;
         knowledgeEngineKey?: string;
         memory?: { enabled?: boolean };
@@ -357,7 +358,9 @@ export default function AgentOverviewPanel({
                 </SectionCard>
             </SimpleGrid>
 
-            {!isConnected ? (
+            {agent.config?.kind === 'flow' ? (
+                <FlowOverviewBadge />
+            ) : !isConnected ? (
                 <Group gap="xs">
                     {agent.config?.knowledgeEngineKey ? <Badge variant="outline" color="blue">knowledge engine</Badge> : null}
                     {agent.config?.memory?.enabled ? <Badge variant="outline" color="grape">memory</Badge> : null}

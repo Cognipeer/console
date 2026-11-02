@@ -134,6 +134,13 @@ export default function EvaluationRunDetailPage() {
       key: 'output',
       label: 'Output',
       render: (i) => {
+        if (i.restricted) {
+          return (
+            <span className="ds-muted" style={{ fontSize: 12 }} data-testid="eval-item-restricted">
+              Hidden: used knowledge base documents you cannot read
+            </span>
+          );
+        }
         const text = i.error ? i.error : (i.output?.text ?? '');
         const short = text.length > 120 ? `${text.slice(0, 120)}…` : text;
         return <span className="ds-muted" style={{ fontSize: 12 }} title={text}>{short || '—'}</span>;

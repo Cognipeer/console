@@ -67,6 +67,12 @@ export const COLLECTIONS = {
   ragChunks: 'rag_chunks',
   ragQueryLogs: 'rag_query_logs',
   ragReindexRuns: 'rag_reindex_runs',
+  // Knowledge Engine access control (folders, permissions, identity directories)
+  ragFolders: 'rag_folders',
+  ragAclEntries: 'rag_acl_entries',
+  ragIdentityDomains: 'rag_identity_domains',
+  ragIdentityUsers: 'rag_identity_users',
+  ragIdentityLinks: 'rag_identity_links',
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',

@@ -46,6 +46,7 @@ import {
     IconCoin,
     IconHandStop,
     IconInfoCircle,
+    IconLock,
     IconMessageCircle,
     IconPlayerPlay,
     IconPlayerStop,
@@ -190,6 +191,11 @@ export interface SessionListItem {
     };
     /** Present only while the session holds scheduled reminders. */
     reminders?: { active: number; nextAt: string };
+    /**
+     * The session used knowledge base documents this viewer may not read: listed without its title, and the server
+     * refuses to open it.
+     */
+    restricted?: boolean;
 }
 
 const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
@@ -582,9 +588,18 @@ export default function SessionList({
                         render: (session) => (
                             <Group gap={6} wrap="nowrap" miw={showAgent ? WIDE_NAME_MIN_WIDTH : undefined}>
                                 <UnstyledButton onClick={(event) => { event.stopPropagation(); onOpen(session._id); }} className={classes.nameButton}>
-                                    <Text size="sm" fw={500} lineClamp={1}>
-                                        {session.title || 'New session'}
-                                    </Text>
+                                    {session.restricted ? (
+                                        <Tooltip label={ts('restrictedTooltip')} withArrow multiline w={320}>
+                                            <Group gap={4} wrap="nowrap" data-testid="session-restricted">
+                                                <IconLock size={12} />
+                                                <Text size="sm" fw={500} c="dimmed" lineClamp={1}>{ts('restrictedTitle')}</Text>
+                                            </Group>
+                                        </Tooltip>
+                                    ) : (
+                                        <Text size="sm" fw={500} lineClamp={1}>
+                                            {session.title || 'New session'}
+                                        </Text>
+                                    )}
                                 </UnstyledButton>
                                 {session.runtimeStatus === 'requires_action' ? (
                                     session.canResolve === false ? (

@@ -57,6 +57,10 @@ vi.mock('@/lib/services/rag/ragService', () => ({
 
 vi.mock('@/server/api/plugins/rag', () => ({
   documentInProjectScope: vi.fn(),
+  // The modules here have no access control: nothing is hidden, no placement is asked for.
+  documentHiddenFor: vi.fn(async () => false),
+  readDocumentPlacement: vi.fn(async () => ({})),
+  refuseAccessChange: vi.fn(async () => false),
   readDocumentChunkConfig: vi.fn().mockReturnValue(undefined),
   readRagModuleCreateFields: vi.fn(),
   readRagModuleUpdateFields: vi.fn(),
@@ -75,6 +79,7 @@ import {
   deleteRagDocument,
   reingestDocument,
 } from '@/lib/services/rag/ragService';
+import { RagOcrIncompleteError } from '@/lib/services/rag/errors';
 import { documentInProjectScope } from '@/server/api/plugins/rag';
 import { clientRagApiPlugin } from '@/server/api/plugins/client-rag';
 import { createMockDb } from '../helpers/db.mock';
@@ -172,7 +177,7 @@ describe('client RAG API — project scope threaded to every service call', () =
     expect(queryRag).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-a', expect.objectContaining({
       ragModuleKey: 'docs-v1',
       query: 'what is our refund policy?',
-    }));
+    }), expect.objectContaining({ caller: expect.objectContaining({ kind: expect.any(String) }) }));
   });
 
   it('DELETE .../documents/:id passes the caller project to deleteRagDocument', async () => {
@@ -224,5 +229,25 @@ describe('client RAG API — project scope threaded to every service call', () =
 
     expect(res.statusCode).toBe(404);
     expect(deleteRagDocument).not.toHaveBeenCalled();
+  });
+});
+
+describe('client RAG API — a file whose text could not be read', () => {
+  it('POST .../ingest answers 422 with the ocr_incomplete code when OCR could not read a scan', async () => {
+    mockFn(ingestFile).mockRejectedValue(new RagOcrIncompleteError('scan.pdf', 'it ran out of time', ['ocr_timeout: slow']));
+    const app = await buildApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/rag/modules/docs-v1/ingest',
+      headers: { authorization: 'Bearer tok', 'content-type': 'application/json' },
+      payload: { fileName: 'scan.pdf', data: Buffer.from('%PDF').toString('base64') },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'Failed to convert "scan.pdf" to text. OCR could not read it: it ran out of time.',
+      code: 'ocr_incomplete',
+    });
   });
 });

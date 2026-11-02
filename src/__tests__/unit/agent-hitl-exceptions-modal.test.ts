@@ -18,9 +18,11 @@ const hitl: IAgentHumanInTheLoopConfig = { toolApproval: { enabled: true, tools:
 const row = (over: Partial<HitlToolRow> = {}): HitlToolRow => ({
   name: 'send_email',
   origin: 'client',
+  kind: 'writes',
   readOnly: false,
   choice: 'always',
   effective: 'always',
+  askChoice: 'default',
   exceptions: [],
   ...over,
 });

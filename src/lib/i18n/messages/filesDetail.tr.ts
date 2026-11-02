@@ -53,6 +53,8 @@ export const filesDetailTr: typeof filesDetailEn = {
       'Bu dönüştürme bir süredir tamamlanmadı. Bu sırada sunucu yeniden başlatıldıysa iş kaybolmuş olabilir. Yeniden başlatmak için tekrar dönüştürün.',
     keptCopy: 'Önceki Markdown kopyası hâlâ duruyor.',
     convertAgain: 'Yeniden dönüştür',
+    ocrOptions: 'Metin tanıma seçenekleri',
+    ocrAgain: 'Metin tanımayla yeniden dönüştür…',
     noneHint: 'Bu dosyanın Markdown kopyası yok.',
     retry: 'Dönüştürmeyi yeniden dene',
     convert: 'Markdown’a dönüştür',

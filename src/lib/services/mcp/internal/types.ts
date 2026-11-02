@@ -8,6 +8,7 @@
  */
 
 import type { IMcpTool } from '@/lib/database';
+import type { ConsoleIdentityCaller } from '@/lib/iam/consoleIdentity';
 
 export interface InternalMcpProviderContext {
   tenantDbName: string;
@@ -15,6 +16,8 @@ export interface InternalMcpProviderContext {
   projectId?: string;
   /** Key of the MCP server the call came through. Set for `execute` only. */
   serverKey?: string;
+  /** Who the call is for. Set for `execute` only; absent when the surface knows nobody (a public endpoint). */
+  identity?: ConsoleIdentityCaller;
 }
 
 /** One selectable instance of a provider, e.g. a single RAG module. */

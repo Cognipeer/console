@@ -396,8 +396,8 @@ describe('the settings editor', () => {
     expect(next.toolApproval?.tools).toEqual({ send: 'always' });
     const cleared = setToolExceptions(setToolExceptions(value, 'send', []), 'gone_tool', []);
     expect(cleared.toolApproval && 'exceptions' in cleared.toolApproval).toBe(false);
+    // A new block leaves the switch unset, which means on.
     expect(setToolExceptions(undefined, 'send', [{ pattern: 'y', action: 'ask' }]).toolApproval).toEqual({
-      enabled: false,
       exceptions: { send: [{ pattern: 'y', action: 'ask' }] },
     });
   });

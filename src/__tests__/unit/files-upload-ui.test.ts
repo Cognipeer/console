@@ -330,6 +330,62 @@ describe('sending', () => {
     expect(FakeXhr.instances[0]!.body).toMatchObject({ convertToMarkdown: false });
   });
 
+  describe('text recognition (OCR)', () => {
+    const modeLabel = (label: string) => qa('label').find((l) => l.textContent?.trim() === label);
+    const convertToggle = () =>
+      qa('label.form-toggle-row').find((label) => label.textContent?.includes('Convert to Markdown'))!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+
+    it('is off unless chosen: an untouched form sends no OCR settings and lists no models', async () => {
+      await open();
+      expect(text()).toContain('Read scanned pages (OCR)');
+      expect(text()).not.toContain('Maximum pages per document');
+      await pick([makeFile('a.txt')]);
+      await startUploads(1);
+      expect(FakeXhr.instances[0]!.body).not.toHaveProperty('ocr');
+      expect(api.to('GET', '/api/models')).toHaveLength(0);
+    });
+
+    it('sends the chosen settings with every file, and says so in the summary', async () => {
+      await open();
+      api.on('GET', '/api/models', (call) => ({
+        models: call.query.category === 'ocr'
+          ? [{ key: 'doc-ocr', name: 'Doc OCR' }]
+          : [{ key: 'vision', name: 'Vision LLM', isMultimodal: true }, { key: 'chat', name: 'Chat only' }],
+      }));
+      await click(modeLabel('Every page'));
+      expect(text()).toContain('Maximum pages per document');
+      expect(text()).toContain('Also read images');
+      // The project's OCR models and vision LLMs are listed (a chat-only model is not).
+      await until(() => api.to('GET', '/api/models').length === 2, 'the model lists');
+      expect(api.to('GET', '/api/models').map((call) => call.query.category).sort()).toEqual(['llm', 'ocr']);
+      expect(text()).toContain('Text recognition');
+      expect(text()).toContain('Every page · Local engine · tr, en');
+
+      await pick([makeFile('scan.pdf', { type: 'application/pdf' })]);
+      await startUploads(1);
+      expect(FakeXhr.instances[0]!.body).toMatchObject({ convertToMarkdown: true, ocr: { mode: 'always' } });
+    });
+
+    it('hides the options and sends none when the Markdown copy is turned off', async () => {
+      await open();
+      await click(modeLabel('Auto (scanned pages only)'));
+      expect(text()).toContain('Maximum pages per document');
+      await click(convertToggle());
+      expect(text()).not.toContain('Read scanned pages (OCR)');
+      await pick([makeFile('a.txt')]);
+      await startUploads(1);
+      expect(FakeXhr.instances[0]!.body).toMatchObject({ convertToMarkdown: false });
+      expect(FakeXhr.instances[0]!.body).not.toHaveProperty('ocr');
+    });
+
+    it('speaks Turkish', async () => {
+      await open({ locale: 'tr' });
+      expect(text()).toContain('Taranmış sayfaları oku (OCR)');
+      await click(modeLabel('Her sayfa'));
+      expect(text()).toContain('Belge başına en çok sayfa');
+    });
+  });
+
   it('submits when Enter sends the form', async () => {
     await open();
     await pick([makeFile('a.txt')]);

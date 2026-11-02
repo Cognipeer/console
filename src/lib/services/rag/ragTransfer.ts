@@ -4,6 +4,7 @@ import type { IRagChunkConfig, IRagDocument } from '@/lib/database';
 import { listRagDocuments, getRagDocument, getRagModule, ingestDocument } from './ragService';
 import { loadSourceText } from './ragSource';
 import { validateChunkConfig } from './chunking';
+import type { RagAccessScope } from './access/scope';
 
 const logger = createLogger('rag-transfer');
 
@@ -79,20 +80,31 @@ function plainObject(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * `reader` is a caller whose reads are checked (a manager while the module keeps
+ * the admin exception off): the export holds the documents it reads, and
+ * nothing says how many were left out.
+ */
 export async function exportRagModule(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
   ragModuleKey: string,
+  reader?: Pick<RagAccessScope, 'documentFilter' | 'canReadDocument'>,
 ): Promise<RagExportResult | undefined> {
   const ragModule = await getRagModule(tenantDbName, ragModuleKey, projectId);
   if (!ragModule) return undefined;
 
-  const documents = await listRagDocuments(tenantDbName, ragModuleKey, { projectId });
+  const access = reader?.documentFilter();
+  const documents = await listRagDocuments(tenantDbName, ragModuleKey, {
+    projectId,
+    ...(access ? { access } : {}),
+  });
   const lines: string[] = [];
   let skippedDocuments = 0;
 
   for (const listed of documents as IRagDocument[]) {
+    if (reader && !reader.canReadDocument(listed)) continue;
     // listRagDocuments drops the inline source text, and a short document keeps
     // its text nowhere else, so each document's full row is read here, one at a
     // time.

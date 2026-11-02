@@ -80,6 +80,8 @@ export const filesUploadTr: typeof filesUploadEn = {
       'PDF, Word, PowerPoint (.pptx), Excel, HTML ile CSV ve JSON gibi metin dosyalarında çalışır. Görseller gibi diğer dosyalar Markdown kopyası olmadan saklanır. Markdown kopyası, üretildiği dosyanın yanına kaydedilir; orijinal dosya hiç değişmez.',
     background:
       'Dönüştürme yüklemeden sonra arka planda çalışır. Durumu dosya listesinde ve dosya ayrıntılarında görünür; başarısız bir dönüştürme oradan yeniden denenebilir.',
+    ocrHint:
+      'Metin tanıma, taranmış PDF ve resimleri okur. Dönüştürmeyle birlikte arka planda çalışır; dosya listesi ve dosya ayrıntıları kaç sayfanın okunduğunu gösterir.',
     advanced: 'Gelişmiş',
     contentType: 'İçerik türü',
     contentTypeHint: 'Yalnızca tek dosya için. Tarayıcının algıladığı türü kullanmak için boş bırakın.',
@@ -91,6 +93,7 @@ export const filesUploadTr: typeof filesUploadEn = {
     totalSize: 'Toplam boyut',
     destination: 'Hedef',
     markdown: 'Markdown kopyası',
+    ocr: 'Metin tanıma',
     on: 'Açık',
     off: 'Kapalı',
     preflight: 'Ön kontrol',

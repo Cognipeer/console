@@ -406,6 +406,19 @@ export async function* crawl(
       if (fetched.type === 'file') {
         let attachmentBody: string | undefined;
         if (fetched.fileBuffer) {
+          // OCR'd files are read by the host's extraction engine, which
+          // needs far more than 60 s for a scanned PDF and can stop its
+          // work: the timeout aborts it instead of abandoning it.
+          const viaExtractor = Boolean(
+            plan.markdownOptions?.ocr?.enabled && deps.extractFile,
+          );
+          const conversion = new AbortController();
+          const stopConversion = () => conversion.abort();
+          if (viaExtractor) {
+            deps.signal?.addEventListener('abort', stopConversion, {
+              once: true,
+            });
+          }
           attachmentBody = await withTimeout(
             fileToMarkdown({
               buffer: fetched.fileBuffer,
@@ -414,16 +427,33 @@ export async function* crawl(
                 fetched.contentType,
               ),
               options: plan.markdownOptions,
+              ...(viaExtractor
+                ? {
+                    extractFile: deps.extractFile,
+                    contentType: fetched.contentType,
+                    signal: conversion.signal,
+                  }
+                : {}),
             }),
-            MARKDOWN_CONVERSION_TIMEOUT_MS,
+            viaExtractor
+              ? (deps.ocrConversionTimeoutMs ?? MARKDOWN_CONVERSION_TIMEOUT_MS)
+              : MARKDOWN_CONVERSION_TIMEOUT_MS,
             `Attachment markdown conversion for ${item.url}`,
-          ).catch((err: unknown) => {
-            logger.warn('Attachment markdown conversion failed', {
-              url: item.url,
-              error: (err as Error).message,
+          )
+            .catch((err: unknown) => {
+              // A timed-out conversion is stopped, not just abandoned.
+              if (viaExtractor) stopConversion();
+              logger.warn('Attachment markdown conversion failed', {
+                url: item.url,
+                error: (err as Error).message,
+              });
+              return undefined;
+            })
+            .finally(() => {
+              if (viaExtractor) {
+                deps.signal?.removeEventListener('abort', stopConversion);
+              }
             });
-            return undefined;
-          });
         }
         return {
           result: {

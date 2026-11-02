@@ -74,6 +74,11 @@ export interface SnapshotPreview {
   samplePct: number;
   limit: number;
   breakdown: SnapshotBreakdownEntry[];
+  /**
+   * Rows/sessions passing the filters that are left out (not in `matching`): they carried passages of knowledge
+   * base documents not open to everyone, and a dataset is read by everyone who reads evaluations.
+   */
+  restricted?: number;
 }
 
 export interface SnapshotSkipCounts {
@@ -87,6 +92,9 @@ export interface SnapshotSkipCounts {
    *  dropped because the dataset hit its payload byte budget (Mongo documents
    *  cap at 16MB — the budget stops well before that). */
   sizeCapped: number;
+  /** Rows/sessions passing the filters that carried passages of knowledge base documents not open to everyone: never
+   *  copied into a dataset (not counted in `matching`). Absent on snapshots made before the rule. */
+  restricted?: number;
 }
 
 /** What kind of content the tracing mapper found in a session's events. */

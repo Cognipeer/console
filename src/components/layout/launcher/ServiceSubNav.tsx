@@ -28,7 +28,9 @@ import {
   IconFolder,
   IconHeartbeat,
   IconHistory,
+  IconKey,
   IconLayoutDashboard,
+  IconLayoutGrid,
   IconListCheck,
   IconMessage,
   IconMessages,
@@ -38,10 +40,12 @@ import {
   IconPinFilled,
   IconPlayerPlay,
   IconPlug,
+  IconPlugConnected,
   IconReportAnalytics,
   IconChartHistogram,
   IconStethoscope,
   IconRobot,
+  IconRoute,
   IconPhoto,
   IconScan,
   IconShieldCheck,
@@ -92,14 +96,23 @@ export interface SubNavItem {
    * in (Webhooks, in Agents): shown only to someone who can use that service.
    */
   requiresService?: PermissionService;
+  /** Shown to tenant owners and admins only (OAuth apps, in Connectors). */
+  tenantAdminOnly?: boolean;
 }
 
-/** Drops the items the viewer has no access to; an item without `requiresService` always stays. */
+/**
+ * Drops the items the viewer has no access to; an item without `requiresService`
+ * or `tenantAdminOnly` always stays. `isTenantAdmin` defaults to true so callers
+ * that only judge by permission service keep their behaviour.
+ */
 export function visibleSubNavItems(
   items: SubNavItem[] | undefined,
   canUse: (service: PermissionService) => boolean,
+  isTenantAdmin = true,
 ): SubNavItem[] | undefined {
-  return items?.filter((item) => !item.requiresService || canUse(item.requiresService));
+  return items?.filter(
+    (item) => (!item.requiresService || canUse(item.requiresService)) && (!item.tenantAdminOnly || isTenantAdmin),
+  );
 }
 
 /** Model categories surfaced as their own sub-nav entries under the Models service. */
@@ -330,6 +343,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
           !p.startsWith('/dashboard/tracing/health') &&
           !p.startsWith('/dashboard/tracing/sessions') &&
           !p.startsWith('/dashboard/tracing/threads') &&
+          !p.startsWith('/dashboard/tracing/flows') &&
           !p.startsWith('/dashboard/tracing/agents')),
     },
     {
@@ -361,6 +375,16 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/tracing/agents',
       icon: IconRobot,
       matcher: (p) => p.startsWith('/dashboard/tracing/agents'),
+    },
+    {
+      // Runs of every flow (test runs, agent calls, API, schedules). Hidden without `flows` access.
+      id: 'flow-runs',
+      label: 'Flow runs',
+      labelKey: 'flowRuns',
+      href: '/dashboard/tracing/flows',
+      icon: IconRoute,
+      matcher: (p) => p.startsWith('/dashboard/tracing/flows'),
+      requiresService: 'flows',
     },
   ],
   cost: [
@@ -718,6 +742,38 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/mcp/monitor',
       icon: IconTimeline,
       matcher: (p) => p.startsWith('/dashboard/mcp/monitor'),
+    },
+  ],
+  connectors: [
+    {
+      id: 'catalog',
+      label: 'Catalog',
+      labelKey: 'connectorsCatalog',
+      href: '/dashboard/connectors/catalog',
+      icon: IconLayoutGrid,
+      matcher: (p) => p.startsWith('/dashboard/connectors/catalog'),
+    },
+    {
+      id: 'installed',
+      label: 'Installed',
+      labelKey: 'connectorsInstalled',
+      href: '/dashboard/connectors',
+      icon: IconPlugConnected,
+      // A connector's own page (/dashboard/connectors/<id>) stays here; its static siblings do not.
+      matcher: (p) =>
+        p === '/dashboard/connectors' ||
+        (p.startsWith('/dashboard/connectors/') &&
+          !['catalog', 'oauth-apps'].some((segment) => p.startsWith(`/dashboard/connectors/${segment}`))),
+    },
+    {
+      id: 'oauth-apps',
+      label: 'OAuth apps',
+      labelKey: 'connectorsOauthApps',
+      sectionKey: 'connectorsSettings',
+      href: '/dashboard/connectors/oauth-apps',
+      icon: IconKey,
+      tenantAdminOnly: true,
+      matcher: (p) => p.startsWith('/dashboard/connectors/oauth-apps'),
     },
   ],
   alerts: [

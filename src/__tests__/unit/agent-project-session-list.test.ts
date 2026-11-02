@@ -9,6 +9,7 @@ const db = vi.hoisted(() => ({
     switchToTenant: vi.fn(),
     listProjectAgentConversations: vi.fn(),
     listAgentRuns: vi.fn(),
+    listOwnedAgentKeys: vi.fn(async () => [] as string[]),
     updateAgentConversationRuntime: vi.fn(),
 }));
 
@@ -62,6 +63,13 @@ describe('listProjectSessions stale-run check', () => {
         await listProjectSessions('tenant_x', { projectId: 'p1', limit: 10, knownInFlight: new Set(['known']) });
         expect(db.listProjectAgentConversations.mock.calls[0][0]).not.toHaveProperty('knownInFlight');
         expect(db.listProjectAgentConversations.mock.calls[0][0]).toMatchObject({ projectId: 'p1', limit: 11 });
+    });
+
+    it('leaves out the sessions of the hidden agents flows own', async () => {
+        db.listOwnedAgentKeys.mockResolvedValueOnce(['flow-demo-ask']);
+        await listProjectSessions('tenant_x', { projectId: 'p1', limit: 10 });
+        expect(db.listOwnedAgentKeys).toHaveBeenCalledWith('p1');
+        expect(db.listProjectAgentConversations.mock.calls[0][0]).toMatchObject({ excludeAgentKeys: ['flow-demo-ask'] });
     });
 
     it('questions every stale row without the set', async () => {

@@ -3,8 +3,11 @@
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
+  Alert,
+  Anchor,
   Badge,
   Box,
   Button,
@@ -61,7 +64,7 @@ const STATUS_COLORS: Record<string, string> = {
   error: 'red',
 };
 
-const actionColumns: DataGridColumn<IToolAction>[] = [
+const actionColumnsFor = (tm: (key: string) => string): DataGridColumn<IToolAction>[] => [
   { key: 'key', label: 'Action Key', render: (action) => <Code>{action.key}</Code> },
   {
     key: 'name',
@@ -77,8 +80,12 @@ const actionColumns: DataGridColumn<IToolAction>[] = [
     key: 'type',
     label: 'Type',
     render: (action) => (
-      <Badge size="xs" variant="light" color={action.executionType === 'openapi_http' ? 'indigo' : 'violet'}>
-        {action.executionType === 'openapi_http' ? 'HTTP' : 'MCP'}
+      <Badge size="xs" variant="light" color={EXECUTION_COLORS[action.executionType] ?? 'violet'}>
+        {action.executionType === 'openapi_http'
+          ? 'HTTP'
+          : action.executionType === 'connector_action'
+            ? tm('native')
+            : 'MCP'}
       </Badge>
     ),
   },
@@ -175,6 +182,19 @@ const logColumns: DataGridColumn<ToolRequestLogView>[] = [
 const TYPE_LABELS: Record<string, string> = {
   openapi: 'OpenAPI',
   mcp: 'MCP',
+  connector: 'Connector',
+};
+
+const EXECUTION_COLORS: Record<string, string> = {
+  openapi_http: 'indigo',
+  mcp_call: 'violet',
+  connector_action: 'grape',
+};
+
+const TYPE_COLORS: Record<string, string> = {
+  openapi: 'indigo',
+  mcp: 'violet',
+  connector: 'grape',
 };
 
 interface ToolAggregateView {
@@ -239,6 +259,7 @@ export default function ToolDetailPage() {
   const params = useParams<{ id: string }>()!;
   const router = useRouter();
   const tConfirm = useTranslations('common.confirm');
+  const tm = useTranslations('managedTools');
   const deleteResource = useDeleteResource();
   const searchParams = useSearchParams()!;
   const tabParam = searchParams.get('tab');
@@ -594,6 +615,10 @@ export default function ToolDetailPage() {
 
   if (!tool) return null;
 
+  // A connector's tool: the Tools API refuses to change or delete it (409), so this page only shows it.
+  const managedBy = tool.managedBy;
+  const readOnly = Boolean(managedBy);
+
   return (
     <>
       <PageContainer>
@@ -611,42 +636,63 @@ export default function ToolDetailPage() {
             >
               Back
             </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconRefresh size={14} />}
-              loading={syncing}
-              onClick={handleSync}
-            >
-              Sync Actions
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconSettings size={14} />}
-              onClick={() => setEditOpen(true)}
-            >
-              Settings
-            </Button>
-            <Button
-              variant="light"
-              color="red"
-              size="xs"
-              leftSection={<IconTrash size={14} />}
-              onClick={() => void handleDelete()}
-            >
-              Delete
-            </Button>
+            {/* Hidden, not disabled, for a connector's tool: a disabled light button looks the same as an enabled one. */}
+            {!readOnly && (
+              <>
+                <Button
+                  variant="light"
+                  size="xs"
+                  leftSection={<IconRefresh size={14} />}
+                  loading={syncing}
+                  onClick={handleSync}
+                >
+                  Sync Actions
+                </Button>
+                <Button
+                  variant="light"
+                  size="xs"
+                  leftSection={<IconSettings size={14} />}
+                  onClick={() => setEditOpen(true)}
+                >
+                  Settings
+                </Button>
+                <Button
+                  variant="light"
+                  color="red"
+                  size="xs"
+                  leftSection={<IconTrash size={14} />}
+                  onClick={() => void handleDelete()}
+                >
+                  Delete
+                </Button>
+              </>
+            )}
           </Group>
         }
       />
+
+      {managedBy && (
+        <Alert
+          color="blue"
+          variant="light"
+          icon={<IconPlugConnected size={16} />}
+          title={tm('noticeTitle')}
+          mb="md"
+          data-testid="managed-tool-notice"
+        >
+          {tm('noticeBody')}{' '}
+          <Anchor component={Link} size="sm" href={`/dashboard/connectors/${managedBy.id}`}>
+            {tm('openConnector')}
+          </Anchor>
+        </Alert>
+      )}
 
       {/* Metadata cards */}
       <Group gap="xs" mb="md">
         <Badge variant="light" color={STATUS_COLORS[tool.status] ?? 'gray'}>
           {tool.status === 'active' ? 'Active' : 'Disabled'}
         </Badge>
-        <Badge variant="light" color={tool.type === 'openapi' ? 'indigo' : 'violet'}>
+        <Badge variant="light" color={TYPE_COLORS[tool.type] ?? 'violet'}>
           {TYPE_LABELS[tool.type]}
         </Badge>
         <Badge variant="light" color="blue">
@@ -714,6 +760,7 @@ export default function ToolDetailPage() {
               <Switch
                 mt="xs"
                 size="sm"
+                disabled={readOnly}
                 label="Accept caller headers"
                 checked={
                   (tool.metadata?.runtimeHeaders as { allow?: boolean } | undefined)?.allow === true
@@ -860,14 +907,17 @@ export default function ToolDetailPage() {
                 <ThemeIcon size={40} variant="light" color="gray" radius="xl">
                   <IconTool size={20} />
                 </ThemeIcon>
-                <Text c="dimmed" size="sm">No actions discovered yet. Try syncing.</Text>
+                <Text c="dimmed" size="sm">
+                  {/* A managed tool is synced from its connector: there is no Sync Actions button above for it. */}
+                  {readOnly ? tm('noActions') : 'No actions discovered yet. Try syncing.'}
+                </Text>
               </Stack>
             </Paper>
           ) : (
             <DataGrid<IToolAction>
               records={tool.actions}
               rowKey={(action) => action.key}
-              columns={actionColumns}
+              columns={actionColumnsFor(tm)}
               onRowClick={(action) => setSelectedAction(action)}
             />
           )}
@@ -1049,8 +1099,12 @@ export default function ToolDetailPage() {
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
               <Box>
                 <Text size="xs" fw={600} c="dimmed" mb={4}>Execution Type</Text>
-                <Badge size="sm" variant="light" color={selectedAction.executionType === 'openapi_http' ? 'indigo' : 'violet'}>
-                  {selectedAction.executionType === 'openapi_http' ? 'HTTP (OpenAPI)' : 'MCP Call'}
+                <Badge size="sm" variant="light" color={EXECUTION_COLORS[selectedAction.executionType] ?? 'violet'}>
+                  {selectedAction.executionType === 'openapi_http'
+                    ? 'HTTP (OpenAPI)'
+                    : selectedAction.executionType === 'connector_action'
+                      ? tm('nativeCall')
+                      : 'MCP Call'}
                 </Badge>
               </Box>
               {selectedAction.httpMethod && selectedAction.httpPath && (

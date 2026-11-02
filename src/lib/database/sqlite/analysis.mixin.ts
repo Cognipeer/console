@@ -326,10 +326,10 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       // createdAt and id only count on insert: the conflict branch leaves them alone.
       db.prepare(`
         INSERT INTO ${TABLES.analysisResults}
-        (id, tenantId, projectId, definitionKey, sourceKind, sourceId, title, agentKey, ownerId, sourceVersion,
+        (id, tenantId, projectId, definitionKey, sourceKind, sourceId, title, agentKey, ownerId, kbRestricted, sourceVersion,
          runId, decisions, extractedFields, judge, accuracy, rationale, needsReview, reviewReason, minConfidence,
          review, analyzedAt, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @definitionKey, @sourceKind, @sourceId, @title, @agentKey, @ownerId, @sourceVersion,
+        VALUES (@id, @tenantId, @projectId, @definitionKey, @sourceKind, @sourceId, @title, @agentKey, @ownerId, @kbRestricted, @sourceVersion,
          @runId, @decisions, @extractedFields, @judge, @accuracy, @rationale, @needsReview, @reviewReason, @minConfidence,
          @review, @analyzedAt, @createdAt, @updatedAt)
         ON CONFLICT(projectId, definitionKey, sourceKind, sourceId) DO UPDATE SET
@@ -337,6 +337,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           title = excluded.title,
           agentKey = excluded.agentKey,
           ownerId = excluded.ownerId,
+          kbRestricted = excluded.kbRestricted,
           sourceVersion = excluded.sourceVersion,
           runId = excluded.runId,
           decisions = excluded.decisions,
@@ -360,6 +361,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         title: result.title ?? null,
         agentKey: result.agentKey ?? null,
         ownerId: result.ownerId ?? null,
+        kbRestricted: result.kbRestricted?.length ? this.toJson(result.kbRestricted) : null,
         sourceVersion: result.sourceVersion ? this.toJson(result.sourceVersion) : null,
         runId: result.runId,
         decisions: this.toJson(result.decisions ?? {}),
@@ -466,6 +468,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         title: (r.title as string | null) ?? undefined,
         agentKey: (r.agentKey as string | null) ?? undefined,
         ownerId: (r.ownerId as string | null) ?? undefined,
+        ...(r.kbRestricted ? { kbRestricted: this.parseJson<string[]>(r.kbRestricted, []) } : {}),
         sourceVersion: r.sourceVersion ? this.parseJson<IAnalysisResult['sourceVersion']>(r.sourceVersion, undefined) : undefined,
         runId: r.runId as string,
         decisions: this.parseJson<Record<string, IAnalysisDecision>>(r.decisions, {}),

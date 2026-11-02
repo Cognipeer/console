@@ -59,9 +59,12 @@ export interface SessionListPage {
 export async function listSessionPage(tenantDbName: string, filters: SessionListFilters): Promise<SessionListPage> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+    // The sessions of a flow's hidden agents are not agent sessions.
+    const excludeAgentKeys = await db.listOwnedAgentKeys(filters.projectId);
     // One more than asked, to know whether there is a next page.
     const rows = await db.listAgentConversationPage({
         projectId: filters.projectId,
+        ...(excludeAgentKeys.length > 0 ? { excludeAgentKeys } : {}),
         ...(filters.agentKey ? { agentKey: filters.agentKey } : {}),
         ...(filters.status ? { runtimeStatus: filters.status } : {}),
         limit: filters.limit + 1,
@@ -115,7 +118,13 @@ export async function listProjectSessions(
     // Not a provider filter.
     const { knownInFlight, ...query } = filters;
     // One more than asked, to know whether there is a next page.
-    const rows = await db.listProjectAgentConversations({ ...query, limit: filters.limit + 1 });
+    // The sessions of a flow's hidden agents are not agent sessions.
+    const excludeAgentKeys = await db.listOwnedAgentKeys(filters.projectId);
+    const rows = await db.listProjectAgentConversations({
+        ...query,
+        ...(excludeAgentKeys.length > 0 ? { excludeAgentKeys } : {}),
+        limit: filters.limit + 1,
+    });
     const hasMore = rows.length > filters.limit;
     const page = rows.slice(0, filters.limit);
     // A "running" row whose turn died reads as ended, like everywhere else a session's state is read - except one

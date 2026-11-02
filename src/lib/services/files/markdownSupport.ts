@@ -10,6 +10,8 @@
  */
 
 import path from 'node:path';
+import { isImageFile, isOcrActive } from '../extraction/settings';
+import type { OcrSettings } from '../extraction/types';
 import { FileServiceError } from './errors';
 import { uploadMaxBytes, uploadMaxMb } from './uploadLimits';
 
@@ -19,14 +21,25 @@ const CONVERTIBLE_EXTENSIONS: ReadonlySet<string> = new Set([
   '.txt', '.csv', '.json', '.yaml', '.yml', '.ipynb',
 ]);
 
-/** Whether a file of this name gets a Markdown copy. The name decides: it is what the converter reads. */
-export function isMarkdownConvertible(fileName: string | null | undefined): boolean {
+/**
+ * Whether a file of this name gets a Markdown copy. The name decides: it is what the converter reads. An image
+ * has no text for the converter to read, so it is convertible only when OCR is on (`options.ocr`): the text is then
+ * what OCR reads from it.
+ */
+export function isMarkdownConvertible(
+  fileName: string | null | undefined,
+  options: { ocr?: OcrSettings | null } = {},
+): boolean {
   if (!fileName) return false;
-  return CONVERTIBLE_EXTENSIONS.has(path.extname(fileName).toLowerCase());
+  if (CONVERTIBLE_EXTENSIONS.has(path.extname(fileName).toLowerCase())) return true;
+  return isOcrActive(options.ocr) && isImageFile(fileName);
 }
 
-export function assertMarkdownConvertible(fileName: string | null | undefined): void {
-  if (!isMarkdownConvertible(fileName)) {
+export function assertMarkdownConvertible(
+  fileName: string | null | undefined,
+  options: { ocr?: OcrSettings | null } = {},
+): void {
+  if (!isMarkdownConvertible(fileName, options)) {
     throw new FileServiceError('conversion_unsupported', 415, 'Markdown conversion is not available for this type of file.');
   }
 }

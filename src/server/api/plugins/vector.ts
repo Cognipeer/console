@@ -48,6 +48,7 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { kbIndexRefusal } from '../ragOwnedResources';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:vector');
@@ -549,6 +550,17 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'query.topK must be a positive number' });
       }
 
+      // The vectors of a knowledge base with access control are read through the knowledge base, document by
+      // document; a query on their index goes on only for a caller who administers every such knowledge base.
+      const kbRefusal = await kbIndexRefusal(request, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        providerKey: query.providerKey,
+        indexKey: externalId,
+      });
+      if (kbRefusal) return reply.code(403).send(kbRefusal);
+
       const result = await queryVectorIndex(
         session.tenantDbName,
         session.tenantId,
@@ -810,6 +822,16 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
+      // A copy of the vectors of a knowledge base with access control could be queried outside the knowledge base.
+      const kbRefusal = await kbIndexRefusal(request, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        providerKey: body.sourceProviderKey as string,
+        indexKey: body.sourceIndexKey as string,
+      }, 'copy');
+      if (kbRefusal) return reply.code(403).send(kbRefusal);
+
       const migration = await createVectorMigration(
         session.tenantDbName,
         session.tenantId,
@@ -890,6 +912,19 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { key } = request.params as { key: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
+
+      // Access control may have been switched on for the source's knowledge base since the migration was made.
+      const planned = await getVectorMigration(session.tenantDbName, key);
+      if (planned) {
+        const kbRefusal = await kbIndexRefusal(request, {
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          projectId,
+          providerKey: planned.sourceProviderKey,
+          indexKey: planned.sourceIndexKey,
+        }, 'copy');
+        if (kbRefusal) return reply.code(403).send(kbRefusal);
+      }
 
       const migration = await startVectorMigration(session.tenantDbName, session.tenantId, projectId, key);
 

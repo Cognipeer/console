@@ -46,6 +46,8 @@ import {
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
+import FlowAttributionLink from '@/components/tracing/FlowAttributionLink';
+import { hasFlowAttribution, type TracingFlowBlock } from '@/components/tracing/flowAttribution';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
@@ -112,6 +114,8 @@ interface SessionDetailResponse {
         rootSpanId?: string;
         source?: 'custom' | 'otlp';
         agentName?: string;
+        /** Set when the agent is owned by a flow: the session belongs to that flow run, not to a stand-alone agent. */
+        flow?: TracingFlowBlock | null;
         agentVersion?: string;
         agentModel?: string;
         metadata?: Record<string, string>;
@@ -1351,7 +1355,11 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                 <>
                     <span className="ds-mono">{session.sessionId}</span>
                     <span className="ds-faint">·</span>
-                    <span>Agent {session.agentName || 'Unknown'}</span>
+                    {hasFlowAttribution(session) ? (
+                        <FlowAttributionLink flow={session.flow} stopRowClick={false} />
+                    ) : (
+                        <span>Agent {session.agentName || 'Unknown'}</span>
+                    )}
                     {session.agentVersion ? (
                         <>
                             <span className="ds-faint">·</span>

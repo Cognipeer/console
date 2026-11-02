@@ -1,6 +1,7 @@
 import type { ObjectId } from 'mongodb';
 import type { EntityMetricType, IUsageAttributionFields } from './types.base';
 import type { IConfigGroupRef, IConfigValueRef } from './types.extended';
+import type { AgentFlowConfig, AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 
 // ── Guardrail types ────────────────────────────────────────────────────────
 
@@ -1082,6 +1083,10 @@ export interface IEvaluationRunItem {
   latencyMs?: number;
   usage?: IEvaluationUsage;
   error?: string;
+  /** See RunItemResult.kbRestricted (evaluation/types.ts). */
+  kbRestricted?: string[];
+  /** Never stored: set on the view of an item whose output this viewer may not read (it is left out). */
+  restricted?: boolean;
 }
 
 export interface IEvaluationRunAggregate {
@@ -1211,6 +1216,10 @@ export interface IRedTeamAttemptResult {
   latencyMs?: number;
   error?: string;
   review?: IRedTeamReview;
+  /** See AttemptResult.kbRestricted (redteam/types.ts). */
+  kbRestricted?: string[];
+  /** Never stored: set on the view of an attempt whose content this viewer may not read (it is left out). */
+  restricted?: boolean;
 }
 
 export interface IRedTeamCategoryBreakdown {
@@ -1478,6 +1487,8 @@ export interface IAnalysisItemResult {
   reviewReason?: AnalysisReviewReason;
   /** The analysis_results row this item was written to. */
   resultId?: string;
+  /** Its session's knowledge base tags and who started it, when it has any (see IAnalysisResult.kbRestricted). */
+  restriction?: { kbRestricted: string[]; ownerId?: string };
 }
 
 export interface IAnalysisDecisionAggregate {
@@ -1568,6 +1579,11 @@ export interface IAnalysisResult {
   agentKey?: string;
   /** Agent sessions only: who started the session (visibility). */
   ownerId?: string;
+  /**
+   * Agent sessions only: the session's knowledge base tags when it was analyzed (`IAgentConversation.kbRestricted`).
+   * What the result says of it is shown only to `ownerId` and to those who read all of them through the admin exception.
+   */
+  kbRestricted?: string[];
   /** Agent sessions only: what the analysis saw, to tell a changed session. */
   sourceVersion?: { messageCount: number; lastMessageAt?: string };
   runId: string;
@@ -1644,6 +1660,41 @@ export type RagChunkStrategy =
   /** Cut where the topic shifts, measured by embedding distance between sentences. */
   | 'semantic';
 
+/** OCR setting of a knowledge-base module (the same shape as the extraction engine's `OcrSettings`). */
+export interface IRagOcrSettings {
+  mode: 'off' | 'auto' | 'always';
+  /** Project model (category 'ocr' or a vision LLM). Absent = the local CPU engine. */
+  modelKey?: string;
+  languages?: string[];
+  maxPages?: number;
+  /** Also read the text of images embedded in Word / PowerPoint files and of image files. */
+  images?: boolean;
+}
+
+export interface IRagExtractionConfig {
+  ocr?: IRagOcrSettings;
+}
+
+/** What is known about how a document's text was extracted. */
+export interface IRagDocumentExtraction {
+  /** 'converted' = the text layer / plain conversion; 'ocr' = all text from OCR; 'mixed' = both. */
+  sourceType: 'converted' | 'ocr' | 'mixed';
+  engine?: 'model' | 'local';
+  modelKey?: string;
+  pageCount?: number;
+  /** How many pages were read by OCR. */
+  ocrPages?: number;
+  ocrImages?: number;
+  /** sha256 of the uploaded bytes. Recorded only: it is never used to skip an upload. */
+  fileHash?: string;
+  /** Set while the extraction is still to run (queued) or running in the ingest job. */
+  stage?: 'queued' | 'running';
+  progress?: { completed: number; total: number };
+  /** The OCR setting this document was asked to be extracted with (null = explicitly off). */
+  requested?: IRagOcrSettings | null;
+  warnings?: string[];
+}
+
 export interface IRagChunkConfig {
   strategy: RagChunkStrategy;
   /**
@@ -1696,6 +1747,35 @@ export interface RagDocumentListFilters {
   search?: string;
   limit?: number;
   offset?: number;
+  /** Only documents in this folder; `null` = only documents at the top level (no folder). */
+  folderId?: string | null;
+  /** Only these document ids. */
+  ids?: string[];
+  /** Only the documents an access scope may read (or, with `negate`, may not read). */
+  access?: RagDocumentAccessFilter;
+  /** 'own' = documents with their own permissions; 'inherit' = the others. */
+  aclMode?: 'own' | 'inherit';
+  /** 'sync' = documents whose folder and permissions a connected source owns; 'console' = the others. */
+  aclManaged?: 'sync' | 'console';
+  /**
+   * With a `projectId`: also the module's rows written before documents carried
+   * a project (no project). Lets one query count what a module owns.
+   */
+  withUnscoped?: boolean;
+}
+
+/**
+ * Which documents an access scope may read, in a form both database providers
+ * can evaluate. A document matches when it carries its own ACL and its id is in
+ * `ownAllowedIds`, or it inherits and its folder is in `inheritFolderIds`, or it
+ * inherits, has no folder, and `includeTopLevel` is set. `negate` inverts the
+ * whole test (the documents the scope may NOT read).
+ */
+export interface RagDocumentAccessFilter {
+  ownAllowedIds: string[];
+  inheritFolderIds: string[];
+  includeTopLevel: boolean;
+  negate?: boolean;
 }
 
 /**
@@ -1758,6 +1838,8 @@ export interface IRagModule {
   fileBucketKey?: string;
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
+  /** How the files uploaded to this module are turned into text (OCR). Absent = converted as before, no OCR. */
+  extraction?: IRagExtractionConfig;
   status: 'active' | 'disabled';
   /** Optional reference to a Reranker service that re-orders vector matches before returning. */
   rerankerKey?: string;
@@ -1806,6 +1888,18 @@ export interface IRagModule {
    */
   isolateByModule?: boolean;
   /**
+   * Document-level access control. Absent (or `enabled: false`) means everyone
+   * who can read the module reads every document — the behaviour before access
+   * control existed, and the default.
+   */
+  access?: IRagModuleAccess;
+  /**
+   * Bumped whenever the folder tree or the module root's permissions change.
+   * Access scopes reuse a cached folder tree only while it carries the same
+   * number, so a change is seen by every replica on its next query.
+   */
+  aclRevision?: number;
+  /**
    * Set when chunkConfig or the embedding model changed and the stored vectors
    * no longer match it. Queries keep working against the old vectors until the
    * re-index run finishes.
@@ -1844,6 +1938,8 @@ export interface IRagDocument {
    * CSV rarely want the same splitter. Unset means "use the module's".
    */
   chunkConfig?: IRagChunkConfig;
+  /** How the text of this document was extracted and, while a deferred extraction runs, where it stands. */
+  extraction?: IRagDocumentExtraction;
   /**
    * The extracted text this document was last indexed from, so a re-index never
    * has to reconstruct it from overlapping chunks. Stored inline only when it
@@ -1854,6 +1950,12 @@ export interface IRagDocument {
   sourceTextKey?: string;
   /** sha256 of the extracted text — lets a re-ingest skip unchanged content. */
   sourceHash?: string;
+  /** Folder the document sits in; absent = the top level of the module. */
+  folderId?: string;
+  /** 'own': the document carries its own ACL; absent: it inherits from its folder (or the module). */
+  aclMode?: 'own';
+  /** Set when a connector source owns the document's permissions; they are then read-only here. */
+  aclManaged?: RagAclManagedBy;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -1953,6 +2055,144 @@ export interface IRagReindexRun {
   createdBy: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+// ── Knowledge Engine access control ─────────────────────────────────────
+
+/** Document-level access control of one knowledge base. */
+export interface IRagModuleAccess {
+  /** Off by default: everyone who can read the module reads every document. */
+  enabled: boolean;
+  /**
+   * Whether the people who administer the knowledge base read every document in
+   * search, answers, agent tools and document reads. Default true. They always
+   * see every document in the management views, so they can set permissions.
+   */
+  adminBypass?: boolean;
+}
+
+/** Who wrote a folder or permission: absent = people in the console; 'sync' = a connector source. */
+export type RagAclManagedBy = 'sync';
+
+export type RagAclNodeType = 'module' | 'folder' | 'document';
+
+/** The connector source a folder mirrors. */
+export interface IRagFolderSource {
+  kind: 'connector';
+  connectorId: string;
+  sourceId: string;
+  /** The folder's id in the source system. */
+  externalId: string;
+}
+
+/** A folder of a knowledge base. Folders form a tree per module. */
+export interface IRagFolder {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  /** Absent = a top-level folder. */
+  parentId?: string;
+  name: string;
+  /** Ids of the ancestors, top level first. Maintained on create and move. */
+  ancestorIds?: string[];
+  /** 'own': the folder carries its own ACL; absent: it inherits from its parent (or the module). */
+  aclMode?: 'own';
+  aclManaged?: RagAclManagedBy;
+  /** Set when a connector source owns the folder; it is then renamed and moved only by that source. */
+  source?: IRagFolderSource;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/**
+ * One grant of read access on a node (the module root, a folder or a document).
+ * `principal` is a canonical key (see services/rag/access/principals.ts):
+ * `everyone`, `user:<id>`, `group:<id>`, `token:<id>`, `email:<address>`,
+ * `x:<domain>:u:<id>`, `x:<domain>:g:<id>`, `x:<domain>:all`.
+ */
+export interface IRagAclEntry {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  ragModuleKey: string;
+  nodeType: RagAclNodeType;
+  /** The module key for the root, else the folder or document id. */
+  nodeId: string;
+  principal: string;
+  /** Display only (a name or an address); never used to decide. */
+  label?: string;
+  managed?: RagAclManagedBy;
+  createdBy?: string;
+  createdAt?: Date;
+}
+
+export type RagIdentityDomainKind = 'entra' | 'qdms' | 'generic';
+
+/**
+ * How a console person is matched to a user of an external directory: the
+ * person's `console` value is compared with the directory user's `external`
+ * value. `attr:<name>` compares with one of the directory user's attributes.
+ */
+export interface IRagIdentityUserMatchRule {
+  console: 'email' | 'externalId';
+  external: 'email' | 'upn' | 'id' | `attr:${string}`;
+}
+
+/** An external identity directory whose users and groups can be granted access (e.g. the Entra tenant behind a SharePoint connector). */
+export interface IRagIdentityDomain {
+  _id?: ObjectId | string;
+  tenantId: string;
+  /** Unique per workspace; appears inside principal keys (`x:<key>:…`). */
+  key: string;
+  kind: RagIdentityDomainKind;
+  label: string;
+  /** Set when a connector maintains the domain; it is then edited only through that connector. */
+  source?: { kind: 'connector'; connectorId: string };
+  /** Ordered; the first rules that find directory users decide. */
+  userMatch: IRagIdentityUserMatchRule[];
+  /** A console group whose externalId equals an external group id stands for that group. Default true. */
+  matchGroupsByExternalId?: boolean;
+  createdBy?: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** One user of an external directory, as an integration last reported it. */
+export interface IRagIdentityUser {
+  _id?: ObjectId | string;
+  tenantId: string;
+  domain: string;
+  /** The user's stable id in the directory. */
+  extId: string;
+  /** Lower-cased. */
+  email?: string;
+  /** Lower-cased. */
+  upn?: string;
+  name?: string;
+  type?: 'member' | 'guest';
+  /** Ids of the external groups the user belongs to, nested ones included. */
+  groups?: string[];
+  /** Extra attributes for `attr:<name>` matching; values lower-cased. At most 16. */
+  attrs?: Record<string, string>;
+  syncRunId?: string;
+  syncedAt?: Date;
+}
+
+/** A hand-made link between an external user or group and a console user or group. */
+export interface IRagIdentityLink {
+  _id?: ObjectId | string;
+  tenantId: string;
+  domain: string;
+  externalKind: 'user' | 'group';
+  externalId: string;
+  consoleKind: 'user' | 'group';
+  consoleId: string;
+  createdBy?: string;
+  createdAt?: Date;
 }
 
 // ── Reranker types ──────────────────────────────────────────────────────
@@ -2403,10 +2643,20 @@ export interface IAlertEvent {
 
 // ── Tool (unified tool system) types ─────────────────────────────────────
 
-export type ToolSourceType = 'openapi' | 'mcp';
+/**
+ * `connector`: a tool the enterprise Connectors module owns, whose actions are
+ * the connector package's own actions (`connector_action`). It is never
+ * created through the Tools API.
+ */
+export type ToolSourceType = 'openapi' | 'mcp' | 'connector';
 export type ToolStatus = 'active' | 'disabled';
 
-export type ToolAuthType = 'none' | 'token' | 'header' | 'basic';
+/**
+ * `connector`: no stored secret. The tool belongs to a connector (enterprise
+ * Connectors module), and its credential is resolved for each call from the
+ * connector's account (see src/enterprise/tool-credentials.ts).
+ */
+export type ToolAuthType = 'none' | 'token' | 'header' | 'basic' | 'connector';
 
 export interface IToolAuthConfig {
   type: ToolAuthType;
@@ -2418,6 +2668,8 @@ export interface IToolAuthConfig {
   /** For 'basic': username + password */
   username?: string;
   password?: string;
+  /** For 'connector': the id of the connector that owns the tool and supplies its credential. */
+  connectorId?: string;
   /**
    * AES-256-GCM ciphertext (base64) holding `token`/`headerValue`/`password`
    * once sealed for storage — see `@/lib/services/tools/secretVault`. Only
@@ -2427,6 +2679,20 @@ export interface IToolAuthConfig {
   sealed?: string;
 }
 
+/**
+ * What a tool action says about its own effects (the MCP `ToolAnnotations` shape). Agent approval reads
+ * `readOnlyHint` first: an action that is not marked read-only asks before it runs, by default.
+ */
+export interface IToolActionAnnotations {
+  title?: string;
+  /** True = the action only reads. Absent or false = it may change something. */
+  readOnlyHint?: boolean;
+  /** With `readOnlyHint` not true: the change may destroy or overwrite data. */
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface IToolAction {
   /** Unique key within the tool (slug of operationId or tool name) */
   key: string;
@@ -2434,14 +2700,20 @@ export interface IToolAction {
   description: string;
   /** JSON Schema for tool input parameters */
   inputSchema: Record<string, unknown>;
-  /** How this action is executed */
-  executionType: 'openapi_http' | 'mcp_call';
+  /** How this action is executed (`connector_action`: by the Connectors module, see src/enterprise/tool-actions.ts) */
+  executionType: 'openapi_http' | 'mcp_call' | 'connector_action';
   /** OpenAPI-specific: HTTP method */
   httpMethod?: string;
   /** OpenAPI-specific: Path template */
   httpPath?: string;
   /** MCP-specific: original tool name on the MCP server */
   mcpToolName?: string;
+  /**
+   * Markings of the action. MCP tools store what the server sent in `tools/list`; OpenAPI actions get
+   * `readOnlyHint` from the HTTP method; managed tools carry the markings their owner sets. Absent on
+   * records saved before this field: read them with `effectiveActionAnnotations`.
+   */
+  annotations?: IToolActionAnnotations;
 }
 
 export interface ITool {
@@ -2510,8 +2782,11 @@ export interface IToolRequestAggregate {
 
 export type AgentStatus = 'active' | 'inactive' | 'draft';
 
-/** How an agent is backed: a native model-config agent, or a connected external endpoint. */
-export type AgentKind = 'native' | 'external';
+/**
+ * How an agent is backed: a native model-config agent ("Smart Agent"), a connected
+ * external endpoint ("Connected Agent"), or a conversation flow ("FlowBase Agent").
+ */
+export type AgentKind = 'native' | 'external' | 'flow';
 
 /** Wire protocol used to reach an external (connected) agent. */
 export type ExternalAgentProtocol = 'a2a' | 'openai-chat' | 'openai-responses';
@@ -2925,6 +3200,12 @@ export interface IAgentAttachmentsConfig {
    * 0 = never re-attach. Default 2.
    */
   carryRecentImages?: number;
+  /**
+   * Reading the text of scanned documents and (with `images`) of pictures at upload: OCR through a project model or
+   * the built-in CPU engine. Absent / `mode: 'off'` = no OCR, exactly as before. A picture is still shown to a model
+   * that takes images; the OCR text stands in for it when the model does not, or the format cannot be shown.
+   */
+  ocr?: IRagOcrSettings;
 }
 
 /** One extra model an agent offers next to its main one. */
@@ -3022,6 +3303,8 @@ export interface IAgentConfig {
   kind?: AgentKind;
   /** Connection settings — present only when kind === 'external'. */
   connection?: IExternalAgentConnection;
+  /** Flow that drives each conversation turn — present only when kind === 'flow'. */
+  flow?: AgentFlowConfig;
   /** Advanced agent-sdk runtime knobs (Settings → Advanced). */
   runtime?: IAgentRuntimeConfig;
   /** JSON-schema contract for the final answer. */
@@ -3167,7 +3450,11 @@ export interface IAgentHumanInTheLoopConfig {
   /** Let the model ask the user a structured question mid-run. */
   askUser?: { enabled: boolean; /** Default true. */ allowFreeText?: boolean };
   toolApproval?: {
-    enabled: boolean;
+    /**
+     * `false` switches approval off. Unset means on for the agent's own and bound tools; tools the caller
+     * runs (client tools) follow only an explicit `true`.
+     */
+    enabled?: boolean;
     /** Policy for every tool not named in `tools` and not read-only. Default `always`. */
     defaultPolicy?: AgentToolApprovalPolicy;
     /** Per-tool override; the key is the tool name as the model sees it. */
@@ -3302,43 +3589,47 @@ export interface IAgentSandboxConfig {
 
 /** A single tool-source binding for an agent */
 export interface IAgentToolBinding {
-  /** Source type – 'tool' (unified), 'mcp' (legacy), or 'system' (built-in like browser_use) */
-  source: 'tool' | 'mcp' | 'system';
-  /** Identifier of the source (tool key, MCP server key, or system tool key) */
+  /** Source type – 'tool' (unified), 'mcp' (legacy), 'system' (built-in like browser_use) or 'flow' (a published Flow) */
+  source: 'tool' | 'mcp' | 'system' | 'flow';
+  /** Identifier of the source (tool key, MCP server key, system tool key, or flow key) */
   sourceKey: string;
   /** Action/tool names selected from that source */
   toolNames: string[];
-  /** Optional configuration for the binding (e.g. { browserId } for system browser_use) */
+  /** Optional configuration for the binding (e.g. { browserId } for system browser_use; FlowToolBindingConfig for 'flow') */
   config?: Record<string, unknown>;
 }
 
-/** The sender an incoming webhook is set up for (its event / delivery id headers and auth choices). */
-export type AgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
+/** The sender an incoming webhook is set up for. Vendor webhooks are connector triggers; only the generic webhook is built in. */
+export type AgentTriggerWebhookPreset = 'generic';
 
 /**
- * How a delivery proves it knows the trigger's secret. The first three sign
+ * Vendor presets that older triggers were stored with. Read-only legacy: such a
+ * trigger no longer receives deliveries (its URL answers 410), can not be
+ * written, and can be converted to a connector or a generic webhook trigger.
+ */
+export type RetiredAgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops';
+
+/**
+ * How a delivery proves it knows the trigger's secret. The first two sign
  * the raw body (checked once the body is read); the rest carry the secret in a
  * header (checked before the body is read).
  */
 export type AgentTriggerWebhookAuth =
-  /** `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(secret, raw body)>`. */
-  | 'github_signature'
   /** Standard Webhooks: `webhook-id` / `webhook-timestamp` / `webhook-signature: v1,<base64>`; the sender's `whsec_` secret. */
   | 'standard_webhooks'
   /** `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`. */
   | 'signature'
-  /** `X-Gitlab-Token: <secret>`. */
-  | 'gitlab_token'
   /** `Authorization: Bearer <secret>`. */
   | 'bearer'
-  /** `Authorization: Basic base64(<any user>:<secret>)`. */
-  | 'basic'
   /** `<headerName>: <secret>`. */
   | 'header';
 
+/** Auth modes of retired vendor presets; stored on old triggers only (see `RetiredAgentTriggerWebhookPreset`). */
+export type RetiredAgentTriggerWebhookAuth = 'github_signature' | 'gitlab_token' | 'basic';
+
 /** One filter rule over the delivery (all rules must match). */
 export interface AgentTriggerWebhookFilterRule {
-  /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-github-event`, `event`. */
+  /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-cognipeer-event`, `event`. */
   path: string;
   op: 'eq' | 'neq' | 'in' | 'not_in' | 'exists' | 'not_exists' | 'contains' | 'starts_with' | 'glob';
   value?: string | number | boolean | Array<string | number | boolean>;
@@ -3351,8 +3642,8 @@ export interface AgentTriggerWebhookFilterRule {
 export interface AgentTriggerWebhook {
   /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
   hookId: string;
-  preset: AgentTriggerWebhookPreset;
-  auth: AgentTriggerWebhookAuth;
+  preset: AgentTriggerWebhookPreset | RetiredAgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth | RetiredAgentTriggerWebhookAuth;
   /** Auth `header` only; lower-case. */
   headerName?: string | null;
   /** `encryptObject(secret)`; never serialized. */
@@ -3372,6 +3663,35 @@ export interface AgentTriggerWebhook {
   includePayload: boolean;
 }
 
+/**
+ * The settings of a `connector` trigger: an event a connector package declares
+ * (a vendor webhook or a poll on a schedule) fires the trigger. The enterprise
+ * Connectors module validates the settings and owns the subscription behind
+ * them (vendor registration or poll cursor); see `src/enterprise/connector-triggers.ts`.
+ */
+export interface AgentTriggerConnector {
+  /** The connector in the trigger's project. */
+  connectorId: string;
+  /** The trigger name the connector's package declares. */
+  trigger: string;
+  /** Parameter values, as the Connectors module normalized them; never secret. */
+  params: Record<string, unknown>;
+  /** Poll triggers only: when to poll (5-field cron in an IANA timezone). */
+  schedule?: AgentTriggerSchedule | null;
+  /** Event types to accept; empty / absent = every event the trigger emits. */
+  events?: string[] | null;
+  /** All must match (≤ 20); paths over the event view, as for webhook triggers. */
+  filter?: AgentTriggerWebhookFilterRule[] | null;
+  /** Append the event data (JSON) to the message. */
+  includePayload: boolean;
+  /** The subscription the Connectors module bound the trigger to. */
+  subscriptionId?: string | null;
+  /** Copied at save time for lists: the package, the trigger's kind and its label ("GitHub · Pull request"). */
+  packageId?: string | null;
+  kind?: 'webhook' | 'poll' | null;
+  label?: string | null;
+}
+
 /** The settings of a `schedule` trigger: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
 export interface AgentTriggerSchedule {
   cron: string;
@@ -3384,7 +3704,7 @@ export interface AgentTriggerOnce {
 }
 
 /** What starts a trigger's runs. */
-export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook';
+export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook' | 'connector';
 
 /**
  * A trigger's type and the ONE settings object named after it (`manual` has
@@ -3396,7 +3716,8 @@ export type AgentTriggerTypeSettings =
   | { type: 'once'; once: AgentTriggerOnce }
   /** Only started on request (Run now, `POST …/triggers/{id}/run`). */
   | { type: 'manual' }
-  | { type: 'webhook'; webhook: AgentTriggerWebhook };
+  | { type: 'webhook'; webhook: AgentTriggerWebhook }
+  | { type: 'connector'; connector: AgentTriggerConnector };
 
 export type AgentTriggerDeliveryOutcome =
   'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
@@ -3474,6 +3795,17 @@ export type AgentTriggerPatch =
   & Partial<Omit<IAgentTriggerBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
   & (AgentTriggerTypeSettings | { type?: undefined });
 
+/**
+ * Who owns a hidden agent. An owned agent is created and managed by its
+ * owner (today: a flow node) and never shows up in agent lists, pickers,
+ * portals, channels or discovery surfaces; it runs on the normal agent engine.
+ */
+export interface IAgentOwner {
+  kind: 'flow';
+  flowId: string;
+  nodeId: string;
+}
+
 export interface IAgent {
   _id?: ObjectId | string;
   tenantId: string;
@@ -3483,6 +3815,8 @@ export interface IAgent {
   description?: string;
   config: IAgentConfig;
   status: AgentStatus;
+  /** Present for a hidden agent owned by a flow node; absent for every ordinary agent. */
+  owner?: IAgentOwner;
   /** Currently published version number (null = never published) */
   publishedVersion?: number | null;
   /** Latest version number (incremented on each publish) */
@@ -3656,6 +3990,11 @@ export interface IAgentConversationMessage {
      */
     origin?: 'reminder';
     reminder?: { runId: string; message: string; setAt?: string };
+    /**
+     * FlowBase agents (`kind: 'flow'`) only: the flow run behind this reply, and what it waits for.
+     * The chat can render `wait.form` / `widgets` as UI; `content` already carries a text version of both.
+     */
+    flow?: AgentFlowReplyMeta;
   };
   /** Wall-clock time the turn took, measured server-side. */
   latencyMs?: number;
@@ -4055,6 +4394,13 @@ export interface IAgentConversation {
    * and no session id is matched back to the session by it (`findAgentConversationsByTranscriptHash`).
    */
   transcriptHash?: string;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags, see `rag/access/restricted.ts`) whose documents not open to
+   * everyone this session has handed to its model. Only grows: its content is shown to the person who started it
+   * and to those who read every one of them through the admin exception. Written by
+   * `addAgentConversationRestriction` alone.
+   */
+  kbRestricted?: string[];
   /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
@@ -4708,7 +5054,15 @@ export interface ICrawlerHttpConfig {
 
 /** Markdown extraction options forwarded to the crawler engine. */
 export interface ICrawlerMarkdownOptions {
-  ocr?: { enabled: boolean; languages?: string[] };
+  /** OCR for downloaded files; see the engine's `CrawlMarkdownOptions.ocr`. */
+  ocr?: {
+    enabled: boolean;
+    languages?: string[];
+    modelKey?: string;
+    mode?: 'auto' | 'always';
+    maxPages?: number;
+    images?: boolean;
+  };
   /** Stored body shape: 'markdown' (default) or flattened plain 'text'. */
   outputFormat?: 'markdown' | 'text';
   /** Run the markdown cleanup pass (entities, dead links, blank lines). Default true. */
@@ -5291,7 +5645,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** The surface that created the run. */
   channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | 'reminder' | 'messaging' | null;
   triggerId?: string | null;
-  trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
+  trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | 'connector' | null;
   /**
    * No interactive user on the run (a trigger fire): a gated tool follows the
    * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.
@@ -5310,6 +5664,12 @@ export interface IAgentRun extends IUsageAttributionFields {
    * continuation keeps it.
    */
   literalVariables?: string[] | null;
+  /**
+   * The event behind a webhook / connector trigger fire (`{ event, delivery_id, payload, connector }`),
+   * kept for the run's engine, for example a FlowBase agent's `{{ trigger.payload.* }}`. Only with the
+   * trigger's `includePayload`; at most 64 KiB of JSON. Absent = none.
+   */
+  triggerData?: Record<string, unknown> | null;
   /** Per-request structured output; the worker and a resume re-apply it. */
   responseFormat?: AgentResponseFormat | null;
   /** Validated agent variables (`IAgentConfig.variables`). */

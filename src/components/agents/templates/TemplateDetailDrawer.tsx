@@ -7,7 +7,7 @@ import { IconAlertTriangle, IconCheck } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import styles from './AgentTemplatesPage.module.css';
 import { TemplateIcon } from './templateIcons';
-import { describeContents, describeTrigger, isUsable } from './templatesModel';
+import { connectorPackages, describeContents, describeTrigger, isUsable } from './templatesModel';
 import { useTemplateDetail } from './useTemplateDetail';
 
 export interface TemplateDetailDrawerProps {
@@ -152,12 +152,17 @@ export default function TemplateDetailDrawer({ templateKey, onClose, onUse }: Te
                         ? t('ui.trigger.schedule', { cron: line.cron })
                         : line.kind === 'webhook'
                           ? t('ui.trigger.webhook', { preset: line.preset }) + (line.events.length ? ` (${t('ui.trigger.events', { events: line.events.join(', ') })})` : '')
-                          : t('ui.trigger.manual')}</span>
+                          : line.kind === 'connector'
+                            ? t('ui.trigger.connector', { package: line.package, trigger: line.trigger }) + (line.events.length ? ` (${t('ui.trigger.events', { events: line.events.join(', ') })})` : '')
+                            : t('ui.trigger.manual')}</span>
                     </li>
                   );
                 })}
               </ul>
               <p className="ds-muted" style={{ fontSize: 12, marginTop: 6 }}>{t('ui.drawer.triggersNote')}</p>
+              {connectorPackages(template).length > 0 ? (
+                <p className="ds-muted" style={{ fontSize: 12, marginTop: 4 }}>{t('ui.drawer.triggersConnectorNote')}</p>
+              ) : null}
             </section>
           ) : null}
 

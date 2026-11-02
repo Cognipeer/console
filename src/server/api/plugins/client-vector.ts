@@ -32,6 +32,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { kbIndexRefusal } from '../ragOwnedResources';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-vector');
@@ -318,6 +319,17 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof topK !== 'number' || topK <= 0) {
         return reply.code(400).send({ error: 'query.topK must be a positive number' });
       }
+
+      // The vectors of a knowledge base with access control are read through the knowledge base, document by
+      // document: a client never queries their index directly (an API token does not administer a knowledge base).
+      const kbRefusal = await kbIndexRefusal(request, {
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        providerKey,
+        indexKey: externalId,
+      });
+      if (kbRefusal) return reply.code(403).send(kbRefusal);
 
       const quotaContext = {
         domain: 'vector' as const,

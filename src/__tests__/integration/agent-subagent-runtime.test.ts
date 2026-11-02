@@ -721,6 +721,8 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
         actions: [{
           key: 'lookup', name: 'lookup', description: 'Looks a customer up', inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
           executionType: 'openapi_http', httpMethod: 'GET', httpPath: '/c',
+          // Marked as changing something, so it asks (a GET would read as read-only).
+          annotations: { readOnlyHint: false },
         }],
       } as never);
     });

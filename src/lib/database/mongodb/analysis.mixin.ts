@@ -21,7 +21,7 @@ import { MongoDBProviderBase, COLLECTIONS } from './base';
 
 /** IAnalysisResult fields a re-analysis may drop; removed when the new result lacks them. */
 const ANALYSIS_RESULT_OPTIONAL_FIELDS = [
-  'title', 'agentKey', 'ownerId', 'sourceVersion', 'judge', 'accuracy', 'rationale', 'reviewReason',
+  'title', 'agentKey', 'ownerId', 'kbRestricted', 'sourceVersion', 'judge', 'accuracy', 'rationale', 'reviewReason',
 ] as const;
 
 export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {

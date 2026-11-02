@@ -15,15 +15,18 @@ export interface AgentReminderView {
     status: 'scheduled' | 'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled';
     /** Epoch seconds. */
     fire_at: number;
-    message: string;
+    /** Null when `restricted`. */
+    message: string | null;
     reason: string | null;
     set_by_run: string | null;
     chain: number;
     created_at: number;
     completed_at: number | null;
-    error: { type?: string; message?: string } | null;
+    error: { type?: string; message?: string | null } | null;
     owner?: { id: string; name?: string; email?: string };
     session_title?: string;
+    /** Its session used knowledge base documents this viewer may not read: listed without its message or session title. */
+    restricted?: boolean;
 }
 
 export interface AgentRemindersResponse {

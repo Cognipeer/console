@@ -3,10 +3,12 @@
 /**
  * Templates → Use template: the full-screen form that turns a template into an
  * agent, and (in the same shell) the page that says what is left to do - with
- * the webhook URL and secret, which the server returns this once.
+ * the webhook URL and secret, which the server returns this once. A template
+ * with connector triggers asks which of the project's connectors they listen
+ * to; the page names the triggers that were skipped for want of one.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Alert, Anchor, Button, Checkbox, Code, MultiSelect, Select, Stack, Text, TextInput } from '@mantine/core';
 import { IconAlertTriangle, IconCheck, IconCopy } from '@tabler/icons-react';
@@ -17,19 +19,26 @@ import FormShell, {
   SummaryKV,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
-import { useTranslations } from '@/lib/i18n';
+import { ConnectorTriggerParamsForm, useConnectorTriggerCatalog } from '@/components/enterprise/EnterpriseConnectorTriggerUi';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import type { InstantiateTemplateResult } from '@/lib/services/agents/templates/types';
 import styles from './AgentTemplatesPage.module.css';
 import { TemplateIcon } from './templateIcons';
 import {
   browserTimezone,
   buildInstantiateBody,
+  connectorPackages,
   describeContents,
+  describeSkipped,
   describeTrigger,
   formBlockers,
   initialForm,
   instantiateTemplateRequest,
+  manualConnectorTriggers,
+  selectedConnector,
+  skippedTriggers,
   webhookTriggers,
+  type ConnectorChoices,
   type FormBlocker,
   type UseTemplateForm,
 } from './templatesModel';
@@ -105,12 +114,14 @@ export interface UseAgentTemplateShellProps {
 
 export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgent }: UseAgentTemplateShellProps) {
   const t = useTranslations('agentTemplates');
+  const locale = useLocale();
   const { template, loading: detailLoading } = useTemplateDetail(templateKey);
   const [facts, setFacts] = useState<ProjectFacts>(NO_FACTS);
   const [form, setForm] = useState<UseTemplateForm | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<InstantiateTemplateResult | null>(null);
+  const catalog = useConnectorTriggerCatalog();
 
   // The project's models, knowledge bases, guardrails and (for sandbox templates) sandbox templates.
   useEffect(() => {
@@ -149,6 +160,18 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
   const contents = template ? describeContents(template) : null;
   const patch = (next: Partial<UseTemplateForm>) => setForm((current) => (current ? { ...current, ...next } : current));
   const zones = useMemo(() => timezoneOptions(form?.timezone ?? browserTimezone()), [form?.timezone]);
+  // The project's active connectors of the packages the template's connector triggers need.
+  const connectorOptions = useMemo(() => {
+    const options: Record<string, Option[]> = {};
+    for (const pkg of template ? connectorPackages(template) : []) {
+      options[pkg] = catalog.connectors.filter((connector) => connector.packageId === pkg && connector.status === 'active').map((connector) => ({ value: connector.id, label: connector.name }));
+    }
+    return options;
+  }, [template, catalog.connectors]);
+  const connectorChoices: ConnectorChoices = useMemo(
+    () => Object.fromEntries(Object.entries(connectorOptions).map(([pkg, options]) => [pkg, options.map((option) => option.value)])),
+    [connectorOptions],
+  );
 
   const close = () => {
     setResult(null);
@@ -160,7 +183,7 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
     setSubmitting(true);
     setError(null);
     try {
-      setResult(await instantiateTemplateRequest(template.key, buildInstantiateBody(template, submitForm)));
+      setResult(await instantiateTemplateRequest(template.key, buildInstantiateBody(template, submitForm, connectorChoices), fetch, locale));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('ui.form.createFailed'));
     } finally {
@@ -169,6 +192,8 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
   };
 
   if (!templateKey) return null;
+  /** A package's display name from the catalog, else its id. */
+  const packageLabel = (pkg: string) => catalog.connectors.find((connector) => connector.packageId === pkg)?.packageName ?? pkg;
   const templateName = template ? t(`items.${template.key}.name`) : '';
   const icon = template ? <TemplateIcon name={template.icon} size={16} /> : undefined;
 
@@ -176,6 +201,8 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
   if (result && template) {
     const agentName = result.agent.name;
     const hooks = webhookTriggers(result);
+    const manualConnectors = manualConnectorTriggers(result);
+    const skipped = skippedTriggers(result);
     return (
       <FormShell
         open
@@ -204,6 +231,43 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
                 <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={14} />} p="xs">{t('ui.created.secretOnce')}</Alert>
               </div>
             ))}
+            {manualConnectors.map((trigger) => {
+              const subscription = trigger.connector!.subscription!;
+              return (
+                <div key={trigger.id}>
+                  <Text size="sm" fw={600} mb={6}>{t('ui.created.connector', { name: trigger.name })}</Text>
+                  <CopyRow label={t('ui.created.callbackUrl')} value={subscription.callback_url!} copyLabel={t('ui.created.copy')} copiedLabel={t('ui.created.copied')} />
+                  {subscription.secret ? (
+                    <>
+                      <CopyRow label={t('ui.created.secret')} value={subscription.secret} copyLabel={t('ui.created.copy')} copiedLabel={t('ui.created.copied')} secret />
+                      <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={14} />} p="xs">{t('ui.created.secretOnce')}</Alert>
+                    </>
+                  ) : (
+                    <Text size="xs" c="dimmed">{t('ui.created.secretGone')}</Text>
+                  )}
+                </div>
+              );
+            })}
+            {skipped.length > 0 ? (
+              <Alert color="yellow" variant="light" title={t('ui.created.skippedTitle')}>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                  {skipped.map((item) => {
+                    const why = describeSkipped(item);
+                    return (
+                      <li key={item.name}>
+                        {why.kind === 'params'
+                          ? t('ui.created.skippedParams', { name: item.name, params: why.params.join(', ') || t('ui.created.skippedParamsSome') })
+                          : why.kind === 'invalid'
+                            ? t('ui.created.skippedInvalid', { name: item.name, details: why.messages.join('; ') || why.params.join(', ') })
+                            : t('ui.created.skipped', { name: item.name, package: packageLabel(item.package) })}
+                      </li>
+                    );
+                  })}
+                </ul>
+                {skipped.some((item) => item.reason === 'connector_required') ? <Text size="xs" mt={6}>{t('ui.created.skippedHint')}</Text> : null}
+                {skipped.some((item) => item.reason !== 'connector_required') ? <Text size="xs" mt={6}>{t('ui.created.skippedHintParams')}</Text> : null}
+              </Alert>
+            ) : null}
             {result.setup.length > 0 ? (
               <div>
                 <Text size="sm" fw={600} mb={6}>{t('ui.created.setupTitle')}</Text>
@@ -418,12 +482,59 @@ export default function UseAgentTemplateShell({ templateKey, onClose, onOpenAgen
                             ? t('ui.trigger.schedule', { cron: line.cron })
                             : line.kind === 'webhook'
                               ? t('ui.trigger.webhook', { preset: line.preset })
-                              : t('ui.trigger.manual')}
+                              : line.kind === 'connector'
+                                ? t('ui.trigger.connector', { package: line.package, trigger: line.trigger })
+                                : t('ui.trigger.manual')}
                         </span>
                       </li>
                     );
                   })}
                 </ul>
+                {form.createTriggers && !catalog.available && connectorPackages(template).length > 0 ? (
+                  <Alert color="yellow" variant="light">{t('ui.form.connectorUnavailable')}</Alert>
+                ) : null}
+                {form.createTriggers && catalog.available ? connectorPackages(template).map((pkg) => {
+                  const options = connectorOptions[pkg] ?? [];
+                  if (options.length === 0) {
+                    return <Alert key={pkg} color="yellow" variant="light">{t('ui.form.connectorNone', { package: packageLabel(pkg) })}</Alert>;
+                  }
+                  const picked = selectedConnector(form, pkg, options.map((option) => option.value));
+                  return (
+                    <Fragment key={pkg}>
+                      <FormField label={t('ui.form.connectorLabel', { package: packageLabel(pkg) })} hint={t('ui.form.connectorHint')}>
+                        <Select
+                          data={options}
+                          value={picked}
+                          clearable
+                          placeholder={t('ui.form.connectorPlaceholder')}
+                          onChange={(value) => {
+                            // Parameters belong to one connector (a repository of its account): another connector, or none, starts them over.
+                            const connectorParams = { ...form.connectorParams };
+                            if (value !== picked) {
+                              for (const trigger of template.triggers) {
+                                if (trigger.type === 'connector' && trigger.connector?.package === pkg) delete connectorParams[trigger.name];
+                              }
+                            }
+                            patch({ connectors: { ...form.connectors, [pkg]: value }, connectorParams });
+                          }}
+                        />
+                      </FormField>
+                      {/* What each of the package's triggers needs that no template can know (a repository). */}
+                      {picked ? template.triggers.map((trigger) => (
+                        trigger.type === 'connector' && trigger.connector?.package === pkg ? (
+                          <ConnectorTriggerParamsForm
+                            key={trigger.name}
+                            connectorId={picked}
+                            trigger={trigger.connector.trigger}
+                            label={t('ui.form.connectorParams', { name: trigger.name })}
+                            value={form.connectorParams[trigger.name] ?? {}}
+                            onChange={(params) => patch({ connectorParams: { ...form.connectorParams, [trigger.name]: params } })}
+                          />
+                        ) : null
+                      )) : null}
+                    </Fragment>
+                  );
+                }) : null}
                 <FormField label={t('ui.form.timezone')} hint={t('ui.form.timezoneHint')}>
                   <Select data={zones} value={form.timezone} searchable onChange={(value) => patch({ timezone: value ?? 'UTC' })} />
                 </FormField>

@@ -69,13 +69,16 @@ export function extractCrawlerEdges(c: Doc) {
 }
 
 export function mapRagModule(m: Doc): ResourceRecord {
+  // The inventory is not read through a module's access checks, and a module's totals count documents not every
+  // reader may see: a module with access control lists none.
+  const counted = (m.access as Doc | null | undefined)?.enabled !== true;
   const record = base('rag-module', m, str(m.status), buildAttributes({
     embeddingModelKey: str(m.embeddingModelKey),
     vectorProviderKey: str(m.vectorProviderKey),
     vectorIndexKey: str(m.vectorIndexKey),
     fileBucketKey: str(m.fileBucketKey),
-    totalDocuments: num(m.totalDocuments),
-    totalChunks: num(m.totalChunks),
+    totalDocuments: counted ? num(m.totalDocuments) : undefined,
+    totalChunks: counted ? num(m.totalChunks) : undefined,
   }));
   const edges = extractRagModuleEdges(m);
   return edges ? { ...record, edges } : record;

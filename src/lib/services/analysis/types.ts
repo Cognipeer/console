@@ -162,6 +162,11 @@ export interface AnalysisItemResult {
   rationale?: string;
   /** Lowest decision confidence; 1 when there are no decisions. */
   minConfidence?: number;
+  /**
+   * An agent session that holds passages of knowledge base documents not open to everyone: its tags and who started
+   * it, carried to the run's stored copy of the item (see IAgentConversation.kbRestricted).
+   */
+  restriction?: { kbRestricted: string[]; ownerId?: string };
 }
 
 export interface DecisionAggregate {

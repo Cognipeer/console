@@ -8,14 +8,15 @@
  * `onRequest`, before the body is read) or as a signature over the raw body
  * (checked once it is read). An unknown URL is 404 and remembered per node for
  * a minute; a found trigger is never cached, so disabling, rotating or deleting
- * applies at once on every replica. A failed lookup is 503 (Azure DevOps
- * retries it) and is not remembered.
+ * applies at once on every replica. A failed lookup is 503 (senders
+ * retry it) and is not remembered. A trigger stored with a retired vendor
+ * preset answers 410 before anything is checked: it never runs again.
  *
  * The body is kept as the exact bytes received (signatures cover them), within
  * AGENT_WEBHOOK_BODY_LIMIT_BYTES; anything but JSON is 415. Floods from many
- * addresses are the ingress / WAF's job: senders such as GitHub and Azure
- * DevOps share addresses, and the client address is only as reliable as the
- * proxy settings, so nothing here keys on it. Bodies, headers and secrets are
+ * addresses are the ingress / WAF's job: big senders share addresses, and the
+ * client address is only as reliable as the proxy settings, so nothing here
+ * keys on it. Bodies, headers and secrets are
  * never logged.
  */
 
@@ -24,11 +25,11 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
-import type { AgentTriggerOfType, IAgentTrigger, ITenant } from '@/lib/database';
+import type { AgentTriggerOfType, AgentTriggerWebhookAuth, IAgentTrigger, ITenant } from '@/lib/database';
 import { authz } from '@/lib/iam/routeAuthz';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
-import { isHeaderAuth, verifyHeaderAuth } from '@/lib/services/agents/agentTriggerWebhookAuth';
-import { processWebhookDelivery, recordDelivery, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/agentTriggerWebhookDelivery';
+import { isHeaderAuth, isRetiredWebhook, verifyHeaderAuth } from '@/lib/services/agents/agentTriggerWebhookAuth';
+import { processWebhookDelivery, recordDelivery, retiredWebhookAnswer, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/agentTriggerWebhookDelivery';
 import { openWebhookSecrets } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { countRequest } from '@/lib/services/auth/sharedRateCounter';
 
@@ -55,7 +56,7 @@ declare module 'fastify' {
 
 const NOT_FOUND_BODY = apiErrorBody('not_found_error', 'Unknown webhook.', 'webhook_not_found');
 const UNAVAILABLE_BODY = apiErrorBody('api_error', 'The webhook cannot be looked up right now; retry later.', 'webhook_unavailable');
-const UNSUPPORTED_MEDIA_MESSAGE = 'Send application/json. GitHub: set Content type to application/json.';
+const UNSUPPORTED_MEDIA_MESSAGE = 'Send application/json.';
 
 const TENANT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/;
@@ -171,7 +172,11 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
     return miss();
   }
 
+  // A retired vendor preset answers before auth: nothing about the request is checked or run.
+  if (isRetiredWebhook(trigger.webhook)) return send(reply, retiredWebhookAnswer());
+
   const webhook = trigger.webhook;
+  const auth = webhook.auth as AgentTriggerWebhookAuth;
   const tenantDbName = tenant.dbName;
   const found = trigger;
   const receivedAt = new Date();
@@ -182,9 +187,9 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
       .catch(() => undefined);
   const secrets = openWebhookSecrets(String(trigger._id), webhook, receivedAt);
 
-  if (isHeaderAuth(webhook.auth)) {
+  if (isHeaderAuth(auth)) {
     const check = secrets
-      ? verifyHeaderAuth(webhook.auth, request.headers, webhook.headerName, secrets)
+      ? verifyHeaderAuth(auth, request.headers, webhook.headerName, secrets)
       : { ok: false as const, reason: 'secret unavailable; rotate the secret' };
     if (!check.ok) {
       // Only failed attempts count here: an authenticated request is never refused by the ceiling.

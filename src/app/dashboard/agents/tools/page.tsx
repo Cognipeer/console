@@ -11,6 +11,7 @@ import {
   IconEye,
   IconPlayerPause,
   IconPlayerPlay,
+  IconPlugConnected,
   IconPlus,
   IconTool,
   IconTrash,
@@ -29,6 +30,9 @@ const TYPE_LABEL: Record<string, string> = {
   mcp: 'MCP',
 };
 
+/** A connector's tool: the Tools API refuses to edit, switch or delete it (409). */
+const isManaged = (t: ToolView) => Boolean(t.managedBy);
+
 export default function ToolsPage() {
   const [tools, setTools] = useState<ToolView[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,6 +43,7 @@ export default function ToolsPage() {
   const router = useRouter();
   const tConfirm = useTranslations('common.confirm');
   const tFeedback = useTranslations('navigationFeedback');
+  const tm = useTranslations('managedTools');
   const deleteResource = useDeleteResource();
 
   const loadTools = useCallback(async () => {
@@ -156,16 +161,35 @@ export default function ToolsPage() {
       label: 'Type',
       render: (t) => (
         <span
-          className={`ds-badge ${t.type === 'openapi' ? 'ds-badge-info' : 'ds-badge-teal'}`}
+          className={`ds-badge ${
+            t.type === 'openapi' ? 'ds-badge-info' : t.type === 'connector' ? 'ds-badge-grape' : 'ds-badge-teal'
+          }`}
         >
           {t.type === 'openapi' ? (
             <IconApi size={10} stroke={2} />
+          ) : t.type === 'connector' ? (
+            <IconPlugConnected size={10} stroke={2} />
           ) : (
             <IconCloud size={10} stroke={2} />
           )}
-          {TYPE_LABEL[t.type] ?? t.type}
+          {t.type === 'connector' ? tm('badge') : (TYPE_LABEL[t.type] ?? t.type)}
         </span>
       ),
+    },
+    {
+      key: 'source',
+      label: tm('source'),
+      render: (t) =>
+        isManaged(t) ? (
+          <span className="ds-badge ds-badge-grape">
+            <IconPlugConnected size={10} stroke={2} />
+            {tm('badge')}
+          </span>
+        ) : (
+          <span className="ds-faint" style={{ fontSize: 12 }}>
+            {tm('manual')}
+          </span>
+        ),
     },
     {
       key: 'actions',
@@ -244,6 +268,7 @@ export default function ToolsPage() {
               { value: 'all', label: 'All types' },
               { value: 'openapi', label: 'OpenAPI' },
               { value: 'mcp', label: 'MCP' },
+              { value: 'connector', label: tm('badge') },
             ],
           },
           {
@@ -282,6 +307,7 @@ export default function ToolsPage() {
             id: 'edit',
             label: 'Edit',
             icon: <IconEdit size={14} />,
+            hidden: isManaged,
             onClick: () => router.push(`/dashboard/agents/tools/${t.id}`),
           },
           {
@@ -293,14 +319,16 @@ export default function ToolsPage() {
               ) : (
                 <IconPlayerPlay size={14} />
               ),
+            hidden: isManaged,
             onClick: () => void handleToggleStatus(t),
           },
-          { divider: true },
+          { divider: true, hidden: isManaged },
           {
             id: 'delete',
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
+            hidden: isManaged,
             onClick: () => void confirmDelete(t),
           },
         ]}

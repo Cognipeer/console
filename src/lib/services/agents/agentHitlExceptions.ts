@@ -252,7 +252,8 @@ export function createHitlCallLog(): HitlCallLog {
 
 /** The stored exceptions, cleaned for the runtime: anything malformed is left out (validation reports it on save). */
 export function normalizeToolExceptions(raw: unknown): Record<string, AgentToolApprovalException[]> {
-    const out: Record<string, AgentToolApprovalException[]> = {};
+    // No prototype: a tool may be named `constructor` or `toString`.
+    const out: Record<string, AgentToolApprovalException[]> = Object.create(null);
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
     for (const [tool, list] of Object.entries(raw as Record<string, unknown>)) {
         if (!Array.isArray(list)) continue;

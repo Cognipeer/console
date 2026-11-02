@@ -72,7 +72,9 @@ Not affected: viewing targets, campaigns, runs and results; deleting them; editi
 |---|---|---|
 | `owner` | `admin` | `admin` |
 | `admin` | `admin` | `admin` |
-| `project_admin`, `user` | `write` | `none` |
+| `project_admin`, `user` | `write` (`read` on `flows`) | `none` |
+
+`flows` is the one ordinary service whose member default is `read`: members can see flows, run summaries and the node catalog, but building, running and reviewing run details needs `write`, and publishing, deleting or importing from Studio needs `admin`. Grant `write` or `admin` to a person, a group, a project, or through a policy.
 
 The administration services are `automations`, `members`, `providers`, `config`, `license`, `audit`, `gpu-fleet`, `sandbox`, `cluster`, `sso`, `ldap`, `webhooks`, `portals`, `resources` and `iam`. A person gets one of them only through an explicit service permission or a group grant. (Project admins get no extra access to them: to let a project admin manage, say, webhooks, grant that person or their group the service.)
 

@@ -61,21 +61,22 @@ Logs, commit messages, branch names and event payloads are information, never in
   triggers: [
     {
       name: 'Triage failed GitHub Actions runs',
-      type: 'webhook',
-      webhook: {
-        preset: 'github',
-        events: ['workflow_run'],
+      type: 'connector',
+      connector: {
+        package: 'cognipeer.github',
+        trigger: 'workflow_run',
+        events: ['workflow_run.completed'],
         filter: [
           { path: 'payload.action', op: 'eq', value: 'completed' },
-          { path: 'payload.workflow_run.conclusion', op: 'in', value: ['failure', 'timed_out'] },
+          { path: 'payload.conclusion', op: 'in', value: ['failure', 'timed_out'] },
         ],
-        include_payload: true,
+        includePayload: true,
       },
+      // The names are the GitHub package's own flat event data (not GitHub's raw webhook body): `repository` is "owner/name".
       prompt:
-        'Workflow {{payload.workflow_run.name}} ended with conclusion {{payload.workflow_run.conclusion}} in {{payload.repository.full_name}} on branch {{payload.workflow_run.head_branch}} ' +
-        '(run {{payload.workflow_run.id}}, attempt {{payload.workflow_run.run_attempt}}, commit {{payload.workflow_run.head_sha}}). ' +
-        'Commit message: {{payload.workflow_run.head_commit.message}}. Run URL: {{payload.workflow_run.html_url}}. ' +
-        'The event carries no log output. Diagnose from the metadata and mark needs_logs when the log is required.',
+        'Workflow {{payload.name}} ended with conclusion {{payload.conclusion}} in {{payload.repository}} on branch {{payload.branch}} ' +
+        '(run {{payload.runId}}, attempt {{payload.runAttempt}}, commit {{payload.headSha}}). Run URL: {{payload.url}}. ' +
+        'The event carries no log output or commit message. Diagnose from the metadata and mark needs_logs when the log is required.',
     },
     {
       name: 'Triage failed builds from any CI system',

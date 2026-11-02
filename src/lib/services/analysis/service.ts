@@ -39,6 +39,7 @@ import type {
   AnalysisResultSourceKind,
 } from '@/lib/database';
 import { aggregateItems, runAnalysis } from './runner';
+import { KnowledgeExposure, restrictedKnowledgeTagsOf, runWithKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import { isDecisionField } from './decision';
 import type { AnalysisConversation, AnalysisItemResult, AnalysisSpec, DecisionInvoker, ModelInvoker } from './types';
 import { buildDecisionInvoker, buildModelInvoker, type AnalysisModelContext } from './adapters';
@@ -128,6 +129,7 @@ function toRunItem(result: AnalysisItemResult, resultId?: string): IAnalysisItem
     ...(decisions ? { decisions } : {}),
     ...(result.needsReview ? { needsReview: true, reviewReason: result.reviewReason } : {}),
     ...(resultId ? { resultId } : {}),
+    ...(result.restriction ? { restriction: result.restriction } : {}),
   };
 }
 
@@ -684,6 +686,7 @@ interface ResultEntry {
   title?: string;
   agentKey?: string;
   ownerId?: string;
+  kbRestricted?: string[];
   sourceVersion?: SourceVersion;
 }
 
@@ -711,7 +714,7 @@ async function writeResults(
   await mapLimit(
     writable,
     WRITE_BACK_CONCURRENCY,
-    async ({ item, sourceId, title, agentKey, ownerId, sourceVersion }) => {
+    async ({ item, sourceId, title, agentKey, ownerId, kbRestricted, sourceVersion }) => {
       const prev = existing.get(sourceId);
       const keep = !!prev && (sourceKind === 'conversation' || sameVersion(prev.sourceVersion, sourceVersion));
       const review = keep && prev?.review ? prev.review : null;
@@ -726,6 +729,7 @@ async function writeResults(
         ...(title ? { title } : {}),
         ...(agentKey ? { agentKey } : {}),
         ...(ownerId ? { ownerId } : {}),
+        ...(kbRestricted?.length ? { kbRestricted } : {}),
         ...(sourceVersion ? { sourceVersion } : {}),
         runId: base.runId,
         decisions: item.decisions ?? {},
@@ -831,6 +835,14 @@ async function executeAgentSessionRun(
       invokeJudge,
       config: { concurrency: definition.runConfig?.concurrency },
       onItem: (item) => flusher.onItem(item),
+      // The model calls of a session that holds passages not open to everyone are marked like the session.
+      scope: async (conversation, analyse) => {
+        const session = sessionById.get(conversation.id);
+        const marks = restrictedKnowledgeTagsOf(session?.kbRestricted);
+        if (marks.length === 0) return analyse();
+        const item = await runWithKnowledgeExposure(new KnowledgeExposure({ seed: marks, parent: null }), analyse);
+        return { ...item, restriction: { kbRestricted: marks, ...(session?.createdBy ? { ownerId: session.createdBy } : {}) } };
+      },
     });
 
     const entries: ResultEntry[] = result.items.map((item) => {
@@ -842,6 +854,7 @@ async function executeAgentSessionRun(
         title: session.title,
         agentKey: session.agentKey,
         ownerId: session.createdBy,
+        kbRestricted: restrictedKnowledgeTagsOf(session.kbRestricted),
         sourceVersion: sourceVersionOf(session),
       };
     });

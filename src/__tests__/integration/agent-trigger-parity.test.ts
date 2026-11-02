@@ -8,11 +8,14 @@
  * (`unattended`, `externalContent`), which a resume requeue keeps; the
  * webhook type (found by hook id, its dates round-trip) and its delivery
  * log (newest first with a cursor, batched retention, removal per trigger);
- * the runs list's trigger filter.
+ * the connector type (its settings round-trip, found and counted by
+ * subscription, undefined fields never stored as null) and the `triggerData`
+ * a run keeps; the runs list's trigger filter.
  */
 
 import { beforeEach, expect, it } from 'vitest';
 import type {
+  AgentTriggerConnector,
   AgentTriggerOnce,
   AgentTriggerSchedule,
   AgentTriggerType,
@@ -43,7 +46,7 @@ describeForEachProvider('Agent triggers', (getDb) => {
    */
   const record = (
     overrides: Partial<Omit<IAgentTriggerBase, '_id' | 'createdAt' | 'updatedAt'>>
-      & Partial<{ type: AgentTriggerType; schedule: AgentTriggerSchedule; once: AgentTriggerOnce; webhook: AgentTriggerWebhook }> = {},
+      & Partial<{ type: AgentTriggerType; schedule: AgentTriggerSchedule; once: AgentTriggerOnce; webhook: AgentTriggerWebhook; connector: AgentTriggerConnector }> = {},
   ): NewAgentTrigger => ({
     tenantId,
     projectId,
@@ -209,8 +212,8 @@ describeForEachProvider('Agent triggers', (getDb) => {
 
   const webhookSettings = (overrides: Partial<AgentTriggerWebhook> = {}): AgentTriggerWebhook => ({
     hookId: 'wh_abcdefghijklmnopqrstuvwx',
-    preset: 'github',
-    auth: 'github_signature',
+    preset: 'generic',
+    auth: 'bearer',
     headerName: null,
     secretSealed: 'sealed-current',
     secretHint: 'wxyz',
@@ -253,6 +256,90 @@ describeForEachProvider('Agent triggers', (getDb) => {
     expect(rehooked).toMatchObject({ type: 'webhook', webhook: { hookId: 'wh_abcdefghijklmnopqrstuvwx' } });
     expect(rehooked).not.toHaveProperty('schedule');
     expect(String((await db.findAgentTriggerByHookId('wh_abcdefghijklmnopqrstuvwx'))?._id)).toBe(String(trigger._id));
+  });
+
+  const connectorSettings = (overrides: Partial<AgentTriggerConnector> = {}): AgentTriggerConnector => ({
+    connectorId: 'conn-1',
+    trigger: 'pull_request',
+    params: { repository: 'acme/api', labels: ['bug'] },
+    schedule: null,
+    events: ['pull_request.opened'],
+    filter: [{ path: 'payload.action', op: 'in', value: ['opened', 'reopened'] }],
+    includePayload: true,
+    subscriptionId: 'sub_1',
+    packageId: 'cognipeer.github',
+    kind: 'webhook',
+    label: 'GitHub - Pull request',
+    ...overrides,
+  });
+
+  it('keeps the connector settings of a connector trigger; switching away drops them, switching back restores them', async () => {
+    const db = getDb();
+    const created = await db.createAgentTrigger(record({ type: 'connector', connector: connectorSettings(), nextFireAt: null }));
+    const got = await db.getAgentTrigger(String(created._id), tenantId, projectId);
+    expect(got).toMatchObject({ type: 'connector', connector: connectorSettings() });
+    expect(got).not.toHaveProperty('schedule');
+    expect(got).not.toHaveProperty('webhook');
+    const listed = (await db.listAgentTriggers({ tenantId, projectId })).find((row) => String(row._id) === String(created._id));
+    expect(listed?.type === 'connector' && listed.connector).toEqual(connectorSettings());
+
+    // A poll trigger keeps its schedule inside the connector settings.
+    const poll = await db.updateAgentTrigger(String(created._id), tenantId, projectId, {
+      type: 'connector', connector: connectorSettings({ kind: 'poll', schedule: { cron: '*/15 * * * *', timezone: 'Europe/Istanbul' } }),
+    });
+    expect(poll?.type === 'connector' && poll.connector.schedule).toEqual({ cron: '*/15 * * * *', timezone: 'Europe/Istanbul' });
+
+    const away = await db.updateAgentTrigger(String(created._id), tenantId, projectId, { type: 'manual' });
+    expect(away).toMatchObject({ type: 'manual' });
+    expect(away).not.toHaveProperty('connector');
+    expect(await db.countAgentTriggersBySubscription('sub_1')).toBe(0);
+    const back = await db.updateAgentTrigger(String(created._id), tenantId, projectId, { type: 'connector', connector: connectorSettings() });
+    expect(back).toMatchObject({ type: 'connector', connector: { subscriptionId: 'sub_1' } });
+    expect(back).not.toHaveProperty('schedule');
+  });
+
+  it('does not store an undefined connector field as null', async () => {
+    const db = getDb();
+    const settings = connectorSettings({ subscriptionId: undefined, packageId: undefined, kind: undefined, label: undefined, schedule: undefined, filter: undefined });
+    const created = await db.createAgentTrigger(record({ type: 'connector', connector: settings }));
+    const got = await db.getAgentTrigger(String(created._id), tenantId, projectId);
+    const connector = got?.type === 'connector' ? got.connector : null;
+    expect(connector).not.toBeNull();
+    for (const key of ['subscriptionId', 'packageId', 'kind', 'label']) {
+      expect(connector?.[key as keyof AgentTriggerConnector] ?? undefined, key).toBeUndefined();
+    }
+    // Setting the subscription later is a plain update; nothing else changes.
+    const attached = await db.updateAgentTrigger(String(created._id), tenantId, projectId, { type: 'connector', connector: { ...settings, subscriptionId: 'sub_9' } });
+    expect(attached?.type === 'connector' && attached.connector.subscriptionId).toBe('sub_9');
+  });
+
+  it('lists and counts the triggers bound to a subscription (enabled ones too), across agents and in creation order', async () => {
+    const db = getDb();
+    const a = await db.createAgentTrigger(record({ name: 'A', type: 'connector', connector: connectorSettings() }));
+    const b = await db.createAgentTrigger(record({ name: 'B', agentKey: 'other', type: 'connector', connector: connectorSettings(), enabled: false }));
+    await db.createAgentTrigger(record({ name: 'C', type: 'connector', connector: connectorSettings({ subscriptionId: 'sub_2' }) }));
+    await db.createAgentTrigger(record({ name: 'Plain' }));
+    const bound = await db.listAgentTriggersBySubscription('sub_1');
+    expect(bound.map((row) => String(row._id))).toEqual([String(a._id), String(b._id)]);
+    expect(await db.countAgentTriggersBySubscription('sub_1')).toBe(2);
+    expect(await db.countAgentTriggersBySubscription('sub_1', { enabledOnly: true })).toBe(1);
+    expect(await db.countAgentTriggersBySubscription('sub_2')).toBe(1);
+    expect(await db.listAgentTriggersBySubscription('sub_none')).toEqual([]);
+    await db.deleteAgentTrigger(String(a._id), tenantId, projectId);
+    expect(await db.countAgentTriggersBySubscription('sub_1')).toBe(1);
+  });
+
+  it('keeps the trigger data of a run (a connector event), also through a resume requeue; a plain run has none', async () => {
+    const db = getDb();
+    const base = { mode: 'background' as const, tenantId, tenantDbName: dbName, projectId, agentKey: 'report-bot', userMessage: 'hi' };
+    const data = { event: 'pull_request.opened', delivery_id: 'evt-1', payload: { number: 42, labels: [{ name: 'bug' }] }, connector: { id: 'conn-1', trigger: 'pull_request' } };
+    const withData = await db.createAgentRun({ ...base, conversationId: 'conv-a', status: 'requires_action', trigger: 'connector', triggerData: data });
+    const plain = await db.createAgentRun({ ...base, conversationId: 'conv-b', status: 'queued' });
+    expect((await db.getAgentRunById(String(withData._id), tenantId, projectId))).toMatchObject({ trigger: 'connector', triggerData: data });
+    expect((await db.getAgentRunById(String(plain._id), tenantId, projectId))?.triggerData ?? null).toBeNull();
+    const requeued = await db.requeueAgentRunForResume(String(withData._id), tenantId, ['action-1']);
+    expect(requeued?.triggerData).toEqual(data);
+    expect((await db.listAgentRuns({ tenantId, projectId, trigger: 'connector' })).map((run) => run.conversationId)).toEqual(['conv-a']);
   });
 
   const delivery = (overrides: Partial<Omit<IAgentTriggerDelivery, '_id'>> = {}): Omit<IAgentTriggerDelivery, '_id'> => ({

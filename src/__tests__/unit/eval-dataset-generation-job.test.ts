@@ -92,6 +92,17 @@ describe('runDatasetGenerationJob', () => {
     expect(last.items).toHaveLength(2);
   });
 
+  it('passes the dataset creator on with the source', async () => {
+    generateDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1' }] });
+
+    await runDatasetGenerationJob({ ...basePayload, source: { type: 'rag', ragModuleKey: 'kb' }, sourceKind: 'rag' });
+
+    expect(generateDatasetItems).toHaveBeenCalledWith(expect.objectContaining({
+      createdBy: 'u1',
+      source: { type: 'rag', ragModuleKey: 'kb' },
+    }));
+  });
+
   it('marks failed and rethrows on generation error', async () => {
     generateDatasetItems.mockRejectedValue(new Error('model down'));
 

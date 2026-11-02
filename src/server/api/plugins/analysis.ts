@@ -1,8 +1,9 @@
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import { getDatabase } from '@/lib/database';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type {
   IAnalysisDecision,
   IAnalysisFieldDef,
+  IAnalysisItemResult,
   IAnalysisModes,
   IAnalysisResult,
   IAnalysisReviewSettings,
@@ -54,7 +55,8 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { sessionListScope, type SessionListScope } from './agent-session-access';
+import { SESSION_RESTRICTED_MESSAGE, sessionListScope, type SessionListScope } from './agent-session-access';
+import { rowsWithHiddenContent } from '../restrictedKnowledgeRequest';
 import type { RunSelection, RunSelectionStrategy } from '@/lib/services/analysis/service';
 
 const logger = createLogger('api:analysis');
@@ -506,6 +508,54 @@ function agentSessionRowView(row: AgentSessionRow) {
   };
 }
 
+/**
+ * Results of agent sessions that hold passages of knowledge base documents not open to everyone, which the viewer
+ * may not read (the session's owner and the administrators of those knowledge bases may). The session's live marks
+ * count too: it can have drawn on such a document after it was analyzed.
+ */
+async function hiddenResults<T extends Pick<IAnalysisResult, 'sourceKind' | 'sourceId' | 'kbRestricted' | 'ownerId'>>(
+  request: FastifyRequest,
+  viewer: { tenantDbName: string; userId: string },
+  results: ReadonlyArray<T>,
+): Promise<Set<T>> {
+  const sessionIds = results.filter((result) => result.sourceKind === 'agent_session').map((result) => result.sourceId);
+  const live = new Map(
+    (sessionIds.length > 0 ? await runWithTenantScope(viewer.tenantDbName, (db) => db.findRestrictedAgentConversations(sessionIds)) : [])
+      .map((conversation) => [String(conversation._id), conversation] as const),
+  );
+  return rowsWithHiddenContent(request, { tenantDbName: viewer.tenantDbName, viewerUserId: viewer.userId }, results, (result) => {
+    const conversation = result.sourceKind === 'agent_session' ? live.get(result.sourceId) : undefined;
+    return {
+      tags: [...(result.kbRestricted ?? []), ...(conversation?.kbRestricted ?? [])],
+      askers: [result.ownerId, conversation?.createdBy],
+    };
+  });
+}
+
+/** A run's items of such sessions: still counted, without what the analysis made of them. */
+async function withoutRestrictedItems(
+  request: FastifyRequest,
+  viewer: { tenantDbName: string; userId: string },
+  items: IAnalysisItemResult[],
+): Promise<Array<IAnalysisItemResult & { restricted?: true }>> {
+  const hidden = await rowsWithHiddenContent(request, { tenantDbName: viewer.tenantDbName, viewerUserId: viewer.userId }, items, (item) => ({
+    tags: item.restriction?.kbRestricted,
+    askers: [item.restriction?.ownerId],
+  }));
+  if (hidden.size === 0) return items;
+  return items.map((item) => (hidden.has(item)
+    ? {
+      conversationKey: item.conversationKey,
+      extractedFields: {},
+      missing: [],
+      passed: item.passed,
+      ...(item.needsReview ? { needsReview: true } : {}),
+      ...(item.resultId ? { resultId: item.resultId } : {}),
+      restricted: true as const,
+    }
+    : item));
+}
+
 function pageParam(raw: string | undefined, fallback: number, min: number, max: number): number {
   const n = Number.parseInt(raw ?? '', 10);
   return Number.isFinite(n) ? Math.max(min, Math.min(n, max)) : fallback;
@@ -800,9 +850,14 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       // run page (filtered there), never in the list, which only needs the totals.
       const hasSessionRuns = runs.some((run) => run.target?.kind === 'agent_sessions');
       const viewer = hasSessionRuns ? viewerOf(await callerScope(request, projectId, session.tenantDbName, session.userId)) : undefined;
-      return reply.code(200).send({
-        runs: viewer ? runs.map((run) => (run.target?.kind === 'agent_sessions' ? { ...run, items: [] } : run)) : runs,
-      });
+      if (viewer) {
+        return reply.code(200).send({ runs: runs.map((run) => (run.target?.kind === 'agent_sessions' ? { ...run, items: [] } : run)) });
+      }
+      const shown = [];
+      for (const run of runs) {
+        shown.push(run.target?.kind === 'agent_sessions' ? { ...run, items: await withoutRestrictedItems(request, session, run.items) } : run);
+      }
+      return reply.code(200).send({ runs: shown });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -816,7 +871,8 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       if (!run || (run.projectId && run.projectId !== projectId)) return reply.code(404).send({ error: 'Run not found' });
       if (run.target?.kind === 'agent_sessions') {
         const viewer = viewerOf(await callerScope(request, projectId, session.tenantDbName, session.userId));
-        if (viewer) return reply.code(200).send({ run: { ...run, items: await visibleRunItems(session.tenantDbName, run, viewer) } });
+        const items = viewer ? await visibleRunItems(session.tenantDbName, run, viewer) : run.items;
+        return reply.code(200).send({ run: { ...run, items: await withoutRestrictedItems(request, session, items) } });
       }
       return reply.code(200).send({ run });
     } catch (error) {
@@ -872,7 +928,11 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
         skip: pageParam(query.skip, 0, 0, Number.MAX_SAFE_INTEGER),
         viewer: viewerOf(scope),
       });
-      return reply.code(200).send({ results: results.map((r) => resultRowView(r)), total });
+      const hidden = await hiddenResults(request, session, results);
+      return reply.code(200).send({
+        results: results.map((r) => (hidden.has(r) ? { ...resultRowView(r), title: null, decisions: {}, restricted: true } : resultRowView(r))),
+        total,
+      });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -885,6 +945,9 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       const scope = await callerScope(request, projectId, session.tenantDbName, session.userId);
       const detail = await getResultDetail(session.tenantDbName, { projectId, id, viewer: viewerOf(scope) });
       if (!detail) return reply.code(404).send({ error: 'Result not found' });
+      if ((await hiddenResults(request, session, [detail.result])).size > 0) {
+        return reply.code(403).send({ error: SESSION_RESTRICTED_MESSAGE, code: 'session_restricted' });
+      }
       return reply.code(200).send({ result: resultView(detail.result), definition: detail.definition, source: detail.source });
     } catch (error) {
       return internalError(reply, error);
@@ -901,6 +964,12 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'values must be an object' });
       }
       const scope = await callerScope(request, projectId, session.tenantDbName, session.userId);
+      // Reviewing a result is reading what it says of its session.
+      const current = await runWithTenantScope(session.tenantDbName, (db) => db.findAnalysisResultById(id));
+      if (current && (current.projectId ?? '') === projectId
+        && (await hiddenResults(request, session, [current])).size > 0) {
+        return reply.code(403).send({ error: SESSION_RESTRICTED_MESSAGE, code: 'session_restricted' });
+      }
       const result = await saveResultReview(session.tenantDbName, {
         projectId,
         id,

@@ -193,7 +193,7 @@ export default function AgentToolExceptionsModal({ opened, onClose, row, hitl, c
 
     const parsedSample = parseSampleArgs(sample);
     // Lines that cannot be saved are left out, as the runtime would.
-    const preview = parsedSample.value ? previewToolCall(hitl, row.name, asExceptions(lines), parsedSample.value) : null;
+    const preview = parsedSample.value ? previewToolCall(hitl, row.name, asExceptions(lines), parsedSample.value, row.boundKind) : null;
     const previewColor = preview?.decision.action === 'deny' ? 'red' : preview?.decision.action === 'ask' ? 'orange' : 'teal';
     const previewLabel = preview
         ? preview.decision.action === 'deny'

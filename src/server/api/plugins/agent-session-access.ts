@@ -49,14 +49,17 @@
 import { createHash } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IAgent, IAgentConversation } from '@/lib/database';
+import { runWithTenantScope, type IAgent, type IAgentConversation, type IAgentRun } from '@/lib/database';
 import { agentSessionResource } from '@/lib/iam/agentEntities';
 import { describeTenantPolicySet } from '@/lib/iam/engine';
 import { getAgentByKey, getConversationById, listAgents } from '@/lib/services/agents';
+import { restrictedKnowledgeTagsOf } from '@/lib/services/rag/access/exposure';
+import { restrictedKnowledgeReaderFor } from '../restrictedKnowledgeRequest';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import {
   authorizationRefusalOf,
   authorizeResourceForRequest,
+  authorizeServiceForRequest,
   refreshRequestPrincipal,
   requireProjectContextForRequest,
   resourceRefusalError,
@@ -84,6 +87,15 @@ export const SESSION_FORBIDDEN_MESSAGE: Readonly<Record<SessionAction, string>> 
   manage: 'This session was started by someone else, and you are not allowed to change it.',
 });
 
+/** The 403 sentence for a session that holds passages not everyone may read. */
+export const SESSION_RESTRICTED_MESSAGE = 'This session used knowledge base documents that are not open to everyone. '
+  + 'Only the person who started it and the administrators of those knowledge bases can open it.';
+
+/** The 403 sentence of a refusal that is not a 404 or a 503. */
+export function sessionRefusalMessage(refusal: Exclude<SessionRefusal, { status: 404 }>): string {
+  return refusal.reason === 'restricted' ? SESSION_RESTRICTED_MESSAGE : SESSION_FORBIDDEN_MESSAGE[refusal.need];
+}
+
 /** Who the request acts for and where; the loaders read it from the request unless the caller already has it. */
 export interface SessionActor {
   tenantDbName: string;
@@ -100,8 +112,8 @@ export interface LoadSessionOptions {
   need: SessionNeed;
   /** The session must belong to this agent (the dashboard routes name one). */
   agentKey?: string;
-  /** The agent, when the caller has it: saves the lookup of its registry id. */
-  agent?: Pick<IAgent, '_id' | 'key'> | null;
+  /** The agent, when the caller has it: saves the lookup of its registry id (and says whether a flow owns it). */
+  agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null;
   /** The project the session must belong to. Default: the one the request runs in. */
   projectId?: string;
   /** People besides the session's creator who count as its owner (the person whose turn raised a request). */
@@ -112,6 +124,9 @@ export interface LoadSessionOptions {
 export type SessionRefusal =
   | { ok: false; status: 404; reason: 'not_found' }
   | { ok: false; status: 403; reason: 'forbidden'; need: SessionAction; decisionId?: string }
+  /** The session holds passages not everyone may read, and the caller is neither its owner nor an administrator of
+   *  every knowledge base they came from (no engine decision of its own). */
+  | { ok: false; status: 403; reason: 'restricted'; need: SessionAction; decisionId?: undefined }
   | { ok: false; status: 503; reason: 'unavailable'; need: SessionAction; decisionId?: string };
 
 export type SessionGrant = {
@@ -150,8 +165,29 @@ async function agentIdOf(
   conversation: Pick<IAgentConversation, 'agentKey' | 'projectId'>,
   known: LoadSessionOptions['agent'],
 ): Promise<string> {
-  const agent = known !== undefined ? known : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
+  const agent = known !== undefined ? known : await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
   return agent?._id ? String(agent._id) : conversation.agentKey;
+}
+
+/**
+ * A session of a hidden agent a flow owns follows the FLOW: `flows` read to view it, `flows` write to change or
+ * continue it (nobody is "another person's session" there). Null for an ordinary agent.
+ */
+async function decideOwnedSessionAccess(
+  request: FastifyRequest,
+  need: SessionNeed,
+  actor: SessionActor,
+): Promise<SessionDecision> {
+  const level = need === 'view' ? 'read' : 'write';
+  const result = await authorizeServiceForRequest(request, 'flows', { level });
+  if (result.allowed) return { ok: true, userId: actor.userId, owner: false };
+  return {
+    ok: false,
+    status: 403,
+    reason: 'forbidden',
+    need: need === 'view' ? 'view' : 'manage',
+    ...(result.decisionId ? { decisionId: result.decisionId } : {}),
+  };
 }
 
 /** Runs one engine question; an outage (the handler-level 503) is an answer here, not an exception. */
@@ -171,7 +207,7 @@ async function ask<T>(need: SessionAction, run: () => Promise<T>): Promise<T | {
  */
 export async function decideSessionAccess(
   request: FastifyRequest,
-  conversation: Pick<IAgentConversation, 'agentKey' | 'projectId' | 'createdBy'>,
+  conversation: Pick<IAgentConversation, 'agentKey' | 'projectId' | 'createdBy' | 'kbRestricted'>,
   options: Pick<LoadSessionOptions, 'need' | 'agent' | 'alsoOwnedBy' | 'quiet' | 'actor'>,
 ): Promise<SessionDecision> {
   const actor = options.actor ?? await sessionActorOf(request);
@@ -179,7 +215,12 @@ export async function decideSessionAccess(
   // The person who started it needs nothing beyond the route's own service check.
   if (actor.userId && owners.some((id) => id === actor.userId)) return { ok: true, userId: actor.userId, owner: true };
 
-  const agentId = await agentIdOf(actor.tenantDbName, conversation, options.agent);
+  const known = options.agent !== undefined
+    ? options.agent
+    : await getAgentByKey(actor.tenantDbName, conversation.agentKey, conversation.projectId, { includeOwned: true });
+  if (known?.owner) return decideOwnedSessionAccess(request, options.need, actor);
+
+  const agentId = await agentIdOf(actor.tenantDbName, conversation, known);
   /** One engine question; null when the answer is yes. */
   const decide = async (action: SessionAction): Promise<Exclude<SessionDecision, { ok: true }> | null> => {
     const answer = await ask(action, async () => authorizeResourceForRequest(request, {
@@ -209,7 +250,94 @@ export async function decideSessionAccess(
     const mayNotView = await decide('view');
     if (mayNotView) return mayNotView;
   }
+  // Passages not everyone may read: whatever else lets the caller in, only the owner and the administrators of every
+  // knowledge base they came from open the session, change it or talk into it.
+  if (restrictedKnowledgeTagsOf(conversation.kbRestricted).length > 0) {
+    const need: SessionAction = options.need === 'view' ? 'view' : 'manage';
+    const answer = await ask(need, () => restrictedKnowledgeReaderFor(request, { tenantDbName: actor.tenantDbName, viewerUserId: actor.userId })
+      .mayRead(conversation.kbRestricted, owners));
+    if (typeof answer === 'object') return { ok: false, status: 503, reason: 'unavailable', need, ...(answer.decisionId ? { decisionId: answer.decisionId } : {}) };
+    if (!answer) return { ok: false, status: 403, reason: 'restricted', need };
+  }
   return { ok: true, userId: actor.userId, owner: false };
+}
+
+/**
+ * For a LIST: may the caller read the content of these sessions (title, messages, a run's output)? A session that
+ * holds passages not everyone may read stays in the list, without its content, for anyone but its owner and the
+ * administrators of every knowledge base they came from. Answers are shared across the rows of the request.
+ */
+export function restrictedSessionContentGate(request: FastifyRequest, actor: Pick<SessionActor, 'tenantDbName' | 'userId'>) {
+  const reader = restrictedKnowledgeReaderFor(request, { tenantDbName: actor.tenantDbName, viewerUserId: actor.userId });
+  return {
+    mayRead(conversation: Pick<IAgentConversation, 'createdBy' | 'kbRestricted'> | null | undefined): Promise<boolean> {
+      if (!conversation) return Promise.resolve(true);
+      return reader.mayRead(conversation.kbRestricted, [conversation.createdBy]);
+    },
+  };
+}
+
+/**
+ * The rows of a session list whose content the viewer may not read (`restrictedSessionContentGate`): the list keeps
+ * them, without their content. A row the engine could not decide for is counted in, so the list still answers.
+ */
+export async function sessionsWithHiddenContent(
+  request: FastifyRequest,
+  actor: Pick<SessionActor, 'tenantDbName' | 'userId'>,
+  rows: ReadonlyArray<Pick<IAgentConversation, '_id' | 'createdBy' | 'kbRestricted'>>,
+): Promise<Set<string>> {
+  const hidden = new Set<string>();
+  const marked = rows.filter((row) => restrictedKnowledgeTagsOf(row.kbRestricted).length > 0);
+  if (marked.length === 0) return hidden;
+  const gate = restrictedSessionContentGate(request, actor);
+  for (const row of marked) {
+    const id = String(row._id);
+    try {
+      if (!(await gate.mayRead(row))) hidden.add(id);
+    } catch (error) {
+      hidden.add(id);
+      logger.warn('Session list: restricted content check failed, row content hidden', {
+        conversationId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return hidden;
+}
+
+/**
+ * The runs of a list whose answer the viewer may not read: those of sessions that drew on knowledge base documents
+ * the viewer may not read (whoever queued the run counts as an asker, like the session's owner). Ids of the runs.
+ */
+export async function runsWithHiddenContent(
+  request: FastifyRequest,
+  actor: Pick<SessionActor, 'tenantDbName' | 'userId'>,
+  runs: ReadonlyArray<Pick<IAgentRun, '_id' | 'conversationId' | 'userId'>>,
+): Promise<Set<string>> {
+  const hidden = new Set<string>();
+  const ids = [...new Set(runs.map((run) => run.conversationId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
+  if (ids.length === 0) return hidden;
+  const marked = new Map(
+    (await runWithTenantScope(actor.tenantDbName, (db) => db.findRestrictedAgentConversations(ids)))
+      .map((conversation) => [String(conversation._id), conversation] as const),
+  );
+  if (marked.size === 0) return hidden;
+  const reader = restrictedKnowledgeReaderFor(request, { tenantDbName: actor.tenantDbName, viewerUserId: actor.userId });
+  for (const run of runs) {
+    const conversation = marked.get(String(run.conversationId));
+    if (!conversation) continue;
+    const id = String(run._id);
+    try {
+      if (!(await reader.mayRead(conversation.kbRestricted, [conversation.createdBy, run.userId]))) hidden.add(id);
+    } catch (error) {
+      hidden.add(id);
+      logger.warn('Run list: restricted content check failed, run content hidden', {
+        runId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return hidden;
 }
 
 /**
@@ -280,7 +408,7 @@ export async function sessionStreamStillAllowed(
     await refreshRequestPrincipal(request);
     const actor = options.actor ?? await sessionActorOf(request);
     const projectId = options.projectId ?? actor.projectId;
-    if ((await serviceLevelForRequest(request, 'agents', { projectId })) === 'none') return false;
+    if ((await serviceLevelForRequest(request, options.agent?.owner ? 'flows' : 'agents', { projectId })) === 'none') return false;
     const loaded = await loadSessionForPrincipal(request, conversationId, { ...options, actor, projectId, need: 'view' });
     return loaded.ok;
   } catch {
@@ -394,10 +522,12 @@ export interface SessionListScope {
  */
 export async function sessionListScope(
   request: FastifyRequest,
-  input: { agent?: Pick<IAgent, '_id' | 'key'> | null; projectId?: string; actor?: SessionActor },
+  input: { agent?: Pick<IAgent, '_id' | 'key' | 'owner'> | null; projectId?: string; actor?: SessionActor },
 ): Promise<SessionListScope> {
   const actor = input.actor ?? await sessionActorOf(request);
   const projectId = input.projectId ?? actor.projectId;
+  // A hidden agent a flow owns: whoever may read the flow (the route asked) sees all its sessions.
+  if (input.agent?.owner) return { userId: actor.userId };
   if (input.agent) {
     return await canViewOthersSessions(request, { agent: input.agent, projectId, actor })
       ? { userId: actor.userId }
@@ -449,6 +579,25 @@ export function refuseTracingThread(
   options: { actor?: SessionActor } = {},
 ) {
   return refuseSessionLinked(request, threadId, 'view', options);
+}
+
+/**
+ * A tracing session is read like the session its thread is, and its own marks (what the traced work handed on of
+ * documents not open to everyone; all a session without a conversation carries) are read only by the person it was
+ * made for and the administrators of those knowledge bases. Null when the viewer may read it.
+ */
+export async function refuseTracingSession(
+  request: FastifyRequest,
+  trace: { threadId?: string | null; userId?: string | null; kbRestricted?: unknown } | null | undefined,
+  options: { actor: SessionActor },
+): Promise<SessionRefusal | null> {
+  const refusal = await refuseTracingThread(request, trace?.threadId, options);
+  if (refusal) return refusal;
+  if (!trace || restrictedKnowledgeTagsOf(trace.kbRestricted).length === 0) return null;
+  const answer = await ask('view', () => restrictedKnowledgeReaderFor(request, { tenantDbName: options.actor.tenantDbName, viewerUserId: options.actor.userId })
+    .mayRead(trace.kbRestricted, [trace.userId]));
+  if (typeof answer === 'object') return { ok: false, status: 503, reason: 'unavailable', need: 'view', ...(answer.decisionId ? { decisionId: answer.decisionId } : {}) };
+  return answer ? null : { ok: false, status: 403, reason: 'restricted', need: 'view' };
 }
 
 /** The conversations the rows of this request name, each read once. */
@@ -590,6 +739,7 @@ export async function pageOfVisibleRows<T, P>(
  */
 export function sessionRefusalError(request: FastifyRequest, refusal: SessionRefusal, options: { message?: string } = {}): Error {
   if (refusal.status === 404) return Object.assign(new Error('Session not found'), { status: 404, code: 'session_not_found' });
+  if (refusal.reason === 'restricted') return Object.assign(new Error(SESSION_RESTRICTED_MESSAGE), { status: 403, code: 'session_restricted' });
   return resourceRefusalError(request, {
     action: ACTION_OF_NEED[refusal.need],
     level: LEVEL_OF_NEED[refusal.need],
@@ -606,6 +756,7 @@ export function sendSessionRefusal(
   options: { message?: string } = {},
 ): FastifyReply {
   if (refusal.status === 404) return reply.code(404).send({ error: 'Session not found' });
+  if (refusal.reason === 'restricted') return reply.code(403).send({ error: SESSION_RESTRICTED_MESSAGE, code: 'session_restricted' });
   const answered = sendProjectContextError(reply, sessionRefusalError(request, refusal, options));
   return answered ?? reply.code(refusal.status).send({ error: options.message ?? SESSION_FORBIDDEN_MESSAGE[refusal.need] });
 }
@@ -652,6 +803,9 @@ export function sendOpenAiSessionRefusal(reply: FastifyReply, request: FastifyRe
   if (refusal.status === 404) {
     return reply.code(404).send({ error: { message: 'Session not found', type: 'invalid_request_error', code: 'session_not_found' } });
   }
+  if (refusal.reason === 'restricted') {
+    return reply.code(403).send({ error: { message: SESSION_RESTRICTED_MESSAGE, type: 'permission_error', code: 'session_restricted' } });
+  }
   const error = sessionRefusalError(request, refusal) as Error & { headers?: Record<string, string> };
   for (const [name, value] of Object.entries(error.headers ?? {})) void reply.header(name, value);
   const decision = refusal.decisionId ? { decision_id: refusal.decisionId } : {};
@@ -664,6 +818,7 @@ export function sendOpenAiSessionRefusal(reply: FastifyReply, request: FastifyRe
 /** The client API's reply to a refusal, in its error envelope. */
 export function sendClientSessionRefusal(reply: FastifyReply, request: FastifyRequest, refusal: SessionRefusal): FastifyReply {
   if (refusal.status === 404) return reply.code(404).send(apiErrorBody('not_found_error', 'Session not found', 'session_not_found'));
+  if (refusal.reason === 'restricted') return reply.code(403).send(apiErrorBody('permission_error', SESSION_RESTRICTED_MESSAGE, 'session_restricted'));
   // The error carries the audit mark (request.iamDenial) and the decision header; the body is the client envelope.
   const error = sessionRefusalError(request, refusal) as Error & { headers?: Record<string, string> };
   for (const [name, value] of Object.entries(error.headers ?? {})) void reply.header(name, value);

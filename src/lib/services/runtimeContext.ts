@@ -23,6 +23,15 @@ export interface RuntimeConnectionOverride {
 
 import { getRequestContext, type RequestVia } from '@/lib/core/requestContext';
 
+/** Where a flow-started agent turn came from. */
+export interface AgentRuntimeFlowRef {
+  id: string;
+  key: string;
+  name: string;
+  runId: string;
+  nodeKey: string;
+}
+
 export interface AgentRuntimeContext {
   /** Headers offered to every outbound target (still subject to per-target policy). */
   headers?: Record<string, string>;
@@ -37,14 +46,24 @@ export interface AgentRuntimeContext {
   /** Stamped by the server from the authenticated caller — not client-writable. */
   userId?: string;
   tokenId?: string;
-  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal' | 'trigger' | 'reminder' | 'messaging';
+  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal' | 'trigger' | 'reminder' | 'messaging' | 'flow' | 'evaluation' | 'redteam';
   /** Stamped by the server on a run a trigger started: its id and kind (schedule, webhook...). Tagged on the trace. */
   trigger?: { id: string; type: string };
+  /**
+   * Stamped by the server on a turn a flow step started (never read from a caller): the flow, its run and the
+   * step. Tagged on the trace session and the agent run so the turn shows up under the flow everywhere.
+   */
+  flow?: AgentRuntimeFlowRef;
   /**
    * Stamped by the server, never read from a caller: the call acts for `userId` (the subject) on behalf of an application whose
    * API token is `tokenId` (the actor), a person a trusted issuer vouched for.
    */
   via?: RequestVia;
+  /**
+   * Stamped by the server, never read from a caller: knowledge bases with access control hand this run only what is open to
+   * everyone, whoever it is for — the answer is read by everyone where it is posted (a shared messaging channel).
+   */
+  kbReader?: 'anonymous';
 }
 
 /** Per-record passthrough policy (stored on the target record). */

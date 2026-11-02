@@ -206,7 +206,7 @@ function fakeSandbox(options: FakeOptions = {}) {
 
 type Fake = ReturnType<typeof fakeSandbox>;
 
-function build(fake: Fake | null, extra: { session?: boolean; modelTakesImages?: boolean; media?: ReturnType<typeof createToolMediaStore> | false } = {}) {
+function build(fake: Fake | null, extra: { session?: boolean; maxImageBytes?: number; modelTakesImages?: boolean; media?: ReturnType<typeof createToolMediaStore> | false } = {}) {
   const store = extra.media || createToolMediaStore();
   const tool = buildReadTool({
     createToolFn: createTool,
@@ -223,7 +223,7 @@ function build(fake: Fake | null, extra: { session?: boolean; modelTakesImages?:
         },
       }
       : {}),
-    ...(extra.session ? { session: { scope: { tenantDbName: 't', tenantId: 't', projectId: 'p' }, conversationId: 'conv-1', readPageChars: 20000 } } : {}),
+    ...(extra.session ? { session: { scope: { tenantDbName: 't', tenantId: 't', projectId: 'p' }, conversationId: 'conv-1', readPageChars: 20000, ...(extra.maxImageBytes !== undefined ? { maxImageBytes: extra.maxImageBytes } : {}) } } : {}),
     ...(extra.media === false ? {} : { media: { store } }),
     modelTakesImages: extra.modelTakesImages ?? true,
   });
@@ -861,6 +861,58 @@ describe('session files (fileId)', () => {
     const out = await build(null, { session: true }).read({ fileId: 'tif' });
     expect(images(out)).toHaveLength(0);
     expect(textOf(out)).toBe('"scan.tiff" is an image in a format (image/tiff) the model cannot be shown; it has no text to read.');
+  });
+
+  describe('a picture OCR read at upload', () => {
+    const ocrRecord = (id: string, name: string, contentType: string) => {
+      sessionFiles.records.set(id, { _id: id, name, contentType, size: 100, markdownStatus: 'succeeded', markdownKey: `${id}.md` });
+    };
+
+    it('is still shown to a model that sees images', async () => {
+      ocrRecord('p1', 'form.png', 'image/png');
+      sessionFiles.texts.set('p1', 'Name: Ada');
+      const out = await build(null, { session: true }).read({ fileId: 'p1' });
+      expect(images(out)).toEqual([{ type: 'image', fileId: 'p1', name: 'form.png', mimeType: 'image/png' }]);
+    });
+
+    it('is read as text by a model that cannot see images', async () => {
+      ocrRecord('p2', 'form.png', 'image/png');
+      sessionFiles.texts.set('p2', 'Name: Ada\nCity: Izmir');
+      const out = await build(null, { session: true, modelTakesImages: false }).read({ fileId: 'p2' });
+      expect(images(out)).toHaveLength(0);
+      expect(textOf(out)).toContain('     2\tCity: Izmir');
+    });
+
+    it('a format no provider takes (tiff) is read as text', async () => {
+      ocrRecord('p3', 'scan.tiff', 'image/tiff');
+      sessionFiles.texts.set('p3', 'Scanned');
+      expect(textOf(await build(null, { session: true }).read({ fileId: 'p3' }))).toContain('Scanned');
+    });
+
+    it('past the size a model request carries is read as text, never shown', async () => {
+      ocrRecord('big', 'poster.png', 'image/png');
+      sessionFiles.records.get('big')!.size = 5_000;
+      sessionFiles.texts.set('big', 'Headline');
+      const out = await build(null, { session: true, maxImageBytes: 1_000 }).read({ fileId: 'big' });
+      expect(images(out)).toHaveLength(0);
+      expect(textOf(out)).toContain('Headline');
+
+      // Without text there is nothing to fall back to: say so instead of sending the picture.
+      sessionFiles.records.set('bare', { _id: 'bare', name: 'photo.png', contentType: 'image/png', size: 5_000 });
+      const bare = await build(null, { session: true, maxImageBytes: 1_000 }).read({ fileId: 'bare' });
+      expect(images(bare)).toHaveLength(0);
+      expect(textOf(bare)).toContain('too large to show');
+    });
+
+    it('with no text found, keeps saying the picture cannot be seen or read', async () => {
+      ocrRecord('p4', 'blank.png', 'image/png');
+      sessionFiles.texts.set('p4', '  ');
+      const blind = await build(null, { session: true, modelTakesImages: false }).read({ fileId: 'p4' });
+      expect(textOf(blind)).toBe('[blank.png — image image/png, 1 KB] This model cannot view images, and OCR found no text in it.');
+      ocrRecord('p5', 'blank.tiff', 'image/tiff');
+      sessionFiles.texts.set('p5', '');
+      expect(textOf(await build(null, { session: true }).read({ fileId: 'p5' }))).toContain('OCR found no text in it.');
+    });
   });
 
   it('a document is read as numbered lines, windowed like sandbox text', async () => {

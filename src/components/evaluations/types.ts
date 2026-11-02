@@ -201,6 +201,8 @@ export interface EvalRunItemView {
   latencyMs?: number;
   usage?: EvalUsageView;
   error?: string;
+  /** The item used knowledge base documents this viewer may not read: its output and scorer details are left out. */
+  restricted?: boolean;
 }
 
 export interface EvalRunAggregateView {

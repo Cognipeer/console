@@ -180,6 +180,9 @@ function buildPrimers(): Record<string, Mock> {
       chunkCount: 0,
     }),
     bulkInsertRagChunks: vi.fn().mockResolvedValue(undefined),
+    // Per-node / per-folder counts answer a record (id -> count); the `count*` default would be the number 0.
+    countRagAclEntriesByNode: vi.fn().mockResolvedValue({}),
+    countRagDocumentsByFolder: vi.fn().mockResolvedValue({}),
 
     // Agent tracing dashboard (callers rely on the nested shape)
     aggregateAgentTracingDashboard: vi.fn().mockResolvedValue({
@@ -261,6 +264,8 @@ function buildPrimers(): Record<string, Mock> {
     getAgentRunByIdempotencyKey: vi.fn().mockResolvedValue(null),
     // Shapes the name-based default would get wrong (a record, not a number / undefined).
     countAgentRunsByStatus: vi.fn().mockResolvedValue({}),
+    // A list, not a lookup: no session drew on restricted knowledge base documents.
+    findRestrictedAgentConversations: vi.fn().mockResolvedValue([]),
     promoteScheduledAgentRun: vi.fn().mockResolvedValue(null),
     markAgentRunDetached: vi.fn().mockResolvedValue(null),
     expireWaitingAgentRun: vi.fn().mockResolvedValue(null),

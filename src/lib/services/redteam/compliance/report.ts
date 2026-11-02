@@ -14,6 +14,7 @@
  */
 
 import { getDatabase } from '@/lib/database';
+import { restrictedKnowledgeTagsOf } from '@/lib/services/rag/access/exposure';
 import type { IRedTeamAttemptResult, IRedTeamRun, RedTeamOutcome } from '@/lib/database';
 import { BUILTIN_PROBE_KEYS, PROBE_REGISTRY } from '../probes';
 import { EU_RISK_CATEGORIES, mapOwaspToEu, type EuRiskCategory } from '../euTaxonomy';
@@ -181,11 +182,13 @@ export async function buildComplianceReport(
   const findingsMap = new Map<string, ComplianceFinding>();
   for (const run of runs) {
     for (const a of run.attempts) {
-      const sample = toSample(run, a);
+      // An exported document: an attempt that handed on passages of knowledge base documents not open to everyone
+      // never becomes evidence text (its finding is still counted below).
+      const sample = restrictedKnowledgeTagsOf(a.kbRestricted).length > 0 ? undefined : toSample(run, a);
       const euCats = mapOwaspToEu(a.category);
-      for (const eu of euCats) {
+      for (const eu of sample ? euCats : []) {
         const arr = samplesByEu.get(eu) ?? [];
-        arr.push(sample);
+        arr.push(sample!);
         samplesByEu.set(eu, arr);
       }
       if (effectiveOutcome(a) === 'vulnerable') {

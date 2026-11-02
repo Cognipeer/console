@@ -27,11 +27,11 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       db.prepare(`
         INSERT INTO ${TABLES.files}
         (id, tenantId, projectId, providerKey, bucketKey, key, name, size, contentType, checksum, etag,
-         metadata, markdownKey, markdownStatus, markdownError, markdownSize, markdownContentType,
+         metadata, markdownKey, markdownStatus, markdownError, markdownSize, markdownContentType, markdownExtraction,
          purpose, conversationId, agentKey, expiresAt, uploadedBy, origin,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @providerKey, @bucketKey, @key, @name, @size, @contentType, @checksum, @etag,
-         @metadata, @markdownKey, @markdownStatus, @markdownError, @markdownSize, @markdownContentType,
+         @metadata, @markdownKey, @markdownStatus, @markdownError, @markdownSize, @markdownContentType, @markdownExtraction,
          @purpose, @conversationId, @agentKey, @expiresAt, @uploadedBy, @origin,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
@@ -52,6 +52,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         markdownError: record.markdownError ?? null,
         markdownSize: record.markdownSize ?? null,
         markdownContentType: record.markdownContentType ?? null,
+        markdownExtraction: record.markdownExtraction ? this.toJson(record.markdownExtraction) : null,
         purpose: record.purpose ?? null,
         conversationId: record.conversationId ?? null,
         agentKey: record.agentKey ?? null,
@@ -84,6 +85,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       if (data.markdownError !== undefined) { sets.push('markdownError = @markdownError'); params.markdownError = data.markdownError; }
       if (data.markdownSize !== undefined) { sets.push('markdownSize = @markdownSize'); params.markdownSize = data.markdownSize; }
       if (data.markdownContentType !== undefined) { sets.push('markdownContentType = @markdownContentType'); params.markdownContentType = data.markdownContentType; }
+      if (data.markdownExtraction !== undefined) { sets.push('markdownExtraction = @markdownExtraction'); params.markdownExtraction = data.markdownExtraction ? this.toJson(data.markdownExtraction) : null; }
       if (data.expiresAt !== undefined) { sets.push('expiresAt = @expiresAt'); params.expiresAt = data.expiresAt ? new Date(data.expiresAt).toISOString() : null; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
@@ -433,6 +435,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         markdownError: r.markdownError as string | undefined,
         markdownSize: r.markdownSize as number | undefined,
         markdownContentType: r.markdownContentType as string | undefined,
+        ...(r.markdownExtraction ? { markdownExtraction: this.parseJson(r.markdownExtraction, undefined) as IFileRecord['markdownExtraction'] } : {}),
         ...(r.purpose ? { purpose: r.purpose as 'conversation' } : {}),
         ...(r.conversationId ? { conversationId: r.conversationId as string } : {}),
         ...(r.agentKey ? { agentKey: r.agentKey as string } : {}),

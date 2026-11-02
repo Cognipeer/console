@@ -219,6 +219,12 @@ export interface AttemptResult {
   latencyMs?: number;
   /** Set when the target invocation itself threw. */
   error?: string;
+  /**
+   * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the attempt's work handed on
+   * (rag/access/exposure.ts): its transcript, rationales and error are shown only to the run's starter and to those
+   * who read all of them through the admin exception.
+   */
+  kbRestricted?: string[];
 }
 
 export interface CategoryBreakdown {

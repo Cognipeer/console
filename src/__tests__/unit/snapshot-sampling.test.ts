@@ -746,6 +746,41 @@ describe('createSnapshotDataset', () => {
     });
   });
 
+  it('leaves out gateway rows that carried restricted knowledge base passages, and counts them', async () => {
+    db.listModels.mockResolvedValue([{ key: 'gpt-4o' } as never]);
+    db.listModelUsageLogs.mockResolvedValue([
+      gatewayRow({ requestId: 'req-open' }),
+      gatewayRow({ requestId: 'req-marked', kbRestricted: ['project-1:handbook'] }),
+    ]);
+
+    const result = await createSnapshotDataset(CTX, { source: 'gateway', filters: { samplePct: 100 }, name: 'Marked', anonymize: ANON });
+
+    expect(result.created).toBe(1);
+    expect(result.skipped.restricted).toBe(1);
+    const [, , , input] = (createDataset as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(input.items.map((item: { id: string }) => item.id)).toEqual(['gw-req-open']);
+  });
+
+  it('leaves out traces that are marked, or whose agent session is, without reading their events', async () => {
+    db.listAgentTracingSessions.mockResolvedValue({
+      sessions: [
+        tracingSession({ sessionId: 'sess-open', threadId: 'conv-open' }),
+        tracingSession({ sessionId: 'sess-marked', kbRestricted: ['project-1:handbook'] }),
+        tracingSession({ sessionId: 'sess-threaded', threadId: 'conv-restricted' }),
+      ],
+      total: 3,
+    });
+    db.findRestrictedAgentConversations.mockImplementation(async (ids: string[]) =>
+      ids.includes('conv-restricted') ? [{ _id: 'conv-restricted', createdBy: 'u1', kbRestricted: ['project-1:handbook'] }] : []);
+    db.listAgentTracingEvents.mockResolvedValue([tracingEvent({ sequence: 1, sections: [{ kind: 'message', role: 'user', content: 'hello' }] })]);
+
+    const result = await createSnapshotDataset(CTX, { source: 'tracing', name: 'Traces', anonymize: ANON });
+
+    expect(result.created).toBe(1);
+    expect(result.skipped.restricted).toBe(2);
+    expect(db.listAgentTracingEvents.mock.calls.map((call) => call[0])).toEqual(['sess-open']);
+  });
+
   it('multi-item tracing sessions respect the item limit and record itemsPerSession', async () => {
     db.listAgentTracingSessions.mockResolvedValue({ sessions: [tracingSession()], total: 1 });
     // Session emits 3 items: two tool actions + the final answer.
@@ -806,6 +841,20 @@ describe('previewSnapshot', () => {
       { key: 'claude', matching: 1, sampled: 1 },
     ]);
     expect(JSON.stringify(preview)).not.toContain('travel agent');
+  });
+
+  it('counts the rows a snapshot would leave out for restricted knowledge, outside what it would create', async () => {
+    db.listModels.mockResolvedValue([{ key: 'gpt-4o' } as never]);
+    db.listModelUsageLogs.mockResolvedValue([
+      gatewayRow({ requestId: 'r1' }),
+      gatewayRow({ requestId: 'r2', kbRestricted: ['project-1:handbook'] }),
+    ]);
+
+    const preview = await previewSnapshot(CTX, { source: 'gateway', filters: { samplePct: 100 } });
+
+    expect(preview.matching).toBe(1);
+    expect(preview.wouldCreate).toBe(1);
+    expect(preview.restricted).toBe(1);
   });
 });
 

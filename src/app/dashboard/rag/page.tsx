@@ -180,7 +180,7 @@ export default function RagDashboardPage() {
           className="ds-mono"
           style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
         >
-          {m.totalDocuments ?? 0}
+          {m.totalDocuments ?? '—'}
         </span>
       ),
     },
@@ -193,7 +193,7 @@ export default function RagDashboardPage() {
           className="ds-mono"
           style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}
         >
-          {m.totalChunks ?? 0}
+          {m.totalChunks ?? '—'}
         </span>
       ),
     },

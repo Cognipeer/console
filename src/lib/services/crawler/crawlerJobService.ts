@@ -17,6 +17,7 @@ import { openHttpConfig } from './httpConfigSecrets';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { sendCrawlerWebhook } from './crawlerWebhook';
 import { ingestCrawlPage } from './crawlerRagBridge';
+import { crawlerExtractionDeps } from './ocrExtractor';
 import type { CrawlerContext } from './types';
 
 const logger = createLogger('crawler:job');
@@ -231,6 +232,8 @@ async function runCrawlJobInner(
         error: (m, meta) => logger.error(m, { jobId, ...meta }),
       },
       signal: abort.signal,
+      // Present only when the plan turns OCR on; a crawl without it is untouched.
+      ...crawlerExtractionDeps(ctx, plan.markdownOptions, 'background'),
     })) {
       if (cancelRequested.has(jobId)) {
         abort.abort();

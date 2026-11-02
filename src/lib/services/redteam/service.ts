@@ -38,6 +38,7 @@ import {
   type RedTeamTargetSpec,
 } from './adapters';
 import type { AttemptResult, DetectionSignal } from './types';
+import { KnowledgeExposure, runWithKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import { sameAgentRevision, agentRevisionLabel, storedAgentRevision } from '@/lib/shared/agentRevision';
 import {
   AgentRevisionError,
@@ -105,6 +106,7 @@ function mapAttempt(a: AttemptResult): IRedTeamAttemptResult {
     signals: a.verdict.signals.map(mapSignal),
     latencyMs: a.latencyMs,
     error: a.error,
+    ...(a.kbRestricted?.length ? { kbRestricted: a.kbRestricted } : {}),
   };
 }
 
@@ -493,7 +495,7 @@ function targetRef(campaign: IRedTeamCampaign): string {
  * a fatal error so the queue can record/retry. Per-attempt errors never abort.
  */
 export async function executeRun(
-  params: { tenantDbName: string; tenantId: string; projectId?: string; createdBy: string; runId: string; campaign: IRedTeamCampaign; options?: RunOptions },
+  params: { tenantDbName: string; tenantId: string; projectId?: string; createdBy: string; apiTokenId?: string; runId: string; campaign: IRedTeamCampaign; options?: RunOptions },
   deps: RunCampaignDeps = {},
 ): Promise<WithId<IRedTeamRun>> {
   const { tenantDbName, tenantId, projectId, createdBy, runId, campaign, options } = params;
@@ -507,7 +509,13 @@ export async function executeRun(
     const customProbes = await db.listRedTeamCustomProbes({ projectId });
     const probes = buildProbes(resolveProbeKeys(campaign, options), customProbes);
     const judgeModelKey = options?.judgeModelKey ?? campaign.judgeModelKey;
-    const ctx: RedTeamModelContext = { tenantDbName, tenantId, projectId: projectId ?? '', userId: createdBy };
+    const ctx: RedTeamModelContext = {
+      tenantDbName,
+      tenantId,
+      projectId: projectId ?? '',
+      userId: createdBy,
+      ...(params.apiTokenId ? { tokenId: params.apiTokenId } : {}),
+    };
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
     const makeJudge = deps.buildJudgeInvoker ?? buildJudgeInvoker;
     const makeAttacker = deps.buildAttackerInvoker ?? buildAttackerInvoker;
@@ -544,6 +552,13 @@ export async function executeRun(
         concurrency: options?.concurrency ?? campaign.runConfig?.concurrency,
         policy: campaign.policy,
         maxTurns: options?.maxTurns,
+      },
+      // Each attempt (every turn, the attacker and the judge) in its own exposure: its stored copy and its model
+      // calls are marked with what it handed on of documents not open to everyone.
+      scope: async (run) => {
+        const exposure = new KnowledgeExposure({ parent: null });
+        const result = await runWithKnowledgeExposure(exposure, run);
+        return exposure.restricted ? { ...result, kbRestricted: exposure.list() } : result;
       },
       onAttempt: (att) => {
         partial.push(mapAttempt(att));
@@ -607,6 +622,8 @@ export interface CreateRunParams {
   tenantId: string;
   projectId?: string;
   createdBy: string;
+  /** The API token a client API call starts the scan with: its agent target reads knowledge bases as the token. */
+  apiTokenId?: string;
   campaignKey: string;
   /** Per-run overrides; merged over campaign defaults. */
   options?: RunOptions;

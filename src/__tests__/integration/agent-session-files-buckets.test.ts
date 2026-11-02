@@ -202,6 +202,16 @@ describe('what a client is told about an agent’s attachments', () => {
     expect((await describeFor({ modelKey: 'main' })).outputs).toMatchObject({ enabled: false });
   });
 
+  it('adds ocr: { enabled } only for an agent that has OCR settings, on only while the bucket works and OCR is not off', async () => {
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    await model('gpt-4o');
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads', ocr: { mode: 'auto', images: true } } })).toMatchObject({ enabled: true, ocr: { enabled: true } });
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads', ocr: { mode: 'off' } } })).toMatchObject({ ocr: { enabled: false } });
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: false, bucketKey: 'uploads', ocr: { mode: 'always' } } })).not.toHaveProperty('ocr');
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads' } })).not.toHaveProperty('ocr');
+  });
+
   it('files on but the bucket cannot take a file: not enabled — the paperclip stays hidden', async () => {
     await provider('s3-main', { status: 'disabled' });
     await bucket('uploads', 's3-main');

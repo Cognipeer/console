@@ -20,6 +20,8 @@ const rag = vi.hoisted(() => ({
 const tracing = vi.hoisted(() => ({
   getSessionDetail: vi.fn(),
   listSessions: vi.fn(),
+  // Who a session was made for and what it is marked with: nothing restricted here.
+  getSessionAccessFacts: vi.fn(async () => null),
 }));
 
 vi.mock('@/lib/services/rag/ragService', () => rag);

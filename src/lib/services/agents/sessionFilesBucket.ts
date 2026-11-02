@@ -177,7 +177,8 @@ export async function findAgentsUsingBucket(
 ): Promise<BucketAgentUse[]> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    const agents: IAgent[] = await db.listAgents({ projectId });
+    // Hidden agents a flow owns count too: one that keeps session files in a bucket keeps it from being deleted.
+    const agents: IAgent[] = await db.listAgents({ projectId, owned: 'include' });
     const uses: BucketAgentUse[] = [];
     for (const agent of agents) {
         if (bucketOf(agent.config) === bucketKey) {

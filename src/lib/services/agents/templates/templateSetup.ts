@@ -17,7 +17,7 @@ export interface TemplateSetupFacts {
   webSearchAvailable: boolean;
   published: boolean;
   /** The suggested triggers that were created. */
-  triggers: Array<{ name: string; type: 'schedule' | 'webhook' | 'manual' }>;
+  triggers: Array<{ name: string; type: 'schedule' | 'webhook' | 'manual' | 'connector' }>;
 }
 
 /** The English text of a setup code, with its `{placeholders}` filled. */

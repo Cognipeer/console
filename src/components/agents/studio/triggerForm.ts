@@ -1,34 +1,36 @@
 /**
  * The trigger editor's form state and its mapping to / from the triggers API
  * (`/api/agents/:agentId/triggers`): a trigger's `type` and the one settings
- * object named after it (`schedule`, `once`, `webhook`). Pure, so it is tested
+ * object named after it (`schedule`, `once`, `webhook`, `connector`). Pure, so it is tested
  * without rendering.
  */
 
-import type { IAgentVariable } from '@/lib/database/provider/types.domain';
+import type { AgentTriggerWebhookFilterRule, IAgentVariable } from '@/lib/database/provider/types.domain';
 import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
+import type { ConnectorSubscriptionWire, ConnectorTriggerCatalogConnector, ConnectorTriggerFormValue } from '@/lib/shared/connectorTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
+import { filterRuleMatches } from '@/lib/services/agents/agentTriggerWebhookView';
 
 /** A trigger as the API returns it. */
 export type TriggerRow = ReturnType<typeof serializeAgentTrigger>;
 
-/** The types the editor offers, in order. A new type is added here and in the editor's switch. */
-export const TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook'] as const;
+/** The types a trigger can have, in the order the editor offers them (`connector` only where the Connectors module is). */
+export const TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook', 'connector'] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
+
+/** A trigger as the API returns it by id: a connector trigger also carries the state of its subscription. */
+export type ConnectorTriggerRow = TriggerRow & { connector_subscription?: ConnectorSubscriptionWire | null };
 
 // ── Webhook ──────────────────────────────────────────────────────────────
 // The preset / auth lists mirror agentTriggerWebhookAuth.ts, which uses node:crypto
 // and cannot be imported here; trigger-form.test.ts keeps the two equal.
 
-export const WEBHOOK_PRESETS = ['github', 'gitlab', 'azure_devops', 'generic'] as const;
+export const WEBHOOK_PRESETS = ['generic'] as const;
 export type WebhookPreset = (typeof WEBHOOK_PRESETS)[number];
-export type WebhookAuth = 'github_signature' | 'gitlab_token' | 'standard_webhooks' | 'basic' | 'header' | 'bearer' | 'signature';
+export type WebhookAuth = 'standard_webhooks' | 'header' | 'bearer' | 'signature';
 
 /** The auth modes each preset offers; the first is its default. */
 export const WEBHOOK_PRESET_AUTH: Record<WebhookPreset, readonly WebhookAuth[]> = {
-    github: ['github_signature'],
-    gitlab: ['gitlab_token', 'standard_webhooks'],
-    azure_devops: ['basic', 'header'],
     generic: ['bearer', 'signature', 'header', 'standard_webhooks'],
 };
 
@@ -52,145 +54,26 @@ export const WEBHOOK_TEMPLATE_VARIABLES = [
     'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'trigger.id', 'trigger.name', 'agent.key',
 ] as const;
 
+/**
+ * The tags offered for a connector trigger's prompt: the same view as a webhook's, without headers (a connector event
+ * has none) and with the connector in place of the preset. Also a subset of the roots the server accepts.
+ */
+export const CONNECTOR_TEMPLATE_VARIABLES = [
+    'payload.…', 'event', 'delivery_id', 'connector.name', 'connector.trigger', 'trigger.id', 'trigger.name', 'agent.key',
+] as const;
+
 /** Event-name suggestions per preset (generic senders name their own). */
 export const WEBHOOK_EVENT_SUGGESTIONS: Record<WebhookPreset, readonly string[]> = {
-    github: ['pull_request', 'pull_request_review', 'pull_request_review_comment', 'push', 'issues', 'issue_comment', 'release', 'workflow_run'],
-    gitlab: ['merge_request', 'push', 'tag_push', 'note', 'issue', 'work_item', 'pipeline', 'build', 'release', 'deployment'],
-    azure_devops: [
-        'git.pullrequest.created', 'git.pullrequest.updated', 'git.pullrequest.merged', 'ms.vss-code.git-pullrequest-comment-event',
-        'git.push', 'build.complete', 'workitem.created', 'workitem.updated', 'workitem.commented',
-    ],
     generic: [],
-};
-
-/** GitHub / GitLab "Actions" chips: compiled to a `<path> in [...]` rule placed first in the filter. */
-export const WEBHOOK_ACTION_PATH: Partial<Record<WebhookPreset, string>> = {
-    github: 'payload.action',
-    gitlab: 'payload.object_attributes.action',
-};
-
-export const WEBHOOK_ACTION_SUGGESTIONS: Partial<Record<WebhookPreset, readonly string[]>> = {
-    github: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'edited', 'closed', 'created', 'submitted', 'completed'],
-    gitlab: ['open', 'update', 'reopen', 'approved', 'merge', 'close'],
 };
 
 /** One-click filter examples per preset (i18n key under agents.triggers → rows they add). */
 export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key: string; rows: WebhookFilterRow[] }>> = {
-    github: [
-        {
-            key: 'exampleGithubOpened',
-            rows: [
-                { path: 'payload.action', op: 'in', value: 'opened, synchronize, reopened' },
-                { path: 'payload.pull_request.draft', op: 'neq', value: 'true' },
-            ],
-        },
-        { key: 'exampleGithubMain', rows: [{ path: 'payload.pull_request.base.ref', op: 'eq', value: 'main' }] },
-        { key: 'exampleGithubMembers', rows: [{ path: 'payload.pull_request.author_association', op: 'in', value: 'OWNER, MEMBER, COLLABORATOR' }] },
-    ],
-    gitlab: [
-        { key: 'exampleGitlabMr', rows: [{ path: 'payload.object_attributes.action', op: 'in', value: 'open, update' }] },
-        { key: 'exampleGitlabNotDraft', rows: [{ path: 'payload.object_attributes.draft', op: 'neq', value: 'true' }] },
-    ],
-    azure_devops: [
-        { key: 'exampleAdoMain', rows: [{ path: 'payload.resource.targetRefName', op: 'eq', value: 'refs/heads/main' }] },
-        {
-            key: 'exampleAdoCompleted',
-            rows: [
-                { path: 'payload.resource.status', op: 'eq', value: 'completed' },
-                { path: 'payload.resource.mergeStatus', op: 'eq', value: 'succeeded' },
-            ],
-        },
-    ],
     generic: [],
 };
 
 /** A sample delivery per preset for the editor's Test tab: what the sender would post (trimmed to the fields a trigger is likely to use). */
 export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, string>; payload: Record<string, unknown> }> = {
-    github: {
-        headers: {
-            'x-github-event': 'pull_request',
-            'x-github-delivery': '00000000-0000-4000-8000-000000000001',
-            'x-github-hook-id': '123456789',
-            'user-agent': 'GitHub-Hookshot/0000000',
-        },
-        payload: {
-            action: 'opened',
-            number: 42,
-            pull_request: {
-                id: 1000000042,
-                number: 42,
-                state: 'open',
-                locked: false,
-                title: 'Add retry to the importer',
-                body: 'Retries a failed import up to three times with a short back-off.',
-                draft: false,
-                merged: false,
-                author_association: 'MEMBER',
-                html_url: 'https://github.com/example/repo/pull/42',
-                user: { login: 'octocat', id: 583231, type: 'User' },
-                labels: [{ name: 'enhancement' }],
-                base: { ref: 'main', sha: '9a4f1c2d8b7e6a5f4c3b2a1908f7e6d5c4b3a291', repo: { full_name: 'example/repo' } },
-                head: { ref: 'feature/retry', sha: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1', repo: { full_name: 'example/repo' } },
-                commits: 3,
-                additions: 48,
-                deletions: 6,
-                changed_files: 4,
-                created_at: '2026-10-17T09:30:00Z',
-                updated_at: '2026-10-17T09:30:00Z',
-            },
-            repository: { id: 1296269, name: 'repo', full_name: 'example/repo', private: false, html_url: 'https://github.com/example/repo', default_branch: 'main' },
-            sender: { login: 'octocat', id: 583231, type: 'User' },
-        },
-    },
-    gitlab: {
-        headers: { 'x-gitlab-event': 'Merge Request Hook', 'x-gitlab-event-uuid': '00000000-0000-4000-8000-000000000002', 'webhook-id': 'msg_sample_1' },
-        payload: {
-            object_kind: 'merge_request',
-            event_type: 'merge_request',
-            user: { id: 1, name: 'Jane Doe', username: 'jane' },
-            project: { id: 15, name: 'repo', path_with_namespace: 'example/repo', web_url: 'https://gitlab.example.com/example/repo', default_branch: 'main' },
-            object_attributes: {
-                id: 99,
-                iid: 7,
-                title: 'Add retry to the importer',
-                description: 'Retries a failed import up to three times with a short back-off.',
-                action: 'open',
-                state: 'opened',
-                draft: false,
-                source_branch: 'feature/retry',
-                target_branch: 'main',
-                url: 'https://gitlab.example.com/example/repo/-/merge_requests/7',
-                last_commit: { id: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1', message: 'Retry failed imports' },
-                created_at: '2026-10-17 09:30:00 UTC',
-            },
-            labels: [{ title: 'enhancement' }],
-        },
-    },
-    azure_devops: {
-        headers: {},
-        payload: {
-            id: '6a1c3a1e-0000-4000-8000-000000000001',
-            eventType: 'git.pullrequest.created',
-            publisherId: 'tfs',
-            message: { text: 'Jane Doe created pull request 12 (Add retry to the importer)' },
-            resource: {
-                pullRequestId: 12,
-                title: 'Add retry to the importer',
-                description: 'Retries a failed import up to three times with a short back-off.',
-                status: 'active',
-                mergeStatus: 'succeeded',
-                isDraft: false,
-                sourceRefName: 'refs/heads/feature/retry',
-                targetRefName: 'refs/heads/main',
-                lastMergeSourceCommit: { commitId: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1' },
-                createdBy: { displayName: 'Jane Doe', uniqueName: 'jane@example.com' },
-                creationDate: '2026-10-17T09:30:00Z',
-                repository: { id: '5a1b2c3d-0000-4000-8000-000000000003', name: 'repo', project: { name: 'Example' } },
-                url: 'https://dev.azure.com/example/Example/_apis/git/repositories/repo/pullRequests/12',
-            },
-            createdDate: '2026-10-17T09:30:01Z',
-        },
-    },
     generic: {
         headers: { 'x-cognipeer-event-id': 'evt_sample_1' },
         payload: {
@@ -238,10 +121,12 @@ export interface TriggerForm {
     /** Standard Webhooks only: the sender's `whsec_…` secret; empty keeps the stored one. */
     webhookSecret: string;
     webhookEvents: string[];
-    /** GitHub / GitLab only (WEBHOOK_ACTION_PATH). */
-    webhookActions: string[];
+    /** The filter rules of a webhook and of a connector trigger (both match over the event). */
     webhookFilter: WebhookFilterRow[];
+    /** Whether the event payload goes to the agent: a webhook's and a connector trigger's. */
     webhookIncludePayload: boolean;
+    /** The connector picker's value (connector, trigger, parameters, events, poll schedule); null until one is picked. */
+    connector: ConnectorTriggerFormValue | null;
 }
 
 export const CRON_PRESETS = [
@@ -298,14 +183,14 @@ export function emptyTriggerForm(timezone = browserTimezone(), now = new Date())
         callbackSecret: '',
         callbackSigned: false,
         responseFormatText: '',
-        webhookPreset: 'github',
-        webhookAuth: 'github_signature',
+        webhookPreset: 'generic',
+        webhookAuth: 'bearer',
         webhookHeaderName: DEFAULT_WEBHOOK_HEADER_NAME,
         webhookSecret: '',
         webhookEvents: [],
-        webhookActions: [],
         webhookFilter: [],
         webhookIncludePayload: true,
+        connector: null,
     };
 }
 
@@ -345,7 +230,7 @@ const listText = (value: unknown) => (Array.isArray(value) ? value.map(String).j
 const splitList = (text: string) => text.split(',').map((item) => item.trim()).filter(Boolean);
 
 /** A filter row → the API rule, or null when its value is missing. */
-function ruleFromRow(row: WebhookFilterRow): Record<string, unknown> | null {
+function ruleFromRow(row: WebhookFilterRow): AgentTriggerWebhookFilterRule | null {
     const path = row.path.trim();
     if (row.op === 'exists' || row.op === 'not_exists') return { path, op: row.op };
     if (row.op === 'in' || row.op === 'not_in') {
@@ -362,42 +247,65 @@ interface StoredWebhook {
     auth?: string;
     header_name?: string | null;
     events?: string[];
-    filter?: Array<{ path: string; op: string; value?: unknown }>;
+    filter?: StoredFilterRule[];
     include_payload?: boolean;
 }
 
-/** The webhook part of the form from a stored `webhook`: an action rule first in the filter becomes the Actions chips. */
+type StoredFilterRule = { path: string; op: string; value?: unknown };
+
+/** Stored filter rules as editable rows. */
+function filterRows(rules: StoredFilterRule[] | undefined): WebhookFilterRow[] {
+    return (rules ?? []).map((rule) => ({
+        path: rule.path,
+        op: (WEBHOOK_FILTER_OPS as readonly string[]).includes(rule.op) ? rule.op as WebhookFilterOp : 'eq',
+        value: listText(rule.value),
+    }));
+}
+
+/** The webhook part of the form from a stored `webhook`. A retired vendor preset opens as the generic one. */
 function webhookFormFields(webhook: StoredWebhook, base: TriggerForm): Partial<TriggerForm> {
     const preset = (WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset ?? '') ? webhook.preset as WebhookPreset : 'generic';
     const auth = WEBHOOK_PRESET_AUTH[preset].includes(webhook.auth as WebhookAuth) ? webhook.auth as WebhookAuth : WEBHOOK_PRESET_AUTH[preset][0];
-    const rules = [...(webhook.filter ?? [])];
-    const actionPath = WEBHOOK_ACTION_PATH[preset];
-    let actions: string[] = [];
-    const first = rules[0];
-    if (actionPath && first && first.path === actionPath && first.op === 'in' && Array.isArray(first.value) && first.value.every((item) => typeof item === 'string')) {
-        actions = first.value as string[];
-        rules.shift();
-    }
     return {
         webhookPreset: preset,
         webhookAuth: auth,
         webhookHeaderName: webhook.header_name ?? base.webhookHeaderName,
         webhookEvents: [...(webhook.events ?? [])],
-        webhookActions: actions,
-        webhookFilter: rules.map((rule) => ({
-            path: rule.path,
-            op: (WEBHOOK_FILTER_OPS as readonly string[]).includes(rule.op) ? rule.op as WebhookFilterOp : 'eq',
-            value: listText(rule.value),
-        })),
+        webhookFilter: filterRows(webhook.filter),
         webhookIncludePayload: webhook.include_payload !== false,
     };
 }
 
-/** The filter rules a save sends: the Actions chips first, then the rows. */
-export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<Record<string, unknown>> } | { ok: false; index: number } {
-    const rules: Array<Record<string, unknown>> = [];
-    const actionPath = WEBHOOK_ACTION_PATH[form.webhookPreset];
-    if (actionPath && form.webhookActions.length > 0) rules.push({ path: actionPath, op: 'in', value: [...form.webhookActions] });
+/** A stored trigger's `connector` object as the API returns it. */
+interface StoredConnector {
+    connector_id: string;
+    trigger: string;
+    params?: Record<string, unknown>;
+    schedule?: { cron: string; timezone: string } | null;
+    events?: string[];
+    filter?: StoredFilterRule[];
+    include_payload?: boolean;
+}
+
+/** The connector part of the form from a stored `connector`: the picker's value, the filter rows and whether the payload is included. */
+function connectorFormFields(connector: StoredConnector, base: TriggerForm): Partial<TriggerForm> {
+    return {
+        connector: {
+            connectorId: connector.connector_id,
+            trigger: connector.trigger,
+            params: { ...(connector.params ?? {}) },
+            events: [...(connector.events ?? [])],
+            scheduleCron: connector.schedule?.cron ?? '',
+            scheduleTimezone: connector.schedule?.timezone ?? base.timezone,
+        },
+        webhookFilter: filterRows(connector.filter),
+        webhookIncludePayload: connector.include_payload !== false,
+    };
+}
+
+/** The filter rules a save sends: the rows with a path and a value. */
+export function webhookFilterBody(form: TriggerForm): { ok: true; rules: AgentTriggerWebhookFilterRule[] } | { ok: false; index: number } {
+    const rules: AgentTriggerWebhookFilterRule[] = [];
     for (const [index, row] of form.webhookFilter.entries()) {
         if (!row.path.trim() && !row.value.trim()) continue;
         const rule = ruleFromRow(row);
@@ -405,15 +313,6 @@ export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<R
         rules.push(rule);
     }
     return { ok: true, rules };
-}
-
-/**
- * Whether the filter limits who can start the trigger (an author / sender
- * rule). On GitHub, GitLab and Azure DevOps anyone who can open a pull request
- * can otherwise start it; the editor shows a hint, never a prefill.
- */
-export function hasWebhookAuthorRule(form: TriggerForm): boolean {
-    return form.webhookFilter.some((row) => /^payload\..*(author|sender|user|createdBy)/i.test(row.path.trim()));
 }
 
 export function formatMetadataLines(metadata: Record<string, string> | null | undefined): string {
@@ -440,6 +339,7 @@ export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserT
     return {
         ...base,
         ...(trigger.type === 'webhook' ? webhookFormFields(trigger.webhook as StoredWebhook, base) : {}),
+        ...(trigger.type === 'connector' ? connectorFormFields(trigger.connector as StoredConnector, base) : {}),
         name: trigger.name,
         description: trigger.description ?? '',
         enabled: trigger.enabled,
@@ -457,10 +357,88 @@ export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserT
     };
 }
 
+/** A webhook trigger that used a retired vendor preset: it receives nothing any more (the server answers 410). */
+export function isRetiredWebhook(trigger: TriggerRow): boolean {
+    return trigger.type === 'webhook' && (trigger.webhook as { retired?: boolean }).retired === true;
+}
+
+/**
+ * The form for the connector trigger that replaces a retired vendor webhook trigger: its name, prompt, variables,
+ * filter and payload choice carry over; the connector, its trigger and the events are picked again.
+ */
+export function connectorFormFromRetired(trigger: TriggerRow, fallbackTimezone = browserTimezone()): TriggerForm {
+    return { ...formFromTrigger(trigger, fallbackTimezone), type: 'connector', connector: null, webhookEvents: [] };
+}
+
+/** What a connector event is to a filter row on the vendor's webhook data: it has no headers and its preset is always `connector`. */
+const CONNECTOR_EVENT_VIEW = { headers: {}, preset: 'connector' };
+
+/**
+ * The filter rows that read the vendor's request `headers` or the webhook `preset`, by what each does on a connector event.
+ * A connector event has no headers and its preset is always `connector`, so the row is run through the matcher the server
+ * filters with, over that much of the event: `never` rows cannot match (`headers.x eq …`, `preset eq github`), `always`
+ * rows match every connector event and filter nothing (`headers.x not_exists`, `preset eq connector`, `preset neq github`).
+ * A converted retired trigger keeps its rows as they were (dropping one would change the rule set unseen); these are the
+ * ones to point out. A row without its value is not judged yet (a save refuses it).
+ */
+export function rowsOnWebhookOnlyData(rows: ReadonlyArray<WebhookFilterRow>): { never: number[]; always: number[] } {
+    const found = { never: [] as number[], always: [] as number[] };
+    rows.forEach((row, index) => {
+        if (!/^(headers|preset)(\.|$)/.test(row.path.trim())) return;
+        const rule = ruleFromRow(row);
+        if (rule) found[filterRuleMatches(CONNECTOR_EVENT_VIEW, rule) ? 'always' : 'never'].push(index);
+    });
+    return found;
+}
+
+/**
+ * A trigger API path with the reader's language (`?locale=tr|en`): the Connectors module writes the steps to set a
+ * webhook up in that language. (The `reason` of a subscription stays one English sentence; the screen says it from
+ * `reason_code`.) Any other locale leaves the path as it is.
+ */
+export function withTriggerLocale(path: string, locale: string): string {
+    return locale === 'tr' || locale === 'en' ? `${path}${path.includes('?') ? '&' : '?'}locale=${locale}` : path;
+}
+
+/**
+ * The name of a connector trigger's event source for a list row. The label the Connectors module stored is always English
+ * (`GitHub · Pull request`, whoever saved the trigger); where the catalog the screen holds, asked in the reader's language,
+ * lists the connector and its trigger, that title is shown instead. Without it (the module is off, the connector or the
+ * trigger is gone) the stored label stands, else the package and trigger names.
+ */
+export function connectorTriggerLabel(
+    connector: { connector_id: string; trigger: string; label?: string | null; package_id?: string | null },
+    catalog: ReadonlyArray<Pick<ConnectorTriggerCatalogConnector, 'id' | 'packageName' | 'triggers'>>,
+): string {
+    const entry = catalog.find((item) => item.id === connector.connector_id);
+    const title = entry?.triggers.find((item) => item.name === connector.trigger)?.title;
+    if (entry && title) return `${entry.packageName} · ${title}`;
+    return connector.label ?? connector.package_id ?? connector.trigger;
+}
+
 export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
 
-/** The `type` and settings object of the request body, or why they cannot be sent. */
-export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
+/**
+ * Is the form still on the poll trigger that is stored: the same connector and trigger, and the stored one has a schedule? An empty
+ * cron field there has to be said (`schedule: null`), since an omitted schedule keeps the stored one. (A webhook-kind trigger has no
+ * schedule, and a trigger moved to another one starts from that one's own.)
+ */
+function isStoredPoll(picked: ConnectorTriggerFormValue, stored: TriggerRow | null | undefined): boolean {
+    return stored?.type === 'connector'
+        && Boolean(stored.connector.schedule)
+        && stored.connector.connector_id === picked.connectorId
+        && stored.connector.trigger === picked.trigger;
+}
+
+/**
+ * The `type` and settings object of the request body, or why they cannot be sent. `stored` is the trigger being edited, if any: a
+ * saved poll trigger whose schedule field was emptied says so (`schedule: null`).
+ */
+export function typeBodyFromForm(
+    form: TriggerForm,
+    now = new Date(),
+    stored?: TriggerRow | null,
+): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
     switch (form.type) {
         case 'schedule':
             if (validateTriggerCron(form.cron)) return { ok: false, problem: { field: 'cron', key: 'previewInvalid' } };
@@ -490,6 +468,35 @@ export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: tru
                         ...(form.webhookAuth === 'header' ? { header_name: form.webhookHeaderName.trim() || DEFAULT_WEBHOOK_HEADER_NAME } : {}),
                         ...(secret ? { secret } : {}),
                         events: [...form.webhookEvents],
+                        filter: filter.rules,
+                        include_payload: form.webhookIncludePayload,
+                    },
+                },
+            };
+        }
+        case 'connector': {
+            const picked = form.connector;
+            if (!picked || !picked.connectorId || !picked.trigger) return { ok: false, problem: { field: 'connector', key: 'connectorRequired' } };
+            // The cron is not judged here: the Connectors module reads a connector schedule by its own grammar (not cron-parser's), and
+            // the server answers with its sentence, which the schedule field shows.
+            const cron = picked.scheduleCron.trim();
+            const filter = webhookFilterBody(form);
+            if (!filter.ok) return { ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } };
+            return {
+                ok: true,
+                body: {
+                    type: 'connector',
+                    connector: {
+                        connector_id: picked.connectorId,
+                        trigger: picked.trigger,
+                        params: picked.params,
+                        events: [...picked.events],
+                        // Only a poll trigger has a schedule. A new trigger with an empty field gets the package's own (nothing is sent). A
+                        // saved poll trigger whose field was emptied says `null` for it: an omitted schedule keeps the stored one, and
+                        // `null` returns it to the package's own schedule, in UTC.
+                        ...(cron
+                            ? { schedule: { cron, timezone: picked.scheduleTimezone || form.timezone } }
+                            : isStoredPoll(picked, stored) ? { schedule: null } : {}),
                         filter: filter.rules,
                         include_payload: form.webhookIncludePayload,
                     },
@@ -549,7 +556,7 @@ export function triggerBodyFromForm(
     const unchangedOnce = stored && stored.type === 'once' && form.type === 'once' && form.onceMode === 'at'
         && toLocalInputValue(new Date(String(stored.once.run_at))) === form.runAtLocal;
     if (!unchangedOnce) {
-        const typeBody = typeBodyFromForm(form, now);
+        const typeBody = typeBodyFromForm(form, now, stored);
         if (!typeBody.ok) return typeBody;
         Object.assign(body, typeBody.body);
     }

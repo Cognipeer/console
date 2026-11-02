@@ -20,11 +20,12 @@ import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValid
 import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from '@/components/agents/studio/configSections';
 
 describe('resolveHitlConfig', () => {
-  it('an agent without the setting never pauses and carries the documented defaults', () => {
+  it('an agent without the setting has made no choice: it asks, and carries the documented defaults', () => {
     const resolved = resolveHitlConfig(undefined);
-    expect(hitlCanPause(resolved)).toBe(false);
+    expect(hitlCanPause(resolved)).toBe(true);
     expect(resolved).toMatchObject({
-      toolApprovalEnabled: false,
+      toolApprovalEnabled: true,
+      toolApprovalChosen: false,
       askUserEnabled: false,
       timeoutMinutes: 1440,
       onTimeout: 'deny',
@@ -50,6 +51,7 @@ describe('resolveHitlConfig', () => {
     });
     expect(resolved).toEqual({
       toolApprovalEnabled: true,
+      toolApprovalChosen: true,
       defaultPolicy: 'never',
       toolPolicies: { sandbox_exec: 'always' },
       toolExceptions: {},
@@ -92,10 +94,18 @@ describe('resolveHitlRunMode', () => {
     ...(unattended ? { unattended } : {}),
   });
 
-  it('an agent that can never pause is never gated, attended or not', () => {
+  it('an agent that switched approval off and asks nothing is never gated, attended or not', () => {
+    const off = resolveHitlConfig({ toolApproval: { enabled: false } });
+    expect(hitlCanPause(off)).toBe(false);
+    expect(resolveHitlRunMode(off, {})).toBe('allow');
+    expect(resolveHitlRunMode(off, { unattended: true })).toBe('allow');
+  });
+
+  it('an agent with no setting asks when attended and denies when nobody can answer (client API agents)', () => {
     const none = resolveHitlConfig(undefined);
-    expect(resolveHitlRunMode(none, {})).toBe('allow');
-    expect(resolveHitlRunMode(none, { unattended: true })).toBe('allow');
+    expect(resolveHitlRunMode(none, {})).toBe('ask');
+    expect(resolveHitlRunMode(none, { unattended: true })).toBe('deny');
+    expect(resolveHitlRunMode(none, { canPause: false })).toBe('deny');
   });
 
   it('an attended run asks, whatever the unattended setting says', () => {
@@ -128,7 +138,7 @@ describe('denyUnattendedTools', () => {
 
   it('returns the very same tools when tool approval is off', () => {
     const tools = [makeTool('sandbox_exec')];
-    expect(denyUnattendedTools(tools, resolveHitlConfig(undefined), new Set())).toBe(tools);
+    expect(denyUnattendedTools(tools, resolveHitlConfig({ toolApproval: { enabled: false } }), new Set())).toBe(tools);
   });
 
   it('replaces the execution of a gated tool with a refusal, and leaves every other tool alone', async () => {
@@ -224,7 +234,7 @@ describe('applyToolApprovals', () => {
   const tools = [{ name: 'sandbox_exec' }, { name: 'read' }, { name: 'knowledge_search' }];
 
   it('returns the very same tools when tool approval is off', () => {
-    expect(applyToolApprovals(tools, resolveHitlConfig(undefined), new Set())).toBe(tools);
+    expect(applyToolApprovals(tools, resolveHitlConfig({ toolApproval: { enabled: false } }), new Set())).toBe(tools);
     expect(applyToolApprovals(tools, resolveHitlConfig({ toolApproval: { enabled: false } }), new Set())).toBe(tools);
   });
 
@@ -300,8 +310,10 @@ describe('validation', () => {
     expect(validateHitlConfig(config({ toolApproval: { enabled: true }, unattended: 'allow' })).warnings.map((w) => w.field))
       .toContain('humanInTheLoop.unattended');
     expect(validateHitlConfig(config({ toolApproval: { enabled: true }, unattended: 'deny' })).warnings).toEqual([]);
+    // Approval left unset is on, so "allow" lets gated tools run unattended: worth the warning.
+    expect(validateHitlConfig(config({ unattended: 'allow' })).warnings.map((w) => w.field)).toContain('humanInTheLoop.unattended');
     // Nothing is gated, so there is nothing to warn about.
-    expect(validateHitlConfig(config({ unattended: 'allow' })).warnings).toEqual([]);
+    expect(validateHitlConfig(config({ toolApproval: { enabled: false }, unattended: 'allow' })).warnings).toEqual([]);
   });
 
   it('warns that free text off makes options mandatory', () => {

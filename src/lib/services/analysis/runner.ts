@@ -36,6 +36,8 @@ export interface RunAnalysisParams {
   invokeJudge?: ModelInvoker;
   config?: AnalysisRunConfig;
   onItem?: (result: AnalysisItemResult, index: number) => void;
+  /** Runs the analysis of one conversation (`analyse`) in a context of the caller's, e.g. to mark its model calls. */
+  scope?: (conversation: AnalysisConversation, analyse: () => Promise<AnalysisItemResult>) => Promise<AnalysisItemResult>;
 }
 
 export async function runAnalysis(params: RunAnalysisParams): Promise<AnalysisResult> {
@@ -49,7 +51,8 @@ export async function runAnalysis(params: RunAnalysisParams): Promise<AnalysisRe
       const index = cursor;
       cursor += 1;
       if (index >= conversations.length) return;
-      const result = await analyseOne(conversations[index], spec, invokeExtraction, invokeDecision, invokeJudge);
+      const analyse = () => analyseOne(conversations[index], spec, invokeExtraction, invokeDecision, invokeJudge);
+      const result = await (params.scope ? params.scope(conversations[index], analyse) : analyse());
       results[index] = result;
       onItem?.(result, index);
     }

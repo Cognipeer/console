@@ -9,6 +9,7 @@ import type { IAgentMessageAttachment } from '@/lib/database/provider/types.doma
 import {
     isImageMime,
     isMimeAllowed,
+    attachmentsOcrReadsImages,
     isSendableImageMime,
     maxUploadBytes,
     type ResolvedAttachmentsConfig,
@@ -63,7 +64,7 @@ export function checkAttachmentCandidate(
     if (held >= cfg.maxFiles) return { code: 'too_many_files', max: cfg.maxFiles };
     // A picture is also held to what one model request carries (the server refuses it past that).
     if (file.size > maxUploadBytes(cfg, file.type)) {
-        const requestBound = isSendableImageMime(file.type) && cfg.maxBytes < Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
+        const requestBound = isSendableImageMime(file.type) && !attachmentsOcrReadsImages(cfg) && cfg.maxBytes < Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
         return { code: 'file_too_large', max: requestBound ? Math.round((cfg.maxBytes / 1_000_000) * 10) / 10 : cfg.maxFileSizeMb };
     }
     // An unknown type is left to the server, which also looks at the file name.

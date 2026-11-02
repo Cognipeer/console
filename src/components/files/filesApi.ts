@@ -17,6 +17,7 @@
 
 import { ApiError } from '@/lib/api/client';
 import type { FileTypeFilter } from '@/lib/database';
+import type { OcrSettings } from '@/lib/services/extraction/types';
 import type {
   BatchDeleteResult,
   BucketDetail,
@@ -248,6 +249,8 @@ export interface UploadObjectInput {
    * is on): send `false` to keep only the original.
    */
   convertToMarkdown?: boolean;
+  /** OCR for the Markdown copy (scanned pages, and with `images` pictures). Left out = the plain conversion. */
+  ocr?: OcrSettings;
   metadata?: Record<string, unknown>;
   /** Upload into this folder (`''`/absent = the bucket root). */
   folder?: string;
@@ -612,12 +615,14 @@ export interface UploadFileOptions extends UploadObjectOptions {
   contentType?: string;
   /** Left out, the server converts (the default is on): send `false` to keep only the original. */
   convertToMarkdown?: boolean;
+  /** OCR for the Markdown copy; left out = the plain conversion. */
+  ocr?: OcrSettings;
   folder?: string;
 }
 
 /** Reads `file` and uploads it: the call the upload screen makes for each queued file. */
 export async function uploadFile(bucketKey: string, file: File, options: UploadFileOptions = {}): Promise<UploadObjectResult> {
-  const { name, contentType, convertToMarkdown, folder, ...rest } = options;
+  const { name, contentType, convertToMarkdown, ocr, folder, ...rest } = options;
   const data = await fileToDataUrl(file);
   return uploadObject(
     bucketKey,
@@ -626,6 +631,7 @@ export async function uploadFile(bucketKey: string, file: File, options: UploadF
       contentType: contentType?.trim() || file.type || 'application/octet-stream',
       data,
       ...(convertToMarkdown !== undefined ? { convertToMarkdown } : {}),
+      ...(ocr ? { ocr } : {}),
       ...(folder ? { folder } : {}),
     },
     rest,
@@ -662,8 +668,14 @@ export async function archiveObjects(bucketKey: string, keys: string[], options:
  * `conversion_too_large`, 409 `bucket_inactive` / `bucket_deleting`, 503 `queue_unavailable` (the record is left
  * `failed` with why).
  */
-export async function convertObject(bucketKey: string, key: string, options: CallOptions = {}): Promise<FileRecordView> {
-  const body = await requestJson<{ record?: FileRecordView }>(filesRoutes.convert(bucketKey), 'POST', { key }, options.signal);
+export async function convertObject(
+  bucketKey: string,
+  key: string,
+  options: CallOptions & { ocr?: OcrSettings | null } = {},
+): Promise<FileRecordView> {
+  // `ocr` replaces the file's own settings (null = the plain conversion); left out, the file keeps the ones it has.
+  const payload = options.ocr !== undefined ? { key, ocr: options.ocr } : { key };
+  const body = await requestJson<{ record?: FileRecordView }>(filesRoutes.convert(bucketKey), 'POST', payload, options.signal);
   if (!body?.record) throw unreadableAnswer(202);
   return body.record;
 }

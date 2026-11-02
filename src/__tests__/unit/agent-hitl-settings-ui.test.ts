@@ -69,8 +69,10 @@ describe('editing the stored object', () => {
     expect('tools' in cleared.toolApproval!).toBe(false);
   });
 
-  it('creates the approval block, switched off, when a tool is set on an agent that had none', () => {
-    expect(setToolChoice(undefined, 'a', 'always')).toEqual({ toolApproval: { enabled: false, tools: { a: 'always' } } });
+  it('creates the approval block without a switch when a tool is set on an agent that had none', () => {
+    // No stored switch means "asks"; the block created for one tool neither switches approval off nor
+    // switches client tools on (they follow only an explicit `enabled: true`).
+    expect(setToolChoice(undefined, 'a', 'always')).toEqual({ toolApproval: { tools: { a: 'always' } } });
   });
 
   it('merges a change and drops keys set to undefined so the runtime default applies again', () => {

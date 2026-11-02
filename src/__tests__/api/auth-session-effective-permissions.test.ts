@@ -48,7 +48,9 @@ import { describeForEachProvider } from '../integration/db-parity.helper';
 
 const LIVE_SERVICES = RBAC_SERVICE_DEFINITIONS.filter((d) => !d.deprecated);
 const ADMIN_SERVICES = RBAC_SERVICE_DEFINITIONS.filter((d) => d.adminService).map((d) => d.id);
-const ORDINARY_SERVICES = LIVE_SERVICES.filter((d) => !d.adminService).map((d) => d.id);
+const ORDINARY_SERVICES = LIVE_SERVICES.filter((d) => !d.adminService && !d.defaultMemberLevel).map((d) => d.id);
+/** Ordinary services whose member default is lower than write (e.g. `flows`: read). */
+const LOWER_DEFAULT_SERVICES = LIVE_SERVICES.filter((d) => !d.adminService && d.defaultMemberLevel);
 
 interface SessionBody {
   authenticated: boolean;
@@ -157,6 +159,7 @@ describeForEachProvider('GET /api/auth/session: effective permissions', (getDb) 
   it('a plain member writes ordinary services and has nothing in the administration ones', async () => {
     const { body } = await session(users.plain);
     for (const service of ORDINARY_SERVICES) expect(body.effectivePermissions![service], service).toBe('write');
+    for (const d of LOWER_DEFAULT_SERVICES) expect(body.effectivePermissions![d.id], d.id).toBe(d.defaultMemberLevel);
     for (const service of ADMIN_SERVICES.filter((s) => LIVE_SERVICES.some((d) => d.id === s))) expect(body.effectivePermissions![service], service).toBe('none');
   });
 

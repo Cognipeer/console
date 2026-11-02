@@ -72,6 +72,8 @@ import LlmRequestDetailModal, {
 import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 import { buildSessionModel, outcomeText, stepCategory } from '@/components/tracing/sessionModel';
 import EventListGrouped from '@/components/tracing/EventListGrouped';
+import FlowAttributionLink from '@/components/tracing/FlowAttributionLink';
+import { hasFlowAttribution, type TracingFlowBlock } from '@/components/tracing/flowAttribution';
 
 dayjs.extend(relativeTime);
 dayjs.extend(duration);
@@ -79,6 +81,8 @@ dayjs.extend(duration);
 interface ThreadSession {
   sessionId: string;
   agentName?: string;
+  /** Set when the session belongs to an agent a flow owns. */
+  flow?: TracingFlowBlock | null;
   agentVersion?: string;
   status?: string;
   startedAt?: string;
@@ -763,9 +767,13 @@ export default function ThreadDetailPage({
                         }
                         title={
                           <Group gap="xs">
-                            <Text fw={600} size="sm">
-                              {session.agentName || 'Unknown Agent'}
-                            </Text>
+                            {hasFlowAttribution(session) ? (
+                              <FlowAttributionLink flow={session.flow} stopRowClick={false} />
+                            ) : (
+                              <Text fw={600} size="sm">
+                                {session.agentName || 'Unknown Agent'}
+                              </Text>
+                            )}
                             {session.agentVersion && (
                               <Badge size="xs" variant="light" color="gray">
                                 v{session.agentVersion}

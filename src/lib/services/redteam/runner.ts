@@ -38,6 +38,8 @@ export interface RunRedTeamParams {
   config?: RedTeamRunConfig;
   /** Progress hook, invoked once per completed attempt. */
   onAttempt?: (result: AttemptResult, index: number) => void;
+  /** Runs one attempt (`run`) in a context of the caller's, e.g. to mark what it used. */
+  scope?: (run: () => Promise<AttemptResult>) => Promise<AttemptResult>;
 }
 
 interface WorkItem {
@@ -64,7 +66,8 @@ export async function runRedTeam(params: RunRedTeamParams): Promise<RedTeamRunRe
       cursor += 1;
       if (index >= work.length) return;
       const { probe, attempt } = work[index];
-      const result = await runAttempt(probe, attempt, invokeTarget, invokeJudge, invokeAttacker, config);
+      const run = () => runAttempt(probe, attempt, invokeTarget, invokeJudge, invokeAttacker, config);
+      const result = await (params.scope ? params.scope(run) : run());
       results[index] = result;
       onAttempt?.(result, index);
     }

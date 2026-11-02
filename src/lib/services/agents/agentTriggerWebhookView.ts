@@ -37,7 +37,7 @@ const FILTER_MAX_VALUE_LENGTH = 1024;
 const GLOB_MAX_PATTERN_LENGTH = 256;
 
 /** The names a delivery's context has at its top. */
-export const WEBHOOK_CONTEXT_ROOTS = ['payload', 'headers', 'event', 'delivery_id', 'preset', 'received_at', 'trigger', 'agent'] as const;
+export const WEBHOOK_CONTEXT_ROOTS = ['payload', 'headers', 'event', 'delivery_id', 'preset', 'received_at', 'trigger', 'agent', 'connector'] as const;
 const ROOTS: ReadonlySet<string> = new Set(WEBHOOK_CONTEXT_ROOTS);
 
 /** Property names a path may not use (they name built-ins, not data). */

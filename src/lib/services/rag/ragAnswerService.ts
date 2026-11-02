@@ -17,6 +17,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { queryRag } from './ragService';
+import { anonymousKbCaller, resolveRagAccess, withKnowledgeExposure, type KbCaller, type RagAccessScope } from './access';
 import { RagModuleInactiveError } from './errors';
 import type { RagQueryMatch } from './types';
 import {
@@ -112,6 +113,8 @@ interface AnswerContext {
   tenantId: string;
   projectId?: string;
   modelKey: string;
+  /** The model's semantic cache may serve and store these calls: not for a knowledge base with access control. */
+  cacheable: boolean;
 }
 
 interface ChatLikeResponse {
@@ -136,7 +139,10 @@ async function invokeChat(
   if (typeof opts.maxTokens === 'number') body.max_tokens = opts.maxTokens;
   const result = (await handleChatCompletion({
     tenantDbName: ctx.tenantDbName,
-    tenantId: ctx.tenantId,
+    // The gateway's semantic cache is on only for a call that names the tenant, and it keys an entry on the prompt
+    // alone: an answer written from one caller's passages would come back to another whose prompt is close. A
+    // knowledge base with access control calls without the tenant, so nothing is looked up and nothing is stored.
+    ...(ctx.cacheable ? { tenantId: ctx.tenantId } : {}),
     modelKey: ctx.modelKey,
     projectId: ctx.projectId ?? '',
     body,
@@ -373,6 +379,19 @@ export async function answerWithRag(
   tenantId: string,
   projectId: string | undefined,
   request: RagAnswerRequest,
+  /** Who is asking; only knowledge bases with access control look at it (see queryRag). */
+  options: { caller?: KbCaller; access?: RagAccessScope } = {},
+): Promise<RagAnswerResult> {
+  // The answer's model calls carry what its queries found: one exposure for both, so their logs are marked.
+  return withKnowledgeExposure(() => answer(tenantDbName, tenantId, projectId, request, options));
+}
+
+async function answer(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  request: RagAnswerRequest,
+  options: { caller?: KbCaller; access?: RagAccessScope },
 ): Promise<RagAnswerResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const startTime = Date.now();
@@ -386,12 +405,22 @@ export async function answerWithRag(
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
   if (ragModule.status !== 'active') throw new RagModuleInactiveError();
+  // Resolved once for every query variant below, not once per variant.
+  const access = ragModule.access?.enabled === true
+    ? options.access ?? await resolveRagAccess({
+      tenantDbName,
+      tenantId,
+      module: ragModule,
+      caller: options.caller ?? anonymousKbCaller('unknown'),
+    })
+    : undefined;
 
   const ctx: AnswerContext = {
     tenantDbName,
     tenantId,
     projectId,
     modelKey: request.answerModelKey,
+    cacheable: ragModule.access?.enabled !== true,
   };
 
   // 1. Build the query list (optionally expanded with alternative phrasings).
@@ -421,7 +450,7 @@ export async function answerWithRag(
         query: q,
         topK: fetchTopK,
         filter: retrieval.filter,
-      }).then((r) => r.matches),
+      }, { caller: options.caller, access }).then((r) => r.matches),
     ),
   );
   let candidates = mergeMatches(groups);

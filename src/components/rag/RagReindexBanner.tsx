@@ -164,15 +164,27 @@ export default function RagReindexBanner({
   reindexRequired,
 }: RagReindexBannerProps) {
   if (activeRun) {
-    const total = activeRun.totalDocuments;
-    const percent = total > 0 ? Math.min(100, Math.round((activeRun.processedDocuments / total) * 100)) : 0;
+    // With access control on, a reader whose reads are checked gets no module total, and one who does not manage
+    // the knowledge base no counts at all.
+    const total = typeof activeRun.totalDocuments === 'number' ? activeRun.totalDocuments : undefined;
+    const processed = typeof activeRun.processedDocuments === 'number' ? activeRun.processedDocuments : undefined;
+    const failed = activeRun.failedDocuments ?? 0;
+    const percent = total !== undefined && processed !== undefined
+      ? (total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0)
+      : 100;
+    let heading = 'Re-indexing documents';
+    if (processed !== undefined) {
+      heading = total !== undefined
+        ? `Re-indexing ${processed} of ${total || '?'} document(s)`
+        : `Re-indexing — ${processed} document(s) rebuilt`;
+    }
     return (
       <Alert color="blue" variant="light" icon={<Loader size={16} />} mb="md">
         <Stack gap="xs">
           <Group justify="space-between" wrap="nowrap">
             <Text size="sm" fw={600}>
-              Re-indexing {activeRun.processedDocuments} of {total || '?'} document(s)
-              {activeRun.failedDocuments > 0 ? ` — ${activeRun.failedDocuments} failed` : ''}
+              {heading}
+              {failed > 0 ? ` — ${failed} failed` : ''}
             </Text>
             <Button
               size="xs"

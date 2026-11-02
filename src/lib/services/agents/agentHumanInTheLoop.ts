@@ -4,8 +4,15 @@
  * may answer it. The runtime side — pausing, resolving, resuming — is in
  * `agentPendingActions.ts` / `agentActionResolution.ts`.
  *
- * An agent without `config.humanInTheLoop` (every agent that existed before
- * this) resolves to "off": nothing pauses, exactly as before.
+ * One rule for every tool source: a call that is not read-only asks for approval. Whether a tool is
+ * read-only comes from its markings (`readOnlyHint` on the tool action: MCP annotations, the HTTP method of
+ * an OpenAPI action, what a managed tool sets) for a bound tool, and from the list below for Console's own
+ * tools. The agent's own settings stay on top: a per-tool `never` / `always` wins, the global switch turned
+ * off means nothing asks, and `defaultPolicy` is what a not-read-only tool resolves to.
+ *
+ * An agent without `config.humanInTheLoop` (created through the client API, or before this existed) has made
+ * no choice, so it resolves to "ask" like a new dashboard agent: a tool that is not read-only waits for an
+ * approver, and a run without one refuses the call.
  */
 
 import type {
@@ -15,6 +22,11 @@ import type {
     IAgentConfig,
     IAgentHumanInTheLoopConfig,
 } from '@/lib/database';
+import {
+    classifyAnnotations,
+    isToolKind,
+    type ToolKind,
+} from '@/lib/services/tools/actionAnnotations';
 import {
     HitlBlockedCallError,
     approvalReasonOf,
@@ -70,6 +82,21 @@ export function isReadOnlyTool(toolName: string): boolean {
         || HITL_READ_ONLY_TOOL_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 }
 
+/**
+ * Classifies a tool for approval. A bound tool (Tools service, MCP server) is classified from its markings
+ * (`annotations` given, even empty: no `readOnlyHint` means it is not read-only); a tool Console builds
+ * itself (`annotations` left out) from {@link isReadOnlyTool}.
+ */
+export function classifyTool(name: string, annotations?: Parameters<typeof classifyAnnotations>[0] | null): ToolKind {
+    if (annotations === undefined || annotations === null) return isReadOnlyTool(name) ? 'reads' : 'writes';
+    return classifyAnnotations(annotations);
+}
+
+/** The kind a bound tool was built with (`buildBoundTools` sets it); none on a tool Console builds itself. */
+export function toolKindOf(tool: { hitlKind?: unknown }): ToolKind | undefined {
+    return isToolKind(tool.hitlKind) ? tool.hitlKind : undefined;
+}
+
 /** Defaults of the settings below — used when the stored config leaves one out. */
 export const HITL_DEFAULTS = {
     timeoutMinutes: 1440,
@@ -82,9 +109,8 @@ export const HITL_DEFAULTS = {
 } as const;
 
 /**
- * What a NEW agent created from the dashboard stores. Agents created through
- * the client API without the field get nothing — their callers never expected
- * a run to stop and wait.
+ * What a NEW agent created from the dashboard stores. An agent without the field (client API) resolves to
+ * the same behaviour: see {@link resolveHitlConfig}.
  */
 export const DASHBOARD_AGENT_HITL_DEFAULTS: IAgentHumanInTheLoopConfig = {
     toolApproval: { enabled: true, defaultPolicy: 'always' },
@@ -93,6 +119,11 @@ export const DASHBOARD_AGENT_HITL_DEFAULTS: IAgentHumanInTheLoopConfig = {
 
 export interface ResolvedHitlConfig {
     toolApprovalEnabled: boolean;
+    /**
+     * The owner switched tool approval on (`enabled: true` is stored). `toolApprovalEnabled` is also true when
+     * no choice was made; tools the owner declared for the caller to run (client tools) only follow an explicit one.
+     */
+    toolApprovalChosen: boolean;
     defaultPolicy: AgentToolApprovalPolicy;
     toolPolicies: Record<string, AgentToolApprovalPolicy>;
     /** Per-tool exceptions judged on a call's arguments (`agentHitlExceptions.ts`); malformed ones left out. */
@@ -130,9 +161,15 @@ export function resolveHitlConfig(
     const approval = hitl?.toolApproval;
     const timeout = hitl?.timeoutMinutes;
     return {
-        toolApprovalEnabled: approval?.enabled === true,
+        // Only an explicit `enabled: false` switches approval off; no choice made means on.
+        toolApprovalEnabled: approval?.enabled !== false,
+        toolApprovalChosen: approval?.enabled === true,
         defaultPolicy: approval?.defaultPolicy === 'never' ? 'never' : HITL_DEFAULTS.defaultPolicy,
-        toolPolicies: carryOverReadPolicies(approval?.tools && typeof approval.tools === 'object' ? { ...approval.tools } : {}),
+        // No prototype: a tool may be named `constructor` or `toString`.
+        toolPolicies: carryOverReadPolicies(Object.assign(
+            Object.create(null) as Record<string, AgentToolApprovalPolicy>,
+            approval?.tools && typeof approval.tools === 'object' ? approval.tools : {},
+        )),
         toolExceptions: normalizeToolExceptions(approval?.exceptions),
         askUserEnabled: hitl?.askUser?.enabled === true,
         allowFreeText: hitl?.askUser?.allowFreeText !== false,
@@ -153,28 +190,44 @@ export function resolveHitlConfig(
 }
 
 /**
- * The effective policy for one tool: an explicit per-tool setting wins, then
- * the read-only exemption, then the agent's default.
+ * The approval settings that apply to tools the caller runs (client tools). They are not covered by the
+ * "ask unless read-only" default: with approval switched on explicitly they follow the agent's policy;
+ * with nothing chosen only a per-tool "always" asks; with approval off nothing does.
  */
-export function toolApprovalPolicy(resolved: ResolvedHitlConfig, toolName: string): AgentToolApprovalPolicy {
+export function clientApprovalConfig(resolved: ResolvedHitlConfig): ResolvedHitlConfig {
+    if (resolved.toolApprovalChosen || !resolved.toolApprovalEnabled) return resolved;
+    return { ...resolved, defaultPolicy: 'never' };
+}
+
+/** Whether a tool only reads: by its markings when it is a bound tool (`kind`), by name when Console built it. */
+function readsOnly(toolName: string, kind: ToolKind | undefined): boolean {
+    return kind === undefined ? isReadOnlyTool(toolName) : kind === 'reads';
+}
+
+/**
+ * The effective policy for one tool: an explicit per-tool setting wins, then
+ * the read-only exemption, then the agent's default. `kind` is the tool's
+ * {@link classifyTool} class when it is a bound tool; without it the name decides.
+ */
+export function toolApprovalPolicy(resolved: ResolvedHitlConfig, toolName: string, kind?: ToolKind): AgentToolApprovalPolicy {
     const explicit = resolved.toolPolicies[toolName];
     if (explicit === 'always' || explicit === 'never') return explicit;
-    if (isReadOnlyTool(toolName)) return 'never';
+    if (readsOnly(toolName, kind)) return 'never';
     return resolved.defaultPolicy;
 }
 
 /** What decides a tool's own setting (see {@link toolApprovalPolicy}): what a call that asks was asked by. */
-export function toolApprovalPolicySource(resolved: ResolvedHitlConfig, toolName: string): ToolPolicySource {
+export function toolApprovalPolicySource(resolved: ResolvedHitlConfig, toolName: string, kind?: ToolKind): ToolPolicySource {
     const explicit = resolved.toolPolicies[toolName];
     if (explicit === 'always' || explicit === 'never') return 'tool_policy';
-    if (isReadOnlyTool(toolName)) return 'read_only';
+    if (readsOnly(toolName, kind)) return 'read_only';
     return 'default_policy';
 }
 
 /** The verdict for one call of a tool: the strictest of its matching exceptions, else its own setting. */
-export function toolCallDecision(resolved: ResolvedHitlConfig, toolName: string, args: unknown): HitlCallDecision {
+export function toolCallDecision(resolved: ResolvedHitlConfig, toolName: string, args: unknown, kind?: ToolKind): HitlCallDecision {
     return decideToolCall(
-        { policy: toolApprovalPolicy(resolved, toolName), source: toolApprovalPolicySource(resolved, toolName) },
+        { policy: toolApprovalPolicy(resolved, toolName, kind), source: toolApprovalPolicySource(resolved, toolName, kind) },
         resolved.toolExceptions[toolName],
         args,
     );
@@ -186,7 +239,7 @@ export function sessionAllowedTools(metadata: Record<string, unknown> | undefine
     return new Set(Array.isArray(raw) ? raw.filter((name): name is string => typeof name === 'string') : []);
 }
 
-type ToolRecord = { name?: string; needsApproval?: unknown; approvalPrompt?: unknown };
+type ToolRecord = { name?: string; needsApproval?: unknown; approvalPrompt?: unknown; hitlKind?: unknown };
 
 /** Whether the tool has exceptions, i.e. is decided per call rather than one way for every call. */
 function hasExceptions(resolved: ResolvedHitlConfig, name: string): boolean {
@@ -261,10 +314,11 @@ export function applyToolApprovals<T extends ToolRecord>(
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
         if (!name) return tool;
+        const kind = toolKindOf(tool);
         const perCall = hasExceptions(resolved, name);
-        if (!perCall && toolApprovalPolicy(resolved, name) !== 'always') return tool;
+        if (!perCall && toolApprovalPolicy(resolved, name, kind) !== 'always') return tool;
         const asks = (args: unknown) => {
-            const decision = toolCallDecision(resolved, name, args);
+            const decision = toolCallDecision(resolved, name, args, kind);
             // A call an exception lets through is recorded, so its step can show the rule.
             if (decision.source === 'exception' && decision.action === 'allow') log?.note(name, args, decision);
             return callAsks(decision, allowedTools, name);
@@ -274,27 +328,29 @@ export function applyToolApprovals<T extends ToolRecord>(
             needsApproval: tool.needsApproval === undefined ? asks : (args: unknown) => priorAsks(tool, args) || asks(args),
             approvalPrompt: (args: unknown) => {
                 if (priorAsks(tool, args)) return promptOf(tool, args);
-                const decision = toolCallDecision(resolved, name, args);
+                const decision = toolCallDecision(resolved, name, args, kind);
                 if (decision.action !== 'ask') return promptOf(tool, args);
                 log?.note(name, args, decision);
                 return promptOf(tool, args) ?? approvalReasonOf(name, decision).text;
             },
         };
         if (!hasDenyException(resolved, name)) return gated;
-        return refuseCalls(gated, (args) => blockedCall(resolved, name, args, log));
+        return refuseCalls(gated, (args) => blockedCall(resolved, name, args, log, kind));
     });
 }
 
 /** The refusal of a call an exception blocks, or null. */
-function blockedCall(resolved: ResolvedHitlConfig, name: string, args: unknown, log?: HitlCallLog): Error | null {
-    const decision = toolCallDecision(resolved, name, args);
+function blockedCall(resolved: ResolvedHitlConfig, name: string, args: unknown, log?: HitlCallLog, kind?: ToolKind): Error | null {
+    const decision = toolCallDecision(resolved, name, args, kind);
     if (decision.action !== 'deny' || !decision.exception) return null;
     log?.note(name, args, decision);
     return new HitlBlockedCallError(name, decision.exception);
 }
 
 /** What a denied call tells the model: the tool did not run, and why. */
-export const UNATTENDED_DENIED_MESSAGE = 'This tool needs human approval and no approver is available in this run.';
+export const UNATTENDED_DENIED_MESSAGE = 'This tool needs human approval and no approver is available in this run. '
+    + 'To let it run without approval, open the agent, go to Approvals & questions and set this tool to "Never ask" '
+    + '(through the API: send humanInTheLoop.toolApproval.tools with this tool set to "never").';
 
 /** Thrown in place of a call that would wait for approval on a run nobody can answer (decided per call). */
 export class HitlUnattendedCallError extends Error {
@@ -353,7 +409,7 @@ export function applyToolBlocks<T extends ToolRecord>(
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
         if (!name || !hasDenyException(resolved, name)) return tool;
-        return refuseCalls(tool, (args) => blockedCall(resolved, name, args, log));
+        return refuseCalls(tool, (args) => blockedCall(resolved, name, args, log, toolKindOf(tool)));
     });
 }
 
@@ -411,12 +467,13 @@ export function denyUnattendedTools<T extends ToolRecord>(
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
         if (!name) return tool;
+        const kind = toolKindOf(tool);
         if (hasExceptions(resolved, name)) {
             // Decided per call: one that would ask is refused (nobody can answer it), one an exception
             // blocks is blocked, the rest run.
             const refusal = (args: unknown): Error | null => {
-                const decision = toolCallDecision(resolved, name, args);
-                if (decision.action === 'deny') return blockedCall(resolved, name, args, log);
+                const decision = toolCallDecision(resolved, name, args, kind);
+                if (decision.action === 'deny') return blockedCall(resolved, name, args, log, kind);
                 if (callAsks(decision, allowedTools, name)) return new HitlUnattendedCallError();
                 if (decision.source === 'exception') log?.note(name, args, decision);
                 return null;
@@ -426,7 +483,7 @@ export function denyUnattendedTools<T extends ToolRecord>(
             if (tool.needsApproval !== undefined) refused.needsApproval = (args: unknown) => refusal(args) === null && priorAsks(tool, args);
             return refused;
         }
-        if (toolApprovalPolicy(resolved, name) !== 'always' || allowedTools.has(name)) return tool;
+        if (toolApprovalPolicy(resolved, name, kind) !== 'always' || allowedTools.has(name)) return tool;
         const denied: Record<string, unknown> = { ...tool };
         for (const key of TOOL_CALLABLE_KEYS) {
             if (typeof denied[key] === 'function') denied[key] = refuse;
@@ -511,6 +568,7 @@ export function validateHitlConfig(config: IAgentConfig): {
     }
 
     const approval = hitl.toolApproval;
+    const approvalOn = resolveHitlConfig(hitl).toolApprovalEnabled;
     if (approval) {
         enumCheck('humanInTheLoop.toolApproval.defaultPolicy', approval.defaultPolicy, ['always', 'never']);
         for (const [tool, policy] of Object.entries(approval.tools ?? {})) {
@@ -518,14 +576,14 @@ export function validateHitlConfig(config: IAgentConfig): {
         }
         errors.push(...validateToolExceptions(approval.exceptions));
         const hasAny = Object.values(approval.exceptions ?? {}).some((list) => Array.isArray(list) && list.length > 0);
-        if (hasAny && !approval.enabled) {
+        if (hasAny && !approvalOn) {
             warnings.push({
                 field: 'humanInTheLoop.toolApproval.exceptions',
                 message: 'Approval exceptions apply only while "Ask before tools run" is on',
             });
         }
     }
-    if (hitl.unattended === 'allow' && (approval?.enabled || hitl.askUser?.enabled)) {
+    if (hitl.unattended === 'allow' && (approvalOn || hitl.askUser?.enabled)) {
         warnings.push({
             field: 'humanInTheLoop.unattended',
             message: 'With "Run without approval", schedules, API bridges and evaluations run this agent\'s gated tools with nobody approving them',

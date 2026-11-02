@@ -11,7 +11,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({ safeFetch: vi.fn() }));
 
-vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: hoisted.safeFetch }));
+vi.mock('@/lib/security/outboundFetch', () => ({
+  safeFetch: hoisted.safeFetch,
+  // The MCP client reads an answer through these; the responses here are plain
+  // `Response` objects, so `text()` stands in for the capped reader.
+  readResponseText: vi.fn(async (response: { text: () => Promise<string> }) => response.text()),
+  ResponseTooLargeError: class ResponseTooLargeError extends Error {},
+}));
 // The tool service asks whether the tools service is on; with no database in a
 // unit test that lookup would try to reach one on every call.
 vi.mock('@/lib/services/availability/serviceAvailability', async (importActual) => ({

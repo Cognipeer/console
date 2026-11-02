@@ -25,8 +25,8 @@ describe('resolveTraceSession', () => {
     const deps = lookups();
     expect(await resolveTraceSession(input, deps)).toEqual({ agentId: 'agent-9', sessionId: 'conv-1' });
     expect(deps.getConversationById).toHaveBeenCalledWith('tenant_acme', 'conv-1');
-    // The agent is looked up by the conversation's key, inside the caller's project.
-    expect(deps.getAgentByKey).toHaveBeenCalledWith('tenant_acme', 'field-ops', 'proj-1');
+    // The agent is looked up by the conversation's key, inside the caller's project (a flow's hidden agent included: its runs are traced).
+    expect(deps.getAgentByKey).toHaveBeenCalledWith('tenant_acme', 'field-ops', 'proj-1', { includeOwned: true });
   });
 
   it('is null for a thread that is no conversation, or one that cannot be looked up', async () => {

@@ -110,6 +110,8 @@ export interface RedTeamAttemptView {
   latencyMs?: number;
   error?: string;
   review?: RedTeamReviewView;
+  /** The attempt used knowledge base documents this viewer may not read: its transcript and rationales are left out. */
+  restricted?: boolean;
 }
 
 export interface RedTeamAggregateView {

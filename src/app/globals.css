@@ -58,6 +58,8 @@
   --ds-text-soft: #4a5260;        /* body */
   --ds-text-muted: #6b7280;       /* meta / captions */
   --ds-text-faint: #98a1ad;
+  /* The arrow of a native .ds-select: Mantine's Select chevron in --ds-text-muted, 3:1 or more on the page (a data URI cannot read a variable). */
+  --ds-select-chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 15 15'><path fill='%236b7280' fill-rule='evenodd' clip-rule='evenodd' d='M4.93179 5.43179C4.75605 5.60753 4.75605 5.89245 4.93179 6.06819C5.10753 6.24392 5.39245 6.24392 5.56819 6.06819L7.49999 4.13638L9.43179 6.06819C9.60753 6.24392 9.89245 6.24392 10.0682 6.06819C10.2439 5.89245 10.2439 5.60753 10.0682 5.43179L7.81819 3.18179C7.73379 3.0974 7.61933 3.04999 7.49999 3.04999C7.38064 3.04999 7.26618 3.0974 7.18179 3.18179L4.93179 5.43179ZM10.0682 9.56819C10.2439 9.39245 10.2439 9.10753 10.0682 8.93179C9.89245 8.75606 9.60753 8.75606 9.43179 8.93179L7.49999 10.8636L5.56819 8.93179C5.39245 8.75606 5.10753 8.75606 4.93179 8.93179C4.75605 9.10753 4.75605 9.39245 4.93179 9.56819L7.18179 11.8182C7.35753 11.9939 7.64245 11.9939 7.81819 11.8182L10.0682 9.56819Z'/></svg>");
   --ds-text-on-accent: #062a23;   /* deep teal-tinted black on accent */
 
   --ds-shadow-xs: 0 1px 0 rgba(20, 30, 40, 0.04), 0 1px 2px rgba(20, 30, 40, 0.04);
@@ -133,6 +135,8 @@
   --ds-text-soft: #b4bcc7;
   --ds-text-muted: #8a939f;
   --ds-text-faint: #5a6473;
+  /* The arrow of a native .ds-select: Mantine's Select chevron in --ds-text-muted, 3:1 or more on the page (a data URI cannot read a variable). */
+  --ds-select-chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 15 15'><path fill='%238a939f' fill-rule='evenodd' clip-rule='evenodd' d='M4.93179 5.43179C4.75605 5.60753 4.75605 5.89245 4.93179 6.06819C5.10753 6.24392 5.39245 6.24392 5.56819 6.06819L7.49999 4.13638L9.43179 6.06819C9.60753 6.24392 9.89245 6.24392 10.0682 6.06819C10.2439 5.89245 10.2439 5.60753 10.0682 5.43179L7.81819 3.18179C7.73379 3.0974 7.61933 3.04999 7.49999 3.04999C7.38064 3.04999 7.26618 3.0974 7.18179 3.18179L4.93179 5.43179ZM10.0682 9.56819C10.2439 9.39245 10.2439 9.10753 10.0682 8.93179C9.89245 8.75606 9.60753 8.75606 9.43179 8.93179L7.49999 10.8636L5.56819 8.93179C5.39245 8.75606 5.10753 8.75606 4.93179 8.93179C4.75605 9.10753 4.75605 9.39245 4.93179 9.56819L7.18179 11.8182C7.35753 11.9939 7.64245 11.9939 7.81819 11.8182L10.0682 9.56819Z'/></svg>");
   --ds-text-on-accent: #062a23;
   --ds-warn-wash: #2b2112;
   --ds-warn-text: #f0c27a;
@@ -906,8 +910,14 @@ button.ds-project-pill:hover,
 /* Form controls */
 .ds-select {
   height: 32px;
-  padding: 0 10px;
-  background: var(--ds-surface-0);
+  /* The arrow is drawn here, not by the browser: the native one sits against the right border whatever the padding. */
+  padding: 0 30px 0 10px;
+  appearance: none;
+  background-color: var(--ds-surface-0);
+  background-image: var(--ds-select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 16px 16px;
   border: 1px solid var(--ds-border-soft);
   border-radius: var(--ds-r-sm);
   color: var(--ds-text);
@@ -916,8 +926,14 @@ button.ds-project-pill:hover,
   cursor: pointer;
   transition: border-color var(--ds-m-fast);
 }
-.ds-select:hover { border-color: var(--ds-border-hover); }
+.ds-select:hover:not(:disabled) { border-color: var(--ds-border-hover); }
 .ds-select:focus { border-color: var(--ds-accent); box-shadow: 0 0 0 3px var(--ds-accent-ring); }
+/* A disabled select takes the cursor and opacity of a disabled Mantine input. */
+.ds-select:disabled { cursor: not-allowed; opacity: 0.6; }
+/* Forced colours repaint the box but not a background image: let the system draw its own arrow there. */
+@media (forced-colors: active) {
+  .ds-select { appearance: auto; background-image: none; padding-right: 10px; }
+}
 
 .ds-checkbox {
   appearance: none;

@@ -29,7 +29,7 @@ These appear on create/update and inside a job's frozen `planSnapshot`:
 | `scope` | object | — | `sameDomainOnly` (default `true`), `includeSubdomains` (default `false`), `allowList[]`, `blockList[]` host globs. |
 | `http` | object | — | `userAgent`, `acceptLanguage`, `timeoutMs` (1000–120000), `maxConcurrency` (1–16), `retries` (1–5), `headers`, `cookies[]`, `basicAuth`, `bearerToken`, `allowPrivateNetwork`, `allowInsecureTls` (skips TLS certificate verification — opt-in escape hatch for sites with a misconfigured cert chain). |
 | `downloadableMimes` | string[] | — | MIME types treated as downloadable files. |
-| `markdownOptions` | object | — | `{ ocr: { enabled, languages? } }` forwarded to the Markdown extractor. |
+| `markdownOptions` | object | — | `{ ocr: { enabled, languages?, modelKey?, mode?, maxPages?, images? } }` forwarded to the Markdown extractor. With `enabled`, downloaded PDFs and images are read by the project OCR model or vision LLM named by `modelKey` (checked at save time), or by the built-in local engine without one; `mode` is `auto` (default, pages without a text layer) or `always`; `images` also reads pictures inside Word/PowerPoint files. |
 | `rag` | object | — | `{ ragModuleKey, enabled }` — ingest crawled pages into a Knowledge Engine module. |
 | `webhook` | object | — | `{ url, secret?, events[] }` where events are `page`, `completed`, `failed`. |
 | `schedule` | object | — | `{ mode: interval\|cron, enabled, intervalSeconds?, cron?, startAt?, endAt? }`. Interval mode needs `intervalSeconds` (≥60); cron mode needs `cron`. |

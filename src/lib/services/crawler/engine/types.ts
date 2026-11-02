@@ -47,7 +47,19 @@ export interface CrawlHttpConfig {
 }
 
 export interface CrawlMarkdownOptions {
-  ocr?: { enabled: boolean; languages?: string[] };
+  /**
+   * OCR for scanned PDFs, images and (with `images`) pictures embedded in Office files. Without `modelKey` the local
+   * engine (Tesseract, bundled) reads; with one, the project's OCR model or vision LLM does. `mode` 'auto' (default)
+   * reads only pages without a text layer, 'always' reads every page.
+   */
+  ocr?: {
+    enabled: boolean;
+    languages?: string[];
+    modelKey?: string;
+    mode?: 'auto' | 'always';
+    maxPages?: number;
+    images?: boolean;
+  };
   /**
    * Shape of the stored page body. `markdown` (default) keeps the converter's
    * markdown; `text` flattens it to clean plain text (headings/links/lists/
@@ -141,10 +153,30 @@ export interface EngineLogger {
   error: (message: string, meta?: Record<string, unknown>) => void;
 }
 
+/** What the crawler hands the injected file extractor. */
+export interface CrawlFileExtraction {
+  buffer: Buffer;
+  fileName: string;
+  contentType?: string;
+  /** The crawler's OCR options (always `enabled`). */
+  ocr: NonNullable<CrawlMarkdownOptions['ocr']>;
+  /** Aborts when the crawl is cancelled or the conversion ran out of time. */
+  signal?: AbortSignal;
+}
+
 export interface CrawlEngineDeps {
   logger: EngineLogger;
   /** Abort the in-flight crawl. Streamed pages drain to completion. */
   signal?: AbortSignal;
+  /**
+   * Reads text out of a downloaded file, OCR included. Injected by the host (the engine imports nothing from the
+   * console). Used only for a file when the plan's `markdownOptions.ocr` is enabled; without it, or with OCR off,
+   * the engine converts the file itself, as it always has. Resolves the raw Markdown (the engine post-processes it)
+   * or `undefined` when nothing could be read.
+   */
+  extractFile?: (input: CrawlFileExtraction) => Promise<string | undefined>;
+  /** Longest time one OCR'd file may take. Defaults to the 60 s every conversion gets. */
+  ocrConversionTimeoutMs?: number;
 }
 
 export const DEFAULT_DOWNLOADABLE_MIMES = [

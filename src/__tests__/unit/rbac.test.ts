@@ -13,6 +13,8 @@ describe('RBAC service routing', () => {
     expect(getPermissionServiceForPath('/api/models')).toBe('models');
     expect(getPermissionServiceForPath('/api/client/v1/vector/indexes')).toBe('vector');
     expect(getPermissionServiceForPath('/api/users/permissions/services')).toBe('members');
+    expect(getPermissionServiceForPath('/api/connectors')).toBe('connectors');
+    expect(getPermissionServiceForPath('/api/connectors/abc/accounts')).toBe('connectors');
   });
 
   it('checks the agents permission on the runs API and the session cancel: read to look, write to act', () => {

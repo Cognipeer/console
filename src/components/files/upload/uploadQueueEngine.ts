@@ -9,6 +9,7 @@
  * again, because a request that was aborted may still have reached the server.
  */
 
+import type { OcrSettings } from '@/lib/services/extraction/types';
 import type { FileRecordView } from '@/lib/services/files';
 import { uploadFile, type UploadFileOptions, type UploadObjectResult } from '../filesApi';
 import { fileIdentity, MAX_QUEUE_FILES, UPLOAD_CONCURRENCY, type QueueItem } from './uploadModel';
@@ -20,6 +21,8 @@ export interface RunSettings {
   /** `''` is the bucket root, otherwise no leading slash and one trailing slash. */
   folder: string;
   convertToMarkdown: boolean;
+  /** OCR for the Markdown copy; left out = the plain conversion. */
+  ocr?: OcrSettings;
 }
 
 export interface RunResult {
@@ -255,6 +258,7 @@ export class UploadQueueEngine {
         name: item.name.trim(),
         ...(contentType ? { contentType } : {}),
         convertToMarkdown: settings.convertToMarkdown,
+        ...(settings.convertToMarkdown && settings.ocr ? { ocr: settings.ocr } : {}),
         ...(settings.folder ? { folder: settings.folder } : {}),
         signal: controller.signal,
         onProgress: ({ fraction }) => {

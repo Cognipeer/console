@@ -98,6 +98,8 @@ export interface ReminderToolDeps {
     accountableUserId?: string;
     tokenId?: string;
     via?: RequestVia;
+    /** The wake reads only what is open to everyone (see `kbReaderOfFollowUp`). */
+    kbReader?: 'anonymous';
     runId?: string;
     version?: number;
     usePublished?: boolean;

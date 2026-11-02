@@ -12,6 +12,8 @@ import {
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBook, IconCheck } from '@tabler/icons-react';
+import { englishOcrText } from '@/components/extraction/ocrEnglish';
+import { describeOcr, type OcrSettings } from '@/components/extraction/ocrForm';
 import FormShell, {
   Checklist,
   FormField,
@@ -21,12 +23,14 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import ChunkConfigFields from './ChunkConfigFields';
+import ExtractionFields from './ExtractionFields';
 import RetrievalFields from './RetrievalFields';
 import {
   CHUNK_STRATEGIES,
   DEFAULT_CHUNK_FORM_VALUES,
   DEFAULT_RETRIEVAL_FORM_VALUES,
   buildChunkConfig,
+  buildExtraction,
   buildHybrid,
   chunkFieldErrors,
   clearedValue,
@@ -75,6 +79,7 @@ interface FormValues {
   vectorProviderKey: string;
   vectorIndexKey: string;
   chunk: ChunkFormValues;
+  ocr: OcrSettings | undefined;
   retrieval: RetrievalFormValues;
   rerankerKey: string;
   rerankerOversample: number | '';
@@ -100,6 +105,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       vectorProviderKey: '',
       vectorIndexKey: '',
       chunk: { ...DEFAULT_CHUNK_FORM_VALUES },
+      ocr: undefined,
       retrieval: { ...DEFAULT_RETRIEVAL_FORM_VALUES },
       rerankerKey: '',
       rerankerOversample: '',
@@ -254,6 +260,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
           vectorProviderKey: values.vectorProviderKey,
           vectorIndexKey: values.vectorIndexKey,
           chunkConfig: buildChunkConfig(values.chunk),
+          ...buildExtraction(values.ocr, MODE),
           hybrid: hybridSupported ? buildHybrid(values.retrieval) : { enabled: false },
           // The tri-state only ever holds null on the edit screen, where an
           // existing module can predate the flag. A new module always states it.
@@ -380,6 +387,10 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
               : <span className="ds-faint">off</span>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="Extraction">
+        <SummaryKV label="OCR" value={describeOcr(englishOcrText, form.values.ocr)} />
       </SummaryGroup>
 
       <SummaryGroup title="Retrieval">
@@ -537,6 +548,17 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
 
       <FormSection
         number={5}
+        title="Extraction"
+        description="How text is read out of uploaded files, including scanned pages."
+      >
+        <ExtractionFields
+          value={form.values.ocr}
+          onChange={(next) => form.setFieldValue('ocr', next)}
+        />
+      </FormSection>
+
+      <FormSection
+        number={6}
         title="Retrieval"
         description="How a query reaches the stored vectors."
       >
@@ -549,7 +571,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       </FormSection>
 
       <FormSection
-        number={6}
+        number={7}
         title="Reranking"
         description="Optionally re-order vector matches with a reranker before they're returned."
       >
@@ -576,7 +598,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       </FormSection>
 
       <FormSection
-        number={7}
+        number={8}
         title="Query defaults"
         description="Applied whenever a query doesn't explicitly override these."
       >

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Badge,
   Button,
@@ -17,6 +17,7 @@ import {
   Paper,
   ScrollArea,
   SegmentedControl,
+  Select,
   SimpleGrid,
   Slider,
   Stack,
@@ -35,7 +36,7 @@ import { notifications } from '@mantine/notifications';
 import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import DataGrid, { type DataGridColumn, type DataGridRowAction } from '@/components/common/ui/DataGrid';
 import {
   IconArrowLeft,
   IconCheck,
@@ -46,8 +47,10 @@ import {
   IconEdit,
   IconFileText,
   IconFilter,
+  IconLock,
   IconPlayerPlay,
   IconRefresh,
+  IconScan,
   IconSearch,
   IconSearchOff,
   IconTrash,
@@ -70,12 +73,28 @@ import {
   chunkFieldErrors,
   chunkFormValues,
   hasChunkFieldErrors,
+  documentExtractionNote,
   type ChunkFormValues,
 } from '@/components/rag/ragModuleForm';
+import { englishOcrText } from '@/components/extraction/ocrEnglish';
+import { describeOcr, ocrIsOn, type OcrSettings } from '@/components/extraction/ocrForm';
+import { replaceUrlParams } from '@/components/iam/principals/urlState';
+import { RagAccessChip } from '@/components/rag/access/RagAccessChip';
+import { RagAccessTab } from '@/components/rag/access/RagAccessTab';
+import { RagPermissionEditor, type RagPermissionTarget } from '@/components/rag/access/RagPermissionEditor';
+import { canChangeRagStructure, useRagAccessLevel } from '@/components/rag/access/useRagAccessLevel';
+import { TOP_LEVEL, folderChoices, folderParamOf, knownPlace, placeOf } from '@/components/rag/library/libraryModel';
+import { parseRagPageTab, visibleRagPageTab, type RagPageTab } from '@/components/rag/library/pageTabs';
+import RagLibrary from '@/components/rag/library/RagLibrary';
+import { useRagFolders } from '@/components/rag/library/useRagFolders';
 import type { IRagChunkConfig, RagChunkStrategy } from '@/lib/database';
 
 /** How often a document still being ingested is re-read. */
 const DOC_POLL_INTERVAL_MS = 2500;
+
+/** What the file picker offers; pictures and scans are readable only while the module's OCR is on. */
+const DOCUMENT_ACCEPT = '.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.htm,.xlsx,.xls,.pptx,.ppt,.rtf,.odt';
+const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff';
 /** Documents per import request; keeps each body well under the server's body limit. */
 const IMPORT_BATCH_SIZE = 1000;
 const IMPORT_FORMAT_NAME = 'cognipeer.rag-module';
@@ -96,6 +115,9 @@ interface RagModuleView {
   fileBucketKey?: string;
   fileProviderKey?: string;
   chunkConfig: IRagChunkConfig;
+  extraction?: { ocr?: OcrSettings | null } | null;
+  /** Document-level access control; absent or null = off. */
+  access?: { enabled: boolean; adminBypass?: boolean } | null;
   status: string;
   hybrid?: { enabled: boolean; mode?: 'rrf' | 'weighted'; alpha?: number; k?: number } | null;
   isolateByModule?: boolean | null;
@@ -124,7 +146,29 @@ interface RagDocumentView {
   errorMessage?: string;
   lastIndexedAt?: string;
   createdAt?: string;
+  /** The folder the document sits in; absent = the top level. */
+  folderId?: string;
+  /** The document has permissions of its own (absent = it follows its folder). */
+  aclMode?: 'own';
+  /** A connected source owns the document's folder and permissions. */
+  aclManaged?: 'sync';
+  /** How the text was read (OCR pages) and, while the file is still being read, where that stands. */
+  extraction?: {
+    sourceType?: string;
+    pageCount?: number;
+    ocrPages?: number;
+    ocrImages?: number;
+    stage?: 'queued' | 'running';
+    progress?: { completed: number; total: number };
+    warnings?: string[];
+  };
 }
+
+/** What the Status column says about the OCR of a document: the finished run, or the one in flight. */
+const extractionNote = (doc: RagDocumentView): string | undefined => documentExtractionNote(doc.extraction);
+
+/** The list while the documents of another place are still on their way. */
+const NO_DOCUMENTS: RagDocumentView[] = [];
 
 /**
  * A match as the query endpoint returns it — not as the service produced it.
@@ -309,6 +353,7 @@ function InlineLoadError({ message, onRetry }: InlineLoadErrorProps) {
 export default function RagModuleDetailPage() {
   const params = useParams()!;
   const router = useRouter();
+  const searchParams = useSearchParams();
   const deleteResource = useDeleteResource();
   const { confirm } = useConfirm();
   const tSafe = useTranslations('common.confirm.dataSafety');
@@ -340,6 +385,23 @@ export default function RagModuleDetailPage() {
   const [chunkOverride, setChunkOverride] = useState<ChunkFormValues>({ ...DEFAULT_CHUNK_FORM_VALUES });
 
   const [editModalOpen, setEditModalOpen] = useState(false);
+
+  /* tabs, folders and permissions */
+  const accessLevel = useRagAccessLevel();
+  const accessEnabled = Boolean(mod?.access?.enabled);
+  const adminBypass = mod?.access?.adminBypass !== false;
+  const canChangeStructure = canChangeRagStructure(accessLevel, accessEnabled);
+  const [tab, setTab] = useState<RagPageTab>(() => parseRagPageTab(searchParams?.get('tab')));
+  const activeTab = visibleRagPageTab(tab, { canAdmin: accessLevel.canAdmin, levelKnown: accessLevel.level !== null });
+  const { folders, ready: foldersReady, reload: reloadFolders } = useRagFolders(moduleKey);
+  /** The folder the Documents tab is in; null = the top level. */
+  const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+  const [permissionTarget, setPermissionTarget] = useState<RagPermissionTarget | null>(null);
+  /** Bumped when permissions or the structure changed: the Access tab and the Access column read again. */
+  const [accessRefreshKey, setAccessRefreshKey] = useState(0);
+  /** The folder the next upload goes to; undefined = follow the open folder. */
+  const [ingestFolderChoice, setIngestFolderChoice] = useState<string | null | undefined>(undefined);
+  const ingestFolderId = knownPlace(folders, ingestFolderChoice === undefined ? openFolderId : ingestFolderChoice);
 
   /* playground */
   const [queryResult, setQueryResult] = useState<RagQueryResult | null>(null);
@@ -430,24 +492,43 @@ export default function RagModuleDetailPage() {
     [moduleKey, router],
   );
 
+  // The list is the open folder's documents (`root` = the top level), or every folder's while a search is in force.
+  const folderParam = folderParamOf(debouncedDocSearch !== '', openFolderId);
+  const locationKey = folderParam ?? '*';
+  /** Which place the documents in state were read for: the list shows them only while that is still the place on screen. */
+  const [docsLocation, setDocsLocation] = useState(locationKey);
+  /** Requests issued, the one whose answer is on screen, and the query the person asks for now. */
+  const docsIssued = useRef(0);
+  const docsShown = useRef(0);
+  const docsWanted = useRef('');
+
   const loadDocuments = useCallback(async (silent = false) => {
     if (!moduleKey) return;
+    const params = new URLSearchParams({
+      limit: String(docPageSize),
+      offset: String((docPage - 1) * docPageSize),
+    });
+    if (debouncedDocSearch) params.set('search', debouncedDocSearch);
+    if (docStatus !== 'all') params.set('status', docStatus);
+    if (folderParam) params.set('folderId', folderParam);
+    const query = params.toString();
+    const request = ++docsIssued.current;
+    docsWanted.current = query;
+    // An answer is shown only while it is still what the person asks for (not a place, page or search they have left)
+    // and never after a newer answer for it. A slow answer with no newer one behind it still lands, so a server slower
+    // than the poll interval does not starve the list.
+    const isCurrent = () => query === docsWanted.current && request >= docsShown.current;
     if (!silent) setDocsLoading(true);
     try {
-      const params = new URLSearchParams({
-        limit: String(docPageSize),
-        offset: String((docPage - 1) * docPageSize),
-      });
-      if (debouncedDocSearch) params.set('search', debouncedDocSearch);
-      if (docStatus !== 'all') params.set('status', docStatus);
       const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(moduleKey)}/documents?${params.toString()}`,
+        `/api/rag/modules/${encodeURIComponent(moduleKey)}/documents?${query}`,
         { cache: 'no-store' },
       );
       if (!res.ok) {
         throw new Error(`Failed to load documents (HTTP ${res.status})`);
       }
       const data = await res.json();
+      if (!isCurrent()) return;
       const total = typeof data.total === 'number' ? data.total : (data.documents ?? []).length;
       // Deleting the last row of the last page leaves that page empty; step back
       // instead of showing "no documents" over a module that still has some.
@@ -455,18 +536,21 @@ export default function RagModuleDetailPage() {
         setDocPage(Math.max(1, Math.ceil(total / docPageSize)));
         return;
       }
+      docsShown.current = request;
       setDocuments(data.documents ?? []);
       setDocTotal(total);
+      setDocsLocation(locationKey);
       setDocsError(null);
     } catch (e) {
+      if (!isCurrent()) return;
       console.error('[rag docs]', e);
       // A failed load must not be mistaken for "zero documents" -- the table
       // below only renders its empty state when docsError is also cleared.
       setDocsError(e instanceof Error ? e.message : 'Failed to load documents');
     } finally {
-      setDocsLoading(false);
+      if (query === docsWanted.current) setDocsLoading(false);
     }
-  }, [moduleKey, docPage, docPageSize, debouncedDocSearch, docStatus]);
+  }, [moduleKey, docPage, docPageSize, debouncedDocSearch, docStatus, folderParam, locationKey]);
 
   const loadUsage = useCallback(async () => {
     if (!moduleKey) return;
@@ -539,6 +623,14 @@ export default function RagModuleDetailPage() {
     void loadInsights();
   }, [loadUsage, loadInsights]);
 
+  // A folder that is no longer in the list (deleted, or moved out of sight) cannot stay open.
+  useEffect(() => {
+    if (foldersReady && openFolderId !== null && !folders.some((folder) => folder._id === openFolderId)) {
+      setOpenFolderId(null);
+      setDocPage(1);
+    }
+  }, [foldersReady, folders, openFolderId]);
+
   /* ── Re-index runs ────────────────────────────────────────────────────── */
 
   const onReindexSettled = useCallback(() => {
@@ -552,7 +644,7 @@ export default function RagModuleDetailPage() {
   // it. Without this the row stayed at its initial status until the user
   // happened to press Refresh, which read as an ingest that had hung.
   const documentsSettling = documents.some(
-    (doc) => doc.status === 'pending' || doc.status === 'processing',
+    (doc) => doc.status === 'pending' || doc.status === 'processing' || Boolean(doc.extraction?.stage),
   );
   useEffect(() => {
     if (!documentsSettling) return undefined;
@@ -603,6 +695,7 @@ export default function RagModuleDetailPage() {
           fileName: ingestFileName.trim(),
           content: ingestContent,
           chunkConfig: ingestChunkConfig(),
+          ...(ingestFolderId ? { folderId: ingestFolderId } : {}),
         }),
       });
       if (!res.ok) {
@@ -614,6 +707,7 @@ export default function RagModuleDetailPage() {
       setIngestContent('');
       await loadDocuments();
       await loadModule('refresh');
+      void reloadFolders();
     } catch (error) {
       notifications.show({ color: 'red', title: 'Ingest failed', message: String(error) });
     } finally {
@@ -643,6 +737,7 @@ export default function RagModuleDetailPage() {
           data: dataUrl,
           contentType: ingestFile.type || undefined,
           chunkConfig: ingestChunkConfig(),
+          ...(ingestFolderId ? { folderId: ingestFolderId } : {}),
         }),
       });
       if (!res.ok) {
@@ -653,6 +748,7 @@ export default function RagModuleDetailPage() {
       setIngestFile(null);
       await loadDocuments();
       await loadModule('refresh');
+      void reloadFolders();
     } catch (error) {
       notifications.show({ color: 'red', title: 'Ingest failed', message: String(error) });
     } finally {
@@ -674,6 +770,7 @@ export default function RagModuleDetailPage() {
         notifications.show({ color: 'green', title: 'Document deleted', message: `${doc.fileName} removed.` });
         await loadDocuments();
         await loadModule('refresh');
+        void reloadFolders();
       },
     });
   };
@@ -883,7 +980,20 @@ export default function RagModuleDetailPage() {
       label: 'Status',
       render: (doc) => (
         <>
-          <Badge variant="light" color={statusColor(doc.status)} size="sm">{doc.status}</Badge>
+          <Group gap={6} wrap="nowrap">
+            <Badge variant="light" color={statusColor(doc.status)} size="sm">{doc.status}</Badge>
+            {!doc.extraction?.stage && extractionNote(doc) ? (
+              <Badge
+                variant="outline"
+                color="grape"
+                size="sm"
+                title={doc.extraction?.warnings?.length ? doc.extraction.warnings.join(', ') : undefined}
+              >
+                {extractionNote(doc)}
+              </Badge>
+            ) : null}
+          </Group>
+          {doc.extraction?.stage ? <Text size="xs" c="dimmed" mt={2}>{extractionNote(doc)}</Text> : null}
           {doc.errorMessage && <Text size="xs" c="red" mt={2}>{doc.errorMessage}</Text>}
         </>
       ),
@@ -918,6 +1028,35 @@ export default function RagModuleDetailPage() {
     await reindex.start();
   };
 
+  /** Reads the stored original of a document again with the module's current OCR setting (a re-index never does). */
+  const handleReextractDocument = async (doc: RagDocumentView) => {
+    const ok = await confirm({
+      title: 'Re-extract this document?',
+      message: `“${doc.fileName}” is read again from its stored original with the module’s current text extraction setting, then indexed again. Scanned pages are read with OCR when it is on, which can take a while and uses the OCR model.`,
+      confirmLabel: 'Re-extract',
+      tone: 'warning',
+    });
+    if (!ok) return;
+    setReingestingDocId(doc._id);
+    try {
+      const res = await fetch(
+        `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reextract: true }) },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(err.error ?? 'Re-extract failed');
+      }
+      notifications.show({ color: 'green', title: 'Re-extract complete', message: `${doc.fileName} was read again.` });
+      await loadDocuments();
+      await loadModule('refresh');
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Re-extract failed', message: String(error) });
+    } finally {
+      setReingestingDocId(null);
+    }
+  };
+
   const handleReingestDocument = async (doc: RagDocumentView) => {
     const ok = await confirm({
       title: tSafe('reingest.title'),
@@ -944,6 +1083,81 @@ export default function RagModuleDetailPage() {
     } finally {
       setReingestingDocId(null);
     }
+  };
+
+  /** The page's own actions of a document row; the library puts its permission and move items around them. */
+  const documentActions = (doc: RagDocumentView): DataGridRowAction<RagDocumentView>[] => [
+    {
+      id: 'reingest',
+      label: 'Re-ingest',
+      icon: <IconRefresh size={14} />,
+      hidden: !accessLevel.canWrite,
+      disabled: reingestingDocId === doc._id,
+      onClick: () => void handleReingestDocument(doc),
+    },
+    ...(doc.fileKey
+      ? [{
+        id: 'reextract',
+        label: 'Re-extract',
+        icon: <IconScan size={14} />,
+        hidden: !accessLevel.canWrite,
+        disabled: reingestingDocId === doc._id || Boolean(doc.extraction?.stage),
+        onClick: () => void handleReextractDocument(doc),
+      }]
+      : []),
+    {
+      id: 'delete',
+      label: 'Delete',
+      icon: <IconTrash size={14} />,
+      color: 'red',
+      // A document a connected source owns is deleted there.
+      hidden: !accessLevel.canWrite || doc.aclManaged === 'sync',
+      onClick: () => void handleDeleteDocument(doc),
+    },
+  ];
+
+  /* ── Tabs, folders and permissions ─────────────────────────────────────── */
+
+  const changeTab = (next: string) => {
+    const value = parseRagPageTab(next);
+    setTab(value);
+    replaceUrlParams({ tab: value });
+  };
+
+  const openFolder = (folderId: string | null) => {
+    if (folderId === openFolderId) return;
+    setOpenFolderId(folderId);
+    setDocPage(1);
+    setIngestFolderChoice(undefined);
+  };
+
+  /** The Access tab points at a folder: leave any search behind and show it in the Documents tab. */
+  const showFolder = (folderId: string | null) => {
+    setDocSearch('');
+    setDocStatus('all');
+    openFolder(folderId);
+    changeTab('documents');
+  };
+
+  /** Folders, placements or permissions changed: the lists and everything that shows permissions read again. */
+  const handleStructureChanged = async () => {
+    setAccessRefreshKey((key) => key + 1);
+    await Promise.all([reloadFolders(), loadDocuments(true)]);
+  };
+
+  const handlePermissionsSaved = () => {
+    setPermissionTarget(null);
+    void handleStructureChanged();
+  };
+
+  /** The Access tab switched enforcement or the admin exception: the module, and what depends on it, read again. */
+  const handleAccessChanged = () => {
+    void loadModule('refresh');
+    void handleStructureChanged();
+  };
+
+  const openConnector = (connectorId: string) => {
+    router.push(`/dashboard/connectors/${encodeURIComponent(connectorId)}?tab=knowledge`);
   };
 
   const handleQuery = queryForm.onSubmit(async (values) => {
@@ -1096,6 +1310,67 @@ export default function RagModuleDetailPage() {
     `});`,
   ].join('\n');
 
+  /* ── Documents tab: the list is one place at a time ──────────────────── */
+
+  // Documents read for another place (a folder just opened) are not shown under this one.
+  const docsHere = docsLocation === locationKey;
+  const listedDocuments = docsHere ? documents : NO_DOCUMENTS;
+  const listedTotal = docsHere ? docTotal : 0;
+  /** The folder path and the line under it replace the module-wide count once there are folders. */
+  const libraryOn = folders.length > 0 || openFolderId !== null;
+  const uploadPlaces = folderChoices(folders);
+
+  const libraryChrome = {
+    search: {
+      value: docSearch,
+      onChange: (value: string) => {
+        setDocSearch(value);
+        setDocPage(1);
+      },
+      placeholder: folders.length > 0 ? 'Search all folders…' : 'Search by file name…',
+    },
+    filters: [
+      {
+        value: docStatus,
+        onChange: (value: string) => {
+          setDocStatus(value);
+          setDocPage(1);
+        },
+        ariaLabel: 'Filter by status',
+        width: 150,
+        options: [
+          { value: 'all', label: 'All statuses' },
+          { value: 'indexed', label: 'Indexed' },
+          { value: 'processing', label: 'Processing' },
+          { value: 'pending', label: 'Pending' },
+          { value: 'failed', label: 'Failed' },
+        ],
+      },
+    ],
+    onRefresh: () => {
+      void loadDocuments();
+      void reloadFolders();
+    },
+    refreshing: docsLoading,
+    pagination: {
+      page: docPage,
+      onPageChange: setDocPage,
+      pageSize: docPageSize,
+      onPageSizeChange: (size: number) => {
+        setDocPageSize(size);
+        setDocPage(1);
+      },
+      pageSizeOptions: [10, 25, 50, 100],
+      total: listedTotal,
+      // The folders of a place are on its first page only: a place with no further documents has no next page.
+      hasMore: docPage * docPageSize < listedTotal,
+    },
+    footerLeft:
+      listedTotal === 0
+        ? undefined
+        : `${(docPage - 1) * docPageSize + 1}–${Math.min(docPage * docPageSize, listedTotal)} of ${listedTotal}`,
+  };
+
   return (
     <PageContainer>
       <PageHeader
@@ -1105,6 +1380,7 @@ export default function RagModuleDetailPage() {
         actions={
           <>
             <Badge variant="light" color={statusColor(mod.status)}>{mod.status}</Badge>
+            {accessLevel.canAdmin ? <RagAccessChip enabled={accessEnabled} onClick={() => changeTab('access')} /> : null}
             <Button
               variant="default"
               size="xs"
@@ -1113,14 +1389,16 @@ export default function RagModuleDetailPage() {
             >
               Back
             </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconEdit size={14} />}
-              onClick={() => setEditModalOpen(true)}
-            >
-              Edit
-            </Button>
+            {accessLevel.canWrite ? (
+              <Button
+                variant="light"
+                size="xs"
+                leftSection={<IconEdit size={14} />}
+                onClick={() => setEditModalOpen(true)}
+              >
+                Edit
+              </Button>
+            ) : null}
             <Button
               variant="light"
               size="xs"
@@ -1130,32 +1408,37 @@ export default function RagModuleDetailPage() {
             >
               Refresh
             </Button>
-            <Button
-              color="red"
-              size="xs"
-              leftSection={<IconTrash size={14} />}
-              onClick={() => void handleDelete()}
-            >
-              Delete
-            </Button>
+            {accessLevel.canWrite ? (
+              <Button
+                color="red"
+                size="xs"
+                leftSection={<IconTrash size={14} />}
+                onClick={() => void handleDelete()}
+              >
+                Delete
+              </Button>
+            ) : null}
           </>
         }
       />
 
       <RagReindexBanner {...reindex} reindexRequired={Boolean(mod.reindexRequired)} />
 
-      <Tabs defaultValue="overview" keepMounted={false}>
+      <Tabs value={activeTab} onChange={(value) => { if (value) changeTab(value); }} keepMounted={false}>
         <Tabs.List mb="md">
           <Tabs.Tab value="overview" leftSection={<IconChartBar size={14} />}>Overview</Tabs.Tab>
           <Tabs.Tab value="documents" leftSection={<IconFileText size={14} />}>
             Documents
             <Badge variant="filled" color="violet" size="xs" ml={6}>
-              {mod.totalDocuments ?? 0}
+              {mod.totalDocuments ?? '—'}
             </Badge>
           </Tabs.Tab>
           <Tabs.Tab value="playground" leftSection={<IconPlayerPlay size={14} />}>Playground</Tabs.Tab>
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>Usage</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<IconActivity size={14} />}>History</Tabs.Tab>
+          {accessLevel.canAdmin ? (
+            <Tabs.Tab value="access" leftSection={<IconLock size={14} />}>Access</Tabs.Tab>
+          ) : null}
         </Tabs.List>
 
         {/* ═══════════════════ Overview Tab ═══════════════════ */}
@@ -1165,13 +1448,13 @@ export default function RagModuleDetailPage() {
             <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
               <KpiCard
                 label="Documents"
-                value={mod.totalDocuments ?? 0}
+                value={mod.totalDocuments ?? '—'}
                 icon={<IconFileText size={24} />}
                 color="cyan"
               />
               <KpiCard
                 label="Chunks"
-                value={mod.totalChunks ?? 0}
+                value={mod.totalChunks ?? '—'}
                 icon={<IconDatabase size={24} />}
                 color="orange"
               />
@@ -1345,6 +1628,14 @@ export default function RagModuleDetailPage() {
                   )}
                 </Stack>
                 <Stack gap={4}>
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Text Extraction (OCR)</Text>
+                  {ocrIsOn(mod.extraction?.ocr) ? (
+                    <Text size="sm">{describeOcr(englishOcrText, mod.extraction?.ocr)}</Text>
+                  ) : (
+                    <Text size="sm" c="dimmed">Off</Text>
+                  )}
+                </Stack>
+                <Stack gap={4}>
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Hybrid Retrieval</Text>
                   {mod.hybrid?.enabled ? (
                     <Text size="sm">
@@ -1411,258 +1702,233 @@ export default function RagModuleDetailPage() {
         {/* ═══════════════════ Documents Tab ═══════════════════ */}
         <Tabs.Panel value="documents">
           <Stack gap="md">
-            {/* Ingest Form */}
-            <Paper withBorder radius="lg" p="lg">
-              <Group justify="space-between" mb="md">
-                <div>
-                  <Text fw={600} size="lg">Ingest Document</Text>
-                  <Text size="sm" c="dimmed">Add a new document to this Knowledge Engine module. Upload a file or paste text content.</Text>
-                </div>
-              </Group>
-              <Stack gap="sm">
-                <SegmentedControl
-                  value={ingestMode}
-                  onChange={setIngestMode}
-                  data={[
-                    { label: 'Upload File', value: 'file' },
-                    { label: 'Paste Text', value: 'text' },
-                  ]}
-                  size="sm"
-                />
-
-                {ingestMode === 'file' ? (
-                  <>
-                    <FileInput
-                      label="Select File"
-                      placeholder="Click to select a file (PDF, DOCX, TXT, MD, etc.)"
-                      accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.htm,.xlsx,.xls,.pptx,.ppt,.rtf,.odt"
-                      value={ingestFile}
-                      onChange={setIngestFile}
-                      clearable
-                    />
-                    {ingestFile && (
-                      <Text size="xs" c="dimmed">
-                        {ingestFile.name} — {(ingestFile.size / 1024).toFixed(1)} KB
-                      </Text>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <TextInput
-                      label="File Name"
-                      placeholder="e.g. product-manual.txt"
-                      value={ingestFileName}
-                      onChange={(e) => setIngestFileName(e.currentTarget.value)}
-                    />
-                    <Textarea
-                      label="Content"
-                      placeholder="Paste your document content here..."
-                      value={ingestContent}
-                      onChange={(e) => setIngestContent(e.currentTarget.value)}
-                      autosize
-                      minRows={6}
-                      maxRows={16}
-                    />
-                  </>
-                )}
-
-                {/* Collapsed by default: almost every ingest wants the module's own chunking. */}
-                <Accordion variant="contained" radius="md" chevronPosition="left">
-                  <Accordion.Item value="chunking">
-                    <Accordion.Control>
-                      <Group gap="xs">
-                        <Text size="sm" fw={500}>Chunking for this document</Text>
-                        <Badge size="xs" variant="light" color={chunkOverrideOn ? 'violet' : 'gray'}>
-                          {chunkOverrideOn
-                            ? 'overridden'
-                            : `module default — ${strategyLabel(mod.chunkConfig.strategy)}`}
-                        </Badge>
-                      </Group>
-                    </Accordion.Control>
-                    <Accordion.Panel>
-                      <Stack gap="sm">
-                        <Switch
-                          label="Override the module's chunking for this document"
-                          description="A 200-page manual and a FAQ CSV rarely want the same splitter. Only this document is affected."
-                          checked={chunkOverrideOn}
-                          onChange={(e) => setChunkOverrideOn(e.currentTarget.checked)}
-                        />
-                        {chunkOverrideOn ? (
-                          <ChunkConfigFields
-                            values={chunkOverride}
-                            onChange={(patch) => setChunkOverride((prev) => ({ ...prev, ...patch }))}
-                            errors={chunkOverrideErrors}
-                          />
-                        ) : null}
-                      </Stack>
-                    </Accordion.Panel>
-                  </Accordion.Item>
-                </Accordion>
-
-                <Group justify="flex-end">
-                  <Button
-                    leftSection={ingesting ? <Loader size={14} /> : <IconFileUpload size={14} />}
-                    onClick={() => void (ingestMode === 'file' ? handleFileIngest() : handleIngest())}
-                    disabled={
-                      ingesting
-                      || chunkOverrideInvalid
-                      || (ingestMode === 'file'
-                        ? !ingestFile
-                        : !ingestFileName.trim() || !ingestContent.trim())
-                    }
-                    loading={ingesting}
-                  >
-                    {ingestMode === 'file' ? 'Upload & Ingest' : 'Ingest Document'}
-                  </Button>
+            {/* Ingest Form (writers) */}
+            {accessLevel.canWrite ? (
+              <Paper withBorder radius="lg" p="lg">
+                <Group justify="space-between" mb="md">
+                  <div>
+                    <Text fw={600} size="lg">Ingest Document</Text>
+                    <Text size="sm" c="dimmed">Add a new document to this Knowledge Engine module. Upload a file or paste text content.</Text>
+                  </div>
                 </Group>
-              </Stack>
-            </Paper>
+                <Stack gap="sm">
+                  <SegmentedControl
+                    value={ingestMode}
+                    onChange={setIngestMode}
+                    data={[
+                      { label: 'Upload File', value: 'file' },
+                      { label: 'Paste Text', value: 'text' },
+                    ]}
+                    size="sm"
+                  />
+
+                  {ingestMode === 'file' ? (
+                    <>
+                      <FileInput
+                        label="Select File"
+                        placeholder="Click to select a file (PDF, DOCX, TXT, MD, etc.)"
+                        accept={ocrIsOn(mod.extraction?.ocr) ? `${DOCUMENT_ACCEPT},${IMAGE_ACCEPT}` : DOCUMENT_ACCEPT}
+                        value={ingestFile}
+                        onChange={setIngestFile}
+                        clearable
+                      />
+                      {ingestFile && (
+                        <Text size="xs" c="dimmed">
+                          {ingestFile.name} — {(ingestFile.size / 1024).toFixed(1)} KB
+                        </Text>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <TextInput
+                        label="File Name"
+                        placeholder="e.g. product-manual.txt"
+                        value={ingestFileName}
+                        onChange={(e) => setIngestFileName(e.currentTarget.value)}
+                      />
+                      <Textarea
+                        label="Content"
+                        placeholder="Paste your document content here..."
+                        value={ingestContent}
+                        onChange={(e) => setIngestContent(e.currentTarget.value)}
+                        autosize
+                        minRows={6}
+                        maxRows={16}
+                      />
+                    </>
+                  )}
+
+                  {/* Where the document goes; it takes that folder's permissions. Only a module with folders has the choice. */}
+                  {folders.length > 0 ? (
+                    <Select
+                      label="Folder"
+                      description="New documents follow this folder's permissions."
+                      data={uploadPlaces}
+                      value={ingestFolderId ?? TOP_LEVEL}
+                      onChange={(value) => setIngestFolderChoice(placeOf(value))}
+                      allowDeselect={false}
+                      searchable
+                      nothingFoundMessage="No folder"
+                    />
+                  ) : null}
+
+                  {/* Collapsed by default: almost every ingest wants the module's own chunking. */}
+                  <Accordion variant="contained" radius="md" chevronPosition="left">
+                    <Accordion.Item value="chunking">
+                      <Accordion.Control>
+                        <Group gap="xs">
+                          <Text size="sm" fw={500}>Chunking for this document</Text>
+                          <Badge size="xs" variant="light" color={chunkOverrideOn ? 'violet' : 'gray'}>
+                            {chunkOverrideOn
+                              ? 'overridden'
+                              : `module default — ${strategyLabel(mod.chunkConfig.strategy)}`}
+                          </Badge>
+                        </Group>
+                      </Accordion.Control>
+                      <Accordion.Panel>
+                        <Stack gap="sm">
+                          <Switch
+                            label="Override the module's chunking for this document"
+                            description="A 200-page manual and a FAQ CSV rarely want the same splitter. Only this document is affected."
+                            checked={chunkOverrideOn}
+                            onChange={(e) => setChunkOverrideOn(e.currentTarget.checked)}
+                          />
+                          {chunkOverrideOn ? (
+                            <ChunkConfigFields
+                              values={chunkOverride}
+                              onChange={(patch) => setChunkOverride((prev) => ({ ...prev, ...patch }))}
+                              errors={chunkOverrideErrors}
+                            />
+                          ) : null}
+                        </Stack>
+                      </Accordion.Panel>
+                    </Accordion.Item>
+                  </Accordion>
+
+                  <Group justify="flex-end">
+                    <Button
+                      leftSection={ingesting ? <Loader size={14} /> : <IconFileUpload size={14} />}
+                      onClick={() => void (ingestMode === 'file' ? handleFileIngest() : handleIngest())}
+                      disabled={
+                        ingesting
+                        || chunkOverrideInvalid
+                        || (ingestMode === 'file'
+                          ? !ingestFile
+                          : !ingestFileName.trim() || !ingestContent.trim())
+                      }
+                      loading={ingesting}
+                    >
+                      {ingestMode === 'file' ? 'Upload & Ingest' : 'Ingest Document'}
+                    </Button>
+                  </Group>
+                </Stack>
+              </Paper>
+            ) : null}
 
             {/* Document List */}
             <Paper withBorder radius="lg" p="lg">
               <Group justify="space-between" mb="md">
                 <div>
                   <Text fw={600} size="lg">Documents</Text>
-                  <Text size="sm" c="dimmed">
-                    {debouncedDocSearch
-                      ? `${docTotal} document(s) match "${debouncedDocSearch}"`
-                      : `${docTotal} document(s) in this module`}
-                  </Text>
+                  {/* With folders the line under the path says what the open place holds. */}
+                  {libraryOn ? null : (
+                    <Text size="sm" c="dimmed">
+                      {debouncedDocSearch
+                        ? `${docTotal} document(s) match "${debouncedDocSearch}"`
+                        : `${docTotal} document(s) in this module`}
+                    </Text>
+                  )}
                 </div>
                 <Group gap="xs">
-                  <Tooltip label="Download every document's source text as a ZIP of JSONL files" withArrow>
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={exporting ? <Loader size={12} /> : <IconDownload size={14} />}
-                      onClick={() => void handleExport()}
-                      disabled={exporting || docsLoading || (mod.totalDocuments ?? docTotal) === 0}
+                  {/* With access control on, an export (every document's text) is for admins only. */}
+                  {!accessEnabled || accessLevel.canAdmin ? (
+                    <Tooltip label="Download every document's source text as a ZIP of JSONL files" withArrow>
+                      <Button
+                        variant="light"
+                        size="xs"
+                        leftSection={exporting ? <Loader size={12} /> : <IconDownload size={14} />}
+                        onClick={() => void handleExport()}
+                        disabled={exporting || docsLoading || (mod.totalDocuments ?? docTotal) === 0}
+                      >
+                        Export
+                      </Button>
+                    </Tooltip>
+                  ) : null}
+                  {/* With access control on, an import is for admins too. */}
+                  {accessLevel.canWrite && (!accessEnabled || accessLevel.canAdmin) ? (
+                    <>
+                      <Tooltip
+                        label="Import one or more JSONL files of an export, in name order; documents are re-chunked and re-embedded with this module"
+                        withArrow
+                      >
+                        <Button
+                          variant="light"
+                          size="xs"
+                          leftSection={importing ? <Loader size={12} /> : <IconUpload size={14} />}
+                          onClick={() => importInputRef.current?.click()}
+                          disabled={importing}
+                        >
+                          {importProgress && importProgress.files > 1
+                            ? `Importing ${importProgress.file}/${importProgress.files}`
+                            : 'Import'}
+                        </Button>
+                      </Tooltip>
+                      <input
+                        ref={importInputRef}
+                        type="file"
+                        accept=".jsonl,.ndjson,application/x-ndjson"
+                        multiple
+                        style={{ display: 'none' }}
+                        onChange={(event) => {
+                          void handleImportFiles(Array.from(event.currentTarget.files ?? []));
+                        }}
+                      />
+                    </>
+                  ) : null}
+                  {accessLevel.canWrite ? (
+                    <Tooltip
+                      label="Rebuild every document's chunks in the background — the run survives closing this tab"
+                      withArrow
                     >
-                      Export
-                    </Button>
-                  </Tooltip>
-                  <Tooltip
-                    label="Import one or more JSONL files of an export, in name order; documents are re-chunked and re-embedded with this module"
-                    withArrow
-                  >
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={importing ? <Loader size={12} /> : <IconUpload size={14} />}
-                      onClick={() => importInputRef.current?.click()}
-                      disabled={importing}
-                    >
-                      {importProgress && importProgress.files > 1
-                        ? `Importing ${importProgress.file}/${importProgress.files}`
-                        : 'Import'}
-                    </Button>
-                  </Tooltip>
-                  <input
-                    ref={importInputRef}
-                    type="file"
-                    accept=".jsonl,.ndjson,application/x-ndjson"
-                    multiple
-                    style={{ display: 'none' }}
-                    onChange={(event) => {
-                      void handleImportFiles(Array.from(event.currentTarget.files ?? []));
-                    }}
-                  />
-                  <Tooltip
-                    label="Rebuild every document's chunks in the background — the run survives closing this tab"
-                    withArrow
-                  >
-                    <Button
-                      variant="light"
-                      color="violet"
-                      size="xs"
-                      leftSection={<IconRefresh size={14} />}
-                      onClick={() => void handleReindexAll()}
-                      disabled={Boolean(reindex.activeRun) || docsLoading || (mod.totalDocuments ?? docTotal) === 0}
-                      loading={reindex.busy}
-                    >
-                      {reindex.activeRun ? 'Re-index running…' : 'Re-index All'}
-                    </Button>
-                  </Tooltip>
+                      <Button
+                        variant="light"
+                        color="violet"
+                        size="xs"
+                        leftSection={<IconRefresh size={14} />}
+                        onClick={() => void handleReindexAll()}
+                        disabled={Boolean(reindex.activeRun) || docsLoading || (mod.totalDocuments ?? docTotal) === 0}
+                        loading={reindex.busy}
+                      >
+                        {reindex.activeRun ? 'Re-index running…' : 'Re-index All'}
+                      </Button>
+                    </Tooltip>
+                  ) : null}
                 </Group>
               </Group>
 
-              {docsError ? (
-                <InlineLoadError message={docsError} onRetry={() => void loadDocuments()} />
-              ) : (
-                <DataGrid<RagDocumentView>
-                  records={documents}
-                  rowKey={(doc) => doc._id}
-                  loading={docsLoading}
-                  columns={docColumns}
-                  search={{
-                    value: docSearch,
-                    onChange: (value) => {
-                      setDocSearch(value);
-                      setDocPage(1);
-                    },
-                    placeholder: 'Search by file name…',
-                  }}
-                  filters={[
-                    {
-                      value: docStatus,
-                      onChange: (value) => {
-                        setDocStatus(value);
-                        setDocPage(1);
-                      },
-                      ariaLabel: 'Filter by status',
-                      width: 150,
-                      options: [
-                        { value: 'all', label: 'All statuses' },
-                        { value: 'indexed', label: 'Indexed' },
-                        { value: 'processing', label: 'Processing' },
-                        { value: 'pending', label: 'Pending' },
-                        { value: 'failed', label: 'Failed' },
-                      ],
-                    },
-                  ]}
-                  rowActions={(doc) => [
-                    {
-                      id: 'reingest',
-                      label: 'Re-ingest',
-                      icon: <IconRefresh size={14} />,
-                      disabled: reingestingDocId === doc._id,
-                      onClick: () => void handleReingestDocument(doc),
-                    },
-                    {
-                      id: 'delete',
-                      label: 'Delete',
-                      icon: <IconTrash size={14} />,
-                      color: 'red',
-                      onClick: () => void handleDeleteDocument(doc),
-                    },
-                  ]}
-                  onRefresh={() => void loadDocuments()}
-                  refreshing={docsLoading}
-                  empty={{
-                    icon: <IconFileText size={28} />,
-                    title: debouncedDocSearch || docStatus !== 'all' ? 'No document matches' : 'No documents yet',
-                    description: debouncedDocSearch || docStatus !== 'all'
-                      ? 'Try a different search or status filter.'
-                      : 'Ingest your first document above.',
-                  }}
-                  pagination={{
-                    page: docPage,
-                    onPageChange: setDocPage,
-                    pageSize: docPageSize,
-                    onPageSizeChange: (size) => {
-                      setDocPageSize(size);
-                      setDocPage(1);
-                    },
-                    pageSizeOptions: [10, 25, 50, 100],
-                    total: docTotal,
-                  }}
-                  footerLeft={
-                    docTotal === 0
-                      ? undefined
-                      : `${(docPage - 1) * docPageSize + 1}–${Math.min(docPage * docPageSize, docTotal)} of ${docTotal}`
-                  }
-                />
-              )}
+              <RagLibrary<RagDocumentView>
+                moduleKey={mod.key}
+                moduleName={mod.name}
+                viewer={{ canWrite: accessLevel.canWrite, canAdmin: accessLevel.canAdmin, canChangeStructure }}
+                accessEnabled={accessEnabled}
+                folders={folders}
+                openFolderId={openFolderId}
+                onOpenFolder={openFolder}
+                documents={listedDocuments}
+                docTotal={docsHere ? docTotal : null}
+                searchTerm={debouncedDocSearch}
+                filtered={Boolean(debouncedDocSearch) || docStatus !== 'all'}
+                page={docPage}
+                loading={docsLoading}
+                chrome={libraryChrome}
+                documentColumns={docColumns}
+                documentActions={documentActions}
+                errorView={docsError ? <InlineLoadError message={docsError} onRetry={() => void loadDocuments()} /> : undefined}
+                accessRefreshKey={accessRefreshKey}
+                onEditPermissions={setPermissionTarget}
+                onOpenConnector={openConnector}
+                onChanged={handleStructureChanged}
+              />
             </Paper>
           </Stack>
         </Tabs.Panel>
@@ -1873,7 +2139,32 @@ export default function RagModuleDetailPage() {
             </Paper>
           </Stack>
         </Tabs.Panel>
+
+        {/* ═══════════════════ Access Tab (admins) ═══════════════════ */}
+        {accessLevel.canAdmin ? (
+          <Tabs.Panel value="access">
+            <RagAccessTab
+              moduleKey={mod.key}
+              moduleName={mod.name}
+              access={mod.access}
+              refreshKey={accessRefreshKey}
+              onModuleChanged={handleAccessChanged}
+              onEditPermissions={setPermissionTarget}
+              onShowFolder={showFolder}
+            />
+          </Tabs.Panel>
+        ) : null}
       </Tabs>
+
+      <RagPermissionEditor
+        moduleKey={mod.key}
+        moduleName={mod.name}
+        target={permissionTarget}
+        accessEnabled={accessEnabled}
+        adminBypass={adminBypass}
+        onClose={() => setPermissionTarget(null)}
+        onSaved={handlePermissionsSaved}
+      />
 
       <EditRagModuleModal
         opened={editModalOpen}

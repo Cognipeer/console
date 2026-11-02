@@ -47,7 +47,7 @@ const activeAt = (pathname: string) =>
 
 describe('the Tracing sub-nav', () => {
   it('has Health right after Overview, translated, pointing at the Health page', () => {
-    expect(items.map((entry) => entry.id)).toEqual(['overview', 'health', 'sessions', 'threads', 'agents']);
+    expect(items.map((entry) => entry.id)).toEqual(['overview', 'health', 'sessions', 'threads', 'agents', 'flow-runs']);
     expect(item('health')).toMatchObject({
       label: 'Health',
       labelKey: 'entityHealth',

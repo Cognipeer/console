@@ -484,7 +484,7 @@ export default function DataGrid<T>({
                       className="ds-select"
                       value={pagination.pageSize}
                       aria-label={tGrid('rowsPerPage')}
-                      style={{ fontSize: 12, padding: '2px 6px' }}
+                      style={{ fontSize: 12, paddingLeft: 6 }}
                       onChange={(e) => pagination.onPageSizeChange?.(Number(e.target.value))}
                     >
                       {pagination.pageSizeOptions.map((n) => (

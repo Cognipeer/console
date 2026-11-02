@@ -29,7 +29,7 @@ export function activeSubagentEntries(config: Pick<IAgentConfig, 'subagents' | '
 /** Why a `ref` entry cannot run, or the agent it points at. */
 export type SubagentTarget =
     | { ok: true; agent: IAgent; config: IAgent['config']; resolvedVersion: number | null }
-    | { ok: false; reason: 'no_agent_key' | 'unresolved' | 'external' | 'inactive'; message: string };
+    | { ok: false; reason: 'no_agent_key' | 'unresolved' | 'external' | 'flow' | 'inactive' | 'owned'; message: string };
 
 /**
  * Loads the agent a `ref` entry points at, the way a run of that agent would
@@ -54,12 +54,24 @@ export async function resolveSubagentTarget(
         const why = error instanceof Error ? error.message : String(error);
         return { ok: false, reason: 'unresolved', message: `Sub-agent "${entry.name}" was skipped: ${why}.` };
     }
+    if (resolved.agent.owner) {
+        // A hidden agent a flow node owns is reachable only through that flow, never as someone's sub-agent.
+        return { ok: false, reason: 'owned', message: `Sub-agent "${entry.name}" was skipped: agent "${entry.agentKey}" does not exist.` };
+    }
     if (resolved.config.kind === 'external') {
         // An external agent is an HTTP endpoint, not a set of tools: it cannot be flattened into a child of this process.
         return {
             ok: false,
             reason: 'external',
             message: `Sub-agent "${entry.name}" was skipped: "${entry.agentKey}" is a connected agent, and only agents that run on this platform can be delegated to.`,
+        };
+    }
+    if (resolved.config.kind === 'flow') {
+        // A FlowBase agent answers through a flow, not a model loop: there are no tools or prompt to flatten into a child.
+        return {
+            ok: false,
+            reason: 'flow',
+            message: `Sub-agent "${entry.name}" was skipped: "${entry.agentKey}" is a FlowBase agent, and only agents with a model loop can be delegated to.`,
         };
     }
     if (resolved.agent.status && resolved.agent.status !== 'active') {

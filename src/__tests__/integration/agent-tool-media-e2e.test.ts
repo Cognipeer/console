@@ -150,7 +150,8 @@ const withFiles = (config: Partial<IAgentConfig> = {}): Partial<IAgentConfig> =>
 
 async function createAgent(config: Partial<IAgentConfig> = {}) {
   await db.createAgent({
-    tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Docs', config: { modelKey: 'gpt-4o', ...withFiles(config) },
+    tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Docs', // These tests are about what a tool's output does, not about approval: the agent runs its tools unasked.
+    config: { modelKey: 'gpt-4o', humanInTheLoop: { toolApproval: { enabled: false } }, ...withFiles(config) },
     status: 'active', createdBy: OWNER,
   });
   return (await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!;

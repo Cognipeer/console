@@ -254,7 +254,13 @@ export const tracingHealthEn = {
     events: 'Events',
     tokens: 'Tokens',
   },
+  flowAttribution: {
+    prefix: 'Flow',
+    openRun: 'Open the flow run',
+  },
   sessions: {
+    flowFilter: 'Filter by flow',
+    flowAll: 'All flows and agents',
     statusAll: 'All statuses',
     statusFilter: 'Filter by status',
     latestStatusFilter: 'Filter by latest status',

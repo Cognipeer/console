@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { AGENT_REASONING_OVERRIDE } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
-import { abortErrorFrom, withResilience } from '@/lib/core/resilience';
+import { abortErrorFrom, withResilience, type RetryConfig } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
 
 const logger = createLogger('inference');
@@ -23,6 +23,8 @@ import type {
   OcrResult,
   ImageGenerateInput,
 } from '@/lib/providers';
+import { providerRegistry } from '@/lib/providers';
+import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 import {
   TTS_PCM_SAMPLE_RATE,
@@ -494,6 +496,16 @@ function getOcrMode(model: IModel): 'native' | 'vlm' {
   const ocrSettings = settings.ocr as Record<string, unknown> | undefined;
   const mode = ocrSettings?.mode;
   if (mode === 'native' || mode === 'vlm') return mode;
+  // Not stored on the model: the driver knows. A driver that can only read through a vision model is `vlm`.
+  try {
+    const capabilities = providerRegistry.getContract(model.providerDriver).capabilities as
+      | { 'ocr.modes'?: unknown }
+      | undefined;
+    const modes = capabilities?.['ocr.modes'];
+    if (Array.isArray(modes) && modes.length > 0 && modes.every((entry) => entry === 'vlm')) return 'vlm';
+  } catch {
+    // Unknown driver: keep the default.
+  }
   // Default: if provider supports native OCR, prefer native; else vlm.
   return 'native';
 }
@@ -1421,6 +1433,22 @@ export async function handleOcrRequest(params: {
   projectId: string;
   input: OcrExtractInput;
   requestId?: string;
+  /** Also accept a vision LLM (category `llm` that takes images) and read through it as a vision-model OCR. */
+  allowVisionLlm?: boolean;
+  /** Who the usage row is attributed to, for callers outside a request (background jobs). */
+  attribution?: Partial<UsageAttribution>;
+  /** Overrides of the call's timeout (per attempt) and retry policy. */
+  resilience?: { timeoutMs?: number; retry?: Partial<RetryConfig> };
+  /** Log a failed call as an error usage row (the HTTP route logs its own). */
+  logErrors?: boolean;
+  /** Stops the call, and any retry of it, when the caller gives up. */
+  signal?: AbortSignal;
+  /**
+   * Keep the start of the recognised text in the usage row (default). Callers that read documents on behalf of
+   * someone else (the extraction engine) turn this off: the text of a page must not land in a log that people
+   * without access to the document can read.
+   */
+  logContent?: boolean;
 }) {
   const { tenantDbName, modelKey, projectId, input } = params;
   const requestId = params.requestId || crypto.randomUUID();
@@ -1430,54 +1458,103 @@ export async function handleOcrRequest(params: {
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
-  ensureOcrModel(model);
+  const visionLlm =
+    params.allowVisionLlm === true && model.category === 'llm' && model.isMultimodal === true;
+  if (!visionLlm) ensureOcrModel(model);
 
-  const mode = getOcrMode(model);
+  const mode = visionLlm ? 'vlm' : getOcrMode(model);
 
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  let result: OcrResult;
+  try {
+    const { runtime } = await buildModelRuntime(
+      tenantDbName,
+      model.tenantId,
+      model.providerKey,
+      projectId,
+    );
 
-  if (!runtime.createOcrRuntime) {
-    throw new Error('Model provider does not support OCR');
-  }
+    if (!visionLlm && !runtime.createOcrRuntime) {
+      throw new Error('Model provider does not support OCR');
+    }
 
-  // The OCR factory itself decides native vs VLM based on the contract. We pass
-  // the requested mode through modelSettings.ocr.mode so VLM-only providers can
-  // refuse a native request explicitly if they wanted to.
-  // The model's declared maximum output is injected the way a chat call gets it, so a VLM read sizes its
-  // page calls from it (Model Hub-declared maximum included).
-  const declaredMax = modelMaxOutputTokens(model);
-  const ocrSettings = {
-    ...((model.settings ?? {}) as Record<string, unknown>),
-    ...(declaredMax !== undefined ? { maxOutputTokens: declaredMax } : {}),
-    ocr: {
-      ...(((model.settings ?? {}) as Record<string, unknown>).ocr as
-        | Record<string, unknown>
-        | undefined),
-      mode,
-    },
-  };
+    // The OCR factory itself decides native vs VLM based on the contract. We pass
+    // the requested mode through modelSettings.ocr.mode so VLM-only providers can
+    // refuse a native request explicitly if they wanted to.
+    // The model's declared maximum output is injected the way a chat call gets it, so a VLM read sizes its
+    // page calls from it (Model Hub-declared maximum included).
+    const declaredMax = modelMaxOutputTokens(model);
+    const ocrSettings = {
+      ...((model.settings ?? {}) as Record<string, unknown>),
+      ...(declaredMax !== undefined ? { maxOutputTokens: declaredMax } : {}),
+      ocr: {
+        ...(((model.settings ?? {}) as Record<string, unknown>).ocr as
+          | Record<string, unknown>
+          | undefined),
+        mode,
+      },
+    };
 
-  const ocrRuntime = ensureOcrRuntime(
-    await runtime.createOcrRuntime({
+    const ocrConfig = {
       modelId: model.modelId,
       category: model.category,
       modelSettings: ocrSettings,
-    }),
-  );
+    };
+    let ocrRuntime: OcrRuntime;
+    if (visionLlm) {
+      const { createVlmOcrRuntime } = await import('@/lib/providers/contracts/vlmOcrHelpers');
+      const storedPrompt = (ocrSettings.ocr as Record<string, unknown>).prompt;
+      ocrRuntime = createVlmOcrRuntime(
+        runtime,
+        ocrConfig,
+        typeof storedPrompt === 'string' ? storedPrompt : undefined,
+      );
+    } else {
+      ocrRuntime = ensureOcrRuntime(await runtime.createOcrRuntime!(ocrConfig));
+    }
 
-  // A VLM read is many page calls that already retry and time out one by one: the whole extract is neither
-  // retried (every page would be billed again) nor held to the single-request timeout.
-  const result: OcrResult = await withResilience(
-    () => ocrRuntime.extract(input),
-    mode === 'vlm'
-      ? { key: `ocr:${model.providerKey}`, retry: { enabled: false }, timeoutMs: 0 }
-      : { key: `ocr:${model.providerKey}` },
-  );
+    // A VLM read is many page calls that already retry and time out one by one: by default the whole extract is
+    // neither retried (every page would be billed again) nor held to the single-request timeout. A caller that
+    // sends one page at a time (the extraction engine) sets its own.
+    result = await withResilience(
+      () => ocrRuntime.extract(input),
+      {
+        key: `ocr:${model.providerKey}`,
+        ...(mode === 'vlm' ? { retry: { enabled: false }, timeoutMs: 0 } : {}),
+        ...(params.resilience?.timeoutMs !== undefined ? { timeoutMs: params.resilience.timeoutMs } : {}),
+        ...(params.resilience?.retry ? { retry: params.resilience.retry } : {}),
+        ...(params.signal ? { signal: params.signal } : {}),
+      },
+    );
+  } catch (error) {
+    if (params.logErrors && !params.signal?.aborted) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      try {
+        await logModelUsage(tenantDbName, model, {
+          requestId,
+          route: 'ocr',
+          status: 'error',
+          providerRequest: sanitizeForLogging({
+            model: modelKey,
+            mode,
+            documentKind: input.document.kind,
+            documentBytes:
+              input.document.kind === 'bytes' ? input.document.data.byteLength : undefined,
+            pages: input.pages,
+          }),
+          providerResponse: sanitizeForLogging({ error: message }),
+          errorMessage: message,
+          latencyMs: Date.now() - start,
+          usage: {},
+          ...(params.attribution ? { attribution: params.attribution } : {}),
+        });
+      } catch (logError) {
+        logger.warn('Failed to log OCR error', {
+          error: logError instanceof Error ? logError.message : logError,
+        });
+      }
+    }
+    throw error;
+  }
 
   const latencyMs = Date.now() - start;
 
@@ -1512,13 +1589,14 @@ export async function handleOcrRequest(params: {
         features: input.features,
       }),
       providerResponse: sanitizeForLogging({
-        text: result.text.slice(0, 500),
+        ...(params.logContent === false ? {} : { text: result.text.slice(0, 500) }),
         pageCount: result.pages?.length,
         tableCount: result.tables?.length,
         invokedVia: result.invokedVia,
       }),
       latencyMs,
       usage,
+      ...(params.attribution ? { attribution: params.attribution } : {}),
     }),
   );
 

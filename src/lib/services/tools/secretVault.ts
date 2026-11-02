@@ -52,6 +52,7 @@ function safeFields(auth: IToolAuthConfig): IToolAuthConfig {
   const safe: IToolAuthConfig = { type: auth.type };
   if (auth.headerName) safe.headerName = auth.headerName;
   if (auth.username) safe.username = auth.username;
+  if (auth.connectorId) safe.connectorId = auth.connectorId;
   return safe;
 }
 
@@ -89,6 +90,7 @@ export function maskAuthConfig(auth: IToolAuthConfig | undefined): IToolAuthConf
   const masked: IToolAuthConfig = { type: auth.type };
   if (auth.headerName) masked.headerName = auth.headerName;
   if (auth.username) masked.username = auth.username;
+  if (auth.connectorId) masked.connectorId = auth.connectorId;
   const sealedSecrets = auth.sealed
     ? (() => {
         try {

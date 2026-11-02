@@ -45,6 +45,7 @@ import { resolveTenantDbName } from '@/lib/services/guardrail/hooks/recordCache'
 import { boundClientMeta } from './clientMeta';
 import { normalizeMcpInstructions, type McpDiscovery } from './discovery';
 import { isMcpToolInputError, McpServerConfigError, McpUnknownToolError, McpUpstreamError } from './errors';
+import { responseLogSummaryOf, setResponseLogSummary } from './responseLog';
 import { buildOpenApiRequest } from './openApiRequest';
 import { specDeclaredParameters } from './openApiSpecParameters';
 import {
@@ -2057,7 +2058,11 @@ export async function logMcpRequest(
         opts?.client,
         secretValues,
       ),
-      responsePayload: redactLogPayload(entry.responsePayload, { secretValues, maxBytes }),
+      // A result its provider marked is logged as the summary it left (see responseLog.ts).
+      responsePayload: redactLogPayload(
+        responseLogSummaryOf(entry.responsePayload) ?? entry.responsePayload,
+        { secretValues, maxBytes },
+      ),
       errorMessage: redactLogString(
         entry.errorMessage,
         secretValues,
@@ -2319,6 +2324,14 @@ function isMcpPolicyOutcome(error: unknown): boolean {
     || message.startsWith('Response blocked by Aegis shield');
 }
 
+/** What a tool call returns; plain data, so it also comes back from another node. */
+export interface McpToolOutcome {
+  result: unknown;
+  latencyMs: number;
+  /** Set when the request log keeps this summary of `result` instead of the result (see responseLog.ts). */
+  logSummary?: Record<string, unknown>;
+}
+
 /**
  * What a cross-node `invoke` job carries: which server to run (the worker
  * loads the record itself), and the call. The server record — with its sealed
@@ -2350,14 +2363,17 @@ export async function executeMcpTool(
   toolName: string,
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
-  /** Who the call is for; a server set up for Console identity refuses a call without a person. */
+  /**
+   * Who the call is for: a server set up for Console identity refuses a call without a person,
+   * and a knowledge base with access control answers with what that person may read.
+   */
   identity?: ConsoleIdentityCaller,
-): Promise<{ result: unknown; latencyMs: number }> {
+): Promise<McpToolOutcome> {
   // Refuse before queuing a remote call and before a failure row is logged.
   await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   const startedAt = Date.now();
   try {
-    let outcome: { result: unknown; latencyMs: number };
+    let outcome: McpToolOutcome;
     if (server._id === undefined || server._id === null) {
       outcome = await executeMcpToolLocal(server, toolName, args, runtimeHeaders, identity);
     } else {
@@ -2380,6 +2396,8 @@ export async function executeMcpTool(
         () => executeMcpToolLocal(server, toolName, args, runtimeHeaders, identity),
       );
     }
+    // The object the caller logs: a result that came back from another node is a new one.
+    if (outcome.logSummary) setResponseLogSummary(outcome.result, outcome.logSummary);
     recordMcpServerMetric(server, 'ok', Date.now() - startedAt);
     return outcome;
   } catch (error) {
@@ -2528,9 +2546,12 @@ export async function executeMcpToolLocal(
    * upstream HTTP request to attach them to.
    */
   runtimeHeaders?: Record<string, string>,
-  /** Who the call is for: a remote / OpenAPI server set up for Console identity gets a token for them. */
+  /**
+   * Who the call is for: a remote / OpenAPI server set up for Console identity gets a token for them,
+   * and an internal provider (a knowledge base with access control) is told who is asking.
+   */
   identity?: ConsoleIdentityCaller,
-): Promise<{ result: unknown; latencyMs: number }> {
+): Promise<McpToolOutcome> {
   await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   const sourceType = resolveSourceType(server);
   const start = Date.now();
@@ -2590,6 +2611,7 @@ export async function executeMcpToolLocal(
   }
 
   let result: unknown;
+  let logSummary: Record<string, unknown> | undefined;
   try {
     if (sourceType === 'openapi') {
       result = await executeOpenApiTool(server, realToolName, effectiveArgs, upstreamHeaders);
@@ -2618,7 +2640,13 @@ export async function executeMcpToolLocal(
         throw new Error('Could not resolve tenant database for internal MCP execution');
       }
       result = await provider.execute(
-        { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId, serverKey: server.key },
+        {
+          tenantDbName: tenant.dbName,
+          tenantId: server.tenantId,
+          projectId: server.projectId,
+          serverKey: server.key,
+          ...(identity ? { identity } : {}),
+        },
         internal.instanceKey,
         internal.config ?? {},
         realToolName,
@@ -2633,6 +2661,9 @@ export async function executeMcpToolLocal(
     } else {
       result = await stdioCallTool(server.stdioConfig!, realToolName, effectiveArgs, { tenantId: server.tenantId });
     }
+    // Read before the masking below, which may hand back a copy; a composite's
+    // result carries its member's mark.
+    logSummary = responseLogSummaryOf(result);
     // The server's own upstream credential (and the identity token minted for
     // it) is never legitimate output: mask it here, before the result reaches
     // the guardrail, the caller or the log.
@@ -2656,7 +2687,7 @@ export async function executeMcpToolLocal(
     if (verdict.result !== undefined) result = verdict.result;
   }
 
-  return { result, latencyMs: Date.now() - start };
+  return { result, latencyMs: Date.now() - start, ...(logSummary ? { logSummary } : {}) };
 }
 
 /**

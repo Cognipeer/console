@@ -37,6 +37,7 @@ import {
   updateDatasetItem,
   updateTarget,
 } from '@/lib/services/evaluation/service';
+import { noteRestrictedKnowledge } from '@/lib/services/rag/access/exposure';
 
 const TENANT_DB_NAME = 'eval_e2e_tenant';
 const TENANT_ID = 'tenant-eval-e2e';
@@ -163,6 +164,40 @@ describe('Evaluation service — full vertical (SQLite)', () => {
     expect(run.aggregate?.failed).toBe(1);
     expect(run.aggregate?.completed).toBe(0);
     expect(run.items[0].error).toMatch(/model exploded/);
+  });
+
+  it('marks each item by what its own answer drew on, and the marks survive a reload', async () => {
+    const target = await createTarget(TENANT_DB_NAME, TENANT_ID, ACTOR, { name: 'Knowledge Target', kind: 'model', modelKey: 'x' });
+    const dataset = await createDataset(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Knowledge Dataset',
+      items: [
+        { id: 'k1', input: [{ role: 'user', content: 'what is in the handbook' }] },
+        { id: 'k2', input: [{ role: 'user', content: 'what time is it' }] },
+      ],
+    });
+    const suite = await createSuite(TENANT_DB_NAME, TENANT_ID, ACTOR, {
+      name: 'Knowledge Suite',
+      targetKey: target.key,
+      datasetKey: dataset.key,
+      scorers: [{ type: 'assertion' }],
+    });
+
+    // Only the first item's answer reads a document not open to everyone (what the agent's knowledge tools note).
+    const run = await runSuite(
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, suiteKey: suite.key },
+      {
+        buildTargetInvoker: () => async (item: { id: string }) => {
+          if (item.id === 'k1') await noteRestrictedKnowledge(['p-eval:handbook']);
+          return { text: 'an answer' };
+        },
+      },
+    );
+
+    const byId = Object.fromEntries(run.items.map((i) => [i.itemId, i]));
+    expect(byId.k1.kbRestricted).toEqual(['p-eval:handbook']);
+    expect(byId.k2.kbRestricted ?? []).toEqual([]);
+    const reloaded = await getRun(TENANT_DB_NAME, run.id);
+    expect(reloaded?.items.find((i) => i.itemId === 'k1')?.kbRestricted).toEqual(['p-eval:handbook']);
   });
 
   it('supports item-level CRUD with pagination, search and dup-id rejection', async () => {

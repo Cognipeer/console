@@ -348,6 +348,8 @@ export type AnswerBlockedReason =
     | 'session_owner'
     /** A rule of the workspace stops the viewer. */
     | 'policy'
+    /** The session used knowledge base documents not open to everyone: its owner and their administrators answer. */
+    | 'restricted'
     /** The server could not check right now. */
     | 'unavailable';
 

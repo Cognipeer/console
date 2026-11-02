@@ -59,10 +59,10 @@ vi.mock('@/lib/services/agents/agentTriggers', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/agents/agentTriggers')>();
   return {
     ...actual,
-    createAgentTrigger: async (...args: Parameters<typeof actual.createAgentTrigger>) => {
+    createAgentTriggerHosted: async (...args: Parameters<typeof actual.createAgentTriggerHosted>) => {
       hoisted.failures.triggerCalls += 1;
       if (hoisted.failures.failTriggerCall === hoisted.failures.triggerCalls) throw new Error('the trigger store is down');
-      return actual.createAgentTrigger(...args);
+      return actual.createAgentTriggerHosted(...args);
     },
   };
 });
@@ -91,7 +91,9 @@ import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { redactAgent } from '@/server/api/plugins/agent-config-write';
 import { agentTemplatesApiPlugin } from '@/server/api/plugins/agent-templates';
 import { prepareTriggerWrite } from '@/server/api/plugins/agent-triggers';
+import { __resetConnectorTriggerHostForTests, registerConnectorTriggerHost } from '@/enterprise/connector-triggers';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
+import { createFakeConnectorHost } from '../helpers/fakeConnectorHost';
 
 const DB_NAME = 'tenant_template_routes';
 const PROJECT_ID = 'proj-1';
@@ -111,9 +113,9 @@ type Json = Record<string, any>;
 const json = (res: { body: string }) => parseJsonBody<Json>(res.body);
 
 const read = (suffix = '') => app.inject({ method: 'GET', url: `/api/agents/templates${suffix}` });
-const instantiate = (templateKey: string, payload?: unknown) => app.inject({
+const instantiate = (templateKey: string, payload?: unknown, query = '') => app.inject({
   method: 'POST',
-  url: `/api/agents/templates/${templateKey}/instantiate`,
+  url: `/api/agents/templates/${templateKey}/instantiate${query}`,
   ...(payload !== undefined ? { payload: payload as never } : {}),
 });
 /** The body every happy path starts from. */
@@ -195,6 +197,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  __resetConnectorTriggerHostForTests();
   await app?.close();
   await db.disconnect();
   rmSync(tmpDir, { recursive: true, force: true });
@@ -320,7 +323,8 @@ describe('GET /agents/templates/:templateKey', () => {
     expect(template.spec).not.toHaveProperty('modelKey');
     expect(template.spec.systemPrompt).toEqual(expect.any(String));
     expect(template.triggers).toHaveLength(2);
-    expect(template.triggers.map((trigger: Json) => trigger.type)).toEqual(['webhook', 'webhook']);
+    expect(template.triggers.map((trigger: Json) => trigger.type)).toEqual(['connector', 'webhook']);
+    expect(template.triggers[0].connector).toMatchObject({ package: 'cognipeer.github', trigger: 'workflow_run' });
     expect(template.resources).toBeNull();
     expect(template.tryIt).toEqual(expect.objectContaining({ message: expect.any(String) }));
   });
@@ -526,36 +530,328 @@ describe('POST instantiate: triggers', () => {
     await addModel(MODEL);
   });
 
-  it('creates the suggested webhook triggers disabled and unpinned, with the URL and the secret shown once', async () => {
+  it('creates the suggested generic webhook trigger disabled and unpinned, with the URL and the secret shown once; the connector one is left out', async () => {
     const res = await instantiate('ci-failure-triage', pick());
     expect(res.statusCode).toBe(201);
     const body = json(res);
-    expect(body.triggers).toHaveLength(2);
-    const secrets = new Map<string, string>();
-    for (const trigger of body.triggers as Json[]) {
-      expect(trigger).toMatchObject({ type: 'webhook', enabled: false });
-      expect(trigger.webhook.url).toMatch(new RegExp(`/api/public/hooks/${tenantId}/wh_[A-Za-z0-9_-]{24}$`));
-      expect(trigger.webhook.secret).toEqual(expect.any(String));
-      expect(trigger.webhook.secret.length).toBeGreaterThanOrEqual(16);
-      secrets.set(String(trigger.webhook.url).split('/').pop()!, trigger.webhook.secret);
-    }
-    expect(new Set(secrets.values()).size).toBe(2);
+    expect(body.triggers).toHaveLength(1);
+    expect(body.skipped_triggers).toEqual([
+      { name: findAgentTemplate('ci-failure-triage')!.triggers![0]!.name, reason: 'connector_required', package: 'cognipeer.github' },
+    ]);
+    const [trigger] = body.triggers as Json[];
+    expect(trigger).toMatchObject({ type: 'webhook', enabled: false, webhook: { preset: 'generic', auth: 'bearer' } });
+    expect(trigger.webhook.url).toMatch(new RegExp(`/api/public/hooks/${tenantId}/wh_[A-Za-z0-9_-]{24}$`));
+    expect(trigger.webhook.secret).toEqual(expect.any(String));
+    expect(trigger.webhook.secret.length).toBeGreaterThanOrEqual(16);
 
     const stored = await triggersOf(body.agent);
-    expect(stored).toHaveLength(2);
-    for (const row of stored) {
-      expect(row).toMatchObject({ enabled: false, type: 'webhook', projectId: PROJECT_ID, agentKey: 'ci-failure-triage' });
-      expect(row.version ?? null).toBeNull();
-      expect(row.nextFireAt ?? null).toBeNull();
-      if (row.type !== 'webhook') throw new Error('expected a webhook trigger');
-      // The row holds the secret sealed, and a read of it shows the hint (its last four characters) only.
-      const secret = secrets.get(String(row.webhook.hookId))!;
-      expect(secret).toBeDefined();
-      expect(JSON.stringify(row)).not.toContain(secret);
-      const view = serializeAgentTrigger(row) as Json;
-      expect(view.webhook).not.toHaveProperty('secret');
-      expect(view.webhook.secret_hint).toBe(secret.slice(-4));
-    }
+    expect(stored).toHaveLength(1);
+    const [row] = stored;
+    expect(row).toMatchObject({ enabled: false, type: 'webhook', projectId: PROJECT_ID, agentKey: 'ci-failure-triage' });
+    expect(row.version ?? null).toBeNull();
+    expect(row.nextFireAt ?? null).toBeNull();
+    if (row.type !== 'webhook') throw new Error('expected a webhook trigger');
+    // The row holds the secret sealed, and a read of it shows the hint (its last four characters) only.
+    const secret = trigger.webhook.secret as string;
+    expect(JSON.stringify(row)).not.toContain(secret);
+    const view = serializeAgentTrigger(row) as Json;
+    expect(view.webhook).not.toHaveProperty('secret');
+    expect(view.webhook.secret_hint).toBe(secret.slice(-4));
+  });
+
+  it('creates the connector trigger too when a connector of its package is given (by id for all, or by trigger name)', async () => {
+    const fake = createFakeConnectorHost();
+    registerConnectorTriggerHost(fake.host);
+    const res = await instantiate('ci-failure-triage', pick({ connector_id: 'conn-1' }));
+    expect(res.statusCode).toBe(201);
+    const body = json(res);
+    expect(body.skipped_triggers).toEqual([]);
+    expect(body.triggers.map((trigger: Json) => trigger.type)).toEqual(['connector', 'webhook']);
+    expect(body.triggers[0]).toMatchObject({ enabled: false, connector: { connectorId: 'conn-1', trigger: 'workflow_run', subscription: { status: 'active' } } });
+    const stored = await triggersOf(body.agent);
+    const connectorRow = stored.find((row) => row.type === 'connector');
+    if (!connectorRow || connectorRow.type !== 'connector') throw new Error('expected a connector trigger');
+    expect(connectorRow).toMatchObject({ enabled: false, connector: { connectorId: 'conn-1', trigger: 'workflow_run', events: ['workflow_run.completed'], packageId: 'cognipeer.github' } });
+    expect(connectorRow.connector.subscriptionId).toMatch(/^sub_/);
+    expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+
+    const byName = json(await instantiate('ci-failure-triage', pick({ connector_ids: { [findAgentTemplate('ci-failure-triage')!.triggers![0]!.name]: 'conn-1' } })));
+    expect(byName.skipped_triggers).toEqual([]);
+    expect(byName.triggers).toHaveLength(2);
+  });
+
+  it('leaves a connector trigger out when the picked connector does not fit it, or the module is absent; the agent is still made', async () => {
+    const absent = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-1' })));
+    expect(absent.triggers).toEqual([]);
+    expect(absent.skipped_triggers).toEqual([expect.objectContaining({ reason: 'connector_required', package: 'cognipeer.github' })]);
+    expect(await triggersOf(absent.agent)).toEqual([]);
+
+    registerConnectorTriggerHost(createFakeConnectorHost().host);
+    const unknown = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-missing' })));
+    expect(unknown.triggers).toEqual([]);
+    expect(unknown.skipped_triggers).toHaveLength(1);
+    expect(await triggersOf(unknown.agent)).toEqual([]);
+  });
+
+  it('refuses a malformed connector_id or connector_ids with a 400', async () => {
+    expect((await instantiate('pr-reviewer', pick({ connector_id: 5 }))).statusCode).toBe(400);
+    expect((await instantiate('pr-reviewer', pick({ connector_ids: ['x'] }))).statusCode).toBe(400);
+    expect((await instantiate('pr-reviewer', pick({ connector_ids: { a: '' } }))).statusCode).toBe(400);
+  });
+
+  describe('connector triggers whose package trigger needs parameters (the GitHub ones need a repository)', () => {
+    const PR_TRIGGER = findAgentTemplate('pr-reviewer')!.triggers![0]!.name;
+    const CI_TRIGGER = findAgentTemplate('ci-failure-triage')!.triggers![0]!.name;
+    let fake: ReturnType<typeof createFakeConnectorHost>;
+
+    beforeEach(() => {
+      fake = createFakeConnectorHost();
+      registerConnectorTriggerHost(fake.host);
+    });
+
+    it('creates the trigger on the given repository, with the template\'s events and filter, still disabled', async () => {
+      const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } }));
+      expect(res.statusCode, res.body).toBe(201);
+      const body = json(res);
+      expect(body.skipped_triggers).toEqual([]);
+      expect(body.triggers).toEqual([expect.objectContaining({ type: 'connector', enabled: false, connector: expect.objectContaining({ connectorId: 'conn-gh', trigger: 'pull_request' }) })]);
+      const [row] = await triggersOf(body.agent);
+      if (!row || row.type !== 'connector') throw new Error('expected a connector trigger');
+      expect(row).toMatchObject({
+        enabled: false,
+        connector: {
+          connectorId: 'conn-gh', trigger: 'pull_request', params: { repository: 'acme/api' }, packageId: 'cognipeer.github',
+          events: ['pull_request.opened', 'pull_request.reopened', 'pull_request.synchronize', 'pull_request.ready_for_review'],
+          filter: [
+            { path: 'payload.action', op: 'in', value: ['opened', 'synchronize', 'reopened', 'ready_for_review'] },
+            { path: 'payload.draft', op: 'eq', value: false },
+          ],
+          includePayload: true,
+        },
+      });
+      // Core asked the module once with the parameters in the body, and the hook was registered once.
+      expect(fake.calls.filter((call) => call === 'prepare')).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+    });
+
+    it('tells the Connectors module the reader\'s language (?locale=tr|en) for the check and for the binding', async () => {
+      const params = { [PR_TRIGGER]: { repository: 'acme/api' } };
+      const made = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: params }), '?locale=tr');
+      expect(made.statusCode, made.body).toBe(201);
+      expect(fake.calls.filter((call) => call === 'prepare' || call.startsWith('attach:'))).toHaveLength(2);
+      expect(fake.scopes.map((scope) => scope.locale)).toEqual(['tr', 'tr']);
+
+      // A locale the module has no texts for, or none: the scope carries no language at all.
+      for (const query of ['', '?locale=de']) {
+        fake.scopes.length = 0;
+        const again = await instantiate('pr-reviewer', pick({ name: `PR ${query}`, key: `pr-${query.length}`, connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: `acme/web${query.length}` } } }), query);
+        expect(again.statusCode, again.body).toBe(201);
+        expect(fake.scopes.length).toBeGreaterThan(0);
+        for (const scope of fake.scopes) expect(scope).not.toHaveProperty('locale');
+      }
+    });
+
+    it('leaves the trigger out as params_required when the repository is missing, naming the field; the agent is still made', async () => {
+      const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh' }));
+      expect(res.statusCode, res.body).toBe(201);
+      const body = json(res);
+      expect(body.triggers).toEqual([]);
+      expect(body.skipped_triggers).toEqual([{
+        name: PR_TRIGGER, reason: 'params_required', package: 'cognipeer.github',
+        errors: [{ field: 'connector.params.repository', message: 'repository is required' }],
+      }]);
+      expect(await triggersOf(body.agent)).toEqual([]);
+      // Nothing was registered at the vendor for it.
+      expect(fake.calls.filter((call) => call.startsWith('attach:'))).toEqual([]);
+      expect(fake.subscriptions.size).toBe(0);
+    });
+
+    it('reads blank values as not given', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: '' } } })));
+      expect(res.triggers).toEqual([]);
+      expect(res.skipped_triggers).toEqual([expect.objectContaining({ reason: 'params_required' })]);
+      const nothing = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: {} } })));
+      expect(nothing.skipped_triggers).toEqual([expect.objectContaining({ reason: 'params_required' })]);
+    });
+
+    it('names a parameter the package does not take as invalid_params, with what it said', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({
+        connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api', branch: 'main' } },
+      })));
+      expect(res.triggers).toEqual([]);
+      expect(res.skipped_triggers).toEqual([{
+        name: PR_TRIGGER, reason: 'invalid_params', package: 'cognipeer.github',
+        errors: [{ field: 'connector.params.branch', message: 'branch is not a parameter of this trigger' }],
+      }]);
+      expect(await triggersOf(res.agent)).toEqual([]);
+    });
+
+    it('a missing connector stays connector_required, with no field errors, even when parameters were given', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-missing', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+      expect(fake.calls.filter((call) => call === 'prepare')).toHaveLength(1);
+      // Without a connector at all the module is not even asked.
+      fake.calls.length = 0;
+      const none = json(await instantiate('pr-reviewer', pick({ connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(none.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+      expect(fake.calls).toEqual([]);
+    });
+
+    it('another package\'s connector is connector_required: the trigger does not exist there', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-poll', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+    });
+
+    describe('a connector whose package declares a trigger of the same name', () => {
+      /** The module answers the check as the connector's package says: every connector below it reports the package it was given. */
+      const reporting = (packageId: string) => {
+        const wrapped = fake.host.prepare;
+        fake.host.prepare = async (scope, input) => {
+          const asked = await wrapped(scope, input);
+          return asked.ok ? { ...asked, settings: { ...asked.settings, packageId } } : asked;
+        };
+      };
+      const given = { connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } };
+
+      it('of another package is connector_required, and nothing is created or registered for it', async () => {
+        reporting('cognipeer.gitlab');
+        const res = await instantiate('pr-reviewer', pick(given));
+        expect(res.statusCode, res.body).toBe(201);
+        const body = json(res);
+        expect(body.triggers).toEqual([]);
+        expect(body.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+        expect(await triggersOf(body.agent)).toEqual([]);
+        expect(fake.calls.filter((call) => call.startsWith('attach:'))).toEqual([]);
+        expect(fake.subscriptions.size).toBe(0);
+      });
+
+      it('of the template\'s own package creates the trigger', async () => {
+        reporting('cognipeer.github');
+        const res = await instantiate('pr-reviewer', pick(given));
+        expect(res.statusCode, res.body).toBe(201);
+        const body = json(res);
+        expect(body.skipped_triggers).toEqual([]);
+        expect(body.triggers).toEqual([expect.objectContaining({ type: 'connector', connector: expect.objectContaining({ connectorId: 'conn-gh', trigger: 'pull_request' }) })]);
+        expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+      });
+
+      it.each([
+        ['no package at all', undefined],
+        ['an empty package', ''],
+      ] as Array<[string, string | undefined]>)('is connector_required when the module\'s answer names %s: it cannot be told which package the connector is, so nothing is made', async (_what, packageId) => {
+        const wrapped = fake.host.prepare;
+        fake.host.prepare = async (scope, input) => {
+          const asked = await wrapped(scope, input);
+          if (!asked.ok) return asked;
+          const { packageId: _dropped, ...settings } = asked.settings as unknown as Record<string, unknown>;
+          return { ...asked, settings: { ...settings, ...(packageId === undefined ? {} : { packageId }) } } as typeof asked;
+        };
+        const res = await instantiate('pr-reviewer', pick(given));
+        expect(res.statusCode, res.body).toBe(201);
+        const body = json(res);
+        expect(body.triggers).toEqual([]);
+        expect(body.skipped_triggers).toEqual([{ name: PR_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+        expect(await triggersOf(body.agent)).toEqual([]);
+        expect(fake.calls.filter((call) => call.startsWith('attach:'))).toEqual([]);
+        expect(fake.subscriptions.size).toBe(0);
+      });
+
+      it('creates only the triggers of the connector\'s own package when a template has connector triggers of two packages and one connector is given', async () => {
+        // A template whose triggers name the same package trigger on two packages (the shared template object, put back after).
+        const template = findAgentTemplate('ci-failure-triage')!;
+        const original = template.triggers!;
+        const github = original[0]!;
+        const GITLAB_TRIGGER = 'Triage failed GitLab pipelines';
+        (template as { triggers: unknown }).triggers = [github, { ...github, name: GITLAB_TRIGGER, connector: { ...github.connector!, package: 'cognipeer.gitlab' } }, original[1]!];
+        try {
+          const res = await instantiate('ci-failure-triage', pick({ connector_id: 'conn-1' }));
+          expect(res.statusCode, res.body).toBe(201);
+          const body = json(res);
+          // conn-1 is a GitHub connector: the GitHub trigger is made, the GitLab one is left out, and the webhook trigger is made next to them.
+          expect(body.skipped_triggers).toEqual([{ name: GITLAB_TRIGGER, reason: 'connector_required', package: 'cognipeer.gitlab' }]);
+          expect(body.triggers.map((trigger: Json) => [trigger.name, trigger.type])).toEqual([[github.name, 'connector'], [original[1]!.name, 'webhook']]);
+          const rows = await triggersOf(body.agent);
+          expect(rows.filter((row) => row.type === 'connector').map((row) => row.name)).toEqual([github.name]);
+          // Only the GitHub trigger was bound: one hook for it, none for the other.
+          expect(fake.calls.filter((call) => call.startsWith('attach:'))).toHaveLength(1);
+          expect(fake.subscriptions.size).toBe(1);
+        } finally {
+          (template as { triggers: unknown }).triggers = original;
+        }
+        expect(findAgentTemplate('ci-failure-triage')!.triggers).toHaveLength(2);
+      });
+
+      it('of another package leaves out only that trigger: the others of the template are still made', async () => {
+        reporting('cognipeer.gitlab');
+        const body = json(await instantiate('ci-failure-triage', pick({ connector_id: 'conn-gh', connector_params: { [CI_TRIGGER]: { repository: 'acme/web' } } })));
+        expect(body.skipped_triggers).toEqual([{ name: CI_TRIGGER, reason: 'connector_required', package: 'cognipeer.github' }]);
+        expect(body.triggers.map((trigger: Json) => trigger.type)).toEqual(['webhook']);
+      });
+    });
+
+    it('takes parameters per trigger name and creates the others next to a skipped one', async () => {
+      const res = json(await instantiate('ci-failure-triage', pick({
+        connector_ids: { [CI_TRIGGER]: 'conn-gh' }, connector_params: { [CI_TRIGGER]: { repository: 'acme/web' }, 'No such trigger': { repository: 'ignored/repo' } },
+      })));
+      expect(res.skipped_triggers).toEqual([]);
+      expect(res.triggers.map((trigger: Json) => trigger.type)).toEqual(['connector', 'webhook']);
+      const connectorRow = (await triggersOf(res.agent)).find((row) => row.type === 'connector');
+      if (!connectorRow || connectorRow.type !== 'connector') throw new Error('expected a connector trigger');
+      expect(connectorRow.connector).toMatchObject({
+        trigger: 'workflow_run', params: { repository: 'acme/web' }, events: ['workflow_run.completed'],
+        filter: [{ path: 'payload.action', op: 'eq', value: 'completed' }, { path: 'payload.conclusion', op: 'in', value: ['failure', 'timed_out'] }],
+      });
+    });
+
+    it('the generic webhook trigger next to a skipped connector one is still created', async () => {
+      const res = json(await instantiate('ci-failure-triage', pick({ connector_id: 'conn-gh' })));
+      expect(res.skipped_triggers).toEqual([expect.objectContaining({ name: CI_TRIGGER, reason: 'params_required' })]);
+      expect(res.triggers.map((trigger: Json) => trigger.type)).toEqual(['webhook']);
+      expect((await triggersOf(res.agent)).map((row) => row.type)).toEqual(['webhook']);
+    });
+
+    it('a lenient connector (no required parameters) still takes the trigger without any', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-1' })));
+      expect(res.skipped_triggers).toEqual([]);
+      expect(res.triggers).toHaveLength(1);
+    });
+
+    it('the events or schedule the module refuses are invalid_params, and say so', async () => {
+      const wrapped = fake.host.prepare;
+      fake.host.prepare = async (scope, input) => {
+        const asked = await wrapped(scope, input);
+        return asked.ok ? { ok: false, errors: [{ field: 'connector.events', message: 'Not an event of this trigger: pull_request.opened' }] } : asked;
+      };
+      const res = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.skipped_triggers).toEqual([{
+        name: PR_TRIGGER, reason: 'invalid_params', package: 'cognipeer.github',
+        errors: [{ field: 'connector.events', message: 'Not an event of this trigger: pull_request.opened' }],
+      }]);
+    });
+
+    it('a refusal about the template itself (not the connector or the parameters) fails the create and undoes it', async () => {
+      fake.host.prepare = async () => ({ ok: false, errors: [{ field: 'connector.include_payload', message: 'include_payload must be a boolean' }] });
+      const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } }));
+      expect(res.statusCode).toBe(400);
+      expect(json(res)).toMatchObject({ code: 'invalid_template_trigger', issues: [{ field: 'connector.include_payload' }] });
+      await expectNothingCreated();
+    });
+
+    it('refuses malformed connector_params with a 400 before anything is made', async () => {
+      for (const bad of [['x'], 'x', { [PR_TRIGGER]: 'acme/api' }, { [PR_TRIGGER]: ['acme/api'] }, { [PR_TRIGGER]: null }]) {
+        const res = await instantiate('pr-reviewer', pick({ connector_id: 'conn-gh', connector_params: bad }));
+        expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+        expect(json(res).code, JSON.stringify(bad)).toBe('invalid_request');
+      }
+      await expectNothingCreated();
+    });
+
+    it('createTriggers: false ignores the parameters', async () => {
+      const res = json(await instantiate('pr-reviewer', pick({ createTriggers: false, connector_id: 'conn-gh', connector_params: { [PR_TRIGGER]: { repository: 'acme/api' } } })));
+      expect(res.triggers).toEqual([]);
+      expect(res.skipped_triggers).toEqual([]);
+      expect(fake.calls).toEqual([]);
+    });
   });
 
   it('puts the schedule in the timezone that was sent (UTC when none), still disabled', async () => {
@@ -572,10 +868,16 @@ describe('POST instantiate: triggers', () => {
   });
 
   it('lists the triggers by name in the setup, and the webhook secret reminder only when there is a webhook', async () => {
-    const webhook = json(await instantiate('pr-reviewer', pick()));
+    const webhook = json(await instantiate('ci-failure-triage', pick()));
     const codes = (webhook.setup as Json[]).map((item) => item.code);
     expect(codes).toEqual(expect.arrayContaining(['triggers_disabled', 'webhook_secret']));
-    expect((webhook.setup as Json[]).find((item) => item.code === 'triggers_disabled')!.detail).toBe(findAgentTemplate('pr-reviewer')!.triggers![0]!.name);
+    expect((webhook.setup as Json[]).find((item) => item.code === 'triggers_disabled')!.detail).toBe(findAgentTemplate('ci-failure-triage')!.triggers![1]!.name);
+
+    registerConnectorTriggerHost(createFakeConnectorHost().host);
+    const connector = json(await instantiate('pr-reviewer', pick({ connector_id: 'conn-1' })));
+    const connectorCodes = (connector.setup as Json[]).map((item) => item.code);
+    expect(connectorCodes).toContain('triggers_disabled');
+    expect(connectorCodes).not.toContain('webhook_secret');
 
     const schedule = json(await instantiate('daily-briefing', pick()));
     const scheduleCodes = (schedule.setup as Json[]).map((item) => item.code);
@@ -723,8 +1025,9 @@ describe('POST instantiate: what is refused, and that nothing is left behind', (
   });
 
   it('a failure after the agent was made removes the agent, its triggers and the skills it added', async () => {
+    registerConnectorTriggerHost(createFakeConnectorHost().host);
     hoisted.failures.failTriggerCall = 2;
-    const res = await instantiate('ci-failure-triage', pick());
+    const res = await instantiate('ci-failure-triage', pick({ connector_id: 'conn-1' }));
     expect(res.statusCode).toBe(500);
     expect(json(res)).toEqual({ error: expect.any(String) });
     expect(hoisted.failures.triggerCalls).toBe(2);
@@ -732,7 +1035,7 @@ describe('POST instantiate: what is refused, and that nothing is left behind', (
 
     // The same template goes through once the store is back, under the key the failed try would have had.
     hoisted.failures.failTriggerCall = 0;
-    const retry = await instantiate('ci-failure-triage', pick());
+    const retry = await instantiate('ci-failure-triage', pick({ connector_id: 'conn-1' }));
     expect(retry.statusCode).toBe(201);
     expect(json(retry).agent.key).toBe('ci-failure-triage');
     expect(await triggersOf(json(retry).agent)).toHaveLength(2);
@@ -777,7 +1080,9 @@ describe('every template in the catalog', () => {
       const body = json(res);
       expect(body.agent, template.key).toMatchObject({ key: template.key, status: 'active', metadata: { template: { key: template.key, version: template.version } } });
       expect(body.agent.config.modelKey, template.key).toBe(MODEL);
-      expect(body.triggers, template.key).toHaveLength(template.triggers?.length ?? 0);
+      const connectorSuggestions = template.triggers?.filter((trigger) => trigger.type === 'connector').length ?? 0;
+      expect(body.triggers, template.key).toHaveLength((template.triggers?.length ?? 0) - connectorSuggestions);
+      expect(body.skipped_triggers, template.key).toHaveLength(connectorSuggestions);
       for (const trigger of body.triggers as Json[]) expect(trigger.enabled, template.key).toBe(false);
       for (const row of await triggersOf(body.agent)) {
         expect(row.enabled, template.key).toBe(false);
@@ -817,7 +1122,7 @@ describe('instantiateTemplate with its own pieces', () => {
   const deps = (overrides: Partial<AgentTemplateWriteDeps> = {}): AgentTemplateWriteDeps => ({
     guardrailExists: async () => true,
     prepareAgentConfig: async (config) => ({ config, warnings: [] }),
-    prepareTriggerWrite: ({ body, agent }) => prepareTriggerWrite({ body, agent, scope: scope() }),
+    prepareTriggerWrite: ({ body, agent, actorId }) => prepareTriggerWrite({ body, agent, scope: scope(), actorId }),
     ...overrides,
   });
   const make = (templateKey: string, input: Json, overrides?: Partial<AgentTemplateWriteDeps>) =>
@@ -846,11 +1151,12 @@ describe('instantiateTemplate with its own pieces', () => {
   });
 
   it('a trigger the parser refuses is a 400 naming the trigger; the agent and the triggers before it are removed', async () => {
+    registerConnectorTriggerHost(createFakeConnectorHost().host);
     let calls = 0;
-    const error = await failure(make('ci-failure-triage', pick(), {
+    const error = await failure(make('ci-failure-triage', pick({ connector_id: 'conn-1' }), {
       prepareTriggerWrite: async (input) => {
         calls += 1;
-        return calls === 1 ? prepareTriggerWrite({ body: input.body, agent: input.agent, scope: scope() }) : { ok: false, errors: [{ field: 'prompt', message: 'unknown variable' }] };
+        return calls === 1 ? prepareTriggerWrite({ body: input.body, agent: input.agent, scope: scope(), actorId: input.actorId }) : { ok: false, errors: [{ field: 'prompt', message: 'unknown variable' }] };
       },
     }));
     expect(error).toMatchObject({ status: 400, code: 'invalid_template_trigger', extra: { issues: [{ field: 'prompt', message: 'unknown variable' }] } });
@@ -901,7 +1207,7 @@ describe('instantiateTemplate with its own pieces', () => {
     const kept = second.status === 'fulfilled' ? second.value.agent.key : '';
     expect(kept).toMatch(/^ci-failure-triage(-\d+)?$/);
     expect((await agentsOfTenant()).map((agent) => agent.key)).toEqual([kept]);
-    expect(await listAgentTriggers(scope())).toHaveLength(2);
+    expect(await listAgentTriggers(scope())).toHaveLength(1);
   });
 
   it('passes the notes of the validation on without stopping the create', async () => {

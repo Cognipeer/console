@@ -14,7 +14,9 @@
  *  - warnings do not: it runs, but something is probably not what was meant.
  */
 
+import { getFlowsHost } from '@/enterprise/flows';
 import { getConfig } from '@/lib/core/config';
+import { normalizeOcrSettings } from '@/lib/services/extraction/settings';
 import { REMINDER_INSTRUCTIONS_MAX_CHARS } from './agentRemindersConfig';
 import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
 import { getCrawler, crawlerHasCredentials, crawlerHasHostScope } from '@/lib/services/crawler';
@@ -118,6 +120,14 @@ function agentHasTools(config: IAgentConfig): boolean {
 export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValidation {
     const issues: Issues = { errors: [], warnings: [] };
     if (config.kind === 'external') return issues;
+    if (config.kind === 'flow') {
+        checkFlowAgentShape(issues, config);
+        return issues;
+    }
+    if (config.kind !== undefined && config.kind !== 'native') {
+        issues.errors.push({ field: 'kind', message: 'must be one of: native, external, flow' });
+        return issues;
+    }
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
     checkAdditionalModelsShape(issues, config);
@@ -316,6 +326,11 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
                 checkNumber(issues, 'attachments.outputs.maxFilesPerTurn', outputs.maxFilesPerTurn, { min: 1, max: SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn, integer: true });
                 checkNumber(issues, 'attachments.outputs.maxFileSizeMb', outputs.maxFileSizeMb, { min: 0, exclusiveMin: true, max: Math.min(SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb, getConfig().limits.fileUploadMaxMb) });
             }
+        }
+        // OCR for uploads: the shape only here (null = none); the model it names is checked against the project below.
+        if (attachments.ocr !== undefined && attachments.ocr !== null) {
+            const ocr = normalizeOcrSettings(attachments.ocr);
+            if (ocr.error) issues.errors.push({ field: 'attachments.ocr', message: ocr.error });
         }
         const folder = normalizeAttachmentsFolder(attachments.folder);
         if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
@@ -527,8 +542,8 @@ function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBin
         issues.errors.push({ field, message: 'Invalid tool binding' });
         return;
     }
-    if (binding.source !== 'tool' && binding.source !== 'mcp' && binding.source !== 'system') {
-        issues.errors.push({ field: `${field}.source`, message: 'must be one of: tool, mcp, system' });
+    if (binding.source !== 'tool' && binding.source !== 'mcp' && binding.source !== 'system' && binding.source !== 'flow') {
+        issues.errors.push({ field: `${field}.source`, message: 'must be one of: tool, mcp, system, flow' });
         return;
     }
     if (!binding.sourceKey) issues.errors.push({ field: `${field}.sourceKey`, message: 'is required' });
@@ -542,9 +557,58 @@ function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBin
         }
         return;
     }
+    if (binding.source === 'flow') {
+        checkFlowBindingShape(issues, field, binding);
+        return;
+    }
     if (!Array.isArray(binding.toolNames) || binding.toolNames.length === 0) {
         issues.errors.push({ field: `${field}.toolNames`, message: 'Select at least one action' });
     }
+}
+
+/** A model-visible tool name: what OpenAI-style function calling accepts (letters, digits, `_`, `-`; at most 64). */
+const FLOW_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Longest a flow tool call may wait for its run before answering `running`. */
+const FLOW_TOOL_MAX_WAIT_MS = 300_000;
+
+/** A binding whose source is `flow`: `sourceKey` = flow key, `toolNames[0]` = the tool name the model sees. */
+function checkFlowBindingShape(issues: Issues, field: string, binding: IAgentToolBinding): void {
+    const name = Array.isArray(binding.toolNames) ? binding.toolNames[0] : undefined;
+    if (typeof name !== 'string' || !FLOW_TOOL_NAME.test(name)) {
+        issues.errors.push({
+            field: `${field}.toolNames`,
+            message: 'A flow tool needs a name of letters, digits, "_" or "-" (at most 64 characters)',
+        });
+    } else if ((binding.toolNames?.length ?? 0) > 1) {
+        issues.warnings.push({ field: `${field}.toolNames`, message: 'A flow binding exposes one tool; only the first name is used' });
+    }
+    const config = binding.config;
+    if (config === undefined || config === null) return;
+    if (typeof config !== 'object' || Array.isArray(config)) {
+        issues.errors.push({ field: `${field}.config`, message: 'must be an object' });
+        return;
+    }
+    checkEnum(issues, `${field}.config.version`, config.version as string | undefined, FLOW_VERSIONS);
+    if (config.description !== undefined && typeof config.description !== 'string') {
+        issues.errors.push({ field: `${field}.config.description`, message: 'must be text' });
+    }
+    checkNumber(issues, `${field}.config.waitMs`, config.waitMs as number | undefined, { min: 0, max: FLOW_TOOL_MAX_WAIT_MS, integer: true });
+}
+
+const FLOW_VERSIONS = new Set(['published', 'draft']);
+
+/** A FlowBase agent: no model loop, so the only required piece is the flow that answers each turn. */
+function checkFlowAgentShape(issues: Issues, config: IAgentConfig): void {
+    const flow = config.flow;
+    if (!flow || typeof flow !== 'object') {
+        issues.errors.push({ field: 'flow.entryFlowId', message: 'Pick the flow that handles each conversation turn' });
+        return;
+    }
+    if (typeof flow.entryFlowId !== 'string' || flow.entryFlowId.trim() === '') {
+        issues.errors.push({ field: 'flow.entryFlowId', message: 'Pick the flow that handles each conversation turn' });
+    }
+    checkEnum(issues, 'flow.version', flow.version, FLOW_VERSIONS);
 }
 
 function hasPrice(pricing: { inputTokenPer1M?: number; outputTokenPer1M?: number } | undefined | null): boolean {
@@ -567,6 +631,10 @@ export async function validateAgentConfig(input: {
     const { config, projectId } = input;
     const issues = validateAgentConfigShape(config);
     if (config.kind === 'external') return issues;
+    if (config.kind === 'flow') {
+        if (issues.errors.length === 0 && input.tenantId) await checkEntryFlow(issues, input.tenantDbName, input.tenantId, projectId, config);
+        return issues;
+    }
 
     const db = await getDatabase();
     await db.switchToTenant(input.tenantDbName);
@@ -650,6 +718,16 @@ export async function validateAgentConfig(input: {
         }
     }
 
+    // The model OCR reads uploads with must exist in this project and be able to read documents (an OCR model or a
+    // vision model). Only checked when OCR is on: a model left over from switching it off blocks nothing.
+    const ocrModelKey = typeof config.attachments?.ocr?.modelKey === 'string' ? config.attachments.ocr.modelKey.trim() : '';
+    if (ocrModelKey && config.attachments?.ocr?.mode !== 'off' && !issues.errors.some((issue) => issue.field === 'attachments.ocr')) {
+        const { validateOcrModelRef } = await import('@/lib/services/extraction');
+        const problem = await validateOcrModelRef({ tenantDbName: input.tenantDbName, tenantId: input.tenantId ?? '', projectId }, ocrModelKey)
+            .catch((error: unknown) => `The OCR model "${ocrModelKey}" could not be checked: ${error instanceof Error ? error.message : String(error)}`);
+        if (problem) issues.errors.push({ field: 'attachments.ocr.modelKey', message: problem });
+    }
+
     const wantsCost = isNumber(config.runtime?.limits?.maxCostUsd) && config.runtime!.limits!.maxCostUsd! > 0;
     if (config.modelKey) await checkModel('modelKey', config.modelKey, wantsCost);
     for (const [index, entry] of (config.additionalModels ?? []).entries()) {
@@ -716,11 +794,15 @@ export async function validateAgentConfig(input: {
                 issues.errors.push({ field: `${field}.agentKey`, message: 'An agent cannot delegate to itself' });
                 continue;
             }
-            const target = await db.findAgentByKey(entry.agentKey, projectId).catch(() => null);
+            const found = await db.findAgentByKey(entry.agentKey, projectId).catch(() => null);
+            // A hidden agent a flow owns is not a delegation target (it is not addressable by key).
+            const target = found && !found.owner ? found : null;
             if (!target) {
                 issues.errors.push({ field: `${field}.agentKey`, message: `Agent "${entry.agentKey}" does not exist` });
             } else if (target.config?.kind === 'external') {
                 issues.errors.push({ field: `${field}.agentKey`, message: `"${entry.agentKey}" is a connected agent and cannot run as a sub-agent` });
+            } else if (target.config?.kind === 'flow') {
+                issues.errors.push({ field: `${field}.agentKey`, message: `"${entry.agentKey}" is a FlowBase agent and cannot run as a sub-agent` });
             } else if (entry.agentVersion === undefined && (target.publishedVersion ?? null) === null) {
                 issues.errors.push({ field: `${field}.agentKey`, message: `Agent "${entry.agentKey}" has no published version to delegate to` });
             } else if (input.agentKey && (target.config?.subagents ?? []).some((child) => child.kind === 'ref' && child.agentKey === input.agentKey)) {
@@ -792,6 +874,9 @@ async function checkBindingReferences(
                     issues.errors.push({ field: `${field}.toolNames`, message: `Tool "${binding.sourceKey}" has no action "${name}"` });
                 }
             }
+        } else if (binding.source === 'flow') {
+            if (!tenantId) continue;
+            await checkFlowReference(issues, field, tenantDbName, tenantId, projectId, { key: binding.sourceKey }, binding.config?.version === 'draft' ? 'draft' : 'published', 'tool');
         } else if (binding.source === 'mcp') {
             const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId).catch(() => null);
             if (!server) {
@@ -809,6 +894,51 @@ async function checkBindingReferences(
             }
         }
     }
+}
+
+/**
+ * A flow an agent points at must exist in this project. A flow without a published version
+ * still saves (the draft can be published afterwards) but warns, because a run of it fails until then.
+ */
+async function checkFlowReference(
+    issues: Issues,
+    field: string,
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    ref: { id?: string; key?: string },
+    wanted: 'published' | 'draft',
+    role: 'tool' | 'entry',
+): Promise<void> {
+    const label = ref.key ?? ref.id ?? '';
+    const host = getFlowsHost();
+    if (!host) {
+        // Flows are not part of this edition: an entry flow cannot answer, a flow tool is ignored at run time.
+        if (role === 'entry') issues.errors.push({ field, message: 'Flows are part of the Enterprise edition' });
+        else issues.warnings.push({ field, message: `Flow "${label}" is ignored: Flows are part of the Enterprise edition` });
+        return;
+    }
+    const flow = await host.describeFlow({ tenantDbName, tenantId, projectId }, ref).catch(() => null);
+    if (!flow) {
+        issues.errors.push({ field, message: `Flow "${label}" does not exist in this project` });
+        return;
+    }
+    if (flow.status !== 'active') {
+        issues.errors.push({ field, message: `Flow "${label}" is archived` });
+        return;
+    }
+    if (wanted === 'published' && !flow.hasPublished) {
+        issues.warnings.push({ field, message: `Flow "${label}" has no published version yet, so ${role === 'tool' ? 'the tool fails' : 'the agent cannot answer'} until it is published` });
+    }
+    if (role === 'entry' && flow.surface && flow.surface !== 'conversation') {
+        issues.warnings.push({ field, message: `Flow "${label}" is a headless flow: it cannot reply in the chat. Use a conversation flow` });
+    }
+}
+
+async function checkEntryFlow(issues: Issues, tenantDbName: string, tenantId: string, projectId: string, config: IAgentConfig): Promise<void> {
+    const flow = config.flow;
+    if (!flow) return;
+    await checkFlowReference(issues, 'flow.entryFlowId', tenantDbName, tenantId, projectId, { id: flow.entryFlowId }, flow.version === 'draft' ? 'draft' : 'published', 'entry');
 }
 
 /** The 400 body for a config that failed validation: the first error, and how many more there are. */

@@ -188,12 +188,12 @@ function mcpResource(server: IMcpServer): ManifestMcpResource | { skip: string }
     return { skip: 'its source definition is incomplete' };
 }
 
-function toolResource(tool: ITool): ManifestToolResource {
+function toolResource(tool: ITool, type: ManifestToolResource['type']): ManifestToolResource {
     return {
         key: tool.key,
         name: tool.name,
         ...(tool.description ? { description: tool.description } : {}),
-        type: tool.type,
+        type,
         ...(tool.openApiSpec ? { openApiSpec: tool.openApiSpec } : {}),
         ...(tool.upstreamBaseUrl ? { upstreamBaseUrl: tool.upstreamBaseUrl } : {}),
         ...(tool.mcpEndpoint ? { mcpEndpoint: tool.mcpEndpoint } : {}),
@@ -263,7 +263,9 @@ export async function collectManifestResources(
         for (const key of refs.tools) {
             const tool = await db.findToolByKey(key, projectId);
             if (!tool) { missing('tools', key); continue; }
-            (resources.tools ??= []).push(toolResource(tool));
+            // A connector's own actions have no endpoint or spec to carry: the importing workspace installs its own connector.
+            if (tool.type === 'connector') { skipped.push({ type: 'tools', key, reason: 'managed by a connector' }); continue; }
+            (resources.tools ??= []).push(toolResource(tool, tool.type));
         }
     }
     return { resources, skipped };

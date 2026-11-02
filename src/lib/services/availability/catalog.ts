@@ -41,6 +41,7 @@ export const SERVICE_REQUIRES: Readonly<Record<string, readonly string[]>> = {
   memory: ['vector'],
   portals: ['agents'],
   channels: ['agents'],
+  connectors: ['tools'],
   realtime: ['models'],
   evaluations: ['models'],
   redteam: ['models'],

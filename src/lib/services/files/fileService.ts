@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileRecord, type IProviderRecord } from '@/lib/database';
+import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileMarkdownExtraction, type IFileRecord, type IProviderRecord } from '@/lib/database';
 import { normalizeFolderPrefix } from '@/lib/database/fileEntryWalk';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
@@ -40,7 +40,8 @@ import {
     type BucketFieldsPatch,
 } from './bucketRules';
 import { bucketDeletingError, bucketInactiveError, describeFailure, FileServiceError, hasObjectMissingCode } from './errors';
-import { convertDocumentToMarkdown, DocumentConversionRefused } from './documentConversion';
+import { DocumentConversionRefused, extractDocument } from '../extraction/engine';
+import { compactExtraction, extractionWithResult } from './markdownExtraction';
 import { publishConvertMarkdownJob, type ConvertMarkdownJobPayload } from './jobs/filesQueue';
 import { isMarkdownConvertible } from './markdownSupport';
 import { base64TextOf } from './payloadSize';
@@ -444,9 +445,11 @@ async function buildRuntimeContext(
 }
 
 export function serializeFileRecord(record: IFileRecord): FileRecordView {
-    const { _id, ...rest } = record;
+    const { _id, markdownExtraction, ...rest } = record;
     return {
         ...rest,
+        // A cleared setting is `null` in some databases: the view omits what is not there.
+        ...(markdownExtraction ? { markdownExtraction } : {}),
         id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
     } satisfies FileRecordView;
 }
@@ -678,31 +681,6 @@ function deriveMarkdownKey(originalKey: string): string {
         }
     }
     return `${originalKey}.md`;
-}
-
-function extractMarkdownContent(conversion: unknown): string | undefined {
-    if (!conversion) {
-        return undefined;
-    }
-
-    if (typeof conversion === 'string') {
-        return conversion;
-    }
-
-    if (typeof conversion === 'object') {
-        const candidate = conversion as Record<string, unknown>;
-        if (typeof candidate.markdown === 'string') {
-            return candidate.markdown;
-        }
-        if (typeof candidate.content === 'string') {
-            return candidate.content;
-        }
-        if (typeof candidate.result === 'string') {
-            return candidate.result;
-        }
-    }
-
-    return undefined;
 }
 
 function truncateError(error: unknown): string {
@@ -1037,6 +1015,7 @@ async function persistRecord(
         etag: handle.etag,
         metadata: handle.metadata ?? request.metadata,
         markdownStatus,
+        ...(settingsOf(request) ? { markdownExtraction: settingsOf(request) } : {}),
         ...(request.recordExtras ?? {}),
         createdBy: request.createdBy,
     });
@@ -1076,6 +1055,10 @@ async function replaceRecord(
         markdownSize: null,
         markdownContentType: null,
         markdownError: null,
+        // The settings and the result belong to the old bytes: the new upload's settings (if any) take their place.
+        ...(settingsOf(request)
+            ? { markdownExtraction: settingsOf(request) }
+            : existing.markdownExtraction ? { markdownExtraction: null } : {}),
         updatedBy: request.createdBy,
     });
     if (!updated) return null;
@@ -1096,9 +1079,30 @@ async function replaceRecord(
     return serializeFileRecord(updated);
 }
 
+/** The extraction settings an upload asks for, compact; `undefined` for the plain conversion. */
+function settingsOf(request: UploadFileRequest): IFileMarkdownExtraction | undefined {
+    return compactExtraction(request.extraction);
+}
+
+/** What a run may be told besides the bytes: who it is for, how long the caller can wait, and how to report progress. */
+export interface MarkdownConversionOptions {
+    /** The tenant database; needed for OCR through a project model (without it OCR is not attempted). */
+    tenantDbName?: string;
+    userId?: string;
+    /** The project the file is in; preferred over the record's own (a legacy record may carry none). */
+    projectId?: string;
+    /** `inline`: a request waits for the answer (the default). `background`: a job. */
+    budget?: 'inline' | 'background';
+    onProgress?: (progress: { completed: number; total: number }) => void;
+    signal?: AbortSignal;
+}
+
 /** The file a Markdown copy is made for, as the conversion needs to know it: a stored record or the view of one. */
 interface ConvertedFile {
     key: string;
+    contentType?: string | null;
+    /** OCR / picture settings of the conversion, and what the last run found. */
+    markdownExtraction?: IFileMarkdownExtraction | null;
     /** The `id` of a record view, or the `_id` of a stored record. */
     id?: string;
     _id?: unknown;
@@ -1194,11 +1198,33 @@ export async function applyMarkdownConversion(
     request: Pick<UploadFileRequest, 'fileName'>,
     fileBuffer: Buffer,
     db: DatabaseProvider,
+    options: MarkdownConversionOptions = {},
 ): Promise<UpdateFileConversionPayload> {
     let markdownContent: string | undefined;
+    // The settings the record carries (OCR, pictures); none = the plain conversion, as before OCR existed.
+    const settings = compactExtraction(record.markdownExtraction);
+    let extraction: IFileMarkdownExtraction | undefined;
     try {
-        const conversion = await convertDocumentToMarkdown(fileBuffer, request.fileName);
-        markdownContent = extractMarkdownContent(conversion);
+        const extracted = await extractDocument({
+            scope: {
+                tenantDbName: options.tenantDbName ?? '',
+                tenantId: bucket.tenantId,
+                ...((options.projectId ?? record.projectId) ? { projectId: options.projectId ?? record.projectId } : {}),
+                ...(options.userId ? { userId: options.userId } : {}),
+            },
+            source: 'files',
+            fileName: request.fileName,
+            data: fileBuffer,
+            ...(record.contentType ? { contentType: record.contentType } : {}),
+            // OCR through a project model needs the tenant database to be named; without it the plain conversion runs.
+            ...(settings?.ocr && options.tenantDbName ? { ocr: settings.ocr } : {}),
+            ...(settings?.images ? { images: settings.images } : {}),
+            budget: options.budget ?? 'inline',
+            ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+            ...(options.signal ? { signal: options.signal } : {}),
+        });
+        markdownContent = extracted.text;
+        extraction = extractionWithResult(record.markdownExtraction, extracted.report);
     } catch (error) {
         if (error instanceof DocumentConversionRefused) {
             return {
@@ -1263,6 +1289,7 @@ export async function applyMarkdownConversion(
             markdownKey: storedRelativeKey,
             markdownSize: handle.size ?? markdownBuffer.length,
             markdownContentType: handle.contentType ?? 'text/markdown',
+            ...(extraction ? { markdownExtraction: extraction } : {}),
         } satisfies UpdateFileConversionPayload;
     } catch (error) {
         logger.error('Storing the Markdown copy failed', { error });
@@ -1400,7 +1427,8 @@ export async function uploadFile(
     const conversionRequested = request.convertToMarkdown ?? true;
     // `queued`: a background job makes the copy, and only for the formats it can read (markdownSupport): a file of
     // any other kind has nothing to wait for. The default (`sync`) converts before the call returns.
-    const convertLater = conversionRequested && request.markdown === 'queued' && isMarkdownConvertible(fileName);
+    const convertLater = conversionRequested && request.markdown === 'queued'
+        && isMarkdownConvertible(fileName, { ocr: compactExtraction(request.extraction)?.ocr });
     const convertNow = conversionRequested && request.markdown !== 'queued';
     const initialStatus: FileMarkdownStatus = convertNow || convertLater ? 'pending' : 'skipped';
     const wholeKey = namesWholeKey(request.keyHint);
@@ -1491,6 +1519,13 @@ export async function uploadFile(
         request,
         fileBuffer,
         db,
+        {
+            tenantDbName,
+            projectId,
+            userId: request.createdBy,
+            budget: 'inline',
+            ...(request.signal ? { signal: request.signal } : {}),
+        },
     );
 
     const settled = await db.updateFileRecord(record.id, {
@@ -1499,6 +1534,7 @@ export async function uploadFile(
         markdownSize: conversion.markdownSize,
         markdownContentType: conversion.markdownContentType,
         markdownError: conversion.markdownError,
+        ...(conversion.markdownExtraction ? { markdownExtraction: conversion.markdownExtraction } : {}),
         updatedBy: request.createdBy,
     });
     if (!settled) {
@@ -1526,7 +1562,14 @@ export async function replaceFileContent(
     projectId: string,
     bucketKey: string,
     key: string,
-    input: { data: Buffer; updatedBy: string; /** false = keep the bytes as the only version (no text copy). Default true. */ convertToMarkdown?: boolean },
+    input: {
+        data: Buffer;
+        updatedBy: string;
+        /** false = keep the bytes as the only version (no text copy). Default true. */
+        convertToMarkdown?: boolean;
+        /** Stops an OCR run that is still going when the caller has gone. */
+        signal?: AbortSignal;
+    },
 ): Promise<FileRecordView> {
     const { bucket, runtime, record } = await requireFileRecord(tenantDbName, tenantId, projectId, bucketKey, key, 'write');
     const request: UploadFileRequest = {
@@ -1552,12 +1595,23 @@ export async function replaceFileContent(
     const db = await withTenantDb(tenantDbName);
     const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
         ? { markdownStatus: 'skipped' }
-        : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db);
+        : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, {
+            tenantDbName,
+            projectId,
+            userId: input.updatedBy,
+            budget: 'inline',
+            ...(input.signal ? { signal: input.signal } : {}),
+        });
+    // What the last run found belongs to the old bytes: a run that did not produce a new result leaves none behind.
+    const clearedExtraction = !conversion.markdownExtraction && record.markdownExtraction
+        ? { markdownExtraction: compactExtraction(record.markdownExtraction) ?? null }
+        : {};
     const updated = await db.updateFileRecord(record.id, {
         size: upload.handle.size ?? input.data.length,
         checksum: upload.handle.checksum,
         etag: upload.handle.etag,
         ...conversion,
+        ...clearedExtraction,
         updatedBy: input.updatedBy,
     });
     if (!updated) {

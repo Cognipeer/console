@@ -1,4 +1,5 @@
-import type { FileMarkdownStatus, FileTypeFilter, IFileBucketRecord, IFileRecord } from '@/lib/database';
+import type { FileMarkdownStatus, FileTypeFilter, IFileBucketRecord, IFileMarkdownExtraction, IFileRecord } from '@/lib/database';
+import type { ImagePolicy, OcrSettings } from '@/lib/services/extraction/types';
 import type { ProviderCapabilityFlags } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 
@@ -153,6 +154,20 @@ export interface UploadFileRequest {
   keyHint?: string;
   /** Session-file tags written onto the record (`IFileRecord.purpose` and friends). */
   recordExtras?: Partial<Pick<IFileRecord, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy' | 'origin'>>;
+  /**
+   * How the Markdown copy is extracted: OCR settings and the policy for pictures. Stored on the record
+   * (`markdownExtraction`), so the background job and a later "Convert again" use the same settings. Absent = the
+   * plain conversion, exactly as before OCR existed.
+   */
+  extraction?: FileExtractionRequest;
+  /** Stops a synchronous conversion (OCR can take a while) when the caller has gone. */
+  signal?: AbortSignal;
+}
+
+/** The settings a caller may give for the extraction of one file's Markdown copy. */
+export interface FileExtractionRequest {
+  ocr?: OcrSettings;
+  images?: ImagePolicy;
 }
 
 export interface UploadFileResponse {
@@ -178,6 +193,8 @@ export interface UpdateFileConversionPayload {
   markdownSize?: number;
   markdownContentType?: string;
   markdownError?: string;
+  /** The record's extraction settings with the result of this run added; absent when the file has no settings. */
+  markdownExtraction?: IFileMarkdownExtraction;
   updatedBy?: string;
 }
 

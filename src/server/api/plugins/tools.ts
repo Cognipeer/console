@@ -4,12 +4,14 @@ import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
 import { isMcpToolInputError } from '@/lib/services/mcp/errors';
 import {
+  addSecretValues,
   aggregateToolRequestLogs,
   countToolRequestLogs,
   createTool,
   deleteTool,
   executeToolAction,
   getTool,
+  isManagedTool,
   listToolRequestLogs,
   listTools,
   logToolRequest,
@@ -18,6 +20,7 @@ import {
   syncToolActions,
   updateTool,
 } from '@/lib/services/tools';
+import type { CreateToolInput } from '@/lib/services/tools';
 import {
   buildRuntimeContextFromRequest,
   describeRuntimeAuth,
@@ -32,6 +35,7 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:tools');
+const MANAGED_TOOL_MESSAGE = 'This tool is managed by a connector. Change it from the connector.';
 
 /**
  * Resolve a tool by id within the caller's project scope.
@@ -62,7 +66,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as {
         search?: string;
         status?: 'active' | 'disabled';
-        type?: 'mcp' | 'openapi';
+        type?: 'mcp' | 'openapi' | 'connector';
       };
 
       const tools = await listTools(session.tenantDbName, {
@@ -95,6 +99,10 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Tool type must be "openapi" or "mcp"' });
       }
 
+      if ((body.upstreamAuth as IToolAuthConfig | undefined)?.type === 'connector') {
+        return reply.code(400).send({ error: 'Connector tools are created from the connector' });
+      }
+
       const tool = await createTool(session.tenantDbName, session.tenantId, session.userId, projectId, {
         description: body.description as string | undefined,
         mcpEndpoint: body.mcpEndpoint as string | undefined,
@@ -103,7 +111,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
         openApiSpec: body.openApiSpec as string | undefined,
         specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
         type: body.type,
-        upstreamAuth: body.upstreamAuth as IToolAuthConfig | undefined,
+        upstreamAuth: body.upstreamAuth as CreateToolInput['upstreamAuth'],
         upstreamBaseUrl: body.upstreamBaseUrl as string | undefined,
       });
 
@@ -152,8 +160,12 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
       const { toolId } = request.params as { toolId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (!(await toolInProjectScope(session.tenantDbName, toolId, projectId))) {
+      const existing = await toolInProjectScope(session.tenantDbName, toolId, projectId);
+      if (!existing) {
         return reply.code(404).send({ error: 'Tool not found' });
+      }
+      if (isManagedTool(existing)) {
+        return reply.code(409).send({ error: MANAGED_TOOL_MESSAGE });
       }
 
       if (body.sync === true) {
@@ -184,8 +196,12 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { toolId } = request.params as { toolId: string };
-      if (!(await toolInProjectScope(session.tenantDbName, toolId, projectId))) {
+      const existing = await toolInProjectScope(session.tenantDbName, toolId, projectId);
+      if (!existing) {
         return reply.code(404).send({ error: 'Tool not found' });
+      }
+      if (isManagedTool(existing)) {
+        return reply.code(409).send({ error: MANAGED_TOOL_MESSAGE });
       }
       const deleted = await deleteTool(session.tenantDbName, toolId);
 
@@ -302,7 +318,9 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
       const secretValues = toolRequestSecretValues(tool, runtimeHeaders);
 
       try {
-        const { latencyMs, result, isError } = await executeToolAction(tool, actionKey, args, runtimeHeaders);
+        const { latencyMs, result, isError } = await executeToolAction(tool, actionKey, args, runtimeHeaders, {
+          onSecrets: (values) => addSecretValues(secretValues, values),
+        });
 
         void logToolRequest(
           session.tenantDbName,

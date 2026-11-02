@@ -48,6 +48,7 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { rowsWithHiddenContent } from '../restrictedKnowledgeRequest';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -658,8 +659,23 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         skip,
         to: to ? new Date(to) : undefined,
       });
+      // A call that carried passages of knowledge base documents not open to everyone: its numbers, not its text,
+      // unless the viewer made it (or the agent session it belongs to) or reads those knowledge bases anyway.
+      const hidden = await rowsWithHiddenContent(
+        request,
+        { tenantDbName: session.tenantDbName, viewerUserId: session.userId },
+        logs,
+        (log) => ({ tags: log.kbRestricted, askers: [log.userId] }),
+      );
 
-      return reply.code(200).send({ logs });
+      return reply.code(200).send({
+        logs: logs.map((log) => {
+          if (!hidden.has(log)) return log;
+          const { providerRequest: _request, providerResponse: _response, errorMessage: _error, ...rest } = log;
+          void _request; void _response; void _error;
+          return { ...rest, restricted: true };
+        }),
+      });
     } catch (error) {
       logger.error('Fetch model logs error', { error });
       return sendProjectError(reply, error)

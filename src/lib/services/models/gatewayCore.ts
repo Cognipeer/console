@@ -54,6 +54,7 @@ import {
   type OutputLimitDialect,
 } from './openaiErrors';
 import { buildCacheVariantKey, isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
+import { currentKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
 import {
   describeRequestContract,
@@ -704,7 +705,10 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
   const outputGuardrailKeys = resolveBindings(model, 'output.pre');
   const includeReasoning = shouldReturnReasoning(model.settings, wire) && context.showReasoning !== false;
   const cacheEnabled = Boolean(
-    !stream && tenantId && isSemanticCacheEnabled(model) && isCacheableConversation(request, wire, route),
+    !stream && tenantId && isSemanticCacheEnabled(model) && isCacheableConversation(request, wire, route)
+    // Work that handled passages not open to everyone neither stores an answer another caller could be served nor
+    // is served one (rag/access/exposure.ts).
+    && !currentKnowledgeExposure()?.restricted,
   );
   const cacheVariantKey = buildCacheVariantKey({
     ...invocation.overrides,

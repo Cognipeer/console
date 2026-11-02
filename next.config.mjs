@@ -77,6 +77,13 @@ const nextConfig = {
     '@cognipeer/pii',
     // Azure Blob file provider (providers/contracts/azure): imported lazily on first use, so keep it out of the bundle.
     '@azure/storage-blob',
+    // Local OCR engine (services/extraction/localOcr.ts, driven through @cognipeer/to-markdown). tesseract.js
+    // starts its worker and loads the wasm core by paths computed from `__dirname`, which webpack rewrites for
+    // anything it bundles; `sharp` is a native binary like @napi-rs/canvas above (a no-op where Next already
+    // externalizes it). Node's own `require` resolves all three at runtime.
+    'tesseract.js',
+    'tesseract.js-core',
+    'sharp',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),

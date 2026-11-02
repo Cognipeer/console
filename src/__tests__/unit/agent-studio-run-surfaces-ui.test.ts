@@ -5,7 +5,7 @@
  *  - the runs table treats a scheduled run as pending work (label, Cancel, polling);
  *  - the webhook Connect card follows the stored secret hint and grace after a re-save;
  *  - the triggers and deliveries panels say a load failed (with a retry) instead of "nothing here";
- *  - the cron presets and filter examples are buttons.
+ *  - the cron presets are buttons.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -196,7 +196,7 @@ describe('a failed load is not an empty list', () => {
   it('triggers: a saved list reads in full — type as text with an icon, status as a dot and a word', async () => {
     fetchMock.mockImplementation(() => json({ data: [{
       id: 'r1', object: 'agent.trigger', agent: 'a', name: 'github-pr-review-with-a-rather-long-name', description: null, enabled: true,
-      type: 'webhook', webhook: { preset: 'github', events: ['pull_request'] }, prompt: 'x', variables: null, version: null, class: 'default',
+      type: 'webhook', webhook: { preset: 'github', events: ['pull_request'], retired: true }, prompt: 'x', variables: null, version: null, class: 'default',
       metadata: {}, callback: null, response_format: null, next_fire_at: null, last_fire_at: 1_760_000_000, last_run_id: 'run_1', last_status: 'failed', last_error: 'boom',
       created_at: null, updated_at: null,
     }] }));
@@ -204,6 +204,7 @@ describe('a failed load is not an empty list', () => {
     await flush();
     expect(document.querySelector('table')).toBeNull();
     expect(text()).toContain('GitHub · pull_request');
+    expect(text()).toContain('Retired');
     expect(text()).toContain('Failed');
     expect(document.querySelector('[role="img"][aria-label="Webhook"]')).not.toBeNull();
     expect(document.querySelector('[title="github-pr-review-with-a-rather-long-name"]')).not.toBeNull();
@@ -233,13 +234,7 @@ describe('a failed load is not an empty list', () => {
   });
 });
 
-describe('chips a keyboard can reach', () => {
-  it('the filter examples are buttons', () => {
-    const form = { ...emptyTriggerForm(), type: 'webhook' as const, webhookPreset: 'github' as const };
-    const markup = renderToStaticMarkup(wrap(h(WebhookFields, { form, set: () => undefined, storedStandardSecret: false, errorOf: () => undefined })));
-    expect(markup).toMatch(/<button[^>]*type="button"[^>]*>(<span[^>]*>)*Opened \/ synchronize/);
-  });
-
+describe('controls a keyboard can reach', () => {
   // One editor session for both checks.
   it('in the trigger editor: the cron presets are buttons that say which one is selected, and a save that fails on the network says so', async () => {
     fetchMock.mockImplementation((_url: string, init?: { method?: string }) => (init?.method === 'POST' ? Promise.reject(new Error('offline')) : json({ data: [] })));

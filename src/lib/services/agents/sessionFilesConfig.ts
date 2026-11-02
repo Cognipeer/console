@@ -6,6 +6,9 @@
 
 import type { IAgentAttachmentsConfig, IAgentConfig } from '@/lib/database/provider/types.domain';
 
+/** `attachments.ocr` as resolved: the same shape as stored, sanitised. */
+export type ResolvedAttachmentsOcr = NonNullable<IAgentAttachmentsConfig['ocr']>;
+
 /** What an unset field of `IAgentConfig.attachments` falls back to. */
 export const SESSION_FILES_DEFAULTS = {
     enabled: false,
@@ -84,6 +87,41 @@ export interface ResolvedAttachmentsConfig {
     /** Recent image-bearing messages shown again when they fell out of the agent's context. 0 = off. */
     carryRecentImages: number;
     bucketKey?: string;
+    /** OCR for uploads, sanitised; absent when the agent has none stored. `mode: 'off'` = stored but off. */
+    ocr?: ResolvedAttachmentsOcr;
+}
+
+const OCR_MODES: ReadonlySet<string> = new Set(['off', 'auto', 'always']);
+
+/**
+ * `attachments.ocr` as the runtime reads it. A stored value that bypassed the save check (by hand, an old import)
+ * must not break an upload: what is wrong is dropped, and a missing or unknown `mode` is `off`.
+ */
+export function resolveAttachmentsOcr(raw: unknown): ResolvedAttachmentsOcr | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const input = raw as Record<string, unknown>;
+    const mode = typeof input.mode === 'string' && OCR_MODES.has(input.mode) ? (input.mode as ResolvedAttachmentsOcr['mode']) : 'off';
+    const modelKey = typeof input.modelKey === 'string' ? input.modelKey.trim() : '';
+    const languages = Array.isArray(input.languages)
+        ? [...new Set(input.languages.filter((entry): entry is string => typeof entry === 'string' && /^[a-z]{2,3}(_[a-z]+)?$/i.test(entry.trim())).map((entry) => entry.trim().toLowerCase()))].slice(0, 8)
+        : [];
+    return {
+        mode,
+        ...(modelKey && modelKey.length <= 120 ? { modelKey } : {}),
+        ...(languages.length > 0 ? { languages } : {}),
+        ...(typeof input.maxPages === 'number' && Number.isInteger(input.maxPages) && input.maxPages >= 1 ? { maxPages: input.maxPages } : {}),
+        ...(typeof input.images === 'boolean' ? { images: input.images } : {}),
+    };
+}
+
+/** OCR is switched on for uploads (a stored `mode` other than `off`). */
+export function attachmentsOcrActive(cfg: Pick<ResolvedAttachmentsConfig, 'ocr'>): boolean {
+    return cfg.ocr !== undefined && cfg.ocr.mode !== 'off';
+}
+
+/** Pictures are read by OCR too: OCR is on and the agent asked for images. */
+export function attachmentsOcrReadsImages(cfg: Pick<ResolvedAttachmentsConfig, 'ocr'>): boolean {
+    return attachmentsOcrActive(cfg) && cfg.ocr?.images === true;
 }
 
 function positive(value: unknown, fallback: number): number {
@@ -120,6 +158,7 @@ export function resolveAttachmentsConfig(raw?: IAgentAttachmentsConfig | null): 
     // A folder that cannot be one (stored by hand, bypassing the save check) falls back to the default
     // rather than letting a path escape the layout.
     const folder = normalizeAttachmentsFolder(raw?.folder).folder || SESSION_FILES_DEFAULTS.folder;
+    const ocr = resolveAttachmentsOcr(raw?.ocr);
     return {
         enabled: raw?.enabled === true,
         maxFiles: Math.floor(positive(raw?.maxFiles, SESSION_FILES_DEFAULTS.maxFiles)),
@@ -136,6 +175,7 @@ export function resolveAttachmentsConfig(raw?: IAgentAttachmentsConfig | null): 
         maxBytes: Math.floor(positive(raw?.maxBytes, SESSION_FILES_DEFAULTS.maxBytes)),
         carryRecentImages: nonNegativeInt(raw?.carryRecentImages, SESSION_FILES_DEFAULTS.carryRecentImages),
         ...(typeof raw?.bucketKey === 'string' && raw.bucketKey.trim() ? { bucketKey: raw.bucketKey.trim() } : {}),
+        ...(ocr ? { ocr } : {}),
     };
 }
 
@@ -259,15 +299,16 @@ export function isUnsupportedImageMime(mimeType: string | undefined): boolean {
  * to that smaller number: refused when it arrives rather than dropped, unseen,
  * from every request.
  */
-export function maxUploadBytes(cfg: Pick<ResolvedAttachmentsConfig, 'maxFileSizeMb' | 'maxBytes'>, mimeType: string | undefined): number {
+export function maxUploadBytes(cfg: Pick<ResolvedAttachmentsConfig, 'maxFileSizeMb' | 'maxBytes' | 'ocr'>, mimeType: string | undefined): number {
     const perFile = Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
-    return isSendableImageMime(mimeType) ? Math.min(perFile, cfg.maxBytes) : perFile;
+    // With OCR on pictures, a picture too big to show is still read as text, so it is held to the document limit.
+    return isSendableImageMime(mimeType) && !attachmentsOcrReadsImages(cfg) ? Math.min(perFile, cfg.maxBytes) : perFile;
 }
 
 /** The size refusal for a file of this type, in the words of whichever limit it hit. */
-export function fileTooLargeMessage(cfg: Pick<ResolvedAttachmentsConfig, 'maxFileSizeMb' | 'maxBytes'>, mimeType: string | undefined): string {
+export function fileTooLargeMessage(cfg: Pick<ResolvedAttachmentsConfig, 'maxFileSizeMb' | 'maxBytes' | 'ocr'>, mimeType: string | undefined): string {
     const perFile = Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
-    if (isSendableImageMime(mimeType) && cfg.maxBytes < perFile) {
+    if (isSendableImageMime(mimeType) && !attachmentsOcrReadsImages(cfg) && cfg.maxBytes < perFile) {
         return `Images larger than ${Math.round((cfg.maxBytes / 1_000_000) * 10) / 10} MB cannot be shown to the model (the image size limit of this agent).`;
     }
     return `File exceeds the ${cfg.maxFileSizeMb} MB limit of this agent.`;

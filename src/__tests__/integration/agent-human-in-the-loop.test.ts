@@ -70,6 +70,8 @@ import { truncateSessionAfterMessage } from '@/lib/services/agents/sessionTrunca
 import { parsePausedState } from '@/lib/services/agents/agentPendingActions';
 import { decodeStoredState, encodeStoredState } from '@/lib/services/agents/agentTurnState';
 import { queueAgentRun } from '../helpers/agent-runs';
+import { decryptObject } from '@/lib/utils/crypto';
+import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 const DB_NAME = 'tenant_hitl';
 const PROJECT_ID = 'proj-1';
@@ -564,8 +566,20 @@ describe('unattended callers', () => {
     expect(model.offered.flat()).not.toContain('ask_user_question');
   });
 
-  it('an agent with no human-in-the-loop settings is unaffected by being unattended', async () => {
+  it('an agent with no human-in-the-loop settings refuses the call unattended, and the message names the fix', async () => {
     await createAgent();
+    const model = scriptModel(oneToolScript('ls'));
+    const response = await chat(String((await newConversation())._id), 'list', { unattended: true });
+    expect(response.status).toBe('completed');
+    expect(executed).toEqual([]);
+    const refusal = String(model.seen.at(-1)!.find((m) => m.role === 'tool')?.content);
+    expect(refusal).toContain('no approver is available');
+    expect(refusal).toContain('Never ask');
+    expect(refusal).toContain('humanInTheLoop');
+  });
+
+  it('an agent that switched approval off is unaffected by being unattended', async () => {
+    await createAgent({ humanInTheLoop: { toolApproval: { enabled: false } } });
     scriptModel(oneToolScript('ls'));
     const response = await chat(String((await newConversation())._id), 'list', { unattended: true });
     expect(response.status).toBe('completed');
@@ -945,9 +959,20 @@ describe('(f) a new message while a request is open', () => {
   });
 });
 
-describe('(g) back-compat: an agent without humanInTheLoop never pauses', () => {
-  it('runs the tool straight away and writes none of the new fields', async () => {
-    await createAgent(); // no humanInTheLoop
+describe('(g) an agent without humanInTheLoop has made no choice: it asks', () => {
+  it('pauses on a tool that is not read-only, like a dashboard agent', async () => {
+    await createAgent(); // no humanInTheLoop (an agent created through the client API)
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const response = await chat(id, 'list');
+
+    expect(response.status).toBe('requires_action');
+    expect(executed).toEqual([]);
+    expect(await db.listAgentPendingActions(id, { status: 'pending' })).toHaveLength(1);
+  });
+
+  it('switching approval off is the owner\'s explicit choice: the tool runs straight away and nothing is written', async () => {
+    await createAgent({ humanInTheLoop: { toolApproval: { enabled: false } } });
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
     const response = await chat(id, 'list');
@@ -1943,5 +1968,58 @@ describe('(i) who a continued turn is for', () => {
     expect(after.kind).toBe('resumed');
     // It paused again, on the second call, and the turn is still the owner's, not the approver's.
     expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
+  });
+});
+
+describe('a reminder set in a continued turn', () => {
+  /** Asks to run a command (gated), then sets a reminder in the continued turn, then answers. */
+  const script = (call: number): Reply => {
+    if (call === 0) return { role: 'assistant', content: '', tool_calls: [toolCall('c1', 'sandbox_exec', { command: 'deploy' })] };
+    if (call === 1) return { role: 'assistant', content: '', tool_calls: [toolCall('c2', 'reminder_set', { delay_seconds: 600, message: 'Check the deploy.' })] };
+    return { role: 'assistant', content: 'I will check back.' };
+  };
+  const withReminders = () => createAgent({
+    humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always', tools: { reminder_set: 'never' } } },
+    reminders: { enabled: true, afterUntrustedContent: 'allow' },
+  });
+  /** The runtime context the wake of the session's reminder starts with. */
+  const wakeContextOf = async (conversationId: string): Promise<AgentRuntimeContext | undefined> => {
+    const [reminder] = await db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId, channel: 'reminder' });
+    expect(reminder, 'a reminder was set').toBeTruthy();
+    const sealed = (reminder!.runtimeContext as { sealed?: string } | null)?.sealed;
+    return sealed ? decryptObject<AgentRuntimeContext>(sealed) : undefined;
+  };
+  const approve = (conversationId: string, actionId: string, userId: string, runtimeContext: AgentRuntimeContext) => resolveAgentPendingAction({
+    tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId, actionId, body: { decision: 'allow' },
+    actor: { userId, channel: 'dashboard' }, authorize: allow, mode: 'sync', runtimeContext,
+  });
+
+  it('wakes as the person when that person continues their own turn', async () => {
+    await withReminders();
+    scriptModel(script);
+    const id = String((await newConversation())._id);
+    const first = await chat(id, 'deploy', { runtimeContext: { userId: OWNER, source: 'portal' } });
+    expect((await approve(id, first.required_action!.actions[0].id, OWNER, { userId: OWNER, source: 'portal' })).kind).toBe('resumed');
+    const wake = await wakeContextOf(id);
+    expect(wake).toMatchObject({ source: 'reminder', userId: OWNER });
+    expect(wake).not.toHaveProperty('kbReader');
+  });
+
+  it('wakes reading as no one when somebody else continued it: the turn read for the person it paused for', async () => {
+    await withReminders();
+    scriptModel(script);
+    const id = String((await newConversation())._id);
+    const first = await chat(id, 'deploy', { runtimeContext: { userId: OWNER, source: 'portal' } });
+    expect((await approve(id, first.required_action!.actions[0].id, 'approver-9', { userId: 'approver-9', source: 'playground' })).kind).toBe('resumed');
+    expect(await wakeContextOf(id)).toMatchObject({ source: 'reminder', userId: 'approver-9', kbReader: 'anonymous' });
+  });
+
+  it('wakes reading as no one when the paused turn read as no one (a shared channel), whoever continues it', async () => {
+    await withReminders();
+    scriptModel(script);
+    const id = String((await newConversation())._id);
+    const first = await chat(id, 'deploy', { runtimeContext: { userId: OWNER, source: 'messaging', kbReader: 'anonymous' } });
+    expect((await approve(id, first.required_action!.actions[0].id, OWNER, { userId: OWNER, source: 'playground' })).kind).toBe('resumed');
+    expect(await wakeContextOf(id)).toMatchObject({ source: 'reminder', userId: OWNER, kbReader: 'anonymous' });
   });
 });

@@ -2,7 +2,7 @@
  * Tool Service – Types
  */
 
-import type { IToolAction, IToolAuthConfig, ToolSourceType } from '@/lib/database';
+import type { IToolAction, IToolAuthConfig, ToolSourceType, ToolStatus } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 
 // ── View types ──────────────────────────────────────────────────────────
@@ -21,6 +21,8 @@ export interface ToolView {
   mcpEndpoint?: string;
   mcpTransport?: string;
   metadata?: Record<string, unknown>;
+  /** Set when another module owns the tool; it is then read-only through the Tools API. */
+  managedBy?: { kind: 'connector'; id: string };
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
@@ -103,3 +105,33 @@ export interface ExecuteToolActionResult {
   /** The upstream MCP server answered `isError: true`: the call failed, and `result` is its error text. */
   isError?: boolean;
 }
+
+export interface ExecuteToolActionOptions {
+  /**
+   * Receives the credential values resolved for this call (a connector-managed
+   * tool), so the caller's request log scrubs them like a static credential.
+   */
+  onSecrets?: (values: string[]) => void;
+}
+
+/**
+ * A tool another module owns (today the enterprise Connectors module). Built by
+ * that module's service code, never from a request body.
+ */
+export interface ManagedToolInput {
+  connectorId: string;
+  key?: string;
+  name: string;
+  description?: string;
+  type: ToolSourceType;
+  /** Defaults to `active`; a tool whose owner is switched off is created `disabled`. */
+  status?: ToolStatus;
+  actions: IToolAction[];
+  mcpEndpoint?: string;
+  mcpTransport?: 'sse' | 'streamable-http';
+  upstreamBaseUrl?: string;
+  openApiSpec?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type ManagedToolUpdate = Partial<Omit<ManagedToolInput, 'connectorId' | 'key' | 'type'>>;

@@ -71,7 +71,10 @@ vi.mock('@/lib/services/analysis/results', () => ({
   visibleRunItems: h.visibleRunItems,
 }));
 vi.mock('@/lib/services/analysis/analysisRunJob', () => ({ enqueueDefinitionRun: h.enqueueDefinitionRun }));
-vi.mock('@/server/api/plugins/agent-session-access', () => ({ sessionListScope: h.sessionListScope }));
+vi.mock('@/server/api/plugins/agent-session-access', () => ({
+  sessionListScope: h.sessionListScope,
+  SESSION_RESTRICTED_MESSAGE: 'This session used knowledge base documents that are not open to everyone.',
+}));
 vi.mock('@/lib/services/agents', () => ({ getAgentByKey: h.getAgentByKey }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: h.getModelByKey }));
 vi.mock('@/lib/services/evaluation/service', () => ({ getDataset: h.getDataset }));
@@ -632,6 +635,53 @@ describe('/api/analysis decision layer', () => {
       h.listResults.mockResolvedValue({ results: [], total: 0 });
       await send('GET', '/api/analysis/results');
       expect(h.listResults.mock.calls[0][1].viewer).toEqual({ userId: 'user-1', agentKeys: [] });
+    });
+  });
+
+  describe('a result of a session that drew on restricted knowledge base documents', () => {
+    const MARKED = { ...RESULT, kbRestricted: ['proj-1:handbook'] };
+
+    // The knowledge base gave up the admin exception: the workspace owner reads it only if they had the session.
+    beforeEach(() => {
+      h.db.findRagModuleByKey.mockResolvedValue({ key: 'handbook', projectId: 'proj-1', access: { enabled: true, adminBypass: false } } as never);
+    });
+
+    it('stays on the list without its title or decisions', async () => {
+      h.listResults.mockResolvedValue({ results: [MARKED, { ...RESULT, id: 'res-2' }], total: 2 });
+      const res = await send('GET', '/api/analysis/results?definitionKey=support-quality');
+      expect(res.statusCode).toBe(200);
+      const [hidden, open] = res.json().results;
+      expect(hidden).toMatchObject({ id: 'res-1', title: null, decisions: {}, restricted: true });
+      expect(JSON.stringify(hidden)).not.toContain('Refund question');
+      expect(open).toMatchObject({ id: 'res-2', title: 'Refund question' });
+    });
+
+    it('is refused as a detail and as a review, without its content', async () => {
+      h.getResultDetail.mockResolvedValue({ result: MARKED, definition: null, source: { kind: 'agent_session', id: 'conv-1', available: true, transcript: [{ role: 'user', content: 'secret' }] } });
+      const detail = await send('GET', '/api/analysis/results/res-1');
+      expect(detail.statusCode).toBe(403);
+      expect(detail.json()).toMatchObject({ code: 'session_restricted' });
+      expect(detail.body).not.toContain('secret');
+
+      h.db.findAnalysisResultById.mockResolvedValue(MARKED as never);
+      const review = await send('POST', '/api/analysis/results/res-1/review', { values: { resolved: true } });
+      expect(review.statusCode).toBe(403);
+      expect(h.saveResultReview).not.toHaveBeenCalled();
+    });
+
+    it('is also hidden when only the live session is marked (marked after the analysis ran)', async () => {
+      h.db.findRestrictedAgentConversations.mockResolvedValue([{ _id: 'conv-1', createdBy: 'user-9', kbRestricted: ['proj-1:handbook'] }] as never);
+      h.listResults.mockResolvedValue({ results: [RESULT], total: 1 });
+      const res = await send('GET', '/api/analysis/results?definitionKey=support-quality');
+      expect(res.json().results[0]).toMatchObject({ restricted: true, title: null });
+    });
+
+    it('is read whole by the person whose session it was', async () => {
+      h.requireProjectContextForRequest.mockResolvedValue({ projectId: 'proj-1', session: { ...SESSION, userId: 'user-9' } });
+      h.listResults.mockResolvedValue({ results: [MARKED], total: 1 });
+      const res = await send('GET', '/api/analysis/results?definitionKey=support-quality');
+      expect(res.json().results[0]).toMatchObject({ title: 'Refund question' });
+      expect(res.json().results[0].restricted).toBeUndefined();
     });
   });
 

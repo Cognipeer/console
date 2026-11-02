@@ -243,7 +243,11 @@ export default function RedTeamRunDetailPage() {
 
             <div>
               <Text size="xs" fw={600} mb={4}>Transcript</Text>
-              {reviewing.transcript.length === 0 ? (
+              {reviewing.restricted ? (
+                <Text size="xs" c="dimmed" data-testid="redteam-attempt-restricted">
+                  Hidden: this attempt used knowledge base documents you cannot read.
+                </Text>
+              ) : reviewing.transcript.length === 0 ? (
                 <Text size="xs" c="dimmed">No transcript captured.</Text>
               ) : (
               <Stack gap={6}>

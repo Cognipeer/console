@@ -13,6 +13,8 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import FlowAttributionLink from '@/components/tracing/FlowAttributionLink';
+import { hasFlowAttribution, type TracingFlowBlock } from '@/components/tracing/flowAttribution';
 import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
 import {
   isTracingStatusFilterValue,
@@ -32,6 +34,8 @@ interface SessionRecord {
   sessionId: string;
   threadId?: string;
   agentName?: string;
+  /** Set when the session belongs to an agent a flow owns. */
+  flow?: TracingFlowBlock | null;
   status?: string;
   startedAt?: string;
   endedAt?: string;
@@ -88,6 +92,9 @@ export default function TracingSessionsPage() {
   const [agentFilter, setAgentFilter] = useState(
     () => searchParams.get('agent')?.trim() || '',
   );
+  // Sessions of the hidden agents a flow owns, narrowed to one flow (`?flowId=`).
+  const [flowFilter, setFlowFilter] = useState(() => searchParams.get('flowId')?.trim() || '');
+  const [flowOptions, setFlowOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [metadataKey, setMetadataKey] = useState(
     () => searchParams.get('metadataKey')?.trim() || '',
   );
@@ -102,6 +109,7 @@ export default function TracingSessionsPage() {
     if (query) params.set('query', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (agentFilter) params.set('agent', agentFilter.trim());
+    if (flowFilter) params.set('flowId', flowFilter);
     if (fromFilter) params.set('from', fromFilter);
     if (toFilter) params.set('to', toFilter);
     if (metadataKey.trim() && metadataValue.trim()) {
@@ -109,7 +117,7 @@ export default function TracingSessionsPage() {
       params.set('metadataValue', metadataValue.trim());
     }
     return params;
-  }, [page, pageSize, query, statusFilter, agentFilter, fromFilter, toFilter, metadataKey, metadataValue]);
+  }, [page, pageSize, query, statusFilter, agentFilter, flowFilter, fromFilter, toFilter, metadataKey, metadataValue]);
 
   /** Writes (or removes) URL params without a navigation, so the filters stay shareable. */
   const replaceUrlParams = useCallback(
@@ -168,6 +176,7 @@ export default function TracingSessionsPage() {
   useEffect(() => {
     const current = {
       agent: searchParams.get('agent')?.trim() || '',
+      flowId: searchParams.get('flowId')?.trim() || '',
       status: statusParam(searchParams.get('status')),
       from: isoParam(searchParams.get('from')),
       to: isoParam(searchParams.get('to')),
@@ -178,6 +187,7 @@ export default function TracingSessionsPage() {
     seenUrl.current = current;
     const moved = (key: keyof typeof current) => before === null || before[key] !== current[key];
     if (moved('agent')) setAgentFilter((value) => (value === current.agent ? value : current.agent));
+    if (moved('flowId')) setFlowFilter((value) => (value === current.flowId ? value : current.flowId));
     if (moved('status')) setStatusFilter((value) => (value === current.status ? value : current.status));
     if (moved('from')) setFromFilter((value) => (value === current.from ? value : current.from));
     if (moved('to')) setToFilter((value) => (value === current.to ? value : current.to));
@@ -188,13 +198,27 @@ export default function TracingSessionsPage() {
   // Another search is another list: the pages of the last one no longer say where this one's start.
   useEffect(() => {
     skipTrail.current.reset();
-  }, [query, statusFilter, agentFilter, fromFilter, toFilter, metadataKey, metadataValue]);
+  }, [query, statusFilter, agentFilter, flowFilter, fromFilter, toFilter, metadataKey, metadataValue]);
 
   useEffect(() => {
     const controller = new AbortController();
     void fetchSessions(false, controller.signal);
     return () => controller.abort();
   }, [fetchSessions]);
+
+  // The flows to filter by. Without flows access the filter is simply not offered.
+  useEffect(() => {
+    const controller = new AbortController();
+    // Answers 404 / 402 where Flows are not part of the edition or the license: no options then.
+    fetch('/api/flows?limit=200', { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => (response.ok ? ((await response.json()) as { items?: Array<{ id: string; name: string }> }) : null))
+      .then((result) => {
+        if (controller.signal.aborted || !result?.items) return;
+        setFlowOptions(result.items.map((flow) => ({ value: flow.id, label: flow.name })));
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(totalSessions / pageSize)),
@@ -205,13 +229,16 @@ export default function TracingSessionsPage() {
     {
       key: 'agent',
       label: t('sessionTable.agent'),
-      render: (s) => (
-        <Tooltip label={s.agentName || s.sessionId} withArrow>
-          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
-            {s.agentName || '—'}
-          </span>
-        </Tooltip>
-      ),
+      render: (s) =>
+        hasFlowAttribution(s) ? (
+          <FlowAttributionLink flow={s.flow} />
+        ) : (
+          <Tooltip label={s.agentName || s.sessionId} withArrow>
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
+              {s.agentName || '—'}
+            </span>
+          </Tooltip>
+        ),
     },
     {
       key: 'session',
@@ -357,6 +384,29 @@ export default function TracingSessionsPage() {
           placeholder: t('sessions.search'),
         }}
         filters={[
+          ...(flowOptions.length > 0 || flowFilter
+            ? [
+                {
+                  value: flowFilter || 'all',
+                  onChange: (v: string) => {
+                    const next = v === 'all' ? '' : v;
+                    setFlowFilter(next);
+                    setPage(1);
+                    replaceUrlParams({ flowId: next || null });
+                  },
+                  ariaLabel: t('sessions.flowFilter'),
+                  width: 190,
+                  options: [
+                    { value: 'all', label: t('sessions.flowAll') },
+                    ...flowOptions,
+                    // A flow filter from the URL that the list does not know (no flows access, or deleted).
+                    ...(flowFilter && !flowOptions.some((o) => o.value === flowFilter)
+                      ? [{ value: flowFilter, label: flowFilter }]
+                      : []),
+                  ],
+                },
+              ]
+            : []),
           {
             value: statusFilter,
             onChange: (v) => {

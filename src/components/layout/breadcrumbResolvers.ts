@@ -228,6 +228,13 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     pickLabel: (b) => wrappedName(b, 'bucket'),
   }),
   createStandardResolver({
+    path: ['connectors'],
+    buildUrl: (id) => `/api/connectors/${encodeURIComponent(id)}`,
+    pickLabel: (b) => wrappedName(b, 'connector'),
+    // A page of the Connectors menu, not a connector id.
+    excludeValues: ['oauth-apps', 'catalog'],
+  }),
+  createStandardResolver({
     path: ['vector', 'migrations'],
     buildUrl: (key) => `/api/vector/migrations/${encodeURIComponent(key)}`,
     pickLabel: (b) => wrappedName(b, 'migration'),
@@ -339,6 +346,33 @@ const tracingSessionResolver: BreadcrumbResolver = {
       );
       const agentName = body?.session?.agentName;
       return agentName ? `${agentName} session` : 'Session';
+    });
+
+    return label ? [{ index: 3, label }] : [];
+  },
+};
+
+/**
+ * Flow runs: `/dashboard/tracing/flows/:runId`. Label is `<flow name> run`.
+ */
+const tracingFlowRunResolver: BreadcrumbResolver = {
+  id: 'custom:tracing-flow-run',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (
+      segments[0] !== 'dashboard'
+      || segments[1] !== 'tracing'
+      || segments[2] !== 'flows'
+    ) return [];
+    const runId = segments[3];
+    if (!runId) return [];
+
+    const label = await cached(ctx, `tracingFlowRun:${runId}`, async () => {
+      const body = await fetchJson<{ run?: { flowName?: string } }>(
+        `/api/flows/runs/${encodeURIComponent(runId)}`,
+      );
+      const flowName = body?.run?.flowName;
+      return flowName ? `${flowName} run` : 'Run';
     });
 
     return label ? [{ index: 3, label }] : [];
@@ -470,6 +504,7 @@ const CUSTOM_RESOLVERS: BreadcrumbResolver[] = [
   entityHealthKeyResolver,
   vectorIndexResolver,
   tracingSessionResolver,
+  tracingFlowRunResolver,
   tracingThreadResolver,
   iamResolver,
 ];

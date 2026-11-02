@@ -153,13 +153,14 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         (id, tenantId, projectId, modelKey, modelId, requestId, route, status,
          providerRequest, providerResponse, errorMessage, latencyMs,
          inputTokens, outputTokens, cachedInputTokens, cachedWriteTokens, totalTokens, finishReason, reasoningTokens, toolCalls, cacheHit, pricingSnapshot, routing,
-         userId, apiTokenId, actorType, agentKey, channel, conversationId, turnId, runId, traceSessionId, createdAt)
+         userId, apiTokenId, actorType, agentKey, channel, conversationId, turnId, runId, traceSessionId, kbRestricted, createdAt)
         VALUES (@id, @tenantId, @projectId, @modelKey, @modelId, @requestId, @route, @status,
          @providerRequest, @providerResponse, @errorMessage, @latencyMs,
          @inputTokens, @outputTokens, @cachedInputTokens, @cachedWriteTokens, @totalTokens, @finishReason, @reasoningTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
-         @userId, @apiTokenId, @actorType, @agentKey, @channel, @conversationId, @turnId, @runId, @traceSessionId, @createdAt)
+         @userId, @apiTokenId, @actorType, @agentKey, @channel, @conversationId, @turnId, @runId, @traceSessionId, @kbRestricted, @createdAt)
       `).run({
         id,
+        kbRestricted: log.kbRestricted && log.kbRestricted.length > 0 ? this.toJson(log.kbRestricted) : null,
         agentKey: log.agentKey ?? null,
         channel: log.channel ?? null,
         conversationId: log.conversationId ?? null,
@@ -487,6 +488,10 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         turnId: (r.turnId as string | null) ?? undefined,
         runId: (r.runId as string | null) ?? undefined,
         traceSessionId: (r.traceSessionId as string | null) ?? undefined,
+        ...(() => {
+          const kbRestricted = r.kbRestricted ? this.parseJson<string[]>(r.kbRestricted, []) : [];
+          return kbRestricted.length > 0 ? { kbRestricted } : {};
+        })(),
         createdAt: this.toDate(r.createdAt),
       };
     }

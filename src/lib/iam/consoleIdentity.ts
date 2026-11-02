@@ -90,6 +90,8 @@ export interface ConsoleIdentityCaller {
   agentKey?: string;
   /** The project the call belongs to. */
   projectId?: string;
+  /** Knowledge bases hand the call only what is open to everyone (AgentRuntimeContext.kbReader). */
+  kbReader?: 'anonymous';
 }
 
 export type ConsoleIdentityErrorCode =
@@ -237,11 +239,13 @@ export function consoleIdentityCallerOf(
     ...(source ? { source } : {}),
     ...(extra.agentKey ? { agentKey: extra.agentKey } : {}),
     ...(extra.projectId ? { projectId: extra.projectId } : {}),
+    // A flow's agent step reads knowledge as no one (rag/access/caller.ts); its MCP calls do the same.
+    ...(runtimeContext?.kbReader === 'anonymous' || runtimeContext?.source === 'flow' ? { kbReader: 'anonymous' as const } : {}),
   };
 }
 
 /** The person part of a caller: what a paused turn stores so its continuation calls for the same person. */
-export type ConsoleIdentityPerson = Pick<ConsoleIdentityCaller, 'userId' | 'tokenId' | 'delegated' | 'source'>;
+export type ConsoleIdentityPerson = Pick<ConsoleIdentityCaller, 'userId' | 'tokenId' | 'delegated' | 'source' | 'kbReader'>;
 
 /** The person part of a caller (or of a stored one, read back from a paused turn); undefined when there is none. */
 export function consoleIdentityPersonOf(value: unknown): ConsoleIdentityPerson | undefined {
@@ -254,6 +258,7 @@ export function consoleIdentityPersonOf(value: unknown): ConsoleIdentityPerson |
     ...(typeof caller.source === 'string' && SOURCES.has(caller.source as ConsoleIdentitySource)
       ? { source: caller.source as ConsoleIdentitySource }
       : {}),
+    ...(caller.kbReader === 'anonymous' ? { kbReader: 'anonymous' as const } : {}),
   };
   return Object.keys(person).length > 0 ? person : undefined;
 }
