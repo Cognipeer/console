@@ -17,6 +17,7 @@ import {
 } from '@/lib/core/browserProxyConfig';
 import { looksLikeJsShell } from './links';
 import { parseContentTypeBase } from './normalize';
+import { createHostBlocker } from './thirdPartyBlocklist';
 import { assertSafeUrl } from './ssrf';
 import type { CrawlHttpConfig } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
@@ -70,6 +71,10 @@ export class PlaywrightSession {
     this.launching = (async () => {
       const proxy = resolveBrowserProxyConfig();
       const cfg = getConfig().browser;
+      const isBlockedHost = createHostBlocker({
+        useDefaults: cfg.crawlerBlockTrackers,
+        extra: cfg.crawlerBlockedHosts,
+      });
       this.proxyRouting = browserProxyRouting(proxy, cfg.chromiumExtraArgs);
       this.browser = await chromium.launch({
         headless: true,
@@ -159,6 +164,15 @@ export class PlaywrightSession {
           } catch {
             return route.abort('blockedbyclient').catch(() => undefined);
           }
+        }
+        // Never wait on a tracker/consent/analytics host. `domcontentloaded`
+        // holds for parser-blocking scripts, and on a network that silently
+        // drops these hosts the request never answers, so the whole navigation
+        // times out though the page's own content loaded in milliseconds.
+        // Aborting fails fast instead. Navigations are never blocked here: the
+        // page being crawled is the caller's choice.
+        if (!request.isNavigationRequest() && isBlockedHost(request.url())) {
+          return route.abort('blockedbyclient').catch(() => undefined);
         }
         const type = request.resourceType();
         // Stylesheets are intentionally NOT blocked (despite being "heavy"):
