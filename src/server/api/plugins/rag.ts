@@ -39,14 +39,14 @@ import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnsw
 import { exportRagModule, importRagModuleJsonl } from '@/lib/services/rag/ragTransfer';
 import {
   authorizeServiceForRequest,
-  readJsonBody,
+  readJsonObjectBody,
   requireProjectContextForRequest,
   safeReadJsonBody,
   sendProjectContextError,
   serviceActionAllowedForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
-import { canAdministerRagAccess, ragAccessForRequest, sendRagAccessError } from '../ragAccessRequest';
+import { canAdministerRagAccess, ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAccessRequest';
 import { kbIndexShareRefusal } from '../ragOwnedResources';
 import type { RagDocumentPlacementInput } from '@/lib/services/rag/ragAccessService';
 import type { RagAccessScope } from '@/lib/services/rag/access';
@@ -529,7 +529,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/rag/modules', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       let fields: Omit<CreateRagModuleRequest, 'createdBy'>;
       try {
@@ -554,6 +554,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ module: ragModule });
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -601,7 +603,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'RAG module not found' });
       }
 
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       let fields: Omit<UpdateRagModuleRequest, 'updatedBy'>;
       try {
@@ -634,6 +636,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ module: ragModule ? await moduleAsCallerSees(request, where, ragModule) : ragModule });
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -722,7 +726,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (typeof body.fileName !== 'string' || body.fileName === '') {
         return reply.code(400).send({ error: 'fileName is required' });
@@ -737,12 +741,13 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return sendInvalidRequest(reply, error);
       }
 
-      const { scope } = await ragAccessForRequest(request, {
+      const { module: ragModule, scope } = await ragAccessForRequest(request, {
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         projectId,
         ragModuleKey: key,
       });
+      if (!ragModule) return reply.code(404).send({ error: 'Knowledge Engine module not found' });
       const { placement, refused } = await readDocumentPlacement(request, reply, body, scope);
       if (refused) return refused;
 
@@ -791,6 +796,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ document: withoutSourceText(document) });
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
@@ -855,7 +862,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (typeof body.data !== 'string' || body.data.trim() === '') {
         return reply.code(400).send({ error: '"data" must be a non-empty JSONL string' });
@@ -884,6 +891,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       logger.error('Import RAG module error', { error });
       if (error instanceof Error && /not found|not active|at most|Unsupported export version/.test(error.message)) {
         return reply.code(400).send({ error: error.message });
@@ -1056,7 +1065,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const { scope } = await ragAccessForRequest(request, accessInput);
 
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       const { placement, refused } = await readDocumentPlacement(request, reply, body, scope);
       if (refused) return refused;
       const encodedData = typeof body.data === 'string'
@@ -1089,6 +1098,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       if (
         error instanceof RagModuleInactiveError
         || error instanceof RagOriginalMissingError
@@ -1112,15 +1123,16 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (typeof body.query !== 'string' || body.query === '') {
         return reply.code(400).send({ error: 'query is required' });
       }
 
-      const { scope, caller } = await ragAccessForRequest(request, {
+      const { module: ragModule, scope, caller } = await ragAccessForRequest(request, {
         tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
       });
+      if (!ragModule) return reply.code(404).send({ error: 'Knowledge Engine module not found' });
       const result = await queryRag(session.tenantDbName, session.tenantId, projectId, {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
@@ -1131,6 +1143,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result: shapeRagQueryResponse(result) });
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -1150,7 +1164,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (typeof body.question !== 'string' || body.question === '') {
         return reply.code(400).send({ error: 'question is required' });
@@ -1159,9 +1173,10 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'answerModelKey is required' });
       }
 
-      const { scope, caller } = await ragAccessForRequest(request, {
+      const { module: ragModule, scope, caller } = await ragAccessForRequest(request, {
         tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
       });
+      if (!ragModule) return reply.code(404).send({ error: 'Knowledge Engine module not found' });
       const result = await answerWithRag(session.tenantDbName, session.tenantId, projectId, {
         ragModuleKey: key,
         question: body.question,
@@ -1174,6 +1189,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result });
     } catch (error) {
+      const badBody = sendBadBody(reply, error);
+      if (badBody) return badBody;
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }

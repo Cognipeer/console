@@ -582,6 +582,36 @@ describe('a crawler that sends its pages into a knowledge base with access contr
     expect(byOwner.statusCode, byOwner.body).toBe(201);
   });
 
+  it('runs a saved crawler that sends pages into it only for an administrator, as access control may have been switched on since', async () => {
+    ragIngestCalls.length = 0;
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: crawlerBody({ ragModuleKey: GUARDED, enabled: true }),
+    });
+    const { crawler } = parseJsonBody<{ crawler: { key: string } }>(created.body);
+    for (const action of ['run', 'crawl']) {
+      const refused = await app.inject({
+        method: 'POST',
+        url: `/api/crawler/crawlers/${crawler.key}/${action}`,
+        headers: writerHeaders,
+        payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+      });
+      expect(refused.statusCode, `${action}: ${refused.body}`).toBe(403);
+      expect(parseJsonBody<{ code: string }>(refused.body).code).toBe('kb_access_controlled');
+    }
+    expect(ragIngestCalls).toEqual([]);
+
+    const allowed = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/crawlers/${crawler.key}/run`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+    });
+    expect(allowed.statusCode, allowed.body).toBe(202);
+  });
+
   it('syncs a job into it only for an administrator, whether the module is named or comes from the run', async () => {
     ragIngestCalls.length = 0;
     const created = await app.inject({

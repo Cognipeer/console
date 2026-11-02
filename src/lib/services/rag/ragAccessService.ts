@@ -61,6 +61,8 @@ const MAX_DIRECTORY_VALUE_LENGTH = 512;
 const DIRECTORY_UPSERT_BATCH = 500;
 
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+/** Folder names also refuse the C1 controls (U+0080-U+009F), which show as nothing or as line breaks. */
+const FOLDER_NAME_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
 // ── errors ─────────────────────────────────────────────────────────────
 
@@ -229,7 +231,7 @@ async function treeChanged(db: Db, ctx: Pick<RagAccessContext, 'tenantDbName'>, 
 export function validateFolderName(name: unknown): string {
   if (typeof name !== 'string') throw new RagAccessError('folder_name_invalid', 'Folder name is required');
   const trimmed = name.trim();
-  if (!trimmed || trimmed.length > MAX_FOLDER_NAME_LENGTH || CONTROL_RE.test(trimmed) || trimmed.includes('/')
+  if (!trimmed || trimmed.length > MAX_FOLDER_NAME_LENGTH || FOLDER_NAME_CONTROL_RE.test(trimmed) || trimmed.includes('/')
     || trimmed === '.' || trimmed === '..') {
     throw new RagAccessError(
       'folder_name_invalid',

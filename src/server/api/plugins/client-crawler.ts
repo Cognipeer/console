@@ -186,6 +186,10 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const { idOrKey } = request.params as { idOrKey: string };
       const body = runCrawlerOptionsSchema.parse(readJsonBody<unknown>(request) ?? {});
       const crawlerCtx = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      // A saved crawler sends pages with the binding it was saved with: access control switched on since then asks again.
+      const saved = await getCrawler(crawlerCtx, idOrKey);
+      const refusal = await kbBindingRefusal(request, saved ? { ...crawlerCtx, projectId: saved.projectId } : crawlerCtx, saved?.rag);
+      if (refusal) return reply.code(403).send(refusal);
       const mode = body.mode ?? 'async';
       const result = await runCrawler(
         crawlerCtx,
@@ -270,6 +274,10 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       const { idOrKey } = request.params as { idOrKey: string };
       const body = crawlOnContainerSchema.parse(readJsonBody<unknown>(request));
       const crawlerCtx = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: projectOf(ctx) };
+      // A saved crawler sends pages with the binding it was saved with: access control switched on since then asks again.
+      const saved = await getCrawler(crawlerCtx, idOrKey);
+      const refusal = await kbBindingRefusal(request, saved ? { ...crawlerCtx, projectId: saved.projectId } : crawlerCtx, saved?.rag);
+      if (refusal) return reply.code(403).send(refusal);
       const mode = body.mode ?? 'async';
       const result = await runCrawler(
         crawlerCtx,

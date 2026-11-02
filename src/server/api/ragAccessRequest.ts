@@ -68,6 +68,12 @@ export async function canAdministerRagAccess(request: FastifyRequest, ragModule:
   return serviceActionAllowedForRequest(request, 'rag', 'admin', { projectId: ragModule.projectId ?? null });
 }
 
+/** A body that is empty, not JSON or `null` (what `readJsonBody` throws a `SyntaxError` for) as its 400, or null for any other error. */
+export function sendBadBody(reply: FastifyReply, error: unknown): FastifyReply | null {
+  if (!(error instanceof SyntaxError)) return null;
+  return reply.code(400).send({ error: 'The request body must be a JSON object', code: 'invalid_body' });
+}
+
 /** A refusal from the access service as its HTTP answer, or null for anything else. */
 export function sendRagAccessError(reply: FastifyReply, error: unknown): FastifyReply | null {
   if (!(error instanceof RagAccessError)) return null;
