@@ -129,7 +129,7 @@ export default function ProjectPill() {
           )}
         </UnstyledButton>
       </Combobox.Target>
-      <Combobox.Dropdown>
+      <Combobox.Dropdown className="ds-project-dropdown">
         <Combobox.Search
           value={search}
           onChange={(event) => setSearch(event.currentTarget.value)}
