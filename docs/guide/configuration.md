@@ -184,6 +184,8 @@ those are usually third-party hosts (CDNs, fonts, analytics) the firewall does n
 | `BROWSER_BLOCK_PRIVATE_NETWORK` | Blocks localhost, link-local, private, and reserved network egress from managed browser sessions. | `true` |
 | `BROWSER_IGNORE_CERTIFICATE_ERRORS` | Ignores certificate errors in the managed browser and the crawler's Playwright engine, for a TLS-inspecting proxy whose CA Chromium cannot trust. Turns certificate checks off for every page. | `false` |
 | `BROWSER_CHROMIUM_EXTRA_ARGS` | Extra Chromium flags, comma-separated, appended to every launch (for example `--proxy-bypass-list=*.corp.example;localhost`, rules separated by `;`). | *(empty)* |
+| `CRAWLER_BLOCK_TRACKERS` | The crawler's Playwright engine aborts sub-resource requests to well-known tracker, analytics and cookie-consent hosts (Google Tag Manager and Analytics, Efilli, OneTrust, Hotjar, ...). A page's `domcontentloaded` waits for parser-blocking scripts, so on a network whose firewall silently drops those hosts the navigation would time out although the page itself loaded. The page being crawled is never blocked. | `true` |
+| `CRAWLER_BLOCKED_HOSTS` | Extra hosts the crawler's browser never loads, comma-separated, suffix match (`example.com` also covers `cdn.example.com`). Use it when a site's own third-party script hangs on your network. | *(empty)* |
 
 ### Outbound HTTP (SSRF Guard)
 
