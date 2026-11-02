@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Lexend_Deca, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "@mantine/core/styles.css";
 import '@mantine/dates/styles.css';
 import "@mantine/notifications/styles.css";
@@ -13,18 +13,28 @@ import { I18nProvider } from "@/lib/i18n";
 import { ConfirmProvider } from "@/components/common/confirm/ConfirmProvider";
 import { theme } from "@/theme/theme";
 
-const lexendDeca = Lexend_Deca({
-  subsets: ["latin"],
+// Self-hosted (OFL, see ./fonts/LICENSE-*): next/font/google downloads at build time and
+// broke release builds whenever the fetch returned an unexpected response.
+const lexendDeca = localFont({
   display: "swap",
-  weight: ["300", "400", "500", "600", "700"],
   variable: "--font-lexend-deca",
+  src: [
+    { path: "./fonts/lexend-deca-latin-300-normal.woff2", weight: "300", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-400-normal.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-500-normal.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-600-normal.woff2", weight: "600", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-700-normal.woff2", weight: "700", style: "normal" },
+  ],
 });
 
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
+const jetbrainsMono = localFont({
   display: "swap",
-  weight: ["400", "500", "600"],
   variable: "--font-jetbrains-mono",
+  src: [
+    { path: "./fonts/jetbrains-mono-latin-400-normal.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/jetbrains-mono-latin-500-normal.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/jetbrains-mono-latin-600-normal.woff2", weight: "600", style: "normal" },
+  ],
 });
 
 export const metadata: Metadata = {
