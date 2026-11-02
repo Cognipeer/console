@@ -55,6 +55,7 @@ import {
 } from '@/components/alerts/incidentUi';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import DeliveryTimeline from '@/components/alerts/incident/DeliveryTimeline';
+import InvestigateCard from '@/components/alerts/incident/InvestigateCard';
 import IncidentMetricChart from '@/components/alerts/incident/IncidentMetricChart';
 import MuteRuleMenu from '@/components/alerts/incident/MuteRuleMenu';
 import RunbookLink from '@/components/alerts/incident/RunbookLink';
@@ -559,6 +560,8 @@ export default function IncidentDetailPage() {
               <RunbookLink url={rule?.runbookUrl} />
             </Stack>
           </DetailCard>
+
+          <InvestigateCard incident={incident} entity={entity} windowMinutes={windowMinutes} entityLinks={entityLinks} />
 
           <SimilarIncidentsCard incidentId={incident._id} relatedPath={relatedPath} />
 
