@@ -424,7 +424,7 @@ export interface ApplyAgentDocumentImportInput {
     skills?: Record<string, SkillImportChoice>;
     /** Cognipeer manifests: what to do with each embedded definition, by `type:key`. */
     resources?: Record<string, ResourceImportChoice>;
-    /** Cognipeer manifests only: overwrite an existing agent with the same key. */
+    /** Overwrite the existing agent with this key (update-from-file) instead of refusing a key clash. */
     overwrite?: boolean;
 }
 
@@ -519,8 +519,12 @@ export async function applyAgentDocumentImport(
     if (!modelKey) throw new AgentImportError('Choose a model for the agent.');
 
     const key = input.key?.trim() || slugify(plan.name);
-    if (await agentKeyExists(ctx.tenantDbName, ctx.projectId, key)) {
+    const keyTaken = await agentKeyExists(ctx.tenantDbName, ctx.projectId, key);
+    if (keyTaken && !input.overwrite) {
         throw new AgentImportError(`An agent with key "${key}" already exists in this project. Choose another key.`, 409);
+    }
+    if (!keyTaken && input.overwrite) {
+        throw new AgentImportError(`Agent "${key}" does not exist, so there is nothing to update.`, 404);
     }
 
     const created: CreatedRecords = { mcpServers: [], skills: [], prompts: [], tools: [] };
@@ -632,7 +636,7 @@ export async function applyAgentDocumentImport(
             dependencies: [],
         } as AgentManifest;
         const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, manifest, {
-            mode: 'create',
+            mode: input.overwrite ? 'update' : 'create',
             canNameBucket: ctx.canNameBucket,
             canReferenceConfig: ctx.canReferenceConfig,
         });
@@ -655,7 +659,7 @@ export async function applyAgentDocumentImport(
 
         return {
             agent: result.agent,
-            action: 'created',
+            action: result.action,
             created: { mcpServers: withoutIds(created.mcpServers), skills: withoutIds(created.skills) },
             warnings: [...warnings, ...validation.warnings.map((w) => ({ code: 'config_warning', message: `${w.field}: ${w.message}` }))],
         };
