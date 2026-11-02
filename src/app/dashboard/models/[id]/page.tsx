@@ -507,7 +507,11 @@ export default function ModelDetailPage() {
   const [logModalOpened, { open: openLogModal, close: closeLogModal }] =
     useDisclosure(false);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
-  const [tab, setTab] = useState<DetailTab>('overview');
+  // A link may open a tab directly (`?tab=logs`), e.g. from an alert incident.
+  const [tab, setTab] = useState<DetailTab>(() => {
+    const requested = searchParams.get('tab');
+    return requested === 'logs' || requested === 'usage' ? requested : 'overview';
+  });
   const [logFilter, setLogFilter] = useState('');
   const [logLevel, setLogLevel] = useState<'all' | 'error'>('all');
 

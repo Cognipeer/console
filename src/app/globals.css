@@ -2921,3 +2921,44 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   overflow: visible;
   text-overflow: clip;
 }
+
+/* Project switcher dropdown: Mantine's default filled-primary highlight
+   makes the dimmed key unreadable; use a soft accent wash with dark text. */
+.ds-project-dropdown {
+  padding: 6px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-raised);
+}
+.ds-project-dropdown .mantine-Combobox-search {
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-sm);
+  background: var(--ds-surface-raised);
+  color: var(--ds-text);
+  margin-bottom: 6px;
+}
+.ds-project-dropdown .mantine-Combobox-search:focus {
+  border-color: var(--ds-accent);
+  box-shadow: 0 0 0 3px var(--ds-accent-ring);
+  outline: none;
+}
+.ds-project-dropdown .mantine-Combobox-option {
+  border-radius: var(--ds-r-sm);
+  color: var(--ds-text);
+}
+.ds-project-dropdown .mantine-Combobox-option[data-combobox-selected],
+.ds-project-dropdown .mantine-Combobox-option[data-combobox-active],
+.ds-project-dropdown .mantine-Combobox-option:hover {
+  background: var(--ds-accent-soft);
+  color: var(--ds-text);
+}
+.ds-project-dropdown .mantine-Combobox-option[data-combobox-selected] .mantine-Text-root,
+.ds-project-dropdown .mantine-Combobox-option[data-combobox-active] .mantine-Text-root {
+  color: var(--ds-text);
+}
+.ds-project-dropdown .mantine-Combobox-option .ds-mono {
+  color: var(--ds-text-muted);
+}
+.ds-project-dropdown .mantine-Combobox-empty {
+  color: var(--ds-text-muted);
+}

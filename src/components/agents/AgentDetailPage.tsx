@@ -45,6 +45,7 @@ import {
   IconRoute,
   IconTopologyStar3,
   IconX,
+  IconUpload,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { ResourceUsageSection } from '@/components/common/confirm';
@@ -79,6 +80,7 @@ import { showRemindersView, type AgentRemindersResponse } from './studio/reminde
 import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
+import ImportAgentShell from './ImportAgentShell';
 import AgentPromptPanel, { type PromptOption } from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList, { type SessionListItem } from './studio/SessionList';
@@ -376,6 +378,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const [publishedConfigKey, setPublishedConfigKey] = useState<string | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [updateFromFileOpen, setUpdateFromFileOpen] = useState(false);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
@@ -1297,6 +1300,16 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         subtitle={ownedByFlow ? agent.description || undefined : agent.description || agent.key}
         actions={
           <Group gap="sm">
+            {!isConnected ? (
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<IconUpload size={14} />}
+                onClick={() => setUpdateFromFileOpen(true)}
+              >
+                Update from file
+              </Button>
+            ) : null}
             {!isConnected && !isFlow && !ownedByFlow && (agent.latestVersion ?? 0) > 0 ? (
               <Button
                 size="xs"
@@ -1342,6 +1355,15 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           </Group>
         }
       />
+
+      {!isConnected ? (
+        <ImportAgentShell
+          opened={updateFromFileOpen}
+          target={{ key: agent.key, name: agent.name }}
+          onClose={() => setUpdateFromFileOpen(false)}
+          onImported={() => { setUpdateFromFileOpen(false); void loadAgent(); }}
+        />
+      ) : null}
 
       <Tabs value={visibleTab} onChange={setActiveTab}>
         <Tabs.List mb="md">
