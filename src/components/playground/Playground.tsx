@@ -36,6 +36,7 @@ import { notifications } from '@mantine/notifications';
 import { useTranslations } from '@/lib/i18n';
 import type { ReasoningEffort } from '@/lib/services/models/reasoning';
 import PlaygroundReasoningControl, { PlaygroundReasoningHintNote } from './PlaygroundReasoningControl';
+import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 import {
   playgroundReasoningControl,
   playgroundReasoningFields,
@@ -587,7 +588,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           size="sm"
           style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
         >
-          {message.content}
+          <LinkifiedText text={message.content} />
         </Text>
       )}
 

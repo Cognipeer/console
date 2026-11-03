@@ -3,6 +3,7 @@
 import { TypographyStylesProvider } from '@mantine/core';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { MARKDOWN_LINK_COMPONENTS } from '@/components/common/ui/ExternalLinks';
 import classes from './AgentMarkdown.module.css';
 
 /**
@@ -12,12 +13,12 @@ import classes from './AgentMarkdown.module.css';
  * undifferentiated block of text.
  *
  * Shared by the session transcript and the compare drawer so an answer reads
- * the same in both places.
+ * the same in both places. Its links open in a new tab.
  */
 export default function AgentMarkdown({ text }: { text: string }) {
     return (
         <TypographyStylesProvider className={classes.markdownBody}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_LINK_COMPONENTS}>{text}</ReactMarkdown>
         </TypographyStylesProvider>
     );
 }

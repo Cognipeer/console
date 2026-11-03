@@ -9,6 +9,7 @@ import { useTranslations } from '@/lib/i18n';
 import { IconArrowLeft, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import type { AnalysisConversationView } from '@/components/analysis/types';
+import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 
 function fmtDate(value?: string): string {
   if (!value) return '—';
@@ -98,7 +99,7 @@ export default function AnalysisConversationDetailPage() {
             {convo.transcript.map((m, i) => (
               <div key={i}>
                 <Text size="xs" c="dimmed" fw={600} tt="uppercase">{m.role}</Text>
-                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{m.content}</Text>
+                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}><LinkifiedText text={m.content} /></Text>
               </div>
             ))}
           </Stack>

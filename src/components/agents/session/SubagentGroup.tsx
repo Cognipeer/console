@@ -46,6 +46,7 @@ import {
 } from './subagentUi';
 import { compactionDividerView } from './turnFlowUi';
 import classes from './AgentSessionView.module.css';
+import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 
 /** The mark of a run's status: a spinner while it works, a glyph for how it ended. */
 function StatusMark({ kind }: { kind: SubagentStatusKind }) {
@@ -233,7 +234,7 @@ export function SubagentGroup({ view, toolName, anchorId, expanded, onExpandedCh
                             {view.resultFull ? (
                                 <Box>
                                     <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{t('subagentResult')}</Text>
-                                    <Text size="sm" className={classes.preWrap}>{view.resultFull}</Text>
+                                    <Text size="sm" className={classes.preWrap}><LinkifiedText text={view.resultFull} /></Text>
                                 </Box>
                             ) : null}
                             {view.error ? (
