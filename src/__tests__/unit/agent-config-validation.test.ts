@@ -319,7 +319,7 @@ describe('validateAgentConfig', () => {
                 enabled: true,
                 mode: 'forever' as never,
                 commandTimeoutSec: 900,
-                resources: { memoryMb: 16 },
+                resources: { memoryMb: 16, diskMb: 100 },
                 env: { 'BAD-NAME': 'x', SHARED: 'a' },
                 secrets: { SHARED: 'b' },
             },
@@ -328,9 +328,23 @@ describe('validateAgentConfig', () => {
             'sandbox.mode',
             'sandbox.commandTimeoutSec',
             'sandbox.resources.memoryMb',
+            'sandbox.resources.diskMb',
             'sandbox.env.BAD-NAME',
             'sandbox.secrets',
         ]));
+    });
+
+    it('sandbox: accepts a disk size in range and rejects a fractional one', () => {
+        const ok = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            sandbox: { enabled: true, resources: { diskMb: 8192 } },
+        });
+        expect(fields(ok.errors)).not.toContain('sandbox.resources.diskMb');
+        const fractional = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            sandbox: { enabled: true, resources: { diskMb: 1024.5 } },
+        });
+        expect(fields(fractional.errors)).toContain('sandbox.resources.diskMb');
     });
 
     it('sandbox: LICENSE — refused for a tenant without Enterprise', async () => {

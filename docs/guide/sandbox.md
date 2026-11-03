@@ -161,19 +161,19 @@ The reaper scans on a fixed interval and skips any sandbox that has a live termi
 
 New sandboxes default to **0.5 vCPU / 1 GB RAM / 1 GB disk**. The effective limit for a launch is resolved in layers — first defined wins per field, then clamped to the operator hard cap:
 
-1. **Per-sandbox** — the Resources fields in the create dialog (or `resources` in the API).
+1. **Per-sandbox** — the Resources fields in the create dialog (or `resources` in the API). For an agent's own sandbox, the **CPU cores**, **Memory (MB)** and **Disk (MB)** fields under Agents → Build → Sandbox → **Machine** (`config.sandbox.resources`).
 2. **Per-project** — the **Project resource defaults** card on the Settings page (stored against the active project).
 3. **Platform default** — `SANDBOX_DEFAULT_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` (env), falling back to the built-in `0.5 / 1024 / 1024 / 512`.
 4. **Hard cap** — `SANDBOX_MAX_CPU` / `_MEMORY_MB` / `_DISK_MB` / `_PIDS` (env). Operator-owned; the UI and token API can never exceed it. `0`/unset = unbounded.
 
-CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) is enforced only when `SANDBOX_DISK_QUOTA=on` **and** the Docker storage driver supports `--storage-opt size` (overlay2 on xfs pquota, or btrfs); otherwise it is tracked and shown but advisory.
+CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) is enforced only when `SANDBOX_DISK_QUOTA=on` **and** the Docker storage driver supports `--storage-opt size` (overlay2 on xfs pquota, or btrfs); otherwise it is tracked and shown but advisory. On the Kubernetes runtime, disk is always enforced: it becomes the pod's `ephemeral-storage` limit, and a sandbox that writes past it (a large clone, `node_modules`) is evicted by the kubelet.
 
 ## A persistent sandbox for an agent
 
 An agent's sandbox (Agents → Build → Sandbox → **Lifetime**) is normally its own: one per conversation (**Session**) or one per message (**Per message**). **Persistent sandbox** gives the agent an existing sandbox of the project instead — one created with **Persistent** on — picked under **Machine** (`config.sandbox.mode: "instance"`, `config.sandbox.instanceId`).
 
 - **Shared.** Every conversation of the agent, and anyone else with access to the sandbox, works on the same machine: files and installed packages stay until someone deletes them, and what the agent writes can be seen by others. The model is told so.
-- **The machine's own settings apply.** Its template, resources, network block and environment are its own; the agent's Template, CPU, memory and Block network settings are not used. The agent's plain variables go with each command (like its secrets) instead of onto the machine.
+- **The machine's own settings apply.** Its template, resources, network block and environment are its own; the agent's Template, CPU, memory, disk and Block network settings are not used. The agent's plain variables go with each command (like its secrets) instead of onto the machine.
 - **Never created, stopped or deleted by the agent.** A stopped sandbox is started on first use; nothing is recorded on the conversation, and deleting a conversation leaves the sandbox alone. A preview link keeps working because the machine stays up.
 - **Outputs.** Only files written to `/outputs/` during a reply are delivered as session files — not what the shared machine already held.
 - **Who may choose it.** Setting or changing the sandbox needs **write access to Sandbox** in the project (`403 sandbox_write_required` otherwise); re-saving the agent asks nothing. The sandbox must be a persistent sandbox of the agent's project (`400` otherwise). Manifest exports leave the id out; importing over an agent keeps the one it has.

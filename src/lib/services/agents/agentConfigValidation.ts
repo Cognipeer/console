@@ -401,6 +401,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         checkNumber(issues, 'sandbox.retentionHours', sandbox.retentionHours, { min: 1, max: 24 * 30, integer: true });
         checkNumber(issues, 'sandbox.resources.cpuCores', sandbox.resources?.cpuCores, { min: 0, exclusiveMin: true, max: 64 });
         checkNumber(issues, 'sandbox.resources.memoryMb', sandbox.resources?.memoryMb, { min: 128, max: 262_144, integer: true });
+        checkNumber(issues, 'sandbox.resources.diskMb', sandbox.resources?.diskMb, { min: 256, max: 262_144, integer: true });
         const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
         for (const [group, map] of [['env', sandbox.env], ['secrets', sandbox.secrets]] as const) {
             for (const key of Object.keys(map ?? {})) {

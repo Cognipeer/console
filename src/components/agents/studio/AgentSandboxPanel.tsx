@@ -237,6 +237,15 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                                         value={value?.resources?.memoryMb ?? ''}
                                         onChange={(next) => patchResources({ memoryMb: optionalNumber(next) })}
                                     />
+                                    <NumberInput
+                                        label="Disk (MB)"
+                                        placeholder="Template default"
+                                        min={256}
+                                        max={262_144}
+                                        step={1024}
+                                        value={value?.resources?.diskMb ?? ''}
+                                        onChange={(next) => patchResources({ diskMb: optionalNumber(next) })}
+                                    />
                                 </Group>
                                 <Switch
                                     label="Block network access"
