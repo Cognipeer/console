@@ -37,11 +37,25 @@ const jetbrainsMono = localFont({
   ],
 });
 
-// latin-ext carries Turkish ğ ş İ Ğ Ş; the latin files lack them, so they fall through to
-// these second families (see the font stacks in globals.css / theme.ts).
+// latin-ext carries Turkish ğ Ğ ş Ş İ, which the latin files lack. The ext families must come
+// FIRST in the font stacks (globals.css / theme.ts): next/font/local appends an Arial-based
+// "<name> Fallback" face to every family it generates, and Arial has these glyphs, so with
+// latin first they rendered in Arial and the ext files were never reached. unicode-range keeps
+// the ext families to their own code points (same range Google Fonts serves for latin-ext), so
+// all other text still uses the latin files, and adjustFontFallback is off so the ext families
+// add no Arial face of their own. (next/font only accepts literal options, hence the repeated
+// range string.)
 const lexendDecaExt = localFont({
   display: "swap",
   variable: "--font-lexend-deca-ext",
+  adjustFontFallback: false,
+  declarations: [
+    {
+      prop: "unicode-range",
+      value:
+        "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+    },
+  ],
   src: [
     { path: "./fonts/lexend-deca-latin-ext-300-normal.woff2", weight: "300", style: "normal" },
     { path: "./fonts/lexend-deca-latin-ext-400-normal.woff2", weight: "400", style: "normal" },
@@ -54,6 +68,14 @@ const lexendDecaExt = localFont({
 const jetbrainsMonoExt = localFont({
   display: "swap",
   variable: "--font-jetbrains-mono-ext",
+  adjustFontFallback: false,
+  declarations: [
+    {
+      prop: "unicode-range",
+      value:
+        "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+    },
+  ],
   src: [
     { path: "./fonts/jetbrains-mono-latin-ext-400-normal.woff2", weight: "400", style: "normal" },
     { path: "./fonts/jetbrains-mono-latin-ext-500-normal.woff2", weight: "500", style: "normal" },
