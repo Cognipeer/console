@@ -310,6 +310,30 @@ function toFinding(
 }
 
 /**
+ * `text` cut at its line breaks (`\n`, `\r\n`, `\r`), each line with its
+ * offset into `text`.
+ *
+ * Built-in patterns sweep one line at a time because their separator classes
+ * (`\s`, `[\d\s().-]`) also match a line break. Swept over the whole text, the
+ * phone pattern read "2026-09-19\n2" — a CSV's last date cell plus the next
+ * row's number — as one phone number, so masking a 1,000-row CSV merged it
+ * into a single line. No built-in value is written across a line break.
+ * Context words are still looked up in the whole text.
+ */
+export function splitLines(text: string): Array<{ start: number; text: string }> {
+  const lines: Array<{ start: number; text: string }> = [];
+  const breaks = /\r\n|\r|\n/g;
+  let start = 0;
+  let m: RegExpExecArray | null;
+  while ((m = breaks.exec(text)) !== null) {
+    lines.push({ start, text: text.slice(start, m.index) });
+    start = m.index + m[0].length;
+  }
+  lines.push({ start, text: text.slice(start) });
+  return lines;
+}
+
+/**
  * Detect PII findings in `text` given the supplied config.
  *
  * `actionMode` controls the `replacement` field on each finding:
@@ -377,17 +401,20 @@ export function detect(
   };
 
   // Built-in patterns are vetted, fixed and anchored; they sweep on the main
-  // thread as they always have.
+  // thread as they always have, one LINE at a time (see `splitLines`).
+  const lines = builtins.length > 0 ? splitLines(text) : [];
   for (const c of builtins) {
-    c.regex.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = c.regex.exec(text)) !== null) {
-      if (m[0].length === 0) {
-        // safety against zero-width matches looping forever
-        c.regex.lastIndex += 1;
-        continue;
+    for (const { start: lineStart, text: line } of lines) {
+      c.regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = c.regex.exec(line)) !== null) {
+        if (m[0].length === 0) {
+          // safety against zero-width matches looping forever
+          c.regex.lastIndex += 1;
+          continue;
+        }
+        push(c, m[0], lineStart + m.index);
       }
-      push(c, m[0], m.index);
     }
   }
 

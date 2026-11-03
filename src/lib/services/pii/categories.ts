@@ -67,7 +67,13 @@ export interface PiiCategoryDefinition {
 
 function validatePhone(value: string): boolean {
   const digits = value.replace(/\D/g, '');
-  return digits.length >= 7 && digits.length <= 15;
+  if (digits.length < 7 || digits.length > 15) return false;
+  // A date is not a phone number, in either order ("19.09.2026",
+  // "2026-09-19"). The loose phone pattern matches both, so every date cell
+  // of a table was masked as a phone. Same guard as @cognipeer/pii's.
+  if (/^\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*$/.test(value)) return false;
+  if (/^\s*\d{4}[./-]\d{1,2}[./-]\d{1,2}\s*$/.test(value)) return false;
+  return true;
 }
 
 function validateLuhn(value: string): boolean {
