@@ -193,3 +193,14 @@ export type AdhocCrawlBody = z.infer<typeof adhocCrawlInputSchema>;
 export type CrawlerUrlsBody = z.infer<typeof crawlerUrlsBodySchema>;
 export type CrawlOnContainerBody = z.infer<typeof crawlOnContainerSchema>;
 export type SyncCrawlJobToRagBody = z.infer<typeof syncCrawlJobToRagSchema>;
+
+/**
+ * The first issue as `path: message` (`http.blockedHosts.1: Enter a host name…`),
+ * the text a 400 for a rejected request body carries instead of Zod's raw JSON.
+ */
+export function formatCrawlerValidationError(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return 'Invalid request payload';
+  const path = issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
+  return `${path}${issue.message}`;
+}

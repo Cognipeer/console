@@ -3,6 +3,7 @@
  * Routes registered under `/crawler/*` (the Fastify plugin mounts at `/api/`).
  */
 import type { FastifyPluginAsync } from 'fastify';
+import { ZodError } from 'zod';
 import { createLogger } from '@/lib/core/logger';
 import {
   addCrawlerUrls,
@@ -22,6 +23,7 @@ import {
   syncCrawlJobToRag,
   updateCrawler,
   createCrawlerInputSchema,
+  formatCrawlerValidationError,
   updateCrawlerInputSchema,
   runCrawlerOptionsSchema,
   adhocCrawlInputSchema,
@@ -44,6 +46,11 @@ function sendError(
   error: unknown,
   fallback: string,
 ) {
+  // A body that fails its schema is the caller's mistake. Zod's own message (the JSON of its
+  // issues) only reads as a 400 below when an issue happens to say "invalid", so it is decided here.
+  if (error instanceof ZodError) {
+    return reply.code(400).send({ error: formatCrawlerValidationError(error) });
+  }
   const message = error instanceof Error ? error.message : fallback;
   // An error that says it is a bad input is a 400 whatever its wording ("model not found" included).
   const badInput = (error as { statusCode?: unknown } | null)?.statusCode === 400;
