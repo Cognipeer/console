@@ -358,6 +358,11 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.browsers, 'storageStateEnc', 'storageStateEnc TEXT');
     this.ensureTableColumn(db, TABLES.browsers, 'storageStateMeta', 'storageStateMeta TEXT');
 
+    // Crawl results: the engine that produced a page and how long its fetch
+    // took. Results saved before this read as NULL and the UI shows no badge.
+    this.ensureTableColumn(db, TABLES.crawlResults, 'engine', 'engine TEXT');
+    this.ensureTableColumn(db, TABLES.crawlResults, 'fetchMs', 'fetchMs INTEGER');
+
     // Result of the last "Test connection" of a provider (JSON). Nullable, no backfill.
     this.ensureTableColumn(db, TABLES.providers, 'lastTest', 'lastTest TEXT');
 

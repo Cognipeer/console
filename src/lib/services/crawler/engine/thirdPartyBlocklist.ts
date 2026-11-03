@@ -1,14 +1,16 @@
 /**
- * Third-party hosts the crawler's browser never loads sub-resources from.
+ * Third-party hosts the crawler's browser skips sub-resources from when a
+ * crawler turns `http.blockTrackers` on (off by default).
  *
  * Why: `page.goto(..., 'domcontentloaded')` waits for every parser-blocking
  * `<script src>` in the page, and sites commonly put a consent manager or tag
  * manager there. On a network whose firewall silently drops traffic to those
  * hosts the request never answers, the parser never moves on, and the page
- * times out although its own content loaded in milliseconds (seen on
- * axess.com.tr: a synchronous `bundles.efilli.com` script in `<head>` on a
- * customer network that blocks it). None of these hosts serve page content, so
- * aborting them fails fast and costs the crawl nothing.
+ * times out although its own content loaded in milliseconds (seen with a
+ * synchronous consent-manager script in `<head>` on a customer network that
+ * blocks its host). These hosts do not serve page content, so aborting them
+ * fails fast. It is opt-in because a site can render its content through one
+ * of them.
  *
  * Only sub-resources are blocked, never the page being crawled: a navigation
  * to one of these hosts is left alone (see `PlaywrightSession`).

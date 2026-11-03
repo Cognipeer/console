@@ -33,6 +33,7 @@ import { assertSafeUrl } from './ssrf';
 import {
   DEFAULT_DOWNLOADABLE_MIMES,
   type CrawlEngineDeps,
+  type CrawlFetchEngine,
   type CrawlPlan,
   type PageResult,
 } from './types';
@@ -199,6 +200,20 @@ export async function* crawl(
     signal,
   } as const;
 
+  // Every fetch goes through one of these two, so a result names the engine
+  // that really produced it: on an explicit pick, on auto, and on a fallback.
+  const fetchViaAxios = async (url: string) => ({
+    ...(await fetchWithAxios(url, plan.http, downloadableMimes, signal)),
+    engine: 'axios' as const,
+  });
+  const fetchViaBrowser = async (url: string) => {
+    if (!session) throw new Error('Playwright session unavailable');
+    return {
+      ...(await session.fetch(url, signal)),
+      engine: 'playwright' as const,
+    };
+  };
+
   // ── per-URL fetch with engine auto-selection ─────────────────────
   async function fetchOne(url: string): Promise<{
     type: 'html' | 'file';
@@ -209,17 +224,18 @@ export async function* crawl(
     fileBytes?: number;
     fileBuffer?: Buffer;
     finalUrl?: string;
+    engine: CrawlFetchEngine;
   }> {
     if (plan.engine === 'axios') {
       return retry(
-        () => fetchWithAxios(url, plan.http, downloadableMimes, signal),
+        () => fetchViaAxios(url),
         retries,
         resetAwareRetryOptions,
       );
     }
     if (plan.engine === 'playwright') {
       if (!session) throw new Error('Playwright session unavailable');
-      return retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
+      return retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
     }
     // auto mode, known-file URL (by extension): try axios first (it streams
     // bytes cheaply), but fall back to the browser download path when axios
@@ -232,11 +248,11 @@ export async function* crawl(
       // Host already known to break axios (bad TLS chain) — skip straight to
       // the browser download path instead of re-paying a doomed axios attempt.
       if (session && axiosCircuitOpen(url)) {
-        return retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
+        return retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
       }
       try {
         return await retry(
-          () => fetchWithAxios(url, plan.http, downloadableMimes, signal),
+          () => fetchViaAxios(url),
           retries,
           axiosRetryOptions,
         );
@@ -245,7 +261,7 @@ export async function* crawl(
         if (!session) throw err;
         await coolDownAfterReset(err, signal);
         try {
-          return await retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
+          return await retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
         } catch (pwErr) {
           throw new Error(
             `All engines failed for ${url}: ${(pwErr as Error).message}`,
@@ -256,7 +272,7 @@ export async function* crawl(
     // auto: axios first, escalate to playwright if shell-like.
     // Skip axios entirely when the host's breaker is open.
     if (session && axiosCircuitOpen(url)) {
-      const pw = await retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
+      const pw = await retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
       if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
         throw new FetchStageError(
           `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
@@ -266,7 +282,7 @@ export async function* crawl(
     }
     try {
       const r = await retry(
-        () => fetchWithAxios(url, plan.http, downloadableMimes, signal),
+        () => fetchViaAxios(url),
         retries,
         axiosRetryOptions,
       );
@@ -296,13 +312,13 @@ export async function* crawl(
         // chain itself and collects those cookies.
         const target = r.finalUrl ?? url;
         const candidates = target !== url ? [target, url] : [url];
-        let pw: Awaited<ReturnType<typeof session.fetch>> | undefined;
+        let pw: Awaited<ReturnType<typeof fetchViaBrowser>> | undefined;
         let usedUrl = url;
         let failure = '';
         for (const candidate of candidates) {
-          let attempt: Awaited<ReturnType<typeof session.fetch>>;
+          let attempt: Awaited<ReturnType<typeof fetchViaBrowser>>;
           try {
-            attempt = await retry(() => session.fetch(candidate, signal), retries, resetAwareRetryOptions);
+            attempt = await retry(() => fetchViaBrowser(candidate), retries, resetAwareRetryOptions);
           } catch (err) {
             failure = `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`;
             if (signal.aborted) break;
@@ -338,9 +354,9 @@ export async function* crawl(
       recordAxiosOutcome(url, err);
       if (!session) throw err;
       await coolDownAfterReset(err, signal);
-      let pw: Awaited<ReturnType<typeof session.fetch>>;
+      let pw: Awaited<ReturnType<typeof fetchViaBrowser>>;
       try {
-        pw = await retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
+        pw = await retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
       } catch (pwErr) {
         throw new Error(
           `All engines failed for ${url}: ${(pwErr as Error).message}`,
@@ -390,8 +406,14 @@ export async function* crawl(
       return errorPage(item, (err as Error).message);
     }
 
+    // Set once the bytes are in hand, so conversion time stays out of it. A
+    // throw before that (every retry spent, a challenge page) times the fetch
+    // up to the failure instead.
+    const fetchStartedAt = Date.now();
+    let fetchMs: number | undefined;
     try {
       const fetched = await fetchOne(item.url);
+      fetchMs = Date.now() - fetchStartedAt;
       // Claim the URL the content was actually served from. `visited`
       // only knows what was SCHEDULED, so two queued aliases of one page
       // (`/old` → `/new`, plus `/new` itself) can both pass it while they
@@ -465,6 +487,8 @@ export async function* crawl(
             contentType: fetched.contentType,
             body: attachmentBody,
             bytes: fetched.fileBytes,
+            engine: fetched.engine,
+            fetchMs,
             fetchedAt: new Date(),
           },
           children: [],
@@ -517,11 +541,17 @@ export async function* crawl(
         description: meta.description || undefined,
         body,
         bytes: fetched.htmlBytes,
+        engine: fetched.engine,
+        fetchMs,
         fetchedAt: new Date(),
       };
       return { result, children, item };
     } catch (err) {
-      return errorPage(item, (err as Error).message);
+      return errorPage(
+        item,
+        (err as Error).message,
+        fetchMs ?? Date.now() - fetchStartedAt,
+      );
     }
   }
 
@@ -629,6 +659,7 @@ export async function* crawl(
 function errorPage(
   item: { url: string; depth: number; parent?: string },
   message: string,
+  fetchMs?: number,
 ): PageResult {
   return {
     url: item.url,
@@ -636,6 +667,7 @@ function errorPage(
     depth: item.depth,
     type: 'error',
     errorMessage: message,
+    fetchMs,
     fetchedAt: new Date(),
   };
 }

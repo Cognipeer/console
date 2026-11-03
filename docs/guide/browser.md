@@ -250,11 +250,11 @@ curl -X POST /api/browser/browsers \
 
 # 2. Open a session
 curl -X POST /api/browser/sessions \
-  -d '{ "browserId": "brw_…", "name": "akbank-research" }'
+  -d '{ "browserId": "brw_…", "name": "example-research" }'
 
 # 3. Drive it
 curl -X POST /api/browser/sessions/<sessionKey>/actions \
-  -d '{ "type": "goto", "url": "https://www.akbank.com", "waitUntil": "networkidle" }'
+  -d '{ "type": "goto", "url": "https://www.example.com", "waitUntil": "networkidle" }'
 
 curl -X POST /api/browser/sessions/<sessionKey>/extract \
   -d '{ "selector": "h1", "mode": "text", "multiple": true }'

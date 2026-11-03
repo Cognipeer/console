@@ -44,6 +44,21 @@ export interface CrawlHttpConfig {
    * though browsers/OS trust stores can. Default false.
    */
   allowInsecureTls?: boolean;
+  /**
+   * Playwright engine: abort sub-resource requests to well-known tracker /
+   * analytics / consent-manager hosts instead of waiting on them. A page's
+   * `domcontentloaded` waits for parser-blocking scripts, so on a network whose
+   * firewall silently drops those hosts the navigation times out although the
+   * page itself loaded. Default false: some sites render their content through
+   * one of these scripts, so blocking is opt-in for a site that needs it.
+   */
+  blockTrackers?: boolean;
+  /**
+   * Playwright engine: extra hosts (suffix match, so `example.com` covers
+   * `cdn.example.com`) the browser never loads, on top of the built-in tracker
+   * list — for a site's own third-party script that hangs on a given network.
+   */
+  blockedHosts?: string[];
 }
 
 export interface CrawlMarkdownOptions {
@@ -126,6 +141,9 @@ export interface CrawlPlan {
 
 export type PageResultType = 'html' | 'file' | 'error';
 
+/** The engine that actually produced a page: never `auto`, which only chooses. */
+export type CrawlFetchEngine = Exclude<CrawlerEngineMode, 'auto'>;
+
 export interface PageResult {
   url: string;
   parentUrl?: string;
@@ -143,6 +161,19 @@ export interface PageResult {
   body?: string;
   /** Raw bytes of fetched content (HTML before markdown, or file). */
   bytes?: number;
+  /**
+   * Engine that produced the content. In `auto` mode this is the one that
+   * answered, so a browser fallback shows as `playwright`. Unset on error
+   * pages: no engine produced anything.
+   */
+  engine?: CrawlFetchEngine;
+  /**
+   * Wall-clock milliseconds spent getting the content, from the first request
+   * to having the bytes in hand. It includes retries, their backoff and an
+   * axios → browser fallback, and excludes markdown conversion. Set on error
+   * pages too (time until the fetch gave up); unset when no fetch was made.
+   */
+  fetchMs?: number;
   errorMessage?: string;
   fetchedAt: Date;
 }

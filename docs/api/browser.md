@@ -50,7 +50,7 @@ POST /api/client/v1/browser/sessions
 ```json
 {
   "browserId": "brw_123",
-  "name": "akbank-research"
+  "name": "example-research"
 }
 ```
 
@@ -76,7 +76,7 @@ POST /api/client/v1/browser/sessions/:sessionKey/actions
 ```json
 {
   "type": "goto",
-  "url": "https://www.akbank.com",
+  "url": "https://www.example.com",
   "waitUntil": "networkidle"
 }
 ```

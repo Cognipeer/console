@@ -4507,7 +4507,7 @@ paths:
               $ref: "#/components/schemas/BrowserSessionCreateRequest"
             example:
               browserId: brw_123
-              name: akbank-research
+              name: example-research
       responses:
         "201":
           description: Browser session created.
@@ -4673,7 +4673,7 @@ paths:
               $ref: "#/components/schemas/BrowserAction"
             example:
               type: goto
-              url: https://www.akbank.com
+              url: https://www.example.com
               waitUntil: networkidle
       responses:
         "200":
@@ -21473,6 +21473,16 @@ components:
         allowInsecureTls:
           type: boolean
           description: Skip TLS certificate verification - opt-in escape hatch for sites with a misconfigured cert chain.
+        blockTrackers:
+          type: boolean
+          description: Browser engine only. Do not load well-known tracker, analytics and cookie-consent hosts, so a network that silently drops them cannot stall page load. Default `false`.
+        blockedHosts:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 253
+          description: Browser engine only. Extra hosts (suffix match, so `example.com` covers `cdn.example.com`) the browser never loads, added to the built-in tracker list. Bare host names only, without scheme, path or port. Never applied to the page being crawled.
     CrawlerJob:
       type: object
       description: A crawl job enqueued from a crawler run or an ad-hoc run.
@@ -21638,6 +21648,17 @@ components:
         bytes:
           type: integer
           nullable: true
+        engine:
+          type: string
+          nullable: true
+          enum:
+            - axios
+            - playwright
+          description: Engine that produced the content. In an `auto` crawl it is the one that answered, so a browser fallback reads `playwright`. Absent on error results and on results saved before this was recorded.
+        fetchMs:
+          type: integer
+          nullable: true
+          description: Milliseconds the fetch took, retries, backoff and any fallback to the browser included, markdown conversion excluded. Error results carry the time until the fetch gave up. Absent on results saved before this was recorded.
         ragDocumentId:
           type: string
           nullable: true

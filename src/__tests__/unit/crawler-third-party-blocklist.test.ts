@@ -3,24 +3,26 @@
  * parser-blocking third-party script that a firewall silently drops cannot
  * hold `domcontentloaded` until the navigation times out.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { chromium } from 'playwright';
 import {
   DEFAULT_BLOCKED_THIRD_PARTY_HOSTS,
   createHostBlocker,
 } from '@/lib/services/crawler/engine/thirdPartyBlocklist';
-import {
-  getConfig,
-  getConfigSource,
-  setConfigSource,
-  type ConfigSource,
-} from '@/lib/core/config';
+import { PlaywrightSession } from '@/lib/services/crawler/engine/playwrightFetcher';
+import type { CrawlHttpConfig } from '@/lib/services/crawler/engine/types';
+import { createCrawlerInputSchema } from '@/lib/services/crawler/validation';
+import { snapshotToPlan } from '@/lib/services/crawler/crawlerJobService';
+import type { ICrawlPlanSnapshot } from '@/lib/database/provider/types.domain';
+
+vi.mock('playwright', () => ({ chromium: { launch: vi.fn() } }));
 
 describe('createHostBlocker', () => {
   const blocked = createHostBlocker();
 
-  it('blocks the tag manager and consent host that stalled axess.com.tr', () => {
-    expect(blocked('https://bundles.efilli.com/axess.com.tr.prod.js')).toBe(true);
-    expect(blocked('https://www.googletagmanager.com/gtm.js?id=GTM-KN4BWJH')).toBe(true);
+  it('blocks a tag manager and a consent-manager host', () => {
+    expect(blocked('https://bundles.efilli.com/example.com.prod.js')).toBe(true);
+    expect(blocked('https://www.googletagmanager.com/gtm.js?id=GTM-ABC123')).toBe(true);
   });
 
   it('matches by registrable suffix: the host itself and its subdomains only', () => {
@@ -41,7 +43,7 @@ describe('createHostBlocker', () => {
 
   it('never blocks ordinary content or the APIs a page needs to render', () => {
     for (const url of [
-      'https://www.axess.com.tr/assets/scripts/jquery-3.7.1.min.js',
+      'https://www.example.com/assets/scripts/jquery-3.7.1.min.js',
       'https://fonts.googleapis.com/css2?family=Inter',
       'https://fonts.gstatic.com/s/inter/v1/x.woff2',
       'https://www.google.com/recaptcha/api.js',
@@ -83,26 +85,137 @@ describe('createHostBlocker', () => {
   });
 });
 
-describe('config.browser — crawler tracker blocking', () => {
-  const original = getConfigSource();
-  afterEach(() => setConfigSource(original));
-  const withEnv = (o: Record<string, string>): ConfigSource =>
-    ({ get: (k: string) => o[k] ?? process.env[k] }) as ConfigSource;
+/**
+ * The per-crawler settings (`http.blockTrackers` / `http.blockedHosts`) have to
+ * reach the browser's route handler: drive the real PlaywrightSession against a
+ * fake Chromium and replay requests through the handler it registers. Tracker
+ * blocking is opt-in, so a crawler that sets nothing loads everything.
+ */
+describe('PlaywrightSession — per-crawler tracker blocking', () => {
+  type RouteHandler = (route: unknown) => unknown;
+  let handler: RouteHandler;
 
-  it('is on by default with no extra hosts', () => {
-    setConfigSource(withEnv({}));
-    const cfg = getConfig().browser;
-    expect(cfg.crawlerBlockTrackers).toBe(true);
-    expect(cfg.crawlerBlockedHosts).toEqual([]);
+  beforeEach(() => {
+    const context = {
+      addInitScript: vi.fn(async () => undefined),
+      addCookies: vi.fn(async () => undefined),
+      route: vi.fn(async (_pattern: string, h: RouteHandler) => {
+        handler = h;
+      }),
+    };
+    const browser = { newContext: vi.fn(async () => context), close: vi.fn(async () => undefined) };
+    vi.mocked(chromium.launch).mockResolvedValue(browser as never);
   });
 
-  it('reads CRAWLER_BLOCK_TRACKERS and a comma-separated CRAWLER_BLOCKED_HOSTS', () => {
-    setConfigSource(withEnv({
-      CRAWLER_BLOCK_TRACKERS: 'false',
-      CRAWLER_BLOCKED_HOSTS: 'hang.example.com , cdn.slow.test',
-    }));
-    const cfg = getConfig().browser;
-    expect(cfg.crawlerBlockTrackers).toBe(false);
-    expect(cfg.crawlerBlockedHosts).toEqual(['hang.example.com', 'cdn.slow.test']);
+  /** Replays one request through the registered handler; returns what the browser did with it. */
+  async function replay(
+    http: CrawlHttpConfig,
+    url: string,
+    { navigation = false, resourceType = 'script' } = {},
+  ): Promise<'aborted' | 'continued'> {
+    const session = new PlaywrightSession(http, []);
+    await (session as unknown as { ensure(): Promise<void> }).ensure();
+    let outcome: 'aborted' | 'continued' | undefined;
+    await handler({
+      request: () => ({
+        url: () => url,
+        isNavigationRequest: () => navigation,
+        resourceType: () => resourceType,
+      }),
+      abort: vi.fn(async () => {
+        outcome = 'aborted';
+      }),
+      continue: vi.fn(async () => {
+        outcome = 'continued';
+      }),
+    });
+    return outcome as 'aborted' | 'continued';
+  }
+
+  const GTM = 'https://www.googletagmanager.com/gtm.js?id=GTM-1';
+  const EFILLI = 'https://bundles.efilli.com/example.com.prod.js';
+  const OWN = 'https://www.example.com/assets/app.js';
+
+  it('loads everything when the crawler sets nothing: blocking is off by default', async () => {
+    expect(await replay({}, GTM)).toBe('continued');
+    expect(await replay({}, EFILLI)).toBe('continued');
+    expect(await replay({}, OWN)).toBe('continued');
+  });
+
+  it('treats an explicit false the same as unset', async () => {
+    expect(await replay({ blockTrackers: false }, GTM)).toBe('continued');
+    expect(await replay({ blockTrackers: false }, EFILLI)).toBe('continued');
+  });
+
+  it('blocks the built-in tracker hosts when the crawler turns blocking on', async () => {
+    expect(await replay({ blockTrackers: true }, GTM)).toBe('aborted');
+    expect(await replay({ blockTrackers: true }, EFILLI)).toBe('aborted');
+    expect(await replay({ blockTrackers: true }, OWN)).toBe('continued');
+  });
+
+  it('never blocks the page being crawled, even on a listed host', async () => {
+    expect(
+      await replay({ blockTrackers: true }, 'https://www.googletagmanager.com/', {
+        navigation: true,
+        resourceType: 'document',
+      }),
+    ).toBe('continued');
+  });
+
+  it('blocks only the crawler’s own hosts when blocking is left off', async () => {
+    const http = { blockedHosts: ['hang.example.com'] };
+    expect(await replay(http, 'https://cdn.hang.example.com/a.js')).toBe('aborted');
+    expect(await replay(http, GTM)).toBe('continued');
+    expect(await replay(http, OWN)).toBe('continued');
+  });
+
+  it('adds the crawler’s own hosts to the defaults when blocking is on', async () => {
+    const http = { blockTrackers: true, blockedHosts: ['hang.example.com'] };
+    expect(await replay(http, 'https://hang.example.com/a.js')).toBe('aborted');
+    expect(await replay(http, GTM)).toBe('aborted');
+    expect(await replay(http, OWN)).toBe('continued');
+  });
+});
+
+describe('crawler http settings — blockTrackers / blockedHosts', () => {
+  const parse = (http: unknown) => createCrawlerInputSchema.safeParse({ name: 'c', http });
+
+  it('are optional, so an existing crawler keeps the default (trackers load)', () => {
+    const ok = parse({});
+    expect(ok.success && ok.data.http?.blockTrackers).toBeUndefined();
+    expect(ok.success && ok.data.http?.blockedHosts).toBeUndefined();
+  });
+
+  it('accept a switch and a trimmed host list', () => {
+    const ok = parse({ blockTrackers: true, blockedHosts: [' hang.example.com ', '*.slow.test', '.metrics.test'] });
+    expect(ok.success && ok.data.http).toMatchObject({
+      blockTrackers: true,
+      blockedHosts: ['hang.example.com', '*.slow.test', '.metrics.test'],
+    });
+  });
+
+  it.each([
+    ['a URL', 'https://cdn.example.com/a.js'],
+    ['a path', 'cdn.example.com/a.js'],
+    ['a port', 'cdn.example.com:8443'],
+    ['whitespace', 'cdn example.com'],
+    ['credentials', 'user@cdn.example.com'],
+    ['an empty entry', '   '],
+  ])('reject a host list entry with %s', (_label, entry) => {
+    expect(parse({ blockedHosts: [entry] }).success).toBe(false);
+  });
+
+  it('reject a non-boolean switch and an oversized list', () => {
+    expect(parse({ blockTrackers: 'false' }).success).toBe(false);
+    expect(parse({ blockedHosts: Array.from({ length: 101 }, (_, i) => `h${i}.example.com`) }).success).toBe(false);
+  });
+
+  it('reach the engine plan: a crawl run is where they take effect', () => {
+    const plan = snapshotToPlan({
+      seeds: [],
+      http: { blockTrackers: true, blockedHosts: ['hang.example.com'] },
+    } as unknown as ICrawlPlanSnapshot);
+    expect(plan.http.blockTrackers).toBe(true);
+    expect(plan.http.blockedHosts).toEqual(['hang.example.com']);
   });
 });

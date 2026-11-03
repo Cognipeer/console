@@ -5043,6 +5043,13 @@ export interface ICrawlerHttpConfig {
    */
   allowInsecureTls?: boolean;
   /**
+   * Browser engine: skip well-known tracker / analytics / consent hosts so a
+   * dropped third-party script cannot stall page load. Unset = off.
+   */
+  blockTrackers?: boolean;
+  /** Browser engine: extra hosts (suffix match) never loaded, beyond the built-in tracker list. */
+  blockedHosts?: string[];
+  /**
    * Encrypted-at-rest secret payload (AES-256-GCM) holding bearerToken /
    * basicAuth.password / cookies[].value. When set, those plaintext fields
    * are absent from the stored record and must be recovered through
@@ -5234,6 +5241,19 @@ export interface ICrawlResult {
   /** Present when type === 'html'. */
   bodyMarkdown?: string;
   bytes?: number;
+  /**
+   * Engine that produced the content (never `auto`: an auto crawl records the
+   * one that answered). Unset on error rows and on rows saved before this was
+   * recorded.
+   */
+  engine?: Exclude<CrawlerEngine, 'auto'>;
+  /**
+   * Wall-clock milliseconds the fetch took, retries, backoff and an
+   * axios → browser fallback included, markdown conversion excluded. Error
+   * rows carry the time until the fetch gave up. Unset on rows saved before
+   * this was recorded.
+   */
+  fetchMs?: number;
   /** RAG ingest outcome (when crawler has a RAG binding). */
   ragDocumentId?: string;
   ragStatus?: 'pending' | 'indexed' | 'skipped' | 'failed';

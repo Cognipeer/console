@@ -368,22 +368,6 @@ export interface AppConfig {
      * to — only turn it on for a network you already control end-to-end.
      */
     ignoreCertificateErrors: boolean;
-    /**
-     * The crawler's Playwright engine aborts sub-resource requests to
-     * well-known tracker / analytics / consent-manager hosts instead of
-     * waiting on them. A page's `domcontentloaded` waits for parser-blocking
-     * scripts, so on a network whose firewall silently drops those hosts the
-     * navigation times out although the page itself loaded. Turn off only if
-     * a crawled site genuinely renders its content through one of them.
-     */
-    crawlerBlockTrackers: boolean;
-    /**
-     * Extra hosts (suffix match, so `example.com` covers `cdn.example.com`)
-     * the crawler's browser never loads, added to the built-in tracker list.
-     * The escape hatch for a site whose own third-party script hangs on a
-     * specific network, without a code change and a release.
-     */
-    crawlerBlockedHosts: string[];
   };
 
   outboundHttp: {
@@ -1132,8 +1116,6 @@ function buildConfig(source: ConfigSource): AppConfig {
       blockPrivateNetwork: bool(source, 'BROWSER_BLOCK_PRIVATE_NETWORK', true),
       chromiumExtraArgs: list(source, 'BROWSER_CHROMIUM_EXTRA_ARGS', []),
       ignoreCertificateErrors: bool(source, 'BROWSER_IGNORE_CERTIFICATE_ERRORS', false),
-      crawlerBlockTrackers: bool(source, 'CRAWLER_BLOCK_TRACKERS', true),
-      crawlerBlockedHosts: list(source, 'CRAWLER_BLOCKED_HOSTS', []),
     },
 
     outboundHttp: {
