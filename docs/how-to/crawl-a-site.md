@@ -90,7 +90,7 @@ The **HTTP** tab's **Request** card configures every fetch.
 | **Custom headers (JSON: `{ "X-Foo": "bar" }`)** | — | Must be a valid JSON object. |
 | **Cookies (JSON array of `{ name, value, domain?, path? }`)** | — | The practical way into a session-gated site: log in with a browser, copy the session cookie here. |
 | **Skip tracker and consent scripts** | Off | Browser engine only (Playwright, or Auto when it falls back to it). When on, the browser does not load Google Tag Manager, analytics, ad pixels or cookie-consent hosts. Turn it on when pages time out although their content loads: if your network silently drops those hosts, a page waits on one of them. Some sites render their content through such a script, so leave it off unless you need it. |
-| **Also skip these hosts** | — | One host per line, for a site's own third-party script that hangs on your network. `cdn.example.com` also covers its subdomains. The page being crawled is never blocked. |
+| **Also skip these hosts** | — | One host per line, for a site's own third-party script that hangs on your network. `cdn.example.com` also covers its subdomains. Names with international characters (`bücher.example`) work as typed. The page being crawled is never blocked. |
 
 A new crawler is stored with `http.retries: 2`, so a failing fetch is attempted twice before the URL is recorded as an error — and permanent failures on the static path (404, 403, a DNS error, an untrusted certificate) are not retried at all. The dashboard does not expose the setting; `http.retries` accepts 1–5 over the API.
 

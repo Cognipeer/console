@@ -57,8 +57,23 @@ export const DEFAULT_BLOCKED_THIRD_PARTY_HOSTS: readonly string[] = [
   'usercentrics.eu',
 ];
 
-function normalizeHost(raw: string): string {
-  return raw.trim().toLowerCase().replace(/^\*?\./, '').replace(/\.$/, '');
+/**
+ * The form the matcher compares in: exactly what `new URL(...).hostname`
+ * reports for a request, so lowercase and, for an internationalized name,
+ * punycode (`bücher.example` → `xn--bcher-kva.example`). Entries and request
+ * hosts go through the same parser, so they cannot drift apart. A leading
+ * `*.` or `.` and a trailing `.` are dropped. Returns `null` when the entry is
+ * not a bare host name (scheme, path, port, credentials, whitespace or a
+ * character a host cannot contain).
+ */
+export function normalizeBlockedHost(raw: string): string | null {
+  const host = raw.trim().replace(/^\*?\./, '').replace(/\.$/, '');
+  if (!host || /[\s/\\:?#@]/.test(host)) return null;
+  try {
+    return new URL(`http://${host}/`).hostname || null;
+  } catch {
+    return null;
+  }
 }
 
 export type HostBlocker = (url: string) => boolean;
@@ -75,15 +90,16 @@ export function createHostBlocker(options: {
   const { useDefaults = true, extra = [] } = options;
   const suffixes = new Set(
     [...(useDefaults ? DEFAULT_BLOCKED_THIRD_PARTY_HOSTS : []), ...extra]
-      .map(normalizeHost)
-      .filter(Boolean),
+      .map(normalizeBlockedHost)
+      .filter((host): host is string => host !== null),
   );
   if (suffixes.size === 0) return () => false;
 
   return (url: string): boolean => {
     let host: string;
     try {
-      host = new URL(url).hostname.toLowerCase();
+      // `www.example.com.` is the same host; the entries are stored without the dot.
+      host = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
     } catch {
       return false; // not a parseable URL — let the browser deal with it
     }

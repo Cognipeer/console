@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 import {
   DEFAULT_BLOCKED_THIRD_PARTY_HOSTS,
   createHostBlocker,
+  normalizeBlockedHost,
 } from '@/lib/services/crawler/engine/thirdPartyBlocklist';
 import { PlaywrightSession } from '@/lib/services/crawler/engine/playwrightFetcher';
 import type { CrawlHttpConfig } from '@/lib/services/crawler/engine/types';
@@ -16,6 +17,43 @@ import { snapshotToPlan } from '@/lib/services/crawler/crawlerJobService';
 import type { ICrawlPlanSnapshot } from '@/lib/database/provider/types.domain';
 
 vi.mock('playwright', () => ({ chromium: { launch: vi.fn() } }));
+
+describe('normalizeBlockedHost', () => {
+  it.each([
+    ['cdn.example.com', 'cdn.example.com'],
+    ['  CDN.Example.COM  ', 'cdn.example.com'],
+    ['*.cdn.example.com', 'cdn.example.com'],
+    ['.cdn.example.com', 'cdn.example.com'],
+    ['cdn.example.com.', 'cdn.example.com'],
+    ['bücher.example', 'xn--bcher-kva.example'],
+    ['BÜCHER.Example', 'xn--bcher-kva.example'],
+    ['*.bücher.example', 'xn--bcher-kva.example'],
+    ['xn--bcher-kva.example', 'xn--bcher-kva.example'],
+    ['a\u3002b.test', 'a.b.test'], // ideographic full stop reads as a dot
+    ['under_score.test', 'under_score.test'],
+    ['127.0.0.1', '127.0.0.1'],
+  ])('turns %j into %j', (raw, expected) => {
+    expect(normalizeBlockedHost(raw)).toBe(expected);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['blank', '   '],
+    ['a bare wildcard', '*.'],
+    ['a scheme', 'https://cdn.example.com'],
+    ['a path', 'cdn.example.com/a.js'],
+    ['a port', 'cdn.example.com:8443'],
+    ['credentials', 'user@cdn.example.com'],
+    ['a query', 'cdn.example.com?x=1'],
+    ['a fragment', 'cdn.example.com#x'],
+    ['a backslash', 'cdn.example.com\\x'],
+    ['whitespace inside', 'cdn example.com'],
+    ['a character no host holds', 'exa<mple.com'],
+    ['a stray bracket', 'a[b.test'],
+  ])('returns null for %s', (_label, raw) => {
+    expect(normalizeBlockedHost(raw)).toBeNull();
+  });
+});
 
 describe('createHostBlocker', () => {
   const blocked = createHostBlocker();
@@ -73,6 +111,33 @@ describe('createHostBlocker', () => {
     expect(b('https://www.googletagmanager.com/gtm.js')).toBe(false);
     expect(b('https://hang.example.com/a.js')).toBe(true);
     expect(createHostBlocker({ useDefaults: false })('https://www.googletagmanager.com/gtm.js')).toBe(false);
+  });
+
+  it('matches an internationalized entry against the punycode form a request URL carries', () => {
+    // `new URL(...).hostname` reports `xn--bcher-kva.example` for `bücher.example`,
+    // so an entry kept as typed would never match.
+    for (const entry of ['bücher.example', 'BÜCHER.Example', '*.bücher.example', '.bücher.example.']) {
+      const b = createHostBlocker({ useDefaults: false, extra: [entry] });
+      expect(b('https://xn--bcher-kva.example/a.js'), entry).toBe(true);
+      expect(b('https://cdn.xn--bcher-kva.example/a.js'), entry).toBe(true);
+      expect(b('https://bücher.example/a.js'), entry).toBe(true); // a URL not yet through the browser
+      expect(b('https://bucher.example/a.js'), entry).toBe(false);
+    }
+    // an entry already written as punycode keeps working
+    expect(createHostBlocker({ useDefaults: false, extra: ['xn--bcher-kva.example'] })('https://xn--bcher-kva.example/a.js')).toBe(true);
+  });
+
+  it('treats a request host with a trailing dot as the same host', () => {
+    expect(blocked('https://www.googletagmanager.com./gtm.js')).toBe(true);
+    expect(blocked('https://notgoogletagmanager.com./gtm.js')).toBe(false);
+  });
+
+  it('drops an entry that is not a host instead of letting it match something else', () => {
+    // `a\b` is read by URL parsers as host `a`: it must be refused, not quietly become `a`.
+    const b = createHostBlocker({ useDefaults: false, extra: ['a\\b.test', 'cdn.example.com/x.js', 'exa<mple.com', '*.'] });
+    expect(b('https://a.test/x.js')).toBe(false);
+    expect(b('https://cdn.example.com/x.js')).toBe(false);
+    expect(b('https://anything.test/x.js')).toBe(false);
   });
 
   it('keeps the default list free of entries that would hide a page’s own content', () => {
@@ -169,6 +234,13 @@ describe('PlaywrightSession — per-crawler tracker blocking', () => {
     expect(await replay(http, OWN)).toBe('continued');
   });
 
+  it('blocks a crawler host written with international characters, as the browser reports it', async () => {
+    const http = { blockedHosts: ['bücher.example'] };
+    // Chromium reports the punycode form of the host in the request URL.
+    expect(await replay(http, 'https://cdn.xn--bcher-kva.example/a.js')).toBe('aborted');
+    expect(await replay(http, 'https://bucher.example/a.js')).toBe('continued');
+  });
+
   it('adds the crawler’s own hosts to the defaults when blocking is on', async () => {
     const http = { blockTrackers: true, blockedHosts: ['hang.example.com'] };
     expect(await replay(http, 'https://hang.example.com/a.js')).toBe('aborted');
@@ -186,6 +258,11 @@ describe('crawler http settings — blockTrackers / blockedHosts', () => {
     expect(ok.success && ok.data.http?.blockedHosts).toBeUndefined();
   });
 
+  it('accept an internationalized host and keep it as typed', () => {
+    const ok = parse({ blockedHosts: ['  bücher.example  ', '*.bücher.example'] });
+    expect(ok.success && ok.data.http?.blockedHosts).toEqual(['bücher.example', '*.bücher.example']);
+  });
+
   it('accept a switch and a trimmed host list', () => {
     const ok = parse({ blockTrackers: true, blockedHosts: [' hang.example.com ', '*.slow.test', '.metrics.test'] });
     expect(ok.success && ok.data.http).toMatchObject({
@@ -200,6 +277,8 @@ describe('crawler http settings — blockTrackers / blockedHosts', () => {
     ['a port', 'cdn.example.com:8443'],
     ['whitespace', 'cdn example.com'],
     ['credentials', 'user@cdn.example.com'],
+    ['a backslash', 'cdn.example.com\\x'],
+    ['a character no host holds', 'exa<mple.com'],
     ['an empty entry', '   '],
   ])('reject a host list entry with %s', (_label, entry) => {
     expect(parse({ blockedHosts: [entry] }).success).toBe(false);

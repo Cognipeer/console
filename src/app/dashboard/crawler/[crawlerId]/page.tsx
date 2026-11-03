@@ -42,6 +42,7 @@ import RunDetailModal from '@/components/crawler/RunDetailModal';
 import { crawlerOcrToSettings, settingsToCrawlerOcr } from '@/components/crawler/crawlerOcr';
 import OcrSettingsFields from '@/components/extraction/OcrSettingsFields';
 import type { OcrSettings } from '@/components/extraction/ocrForm';
+import { normalizeBlockedHost } from '@/lib/services/crawler/engine/thirdPartyBlocklist';
 import type {
   CrawlerView,
   CrawlJobView,
@@ -174,9 +175,12 @@ export default function CrawlerDetailPage() {
       ocr: undefined,
     },
     validate: {
-      // Mirrors the server rule: a bare host name, no scheme, path, port or credentials.
+      // Same rule as the server: a bare host name, no scheme, path, port or credentials.
       blockedHosts: (value) => {
-        const bad = value.split('\n').map((s) => s.trim()).find((h) => /[\s/:?#@]/.test(h));
+        const bad = value
+          .split('\n')
+          .map((s) => s.trim())
+          .find((h) => h !== '' && normalizeBlockedHost(h) === null);
         return bad ? `"${bad}" is not a host name. Use something like cdn.example.com` : null;
       },
     },
