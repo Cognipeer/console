@@ -1096,6 +1096,12 @@ export interface IOcrModelSettings {
   prompt?: string;
 }
 
+/** Reversible PII protection: which stored PII policy decides what the model never sees. */
+export interface IPiiProtectionConfig {
+  /** Key of a PII policy (`/dashboard/pii`) in the same project. */
+  policyKey: string;
+}
+
 export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
@@ -1113,6 +1119,12 @@ export interface IModel {
   settings: Record<string, unknown>;
   pricing: IModelPricing;
   semanticCache?: ISemanticCacheConfig;
+  /**
+   * Reversible PII protection for every call of this model, whoever calls: the
+   * provider sees tokens in place of what the policy finds, and the caller gets
+   * the values back. An agent's own `piiProtection` outranks it for that agent.
+   */
+  piiProtection?: IPiiProtectionConfig | null;
   /**
    * Interchangeable deployments of THIS SAME model, for capacity and
    * resilience. Every replica must be the same model — same pricing, same

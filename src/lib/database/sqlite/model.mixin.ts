@@ -4,6 +4,7 @@
 
 import type {
   IModelReplica,
+  IPiiProtectionConfig,
   IGuardrailBinding,
   IModel, IModelUsageLog, IModelUsageAggregate, IAgentTurnUsageSummary,
   ModelCategory, ModelProviderType,
@@ -25,10 +26,10 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.models}
         (id, tenantId, projectId, name, description, key, providerKey, providerDriver, provider,
          category, modelId, isMultimodal, supportsToolCalls, settings, pricing, semanticCache,
-         inputGuardrailKey, outputGuardrailKey, guardrails, replicas, metadata, createdBy, updatedBy, createdAt, updatedAt)
+         inputGuardrailKey, outputGuardrailKey, guardrails, replicas, piiProtection, metadata, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @name, @description, @key, @providerKey, @providerDriver, @provider,
          @category, @modelId, @isMultimodal, @supportsToolCalls, @settings, @pricing, @semanticCache,
-         @inputGuardrailKey, @outputGuardrailKey, @guardrails, @replicas, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @inputGuardrailKey, @outputGuardrailKey, @guardrails, @replicas, @piiProtection, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: model.tenantId,
@@ -53,6 +54,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         // what makes resolveBindings fall back to the two legacy keys above.
         guardrails: model.guardrails ? this.toJson(model.guardrails) : null,
         replicas: model.replicas ? this.toJson(model.replicas) : null,
+        piiProtection: model.piiProtection ? this.toJson(model.piiProtection) : null,
         metadata: this.toJson(model.metadata ?? {}),
         createdBy: model.createdBy ?? null,
         updatedBy: model.updatedBy ?? null,
@@ -87,6 +89,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       // NULL, which would resurrect the deprecated legacy keys.
       if (data.guardrails !== undefined) { sets.push('guardrails = @guardrails'); params.guardrails = data.guardrails ? this.toJson(data.guardrails) : null; }
       if (data.replicas !== undefined) { sets.push('replicas = @replicas'); params.replicas = data.replicas ? this.toJson(data.replicas) : null; }
+      if (data.piiProtection !== undefined) { sets.push('piiProtection = @piiProtection'); params.piiProtection = data.piiProtection ? this.toJson(data.piiProtection) : null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
@@ -446,6 +449,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
           const parsed = this.parseJson<IModelReplica[] | null>(r.replicas, null);
           return Array.isArray(parsed) ? parsed : undefined;
         })(),
+        piiProtection: r.piiProtection ? this.parseJson<IPiiProtectionConfig | null>(r.piiProtection, null) : undefined,
         metadata: this.parseJson(r.metadata, {}),
         createdBy: r.createdBy as string | undefined,
         updatedBy: r.updatedBy as string | undefined,

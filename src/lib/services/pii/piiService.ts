@@ -450,6 +450,48 @@ export async function scanWithPolicy(params: {
   };
 }
 
+/**
+ * A stored policy loaded ONCE, for a caller that scans many texts under it (the
+ * reversible round trip scans every message of a model call). `null` when the
+ * policy is disabled or the tenant's PII service is switched off, which pass
+ * text through unchanged exactly as `scanWithPolicy` does. A missing policy
+ * throws: a caller configured to protect must not silently stop protecting.
+ */
+export async function loadPolicyScanner(params: {
+  tenantDbName: string;
+  policyKey: string;
+  projectId?: string;
+}): Promise<{ policyKey: string; version: string; scan: (text: string) => Promise<PiiFinding[]> } | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(params.tenantDbName);
+  const policy = await db.findPiiPolicyByKey(params.policyKey, params.projectId);
+  if (!policy) {
+    throw new Error(`PII policy with key "${params.policyKey}" not found`);
+  }
+  if (!policy.enabled || await safetyCheckSkipped({ tenantDbName: params.tenantDbName }, 'pii', { policyKey: params.policyKey })) {
+    return null;
+  }
+  const updatedAt = policy.updatedAt ? new Date(policy.updatedAt).getTime() : 0;
+  return {
+    policyKey: policy.key,
+    version: `${policy.key}@${updatedAt}`,
+    scan: async (text) => {
+      const detected = await runDetection(
+        text,
+        policy.engine ?? 'regex',
+        {
+          categories: policy.categories,
+          customPatterns: policy.customPatterns,
+          languages: policy.languages,
+          detection: policy.detection,
+        },
+        'detect',
+      );
+      return detected.findings;
+    },
+  };
+}
+
 export type { PiiFinding, PiiScanResult, PiiVault };
 export { PII_CATEGORIES, PII_CATEGORIES_BY_ID };
 export type { PiiCategoryDefinition };

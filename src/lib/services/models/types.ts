@@ -1,4 +1,4 @@
-import type { IModel, IModelPricing, IModelReplica, ISemanticCacheConfig, ModelCategory } from '@/lib/database';
+import type { IModel, IModelPricing, IModelReplica, IPiiProtectionConfig, ISemanticCacheConfig, ModelCategory } from '@/lib/database';
 import type { IGuardrailBinding } from '@/lib/database/provider/types.domain';
 import type { ProviderCapabilityFlags } from '@/lib/providers';
 import type {
@@ -62,6 +62,8 @@ export interface UpdateModelInput {
    * `providerKey`/`modelId`.
    */
   replicas?: IModelReplica[];
+  /** Reversible PII protection; `null` turns it off. Validated by `readPiiProtectionField`. */
+  piiProtection?: IPiiProtectionConfig | null;
   /** @deprecated Use `guardrails`. Kept as the read fallback for legacy rows. */
   inputGuardrailKey?: string;
   /** @deprecated Use `guardrails`. Kept as the read fallback for legacy rows. */

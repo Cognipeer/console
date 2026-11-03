@@ -52,7 +52,7 @@ import {
 } from './agentKnowledgeBindings';
 import { applyServiceAvailability, assertAgentsEnabled, filterChildSources } from './agentServiceAvailability';
 import { getDisabledServices } from '@/lib/services/availability/serviceAvailability';
-import { getDatabase, runWithTenantScope, type AgentResponseFormat, type DatabaseProvider, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type AgentResponseFormat, type DatabaseProvider, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion, type IModelPricing, type IPiiProtectionConfig } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
     getRagDocument,
@@ -2004,6 +2004,8 @@ export interface AgentModelCaller {
     /** The Session / API conversation. */
     sessionId?: string;
     userId?: string;
+    /** The agent's reversible PII protection: every model call of the run carries it. */
+    piiProtection?: IPiiProtectionConfig | null;
 }
 
 /** What a sub-agent's own model call is told about output tokens (see `buildSubagentModel`). */
@@ -2311,6 +2313,7 @@ export async function buildSubagentModel(
             ...(caller?.agentKey ? { agentKey: caller.agentKey } : {}),
             ...(caller?.sessionId ? { sessionId: caller.sessionId } : {}),
             ...(caller?.userId ? { userId: caller.userId } : {}),
+            ...(caller?.piiProtection ? { piiProtection: caller.piiProtection } : {}),
             ...(agentPick ? { reasoning: agentPick } : {}),
             ...(reasoning?.request ? { requestReasoning: reasoning.request } : {}),
             ...(reasoning?.config && !agentShowsReasoning(reasoning.config) ? { showReasoning: false } : {}),
@@ -4666,6 +4669,7 @@ async function buildLocalAgentRun(input: {
         agentKey,
         ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
         ...(input.userId ? { userId: input.userId } : {}),
+        ...(config.piiProtection ? { piiProtection: config.piiProtection } : {}),
         onRouted: (key) => { routedModelKey = key; },
         // The operator's own views (playground, Compare versions) ask for the thinking text whatever the
         // agent publishes; every other surface follows the agent. Live deltas come from the SDK's reasoning
@@ -5052,6 +5056,7 @@ async function buildLocalAgentRun(input: {
             agentKey,
             ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
             ...(input.userId ? { userId: input.userId } : {}),
+            ...(config.piiProtection ? { piiProtection: config.piiProtection } : {}),
         },
         output: {
             ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),

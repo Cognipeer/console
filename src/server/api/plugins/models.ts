@@ -55,6 +55,7 @@ import {
   readGuardrailBindingsField,
   validateGuardrailBindings,
 } from './guardrail-bindings';
+import { readPiiProtectionField } from '@/lib/services/pii/protectionConfig';
 
 const logger = createLogger('api:models');
 const MAX_LIMIT = 200;
@@ -848,6 +849,12 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
       if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
       if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
+
+      const piiProtection = await readPiiProtectionField(body.piiProtection, { tenantDbName: session.tenantDbName, projectId });
+      if (piiProtection.error) {
+        return reply.code(400).send({ error: piiProtection.error });
+      }
+      if (piiProtection.value !== undefined) updates.piiProtection = piiProtection.value;
 
       // Multi-guardrail binding. When present it is authoritative and the two
       // deprecated keys are DERIVED from it, so a client cannot set both and

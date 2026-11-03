@@ -72,6 +72,7 @@ import {
   readGuardrailBindingsField,
   validateGuardrailBindings,
 } from './guardrail-bindings';
+import { readPiiProtectionField } from '@/lib/services/pii/protectionConfig';
 
 const logger = createLogger('api:client-models');
 
@@ -381,6 +382,12 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.isMultimodal !== undefined) updates.isMultimodal = body.isMultimodal;
       if (body.supportsToolCalls !== undefined) updates.supportsToolCalls = body.supportsToolCalls;
       if (body.semanticCache !== undefined) updates.semanticCache = body.semanticCache;
+
+      const piiProtection = await readPiiProtectionField(body.piiProtection, { tenantDbName: auth.tenantDbName, projectId });
+      if (piiProtection.error) {
+        return reply.code(400).send({ error: piiProtection.error });
+      }
+      if (piiProtection.value !== undefined) updates.piiProtection = piiProtection.value;
 
       // Same binding contract as the dashboard route (`plugins/models.ts`),
       // through the same helpers: a token write and a session write that
