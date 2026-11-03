@@ -14,8 +14,8 @@ import { SQLiteProviderBase, TABLES } from './base';
 /** Every crawl_results column except the (potentially large) bodyMarkdown. */
 const CRAWL_RESULT_SUMMARY_COLUMNS = [
   'id', 'tenantId', 'projectId', 'jobId', 'crawlerKey', 'url', 'parentUrl', 'depth', 'type',
-  'httpStatus', 'contentType', 'title', 'description', 'bytes', 'ragDocumentId', 'ragStatus',
-  'errorMessage', 'fetchedAt', 'createdAt',
+  'httpStatus', 'contentType', 'title', 'description', 'bytes', 'engine', 'fetchMs',
+  'ragDocumentId', 'ragStatus', 'errorMessage', 'fetchedAt', 'createdAt',
 ].join(', ');
 
 export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
@@ -402,10 +402,10 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       db.prepare(`
         INSERT INTO ${TABLES.crawlResults}
         (id, tenantId, projectId, jobId, crawlerKey, url, parentUrl, depth, type,
-         httpStatus, contentType, title, description, bodyMarkdown, bytes,
+         httpStatus, contentType, title, description, bodyMarkdown, bytes, engine, fetchMs,
          ragDocumentId, ragStatus, errorMessage, fetchedAt, createdAt)
         VALUES (@id, @tenantId, @projectId, @jobId, @crawlerKey, @url, @parentUrl, @depth, @type,
-         @httpStatus, @contentType, @title, @description, @bodyMarkdown, @bytes,
+         @httpStatus, @contentType, @title, @description, @bodyMarkdown, @bytes, @engine, @fetchMs,
          @ragDocumentId, @ragStatus, @errorMessage, @fetchedAt, @createdAt)
       `).run({
         id,
@@ -423,6 +423,8 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         description: record.description ?? null,
         bodyMarkdown: record.bodyMarkdown ?? null,
         bytes: record.bytes ?? null,
+        engine: record.engine ?? null,
+        fetchMs: record.fetchMs == null ? null : Math.round(record.fetchMs),
         ragDocumentId: record.ragDocumentId ?? null,
         ragStatus: record.ragStatus ?? null,
         errorMessage: record.errorMessage ?? null,
@@ -548,6 +550,8 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         description: (row.description as string) ?? undefined,
         bodyMarkdown: (row.bodyMarkdown as string) ?? undefined,
         bytes: row.bytes == null ? undefined : Number(row.bytes),
+        engine: (row.engine as ICrawlResult['engine']) ?? undefined,
+        fetchMs: row.fetchMs == null ? undefined : Number(row.fetchMs),
         ragDocumentId: (row.ragDocumentId as string) ?? undefined,
         ragStatus: (row.ragStatus as ICrawlResult['ragStatus']) ?? undefined,
         errorMessage: (row.errorMessage as string) ?? undefined,

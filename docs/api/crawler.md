@@ -27,7 +27,7 @@ These appear on create/update and inside a job's frozen `planSnapshot`:
 | `maxPages` | int 0–5000 | `50` | Page cap. `0` = unlimited. |
 | `autoCrawl` | boolean | `false` | Follow discovered links within scope. |
 | `scope` | object | — | `sameDomainOnly` (default `true`), `includeSubdomains` (default `false`), `allowList[]`, `blockList[]` host globs. |
-| `http` | object | — | `userAgent`, `acceptLanguage`, `timeoutMs` (1000–120000), `maxConcurrency` (1–16), `retries` (1–5), `headers`, `cookies[]`, `basicAuth`, `bearerToken`, `allowPrivateNetwork`, `allowInsecureTls` (skips TLS certificate verification — opt-in escape hatch for sites with a misconfigured cert chain). |
+| `http` | object | — | `userAgent`, `acceptLanguage`, `timeoutMs` (1000–120000), `maxConcurrency` (1–16), `retries` (1–5), `headers`, `cookies[]`, `basicAuth`, `bearerToken`, `allowPrivateNetwork`, `allowInsecureTls` (skips TLS certificate verification — opt-in escape hatch for sites with a misconfigured cert chain), `blockTrackers` (default `false`) and `blockedHosts[]` (browser engine only, so a network that silently drops a third-party host cannot stall a page: with `blockTrackers` on, tracker, analytics and consent-manager hosts are never loaded; `blockedHosts` adds hosts of your own and applies whether `blockTrackers` is on or off; bare host names, suffix match, at most 100; the page being crawled is never blocked). |
 | `downloadableMimes` | string[] | — | MIME types treated as downloadable files. |
 | `markdownOptions` | object | — | `{ ocr: { enabled, languages?, modelKey?, mode?, maxPages?, images? } }` forwarded to the Markdown extractor. With `enabled`, downloaded PDFs and images are read by the project OCR model or vision LLM named by `modelKey` (checked at save time), or by the built-in local engine without one; `mode` is `auto` (default, pages without a text layer) or `always`; `images` also reads pictures inside Word/PowerPoint files. |
 | `rag` | object | — | `{ ragModuleKey, enabled }` — ingest crawled pages into a Knowledge Engine module. |
@@ -314,6 +314,8 @@ GET /api/client/v1/crawler/jobs/:jobId/results?type=html&limit=100&skip=0
       "title": "Introduction",
       "bodyMarkdown": "# Introduction\n\n…",
       "bytes": 4096,
+      "engine": "axios",
+      "fetchMs": 412,
       "ragDocumentId": "doc_abc",
       "ragStatus": "indexed",
       "fetchedAt": "2026-06-15T10:01:05.000Z"
@@ -322,7 +324,7 @@ GET /api/client/v1/crawler/jobs/:jobId/results?type=html&limit=100&skip=0
 }
 ```
 
-`bodyMarkdown` is present for `html` results. `ragStatus` is one of `pending`, `indexed`, `skipped`, `failed` (only when the crawler has a Knowledge Engine binding). `error` results carry an `errorMessage`.
+`bodyMarkdown` is present for `html` results. `engine` (`axios` or `playwright`) is the engine that produced the content: in an `auto` crawl it is the one that answered, so a browser fallback reads `playwright`. `fetchMs` is how long the fetch took, retries and any fallback included and markdown conversion excluded. Error results carry `fetchMs` (time until the fetch gave up) but no `engine`; results saved before these fields existed have neither. `ragStatus` is one of `pending`, `indexed`, `skipped`, `failed` (only when the crawler has a Knowledge Engine binding). `error` results carry an `errorMessage`.
 
 ### Get result
 

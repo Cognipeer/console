@@ -61,6 +61,14 @@ function formatBytes(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 59_950) return `${(ms / 1000).toFixed(1)} s`;
+  // Round to whole seconds first, so 119.6 s reads 2m 0s and never 1m 60s.
+  const totalSeconds = Math.round(ms / 1000);
+  return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+}
+
 async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
   const res = await fetch(url, { cache: 'no-store', signal });
   if (!res.ok) {
@@ -442,6 +450,8 @@ export default function RunDetailModal({
                           <span>d{r.depth}</span>
                           {r.httpStatus ? <span>{r.httpStatus}</span> : null}
                           <span>{formatBytes(r.bytes)}</span>
+                          {r.fetchMs != null ? <span>{formatDuration(r.fetchMs)}</span> : null}
+                          {r.engine ? <span>{r.engine}</span> : null}
                           {r.ragStatus ? (
                             <span style={{ color: `var(--mantine-color-${ragColor(r.ragStatus)}-6)` }}>
                               {r.ragStatus}
@@ -543,6 +553,23 @@ export default function RunDetailModal({
                       <Badge size="xs" variant="light" color="gray">
                         {formatBytes(selected.bytes)}
                       </Badge>
+                      {selected.fetchMs != null ? (
+                        <Tooltip
+                          label="Time to fetch the page, including retries and any fallback to the browser. Markdown conversion is not counted."
+                          multiline
+                          w={260}
+                          withArrow
+                        >
+                          <Badge size="xs" variant="light" color="gray">
+                            fetch {formatDuration(selected.fetchMs)}
+                          </Badge>
+                        </Tooltip>
+                      ) : null}
+                      {selected.engine ? (
+                        <Badge size="xs" variant="light" color="gray">
+                          engine: {selected.engine}
+                        </Badge>
+                      ) : null}
                       {selected.contentType ? (
                         <Badge size="xs" variant="light" color="gray">
                           {selected.contentType.split(';')[0]}

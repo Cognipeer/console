@@ -3,6 +3,7 @@
  */
 
 import { z } from 'zod';
+import { normalizeBlockedHost } from './engine/thirdPartyBlocklist';
 
 const scopeSchema = z.object({
   sameDomainOnly: z.boolean().default(true),
@@ -22,6 +23,18 @@ const cookieSchema = z.object({
   expires: z.number().optional(),
 });
 
+// A host or domain, optionally `*.`/`.`-prefixed: no scheme, path, port or credentials.
+// Stored as typed (an internationalized name stays readable); the matcher converts
+// it to the form request URLs use, and this refine asks the same function.
+const blockedHostSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(253)
+  .refine((v) => normalizeBlockedHost(v) !== null, {
+    message: 'Enter a host name such as cdn.example.com, without scheme, path or port',
+  });
+
 const httpSchema = z.object({
   userAgent: z.string().optional(),
   acceptLanguage: z.string().optional(),
@@ -34,6 +47,8 @@ const httpSchema = z.object({
   bearerToken: z.string().optional(),
   allowPrivateNetwork: z.boolean().optional(),
   allowInsecureTls: z.boolean().optional(),
+  blockTrackers: z.boolean().optional(),
+  blockedHosts: z.array(blockedHostSchema).max(100).optional(),
 });
 
 const webhookSchema = z.object({

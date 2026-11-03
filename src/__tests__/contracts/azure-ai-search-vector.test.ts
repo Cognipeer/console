@@ -89,7 +89,7 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
   });
 
   it('encodes ids with unsafe characters into Azure-safe keys on upsert', async () => {
-    const unsafeId = 'akbank-55d99256:6a87cf02fca13acf380663aa:0';
+    const unsafeId = 'tenant-1a2b3c4d:5f0123456789abcdef0123aa:0';
     await runtime.upsertVectors(HANDLE, [
       { id: unsafeId, values: [0.1, 0.2, 0.3], metadata: { a: 1 } },
     ]);
@@ -105,7 +105,7 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
     // The ids a real deployment actually sends, including the ones that made the
     // marker itself illegal.
     const ids = [
-      'akbank-55d99256:6a87cf02fca13acf380663aa:0',
+      'tenant-1a2b3c4d:5f0123456789abcdef0123aa:0',
       '_leading-underscore',
       'with space',
       'türkçe-karakter:1',
@@ -132,7 +132,7 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
   });
 
   it('round-trips unsafe ids through queryVectors', async () => {
-    const unsafeId = 'akbank-55d99256:6a87cf02fca13acf380663aa:5';
+    const unsafeId = 'tenant-1a2b3c4d:5f0123456789abcdef0123aa:5';
     await runtime.upsertVectors(HANDLE, [
       { id: unsafeId, values: [0.1, 0.2, 0.3], metadata: { chunk: 5 } },
     ]);
@@ -170,7 +170,7 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
   });
 
   it('encodes ids consistently on deleteVectors so stored documents are targeted', async () => {
-    const unsafeId = 'akbank-55d99256:6a87cf02fca13acf380663aa:2';
+    const unsafeId = 'tenant-1a2b3c4d:5f0123456789abcdef0123aa:2';
     await runtime.upsertVectors(HANDLE, [
       { id: unsafeId, values: [0.1, 0.2, 0.3] },
     ]);
@@ -185,9 +185,9 @@ describe('AzureAiSearchVectorProvider — document key encoding', () => {
 
   it('produces distinct keys for distinct unsafe ids (no collisions)', async () => {
     const ids = [
-      'akbank-55d99256:6a87cf02fca13acf380663aa:0',
-      'akbank-55d99256:6a87cf02fca13acf380663aa:1',
-      'akbank-55d99256:6a87cf02fca13acf380663ab:0',
+      'tenant-1a2b3c4d:5f0123456789abcdef0123aa:0',
+      'tenant-1a2b3c4d:5f0123456789abcdef0123aa:1',
+      'tenant-1a2b3c4d:5f0123456789abcdef0123ab:0',
     ];
     await runtime.upsertVectors(
       HANDLE,

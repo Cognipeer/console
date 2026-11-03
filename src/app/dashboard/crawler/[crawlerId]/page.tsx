@@ -42,6 +42,7 @@ import RunDetailModal from '@/components/crawler/RunDetailModal';
 import { crawlerOcrToSettings, settingsToCrawlerOcr } from '@/components/crawler/crawlerOcr';
 import OcrSettingsFields from '@/components/extraction/OcrSettingsFields';
 import type { OcrSettings } from '@/components/extraction/ocrForm';
+import { normalizeBlockedHost } from '@/lib/services/crawler/engine/thirdPartyBlocklist';
 import type {
   CrawlerView,
   CrawlJobView,
@@ -72,6 +73,9 @@ interface HttpForm {
   cookies: string;
   allowPrivateNetwork: boolean;
   allowInsecureTls: boolean;
+  blockTrackers: boolean;
+  /** One host per line. */
+  blockedHosts: string;
   outputFormat: 'markdown' | 'text';
   cleanup: boolean;
   stripDataImages: boolean;
@@ -158,6 +162,8 @@ export default function CrawlerDetailPage() {
       cookies: '',
       allowPrivateNetwork: false,
       allowInsecureTls: false,
+      blockTrackers: false,
+      blockedHosts: '',
       outputFormat: 'markdown',
       cleanup: true,
       stripDataImages: true,
@@ -167,6 +173,16 @@ export default function CrawlerDetailPage() {
       removeSelectors: '',
       maxBodyChars: 0,
       ocr: undefined,
+    },
+    validate: {
+      // Same rule as the server: a bare host name, no scheme, path, port or credentials.
+      blockedHosts: (value) => {
+        const bad = value
+          .split('\n')
+          .map((s) => s.trim())
+          .find((h) => h !== '' && normalizeBlockedHost(h) === null);
+        return bad ? `"${bad}" is not a host name. Use something like cdn.example.com` : null;
+      },
     },
   });
 
@@ -230,6 +246,8 @@ export default function CrawlerDetailPage() {
         cookies: c.http.cookies ? JSON.stringify(c.http.cookies, null, 2) : '',
         allowPrivateNetwork: c.http.allowPrivateNetwork ?? false,
         allowInsecureTls: c.http.allowInsecureTls ?? false,
+        blockTrackers: c.http.blockTrackers ?? false,
+        blockedHosts: (c.http.blockedHosts ?? []).join('\n'),
         outputFormat: c.markdownOptions?.outputFormat ?? 'markdown',
         cleanup: c.markdownOptions?.cleanup ?? true,
         stripDataImages: c.markdownOptions?.stripDataImages ?? true,
@@ -442,6 +460,9 @@ export default function CrawlerDetailPage() {
         bearerToken: values.bearerToken || undefined,
         allowPrivateNetwork: values.allowPrivateNetwork,
         allowInsecureTls: values.allowInsecureTls,
+        blockTrackers: values.blockTrackers,
+        // [] (not undefined) so clearing the field actually clears the stored list on merge.
+        blockedHosts: values.blockedHosts.split('\n').map((s) => s.trim()).filter(Boolean),
         headers,
         cookies,
       };
@@ -1167,6 +1188,20 @@ Content-Type: application/json
                 label="Allow insecure TLS (DANGER: skips certificate verification)"
                 description="Rarely needed — the crawler now falls back to the browser engine for sites with a missing-intermediate TLS chain, keeping verification on. Enable this only as a last resort for a destination you trust."
                 {...httpForm.getInputProps('allowInsecureTls', { type: 'checkbox' })}
+              />
+              <Divider my={2} label="Browser engine" />
+              <Switch
+                label="Skip tracker and consent scripts"
+                description="The browser (Playwright, or Auto when it falls back to it) does not load Google Tag Manager, analytics, ad pixels or cookie-consent hosts. Turn this on when pages time out although their content loads: a network that silently drops those hosts leaves the page waiting on one of them. Some sites render their content through such a script, so leave it off unless you need it."
+                {...httpForm.getInputProps('blockTrackers', { type: 'checkbox' })}
+              />
+              <Textarea
+                label="Also skip these hosts (one per line)"
+                description="For a site's own third-party script that hangs on your network. cdn.example.com also covers its subdomains. Never applied to the page being crawled."
+                placeholder="cdn.example.com"
+                autosize
+                minRows={2}
+                {...httpForm.getInputProps('blockedHosts')}
               />
               </Stack>
             </DetailCard>

@@ -72,8 +72,8 @@ export class PlaywrightSession {
       const proxy = resolveBrowserProxyConfig();
       const cfg = getConfig().browser;
       const isBlockedHost = createHostBlocker({
-        useDefaults: cfg.crawlerBlockTrackers,
-        extra: cfg.crawlerBlockedHosts,
+        useDefaults: this.http.blockTrackers ?? false,
+        extra: this.http.blockedHosts,
       });
       this.proxyRouting = browserProxyRouting(proxy, cfg.chromiumExtraArgs);
       this.browser = await chromium.launch({

@@ -2567,6 +2567,8 @@ export const TENANT_SCHEMA_SQL = `
     description TEXT,
     bodyMarkdown TEXT,
     bytes INTEGER,
+    engine TEXT,
+    fetchMs INTEGER,
     ragDocumentId TEXT,
     ragStatus TEXT,
     errorMessage TEXT,

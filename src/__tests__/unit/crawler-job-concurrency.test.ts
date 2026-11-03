@@ -16,7 +16,8 @@ vi.mock('@/lib/services/crawler/crawlerWebhook', () => ({
 }));
 
 const { pages, ingest } = vi.hoisted(() => ({
-  pages: { count: 0 },
+  // `extra` is merged into every yielded page, e.g. the engine's fetch fields.
+  pages: { count: 0, extra: {} as Record<string, unknown> },
   ingest: vi.fn(),
 }));
 
@@ -30,6 +31,7 @@ vi.mock('@/lib/services/crawler/engine', async (importOriginal) => ({
         type: 'html' as const,
         httpStatus: 200,
         body: `# Page ${i}`,
+        ...pages.extra,
         fetchedAt: new Date(),
       };
     }
@@ -63,6 +65,7 @@ function job(maxConcurrency: number) {
 let db: ReturnType<typeof createMockDb>;
 
 beforeEach(() => {
+  pages.extra = {};
   db = createMockDb();
   (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   db.updateCrawlJob.mockResolvedValue(null);
@@ -141,5 +144,31 @@ describe('crawl job runner — concurrent persistence', () => {
       'tenant-1',
       expect.objectContaining({ errorMessage: 'disk full' }),
     );
+  });
+
+  it('stores the engine and fetch time the crawl measured with each result', async () => {
+    pages.count = 2;
+    pages.extra = { engine: 'playwright', fetchMs: 1840 };
+    db.claimCrawlJob.mockResolvedValue(job(2));
+    ingest.mockResolvedValue({ ragStatus: 'indexed', ragDocumentId: 'doc' });
+
+    await runCrawlJobLocal(ctx as never, 'job-1');
+
+    expect(db.createCrawlResult).toHaveBeenCalledTimes(2);
+    for (const [row] of db.createCrawlResult.mock.calls) {
+      expect(row).toMatchObject({ engine: 'playwright', fetchMs: 1840 });
+    }
+  });
+
+  it('stores an error page\'s fetch time without inventing an engine', async () => {
+    pages.count = 1;
+    pages.extra = { type: 'error', errorMessage: 'All engines failed', fetchMs: 30_012 };
+    db.claimCrawlJob.mockResolvedValue(job(1));
+
+    await runCrawlJobLocal(ctx as never, 'job-1');
+
+    const [row] = db.createCrawlResult.mock.calls[0]!;
+    expect(row).toMatchObject({ type: 'error', fetchMs: 30_012 });
+    expect(row.engine).toBeUndefined();
   });
 });
