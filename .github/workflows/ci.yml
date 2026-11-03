@@ -202,7 +202,10 @@ jobs:
   # Builds the Dockerfile's `builder` stage, which runs its own `npm run build`
   # inside the image. It does not use the build job's output, so the two run
   # side by side.
+  # The Docker builder parity check is the slowest job (about 9 min), so it runs on pushes to main only.
+  # A PR gets it skipped; `validate` allows exactly that.
   docker-builder:
+    if: github.event_name == 'push'
     needs: [lint, test, endpoint-coverage]
     runs-on: cognipeer-azure-runners
     steps:
@@ -220,10 +223,15 @@ jobs:
       - name: Require every job to succeed
         env:
           NEEDS: ${{ toJSON(needs) }}
-          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+          EVENT: ${{ github.event_name }}
         run: |
           echo "$NEEDS"
-          if [ "$FAILED" = 'true' ]; then
-            echo 'One or more required jobs did not succeed.'
+          # Every job must succeed, except docker-builder, which is skipped on pull requests by design.
+          NOT_OK=$(jq -r --arg event "$EVENT" 'to_entries[]
+            | select(.value.result != "success")
+            | select(($event != "push" and .key == "docker-builder" and .value.result == "skipped") | not)
+            | "\(.key)=\(.value.result)"' <<<"$NEEDS")
+          if [ -n "$NOT_OK" ]; then
+            echo "One or more required jobs did not succeed: $NOT_OK"
             exit 1
           fi
