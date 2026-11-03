@@ -27,6 +27,7 @@
 
 import type { IPiiCustomPattern, PiiAction, PiiDetectionConfig, PiiLanguage } from '@/lib/database';
 import type { PiiFinding } from './types';
+import { splitLines } from './detector';
 
 /** Cached module reference — the package's functions are stateless calls (no
  *  `.load()` step to repeat, unlike `@cognipeer/guardrail`'s classifier
@@ -89,15 +90,14 @@ export async function scanWithCognipeer(
       ? await pii.maskAsync(text, callOptions)
       : await pii.detectAsync(text, callOptions);
 
-  // shortcut: filters after the package's fusion, so a disabled name span that out-scored an overlapping enabled finding hides it; move the filter into @cognipeer/pii's dictionary pass when the package is next released.
-  const enabled = scan.findings.filter((f) => !DICTIONARY_CATEGORIES.has(f.category) || options.categories?.[f.category] === true);
-  const findings: PiiFinding[] = enabled.map((f) => ({
+  type PackageFinding = (typeof scan.findings)[number];
+  const toFinding = (f: PackageFinding, offset: number): PiiFinding => ({
     category: f.category,
     source: f.source,
     severity: f.severity,
     value: f.value,
-    start: f.start,
-    end: f.end,
+    start: f.start + offset,
+    end: f.end + offset,
     label: f.label,
     message: f.message,
     // The REQUESTED action, not the package's own report (which only ever
@@ -110,7 +110,37 @@ export async function scanWithCognipeer(
     confidence: f.confidence,
     detector: f.detector,
     evidence: f.evidence,
-  }));
+  });
+
+  // shortcut: filters after the package's fusion, so a disabled name span that out-scored an overlapping enabled finding hides it; move the filter into @cognipeer/pii's dictionary pass when the package is next released.
+  const enabled = scan.findings.filter((f) => !DICTIONARY_CATEGORIES.has(f.category) || options.categories?.[f.category] === true);
+
+  // The package sweeps its patterns over the whole text, and their separator
+  // classes match a line break: "2026-07-18\n118" (a CSV's date cell plus the
+  // next row's number) came back as a tc_kimlik, merging two rows of a masked
+  // table. The in-house engine sweeps line by line (`splitLines`); here a
+  // finding that crosses a line break is dropped and the lines it touched are
+  // scanned again on their own, pattern tier only. Remove once the package
+  // sweeps by line itself.
+  const crossesLine = (f: PackageFinding) => /[\r\n]/.test(f.value);
+  const findings = enabled.filter((f) => !crossesLine(f)).map((f) => toFinding(f, 0));
+  const crossing = enabled.filter(crossesLine);
+  if (crossing.length > 0) {
+    const scanLine = action === 'redact' ? pii.redact : action === 'mask' ? pii.mask : pii.detect;
+    const overlapsKept = (start: number, end: number) => findings.some((k) => start < k.end && k.start < end);
+    const touched = splitLines(text).filter((line) =>
+      crossing.some((f) => f.start < line.start + line.text.length && line.start < f.end));
+    const rescued: PiiFinding[] = [];
+    for (const line of touched) {
+      for (const f of scanLine(line.text, callOptions).findings) {
+        if (DICTIONARY_CATEGORIES.has(f.category)) continue;
+        const finding = toFinding(f, line.start);
+        if (!overlapsKept(finding.start, finding.end)) rescued.push(finding);
+      }
+    }
+    findings.push(...rescued);
+    findings.sort((a, b) => a.start - b.start);
+  }
 
   const degraded = (scan.degraded ?? []).map((d) => `${d.layer}: ${d.reason}`);
   return { findings, degraded };
