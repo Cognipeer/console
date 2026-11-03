@@ -45,10 +45,10 @@ const darkPalette: MantineColorsTuple = [
 ];
 
 const sharedFontStack =
-  'var(--font-lexend-deca), "Lexend Deca", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  'var(--font-lexend-deca), var(--font-lexend-deca-ext), "Lexend Deca", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
 const monoFontStack =
-  'var(--font-jetbrains-mono), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  'var(--font-jetbrains-mono), var(--font-jetbrains-mono-ext), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 export const designTokens = {
   spacing: {
