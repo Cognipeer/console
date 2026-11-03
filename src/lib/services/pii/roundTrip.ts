@@ -27,7 +27,7 @@
  * the tokens the model wrote.
  */
 
-import { createHash, createHmac } from 'crypto';
+import { createHash, createHmac, hkdfSync } from 'crypto';
 import type { PiiFinding } from './types';
 
 /** A token as it appears in text, brackets optional: a model sometimes drops them. */
@@ -62,12 +62,13 @@ export function clearRoundTripScanCache(): void {
 }
 
 /**
- * The HMAC key of one scope. `secret` is the server's encryption secret, so a
- * token cannot be reversed (or a value confirmed by computing its token) by
- * anyone who sees only the model traffic.
+ * The HMAC key of one scope, derived with HKDF-SHA256 from the server's
+ * encryption secret (input key material), bound to the tenant and the scope
+ * (info). Without the secret a token cannot be reversed, or a value confirmed
+ * by computing its token, by anyone who sees only the model traffic.
  */
 export function deriveRoundTripKey(secret: string, tenant: string, scope: string): Buffer {
-  return createHmac('sha256', secret).update(`pii-round-trip:v1\u0000${tenant}\u0000${scope}`).digest();
+  return Buffer.from(hkdfSync('sha256', secret, 'pii-round-trip:v1', `${tenant}\u0000${scope}`, 32));
 }
 
 function tokenPrefix(category: string): string {
