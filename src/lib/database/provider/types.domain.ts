@@ -3544,7 +3544,8 @@ export interface IAgentSandboxConfig {
   commandTimeoutSec?: number;
   /** @deprecated No longer used — a session sandbox closes by the sandbox module's idle timeout. Still accepted so saved configs load. */
   retentionHours?: number;
-  resources?: { cpuCores?: number; memoryMb?: number };
+  /** Absent fields fall back to the project's sandbox defaults, then the template, then the platform default. */
+  resources?: { cpuCores?: number; memoryMb?: number; diskMb?: number };
   /** Cut the sandbox off from the network. */
   blockNetwork?: boolean;
   /** Plain (non-secret) environment variables. */

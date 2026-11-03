@@ -306,7 +306,7 @@ export interface AgentSandboxSpec {
   templateKey?: string;
   /** `persist`: survives stop and the idle reaper. `ephemeral`: deleted on stop. */
   persist: boolean;
-  resources?: { cpuCores?: number; memoryMb?: number };
+  resources?: { cpuCores?: number; memoryMb?: number; diskMb?: number };
   blockNetwork?: boolean;
   /** Non-secret variables set on the instance. Secrets go per call. */
   env?: Record<string, string>;
