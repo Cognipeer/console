@@ -340,7 +340,8 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           secretValues,
         );
 
-        return reply.code(200).send({ latencyMs, result });
+        // isError: the action ran and failed (an MCP or connector error); `result` is its error text.
+        return reply.code(200).send({ latencyMs, result, ...(isError ? { isError: true } : {}) });
       } catch (execError) {
         const errorMessage = execError instanceof Error ? execError.message : 'Execution failed';
 
