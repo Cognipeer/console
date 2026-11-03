@@ -61,19 +61,30 @@ export const DEFAULT_BLOCKED_THIRD_PARTY_HOSTS: readonly string[] = [
  * The form the matcher compares in: exactly what `new URL(...).hostname`
  * reports for a request, so lowercase and, for an internationalized name,
  * punycode (`bücher.example` → `xn--bcher-kva.example`). Entries and request
- * hosts go through the same parser, so they cannot drift apart. A leading
- * `*.` or `.` and a trailing `.` are dropped. Returns `null` when the entry is
- * not a bare host name (scheme, path, port, credentials, whitespace or a
- * character a host cannot contain).
+ * hosts go through the same parser, so they cannot drift apart.
+ *
+ * A leading `*.` or `.` and a trailing `.` are markers, not part of the name,
+ * and they are removed from the parsed host rather than the typed text: URL
+ * parsing has already turned every Unicode dot (`。` `．` `｡`) and a full-width
+ * asterisk into `.` and `*`, so `*。bücher.example` and `bücher.example。`
+ * reduce to the same name as their ASCII forms.
+ *
+ * Returns `null` when the entry is not a bare host name: a scheme, path, port,
+ * credentials, whitespace, a character a host cannot contain, an empty name, a
+ * stray or repeated dot at an end, or a `*` anywhere but the leading marker.
  */
 export function normalizeBlockedHost(raw: string): string | null {
-  const host = raw.trim().replace(/^\*?\./, '').replace(/\.$/, '');
-  if (!host || /[\s/\\:?#@]/.test(host)) return null;
+  const entry = raw.trim();
+  if (!entry || /[\s/\\:?#@]/.test(entry)) return null;
+  let host: string;
   try {
-    return new URL(`http://${host}/`).hostname || null;
+    host = new URL(`http://${entry}/`).hostname;
   } catch {
     return null;
   }
+  host = host.replace(/^\*?\./, '').replace(/\.$/, '');
+  if (!host || host.startsWith('.') || host.endsWith('.') || host.includes('*')) return null;
+  return host;
 }
 
 export type HostBlocker = (url: string) => boolean;

@@ -40,6 +40,7 @@ export {
   crawlerUrlsBodySchema,
   crawlOnContainerSchema,
   syncCrawlJobToRagSchema,
+  formatCrawlerValidationError,
 } from './validation';
 export type {
   CreateCrawlerBody,

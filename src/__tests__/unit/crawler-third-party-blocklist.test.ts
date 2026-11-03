@@ -29,6 +29,15 @@ describe('normalizeBlockedHost', () => {
     ['BÜCHER.Example', 'xn--bcher-kva.example'],
     ['*.bücher.example', 'xn--bcher-kva.example'],
     ['xn--bcher-kva.example', 'xn--bcher-kva.example'],
+    // Unicode dots and a full-width asterisk are markers too, once URL parsing has read them
+    ['bücher.example。', 'xn--bcher-kva.example'],
+    ['。bücher.example', 'xn--bcher-kva.example'],
+    ['*。bücher.example', 'xn--bcher-kva.example'],
+    ['＊.bücher.example', 'xn--bcher-kva.example'],
+    ['bücher.example．', 'xn--bcher-kva.example'],
+    ['｡bücher.example｡', 'xn--bcher-kva.example'],
+    ['*。cdn。example。com。', 'cdn.example.com'],
+    ['ＣＤＮ.Ｅxample.com', 'cdn.example.com'],
     ['a\u3002b.test', 'a.b.test'], // ideographic full stop reads as a dot
     ['under_score.test', 'under_score.test'],
     ['127.0.0.1', '127.0.0.1'],
@@ -50,6 +59,16 @@ describe('normalizeBlockedHost', () => {
     ['whitespace inside', 'cdn example.com'],
     ['a character no host holds', 'exa<mple.com'],
     ['a stray bracket', 'a[b.test'],
+    ['a full-width colon', 'a：b.test'],
+    ['a full-width slash', 'a／b.test'],
+    ['a lone asterisk', '*'],
+    ['an asterisk inside the name', 'a*b.test'],
+    ['a second wildcard', '*.*.example.com'],
+    ['a repeated trailing dot', 'example.com..'],
+    ['a repeated leading dot', '..example.com'],
+    ['a wildcard then a second dot', '*..example.com'],
+    ['only a dot', '.'],
+    ['only Unicode markers', '*。'],
   ])('returns null for %s', (_label, raw) => {
     expect(normalizeBlockedHost(raw)).toBeNull();
   });
@@ -116,7 +135,16 @@ describe('createHostBlocker', () => {
   it('matches an internationalized entry against the punycode form a request URL carries', () => {
     // `new URL(...).hostname` reports `xn--bcher-kva.example` for `bücher.example`,
     // so an entry kept as typed would never match.
-    for (const entry of ['bücher.example', 'BÜCHER.Example', '*.bücher.example', '.bücher.example.']) {
+    for (const entry of [
+      'bücher.example',
+      'BÜCHER.Example',
+      '*.bücher.example',
+      '.bücher.example.',
+      'bücher.example。',
+      '。bücher.example',
+      '*。bücher.example',
+      '＊.bücher.example',
+    ]) {
       const b = createHostBlocker({ useDefaults: false, extra: [entry] });
       expect(b('https://xn--bcher-kva.example/a.js'), entry).toBe(true);
       expect(b('https://cdn.xn--bcher-kva.example/a.js'), entry).toBe(true);
@@ -259,8 +287,9 @@ describe('crawler http settings — blockTrackers / blockedHosts', () => {
   });
 
   it('accept an internationalized host and keep it as typed', () => {
-    const ok = parse({ blockedHosts: ['  bücher.example  ', '*.bücher.example'] });
-    expect(ok.success && ok.data.http?.blockedHosts).toEqual(['bücher.example', '*.bücher.example']);
+    const typed = ['bücher.example', '*.bücher.example', 'bücher.example。', '*。bücher.example'];
+    const ok = parse({ blockedHosts: ['  bücher.example  ', ...typed.slice(1)] });
+    expect(ok.success && ok.data.http?.blockedHosts).toEqual(typed);
   });
 
   it('accept a switch and a trimmed host list', () => {
@@ -279,6 +308,8 @@ describe('crawler http settings — blockTrackers / blockedHosts', () => {
     ['credentials', 'user@cdn.example.com'],
     ['a backslash', 'cdn.example.com\\x'],
     ['a character no host holds', 'exa<mple.com'],
+    ['an asterisk inside the name', 'a*b.example.com'],
+    ['a repeated trailing dot', 'cdn.example.com..'],
     ['an empty entry', '   '],
   ])('reject a host list entry with %s', (_label, entry) => {
     expect(parse({ blockedHosts: [entry] }).success).toBe(false);
