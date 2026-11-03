@@ -37,6 +37,30 @@ const jetbrainsMono = localFont({
   ],
 });
 
+// latin-ext carries Turkish ğ ş İ Ğ Ş; the latin files lack them, so they fall through to
+// these second families (see the font stacks in globals.css / theme.ts).
+const lexendDecaExt = localFont({
+  display: "swap",
+  variable: "--font-lexend-deca-ext",
+  src: [
+    { path: "./fonts/lexend-deca-latin-ext-300-normal.woff2", weight: "300", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-ext-400-normal.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-ext-500-normal.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-ext-600-normal.woff2", weight: "600", style: "normal" },
+    { path: "./fonts/lexend-deca-latin-ext-700-normal.woff2", weight: "700", style: "normal" },
+  ],
+});
+
+const jetbrainsMonoExt = localFont({
+  display: "swap",
+  variable: "--font-jetbrains-mono-ext",
+  src: [
+    { path: "./fonts/jetbrains-mono-latin-ext-400-normal.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/jetbrains-mono-latin-ext-500-normal.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/jetbrains-mono-latin-ext-600-normal.woff2", weight: "600", style: "normal" },
+  ],
+});
+
 export const metadata: Metadata = {
   title: "Cognipeer Console",
   description: "Multi-tenant AI and agentic services platform",
@@ -82,7 +106,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${lexendDeca.variable} ${jetbrainsMono.variable}`}
+      className={`${lexendDeca.variable} ${lexendDecaExt.variable} ${jetbrainsMono.variable} ${jetbrainsMonoExt.variable}`}
     >
       <head>
         <ColorSchemeScript defaultColorScheme="light" />
