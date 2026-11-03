@@ -6,6 +6,7 @@ import { DetailCard, DetailTwoCol } from '@/components/common/ui/DetailShell';
 import DecisionCard, { answerToDraft, draftToAnswer } from './DecisionCard';
 import { pct } from './decisionUi';
 import type { AnalysisResultDetailResponse } from './types';
+import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 
 function fmtDate(value?: string): string {
   if (!value) return '—';
@@ -98,7 +99,7 @@ export default function ResultDetail({ data, queue, saving, onSave, onSkip }: Re
             {source.transcript.map((m, i) => (
               <div key={i}>
                 <Text size="xs" c="dimmed" fw={600} tt="uppercase">{m.role}</Text>
-                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{m.content}</Text>
+                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}><LinkifiedText text={m.content} /></Text>
               </div>
             ))}
           </Stack>

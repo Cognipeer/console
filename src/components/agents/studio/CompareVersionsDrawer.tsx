@@ -49,6 +49,7 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
 import AgentMarkdown from '../session/AgentMarkdown';
+import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 import { formatCost } from '../session/sessionUsage';
 import {
     DEFAULT_RESPONSE_FORMAT,
@@ -401,7 +402,7 @@ function TurnView({ turn, responseFormat, live = false }: { turn: Turn; response
     if (turn.role === 'error') {
         return (
             <Alert color="red" variant="light" p="xs">
-                <Text size="xs">{turn.content}</Text>
+                <Text size="xs"><LinkifiedText text={turn.content} /></Text>
             </Alert>
         );
     }

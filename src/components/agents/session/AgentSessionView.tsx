@@ -72,6 +72,7 @@ import {
 import DetailShell from '@/components/common/ui/DetailShell';
 import ConfirmModal from '@/components/common/ui/ConfirmModal';
 import Markdown from './AgentMarkdown';
+import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 import LoadingState from '@/components/common/LoadingState';
 import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
@@ -1314,7 +1315,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 />
                                                             ) : (
                                                                 <>
-                                                                    <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
+                                                                    <Text size="sm" className={classes.preWrap}><LinkifiedText text={msg.content} /></Text>
                                                                     <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
                                                                 </>
                                                             )}
@@ -1343,7 +1344,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                     <Group gap={6} mb={4}>
                                                         <RoleBadge user agentName={agent.name} />
                                                     </Group>
-                                                    <Text size="sm" className={classes.preWrap}>{followedUser.content}</Text>
+                                                    <Text size="sm" className={classes.preWrap}><LinkifiedText text={followedUser.content} /></Text>
                                                 </Box>
                                             )
                                         ) : null}
@@ -1567,7 +1568,7 @@ function ReminderNote({ message, at }: { message: string; at?: string }) {
                     {tRem('transcriptHeader', { time: at ? new Date(at).toLocaleString() : '—' })}
                 </Text>
             </Group>
-            <Text size="sm" className={classes.preWrap}>{message}</Text>
+            <Text size="sm" className={classes.preWrap}><LinkifiedText text={message} /></Text>
         </Box>
     );
 }
@@ -1626,7 +1627,7 @@ function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () =
                     <Text size="10px" c="dimmed" ff="monospace">{message.errorType}</Text>
                 ) : null}
             </Group>
-            <Text size="sm" className={classes.preWrap}>{message.content}</Text>
+            <Text size="sm" className={classes.preWrap}><LinkifiedText text={message.content} /></Text>
             {hint ? <Text size="xs" c="dimmed">{hint}</Text> : null}
             {onRetry ? (
                 <Group>
