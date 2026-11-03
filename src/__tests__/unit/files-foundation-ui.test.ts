@@ -392,12 +392,19 @@ describe.each(['en', 'tr'] as const)('shared components (%s)', (locale) => {
     const copy = await showSubject(h(CopyButton, { value: 'docs/a.pdf' }), locale);
     const button = copy.querySelector<HTMLButtonElement>(`button[aria-label="${words.copy.copy}"]`);
     expect(button).not.toBeNull();
+    // Mantine's useClipboard resets "copied" with a 1800 ms timer it never clears on unmount. Left to real time it
+    // fires after this file is torn down — inside whatever file the worker runs next, where `window` is gone — and
+    // fails the run with an unhandled "window is not defined". Fake time lets it fire here, while the DOM exists.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     await act(async () => {
       button!.click();
+      await vi.advanceTimersByTimeAsync(20);
     });
-    await wait(20);
     expect(writeText).toHaveBeenCalledWith('docs/a.pdf');
     expect(document.body.textContent).toContain(words.copy.copied);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
   });
 });
 
