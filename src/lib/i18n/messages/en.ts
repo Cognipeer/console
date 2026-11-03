@@ -16,6 +16,7 @@ import { filesDetailEn } from './filesDetail.en';
 import { filesListEn } from './filesList.en';
 import { filesUploadEn } from './filesUpload.en';
 import { ocrSettingsEn } from './ocrSettings.en';
+import { piiProtectionEn } from './piiProtection.en';
 import { healthDigestEn } from './healthDigest.en';
 import { consoleIdentityEn } from './consoleIdentity.en';
 import { iamDirectoryEn } from './iamDirectory.en';
@@ -30,6 +31,8 @@ export const en = {
   ...projectsAccessEn,
   // The OCR settings fields shared by Files, agents, knowledge bases and crawlers (ocrSettings.en.ts).
   ocrSettings: ocrSettingsEn,
+  // The PII protection picker on the model edit page and the agent Build tab (piiProtection.en.ts).
+  piiProtection: piiProtectionEn,
   auth: {
     eyebrow: 'Console access',
   },
@@ -7369,12 +7372,14 @@ export const en = {
       'agent.browser': 'Browser',
       'agent.webSearchProvider': 'Web search provider',
       'agent.crawler': 'Crawler',
+      'agent.piiPolicy': 'PII protection policy',
       'model.provider': 'Provider',
       'model.replicaProvider': 'Replica provider',
       'model.guardrail': 'Guardrail',
       'model.dynamicModel': 'Dynamic model',
       'model.semanticCacheModel': 'Semantic cache model',
       'model.semanticCacheIndex': 'Semantic cache vector index',
+      'model.piiPolicy': 'PII protection policy',
       'rag.embeddingModel': 'Embedding model',
       'rag.vectorIndex': 'Vector index',
       'rag.reranker': 'Reranker',

@@ -25,6 +25,7 @@ import { filesDetailTr } from './filesDetail.tr';
 import { filesListTr } from './filesList.tr';
 import { filesUploadTr } from './filesUpload.tr';
 import { ocrSettingsTr } from './ocrSettings.tr';
+import { piiProtectionTr } from './piiProtection.tr';
 import { healthDigestTr } from './healthDigest.tr';
 import { consoleIdentityTr } from './consoleIdentity.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
@@ -39,6 +40,7 @@ export const tr: typeof en = {
   // Projects list / create / detail / limits / settings (projectsAccess.tr.ts).
   ...projectsAccessTr,
   ocrSettings: ocrSettingsTr,
+  piiProtection: piiProtectionTr,
   common: {
     ...en.common,
     confirm: {
@@ -5653,12 +5655,14 @@ export const tr: typeof en = {
       'agent.browser': 'Browser',
       'agent.webSearchProvider': 'Web arama sağlayıcısı',
       'agent.crawler': 'Crawler',
+      'agent.piiPolicy': 'PII koruma politikası',
       'model.provider': 'Sağlayıcı',
       'model.replicaProvider': 'Replika sağlayıcısı',
       'model.guardrail': 'Guardrail',
       'model.dynamicModel': 'Dinamik model',
       'model.semanticCacheModel': 'Semantik önbellek modeli',
       'model.semanticCacheIndex': 'Semantik önbellek vektör indeksi',
+      'model.piiPolicy': 'PII koruma politikası',
       'rag.embeddingModel': 'Embedding modeli',
       'rag.vectorIndex': 'Vektör indeksi',
       'rag.reranker': 'Reranker',

@@ -59,6 +59,8 @@ import {
   storedInputModalities,
 } from '@/components/models/inputModalities';
 import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
+import PiiProtectionField from '@/components/pii/PiiProtectionField';
+import { piiPolicyKeyOf, piiProtectionPayload } from '@/components/pii/piiProtectionForm';
 import type { GuardrailBindingRow } from '@/components/guardrails/GuardrailBindingList';
 
 
@@ -126,6 +128,8 @@ interface ModelDetailDto {
   inputGuardrailKey?: string;
   /** @deprecated See `inputGuardrailKey`. */
   outputGuardrailKey?: string;
+  /** Reversible PII protection: the PII policy every call to this model is tokenized with; absent / null = off. */
+  piiProtection?: { policyKey: string } | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -173,6 +177,8 @@ interface FormValues {
   semanticCacheEmbeddingModelKey: string;
   semanticCacheSimilarityThreshold: number;
   semanticCacheTtlSeconds: number;
+  /** The PII protection policy key; '' = off. */
+  piiPolicyKey: string;
 }
 
 interface VectorProviderOption {
@@ -203,6 +209,7 @@ interface EditModelModalProps {
 
 export default function EditModelModal({ modelId: editModelId, opened, onClose, onSaved, initialSection }: EditModelModalProps) {
   const t = useTranslations('modelEdit');
+  const tPii = useTranslations('piiProtection');
   const tWizard = useTranslations('modelWizard');
   const tNouns = useTranslations('common.confirm.nouns');
   const confirmKeyChange = useConfirmKeyChange();
@@ -251,6 +258,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
       semanticCacheEmbeddingModelKey: '',
       semanticCacheSimilarityThreshold: 0.92,
       semanticCacheTtlSeconds: 3600,
+      piiPolicyKey: '',
     },
     validate: {
       name: (value) => (!value ? tWizard('validation.name') : null),
@@ -408,6 +416,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
         semanticCacheEmbeddingModelKey: cache?.embeddingModelKey || '',
         semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
         semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
+        piiPolicyKey: piiPolicyKeyOf(nextModel.piiProtection) ?? '',
       });
       setLoadVersion((v) => v + 1);
 
@@ -624,6 +633,11 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             similarityThreshold: values.semanticCacheSimilarityThreshold,
             ttlSeconds: values.semanticCacheTtlSeconds,
           },
+          // Sent only when it changed (absent = unchanged): the API checks the key against the project's PII
+          // policies, so echoing back a policy deleted since would refuse an unrelated edit.
+          ...(values.piiPolicyKey !== (piiPolicyKeyOf(model.piiProtection) ?? '')
+            ? { piiProtection: piiProtectionPayload(values.piiPolicyKey) }
+            : {}),
           // No guardrail field of any kind. The bindings are written by the
           // editor overlay (which sends `guardrails`, and lets the API derive
           // the two deprecated columns from it); resending the legacy keys from
@@ -723,6 +737,11 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
                 <SummaryKV
                   label="Semantic cache"
                   value={form.values.semanticCacheEnabled ? 'on' : <span className="ds-faint">off</span>}
+                />
+                <SummaryKV
+                  label={tPii('title')}
+                  value={form.values.piiPolicyKey || <span className="ds-faint">off</span>}
+                  mono={Boolean(form.values.piiPolicyKey)}
                 />
               </SummaryGroup>
             ) : null}
@@ -1089,6 +1108,25 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
                 })}
               </Group>
             )}
+          </FormSection>
+        ) : null}
+
+        {/*
+          * PII protection: only WHICH policy is chosen here. What to look for (categories, engine, custom
+          * patterns) is configured on the policy itself, under PII.
+          */}
+        {isLlm ? (
+          <FormSection
+            number={sectionNumber()}
+            title={tPii('title')}
+            description={tPii('model.description')}
+            done={Boolean(form.values.piiPolicyKey)}
+          >
+            <PiiProtectionField
+              surface="model"
+              value={form.values.piiPolicyKey || null}
+              onChange={(next) => form.setFieldValue('piiPolicyKey', next ?? '')}
+            />
           </FormSection>
         ) : null}
       </ModelFormLayout>
