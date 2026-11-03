@@ -64,10 +64,13 @@ export const DEFAULT_BLOCKED_THIRD_PARTY_HOSTS: readonly string[] = [
  * hosts go through the same parser, so they cannot drift apart.
  *
  * A leading `*.` or `.` and a trailing `.` are markers, not part of the name,
- * and they are removed from the parsed host rather than the typed text: URL
- * parsing has already turned every Unicode dot (`。` `．` `｡`) and a full-width
- * asterisk into `.` and `*`, so `*。bücher.example` and `bücher.example。`
- * reduce to the same name as their ASCII forms.
+ * and each is removed once, in whichever of two places it appears:
+ *  - typed in ASCII, before parsing. A dotted name whose last label is a number
+ *    is read as an IPv4 address, and `.127.0.0.1` / `*.127.0.0.1` are not valid
+ *    ones until the marker is gone;
+ *  - typed as a Unicode dot (`。` `．` `｡`) or a full-width asterisk, after
+ *    parsing, which is what turns them into `.` and `*`. So `*。bücher.example`
+ *    and `bücher.example。` reduce to the same name as their ASCII forms.
  *
  * Returns `null` when the entry is not a bare host name: a scheme, path, port,
  * credentials, whitespace, a character a host cannot contain, an empty name, a
@@ -76,13 +79,23 @@ export const DEFAULT_BLOCKED_THIRD_PARTY_HOSTS: readonly string[] = [
 export function normalizeBlockedHost(raw: string): string | null {
   const entry = raw.trim();
   if (!entry || /[\s/\\:?#@]/.test(entry)) return null;
+
+  let name = entry;
+  const asciiLeading = /^\*?\./.test(name);
+  if (asciiLeading) name = name.replace(/^\*?\./, '');
+  const asciiTrailing = name.endsWith('.');
+  if (asciiTrailing) name = name.slice(0, -1);
+
   let host: string;
   try {
-    host = new URL(`http://${entry}/`).hostname;
+    host = new URL(`http://${name}/`).hostname;
   } catch {
     return null;
   }
-  host = host.replace(/^\*?\./, '').replace(/\.$/, '');
+  // Only a side that did not already lose its marker above: `..example.com`
+  // and `*.*.example.com` carry a second marker, which stays a mistake.
+  if (!asciiLeading) host = host.replace(/^\*?\./, '');
+  if (!asciiTrailing) host = host.replace(/\.$/, '');
   if (!host || host.startsWith('.') || host.endsWith('.') || host.includes('*')) return null;
   return host;
 }
