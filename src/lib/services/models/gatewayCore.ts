@@ -75,6 +75,7 @@ import {
   replaceLatestUserTextNative,
 } from './gatewayGuardrails';
 import { resolveDynamicCompletion } from './gatewayRouting';
+import { openPiiRoundTrip, protectCallInput, restoreCallOutcome } from './gatewayPii';
 import {
   type ImagePartWithDetail,
   OpenAiStreamFramer,
@@ -592,7 +593,19 @@ function isCacheableConversation(request: ModelCallInput['request'], wire: AnyRe
   );
 }
 
+/**
+ * One model call. With reversible PII protection on (the caller's or the
+ * model's `piiProtection`), the core below sees tokens only and the caller gets
+ * the values back: see `gatewayPii.ts`.
+ */
 export async function executeModelCall(input: ModelCallInput): Promise<ModelCallOutcome> {
+  const roundTrip = await openPiiRoundTrip(input);
+  if (!roundTrip) return executeCoreCall(input);
+  const outcome = await executeCoreCall(await protectCallInput(roundTrip, input));
+  return restoreCallOutcome(roundTrip, input, outcome);
+}
+
+async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome> {
   const { tenantDbName, tenantId, modelKey, projectId, stream } = input;
   // The caller context is the explicit one merged over the ambient scope an agent run opens, so the usage row of a
   // top-level call (not only a routed child) carries the run's channel and attribution.

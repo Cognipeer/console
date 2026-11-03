@@ -74,7 +74,7 @@ const AGENT_CONFIG_KEYS: Record<keyof IAgentConfig, true> = {
   additionalModels: true, systemPrompt: true, promptKey: true, promptVariables: true,
   temperature: true, topP: true, maxTokens: true, knowledgeEngineKey: true,
   knowledgeBindings: true, knowledgeToolMode: true, guardrails: true,
-  inputGuardrailKey: true, outputGuardrailKey: true, toolBindings: true, kind: true,
+  inputGuardrailKey: true, outputGuardrailKey: true, piiProtection: true, toolBindings: true, kind: true,
   connection: true, runtime: true, structuredOutput: true, subagents: true,
   subagentPolicy: true, skills: true, skillPolicy: true, memory: true, sandbox: true,
   callback: true, budget: true, variables: true, humanInTheLoop: true,

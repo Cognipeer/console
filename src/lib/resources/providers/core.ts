@@ -82,6 +82,7 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
   edges.add('agent.knowledge', config.knowledgeEngineKey, 'config.knowledgeEngineKey');
   asArray(config.knowledgeBindings).forEach((b, i) => edges.add('agent.knowledge', b.key, `config.knowledgeBindings[${i}].key`));
   addGuardrailEdges(edges, 'agent.guardrail', config, 'config.');
+  edges.add('agent.piiPolicy', (config.piiProtection as Doc | null | undefined)?.policyKey, 'config.piiProtection.policyKey');
   addBindingEdges(edges, config.toolBindings, { tool: 'agent.tool', mcp: 'agent.mcp' }, 'config.');
   asArray(config.toolBindings).forEach((binding, i) => {
     if (binding.source !== 'system') return;
@@ -167,6 +168,7 @@ export function extractModelEdges(m: Doc): ResourceEdgeInput[] | undefined {
     edges.add('model.replicaProvider', replica.providerKey, `replicas[${i}].providerKey`);
   });
   addGuardrailEdges(edges, 'model.guardrail', m, '');
+  edges.add('model.piiPolicy', (m.piiProtection as Doc | null | undefined)?.policyKey, 'piiProtection.policyKey');
 
   const cache = m.semanticCache as Doc | undefined;
   if (cache && cache.enabled === true) {

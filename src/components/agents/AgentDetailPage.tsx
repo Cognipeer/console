@@ -32,6 +32,7 @@ import {
   IconSettings,
   IconDatabase,
   IconShield,
+  IconShieldLock,
   IconTool,
   IconRocket,
   IconGitBranch,
@@ -108,6 +109,8 @@ import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import EnterpriseAgentShipSections from './EnterpriseAgentShipSections';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
+import PiiProtectionField from '@/components/pii/PiiProtectionField';
+import { piiPolicyKeyOf, piiProtectionPayload } from '@/components/pii/piiProtectionForm';
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
 import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
 import { subagentPolicyToStore } from './studio/subagentSettings';
@@ -183,6 +186,8 @@ interface Model {
   providerDriver?: string;
   capabilities?: { supportsReasoning?: boolean } | null;
   settings?: Record<string, unknown>;
+  /** The model's own PII protection: the agent's choice replaces it, and it applies when the agent has none. */
+  piiProtection?: { policyKey?: string } | null;
 }
 
 interface RagModule {
@@ -303,6 +308,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const searchParams = useSearchParams()!;
   const agentId = agentIdProp ?? (params.agentId as string);
   const t = useTranslations('agents');
+  const tPii = useTranslations('piiProtection');
   const tIdentity = useTranslations('consoleIdentity');
   const flowTexts = useFlowDetailTexts();
   const flowsPermission = useFlowsAccess();
@@ -399,6 +405,9 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   // owner hit. The API still derives the deprecated columns from the list, so
   // an older console binary on the same tenant DB keeps enforcing.
   const [guardrailBindings, setGuardrailBindings] = useState<GuardrailBindingRow[]>([]);
+  // Reversible PII protection: the key of a PII policy of the project, or null (off). Outside `configForm` like
+  // the knobs above, so an agent that never had it serializes exactly the config it had.
+  const [piiPolicyKey, setPiiPolicyKey] = useState<string | null>(null);
 
   // Publish & version state
   const [a2aSaving, setA2aSaving] = useState(false);
@@ -494,6 +503,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         setClientToolsConfig(cfg.clientTools);
         setClientToolSurfaces(cfg.clientToolSurfaces);
         setAttachmentsConfig(cfg.attachments);
+        setPiiPolicyKey(piiPolicyKeyOf(cfg.piiProtection));
         setFilesSaveRefused(false);
 
         // An array — even an empty one — means the operator has already moved
@@ -856,6 +866,9 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     nextConfig.clientToolSurfaces = clientToolSurfaces && Object.keys(clientToolSurfaces).length > 0 ? clientToolSurfaces : undefined;
     // Absent = files off.
     nextConfig.attachments = attachmentsConfig && Object.keys(attachmentsConfig).length > 0 ? attachmentsConfig : undefined;
+    // Absent = off (the model's own protection, if any, still applies). `config` replaces the stored object
+    // wholesale, so this must always be sent or a save from here would drop a policy set through the API.
+    nextConfig.piiProtection = piiProtectionPayload(piiPolicyKey) ?? undefined;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -1076,6 +1089,9 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     draftVariables: agent.config?.variables,
   });
 
+  // The main model as picked in the form: its own PII protection is shown next to the agent's.
+  const mainModel = models.find((m) => m.key === configForm.values.modelKey);
+
   /**
    * The General section's fields, all open.
    *
@@ -1222,6 +1238,19 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             onChange={setGuardrailBindings}
             surface="agent"
           />
+        </ConfigBlock>
+
+        <ConfigBlock icon={<IconShieldLock size={15} />} title={tPii('title')}>
+          <Stack gap="xs">
+            <Text size="xs" c="dimmed">{tPii('agent.description')}</Text>
+            <PiiProtectionField
+              surface="agent"
+              value={piiPolicyKey}
+              onChange={setPiiPolicyKey}
+              modelPolicyKey={piiPolicyKeyOf(mainModel?.piiProtection)}
+              modelName={mainModel?.name}
+            />
+          </Stack>
         </ConfigBlock>
 
         <ConfigBlock icon={<IconTool size={15} />} title={t('config.tools')}>

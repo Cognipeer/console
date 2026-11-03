@@ -922,6 +922,8 @@ export class SQLiteProviderBase {
     // ride the existing `config` JSON column on both backends.
     this.ensureTableColumn(db, TABLES.models, 'guardrails', 'guardrails TEXT');
     this.ensureTableColumn(db, TABLES.models, 'replicas', 'replicas TEXT');
+    // Reversible PII protection (IPiiProtectionConfig) as JSON; NULL = off.
+    this.ensureTableColumn(db, TABLES.models, 'piiProtection', 'piiProtection TEXT');
     // Evaluation log: without these, all five hooks collapse into the two
     // legacy `target` values and a tool.pre block is indistinguishable from an
     // output.pre redaction in the audit trail. riskScore has no other home.

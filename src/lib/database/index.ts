@@ -223,6 +223,7 @@ export type {
   IDynamicPoolEstimate,
   DynamicPoolPolicy,
   ISemanticCacheConfig,
+  IPiiProtectionConfig,
   ITenantUserDirectoryEntry,
   ProviderDomain,
   IProviderRecord,

@@ -110,6 +110,14 @@ export interface GatewayCallContext {
   routingDepth?: number;
   /** Internal: the Dynamic LLM decision this call serves. */
   routedBy?: RoutedBy;
+  /**
+   * Reversible PII protection asked for by the caller (an agent's own setting). It
+   * outranks the model's `piiProtection`. `scope` names whose tokens these are (an
+   * agent session): the same value is the same token in every call of the scope.
+   */
+  piiProtection?: { policyKey: string; scope?: string };
+  /** Internal: an outer call already tokenized this request (a Dynamic LLM's child). */
+  piiProtected?: boolean;
 }
 
 /** Routing attribution handed to the child / decider call it caused. */

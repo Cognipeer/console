@@ -784,6 +784,15 @@ export async function validateAgentConfig(input: {
         else if (skill.status !== 'active') issues.warnings.push({ field: 'skills', message: `Skill "${key}" is not active and is skipped` });
     }
 
+    if (config.piiProtection) {
+        const key = typeof config.piiProtection.policyKey === 'string' ? config.piiProtection.policyKey.trim() : '';
+        if (!key) {
+            issues.errors.push({ field: 'piiProtection.policyKey', message: 'Pick the PII policy that decides what the model never sees' });
+        } else if (!(await db.findPiiPolicyByKey(key, projectId).catch(() => null))) {
+            issues.errors.push({ field: 'piiProtection.policyKey', message: `PII policy "${key}" does not exist in this project` });
+        }
+    }
+
     await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, 'toolBindings', config.toolBindings);
 
     for (const [index, entry] of (config.subagents ?? []).entries()) {

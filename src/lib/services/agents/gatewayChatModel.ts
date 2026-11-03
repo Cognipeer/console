@@ -41,7 +41,7 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
 } from '@cognipeer/agent-sdk';
-import type { IModel } from '@/lib/database';
+import type { IModel, IPiiProtectionConfig } from '@/lib/database';
 import type { NativeReasoning } from '@/lib/providers/domains/model';
 import { normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import { executeModelCall } from '@/lib/services/models/gatewayCore';
@@ -107,6 +107,11 @@ export interface GatewayChatModelInput {
   /** The Session / API conversation this call belongs to. */
   sessionId?: string;
   userId?: string;
+  /**
+   * The agent's reversible PII protection. Its tokens are scoped to the session
+   * (else the agent), so the history re-sent on every call gets the same tokens.
+   */
+  piiProtection?: IPiiProtectionConfig | null;
   /** What the call is for when it is not the agent answering (`title`, `model-check`). */
   purpose?: string;
   /**
@@ -281,6 +286,12 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
   // message once however many steps the tool loop takes.
   const turnKey = crypto.randomUUID();
   const overrides = input.overrides ?? {};
+  const piiProtection = input.piiProtection?.policyKey
+    ? {
+      policyKey: input.piiProtection.policyKey,
+      scope: input.sessionId ? `session:${input.sessionId}` : `agent:${input.projectId}:${input.agentKey ?? model.key}`,
+    }
+    : undefined;
   // A synthetic actor (the system, an agent, a public A2A caller) is no user row: nothing to attribute to.
   const actorId = input.userId && !isSyntheticActor(input.userId) ? input.userId : undefined;
   const agentPick = normalizeNativeReasoning(input.reasoning);
@@ -363,6 +374,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       logFailures: true,
       guardrailTurnKey: turnKey,
       onUsageSettled: settle,
+      ...(piiProtection ? { piiProtection } : {}),
     };
     // A Dynamic LLM decides once per call: the retry of an attempt runs on the child that attempt ran
     // on (no second decision), and every attempt says which child it ran on, a failed one included.

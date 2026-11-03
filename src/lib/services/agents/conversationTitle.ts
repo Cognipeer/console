@@ -14,7 +14,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import { runWithRequestContext } from '@/lib/core/requestContext';
-import type { IAgentConfig } from '@/lib/database';
+import type { IAgentConfig, IPiiProtectionConfig } from '@/lib/database';
 import { buildAgentChatModel } from './agentService';
 import { titleReasoningForModel } from './agentReasoning';
 import { isDynamicModel } from './gatewayChatModel';
@@ -72,6 +72,9 @@ export interface GenerateTitleInput {
     /** The person the usage is attributed to. */
     userId?: string;
     agentKey?: string;
+    /** The conversation, and the agent's PII protection: the title call is protected like the agent's own. */
+    sessionId?: string;
+    piiProtection?: IPiiProtectionConfig | null;
     /** The first exchange of the conversation. */
     exchange: { user: string; assistant: string };
     maxWords?: number;
@@ -119,6 +122,8 @@ export async function generateConversationTitle(input: GenerateTitleInput): Prom
                     purpose: 'title',
                     ...(input.agentKey ? { agentKey: input.agentKey } : {}),
                     ...(input.userId ? { userId: input.userId } : {}),
+                    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+                    ...(input.piiProtection ? { piiProtection: input.piiProtection } : {}),
                     onCost: agentSpendSettler(spend, input.modelKey),
                 });
                 const tapped = chatModel as { invoke: (messages: unknown, options?: { signal?: AbortSignal }) => Promise<unknown> };
@@ -202,12 +207,18 @@ export async function generateAndStoreConversationTitle(input: NameConversationI
     const title = conversation.title?.trim();
     if (title && title !== 'New conversation' && title !== defaultTitle) return null;
 
+    // The agent's PII protection covers its title call too: the title is written from the same messages.
+    const agent = conversation.agentKey
+        ? await runWithTenantDb(input.tenantDbName, (db) => db.findAgentByKey(conversation.agentKey, input.projectId).catch(() => null))
+        : null;
     const generated = await generateConversationTitle({
         tenantDbName: input.tenantDbName,
         tenantId: input.tenantId,
         projectId: input.projectId,
         modelKey: input.modelKey,
         agentKey: conversation.agentKey,
+        sessionId: input.conversationId,
+        ...(agent?.config?.piiProtection ? { piiProtection: agent.config.piiProtection } : {}),
         ...(input.userId ? { userId: input.userId } : {}),
         exchange: { user: firstUser.content, assistant: firstAnswer.content },
         ...(input.maxWords ? { maxWords: input.maxWords } : {}),

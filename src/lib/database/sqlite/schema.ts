@@ -579,6 +579,8 @@ export const TENANT_SCHEMA_SQL = `
     -- providerKey/modelId are then its single replica, which is what every row
     -- written before pools existed says.
     replicas TEXT,
+    -- Reversible PII protection (IPiiProtectionConfig); NULL = off.
+    piiProtection TEXT,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT,
     updatedBy TEXT,

@@ -1,5 +1,5 @@
 import type { ObjectId } from 'mongodb';
-import type { EntityMetricType, IUsageAttributionFields } from './types.base';
+import type { EntityMetricType, IPiiProtectionConfig, IUsageAttributionFields } from './types.base';
 import type { IConfigGroupRef, IConfigValueRef } from './types.extended';
 import type { AgentFlowConfig, AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 
@@ -3297,6 +3297,13 @@ export interface IAgentConfig {
    * @deprecated Use `guardrails`. See `inputGuardrailKey`.
    */
   outputGuardrailKey?: string;
+  /**
+   * Reversible PII protection for every model call of this agent (main model,
+   * sub-calls, summaries): the model sees tokens, while the transcript, the tools
+   * and the user see the real values. Outranks the model's own `piiProtection`.
+   * Tokens are scoped to the session. Rides the `config` JSON like `guardrails`.
+   */
+  piiProtection?: IPiiProtectionConfig | null;
   /** Bound tools from various sources (tools, MCP servers legacy) */
   toolBindings?: IAgentToolBinding[];
   /** Agent backing kind. Defaults to 'native' when omitted. */

@@ -178,6 +178,11 @@ kind('agent.attachmentsBucket', 'agent', 'file-bucket', 'strict-project', 'warni
 // Lookup is by key across the whole tenant, hence the 'tenant' scope.
 kind('agent.sandboxTemplate', 'agent', 'sandbox-template', 'tenant', 'error');
 
+// Reversible PII protection (`config.piiProtection.policyKey`): loadPolicyScanner looks the policy up strictly in
+// the project and THROWS when it is missing, so every model call of the agent fails; a disabled policy is skipped
+// and the calls go out unprotected, i.e. the safety control is silently lost. Same rules for a model below.
+kind('agent.piiPolicy', 'agent', 'pii-policy', 'strict-project', 'error', { inactiveBreaks: true });
+
 // ── model ────────────────────────────────────────────────────────────────────
 // providerService throws when the provider is missing or not assigned to the project.
 kind('model.provider', 'model', 'provider', 'provider-assignment', 'error');
@@ -189,6 +194,8 @@ kind('model.dynamicModel', 'model', 'model', 'strict-project', 'error');
 // lookupCache swallows every failure and falls through to "no cache".
 kind('model.semanticCacheModel', 'model', 'model', 'strict-project', 'warning');
 kind('model.semanticCacheIndex', 'model', 'vector-index', 'strict-project', 'warning');
+// `piiProtection.policyKey`: see agent.piiPolicy.
+kind('model.piiPolicy', 'model', 'pii-policy', 'strict-project', 'error', { inactiveBreaks: true });
 
 // ── knowledge ────────────────────────────────────────────────────────────────
 // A tenant-wide RAG module/reranker resolves model + vector index in the caller's project.

@@ -1,0 +1,34 @@
+/**
+ * The PII protection picker (`components/pii/PiiProtectionField`) on the model edit page and the agent Build tab.
+ * Registered in `en.ts` as `piiProtection`; the twin is `piiProtection.tr.ts`.
+ */
+export const piiProtectionEn = {
+  title: 'PII protection',
+  model: {
+    description:
+      'Personal data never reaches the provider: each value the PII policy finds goes out as a token, and the answer comes back with the real value. Applies to every call to this model.',
+  },
+  agent: {
+    description: 'The model sees tokens; tools, the conversation and the user see the real values.',
+    inherited: 'The model {model} already protects every call with the policy {policy}. A policy chosen here replaces it for this agent.',
+    replaces: 'Replaces the policy {policy} of the model {model} for this agent.',
+  },
+  policy: {
+    label: 'PII policy',
+    hint: 'What to look for is set on the policy, under PII. Off sends the text as it is.',
+    placeholder: 'Off',
+    loading: 'Loading policies…',
+    failed: 'The PII policies could not be loaded.',
+    none: 'No PII policy in this project yet.',
+    create: 'Create a PII policy',
+    open: 'Open the policy',
+    missing: 'The policy “{key}” is not in this project any more. Calls fail until another one is chosen or protection is turned off.',
+    disabled: 'This policy is turned off, so calls go out unprotected until it is turned on again.',
+    disabledSuffix: 'off',
+  },
+  limits: {
+    media: 'Images, files and audio are refused while protection is on.',
+    logs: 'Usage logs keep the tokens, not the values.',
+    session: 'A value keeps the same token for the whole session.',
+  },
+};
