@@ -6,7 +6,7 @@
 
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
-import { chromium, type Browser, type BrowserContext, type Download, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Download, type Page, type Request } from 'playwright';
 import mime from 'mime-types';
 import { getConfig } from '@/lib/core/config';
 import {
@@ -52,6 +52,46 @@ export interface PlaywrightFetchResult {
    * from the requested URL; relative links must resolve against this.
    */
   finalUrl?: string;
+}
+
+/** Requests listed in a failure message: enough to see the pattern, not a page's whole waterfall. */
+const MAX_DIAGNOSED_REQUESTS = 5;
+/**
+ * Request failures that say nothing about why a navigation failed: the crawler
+ * itself aborts blocked hosts, and Chromium aborts the hop a redirect replaces.
+ */
+const UNINFORMATIVE_FAILURE = /ERR_BLOCKED_BY_CLIENT|ERR_ABORTED/;
+
+/** A URL for an error message: no query or fragment (they carry tokens), and bounded. */
+function describeRequestUrl(raw: string): string {
+  let text = raw;
+  try {
+    const parsed = new URL(raw);
+    text = `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    /* not a parseable URL: keep it, bounded below */
+  }
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
+/**
+ * What a failed navigation was doing, as a suffix for its error message. A
+ * timeout names no cause by itself; the requests still in flight are the cause:
+ * the page's own document that never answered (the network or a firewall), or a
+ * script from another host that never answered (a tracker or consent manager).
+ */
+function describeNavigationActivity(inFlight: Iterable<Request>, failures: readonly string[]): string {
+  const waiting = [...inFlight].filter((request) => /^https?:/i.test(request.url()));
+  const parts: string[] = [];
+  if (waiting.length > 0) {
+    const shown = waiting
+      .slice(0, MAX_DIAGNOSED_REQUESTS)
+      .map((request) => `${describeRequestUrl(request.url())} (${request.resourceType()})`);
+    const more = waiting.length - shown.length;
+    parts.push(`[still waiting on: ${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}]`);
+  }
+  if (failures.length > 0) parts.push(`[failed requests: ${failures.join(', ')}]`);
+  return parts.join(' ');
 }
 
 export class PlaywrightSession {
@@ -234,8 +274,21 @@ export class PlaywrightSession {
     // only to make a failed/timed-out navigation diagnosable: a stall on a
     // redirect hop otherwise looks identical to a stall on the final page.
     const navChain: string[] = [];
+    // Requests still unanswered, and the ones that failed, for the same reason.
+    const inFlight = new Set<Request>();
+    const failedRequests: string[] = [];
     page.on('request', (req) => {
+      inFlight.add(req);
       if (req.isNavigationRequest() && navChain.length < 10) navChain.push(req.url());
+    });
+    page.on('requestfinished', (req) => {
+      inFlight.delete(req);
+    });
+    page.on('requestfailed', (req) => {
+      inFlight.delete(req);
+      const reason = req.failure()?.errorText;
+      if (!reason || UNINFORMATIVE_FAILURE.test(reason) || failedRequests.length >= MAX_DIAGNOSED_REQUESTS) return;
+      failedRequests.push(`${describeRequestUrl(req.url())} (${reason})`);
     });
     try {
       let response;
@@ -254,9 +307,11 @@ export class PlaywrightSession {
         if (err instanceof Error) {
           const summary = err.message.split('\n')[0];
           const hint = explainProxyNetworkError(summary, this.proxyRouting);
-          if (hint || navChain.length > 0) {
+          const activity = describeNavigationActivity(inFlight, failedRequests);
+          if (hint || navChain.length > 0 || activity) {
             err.message = `${summary}${hint ? ` ${hint}` : ''}`
-              + `${navChain.length > 0 ? ` [navigation chain: ${navChain.join(' -> ')}]` : ''}`;
+              + `${navChain.length > 0 ? ` [navigation chain: ${navChain.join(' -> ')}]` : ''}`
+              + `${activity ? ` ${activity}` : ''}`;
           }
         }
         throw err;
