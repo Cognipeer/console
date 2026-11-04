@@ -16,6 +16,8 @@ vi.mock('@/lib/license/tenantLicense', () => ({
 }));
 
 const conversations = vi.hoisted(() => new Map<string, Record<string, unknown>>());
+/** The conversation's session files, as the database lists them. */
+const attached = vi.hoisted(() => ({ records: [] as Array<Record<string, unknown>> }));
 /** Config rows behind `sandbox.envRefs / secretRefs / groupRefs` (values are stored plain here, see the configService mock). */
 const configRows = vi.hoisted(() => ({
     items: [] as Array<{ _id: string; key: string; value: string; isSecret: boolean; groupId: string; projectId: string; version: number }>,
@@ -35,6 +37,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
             listConfigItems: vi.fn(async (f: { groupId?: string }) => configRows.items.filter((i) => !f.groupId || i.groupId === f.groupId)),
             createConfigAuditLog: vi.fn(async (entry: Record<string, unknown>) => { configRows.audit.push(entry); return entry; }),
             findAgentConversationById: vi.fn(async (id: string) => conversations.get(id) ?? null),
+            listFileRecordsByConversation: vi.fn(async () => attached.records),
             updateAgentConversation: vi.fn(async (id: string, data: Record<string, unknown>) => {
                 conversations.set(id, { ...(conversations.get(id) ?? {}), ...data });
                 return conversations.get(id);
@@ -873,5 +876,51 @@ describe('the turn\'s Stop reaches a running command', () => {
         expect(execs[0].signal).toBe(controller.signal);
         expect(execs[1].signal).toBe(controller.signal);
         expect('signal' in execs[2]).toBe(false);
+    });
+});
+
+describe('attached files in the sandbox', () => {
+    const zip = { _id: 'file-1', name: 'project.zip', size: 4, projectId: 'p1', purpose: 'conversation', bucketKey: 'sessions', key: 'agent-sessions/builder/conv-1/project.zip', createdAt: new Date(1) };
+    const writes = () => fake.calls
+        .filter((c) => c.op === 'exec')
+        .map((c) => (c.args[2] as { command: string }).command)
+        .filter((command) => command.includes('/inputs/'));
+
+    beforeEach(() => {
+        attached.records = [];
+        downloaded.files.set(zip.key, new Uint8Array([1, 2, 3, 4]));
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: {} });
+    });
+
+    it('copies the conversation files into /inputs when the sandbox starts', async () => {
+        attached.records = [zip, { ...zip, _id: 'file-2', name: 'report.md', origin: 'agent_output' }, { ...zip, _id: 'file-3', name: 'other.zip', projectId: 'p2' }];
+        const { byName, promptNote } = await build({ enabled: true }, { conversation: { _id: 'conv-1', metadata: {} } });
+        expect(promptNote).toContain('/inputs/');
+        await byName('sandbox_exec').invoke({ command: 'ls /inputs' });
+
+        const commands = writes();
+        expect(commands.some((command) => command.includes("'/inputs/project.zip.seed-tmp'") && command.includes('mkdir -p'))).toBe(true);
+        expect(commands.some((command) => command.includes("mv -f '/inputs/project.zip.seed-tmp' '/inputs/project.zip'"))).toBe(true);
+        expect(commands.join('\n')).not.toContain('report.md');
+        expect(commands.join('\n')).not.toContain('other.zip');
+    });
+
+    it('does not send a file again when the same size is already there', async () => {
+        attached.records = [zip];
+        const original = fake.runner.exec;
+        fake.runner.exec = async (...args) => {
+            const command = (args[2] as { command: string }).command;
+            if (command.startsWith('stat -c %s')) { fake.calls.push({ op: 'exec', args }); return { exitCode: 0, stdout: '4\n', stderr: '' }; }
+            return original(...args);
+        };
+        const { byName } = await build({ enabled: true }, { conversation: { _id: 'conv-1', metadata: {} } });
+        await byName('sandbox_exec').invoke({ command: 'true' });
+        expect(writes().filter((command) => command.includes('base64 -d'))).toHaveLength(0);
+    });
+
+    it('leaves a shared persistent sandbox alone and tells the agent nothing about attachments', async () => {
+        attached.records = [zip];
+        const { promptNote } = await build({ enabled: true, mode: 'instance', instanceId: 'shared-1' }, { conversation: { _id: 'conv-1', metadata: {} } });
+        expect(promptNote).not.toContain('/inputs/');
     });
 });

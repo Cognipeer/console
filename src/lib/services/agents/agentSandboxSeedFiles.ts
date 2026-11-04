@@ -156,12 +156,15 @@ async function remoteSha256(input: ApplySeedFilesInput, path: string): Promise<s
     return out.exitCode === 0 ? (out.stdout ?? '').trim() || null : null;
 }
 
-async function run(input: ApplySeedFilesInput, command: string): Promise<void> {
+type ByteWriter = Pick<ApplySeedFilesInput, 'runner' | 'signal'>;
+
+async function run(input: ByteWriter, command: string): Promise<void> {
     const out = await input.runner.exec({ command, timeoutSec: 120, ...(input.signal ? { signal: input.signal } : {}) });
     if (out.exitCode !== 0) throw new Error((out.stderr ?? '').trim().slice(0, 300) || `exit code ${out.exitCode}`);
 }
 
-async function writeBytes(input: ApplySeedFilesInput, path: string, bytes: Buffer, mode?: string): Promise<void> {
+/** Writes `bytes` to `path` in the sandbox (binary-safe, chunked base64 through `exec`; moved into place when complete). */
+export async function writeBytes(input: ByteWriter, path: string, bytes: Buffer, mode?: string): Promise<void> {
     const tmp = `${path}.seed-tmp`;
     await run(input, `mkdir -p ${shQuote((path.slice(0, path.lastIndexOf('/')) || '/'))} && : > ${shQuote(tmp)}`);
     for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
