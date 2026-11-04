@@ -34,7 +34,7 @@ export async function renderPdfToPngDataUrls(
   const scale = options?.scale ?? 2;
 
   const { pdf } = await import('pdf-to-img');
-  const document = await pdf(data, { scale });
+  const document = await pdf(data, { scale, docInitParams: { verbosity: 0 } });
   const totalPages = document.length;
 
   const dataUrls: string[] = [];
