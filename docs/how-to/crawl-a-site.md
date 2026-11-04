@@ -195,8 +195,9 @@ Everything below is in the error row itself, so you can diagnose a failure witho
 - **`page.goto: Timeout …ms exceeded`** on its own names no cause. The browser adds what it was doing when the time ran out:
   - `[still waiting on: https://example.com/ (document)]`: the page itself never answered. This is the network, a firewall or a WAF dropping the crawler's address; no crawler setting changes it.
   - `[still waiting on: https://consent.example.net/loader.js (script)]`: a script from another host never answered and held the page. Turn on **Skip tracker and consent scripts**, or add that host under **Also skip these hosts**.
-  - `[failed requests: … (net::ERR_CONNECTION_RESET)]`: sub-requests that failed outright, with the browser's reason.
-- Listed addresses never include query strings or fragments, and at most five requests are named.
+  - `[failed requests: net::ERR_CONNECTION_RESET (3 requests): https://a.example/x.js, https://b.example/y.js and 1 more; net::ERR_NAME_NOT_RESOLVED: https://c.example/z.js]`: sub-requests that failed outright, grouped by the browser's error so one flood of failures cannot hide a different one. Each group gives a count and a couple of example addresses. Requests the crawler blocks itself (images, media and fonts; hosts you skip with **Skip tracker and consent scripts** or **Also skip these hosts**) are not reported as failures.
+- The addresses in those two lists (waiting on, failed) never include query strings or fragments. Everything else in the row is as written: the `All engines failed for <url>` address, the browser's own message and the `[navigation chain: …]` keep their full URLs, query strings included.
+- The lists are short: up to five requests under *still waiting on*, and under *failed requests* up to six kinds of failure with two example addresses each.
 - The **fetch** badge on the row shows how long the attempt took, so a 10 s timeout reads as exactly that.
 
 ## The same thing over the API

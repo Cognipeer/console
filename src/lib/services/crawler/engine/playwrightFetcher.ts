@@ -54,8 +54,18 @@ export interface PlaywrightFetchResult {
   finalUrl?: string;
 }
 
-/** Requests listed in a failure message: enough to see the pattern, not a page's whole waterfall. */
+/** Pending requests named in a failure message: enough to see the pattern, not a page's whole waterfall. */
 const MAX_DIAGNOSED_REQUESTS = 5;
+/** Failed requests are grouped by the browser's error, so one flood cannot hide another kind. */
+const MAX_FAILURE_GROUPS = 6;
+/** Example addresses named per error. */
+const MAX_FAILURE_EXAMPLES = 2;
+/**
+ * Resource types the crawler aborts on purpose to save bandwidth (see the route
+ * handler). Their requests all fail, with the browser's generic `net::ERR_FAILED`,
+ * and that is the crawler's doing, not the page's.
+ */
+const BLOCKED_RESOURCE_TYPES: readonly string[] = ['image', 'media', 'font'];
 /**
  * Request failures that say nothing about why a navigation failed: the crawler
  * itself aborts blocked hosts, and Chromium aborts the hop a redirect replaces.
@@ -80,7 +90,40 @@ function describeRequestUrl(raw: string): string {
  * the page's own document that never answered (the network or a firewall), or a
  * script from another host that never answered (a tracker or consent manager).
  */
-function describeNavigationActivity(inFlight: Iterable<Request>, failures: readonly string[]): string {
+/** Failed requests of one kind: how many, a couple of examples, and how many of the rest are not named. */
+interface FailureGroup {
+  count: number;
+  examples: string[];
+  /** Failed requests whose address is not among the examples (a repeat of a named address is not one). */
+  unlisted: number;
+}
+
+function recordFailure(groups: Map<string, FailureGroup>, reason: string, url: string): void {
+  // A bound on the map itself: the browser has a small fixed set of error codes, but
+  // nothing here should grow without limit if that ever stops being true.
+  const group = groups.get(reason)
+    ?? (groups.size < MAX_FAILURE_GROUPS * 3 ? { count: 0, examples: [], unlisted: 0 } : undefined);
+  if (!group) return;
+  group.count += 1;
+  const example = describeRequestUrl(url);
+  if (!group.examples.includes(example)) {
+    if (group.examples.length < MAX_FAILURE_EXAMPLES) group.examples.push(example);
+    else group.unlisted += 1;
+  }
+  groups.set(reason, group);
+}
+
+/** `net::ERR_X: url` for one request, `net::ERR_X (3 requests): a, b and 1 more` for several. */
+function describeFailureGroups(groups: ReadonlyMap<string, FailureGroup>): string {
+  const entries = [...groups].map(([reason, { count, examples, unlisted }]) => {
+    const subject = count > 1 ? `${reason} (${count} requests)` : reason;
+    return `${subject}: ${examples.join(', ')}${unlisted > 0 ? ` and ${unlisted} more` : ''}`;
+  });
+  const hidden = entries.length - MAX_FAILURE_GROUPS;
+  return entries.slice(0, MAX_FAILURE_GROUPS).join('; ') + (hidden > 0 ? `; and ${hidden} other kinds of failure` : '');
+}
+
+function describeNavigationActivity(inFlight: Iterable<Request>, failures: ReadonlyMap<string, FailureGroup>): string {
   const waiting = [...inFlight].filter((request) => /^https?:/i.test(request.url()));
   const parts: string[] = [];
   if (waiting.length > 0) {
@@ -90,7 +133,7 @@ function describeNavigationActivity(inFlight: Iterable<Request>, failures: reado
     const more = waiting.length - shown.length;
     parts.push(`[still waiting on: ${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}]`);
   }
-  if (failures.length > 0) parts.push(`[failed requests: ${failures.join(', ')}]`);
+  if (failures.size > 0) parts.push(`[failed requests: ${describeFailureGroups(failures)}]`);
   return parts.join(' ');
 }
 
@@ -222,7 +265,7 @@ export class PlaywrightSession {
         // they don't affect extracted text content and blocking them is a
         // much weaker bot signal (many real browsers also skip fonts/media
         // when e.g. data-saver mode is on).
-        if (['image', 'media', 'font'].includes(type)) {
+        if (BLOCKED_RESOURCE_TYPES.includes(type)) {
           return route.abort().catch(() => undefined);
         }
         return route.continue().catch(() => undefined);
@@ -276,7 +319,7 @@ export class PlaywrightSession {
     const navChain: string[] = [];
     // Requests still unanswered, and the ones that failed, for the same reason.
     const inFlight = new Set<Request>();
-    const failedRequests: string[] = [];
+    const failureGroups = new Map<string, FailureGroup>();
     page.on('request', (req) => {
       inFlight.add(req);
       if (req.isNavigationRequest() && navChain.length < 10) navChain.push(req.url());
@@ -287,8 +330,8 @@ export class PlaywrightSession {
     page.on('requestfailed', (req) => {
       inFlight.delete(req);
       const reason = req.failure()?.errorText;
-      if (!reason || UNINFORMATIVE_FAILURE.test(reason) || failedRequests.length >= MAX_DIAGNOSED_REQUESTS) return;
-      failedRequests.push(`${describeRequestUrl(req.url())} (${reason})`);
+      if (!reason || UNINFORMATIVE_FAILURE.test(reason) || BLOCKED_RESOURCE_TYPES.includes(req.resourceType())) return;
+      recordFailure(failureGroups, reason, req.url());
     });
     try {
       let response;
@@ -307,7 +350,7 @@ export class PlaywrightSession {
         if (err instanceof Error) {
           const summary = err.message.split('\n')[0];
           const hint = explainProxyNetworkError(summary, this.proxyRouting);
-          const activity = describeNavigationActivity(inFlight, failedRequests);
+          const activity = describeNavigationActivity(inFlight, failureGroups);
           if (hint || navChain.length > 0 || activity) {
             err.message = `${summary}${hint ? ` ${hint}` : ''}`
               + `${navChain.length > 0 ? ` [navigation chain: ${navChain.join(' -> ')}]` : ''}`

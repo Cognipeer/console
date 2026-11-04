@@ -31,6 +31,13 @@ function request(url: string, resourceType = 'script', over: Partial<FakeRequest
   };
 }
 
+/** A request that started and then failed with `errorText`, as the two events Chromium sends. */
+function fails(page: EventEmitter, url: string, errorText: string, resourceType = 'script'): void {
+  const failed = request(url, resourceType, { failure: () => ({ errorText }) });
+  page.emit('request', failed);
+  page.emit('requestfailed', failed);
+}
+
 /** What happens on the page between `goto` starting and failing. */
 type Activity = (page: EventEmitter) => void;
 
@@ -103,7 +110,7 @@ describe('failed navigation — what the page was waiting on', () => {
     expect(message).not.toContain('SECRET');
     expect(message).not.toContain('frag');
     expect(message).toContain('https://cdn.example.net/a.js (script)');
-    expect(message).toContain('[failed requests: https://api.example.net/x (net::ERR_CONNECTION_RESET)]');
+    expect(message).toContain('[failed requests: net::ERR_CONNECTION_RESET: https://api.example.net/x]');
   });
 
   it('does not list requests that finished or failed', async () => {
@@ -119,7 +126,7 @@ describe('failed navigation — what the page was waiting on', () => {
     });
 
     expect(message).not.toContain('still waiting on');
-    expect(message).toContain('[failed requests: https://static.example.net/gone.js (net::ERR_NAME_NOT_RESOLVED)]');
+    expect(message).toContain('[failed requests: net::ERR_NAME_NOT_RESOLVED: https://static.example.net/gone.js]');
     expect(message).not.toContain('app.css');
   });
 
@@ -147,6 +154,80 @@ describe('failed navigation — what the page was waiting on', () => {
     expect(message).toContain('and 3 more]');
   });
 
+  it('does not report the images, media and fonts the crawler blocks itself', async () => {
+    const message = await failedNavigation((page) => {
+      // a normal page: many images, a web font and a video, every one aborted on purpose
+      for (let i = 1; i <= 10; i++) fails(page, `https://img.example.net/photo-${i}.jpg`, 'net::ERR_FAILED', 'image');
+      fails(page, 'https://fonts.example.net/face.woff2', 'net::ERR_FAILED', 'font');
+      fails(page, 'https://media.example.net/clip.mp4', 'net::ERR_FAILED', 'media');
+      // and one request that really failed, after all of them
+      fails(page, 'https://api.example.net/session.js', 'net::ERR_EMPTY_RESPONSE');
+    });
+
+    expect(message).toContain('[failed requests: net::ERR_EMPTY_RESPONSE: https://api.example.net/session.js]');
+    expect(message).not.toContain('ERR_FAILED');
+    expect(message).not.toContain('photo-');
+  });
+
+  it('still reports a generic failure from a request the crawler did not block', async () => {
+    const message = await failedNavigation((page) => {
+      fails(page, 'https://api.example.net/app.js', 'net::ERR_FAILED', 'script');
+    });
+
+    expect(message).toContain('[failed requests: net::ERR_FAILED: https://api.example.net/app.js]');
+  });
+});
+
+describe('failed navigation — failures grouped by error', () => {
+  it('shows one entry per kind of failure, with a count and examples', async () => {
+    const message = await failedNavigation((page) => {
+      fails(page, 'https://a.example.net/one.js', 'net::ERR_CONNECTION_RESET');
+      fails(page, 'https://b.example.net/two.js', 'net::ERR_CONNECTION_RESET');
+      fails(page, 'https://c.example.net/three.js', 'net::ERR_CONNECTION_RESET');
+      fails(page, 'https://gone.example.net/x.js', 'net::ERR_NAME_NOT_RESOLVED');
+    });
+
+    expect(message).toContain(
+      '[failed requests: net::ERR_CONNECTION_RESET (3 requests): https://a.example.net/one.js, https://b.example.net/two.js and 1 more; '
+        + 'net::ERR_NAME_NOT_RESOLVED: https://gone.example.net/x.js]',
+    );
+  });
+
+  it('does not let a flood of one error hide a different one that came later', async () => {
+    const message = await failedNavigation((page) => {
+      for (let i = 1; i <= 25; i++) fails(page, `https://tracker.example.net/pixel-${i}.js`, 'net::ERR_CONNECTION_RESET');
+      fails(page, 'https://api.example.net/session.js', 'net::ERR_CERT_AUTHORITY_INVALID');
+      fails(page, 'https://cdn.example.net/lib.js', 'net::ERR_NAME_NOT_RESOLVED');
+    });
+
+    expect(message).toContain('net::ERR_CONNECTION_RESET (25 requests)');
+    expect(message).toContain('net::ERR_CERT_AUTHORITY_INVALID: https://api.example.net/session.js');
+    expect(message).toContain('net::ERR_NAME_NOT_RESOLVED: https://cdn.example.net/lib.js');
+  });
+
+  it('counts a request that failed more than once, but names its address once', async () => {
+    const message = await failedNavigation((page) => {
+      for (let i = 0; i < 3; i++) fails(page, 'https://api.example.net/retry.js?attempt=' + i, 'net::ERR_CONNECTION_RESET');
+    });
+
+    expect(message).toContain('net::ERR_CONNECTION_RESET (3 requests): https://api.example.net/retry.js');
+    expect(message).not.toContain('and 2 more');
+    expect(message).not.toContain('attempt=');
+  });
+
+  it('keeps the number of kinds short and says how many it left out', async () => {
+    const message = await failedNavigation((page) => {
+      for (let i = 1; i <= 9; i++) fails(page, `https://h${i}.example.net/x.js`, `net::ERR_KIND_${i}`);
+    });
+
+    expect(message).toContain('net::ERR_KIND_1:');
+    expect(message).toContain('net::ERR_KIND_6:');
+    expect(message).not.toContain('net::ERR_KIND_7');
+    expect(message).toContain('and 3 other kinds of failure]');
+  });
+});
+
+describe('failed navigation — a message with nothing to add', () => {
   it('leaves the message as Playwright wrote it when the page did nothing worth reporting', async () => {
     const message = await failedNavigation(() => undefined, new Error('page.goto: net::ERR_CONNECTION_REFUSED at https://example.com/'));
 
