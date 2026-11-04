@@ -100,6 +100,7 @@ export default function AuditLogViewer() {
   const [page, setPage] = useState(1);
   const [pageSize] = useState(25);
   const [hasNextPage, setHasNextPage] = useState(false);
+  const [total, setTotal] = useState<number | undefined>(undefined);
   const [exporting, setExporting] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditLogRecord | null>(null);
   const [drawerOpened, drawerHandlers] = useDisclosure(false);
@@ -135,6 +136,7 @@ export default function AuditLogViewer() {
       }
       const nextLogs = (data.logs ?? []) as AuditLogRecord[];
       setHasNextPage(nextLogs.length > pageSize);
+      setTotal(typeof data.total === 'number' ? data.total : undefined);
       setLogs(nextLogs.slice(0, pageSize));
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -387,8 +389,9 @@ export default function AuditLogViewer() {
           onPageChange: setPage,
           pageSize,
           hasMore: hasNextPage,
+          total,
         }}
-        footerLeft={`Page ${page}`}
+        footerLeft={total !== undefined ? `${total.toLocaleString()} events` : `Page ${page}`}
       />
 
       <Drawer

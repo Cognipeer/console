@@ -29,6 +29,29 @@ export function AuditMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       skip?: number;
     } = {}): Promise<IAuditLog[]> {
       const db = this.getTenantDb();
+      const query = this.buildAuditQuery(filters);
+      const cursor = db
+        .collection<IAuditLog>(COLLECTIONS.auditLogs)
+        .find(query as Filter<IAuditLog>)
+        .sort({ createdAt: -1 });
+
+      cursor.skip(Math.max(filters.skip ?? 0, 0));
+      cursor.limit(Math.min(Math.max(filters.limit ?? 100, 1), 500));
+
+      const docs = await cursor.toArray();
+      return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() }) as IAuditLog);
+    }
+
+    private buildAuditQuery(filters: {
+      actorUserId?: string;
+      outcome?: IAuditLog['outcome'];
+      service?: string;
+      action?: string;
+      method?: string;
+      q?: string;
+      from?: Date;
+      to?: Date;
+    }): Record<string, unknown> {
       const query: Record<string, unknown> = {};
       if (filters.actorUserId) query.actorUserId = filters.actorUserId;
       if (filters.outcome) query.outcome = filters.outcome;
@@ -47,16 +70,23 @@ export function AuditMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         query.createdAt = createdAt;
       }
 
-      const cursor = db
+      return query;
+    }
+
+    async countAuditLogs(filters: {
+      actorUserId?: string;
+      outcome?: IAuditLog['outcome'];
+      service?: string;
+      action?: string;
+      method?: string;
+      q?: string;
+      from?: Date;
+      to?: Date;
+    } = {}): Promise<number> {
+      const db = this.getTenantDb();
+      return db
         .collection<IAuditLog>(COLLECTIONS.auditLogs)
-        .find(query as Filter<IAuditLog>)
-        .sort({ createdAt: -1 });
-
-      cursor.skip(Math.max(filters.skip ?? 0, 0));
-      cursor.limit(Math.min(Math.max(filters.limit ?? 100, 1), 500));
-
-      const docs = await cursor.toArray();
-      return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() }) as IAuditLog);
+        .countDocuments(this.buildAuditQuery(filters) as Filter<IAuditLog>);
     }
   };
 }
