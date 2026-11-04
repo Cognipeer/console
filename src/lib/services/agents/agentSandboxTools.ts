@@ -47,6 +47,7 @@ import { resolveSandboxMode } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './sandboxAvailability';
 import { downloadFile } from '@/lib/services/files';
 import { applySeedFiles, buildSeedPromptNote, isOwnedObjectKey, type SeedApplyResult } from './agentSandboxSeedFiles';
+import { ATTACHMENTS_DIR, stageSessionFiles } from './agentSandboxAttachments';
 import {
     SANDBOX_OUTPUTS_DIR,
     collectSandboxOutputs,
@@ -396,7 +397,41 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             logger.warn('Could not record the conversation sandbox', { instanceId, error: error instanceof Error ? error.message : String(error) });
         });
         await seedInstance(instanceId);
+        await stageAttachments(instanceId);
         return instanceId;
+    };
+
+    /**
+     * Places the conversation's attached files in `/inputs/` (see `agentSandboxAttachments.ts`); never
+     * throws. Not done for a shared persistent sandbox: what is written there can be seen by other conversations.
+     */
+    const stageAttachments = async (instanceId: string): Promise<void> => {
+        if (!conversationId) return;
+        try {
+            const db = await getDatabase();
+            await db.switchToTenant(input.tenantDbName);
+            const records = (await db.listFileRecordsByConversation(conversationId))
+                .filter((record) => record.projectId === input.projectId && record.purpose === 'conversation' && record.origin !== 'agent_output');
+            if (records.length === 0) return;
+            const byId = new Map(records.map((record) => [String(record._id), record]));
+            const staged = await stageSessionFiles({
+                files: records.map((record) => ({ id: String(record._id), name: record.name, size: record.size, createdAt: record.createdAt })),
+                runner: { exec: (cmd) => runner.exec(ref, instanceId, cmd) },
+                readBytes: async (file) => {
+                    const record = byId.get(file.id)!;
+                    const result = await downloadFile(input.tenantDbName, input.tenantId, input.projectId, record.bucketKey, record.key);
+                    return Buffer.from(result.data as Uint8Array);
+                },
+                ...(currentTurnSignal() ? { signal: currentTurnSignal() } : {}),
+                onWarn: (message, meta) => logger.warn(message, { agentKey: input.agentKey, instanceId, ...meta }),
+            });
+            if (staged.failed.length > 0) {
+                const failed = `Some attached files could not be placed in ${ATTACHMENTS_DIR}: ${staged.failed.map((f) => `${f.name} (${f.reason})`).join('; ')}.`;
+                seedNotice = [seedNotice, failed].filter(Boolean).join(' ');
+            }
+        } catch (error) {
+            logger.warn('Could not place the attached files in the sandbox', { agentKey: input.agentKey, error: error instanceof Error ? error.message : String(error) });
+        }
     };
 
     /** Writes the operator's seed files (missing or changed ones only); never throws. */
@@ -647,7 +682,15 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         definitions,
         cleanup,
         collectOutputs,
-        promptNote: tools.length > 0 ? buildSeedPromptNote(config.seedFiles) : '',
+        promptNote: tools.length > 0
+            ? [
+                buildSeedPromptNote(config.seedFiles),
+                // A shared persistent sandbox gets no copies (see `stageAttachments`).
+                conversationId && !attachedId
+                    ? `Files the user attaches to the conversation (a zip, a project) are copied into ${ATTACHMENTS_DIR}/ when your sandbox starts. Work on them there with sandbox_exec (ls, grep, and unzip or python3 -m zipfile -e for a zip) rather than through the read tool.`
+                    : '',
+            ].filter(Boolean).join('\n\n')
+            : '',
         ...(toolsEnabled.files ? { reader: { runner, ref, getInstance, resolvePath, scrub } } : {}),
     };
 }
