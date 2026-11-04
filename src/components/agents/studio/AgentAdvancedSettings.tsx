@@ -475,15 +475,15 @@ export default function AgentAdvancedSettings({
 
             <SettingsGroup
                 title="Reflection"
-                badge={reasoning.reflection === false ? <Badge size="xs" color="gray" variant="light">off</Badge> : null}
+                badge={reasoning.reflection === true ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
             >
                 {/* Effort, budget and thinking text moved next to the model (Build tab). */}
                 <Switch
                     label="Reflection pass"
-                    description="The agent reviews its draft before answering. On by default; turn it off for faster, cheaper turns. The reasoning level of each model is set next to the model in the Build tab."
-                    checked={reasoning.reflection !== false}
+                    description="The agent reviews its draft before answering. Off by default; turn it on for higher-quality answers at the cost of extra latency and tokens. The reasoning level of each model is set next to the model in the Build tab."
+                    checked={reasoning.reflection === true}
                     onChange={(event) =>
-                        patch({ reasoning: event.currentTarget.checked ? undefined : { reflection: false } })
+                        patch({ reasoning: event.currentTarget.checked ? { reflection: true } : undefined })
                     }
                     data-testid="agent-reflection"
                 />

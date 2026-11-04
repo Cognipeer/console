@@ -134,7 +134,8 @@ describe('migration of the old Advanced-tab reasoning', () => {
     const old = resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'high', budgetTokens: 5000, reflection: false } } });
     expect(old.reasoning).toEqual({ enabled: true, reflection: false });
     expect(JSON.stringify(old.reasoning)).not.toContain('native');
-    expect(resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'high' } } }).reasoning).toBeUndefined();
+    expect(resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'high' } } }).reasoning).toEqual({ enabled: true, reflection: false });
+    expect(resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { reflection: true } } }).reasoning).toBeUndefined();
   });
 });
 

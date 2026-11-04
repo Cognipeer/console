@@ -111,8 +111,8 @@ describe('agent settings — runtime resolution', () => {
         expect(resolved.limits?.maxToolCalls).toBe(25);
         expect(resolved.limits?.maxCostUsd).toBe(1.5);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
-        // Effort / level moved next to the model; with reflection left on there is nothing to hand the SDK loop.
-        expect(resolved.reasoning).toBeUndefined();
+        // Effort / level moved next to the model; reflection is off by default, so the SDK loop is told to disable it.
+        expect(resolved.reasoning).toEqual({ enabled: true, reflection: false });
         // A stored `askUser: true` is ignored: no console channel can answer
         // the question, so offering the tool only ever locked the conversation.
         expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();
