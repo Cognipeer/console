@@ -340,6 +340,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     limit?: number;
     skip?: number;
   }): Promise<IAuditLog[]>;
+  countAuditLogs(filters?: {
+    actorUserId?: string;
+    outcome?: IAuditLog['outcome'];
+    service?: string;
+    action?: string;
+    method?: string;
+    q?: string;
+    from?: Date;
+    to?: Date;
+  }): Promise<number>;
 
   // Project operations (tenant-specific)
   createProject(

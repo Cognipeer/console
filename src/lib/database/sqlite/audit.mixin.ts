@@ -63,6 +63,29 @@ export function AuditMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       skip?: number;
     } = {}): Promise<IAuditLog[]> {
       const db = this.getTenantDb();
+      const { where, params } = this.buildAuditWhere(filters);
+      const limit = Math.min(Math.max(filters.limit ?? 100, 1), 500);
+      const skip = Math.max(filters.skip ?? 0, 0);
+      const rows = db.prepare(`
+        SELECT * FROM ${TABLES.auditLogs}
+        ${where}
+        ORDER BY createdAt DESC
+        LIMIT @limit OFFSET @skip
+      `).all({ ...params, limit, skip }) as SqliteRow[];
+
+      return rows.map((row) => this.mapAuditLogRow(row));
+    }
+
+    private buildAuditWhere(filters: {
+      actorUserId?: string;
+      outcome?: IAuditLog['outcome'];
+      service?: string;
+      action?: string;
+      method?: string;
+      q?: string;
+      from?: Date;
+      to?: Date;
+    }): { where: string; params: Record<string, unknown> } {
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
 
@@ -102,16 +125,25 @@ export function AuditMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       }
 
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-      const limit = Math.min(Math.max(filters.limit ?? 100, 1), 500);
-      const skip = Math.max(filters.skip ?? 0, 0);
-      const rows = db.prepare(`
-        SELECT * FROM ${TABLES.auditLogs}
-        ${where}
-        ORDER BY createdAt DESC
-        LIMIT @limit OFFSET @skip
-      `).all({ ...params, limit, skip }) as SqliteRow[];
+      return { where, params };
+    }
 
-      return rows.map((row) => this.mapAuditLogRow(row));
+    async countAuditLogs(filters: {
+      actorUserId?: string;
+      outcome?: IAuditLog['outcome'];
+      service?: string;
+      action?: string;
+      method?: string;
+      q?: string;
+      from?: Date;
+      to?: Date;
+    } = {}): Promise<number> {
+      const db = this.getTenantDb();
+      const { where, params } = this.buildAuditWhere(filters);
+      const row = db
+        .prepare(`SELECT COUNT(*) AS c FROM ${TABLES.auditLogs} ${where}`)
+        .get(params) as { c: number };
+      return row.c;
     }
 
     private mapAuditLogRow(row: SqliteRow): IAuditLog {

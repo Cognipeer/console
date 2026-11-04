@@ -51,6 +51,15 @@ export async function listAuditLogs(
   return db.listAuditLogs(filters);
 }
 
+export async function countAuditLogs(
+  context: AuditWriteContext,
+  filters: Omit<AuditLogListFilters, 'limit' | 'skip'> = {},
+): Promise<number> {
+  const db = await getDatabase();
+  await db.switchToTenant(context.tenantDbName);
+  return db.countAuditLogs(filters);
+}
+
 export function sanitizeAuditLog(log: IAuditLog): IAuditLog & { id: string } {
   return {
     ...log,

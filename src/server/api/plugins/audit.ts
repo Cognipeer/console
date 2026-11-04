@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAuditLog } from '@/lib/database';
 import { RBAC_SERVICE_DEFINITIONS, SERVICE_PERMISSION_LEVELS } from '@/lib/security/rbac';
-import { listAuditLogs, sanitizeAuditLog, type AuditLogListFilters } from '@/lib/services/audit';
+import { countAuditLogs, listAuditLogs, sanitizeAuditLog, type AuditLogListFilters } from '@/lib/services/audit';
 import {
   requireSessionContext,
   withApiRequestContext,
@@ -98,17 +98,20 @@ export const auditApiPlugin: FastifyPluginAsync = async (app) => {
 
       const limit = query.limit ? Number(query.limit) : 100;
       const skip = query.skip ? Number(query.skip) : 0;
-      const logs = await listAuditLogs(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
-        {
-          ...parseFilters(query),
+      const context = { tenantDbName: session.tenantDbName, tenantId: session.tenantId };
+      const filters = parseFilters(query);
+      const [logs, total] = await Promise.all([
+        listAuditLogs(context, {
+          ...filters,
           limit: Number.isFinite(limit) ? limit : 100,
           skip: Number.isFinite(skip) ? skip : 0,
-        },
-      );
+        }),
+        countAuditLogs(context, filters),
+      ]);
 
       return reply.code(200).send({
         logs: logs.map(sanitizeAuditLog),
+        total,
       });
     } catch (error) {
       logger.error('List audit logs error', { error });

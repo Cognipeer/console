@@ -504,7 +504,9 @@ export default function DataGrid<T>({
                     {tGrid('previous')}
                   </Button>
                   <span className="ds-mono" style={{ fontSize: 12 }}>
-                    {pagination.page}
+                    {pagination.total !== undefined && pagination.pageSize
+                      ? `${pagination.page} / ${Math.max(1, Math.ceil(pagination.total / pagination.pageSize))}`
+                      : pagination.page}
                   </span>
                   <Button
                     variant="default"
