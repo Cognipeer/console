@@ -92,12 +92,11 @@ function resolveLimits(runtime: IAgentRuntimeConfig | undefined): IAgentLimits {
  * Only `reflection` is read from `runtime.reasoning`: effort, budget and the
  * thinking switches live next to the model now (`config.reasoningEffort`, see
  * agentReasoning.ts) and reach the provider through the native model, not the
- * SDK loop. `reflection` is tri-state on the SDK: absent keeps the profile
- * default, `false` disables it. `true` is expressed by leaving it absent, which
- * is why only the `false` case is emitted here.
+ * SDK loop. `reflection` is OFF by default in console: only an explicit `true`
+ * leaves it to the SDK profile default (on); absent or `false` disables it.
  */
 function resolveReasoning(runtime: IAgentRuntimeConfig | undefined) {
-    if (runtime?.reasoning?.reflection !== false) return undefined;
+    if (runtime?.reasoning?.reflection === true) return undefined;
     return { enabled: true, reflection: false as const };
 }
 

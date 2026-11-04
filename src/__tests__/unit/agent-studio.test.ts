@@ -58,7 +58,7 @@ describe('resolveAgentRuntimeOptions', () => {
         expect(resolved.toolResponses?.toolResponseRetentionByTool).toEqual({ knowledge_search: 'keep_full' });
         // Absent knobs stay absent so the SDK keeps its own profile behaviour.
         expect(resolved.contextPilot).toBeUndefined();
-        expect(resolved.reasoning).toBeUndefined();
+        expect(resolved.reasoning).toEqual({ enabled: true, reflection: false }); // reflection is off by default
         expect(resolved.subagentPolicy).toBeUndefined();
     });
 

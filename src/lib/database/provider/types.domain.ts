@@ -2885,7 +2885,7 @@ export interface IAgentReasoningConfig {
   effort?: AgentReasoningEffort;
   budgetTokens?: number;
   includeThoughts?: boolean;
-  /** SDK reflection pass. Absent = SDK default; `false` disables it. */
+  /** SDK reflection pass. Absent or `false` = off (console default); `true` enables it. */
   reflection?: boolean;
 }
 
