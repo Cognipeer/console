@@ -87,6 +87,18 @@ function withTimeout<T>(
 export * from './types';
 
 /**
+ * The message when `auto` ran axios and then the browser and both failed. The
+ * browser's error alone says how the last attempt ended ("Timeout 10000ms
+ * exceeded") and hides what axios hit first (a reset, a refused connection, an
+ * HTTP status), which is often the real cause.
+ */
+function enginesFailedMessage(url: string, axiosError: unknown, browserError: unknown): string {
+  const text = (error: unknown): string =>
+    (error instanceof Error ? error.message : String(error)).split('\n')[0]!.trim();
+  return `All engines failed for ${url}: axios: ${text(axiosError)}; playwright: ${text(browserError)}`;
+}
+
+/**
  * Run a crawl. Yields one PageResult per fetched URL (HTML, file or error).
  *
  * The crawler respects:
@@ -263,9 +275,7 @@ export async function* crawl(
         try {
           return await retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
         } catch (pwErr) {
-          throw new Error(
-            `All engines failed for ${url}: ${(pwErr as Error).message}`,
-          );
+          throw new Error(enginesFailedMessage(url, err, pwErr));
         }
       }
     }
@@ -358,9 +368,7 @@ export async function* crawl(
       try {
         pw = await retry(() => fetchViaBrowser(url), retries, resetAwareRetryOptions);
       } catch (pwErr) {
-        throw new Error(
-          `All engines failed for ${url}: ${(pwErr as Error).message}`,
-        );
+        throw new Error(enginesFailedMessage(url, err, pwErr));
       }
       if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
         throw new Error(

@@ -213,6 +213,29 @@ describe('engine — error pages', () => {
     expect(page!.engine).toBeUndefined();
   });
 
+  it('names what each engine hit, so the browser’s timeout is not the only thing an error row says', async () => {
+    axiosFetch.mockImplementation(failsAfter(5, 'read ECONNRESET'));
+    pwFetch.mockImplementation(failsAfter(5, 'page.goto: Timeout 10000ms exceeded.\nCall log:\n  - navigating to "https://example.com/"'));
+
+    const [page] = await run(plan({ engine: 'auto' }));
+
+    expect(page!.errorMessage).toBe(
+      'All engines failed for https://example.com/: axios: read ECONNRESET; playwright: page.goto: Timeout 10000ms exceeded.',
+    );
+  });
+
+  it('does the same for an attachment the browser could not download either', async () => {
+    axiosFetch.mockImplementation(failsAfter(5, 'unable to verify the first certificate'));
+    pwFetch.mockImplementation(failsAfter(5, 'Download for https://example.com/a.pdf produced no file'));
+
+    const [page] = await run(plan({ engine: 'auto', seeds: ['https://example.com/a.pdf'] }));
+
+    expect(page!.errorMessage).toBe(
+      'All engines failed for https://example.com/a.pdf: axios: unable to verify the first certificate; '
+        + 'playwright: Download for https://example.com/a.pdf produced no file',
+    );
+  });
+
   it('records no fetch time for a URL rejected before any request', async () => {
     const [page] = await run(
       plan({ engine: 'auto', seeds: ['http://127.0.0.1:9/'], http: { maxConcurrency: 4, retries: 1 } }),

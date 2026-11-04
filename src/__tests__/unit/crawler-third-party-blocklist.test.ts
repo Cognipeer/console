@@ -267,6 +267,17 @@ describe('PlaywrightSession — per-crawler tracker blocking', () => {
     expect(await replay({ blockTrackers: true }, OWN)).toBe('continued');
   });
 
+  it('aborts images, media and fonts, and nothing else, whatever the crawler sets', async () => {
+    for (const http of [{}, { blockTrackers: true }]) {
+      for (const resourceType of ['image', 'media', 'font']) {
+        expect(await replay(http, OWN, { resourceType }), resourceType).toBe('aborted');
+      }
+      for (const resourceType of ['script', 'stylesheet', 'xhr', 'fetch', 'document', 'other']) {
+        expect(await replay(http, OWN, { resourceType }), resourceType).toBe('continued');
+      }
+    }
+  });
+
   it('never blocks the page being crawled, even on a listed host', async () => {
     expect(
       await replay({ blockTrackers: true }, 'https://www.googletagmanager.com/', {
