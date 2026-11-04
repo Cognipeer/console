@@ -60,6 +60,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { createdAt: -1 }, options: { name: 'idx_createdAt' } },
     { key: { service: 1, action: 1, createdAt: -1 }, options: { name: 'idx_service_action_createdAt' } },
     { key: { actorUserId: 1, createdAt: -1 }, options: { name: 'idx_actor_createdAt' } },
+    // Newest-first by service alone (data-retention "destruction records" reads
+    // service:'retention'; without this it walks idx_createdAt over the whole
+    // collection filtering rows, a full scan on Cosmos vCore).
+    { key: { service: 1, createdAt: -1 }, options: { name: 'idx_service_createdAt' } },
   ],
   // Prescriptions (automated analysis reports): list is project + newest-first;
   // eligibility looks up the latest ready report per subject.
