@@ -328,6 +328,46 @@ describe('the Connector choice', () => {
   });
 });
 
+describe('the callback of a trigger', () => {
+  const scheduleRow = () => ({
+    ...common, id: 'r3', name: 'Nightly digest', type: 'schedule', prompt: 'Summarise the day', schedule: { cron: '0 9 * * *', timezone: 'UTC' },
+    callback: { url: 'https://hooks.example.com/run', signed: true },
+  });
+  const callbackUrlInput = () => document.querySelector<HTMLInputElement>('input[placeholder="https://"]')!;
+
+  // A text field followed by a password field reads as a login form to a password manager: it filled the saved e-mail into the
+  // callback URL, and every save of every trigger failed with "callback.url is not a valid URL".
+  it('keeps password managers out of the callback URL and secret', async () => {
+    listOf(scheduleRow());
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    const url = callbackUrlInput();
+    expect(url.value).toBe('https://hooks.example.com/run');
+    expect(url.getAttribute('autocomplete')).toBe('off');
+    expect(url.hasAttribute('data-1p-ignore')).toBe(true);
+    const secret = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    expect(secret.getAttribute('autocomplete')).toBe('new-password');
+    expect(secret.getAttribute('data-lpignore')).toBe('true');
+  });
+
+  it('shows the server’s callback error under the URL field', async () => {
+    listOf(scheduleRow());
+    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r3(?:\?|$)/.test(url)
+      ? json({ error: { type: 'invalid_request_error', code: 'invalid_trigger', message: 'Invalid trigger - callback: callback.url is not a valid URL', errors: [
+        { field: 'callback', message: 'callback.url is not a valid URL' },
+      ] } }, false, 400)
+      : null));
+    mount(panel());
+    await flush();
+    await click(button('Edit'));
+    typeInto(callbackUrlInput(), 'someone@example.com');
+    await click(button('Save trigger'));
+    expect(calls.find((call) => call.method === 'PATCH')?.body?.callback).toEqual({ url: 'someone@example.com' });
+    expect(hintUnder(callbackUrlInput())).toBe('callback.url is not a valid URL');
+  });
+});
+
 describe('the schedule of a poll connector trigger', () => {
   const pollRow = () => connectorRow({ id: 'r4', name: 'Daily issues' }, { kind: 'poll', trigger: 'issues', events: [], schedule: { cron: '*/10 * * * *', timezone: 'Europe/Istanbul' } });
   /** What the server stored once the field was empty: the package's own schedule, in UTC. */

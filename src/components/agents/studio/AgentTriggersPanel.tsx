@@ -56,6 +56,7 @@ import {
 } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import EmptyState from '@/components/common/EmptyState';
+import { NO_AUTOFILL_FIELD, NO_AUTOFILL_SECRET } from '@/components/common/noCredentialAutofill';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
 import { useDeleteResource } from '@/components/common/confirm';
 import {
@@ -432,7 +433,7 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
     const locale = useLocale();
     const [form, setForm] = useState<TriggerForm>(() => (trigger ? (convert ? connectorFormFromRetired(trigger) : formFromTrigger(trigger)) : emptyTriggerForm()));
     const [problem, setProblem] = useState<TriggerFormProblem | null>(null);
-    /** Field errors the server named for the connector part, keyed like its answer (`connector.params.<key>`). */
+    /** Field errors the server named for the connector part (`connector.params.<key>`) and the callback, keyed like its answer. */
     const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
     const [saving, setSaving] = useState(false);
     const [tab, setTab] = useState<EditorTab>('settings');
@@ -510,7 +511,7 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
             });
             if (!res.ok) {
                 const failure = await readFailure(res);
-                setServerErrors(Object.fromEntries(failure.fields.filter((issue) => issue.field.startsWith('connector')).map((issue) => [issue.field, issue.message])));
+                setServerErrors(Object.fromEntries(failure.fields.filter((issue) => issue.field.startsWith('connector') || issue.field === 'callback').map((issue) => [issue.field, issue.message])));
                 notifications.show({ color: 'red', message: t('saveFailed', { message: failure.message }) });
                 return;
             }
@@ -777,10 +778,17 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                 </FormField>
                 <FormRow>
                     <FormField label={t('callbackUrl')} hint={t('callbackHint')} optional>
-                        <TextInput value={form.callbackUrl} placeholder="https://" onChange={(event) => set('callbackUrl', event.currentTarget.value)} />
+                        <TextInput
+                            {...NO_AUTOFILL_FIELD}
+                            value={form.callbackUrl}
+                            placeholder="https://"
+                            error={serverErrors.callback}
+                            onChange={(event) => set('callbackUrl', event.currentTarget.value)}
+                        />
                     </FormField>
                     <FormField label={t('callbackSecret')} optional>
                         <PasswordInput
+                            {...NO_AUTOFILL_SECRET}
                             value={form.callbackSecret}
                             placeholder={form.callbackSigned ? t('callbackSecretStored') : ''}
                             onChange={(event) => set('callbackSecret', event.currentTarget.value)}
