@@ -58,8 +58,17 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
 export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   audit_logs: [
     { key: { createdAt: -1 }, options: { name: 'idx_createdAt' } },
+    // IAM center audit feed (src/lib/iam/auditFeed.ts), newest-first: the refusals read
+    // outcome:'denied', the change trail's token edits read event IN (...). Without these the
+    // feed walks idx_createdAt filtering every row and hits its maxTimeMS on a large table.
+    { key: { outcome: 1, createdAt: -1 }, options: { name: 'idx_outcome_createdAt' } },
+    { key: { event: 1, createdAt: -1 }, options: { name: 'idx_event_createdAt' } },
     { key: { service: 1, action: 1, createdAt: -1 }, options: { name: 'idx_service_action_createdAt' } },
     { key: { actorUserId: 1, createdAt: -1 }, options: { name: 'idx_actor_createdAt' } },
+    // Newest-first by service alone (data-retention "destruction records" reads
+    // service:'retention'; without this it walks idx_createdAt over the whole
+    // collection filtering rows, a full scan on Cosmos vCore).
+    { key: { service: 1, createdAt: -1 }, options: { name: 'idx_service_createdAt' } },
   ],
   // Prescriptions (automated analysis reports): list is project + newest-first;
   // eligibility looks up the latest ready report per subject.

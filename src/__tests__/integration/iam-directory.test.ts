@@ -423,5 +423,14 @@ describeForEachProvider('IAM directory audit filters: big actor lists and extra 
     // an empty resource-type list matches nothing by itself, but not when extra events are asked for
     expect((await db.iamListAuditEvents({ ...scope, resourceTypes: [] })).items).toEqual([]);
     expect((await db.iamListAuditEvents({ ...scope, resourceTypes: [], alsoEvents: ['token.restrictions.updated'] })).items).toHaveLength(2);
+    // pages across both sides: every row once, newest first, hasMore until the last
+    const widenedScope = { ...scope, alsoEvents: ['token.restrictions.updated'] };
+    const pages = await Promise.all([0, 1, 2].map((offset) => db.iamListAuditEvents({ ...widenedScope, limit: 1, offset })));
+    expect(pages.map((p) => p.hasMore)).toEqual([true, true, false]);
+    const paged = pages.flatMap((p) => p.items);
+    expect(new Set(paged.map((r) => String(r._id))).size).toBe(3);
+    const times = paged.map((r) => new Date(r.createdAt!).getTime());
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+    expect((await db.iamListAuditEvents({ ...widenedScope, limit: 50 })).items.map((r) => String(r._id))).toEqual(paged.map((r) => String(r._id)));
   });
 });

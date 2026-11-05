@@ -470,6 +470,20 @@ describe('OverviewTab (when something cannot be loaded)', () => {
     expect(q('[data-testid="overview-users"]')!.textContent).toBe('2');
   });
 
+  it('shows every other card while the latest denials are still being read', async () => {
+    let answer: (value: unknown) => void = () => {};
+    const slow = new Promise((resolve) => { answer = resolve; });
+    await render({ extra: [['GET', '/api/iam/audit', () => slow]] });
+    // the audit table can take seconds: the engine, policy and people cards do not wait for it
+    expect(q('[data-testid="overview-engine-status"]')!.textContent).toBe('Running');
+    expect(q('[data-testid="overview-policies-enabled"]')!.textContent).toBe('2');
+    expect(q('[data-testid="overview-users"]')!.textContent).toBe('2');
+    expect(text()).not.toContain('Bob Ray');
+    answer({ items: [DENIAL], nextCursor: null });
+    await settle(200);
+    expect(text()).toContain('Bob Ray');
+  });
+
   it('explains a missing read permission and offers a retry when nothing loads at all', async () => {
     api = installApiMock([
       ['GET', /^\/api\/iam\//, () => jsonResponse({ error: 'Forbidden', code: 'forbidden' }, 403)],

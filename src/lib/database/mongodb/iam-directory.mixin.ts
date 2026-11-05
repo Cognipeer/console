@@ -39,6 +39,16 @@ const MAX_IDS = 500;
 const MAX_ACTOR_IDS = 5_000;
 const META_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/** The audit feed's order, `{ createdAt: -1, _id: -1 }`, for rows merged in memory (ObjectId hex sorts like the id). */
+function newestFirst(a: { createdAt?: Date | string; _id?: unknown }, b: { createdAt?: Date | string; _id?: unknown }): number {
+  const at = (doc: { createdAt?: Date | string }) => (doc.createdAt ? new Date(doc.createdAt).getTime() : 0);
+  const byTime = at(b) - at(a);
+  if (byTime !== 0) return byTime;
+  const ida = String(a._id);
+  const idb = String(b._id);
+  return ida < idb ? 1 : ida > idb ? -1 : 0;
+}
+
 const clampLimit = (n: number | undefined): number => Math.max(1, Math.min(MAX_PAGE, Math.floor(Number(n)) || 50));
 const clampOffset = (n: number | undefined): number => Math.max(0, Math.min(10_000_000, Math.floor(Number(n)) || 0));
 /** The typed words, escaped, with the Turkish i family interchangeable (SQLite folds with the same rule). */
@@ -326,11 +336,6 @@ export function IamDirectoryMixin<TBase extends Constructor<MongoDBProviderBase>
         if (query.resourceTypes.length === 0 && !query.alsoEvents?.length) return { items: [], hasMore: false };
         scope.resourceType = { $in: query.resourceTypes };
       }
-      if (query.alsoEvents?.length) {
-        filter.$or = [scope, { event: { $in: query.alsoEvents.slice(0, MAX_IDS) } }];
-      } else {
-        Object.assign(filter, scope);
-      }
       if (query.outcome) filter.outcome = query.outcome;
       if (query.actorUserId) filter.actorUserId = query.actorUserId;
       if (query.actorUserIds) {
@@ -345,14 +350,42 @@ export function IamDirectoryMixin<TBase extends Constructor<MongoDBProviderBase>
         if (!META_KEY_RE.test(query.metadata.key)) throw new Error(`Invalid metadata key "${query.metadata.key}"`);
         filter[`metadata.${query.metadata.key}`] = query.metadata.value;
       }
-      const cursor = db
-        .collection<IAuditLog>(COLLECTIONS.auditLogs)
-        .find(filter as Filter<IAuditLog>)
-        .sort({ createdAt: -1, _id: -1 })
-        .skip(clampOffset(query.offset))
-        .limit(limit + 1);
-      if (query.maxTimeMs && query.maxTimeMs > 0) cursor.maxTimeMS(Math.floor(query.maxTimeMs));
-      const docs = await cursor.toArray();
+      const offset = clampOffset(query.offset);
+      const read = (where: Record<string, unknown>, skip: number, take: number) => {
+        const cursor = db
+          .collection<IAuditLog>(COLLECTIONS.auditLogs)
+          .find(where as Filter<IAuditLog>)
+          .sort({ createdAt: -1, _id: -1 })
+          .skip(skip)
+          .limit(take);
+        if (query.maxTimeMs && query.maxTimeMs > 0) cursor.maxTimeMS(Math.floor(query.maxTimeMs));
+        return cursor.toArray();
+      };
+      let docs: Array<IAuditLog & { _id?: unknown }>;
+      if (query.alsoEvents?.length) {
+        // Two reads merged here rather than one `$or`: each side is then an equality on an indexed
+        // field plus the createdAt order (idx_service_createdAt / idx_event_createdAt). Under a
+        // createdAt sort, an `$or` is planned as a walk of idx_createdAt that filters every row
+        // (a full scan of the audit table on Cosmos DB vCore, which times out).
+        const sides = [
+          ...(query.resourceTypes?.length === 0 ? [] : [{ ...filter, ...scope }]),
+          { ...filter, event: { $in: query.alsoEvents.slice(0, MAX_IDS) } },
+        ];
+        const pages = await Promise.all(sides.map((where) => read(where, 0, offset + limit + 1)));
+        const seen = new Set<string>();
+        docs = pages
+          .flat()
+          .filter((doc) => {
+            const id = String(doc._id);
+            if (seen.has(id)) return false;
+            seen.add(id);
+            return true;
+          })
+          .sort(newestFirst)
+          .slice(offset, offset + limit + 1);
+      } else {
+        docs = await read({ ...filter, ...scope }, offset, limit + 1);
+      }
       return {
         items: docs.slice(0, limit).map((doc) => ({ ...doc, _id: doc._id?.toString() }) as IAuditLog),
         hasMore: docs.length > limit,
