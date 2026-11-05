@@ -122,6 +122,7 @@ owned by the given user on first boot and public signup stays off.
 | `RATE_LIMIT_PROVIDER` | Provider: `mongodb`, `memory`, `redis`. `memory` and `redis` require the same `CACHE_PROVIDER`. | `mongodb` |
 | `RATE_LIMIT_SYNC_INTERVAL_MS` | Sync interval for distributed counters | `5000` |
 | `RATE_LIMIT_MAX_TRACKED_KEYS` | Counters the in-process limiter (login and other auth endpoints, public MCP endpoints) keeps at once. When it is full, counters whose window has ended are dropped, then the ones counted least recently. A whole number from `1`; any other value (`0`, a negative or non-numeric one, `1e5`, `100,000`) uses the default. | `100000` |
+| `CLIENT_API_IP_RATE_LIMIT_PER_MINUTE` | Requests one client address may make to `/api/client/*` and `/api/public/*` per minute, counted before authentication; over it the API answers `429` with `Retry-After`. IPv6 is counted per `/64`. The address follows `TRUSTED_PROXIES`, so set that first behind a proxy. Tenants limit addresses with their own IP limits (Settings → Limits). `0` turns it off. | `0` |
 
 Sign-in, registration, password reset and session issuance are limited per client
 address (`request.ip`, which follows `TRUSTED_PROXIES`). A forwarded value that is

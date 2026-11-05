@@ -25,10 +25,20 @@
  *                                   (`payload.agent.name`, else the session
  *                                   id)
  *   agent                           the agent KEY                             never set
+ *   websearch                       the web search instance's key             never set
+ *   rag                             the knowledge module key                  never set
+ *   mcp                             the MCP server key                        never set
+ *   rerank                          the reranker key                          never set
+ *   memory                          the memory store key                      never set
+ *   browser                         the browser key                           never set
+ *   crawler                         the crawler key                           never set
+ *   guardrail                       the guardrail key                         never set
+ *   sandbox                         the sandbox template key                  never set
+ *   jobs                            the job kind (QUOTA_JOB_KINDS)            never set
  *   global                          whichever of the above the request has    vector / file provider key
  *
- * `global` limits are matched against every service's context but the agent
- * domain's (see `DOMAINS_WITHOUT_GLOBAL_FALLBACK`), hence the three registry
+ * `global` limits are matched against the services that existed before the
+ * domain registry (`globalFallback` in domains.ts), hence the three registry
  * types. A provider scope under a service that never reports a provider can not
  * match anything: `neverApplies` lets the editor say so instead of saving a
  * limit that sits there inert.
@@ -75,6 +85,22 @@ const MODEL_SERVICES: ReadonlySet<QuotaDomain> = new Set<QuotaDomain>([
   'moderation',
 ]);
 
+/**
+ * Services added with the domain registry whose target is one registry row:
+ * the registry type and, when the type is shared, the attribute that narrows it.
+ */
+const REGISTRY_TARGETS: Partial<Record<QuotaDomain, { types: readonly string[]; attributes?: Readonly<Record<string, readonly string[]>> }>> = {
+  websearch: { types: ['provider'], attributes: { type: ['websearch'] } },
+  rag: { types: ['rag-module'] },
+  mcp: { types: ['mcp-server'] },
+  rerank: { types: ['reranker'] },
+  memory: { types: ['memory-store'] },
+  browser: { types: ['browser'] },
+  crawler: { types: ['crawler'] },
+  guardrail: { types: ['guardrail'] },
+  sandbox: { types: ['sandbox-template'] },
+};
+
 /** Services whose guarded calls report a provider key (vector and file operations), and the registry `type` of those providers. */
 const REPORTED_PROVIDER_TYPES: Partial<Record<QuotaDomain, readonly string[]>> = {
   vector: ['vector'],
@@ -88,7 +114,14 @@ function resourceSource(domain: QuotaDomain): QuotaTargetSource {
   if (MODEL_SERVICES.has(domain)) {
     return { ...common, id: `model:${domain}`, types: ['model'], attributes: { category: [domain] }, noun: 'model' };
   }
+  const registryTarget = REGISTRY_TARGETS[domain];
+  if (registryTarget) {
+    return { ...common, id: `registry:${domain}`, types: registryTarget.types, attributes: registryTarget.attributes, noun: 'resource' };
+  }
   switch (domain) {
+    case 'jobs':
+      // A fixed list (QUOTA_JOB_KINDS), offered by the editor itself rather than searched.
+      return { ...common, id: 'job-kind', types: [], allowsUnregistered: true, noun: 'resource' };
     case 'vector':
       return { ...common, id: 'vector-index', types: ['vector-index'], noun: 'vectorIndex' };
     case 'file':

@@ -1140,6 +1140,7 @@ export function withApiRequestContext<
           userId: session?.userId,
           actorType: session ? 'user' : undefined,
           source: 'dashboard',
+          clientIp: getAuthzClientIp(request),
         },
         async () => {
           // Bind the tenant DB for the whole handler execution so every nested
@@ -1486,6 +1487,7 @@ export function withClientApiRequestContext<
           apiTokenId: apiToken.tokenRecord._id ? String(apiToken.tokenRecord._id) : undefined,
           actorType: 'api_token',
           source: 'api',
+          clientIp: getAuthzClientIp(request),
           ...(apiToken.delegation?.state === 'active' ? { via: { kind: 'delegated' as const, issuer: apiToken.delegation.issuer } } : {}),
         },
         async () => {

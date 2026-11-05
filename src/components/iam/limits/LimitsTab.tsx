@@ -22,6 +22,7 @@ import {
   IconTrash,
   IconUser,
   IconUsersGroup,
+  IconNetwork,
 } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn, type DataGridRowAction } from '@/components/common/ui/DataGrid';
 import StatTile from '@/components/common/ui/StatTile';
@@ -31,7 +32,8 @@ import { QuotaPolicyModal, type QuotaPolicyFormData } from '@/components/quota/Q
 import { tryTranslate } from '@/components/resources/i18nLookup';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import { QUOTA_DOMAINS, QUOTA_SCOPES, type QuotaDomain, type QuotaScope } from '@/lib/quota/types';
+import { QUOTA_SCOPES, type QuotaDomain, type QuotaScope } from '@/lib/quota/types';
+import { ENFORCED_QUOTA_DOMAINS } from '@/lib/quota/domains';
 import { parseLimitLink } from './links';
 import {
   duplicateSeed,
@@ -61,6 +63,7 @@ const SCOPE_BADGE: Record<QuotaScope, string> = {
   token: 'ds-badge-warn',
   resource: '',
   provider: '',
+  ip: 'ds-badge-info',
 };
 
 const SCOPE_ICON: Record<QuotaScope, ReactNode> = {
@@ -70,6 +73,7 @@ const SCOPE_ICON: Record<QuotaScope, ReactNode> = {
   token: <IconKey size={12} />,
   resource: <IconPackage size={12} />,
   provider: <IconServer size={12} />,
+  ip: <IconNetwork size={12} />,
 };
 
 /** What a resource limit points at, when it is more specific than "a resource". */
@@ -262,6 +266,11 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
           {row.scope === 'group' ? (
             <Tooltip label={row.groupMode === 'shared' ? t('mode.sharedHint') : t('mode.perMemberHint')} multiline w={260}>
               <span className="ds-badge">{row.groupMode === 'shared' ? t('mode.shared') : t('mode.perMember')}</span>
+            </Tooltip>
+          ) : null}
+          {row.scope === 'ip' ? (
+            <Tooltip label={row.ipMode === 'shared' ? t('form.ip.sharedHint') : t('form.ip.perAddressHint')} multiline w={260}>
+              <span className="ds-badge">{row.ipMode === 'shared' ? t('form.ip.shared') : t('form.ip.perAddress')}</span>
             </Tooltip>
           ) : null}
         </div>
@@ -488,7 +497,9 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
             width: 200,
             options: [
               { value: 'all', label: t('filters.allDomains') },
-              ...QUOTA_DOMAINS.map((domain) => ({ value: domain, label: tDomains(domain) })),
+              // The core's services, plus any an existing limit names (the overlay's).
+              ...[...new Set<QuotaDomain>([...ENFORCED_QUOTA_DOMAINS, ...rows.map((row) => row.domain)])]
+                .map((domain) => ({ value: domain, label: tDomains(domain) })),
             ],
           },
           {
@@ -536,7 +547,6 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
         policy={editing as unknown as IQuotaPolicy | null}
         loading={saving}
         defaultDomain="llm"
-        allowedDomains={[...QUOTA_DOMAINS]}
         allowedScopes={[...QUOTA_SCOPES]}
         projects={projectOptions}
         seed={seed}

@@ -21,8 +21,9 @@ vi.mock('@mantine/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@mantine/core')>();
   const { createElement: h } = await import('react');
   type Option = string | { value: string; label: string };
+  type Group = { group: string; items: Option[] };
   const Select = (props: {
-    data?: Option[];
+    data?: (Option | Group)[];
     value?: string | null;
     onChange?: (value: string | null) => void;
     label?: string;
@@ -38,10 +39,13 @@ vi.mock('@mantine/core', async (importOriginal) => {
         onChange: (event: { target: { value: string } }) => props.onChange?.(event.target.value || null),
       },
       h('option', { value: '' }, props.placeholder ?? ''),
-      ...(props.data ?? []).map((option) => {
-        const { value, label } = typeof option === 'string' ? { value: option, label: option } : option;
-        return h('option', { key: value, value }, label);
-      }),
+      // Grouped data (Mantine's `{ group, items }`) is flattened: the tests pick by value.
+      ...(props.data ?? [])
+        .flatMap((entry) => (typeof entry === 'object' && 'items' in entry ? entry.items : [entry]))
+        .map((option) => {
+          const { value, label } = typeof option === 'string' ? { value: option, label: option } : option;
+          return h('option', { key: value, value }, label);
+        }),
     );
   return { ...actual, Select };
 });

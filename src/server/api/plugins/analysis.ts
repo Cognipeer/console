@@ -1,3 +1,4 @@
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type {
@@ -85,6 +86,7 @@ function internalError(reply: FastifyReply, error: unknown) {
  * them share one mapping. Anything else is an internal error.
  */
 function serviceError(reply: FastifyReply, error: unknown) {
+  if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
   if (error instanceof AnalysisReviewError) return reply.code(400).send({ error: error.message });
   if (error instanceof Error) {
     const message = error.message.toLowerCase();
@@ -801,6 +803,10 @@ export const analysisApiPlugin: FastifyPluginAsync = async (app) => {
       // Enqueue + return immediately (status 'pending'); the queue consumer runs
       // it in the background so the dashboard never blocks. The UI polls the run
       // detail endpoint to watch progress.
+      await enforceServiceQuota(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        { domain: 'jobs', resourceKey: 'analysis', cost: { requests: 1 } },
+      );
       const run = await enqueueDefinitionRun(params);
       return reply.code(202).send({ run });
     } catch (error) {

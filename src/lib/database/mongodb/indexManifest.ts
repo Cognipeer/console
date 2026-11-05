@@ -291,6 +291,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, analyzedAt: -1 }, options: { name: 'idx_analysis_result_project' } },
   ],
   agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
+  // Quota and budget counters. A counter whose window ended is reset by its
+  // next increment, so it is never read again: the TTL drops it shortly after
+  // (otherwise every client address an IP limit ever counted stays forever).
+  rate_limits: [{ key: { resetAt: 1 }, options: { name: 'ttl_resetAt', expireAfterSeconds: 300 } }],
   // Append-only session event log. The unique pair is the sequence guard; the
   // TTL index (expireAfterSeconds 0 = "at expiresAt") is the retention. The
   // agent mixin also ensures both on its first write — names/keys IDENTICAL.

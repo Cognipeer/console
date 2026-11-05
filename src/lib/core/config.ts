@@ -195,6 +195,11 @@ export interface AppConfig {
      * other value takes the default.
      */
     maxTrackedKeys: number;
+    /**
+     * Requests one client address may make to the client and public APIs per
+     * minute, counted before authentication. 0 (the default) turns it off.
+     */
+    clientApiIpPerMinute: number;
   };
 
   quota: {
@@ -1028,6 +1033,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       provider: oneOf(source, 'RATE_LIMIT_PROVIDER', ['mongodb', 'memory', 'redis'], 'mongodb'),
       syncIntervalMs: int(source, 'RATE_LIMIT_SYNC_INTERVAL_MS', 5000),
       maxTrackedKeys: positiveInt(source, 'RATE_LIMIT_MAX_TRACKED_KEYS', 100_000),
+      clientApiIpPerMinute: Math.max(0, int(source, 'CLIENT_API_IP_RATE_LIMIT_PER_MINUTE', 0)),
     },
 
     quota: {

@@ -18,7 +18,7 @@ import {
 import { includesFolded } from '@/lib/shared/searchFold';
 
 export interface LimitTarget {
-  type: 'tenant' | 'group' | 'user' | 'token' | 'agent' | 'resource' | 'provider';
+  type: 'tenant' | 'group' | 'user' | 'token' | 'agent' | 'resource' | 'provider' | 'ip';
   id?: string;
   label?: string;
   sublabel?: string;
@@ -34,7 +34,7 @@ export interface LimitRow extends QuotaPolicy {
 
 // ── parsing ──────────────────────────────────────────────────────────────
 
-const TARGET_TYPES: ReadonlySet<string> = new Set(['tenant', 'group', 'user', 'token', 'agent', 'resource', 'provider']);
+const TARGET_TYPES: ReadonlySet<string> = new Set(['tenant', 'group', 'user', 'token', 'agent', 'resource', 'provider', 'ip']);
 
 const str = (value: unknown): string | undefined =>
   typeof value === 'string' && value !== '' ? value : undefined;
@@ -68,6 +68,8 @@ export function parseLimitRow(raw: unknown): LimitRow | undefined {
     limits: (policy.limits && typeof policy.limits === 'object' ? policy.limits : {}) as QuotaLimits,
     projectId: str(policy.projectId),
     groupMode: scope === 'group' ? (policy.groupMode === 'shared' ? 'shared' : 'perMember') : undefined,
+    ipMode: scope === 'ip' ? (policy.ipMode === 'shared' ? 'shared' : 'perAddress') : undefined,
+    ipRanges: scope === 'ip' && Array.isArray(policy.ipRanges) ? (policy.ipRanges as unknown[]).map(String) : undefined,
     target,
     projectName: str(policy.projectName),
     projectKey: str(policy.projectKey),
@@ -151,7 +153,7 @@ export function filterLimitRows(rows: readonly LimitRow[], filters: LimitFilters
   });
 }
 
-const SCOPE_ORDER: Record<QuotaScope, number> = { tenant: 0, group: 1, user: 2, token: 3, resource: 4, provider: 5 };
+const SCOPE_ORDER: Record<QuotaScope, number> = { tenant: 0, group: 1, ip: 2, user: 3, token: 4, resource: 5, provider: 6 };
 
 /** Broad to narrow (tenant, group, user, ...), then the most recently changed first. */
 export function sortLimitRows(rows: readonly LimitRow[]): LimitRow[] {
@@ -181,6 +183,8 @@ export function registryLookupOf(row: LimitRow): RegistryLookup | null {
   if (row.scope !== 'resource' && row.scope !== 'provider') return null;
   // Agents are named by the quota API itself.
   if (row.scope === 'resource' && row.domain === 'agent') return null;
+  // Job kinds are a fixed list, not registry rows.
+  if (row.domain === 'jobs') return null;
   const value = row.scopeId;
   if (!value) return null;
   // The server already named it (or found it gone): nothing to add.
@@ -241,7 +245,7 @@ export function targetNounOf(row: Pick<LimitRow, 'scope' | 'domain'>): QuotaTarg
 
 // ── amounts (what a limit actually says) ─────────────────────────────────
 
-export const RATE_KINDS = ['requests', 'tokens', 'vectors', 'files', 'storage'] as const;
+export const RATE_KINDS = ['requests', 'tokens', 'vectors', 'files', 'storage', 'units'] as const;
 export const RATE_WINDOWS = ['perSecond', 'perMinute', 'perHour', 'perDay', 'perMonth'] as const;
 
 /** One number a limit sets, addressed by its path in `QuotaLimits`. */
@@ -303,12 +307,14 @@ export function formatAmountValue(amount: LimitAmount, locale?: string): string 
 /** A copy of a limit to start a new one from: same amounts and target, a distinguishable name. */
 export function duplicateSeed(row: LimitRow, copyLabel: (label: string) => string): Pick<
   LimitRow,
-  'scope' | 'scopeId' | 'groupMode' | 'domain' | 'priority' | 'enabled' | 'label' | 'description' | 'limits' | 'projectId'
+  'scope' | 'scopeId' | 'groupMode' | 'ipMode' | 'ipRanges' | 'domain' | 'priority' | 'enabled' | 'label' | 'description' | 'limits' | 'projectId'
 > {
   return {
     scope: row.scope,
     scopeId: row.scopeId,
     groupMode: row.groupMode,
+    ipMode: row.ipMode,
+    ipRanges: row.ipRanges ? [...row.ipRanges] : undefined,
     domain: row.domain,
     priority: row.priority,
     enabled: row.enabled,

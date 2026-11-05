@@ -20,7 +20,8 @@ import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
-import { getClientIp, rejectInactiveSessionAccount } from './fastify-utils';
+import { getAuthzClientIp, getClientIp, rejectInactiveSessionAccount } from './fastify-utils';
+import { checkPlatformIpLimit, isPlatformIpLimitedPath, platformIpLimitBody } from './platformIpLimit';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
@@ -410,6 +411,15 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
       if (request.method === 'OPTIONS' && corsApplied) {
         reply.code(204).send();
         return reply;
+      }
+    }
+
+    // The platform's per-address limit (off by default), before any token is read.
+    if (isPlatformIpLimitedPath(pathname)) {
+      const decision = await checkPlatformIpLimit(getAuthzClientIp(request));
+      if (!decision.allowed) {
+        reply.header('Retry-After', String(decision.retryAfterSeconds));
+        return reply.code(429).send(platformIpLimitBody());
       }
     }
 

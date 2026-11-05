@@ -4,15 +4,19 @@ import { createLogger } from '@/lib/core/logger';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { quotaPolicyCacheKey } from '@/lib/quota/quotaGuard';
 import {
-  QUOTA_DOMAINS,
   QUOTA_GROUP_MODES,
+  QUOTA_IP_MODES,
   QUOTA_SCOPES,
   type QuotaDomain,
   type QuotaGroupMode,
+  type QuotaIpMode,
+  type QuotaLimits,
   type QuotaPolicy,
   type QuotaPolicyInput,
   type QuotaScope,
 } from '@/lib/quota/types';
+import { offeredQuotaDomains, offeredQuotaJobKinds } from '@/enterprise/quota-domains';
+import { validateQuotaIpRanges } from '@/lib/quota/ipScope';
 
 const logger = createLogger('quota-service');
 
@@ -52,7 +56,7 @@ async function invalidatePolicyCache(
 }
 
 function normalizePolicy(policy: IQuotaPolicy): QuotaPolicy {
-  const { groupMode, ...rest } = policy;
+  const { groupMode, ipMode, ipRanges, ...rest } = policy;
   return {
     ...rest,
     _id: policy._id ? policy._id.toString() : undefined,
@@ -60,6 +64,13 @@ function normalizePolicy(policy: IQuotaPolicy): QuotaPolicy {
     // MongoDB null) must not leak into the API.
     ...(policy.scope === 'group'
       ? { groupMode: groupMode === 'shared' ? 'shared' as const : 'perMember' as const }
+      : {}),
+    // Likewise only an IP policy has ranges and a mode.
+    ...(policy.scope === 'ip'
+      ? {
+        ipMode: ipMode === 'shared' ? 'shared' as const : 'perAddress' as const,
+        ipRanges: Array.isArray(ipRanges) ? ipRanges : [],
+      }
       : {}),
   };
 }
@@ -123,6 +134,8 @@ export function pickQuotaPolicyFields(body: Record<string, unknown>): Partial<Qu
     'scope',
     'scopeId',
     'groupMode',
+    'ipRanges',
+    'ipMode',
     'domain',
     'priority',
     'enabled',
@@ -133,7 +146,25 @@ export function pickQuotaPolicyFields(body: Record<string, unknown>): Partial<Qu
   ] as const) {
     if (body[key] !== undefined) picked[key] = body[key];
   }
+  // Store ranges in their normalized spelling; a list that does not validate is
+  // left as sent so `assertValidQuotaPolicy` can say what is wrong with it.
+  if (picked.ipRanges !== undefined) {
+    const ranges = validateQuotaIpRanges(picked.ipRanges);
+    if (ranges.ok) picked.ipRanges = ranges.ranges;
+  }
   return picked as Partial<QuotaPolicyInput>;
+}
+
+/** Whether a limits object sets anything besides `rateLimit` (a number other than -1 = "unlimited"). */
+function setsMoreThanRateLimit(limits: QuotaLimits | undefined): boolean {
+  if (!limits || typeof limits !== 'object') return false;
+  const sets = (node: unknown): boolean => {
+    if (typeof node === 'number') return node !== -1;
+    if (Array.isArray(node)) return node.some(sets);
+    if (node && typeof node === 'object') return Object.values(node).some(sets);
+    return false;
+  };
+  return (['perRequest', 'quotas', 'budget'] as const).some((key) => sets(limits[key]));
 }
 
 async function findExistingPolicy(
@@ -172,8 +203,34 @@ export async function assertValidQuotaPolicy(
   if (patch.scope !== undefined && !QUOTA_SCOPES.includes(patch.scope)) {
     throw new QuotaPolicyValidationError(`Unknown scope "${String(patch.scope)}"`, 'invalid_scope');
   }
-  if (patch.domain !== undefined && !QUOTA_DOMAINS.includes(patch.domain)) {
+  if (patch.domain !== undefined && !offeredQuotaDomains().includes(patch.domain)) {
     throw new QuotaPolicyValidationError(`Unknown domain "${String(patch.domain)}"`, 'invalid_domain');
+  }
+
+  // IP limits: ranges and a mode, rate limits only.
+  if (patch.ipMode !== undefined) {
+    if (!QUOTA_IP_MODES.includes(patch.ipMode as QuotaIpMode)) {
+      throw new QuotaPolicyValidationError(`ipMode must be one of ${QUOTA_IP_MODES.join(', ')}`, 'invalid_ip_mode');
+    }
+    if (scope !== 'ip') {
+      throw new QuotaPolicyValidationError('ipMode applies to IP-scoped policies only', 'ip_mode_requires_ip_scope');
+    }
+  }
+  if (patch.ipRanges !== undefined && patch.ipRanges !== null && scope !== 'ip') {
+    throw new QuotaPolicyValidationError('ipRanges applies to IP-scoped policies only', 'ip_ranges_require_ip_scope');
+  }
+  if (scope === 'ip') {
+    const ranges = validateQuotaIpRanges(patch.ipRanges !== undefined ? patch.ipRanges : existing?.ipRanges);
+    if (!ranges.ok) {
+      throw new QuotaPolicyValidationError(ranges.message, 'invalid_ip_ranges');
+    }
+    const limits = patch.limits !== undefined ? patch.limits : existing?.limits;
+    if (setsMoreThanRateLimit(limits)) {
+      throw new QuotaPolicyValidationError(
+        'An IP-scoped policy may only set rate limits (no per-request limits, caps or budget)',
+        'ip_limits_rate_only',
+      );
+    }
   }
   if (patch.groupMode !== undefined) {
     if (!QUOTA_GROUP_MODES.includes(patch.groupMode as QuotaGroupMode)) {
@@ -212,12 +269,18 @@ export async function assertValidQuotaPolicy(
   if (domain === 'agent' && scope === 'resource' && (typeof scopeId !== 'string' || scopeId.trim() === '')) {
     throw new QuotaPolicyValidationError('An agent-narrowed policy needs the agent key in scopeId', 'agent_required');
   }
+
+  // A `jobs` limit narrowed to one kind names a kind this install counts.
+  if (domain === 'jobs' && scope === 'resource' && typeof scopeId === 'string' && scopeId !== ''
+    && !(offeredQuotaJobKinds() as string[]).includes(scopeId)) {
+    throw new QuotaPolicyValidationError(`Unknown job kind "${scopeId}"`, 'invalid_job_kind');
+  }
 }
 
 // ── target resolution (for the Limits table) ─────────────────────────────
 
 export interface QuotaPolicyTarget {
-  type: 'tenant' | 'group' | 'user' | 'token' | 'agent' | 'resource' | 'provider';
+  type: 'tenant' | 'group' | 'user' | 'token' | 'agent' | 'resource' | 'provider' | 'ip';
   id?: string;
   /** Human name of the target; absent for `tenant`, and the raw id when the target no longer exists. */
   label?: string;
@@ -344,6 +407,15 @@ export async function describeQuotaPolicies(
       case 'provider':
         target = { type: 'provider', id, label: id };
         break;
+      case 'ip': {
+        const ranges = Array.isArray(policy.ipRanges) ? policy.ipRanges : [];
+        target = {
+          type: 'ip',
+          label: ranges.length > 1 ? `${ranges[0]} +${ranges.length - 1}` : ranges[0] ?? '',
+          sublabel: ranges.join(', '),
+        };
+        break;
+      }
       default:
         target = { type: 'tenant' };
     }

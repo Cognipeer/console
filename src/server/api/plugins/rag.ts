@@ -1,3 +1,4 @@
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
@@ -806,6 +807,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const accessRefusal = sendRagAccessError(reply, error);
       if (accessRefusal) return accessRefusal;
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Ingest RAG document error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -893,6 +895,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Import RAG module error', { error });
       if (error instanceof Error && /not found|not active|at most|Unsupported export version/.test(error.message)) {
         return reply.code(400).send({ error: error.message });
@@ -1151,6 +1154,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Query RAG module error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({

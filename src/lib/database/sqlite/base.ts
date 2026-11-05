@@ -1176,6 +1176,10 @@ export class SQLiteProviderBase {
     // NULL is read back as `undefined`, which the guard treats as perMember, and
     // only `scope = 'group'` rows carry it, so existing rows need no backfill.
     this.ensureTableColumn(db, TABLES.quotaPolicies, 'groupMode', 'groupMode TEXT');
+    // Quota IP scope: the CIDR list (JSON) and 'perAddress' | 'shared'. Nullable,
+    // only `scope = 'ip'` rows carry them, so existing rows need no backfill.
+    this.ensureTableColumn(db, TABLES.quotaPolicies, 'ipRanges', 'ipRanges TEXT');
+    this.ensureTableColumn(db, TABLES.quotaPolicies, 'ipMode', 'ipMode TEXT');
     // PII v2 (NLP/dictionary/NER layers): opt-in detection config living
     // alongside categories/customPatterns. Absent/null on old rows, which
     // `mapPiiPolicyRow` reads back as `undefined` — the detector's default

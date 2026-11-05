@@ -1,3 +1,4 @@
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import type { MemorySource } from '@/lib/database';
 import type { AddMemoryRequest } from '@/lib/services/memory/types';
@@ -185,6 +186,7 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Add client memory item error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -246,6 +248,7 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send(result);
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Batch add client memory items error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -342,6 +345,7 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Search client memories error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -375,6 +379,7 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Recall client memories error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

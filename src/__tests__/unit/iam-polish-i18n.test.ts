@@ -94,6 +94,7 @@ describe('the quota editor and its cards in Turkish', () => {
     'card.unlimited',
     'target.kind.model',
     'target.types.model',
+    'domains.sandbox',
   ]);
 
   it('translates every string of the quota section instead of falling back to the English', () => {

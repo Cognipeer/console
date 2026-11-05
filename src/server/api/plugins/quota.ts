@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { offeredQuotaDomains, offeredQuotaJobKinds } from '@/enterprise/quota-domains';
 import { createLogger } from '@/lib/core/logger';
+import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import {
   isTenantWideKind,
   type QuotaDomain,
@@ -44,6 +46,14 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
         defaults: license.limits,
         license,
         licenseType: license.licenseType,
+        // IP limits count the address the server can vouch for. With no trusted
+        // proxy configured that is the connection's own peer, so behind a reverse
+        // proxy every caller looks alike: the editor says so.
+        ipScope: { trustedProxiesUnset: trustsEveryHop() },
+        // What a limit may be written for here: the core's services plus what the
+        // enterprise overlay registered (src/enterprise/quota-domains.ts).
+        domains: offeredQuotaDomains(),
+        jobKinds: offeredQuotaJobKinds(),
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
@@ -137,6 +147,7 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
         scope: body.scope,
         scopeId: body.scopeId,
         ...(body.scope === 'group' ? { groupMode: body.groupMode ?? 'perMember' } : {}),
+        ...(body.scope === 'ip' ? { ipMode: fields.ipMode ?? 'perAddress', ipRanges: fields.ipRanges } : {}),
         updatedBy: session.userId,
       });
 

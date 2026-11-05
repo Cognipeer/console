@@ -120,6 +120,8 @@ describe('the sources as a set', () => {
     for (const domain of QUOTA_DOMAINS) {
       for (const scope of ['resource', 'provider'] as const) {
         const source = quotaTargetSource(domain, scope)!;
+        // A fixed list (job kinds) is picked from, not searched: no registry types.
+        if (source.types.length === 0 && source.allowsUnregistered) continue;
         expect(source.types.length).toBeGreaterThan(0);
         expect(source.types.length).toBeLessThanOrEqual(8);
         expect(Object.keys(source.attributes ?? {}).length).toBeLessThanOrEqual(4);

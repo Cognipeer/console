@@ -1,3 +1,4 @@
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { GuardrailAction, GuardrailType, IGuardrail, IUser } from '@/lib/database';
@@ -380,6 +381,11 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'text is required' });
       }
 
+      await enforceServiceQuota(
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        { domain: 'guardrail', resourceKey: body.guardrail_key, cost: { requests: 1 } },
+      );
+
       const result = await evaluateGuardrail({
         guardrailKey: body.guardrail_key,
         projectId: ctx.projectId,
@@ -411,6 +417,7 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         verdict: result.verdict ?? null,
       });
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Evaluate client guardrail error', { error });
       const message = error instanceof Error ? error.message : 'Internal error';
       return reply.code(message.toLowerCase().includes('not found') ? 404 : 500).send({
@@ -468,6 +475,14 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: optionsField.error });
       }
 
+      // One request per evaluate call, counted against each guardrail named.
+      for (const record of records) {
+        await enforceServiceQuota(
+          { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+          { domain: 'guardrail', resourceKey: record.key, cost: { requests: 1 } },
+        );
+      }
+
       // Several guardrails merge into one verdict, so their visibility settings
       // have to merge too, and every field merges by OR. Opting ANY guardrail
       // into the verdict status codes opts the response in: the alternative is
@@ -504,6 +519,7 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         options: optionsField.options,
       });
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Evaluate client guardrail hook error', { error });
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
