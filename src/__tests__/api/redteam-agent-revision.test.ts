@@ -22,6 +22,11 @@ const mocks = vi.hoisted(() => ({
   authorizeServiceForRequest: vi.fn(),
 }));
 
+// The tenant quota guard reads license and policy rows these stubs do not have; quota has its own tests.
+vi.mock('@/lib/quota/serviceQuota', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/quota/serviceQuota')>()),
+  enforceServiceQuota: vi.fn(async () => null),
+}));
 vi.mock('@/lib/services/redteam/service', () => ({
   createCampaign: mocks.createCampaign,
   getCampaign: mocks.getCampaign,
