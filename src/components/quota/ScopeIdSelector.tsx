@@ -3,7 +3,7 @@
 import { useMemo, type ReactNode } from 'react';
 import { Stack, Text } from '@mantine/core';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
-import { QUOTA_JOB_KINDS } from '@/lib/quota/domains';
+import { COMMUNITY_QUOTA_JOB_KINDS } from '@/lib/quota/domains';
 import { quotaTargetSource } from '@/lib/quota/targets';
 import { useTranslations } from '@/lib/i18n';
 import { PrincipalSelect } from './PrincipalSelect';
@@ -13,6 +13,8 @@ import type { PickerOption } from './pickerSources';
 
 interface ScopeIdSelectorProps {
   scope: QuotaScope;
+  /** `jobs` kinds this install counts (GET /api/quota/defaults); the core's until known. */
+  jobKinds?: readonly string[];
   /**
    * Which service the limit is for: it decides what a `resource` or `provider`
    * target is (an agent in the agent domain, a model in the model domains, an
@@ -47,6 +49,7 @@ interface ScopeIdSelectorProps {
  */
 export function ScopeIdSelector({
   scope,
+  jobKinds,
   domain,
   value,
   valueLabel,
@@ -154,7 +157,7 @@ export function ScopeIdSelector({
       return (
         <SearchableSelect
           placeholder={t('selectResource')}
-          data={QUOTA_JOB_KINDS.map((kind) => ({ value: kind, label: tJobs(kind) }))}
+          data={(jobKinds ?? COMMUNITY_QUOTA_JOB_KINDS).map((kind) => ({ value: kind, label: tJobs(kind) }))}
           value={value || null}
           onChange={(v) => onChange(v || undefined)}
           clearable

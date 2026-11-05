@@ -497,7 +497,9 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
             width: 200,
             options: [
               { value: 'all', label: t('filters.allDomains') },
-              ...ENFORCED_QUOTA_DOMAINS.map((domain) => ({ value: domain, label: tDomains(domain) })),
+              // The core's services, plus any an existing limit names (the overlay's).
+              ...[...new Set<QuotaDomain>([...ENFORCED_QUOTA_DOMAINS, ...rows.map((row) => row.domain)])]
+                .map((domain) => ({ value: domain, label: tDomains(domain) })),
             ],
           },
           {
@@ -545,7 +547,6 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
         policy={editing as unknown as IQuotaPolicy | null}
         loading={saving}
         defaultDomain="llm"
-        allowedDomains={[...ENFORCED_QUOTA_DOMAINS]}
         allowedScopes={[...QUOTA_SCOPES]}
         projects={projectOptions}
         seed={seed}

@@ -5914,6 +5914,7 @@ export const tr: typeof en = {
       ip_mode_requires_ip_scope: 'Adres sayımı yalnızca IP limitlerinde geçerlidir.',
       ip_limits_rate_only: 'IP limitleri yalnızca hız limiti tanımlayabilir.',
       ip_ranges_require_ip_scope: 'IP aralıkları yalnızca IP limitlerinde geçerlidir.',
+      invalid_job_kind: 'Bu iş türü burada sayılmıyor.',
     },
     form: {
       createTitle: 'Yeni limit',

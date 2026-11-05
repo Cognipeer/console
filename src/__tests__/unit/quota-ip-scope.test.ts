@@ -47,6 +47,7 @@ import {
 import { ENFORCED_QUOTA_DOMAINS, domainFallsBackToGlobal } from '@/lib/quota/domains';
 import { MAX_QUOTA_IP_RANGES, type QuotaLimits } from '@/lib/quota/types';
 import { assertValidQuotaPolicy, QuotaPolicyValidationError } from '@/lib/services/quota/quotaService';
+import { registerEnterpriseQuotaDomains, resetEnterpriseQuotaDomainsForTests } from '@/enterprise/quota-domains';
 
 const TENANT_ID = 'tenant-1';
 const PROJECT_ID = 'proj-1';
@@ -248,6 +249,19 @@ describe('quota policy validation — ip scope', () => {
       .rejects.toBeInstanceOf(QuotaPolicyValidationError);
     await expect(validate({ scope: 'user', domain: 'llm', ipRanges: ['10.0.0.0/8'] }))
       .rejects.toMatchObject({ code: 'ip_ranges_require_ip_scope' });
+  });
+
+  it('offers the sandbox and the overlay\'s job kinds only once the enterprise overlay registers them', async () => {
+    resetEnterpriseQuotaDomainsForTests();
+    await expect(validate({ scope: 'tenant', domain: 'sandbox' })).rejects.toMatchObject({ code: 'invalid_domain' });
+    await expect(validate({ scope: 'resource', domain: 'jobs', scopeId: 'flow' })).rejects.toMatchObject({ code: 'invalid_job_kind' });
+    await expect(validate({ scope: 'resource', domain: 'jobs', scopeId: 'analysis' })).resolves.toBeUndefined();
+
+    registerEnterpriseQuotaDomains({ domains: ['sandbox'], jobKinds: ['flow'] });
+    await expect(validate({ scope: 'tenant', domain: 'sandbox' })).resolves.toBeUndefined();
+    await expect(validate({ scope: 'resource', domain: 'jobs', scopeId: 'flow' })).resolves.toBeUndefined();
+    await expect(validate({ scope: 'resource', domain: 'jobs', scopeId: 'abacus' })).rejects.toMatchObject({ code: 'invalid_job_kind' });
+    resetEnterpriseQuotaDomainsForTests();
   });
 
   it('accepts every enforced domain and refuses an unknown one', async () => {

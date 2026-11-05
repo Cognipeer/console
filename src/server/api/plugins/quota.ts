@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { offeredQuotaDomains, offeredQuotaJobKinds } from '@/enterprise/quota-domains';
 import { createLogger } from '@/lib/core/logger';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import {
@@ -49,6 +50,10 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
         // proxy configured that is the connection's own peer, so behind a reverse
         // proxy every caller looks alike: the editor says so.
         ipScope: { trustedProxiesUnset: trustsEveryHop() },
+        // What a limit may be written for here: the core's services plus what the
+        // enterprise overlay registered (src/enterprise/quota-domains.ts).
+        domains: offeredQuotaDomains(),
+        jobKinds: offeredQuotaJobKinds(),
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {

@@ -138,7 +138,12 @@ export const QUOTA_DOMAIN_SPECS: Readonly<Record<QuotaDomain, QuotaDomainSpec>> 
   crawler: service('tool', { rateKinds: ['requests', 'units'], unit: 'page' }),
   guardrail: service('tool'),
   jobs: service('runtime'),
-  sandbox: service('runtime', { rateKinds: ['requests', 'units'], unit: 'minute', perRequest: ['maxConcurrentRequests'] }),
+  // Guarded by the enterprise overlay (the sandbox lives there): offered once it
+  // registers (src/enterprise/quota-domains.ts), never in a community install.
+  sandbox: {
+    ...service('runtime', { rateKinds: ['requests', 'units'], unit: 'minute', perRequest: ['maxConcurrentRequests'] }),
+    enforced: false,
+  },
 };
 
 export const QUOTA_DOMAIN_GROUP_ORDER: readonly QuotaDomainGroup[] = ['model', 'data', 'tool', 'runtime', 'platform'];
@@ -147,7 +152,11 @@ export function quotaDomainSpec(domain: QuotaDomain): QuotaDomainSpec {
   return QUOTA_DOMAIN_SPECS[domain] ?? QUOTA_DOMAIN_SPECS.global;
 }
 
-/** Domains a policy may be written for (those with a guarded call site), in registry order. */
+/**
+ * Domains the community core guards, in registry order. What a policy may be
+ * written for at runtime also includes what the enterprise overlay registers:
+ * see `offeredQuotaDomains` in src/enterprise/quota-domains.ts.
+ */
 export const ENFORCED_QUOTA_DOMAINS: readonly QuotaDomain[] = (Object.keys(QUOTA_DOMAIN_SPECS) as QuotaDomain[])
   .filter((domain) => QUOTA_DOMAIN_SPECS[domain].enforced);
 
@@ -162,3 +171,6 @@ export function domainFallsBackToGlobal(domain: QuotaDomain): boolean {
  */
 export const QUOTA_JOB_KINDS = ['analysis', 'evaluation', 'redteam', 'prompt-optimizer', 'abacus', 'flow'] as const;
 export type QuotaJobKind = (typeof QUOTA_JOB_KINDS)[number];
+
+/** The job kinds the community core counts; the others are the enterprise overlay's. */
+export const COMMUNITY_QUOTA_JOB_KINDS: readonly QuotaJobKind[] = ['analysis', 'evaluation', 'redteam'];

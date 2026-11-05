@@ -240,8 +240,34 @@ export function QuotaPolicyModal({
     label: tScopes(s),
   }));
 
-  // Services grouped as the registry groups them; only those with a guarded call site.
-  const offeredDomains = allowedDomains || [...ENFORCED_QUOTA_DOMAINS];
+  // What this install guards (the core's services plus what the enterprise
+  // overlay registered), from GET /api/quota/defaults; the core's list until it answers.
+  const [served, setServed] = useState<{ domains?: QuotaDomain[]; jobKinds?: string[] }>({});
+  useEffect(() => {
+    if (!opened) return;
+    let cancelled = false;
+    fetch('/api/quota/defaults', { credentials: 'same-origin' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (cancelled || !body) return;
+        setTrustedProxiesUnset(body.ipScope?.trustedProxiesUnset === true);
+        setServed({
+          domains: Array.isArray(body.domains) ? body.domains : undefined,
+          jobKinds: Array.isArray(body.jobKinds) ? body.jobKinds : undefined,
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [opened]);
+
+  // Services grouped as the registry groups them; only those with a guarded call site
+  // (and the one an existing limit already names, so it still shows).
+  const baseDomains = allowedDomains || served.domains || [...ENFORCED_QUOTA_DOMAINS];
+  const offeredDomains = baseDomains.includes(form.values.domain) || allowedDomains
+    ? baseDomains
+    : [...baseDomains, form.values.domain];
   const domainOptions = QUOTA_DOMAIN_GROUP_ORDER
     .map((group) => ({
       group: tl(`domainGroups.${group}`),
@@ -276,19 +302,6 @@ export function QuotaPolicyModal({
 
   // Behind a reverse proxy with no TRUSTED_PROXIES every caller has the proxy's address: say so on an IP limit.
   const [trustedProxiesUnset, setTrustedProxiesUnset] = useState(false);
-  useEffect(() => {
-    if (!opened || !isIpScope) return;
-    let cancelled = false;
-    fetch('/api/quota/defaults', { credentials: 'same-origin' })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((body) => {
-        if (!cancelled) setTrustedProxiesUnset(body?.ipScope?.trustedProxiesUnset === true);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [opened, isIpScope]);
 
   // Where the limit lives. Group and agent-run limits may be tenant-wide; every
   // other kind only exists inside a project (see isTenantWideKind).
@@ -634,6 +647,7 @@ export function QuotaPolicyModal({
                 <ScopeIdSelector
                   scope={values.scope}
                   domain={values.domain}
+                  jobKinds={served.jobKinds}
                   value={values.scopeId}
                   valueLabel={policy ? targetLabelOf(policy) : undefined}
                   valueMissing={savedTargetGone}

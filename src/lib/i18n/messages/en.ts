@@ -7631,6 +7631,7 @@ export const en = {
       ip_mode_requires_ip_scope: 'Address counting only applies to IP limits.',
       ip_limits_rate_only: 'IP limits can only set rate limits.',
       ip_ranges_require_ip_scope: 'IP ranges only apply to IP limits.',
+      invalid_job_kind: 'This kind of job is not counted here.',
     },
     form: {
       createTitle: 'New limit',

@@ -15,7 +15,7 @@ import {
   type QuotaPolicyInput,
   type QuotaScope,
 } from '@/lib/quota/types';
-import { ENFORCED_QUOTA_DOMAINS } from '@/lib/quota/domains';
+import { offeredQuotaDomains, offeredQuotaJobKinds } from '@/enterprise/quota-domains';
 import { validateQuotaIpRanges } from '@/lib/quota/ipScope';
 
 const logger = createLogger('quota-service');
@@ -203,7 +203,7 @@ export async function assertValidQuotaPolicy(
   if (patch.scope !== undefined && !QUOTA_SCOPES.includes(patch.scope)) {
     throw new QuotaPolicyValidationError(`Unknown scope "${String(patch.scope)}"`, 'invalid_scope');
   }
-  if (patch.domain !== undefined && !ENFORCED_QUOTA_DOMAINS.includes(patch.domain)) {
+  if (patch.domain !== undefined && !offeredQuotaDomains().includes(patch.domain)) {
     throw new QuotaPolicyValidationError(`Unknown domain "${String(patch.domain)}"`, 'invalid_domain');
   }
 
@@ -268,6 +268,12 @@ export async function assertValidQuotaPolicy(
 
   if (domain === 'agent' && scope === 'resource' && (typeof scopeId !== 'string' || scopeId.trim() === '')) {
     throw new QuotaPolicyValidationError('An agent-narrowed policy needs the agent key in scopeId', 'agent_required');
+  }
+
+  // A `jobs` limit narrowed to one kind names a kind this install counts.
+  if (domain === 'jobs' && scope === 'resource' && typeof scopeId === 'string' && scopeId !== ''
+    && !(offeredQuotaJobKinds() as string[]).includes(scopeId)) {
+    throw new QuotaPolicyValidationError(`Unknown job kind "${scopeId}"`, 'invalid_job_kind');
   }
 }
 

@@ -16051,6 +16051,7 @@ paths:
               - tts
               - ocr
               - image
+              - moderation
               - decision
         - name: providerKey
           in: query
