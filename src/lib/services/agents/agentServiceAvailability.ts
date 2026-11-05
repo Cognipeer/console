@@ -36,6 +36,7 @@ export function bindingServiceOf(binding: Pick<IAgentToolBinding, 'source' | 'so
     if (binding.sourceKey === 'browser_use') return 'browser';
     if (binding.sourceKey === 'web_search') return 'websearch';
     if (binding.sourceKey === 'crawler') return 'crawler';
+    if (binding.sourceKey === 'channel') return 'channels';
   }
   return null;
 }

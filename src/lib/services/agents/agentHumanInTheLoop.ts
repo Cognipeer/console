@@ -72,6 +72,9 @@ export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     'reminder_cancel',
     // The SDK's own ask-user tool: asking IS the human step.
     'ask_user_question',
+    // The channels an agent's Slack / Teams bot may post in (enterprise channel tools): a listing, nothing is sent.
+    'slack_list_channels',
+    'teams_list_channels',
 ];
 
 /** Every tool whose name starts with one of these is read-only (`knowledge_search`, `knowledge_read_document`…). */

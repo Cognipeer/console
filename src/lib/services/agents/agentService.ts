@@ -6,6 +6,7 @@
  */
 
 import { getFlowsHost, FlowsUnavailableError, type FlowAgentTurnActivity } from '@/enterprise/flows';
+import { getChannelToolsHost, isChannelToolName } from '@/enterprise/channel-tools';
 import type { AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 import { channelFromSource, getRoutingCaller, noteRoutingRun, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 import { randomUUID } from 'node:crypto';
@@ -429,6 +430,7 @@ function knowledgeReadLinesToolDefinition(): TraceToolDefinition {
  *   agent.browser.<toolName>               the browser_use system tools
  *   agent.websearch.<toolName>             the web_search system tool
  *   agent.crawler.<toolName>               the web_fetch system tool
+ *   agent.channel.<toolName>               the channel system tools (`slack_send_direct_message`…)
  *
  * The browser/websearch segment is the tool's own name VERBATIM (`agent.browser.
  * browser_navigate`, `agent.websearch.web_search`), redundant prefix and all.
@@ -2651,6 +2653,38 @@ export async function buildBoundTools(
             }));
             tools.push(...webFetchTools.tools);
             definitions.push(...webFetchTools.definitions);
+        } else if (binding.source === 'system' && binding.sourceKey === 'channel') {
+            // ── System tool: Channels (write to Slack / Teams as the agent's own bot) ──
+            // The Channels module builds them for the agent's deployments that allow it, and decides
+            // who and where they may write to; an edition without it binds nothing.
+            const channelHost = getChannelToolsHost();
+            if (!channelHost) {
+                logger.warn('channel tool binding skipped: Channels are not part of this edition');
+                continue;
+            }
+            const toolNames = binding.toolNames.filter(isChannelToolName);
+            if (toolNames.length === 0) continue;
+            try {
+                const built = await channelHost.buildTools({
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    ...(mcpIdentity.agentKey ? { agentKey: mcpIdentity.agentKey } : {}),
+                    toolNames,
+                    ...((flowCaller?.accountableUserId ?? mcpIdentity.userId) ? { userId: flowCaller?.accountableUserId ?? mcpIdentity.userId } : {}),
+                    ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId } : {}),
+                    ...(runtimeContext ? { runtimeContext } : {}),
+                    createToolFn: createToolFn as unknown as Parameters<typeof channelHost.buildTools>[0]['createToolFn'],
+                    zod,
+                });
+                const channelTools = adoptBuiltTools(guard, 'channel', built);
+                tools.push(...channelTools.tools);
+                definitions.push(...channelTools.definitions);
+            } catch (err) {
+                logger.error('Failed to bind channel system tools', {
+                    error: err instanceof Error ? err.message : String(err),
+                });
+            }
         } else if (binding.source === 'flow') {
             // ── Flow as a tool ──────────────────────────────────
             // The tool name is what the HITL policy is keyed by, and the call is guarded under
@@ -2685,7 +2719,7 @@ export async function buildBoundTools(
 }
 
 /**
- * Guards system tools built elsewhere (browser, web search, web fetch) after the fact,
+ * Guards system tools built elsewhere (browser, web search, web fetch, channels) after the fact,
  * under `agent.<surface>.<toolName>`. The browser tools are the agent's only
  * tools that navigate and type into a live browser, i.e. the surface
  * `tool_access.sideEffects` most wants to name.
@@ -2695,7 +2729,7 @@ export async function buildBoundTools(
  */
 function adoptBuiltTools(
     guard: AgentToolGuard,
-    surface: 'browser' | 'websearch' | 'crawler',
+    surface: 'browser' | 'websearch' | 'crawler' | 'channel',
     built: readonly unknown[],
 ): { tools: AgentSdkToolInterface[]; definitions: TraceToolDefinition[] } {
     const tools = (built as AgentSdkToolInterface[]).map((tool) => protectBuiltTool(
