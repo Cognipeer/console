@@ -328,7 +328,9 @@ export default function ModelCatalogModal({
             onClick: () => void addSelected(),
           };
 
-  const sourceLabel = data ? t(`summary.${sourceSummaryKey(data.source)}`) : '—';
+  const sourceLabel = data
+    ? t(data.error && data.models.length === 0 ? 'summary.sourceFailed' : `summary.${sourceSummaryKey(data.source)}`)
+    : '—';
 
   const summary = (
     <>
@@ -750,8 +752,12 @@ function SourceLine({
   locale: string;
 }) {
   let text: ReactNode;
+  // A listing that failed and brought nothing back is not "live": say it failed (the error card below says why).
+  const failed = Boolean(data?.error) && (data?.models.length ?? 0) === 0;
   if (!data) text = loading ? t('source.refreshing') : '—';
-  else if (data.source === 'live') {
+  else if (failed) {
+    text = t('source.failed', { provider: data.provider.label, time: formatRelative(data.fetchedAt, locale) });
+  } else if (data.source === 'live') {
     text = t('source.live', { provider: data.provider.label, time: formatRelative(data.fetchedAt, locale) });
   } else if (data.source === 'reference') {
     text = t('source.reference', { time: formatRelative(data.fetchedAt, locale) });
@@ -761,7 +767,11 @@ function SourceLine({
   return (
     <div className="ds-row-between" style={{ gap: 8 }}>
       <span className="ds-row ds-muted" style={{ fontSize: 12.5, gap: 6 }} aria-live="polite">
-        {data?.source === 'live' ? <span className="ds-badge-dot" style={{ color: 'var(--ds-ok)' }} /> : null}
+        {failed ? (
+          <span className="ds-badge-dot" style={{ color: 'var(--ds-err)' }} />
+        ) : data?.source === 'live' ? (
+          <span className="ds-badge-dot" style={{ color: 'var(--ds-ok)' }} />
+        ) : null}
         {refreshing ? t('source.refreshing') : text}
       </span>
       <Tooltip label={t('source.refresh')} withArrow>
@@ -835,7 +845,9 @@ function CatalogRow({
         style={{
           gap: 10,
           padding: '9px 14px',
-          flexWrap: 'nowrap',
+          // The meta cluster (capabilities, context, price, Configure) wraps under the name when both do not fit,
+          // instead of squeezing the name and id into a narrow column (long translations, long names).
+          flexWrap: 'wrap',
           alignItems: 'flex-start',
           cursor: registered || locked ? 'default' : 'pointer',
           background: selected ? 'var(--ds-hover)' : undefined,
@@ -851,8 +863,8 @@ function CatalogRow({
             aria-label={t('row.select', { name: model.name })}
           />
         </span>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div className="ds-row" style={{ gap: 6 }}>
+        <div style={{ minWidth: 0, flex: '1 1 240px' }}>
+          <div className="ds-row" style={{ gap: 6, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 13, fontWeight: 500, overflowWrap: 'anywhere' }}>{model.name}</span>
             <Badge size="sm" variant="light" color={CATEGORY_COLORS[model.category] ?? 'gray'}>
               {t(`categories.${model.category}`)}
@@ -879,7 +891,10 @@ function CatalogRow({
             </Text>
           ) : null}
         </div>
-        <div className="ds-row" style={{ gap: 6, flexShrink: 0, justifyContent: 'flex-end', paddingTop: 1 }}>
+        <div
+          className="ds-row"
+          style={{ gap: 6, flex: '0 1 auto', flexWrap: 'wrap', justifyContent: 'flex-end', marginLeft: 'auto', paddingTop: 1 }}
+        >
           {takesImages(model) ? (
             <span className="ds-faint" style={{ display: 'inline-flex' }} title={t('row.vision')} role="img" aria-label={t('row.vision')}>
               <IconEye size={14} />

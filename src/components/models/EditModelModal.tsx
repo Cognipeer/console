@@ -311,7 +311,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     const categories = modelIdSuggestionCategories(model.category, storedMode);
     return (modelCatalog.data?.models ?? [])
       .filter((entry) => categories.includes(entry.category))
-      .map((entry) => ({ value: entry.id, label: entry.name }));
+      .map((entry) => ({ value: entry.id, label: entry.name, added: Boolean(entry.registeredModelKeys?.length) }));
   }, [modelCatalog.data, model, storedMode]);
 
   // What the model id is known to accept — the boxes start from it until someone ticks one.

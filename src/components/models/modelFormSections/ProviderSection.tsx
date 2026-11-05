@@ -20,6 +20,8 @@ export interface ModelIdSuggestion {
   label?: string;
   /** Options with the same group are listed under one heading. */
   group?: string;
+  /** The project already has a model on this provider + id (it can still be picked: a second copy is allowed). */
+  added?: boolean;
 }
 
 interface ProviderSectionProps {
@@ -151,10 +153,11 @@ function ModelIdAutocomplete({
   inputProps: FieldProps;
 }) {
   const t = useTranslations('modelCatalog');
-  const { data, labels } = useMemo(() => {
+  const { data, labels, added } = useMemo(() => {
     // Mantine refuses duplicate values; the first suggestion of an id wins.
     const seen = new Set<string>();
     const labelOf = new Map<string, string>();
+    const addedIds = new Set<string>();
     const groups = new Map<string, string[]>();
     const ungrouped: string[] = [];
     for (const suggestion of suggestions) {
@@ -162,12 +165,14 @@ function ModelIdAutocomplete({
       if (!value || seen.has(value)) continue;
       seen.add(value);
       if (suggestion.label && suggestion.label !== value) labelOf.set(value, suggestion.label);
+      if (suggestion.added) addedIds.add(value);
       if (suggestion.group) groups.set(suggestion.group, [...(groups.get(suggestion.group) ?? []), value]);
       else ungrouped.push(value);
     }
     return {
       data: [...ungrouped, ...[...groups].map(([group, items]) => ({ group, items }))],
       labels: labelOf,
+      added: addedIds,
     };
   }, [suggestions]);
 
@@ -205,7 +210,10 @@ function ModelIdAutocomplete({
         const label = labels.get(option.value);
         return (
           <div className="ds-col" style={{ gap: 1, minWidth: 0 }}>
-            <span className="ds-mono" style={{ fontSize: 12.5 }}>{option.value}</span>
+            <span className="ds-row" style={{ gap: 6 }}>
+              <span className="ds-mono" style={{ fontSize: 12.5 }}>{option.value}</span>
+              {added.has(option.value) ? <span className="ds-badge ds-badge-ok">{t('autocomplete.added')}</span> : null}
+            </span>
             {label ? <span className="ds-faint" style={{ fontSize: 11.5 }}>{label}</span> : null}
           </div>
         );

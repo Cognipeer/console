@@ -465,7 +465,7 @@ export default function CreateModelModal({
     const categories = modelIdSuggestionCategories(formValues.category, suggestionMode);
     return (modelCatalog.data?.models ?? [])
       .filter((model) => categories.includes(model.category))
-      .map((model) => ({ value: model.id, label: model.name }));
+      .map((model) => ({ value: model.id, label: model.name, added: Boolean(model.registeredModelKeys?.length) }));
   }, [modelCatalog.data, formValues.category, suggestionMode]);
 
   const backToCatalog = () => {

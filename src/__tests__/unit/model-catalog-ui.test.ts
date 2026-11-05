@@ -315,6 +315,29 @@ describe('the create form\'s Model ID suggestions', () => {
     expect(options().some((option) => option.startsWith('gpt-4o'))).toBe(true);
     expect(options().some((option) => option.startsWith('text-embedding-3-small'))).toBe(false);
   });
+
+  it('marks the ids the project already has on this provider, and still offers them', async () => {
+    catalogs[openai.key] = {
+      status: 200,
+      body: catalogOf(openai, [
+        entry({ id: 'gpt-4o', name: 'GPT-4o', registeredModelKeys: ['gpt-4o'] }),
+        entry({ id: 'gpt-4o-mini', name: 'GPT-4o mini' }),
+      ]),
+    };
+    const form = (opened: boolean) =>
+      h(CreateModelModal, { opened, onClose: () => undefined, providers: [openai], onCreated: () => undefined });
+    await render(form(false));
+    await render(form(true));
+    const modelId = fieldNamed('Model ID')!.querySelector('input')!;
+    await act(async () => modelId.focus());
+    await setInput(modelId, 'gpt');
+    const listbox = document.getElementById(modelId.getAttribute('aria-controls') ?? '')!;
+    const optionFor = (id: string) =>
+      [...listbox.querySelectorAll('[role="option"]')].find((option) => option.querySelector('.ds-mono')?.textContent === id);
+    expect(optionFor('gpt-4o')?.querySelector('.ds-badge')?.textContent).toBe('added');
+    expect(optionFor('gpt-4o-mini')).toBeDefined();
+    expect(optionFor('gpt-4o-mini')?.querySelector('.ds-badge')).toBeNull();
+  });
 });
 
 describe('ModelCatalogModal', () => {
@@ -455,6 +478,10 @@ describe('ModelCatalogModal', () => {
     expect(text()).toContain('The provider refused the credentials');
     expect(text()).toContain('HTTP 401 · Incorrect API key provided');
     expect(buttonByText('Try again')).toBeDefined();
+    // A listing that failed and brought nothing back is not presented as live.
+    expect(text()).toContain('Could not list OpenAI');
+    expect(text()).not.toContain('Live from OpenAI');
+    expect(text()).toContain('Listing failed');
   });
 
   it('keeps "Try again" busy while a refused listing is listed again (one listing at a time)', async () => {
