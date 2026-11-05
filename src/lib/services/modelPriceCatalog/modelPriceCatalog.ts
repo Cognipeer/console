@@ -4,10 +4,12 @@
  * Imports the community-maintained LiteLLM price file
  * (`model_prices_and_context_window.json`) and exposes it as an in-memory
  * catalog in the console's `IModelPricing` shape (USD per 1M tokens). The
- * catalog feeds two surfaces:
+ * catalog feeds three surfaces:
  *   - Cost → Pricing: bulk "match from catalog" suggestions for observed but
  *     unpriced models,
- *   - Model Hub: "fill from catalog" for the pricing fields of a model form.
+ *   - Model Hub: "fill from catalog" for the pricing fields of a model form,
+ *   - Model Hub: the provider model catalog ("Add model"), which prices and
+ *     sizes the models a provider lists (`models/catalog/discovery.ts`).
  *
  * Contract:
  *   - The catalog is process-global (not tenant data) and cached in memory
@@ -83,12 +85,25 @@ export interface PricingSuggestion {
   };
 }
 
-interface CatalogCache {
-  entries: ModelPriceCatalogEntry[];
+/**
+ * The lookup tables name matching runs on. Built once per loaded catalog; `indexCatalogEntries` builds (and keeps)
+ * one for callers that hold the entries array itself.
+ */
+export interface ModelPriceCatalogIndex {
   /** Raw key → entry (exact matching). */
-  byKey: Map<string, ModelPriceCatalogEntry>;
+  readonly byKey: ReadonlyMap<string, ModelPriceCatalogEntry>;
   /** Normalized key → entries sharing it (e.g. 'gpt-4o' + 'azure/gpt-4o'). */
-  byNormalized: Map<string, ModelPriceCatalogEntry[]>;
+  readonly byNormalized: ReadonlyMap<string, ModelPriceCatalogEntry[]>;
+}
+
+/** One name matched in the catalog, and how. */
+export interface CatalogEntryMatch {
+  entry: ModelPriceCatalogEntry;
+  confidence: SuggestionConfidence;
+}
+
+interface CatalogCache extends ModelPriceCatalogIndex {
+  entries: ModelPriceCatalogEntry[];
   fetchedAt: Date;
 }
 
@@ -192,7 +207,10 @@ export function parseCatalogJson(raw: Record<string, unknown>): ModelPriceCatalo
   return entries;
 }
 
-function buildCache(entries: ModelPriceCatalogEntry[], fetchedAt: Date): CatalogCache {
+/** Index per entries array: the catalog array lives for a day and is matched against on every model listing. */
+const indexes = new WeakMap<readonly ModelPriceCatalogEntry[], ModelPriceCatalogIndex>();
+
+function buildIndex(entries: readonly ModelPriceCatalogEntry[]): ModelPriceCatalogIndex {
   const byKey = new Map<string, ModelPriceCatalogEntry>();
   const byNormalized = new Map<string, ModelPriceCatalogEntry[]>();
   for (const entry of entries) {
@@ -203,7 +221,27 @@ function buildCache(entries: ModelPriceCatalogEntry[], fetchedAt: Date): Catalog
     if (bucket) bucket.push(entry);
     else byNormalized.set(normalized, [entry]);
   }
-  return { entries, byKey, byNormalized, fetchedAt };
+  return { byKey, byNormalized };
+}
+
+function buildCache(entries: ModelPriceCatalogEntry[], fetchedAt: Date): CatalogCache {
+  const index = buildIndex(entries);
+  // The loaded array maps to its own tables, so a caller that indexes what `getCatalogEntries` returned reuses them.
+  indexes.set(entries, index);
+  return { entries, ...index, fetchedAt };
+}
+
+/**
+ * The matching tables of an entries array (`getCatalogEntries()`'s, or a test's own), built on first use and kept as
+ * long as the array lives.
+ */
+export function indexCatalogEntries(entries: readonly ModelPriceCatalogEntry[]): ModelPriceCatalogIndex {
+  let index = indexes.get(entries);
+  if (!index) {
+    index = buildIndex(entries);
+    indexes.set(entries, index);
+  }
+  return index;
 }
 
 async function fetchCatalog(): Promise<CatalogCache> {
@@ -321,53 +359,76 @@ function toMatch(
   };
 }
 
+/** Which tiers `matchCatalogEntry` may answer with. */
+export interface CatalogMatchOptions {
+  /**
+   * Try the prefix/suffix tier (default true). It scans every catalog key, so a caller matching many names tries the
+   * cheaper tiers on all its candidate names first.
+   */
+  fuzzy?: boolean;
+}
+
 /**
- * Suggest catalog pricing for each observed model name. Tiers, best first:
+ * Match one model name against the catalog. Tiers, best first:
  *   1. 'exact' — the name is a raw catalog key,
  *   2. 'normalized' — the names are equal after `normalizeModelName`,
  *   3. 'fuzzy' — the normalized name is a prefix/suffix of a normalized
  *      catalog key (or vice versa) and exactly one candidate scores best.
- * Names that resolve ambiguously get NO match rather than a guess.
+ * A name that resolves ambiguously gets NO match rather than a guess.
+ */
+export function matchCatalogEntry(
+  index: ModelPriceCatalogIndex,
+  name: string,
+  options: CatalogMatchOptions = {},
+): CatalogEntryMatch | undefined {
+  const exact = index.byKey.get(name);
+  if (exact) return { entry: exact, confidence: 'exact' };
+
+  const normalized = normalizeModelName(name);
+  if (!normalized) return undefined;
+
+  const normalizedHits = index.byNormalized.get(normalized);
+  if (normalizedHits && normalizedHits.length > 0) {
+    return { entry: pickCanonical(normalizedHits, normalized), confidence: 'normalized' };
+  }
+
+  if (options.fuzzy === false || normalized.length < MIN_FUZZY_LENGTH) return undefined;
+
+  let bestScore = 0;
+  let bestKeys: string[] = [];
+  for (const candidate of index.byNormalized.keys()) {
+    if (candidate.length < MIN_FUZZY_LENGTH) continue;
+    const overlaps =
+      candidate.startsWith(normalized)
+      || candidate.endsWith(normalized)
+      || normalized.startsWith(candidate)
+      || normalized.endsWith(candidate);
+    if (!overlaps) continue;
+    const score = Math.min(candidate.length, normalized.length);
+    if (score > bestScore) {
+      bestScore = score;
+      bestKeys = [candidate];
+    } else if (score === bestScore) {
+      bestKeys.push(candidate);
+    }
+  }
+
+  if (bestKeys.length !== 1) return undefined; // none, or ambiguous tie
+  const fuzzyHits = index.byNormalized.get(bestKeys[0]);
+  if (!fuzzyHits || fuzzyHits.length === 0) return undefined;
+  return { entry: pickCanonical(fuzzyHits, bestKeys[0]), confidence: 'fuzzy' };
+}
+
+/**
+ * Suggest catalog pricing for each observed model name, at the tiers of
+ * `matchCatalogEntry`. Names that resolve ambiguously get NO match rather
+ * than a guess.
  */
 export async function suggestPricing(names: string[]): Promise<PricingSuggestion[]> {
   const loaded = await ensureCatalog();
 
   return names.map((name): PricingSuggestion => {
-    const exact = loaded.byKey.get(name);
-    if (exact) return { name, match: toMatch(exact, 'exact') };
-
-    const normalized = normalizeModelName(name);
-    if (!normalized) return { name };
-
-    const normalizedHits = loaded.byNormalized.get(normalized);
-    if (normalizedHits && normalizedHits.length > 0) {
-      return { name, match: toMatch(pickCanonical(normalizedHits, normalized), 'normalized') };
-    }
-
-    if (normalized.length < MIN_FUZZY_LENGTH) return { name };
-
-    let bestScore = 0;
-    let bestKeys: string[] = [];
-    for (const candidate of loaded.byNormalized.keys()) {
-      if (candidate.length < MIN_FUZZY_LENGTH) continue;
-      const overlaps =
-        candidate.startsWith(normalized)
-        || candidate.endsWith(normalized)
-        || normalized.startsWith(candidate)
-        || normalized.endsWith(candidate);
-      if (!overlaps) continue;
-      const score = Math.min(candidate.length, normalized.length);
-      if (score > bestScore) {
-        bestScore = score;
-        bestKeys = [candidate];
-      } else if (score === bestScore) {
-        bestKeys.push(candidate);
-      }
-    }
-
-    if (bestKeys.length !== 1) return { name }; // none, or ambiguous tie
-    const fuzzyHits = loaded.byNormalized.get(bestKeys[0]);
-    if (!fuzzyHits || fuzzyHits.length === 0) return { name };
-    return { name, match: toMatch(pickCanonical(fuzzyHits, bestKeys[0]), 'fuzzy') };
+    const match = matchCatalogEntry(loaded, name);
+    return match ? { name, match: toMatch(match.entry, match.confidence) } : { name };
   });
 }

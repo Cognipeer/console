@@ -182,8 +182,8 @@ function decodeURIComponentSafe(value: string): string {
  */
 const CONNECTION_STRING_PASSWORD = /^[a-z][a-z0-9+.-]*:\/\/[^/?#@:]*:([^/?#@]+)@/i;
 
-/** Every credential value, so a message can be cleaned of them. */
-function secretsOf(...sources: Array<Record<string, unknown> | undefined>): string[] {
+/** Every credential value, so a message can be cleaned of them (with `scrubMessage`). */
+export function secretsOf(...sources: Array<Record<string, unknown> | undefined>): string[] {
   const out: string[] = [];
   const visit = (value: unknown) => {
     if (typeof value === 'string') {

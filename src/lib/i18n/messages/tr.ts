@@ -34,6 +34,7 @@ import { portalsNowTr } from './portalsNow.tr';
 import { managedToolsTr } from './managedTools.tr';
 import { tracingHealthTr } from './tracingHealth.tr';
 import { projectsAccessTr } from './projectsAccess.tr';
+import { modelCatalogTr } from './modelCatalog.tr';
 
 export const tr: typeof en = {
   ...en,
@@ -4625,6 +4626,8 @@ export const tr: typeof en = {
       },
     },
   },
+  // Sağlayıcının sunduğu modellerin "Model ekle" kataloğu ve Model ID otomatik tamamlama (modelCatalog.tr.ts).
+  modelCatalog: modelCatalogTr,
   modelPriceCatalog: {
     confidence: {
       exact: 'Birebir',

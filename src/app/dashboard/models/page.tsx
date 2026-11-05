@@ -51,6 +51,9 @@ import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
+import ModelCatalogModal from '@/components/models/catalog/ModelCatalogModal';
+import type { CreateModelPrefill } from '@/components/models/catalog/catalogPrefill';
+import { invalidateProviderModelCatalog, noteCatalogModelsCreated } from '@/components/models/catalog/useProviderModelCatalog';
 import EditModelModal from '@/components/models/EditModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { modelTakesImages } from '@/components/models/inputModalities';
@@ -200,6 +203,10 @@ export default function ModelsPage() {
   const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  // "Add model" opens the provider catalog first; a pick (or "Enter custom model") opens the create form.
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogProviderKey, setCatalogProviderKey] = useState<string | undefined>(undefined);
+  const [createPrefill, setCreatePrefill] = useState<CreateModelPrefill | null>(null);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [dynamicModalOpen, setDynamicModalOpen] = useState(false);
   const [editModelId, setEditModelId] = useState<string | null>(null);
@@ -341,15 +348,22 @@ export default function ModelsPage() {
     setProviders((current) =>
       current.some((p) => p.key === provider.key) ? current : [...current, provider],
     );
+    // The catalog's "Added" badge follows without listing the provider again.
+    noteCatalogModelsCreated(model.providerKey, [{ modelId: model.modelId, key: model.key }]);
     void loadModels();
+  };
+
+  const openCatalog = (providerKey?: string) => {
+    setCatalogProviderKey(providerKey);
+    setCatalogOpen(true);
   };
 
   const handleProviderCreated = (provider: ModelProviderView) => {
     setProviders((current) =>
       current.some((p) => p.key === provider.key) ? current : [...current, provider],
     );
-    // Chain straight into model creation so the freshly-added provider is ready to pick.
-    setCreateModalOpen(true);
+    // Chain straight into the freshly-added provider's model catalog.
+    openCatalog(provider.key);
   };
 
   const providerLookup = useMemo(() => {
@@ -410,7 +424,7 @@ export default function ModelsPage() {
   useEffect(() => {
     if (!addModelsFor || !modelsLoaded) return;
     setPresetProviderKey(addModelsFor);
-    setCreateModalOpen(true);
+    openCatalog(addModelsFor);
     const next = new URLSearchParams(searchParams.toString());
     next.delete('addModelsFor');
     const qs = next.toString();
@@ -460,6 +474,8 @@ export default function ModelsPage() {
       });
       if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
+      // The catalog's remembered listing still marks the model "Added": it is listed again on its next opening.
+      invalidateProviderModelCatalog(model.providerKey);
       void loadDashboard();
       notifications.show({
         color: 'green',
@@ -550,7 +566,7 @@ export default function ModelsPage() {
               color="teal"
               size="sm"
               leftSection={<IconPlus size={14} stroke={1.7} />}
-              onClick={dynamicOnly ? openDynamicCreate : () => setCreateModalOpen(true)}
+              onClick={dynamicOnly ? openDynamicCreate : () => openCatalog(presetProviderKey)}
             >
               {dynamicOnly ? 'New Dynamic LLM' : t('actions.create')}
             </Button>
@@ -663,7 +679,7 @@ export default function ModelsPage() {
             primaryAction: {
               label: t('actions.create'),
               icon: <IconPlus size={14} stroke={1.7} />,
-              onClick: () => setCreateModalOpen(true),
+              onClick: () => openCatalog(presetProviderKey),
             },
           }}
           footerLeft={`Showing ${modelsCtl.records.length} of ${filtered.length} models`}
@@ -959,12 +975,49 @@ export default function ModelsPage() {
         onCreated={handleProviderCreated}
       />
 
+      <ModelCatalogModal
+        opened={catalogOpen}
+        onClose={() => setCatalogOpen(false)}
+        providers={providers}
+        defaultProviderKey={catalogProviderKey}
+        defaultCategory={activeType === 'all' ? undefined : activeType}
+        onSelectModel={(prefill) => {
+          setCreatePrefill(prefill);
+          setPresetProviderKey(prefill.providerKey);
+          setCatalogOpen(false);
+          setCreateModalOpen(true);
+        }}
+        onCustom={(providerKey) => {
+          setCreatePrefill(null);
+          if (providerKey) setPresetProviderKey(providerKey);
+          setCatalogOpen(false);
+          setCreateModalOpen(true);
+        }}
+        onModelsCreated={() => {
+          void loadModels();
+          void loadDashboard();
+        }}
+        onAddProvider={() => {
+          setCatalogOpen(false);
+          setProviderModalOpen(true);
+        }}
+      />
+
       <CreateModelModal
         opened={createModalOpen}
-        onClose={() => setCreateModalOpen(false)}
+        onClose={() => {
+          setCreateModalOpen(false);
+          setCreatePrefill(null);
+        }}
         providers={providers}
         defaultCategory={activeType === 'all' ? undefined : activeType}
         defaultProviderKey={presetProviderKey}
+        prefill={createPrefill}
+        onBackToCatalog={(providerKey) => {
+          setCreateModalOpen(false);
+          setCreatePrefill(null);
+          openCatalog(providerKey ?? presetProviderKey);
+        }}
         onCreated={handleModelCreated}
         onAddProvider={() => setProviderModalOpen(true)}
       />
@@ -974,6 +1027,9 @@ export default function ModelsPage() {
         opened={editModelId !== null}
         onClose={() => setEditModelId(null)}
         onSaved={() => {
+          // The edit may have moved the model to another provider or model ID, which the catalog's "Added" badges
+          // follow; the form does not say what changed, so every remembered listing is listed again when next shown.
+          invalidateProviderModelCatalog();
           void loadModels();
           void loadDashboard();
         }}

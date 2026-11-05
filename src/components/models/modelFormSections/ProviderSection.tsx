@@ -1,6 +1,8 @@
-import type { ReactNode } from 'react';
-import { Select, TextInput } from '@mantine/core';
+import { useId, useMemo, type ReactNode } from 'react';
+import { Autocomplete, Loader, Select, TextInput, type ComboboxStringItem, type OptionsFilter } from '@mantine/core';
 import { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
+import { useTranslations } from '@/lib/i18n';
+import FieldWithAction from './FieldWithAction';
 import type { FieldProps } from './types';
 
 export interface ProviderSummary {
@@ -11,6 +13,17 @@ export interface ProviderSummary {
   description?: string;
 }
 
+/** One model id the provider is known to serve, offered while typing the Model ID. */
+export interface ModelIdSuggestion {
+  value: string;
+  /** Shown next to the id when it differs (the provider's display name). */
+  label?: string;
+  /** Options with the same group are listed under one heading. */
+  group?: string;
+  /** The project already has a model on this provider + id (it can still be picked: a second copy is allowed). */
+  added?: boolean;
+}
+
 interface ProviderSectionProps {
   number: number;
   done?: boolean;
@@ -19,9 +32,21 @@ interface ProviderSectionProps {
   onProviderChange: (key: string) => void;
   modelIdProps: FieldProps;
   modelIdPlaceholder?: string;
+  /**
+   * Model ids the provider serves. When given (even empty), the Model ID field offers them while typing and still
+   * takes any text; keep passing an array once the form shows, or the field is swapped and loses focus.
+   */
+  modelIdSuggestions?: ModelIdSuggestion[];
+  /** The suggestions are being listed. */
+  modelIdLoading?: boolean;
+  /** Shown at the end of the Model ID label row, next to the label (e.g. a link back to the model catalog). */
+  modelIdAction?: ReactNode;
   /** Shown instead of the picker when the project has no provider. */
   emptyState?: ReactNode;
 }
+
+/** At most this many suggestions are drawn at once; typing narrows the rest. */
+const SUGGESTION_LIMIT = 50;
 
 /** Section "Provider & connection": which provider serves the model, and under which model id. */
 export default function ProviderSection({
@@ -32,9 +57,24 @@ export default function ProviderSection({
   onProviderChange,
   modelIdProps,
   modelIdPlaceholder = 'gpt-4o-mini',
+  modelIdSuggestions,
+  modelIdLoading = false,
+  modelIdAction,
   emptyState,
 }: ProviderSectionProps) {
   const selected = providers.find((p) => p.key === providerKey);
+  const modelIdInputId = useId();
+  const modelIdInput = modelIdSuggestions ? (
+    <ModelIdAutocomplete
+      id={modelIdInputId}
+      placeholder={modelIdPlaceholder}
+      suggestions={modelIdSuggestions}
+      loading={modelIdLoading}
+      inputProps={modelIdProps}
+    />
+  ) : (
+    <TextInput id={modelIdInputId} placeholder={modelIdPlaceholder} {...modelIdProps} />
+  );
   return (
     <FormSection
       number={number}
@@ -79,10 +119,107 @@ export default function ProviderSection({
         </>
       )}
       <FormRow cols={1}>
-        <FormField label="Model ID" required>
-          <TextInput placeholder={modelIdPlaceholder} {...modelIdProps} />
-        </FormField>
+        {modelIdAction ? (
+          // Not FormField's `action`: inside its <label> the button became the label's control, so clicking
+          // "Model ID" pressed "Back to catalog" and closed the form.
+          <FieldWithAction label="Model ID" required htmlFor={modelIdInputId} action={modelIdAction}>
+            {modelIdInput}
+          </FieldWithAction>
+        ) : (
+          <FormField label="Model ID" required>
+            {modelIdInput}
+          </FormField>
+        )}
       </FormRow>
     </FormSection>
+  );
+}
+
+/**
+ * The Model ID as free text with the provider's model ids offered while typing. Matching looks at the id and the
+ * display name, so "sonnet" finds `claude-sonnet-4-5`.
+ */
+function ModelIdAutocomplete({
+  id,
+  placeholder,
+  suggestions,
+  loading,
+  inputProps,
+}: {
+  id: string;
+  placeholder: string;
+  suggestions: ModelIdSuggestion[];
+  loading: boolean;
+  inputProps: FieldProps;
+}) {
+  const t = useTranslations('modelCatalog');
+  const { data, labels, added } = useMemo(() => {
+    // Mantine refuses duplicate values; the first suggestion of an id wins.
+    const seen = new Set<string>();
+    const labelOf = new Map<string, string>();
+    const addedIds = new Set<string>();
+    const groups = new Map<string, string[]>();
+    const ungrouped: string[] = [];
+    for (const suggestion of suggestions) {
+      const value = suggestion.value.trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      if (suggestion.label && suggestion.label !== value) labelOf.set(value, suggestion.label);
+      if (suggestion.added) addedIds.add(value);
+      if (suggestion.group) groups.set(suggestion.group, [...(groups.get(suggestion.group) ?? []), value]);
+      else ungrouped.push(value);
+    }
+    return {
+      data: [...ungrouped, ...[...groups].map(([group, items]) => ({ group, items }))],
+      labels: labelOf,
+      added: addedIds,
+    };
+  }, [suggestions]);
+
+  const filter = useMemo<OptionsFilter>(() => ({ options, search, limit }) => {
+    const term = search.trim().toLowerCase();
+    const matches = (item: ComboboxStringItem) =>
+      !term || item.value.toLowerCase().includes(term) || (labels.get(item.value)?.toLowerCase().includes(term) ?? false);
+    let left = limit;
+    const out: typeof options = [];
+    for (const option of options) {
+      if (left <= 0) break;
+      if ('group' in option) {
+        const items = option.items.filter(matches).slice(0, left);
+        if (items.length) {
+          out.push({ ...option, items });
+          left -= items.length;
+        }
+      } else if (matches(option)) {
+        out.push(option);
+        left -= 1;
+      }
+    }
+    return out;
+  }, [labels]);
+
+  return (
+    <Autocomplete
+      id={id}
+      placeholder={placeholder}
+      data={data}
+      filter={filter}
+      limit={SUGGESTION_LIMIT}
+      maxDropdownHeight={280}
+      renderOption={({ option }) => {
+        const label = labels.get(option.value);
+        return (
+          <div className="ds-col" style={{ gap: 1, minWidth: 0 }}>
+            <span className="ds-row" style={{ gap: 6 }}>
+              <span className="ds-mono" style={{ fontSize: 12.5 }}>{option.value}</span>
+              {added.has(option.value) ? <span className="ds-badge ds-badge-ok">{t('autocomplete.added')}</span> : null}
+            </span>
+            {label ? <span className="ds-faint" style={{ fontSize: 11.5 }}>{label}</span> : null}
+          </div>
+        );
+      }}
+      rightSection={loading ? <Loader size={14} aria-label={t('autocomplete.loading')} /> : null}
+      {...inputProps}
+    />
   );
 }

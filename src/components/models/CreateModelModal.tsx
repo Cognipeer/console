@@ -3,8 +3,21 @@ import { resolveUpstreamApi, supportsUpstreamApiChoice, type UpstreamApi } from 
 import { Button, NumberInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconBolt, IconBrain } from '@tabler/icons-react';
+import { IconArrowLeft, IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useConfirm } from '@/components/common/confirm/ConfirmProvider';
+import {
+  modelIdSuggestionCategories,
+  providerSupportsToolCalls,
+  resolveDecisionModes,
+  resolveOcrModes,
+  resolveProviderCategories,
+  type CreateModelPrefill,
+  type DecisionMode,
+  type OcrMode,
+} from '@/components/models/catalog/catalogPrefill';
+import { useProviderModelCatalog } from '@/components/models/catalog/useProviderModelCatalog';
+import type { ModelIdSuggestion } from '@/components/models/modelFormSections/ProviderSection';
 import {
   getDefaultModelOutputModalities,
   limitsFromCatalogFill,
@@ -69,11 +82,6 @@ const DEFAULT_PRICING: {
   cacheWriteTokenPer1M: '',
 };
 
-const CAPABILITY_KEYS = {
-  categories: 'model.categories',
-  toolCalls: 'model.supports.tool_calls',
-} as const;
-
 type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
 
 const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
@@ -97,9 +105,6 @@ const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
  */
 const CAPABILITY_CATEGORIES: ReadonlyArray<ModelCategory> = ['llm'];
 
-type OcrMode = 'native' | 'vlm';
-type DecisionMode = 'structured' | 'native';
-
 type CreateModelModalProps = {
   opened: boolean;
   onClose: () => void;
@@ -111,6 +116,13 @@ type CreateModelModalProps = {
   onCreated:(options: { model: IModel; provider: ModelProviderView }) => void;
   /** Opens the "Add provider" flow when no provider is available for this project. */
   onAddProvider?: () => void;
+  /**
+   * A model picked in the provider catalog: applied over the defaults when the modal opens (its provider and
+   * category win over `defaultProviderKey` / `defaultCategory`).
+   */
+  prefill?: CreateModelPrefill | null;
+  /** Shows "Back to catalog" next to the Model ID; called with the provider the form has selected. */
+  onBackToCatalog?: (providerKey?: string) => void;
 };
 
 interface FormValues {
@@ -168,27 +180,6 @@ function toNumber(value: number | '' | undefined): number | undefined {
   return value;
 }
 
-function resolveProviderCategories(provider?: ModelProviderView): ModelCategory[] {
-  const raw = provider?.driverCapabilities?.[CAPABILITY_KEYS.categories];
-  if (!Array.isArray(raw)) return ['llm', 'embedding'];
-  return raw.filter((item): item is ModelCategory =>
-    ALL_CATEGORIES.some((c) => c.value === item),
-  );
-}
-
-function resolveOcrModes(provider?: ModelProviderView): OcrMode[] {
-  const raw = provider?.driverCapabilities?.['ocr.modes'];
-  if (Array.isArray(raw)) {
-    const modes = raw.filter((m): m is OcrMode => m === 'native' || m === 'vlm');
-    if (modes.length > 0) return modes;
-  }
-  return ['vlm'];
-}
-
-function providerSupportsToolCalls(provider?: ModelProviderView) {
-  return Boolean(provider?.driverCapabilities?.[CAPABILITY_KEYS.toolCalls]);
-}
-
 const isLlmCategory = (category: ModelCategory) => CAPABILITY_CATEGORIES.includes(category);
 const definedOnly = (patch: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
@@ -201,12 +192,25 @@ export default function CreateModelModal({
   defaultProviderKey,
   onCreated,
   onAddProvider,
+  prefill,
+  onBackToCatalog,
 }: CreateModelModalProps) {
   const tWizard = useTranslations('modelWizard');
+  const tCatalog = useTranslations('modelCatalog');
+  const { confirm } = useConfirm();
   const [availableProviders, setAvailableProviders] =
     useState<ModelProviderView[]>(providers);
   const [submitting, setSubmitting] = useState(false);
   const wasOpenedRef = useRef(false);
+  // The prefill already written into the form for this opening (it is applied once, not on every providers change).
+  const appliedPrefillRef = useRef<CreateModelPrefill | null>(null);
+  // Off on the render the modal opens, while the form still holds the previous provider: the Model ID suggestions
+  // list the provider the open effects settle on, not a provider that is about to be replaced.
+  const [suggestionsActive, setSuggestionsActive] = useState(false);
+  // The form as the catalog's pick left it, once the provider clamps have settled on it: what "edited" is measured
+  // from. The version counts the picks written, so the snapshot is taken again for each one.
+  const [prefillVersion, setPrefillVersion] = useState(0);
+  const [prefillBaseline, setPrefillBaseline] = useState<string | null>(null);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -303,12 +307,15 @@ export default function CreateModelModal({
       }
     } else {
       wasOpenedRef.current = true;
-      // Honour the category the user was filtering by, when the provider supports it.
-      if (defaultCategory) {
-        setFieldValue('category', defaultCategory);
+      // Honour the category the user was filtering by (or the one of the model picked in the catalog), when the
+      // provider supports it. The catalog's pick wins, so this re-run on a providers change keeps it too.
+      const openCategory = prefill?.category ?? defaultCategory;
+      const openProviderKey = prefill?.providerKey ?? defaultProviderKey;
+      if (openCategory) {
+        setFieldValue('category', openCategory);
       }
-      if (defaultProviderKey && providers.some((p) => p.key === defaultProviderKey)) {
-        setFieldValue('providerKey', defaultProviderKey);
+      if (openProviderKey && providers.some((p) => p.key === openProviderKey)) {
+        setFieldValue('providerKey', openProviderKey);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,12 +358,10 @@ export default function CreateModelModal({
 
   // Structured needs a chat model on the provider; native needs the provider's own
   // decision endpoint (decision.native). A provider can offer either or both.
-  const allowedDecisionModes = useMemo((): DecisionMode[] => {
-    const modes: DecisionMode[] = [];
-    if (resolveProviderCategories(selectedProvider).includes('llm')) modes.push('structured');
-    if (selectedProvider?.driverCapabilities?.['decision.native'] === true) modes.push('native');
-    return modes.length > 0 ? modes : ['structured'];
-  }, [selectedProvider]);
+  const allowedDecisionModes = useMemo(
+    () => resolveDecisionModes(selectedProvider),
+    [selectedProvider],
+  );
 
   useEffect(() => {
     if (formValues.category !== 'decision') return;
@@ -394,6 +399,97 @@ export default function CreateModelModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProvider, formValues.category]);
 
+  // A model picked in the catalog, written over the defaults once per opening. This effect is declared after every
+  // other one on purpose: React runs a commit's effects in declaration order, so on the render the modal opens it
+  // runs after the open effect (reset values, default category / provider) and after the provider clamps that see
+  // that render's values, and what it writes wins. On the next render the clamps above see the prefilled provider
+  // and category and only take away what that provider cannot do (a category it does not serve, tool calls, an
+  // OCR or decision mode). Tool calls are clamped here as well, since the clamp effect does not re-run when the
+  // provider and category stay the same.
+  useEffect(() => {
+    if (!opened) {
+      appliedPrefillRef.current = null;
+      setSuggestionsActive(false);
+      setPrefillBaseline(null);
+      return;
+    }
+    setSuggestionsActive(true);
+    if (!prefill || appliedPrefillRef.current === prefill) return;
+    appliedPrefillRef.current = prefill;
+    const provider = providers.find((p) => p.key === prefill.providerKey);
+    if (provider) {
+      setFieldValue('providerKey', provider.key);
+      setFieldValue('supportsToolCalls', (prefill.supportsToolCalls ?? true) && providerSupportsToolCalls(provider));
+    }
+    setFieldValue('category', prefill.category);
+    setFieldValue('modelId', prefill.modelId);
+    setFieldValue('name', prefill.name);
+    if (prefill.contextWindow !== undefined) setFieldValue('capabilities.contextWindow', prefill.contextWindow);
+    if (prefill.maxOutputTokens !== undefined) setFieldValue('capabilities.maxOutputTokens', prefill.maxOutputTokens);
+    if (prefill.supportsReasoning !== undefined) {
+      setFieldValue('capabilities.supportsReasoning', prefill.supportsReasoning);
+    }
+    if (prefill.supportsStructuredOutputs !== undefined) {
+      setFieldValue('capabilities.supportsStructuredOutputs', prefill.supportsStructuredOutputs);
+    }
+    // Null leaves the input types to the detection from the model id, as for a model typed in by hand.
+    setFieldValue('inputModalities', prefill.inputModalities ?? null);
+    if (prefill.pricing) {
+      setFieldValue('pricing.inputTokenPer1M', prefill.pricing.inputTokenPer1M);
+      setFieldValue('pricing.outputTokenPer1M', prefill.pricing.outputTokenPer1M);
+      setFieldValue('pricing.cachedTokenPer1M', prefill.pricing.cachedTokenPer1M ?? '');
+      setFieldValue('pricing.cacheWriteTokenPer1M', prefill.pricing.cacheWriteTokenPer1M ?? '');
+    }
+    setPrefillVersion((version) => version + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, prefill]);
+
+  // Declared after the clamps: on the render after the pick lands they run first and write their values at once
+  // (setFieldValue updates what getValues reads synchronously), so the snapshot is the pick as the selected provider
+  // allows it, and a clamp does not count as an edit. Not `form.resetDirty()`: that moves the snapshot the close-time
+  // `reset()` goes back to, which must stay the blank form.
+  useEffect(() => {
+    if (prefillVersion > 0) setPrefillBaseline(JSON.stringify(form.getValues()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillVersion]);
+
+  // The models the selected provider serves, offered while typing the Model ID (same listing as the catalog's).
+  const modelCatalog = useProviderModelCatalog(formValues.providerKey || undefined, {
+    enabled: opened && suggestionsActive,
+  });
+  // OCR in VLM mode and structured decision are served by a chat model, so the provider's chat models are offered.
+  const suggestionMode = formValues.category === 'ocr'
+    ? formValues.ocr.mode
+    : formValues.category === 'decision' ? formValues.decision.mode : undefined;
+  const modelIdSuggestions = useMemo<ModelIdSuggestion[]>(() => {
+    const categories = modelIdSuggestionCategories(formValues.category, suggestionMode);
+    return (modelCatalog.data?.models ?? [])
+      .filter((model) => categories.includes(model.category))
+      .map((model) => ({ value: model.id, label: model.name, added: Boolean(model.registeredModelKeys?.length) }));
+  }, [modelCatalog.data, formValues.category, suggestionMode]);
+
+  const backToCatalog = () => {
+    if (!onBackToCatalog) return;
+    const go = () => onBackToCatalog(form.getValues().providerKey || undefined);
+    if (!dirty) {
+      go();
+      return;
+    }
+    void confirm({
+      title: tCatalog('createForm.discardTitle'),
+      message: tCatalog('createForm.discardMessage'),
+      confirmLabel: tCatalog('createForm.discardConfirm'),
+      tone: 'danger',
+    }).then((ok) => {
+      if (ok) go();
+    });
+  };
+
+  // A form the catalog filled in is not "edited" until someone changes anything in it (a description or a price
+  // counts as much as the name); a blank form is edited once it has a name, key or model ID.
+  const dirty = opened && (prefill
+    ? prefillBaseline !== null && prefillBaseline !== JSON.stringify(formValues)
+    : Boolean(formValues.name || formValues.key || formValues.modelId));
   const validProvider = Boolean(formValues.providerKey);
   const validIdentity = Boolean(formValues.name && formValues.modelId);
   const validPricing =
@@ -649,7 +745,6 @@ export default function CreateModelModal({
   );
 
   const noProviders = availableProviders.length === 0;
-  const dirty = opened && Boolean(formValues.name || formValues.key || formValues.modelId);
   const canSubmit = !noProviders && validProvider && validIdentity && validPricing;
   const isLlm = CAPABILITY_CATEGORIES.includes(formValues.category);
   // What a blank "Default max tokens" amounts to, and the limits that do not fit together (shown, never blocking).
@@ -715,6 +810,20 @@ export default function CreateModelModal({
         providerKey={formValues.providerKey}
         onProviderChange={(key) => setFieldValue('providerKey', key)}
         modelIdProps={form.getInputProps('modelId')}
+        modelIdSuggestions={modelIdSuggestions}
+        modelIdLoading={modelCatalog.loading || modelCatalog.refreshing}
+        modelIdAction={
+          onBackToCatalog ? (
+            <Button
+              variant="subtle"
+              size="compact-xs"
+              leftSection={<IconArrowLeft size={12} />}
+              onClick={backToCatalog}
+            >
+              {tCatalog('createForm.backToCatalog')}
+            </Button>
+          ) : undefined
+        }
         emptyState={
           <div className="ds-card ds-card-pad" style={{ background: 'var(--ds-surface-1)' }}>
             <span className="ds-muted" style={{ fontSize: 13 }}>
