@@ -92,6 +92,17 @@ export const agentChannelsListEn = {
       },
       saved: 'People matching updated',
     },
+    outbound: {
+      title: 'Messages from the agent',
+      label: 'The agent may write on its own',
+      hint: "With the channel tools, the agent can message people and post in channels as this bot, for example to report on a task it is doing. The agent's owner still has to give it the tools, and sending follows the agent's approval settings.",
+      rules: {
+        slack: 'It posts only in public channels of this workspace that the bot was invited to (never in private or shared channels), and says on whose behalf it writes.',
+        teams: 'It posts only in the channels of teams the bot is installed in, writes only to people who have the app, and says on whose behalf it writes.',
+      },
+      on: 'The agent may now write on its own',
+      off: 'The agent no longer writes on its own',
+    },
     connection: {
       title: 'Connection',
       changeTokens: 'Change tokens',
@@ -173,6 +184,17 @@ export const agentChannelsListEn = {
     moreAria: '{count} more: {names}',
   },
   // The Channels section of an agent's Ship tab.
+  toolGroup: {
+    name: 'Channels (Slack / Teams)',
+    description: "Write to Slack or Teams as the agent's own bot. Works where the agent is deployed to a channel whose admin lets it write on its own.",
+    typeLabel: 'System',
+    tools: {
+      list_channels: 'List the channels the bot can post to (read-only).',
+      send_direct_message: 'Send a direct message to a person, found by email.',
+      send_channel_message: 'Post in a channel, or in the thread of a message it posted.',
+      update_message: 'Edit a message the agent sent.',
+    },
+  },
   ship: {
     title: 'Channels',
     description: 'Slack and Microsoft Teams channels where this agent answers.',
