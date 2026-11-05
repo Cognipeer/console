@@ -1,0 +1,188 @@
+/**
+ * Provider model catalog: what a provider of the active project can serve, for the "Add model" catalog and the Model
+ * ID autocomplete of the Model Hub.
+ *
+ * The provider is looked up in the project (a provider of another project, or of a domain that cannot back a model,
+ * is "not found"), its stored credentials are opened, and `discoverProviderModels` asks the provider. Models of the
+ * project that already serve an id of this provider are marked on the entry.
+ */
+import type { ModelCategory } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+import { providerRegistry } from '@/lib/providers';
+import {
+  getProviderConfigByKey,
+  loadProviderRuntimeData,
+  ProviderCredentialDecryptError,
+} from '@/lib/services/providers/providerService';
+import { listModels } from '@/lib/services/models/modelService';
+import { discoverProviderModels, type DiscoveryDeps, type DiscoveryResult } from './discovery';
+import type { ProviderModelCatalog } from './types';
+
+export * from './types';
+export {
+  discoverProviderModels,
+  CATALOG_MAX_RESPONSE_BYTES,
+  CATALOG_OVERALL_TIMEOUT_MS,
+  CATALOG_REFERENCE_WAIT_MS,
+  CATALOG_REQUEST_TIMEOUT_MS,
+  type DiscoveryDeps,
+  type DiscoveryInput,
+  type DiscoveryResult,
+} from './discovery';
+export { inferCatalogCategory, constrainCategory, type CategoryHints } from './inferCategory';
+
+const logger = createLogger('model-catalog');
+
+/** The provider does not exist in the project, or cannot back a model. Maps to HTTP 404. */
+export class ProviderCatalogNotFoundError extends Error {
+  readonly providerKey: string;
+
+  constructor(providerKey: string) {
+    super(`Model provider "${providerKey}" is not available in this project.`);
+    this.name = 'ProviderCatalogNotFoundError';
+    this.providerKey = providerKey;
+  }
+}
+
+/** The provider is switched off: nothing is listed with its credentials. Maps to HTTP 409. */
+export class ProviderCatalogDisabledError extends Error {
+  readonly code = 'provider_disabled';
+  readonly providerKey: string;
+
+  constructor(providerKey: string) {
+    super(`Model provider "${providerKey}" is disabled.`);
+    this.name = 'ProviderCatalogDisabledError';
+    this.providerKey = providerKey;
+  }
+}
+
+/**
+ * The provider domains that can back a Model Hub entry. Mirrors `MODEL_PROVIDER_TYPES` of `modelService.ts`, which
+ * lists the providers the Model Hub offers.
+ */
+const MODEL_PROVIDER_TYPES: ReadonlySet<string> = new Set(['model', 'stt', 'tts', 'ocr']);
+
+const MODEL_CATEGORIES: ReadonlySet<ModelCategory> = new Set([
+  'llm',
+  'embedding',
+  'rerank',
+  'stt',
+  'tts',
+  'ocr',
+  'image',
+  'moderation',
+  'decision',
+]);
+
+/** When a driver does not declare its categories, the Model Hub forms offer chat and embedding models. */
+const DEFAULT_CATEGORIES: ModelCategory[] = ['llm', 'embedding'];
+
+/** The categories a driver serves (`model.categories` of its contract). */
+function allowedCategoriesOf(driver: string): ModelCategory[] {
+  let raw: unknown;
+  try {
+    raw = providerRegistry.getContract(driver).capabilities?.['model.categories'];
+  } catch {
+    return DEFAULT_CATEGORIES;
+  }
+  if (!Array.isArray(raw)) return DEFAULT_CATEGORIES;
+  const categories = raw.filter(
+    (value): value is ModelCategory => typeof value === 'string' && MODEL_CATEGORIES.has(value as ModelCategory),
+  );
+  return categories.length > 0 ? categories : DEFAULT_CATEGORIES;
+}
+
+/** Model keys of the project per `modelId` of this provider; a failed read leaves the catalog unmarked. */
+async function registeredKeysByModelId(
+  tenantDbName: string,
+  projectId: string,
+  providerKey: string,
+): Promise<Map<string, string[]>> {
+  const byModelId = new Map<string, string[]>();
+  try {
+    const models = await listModels(tenantDbName, projectId, { providerKey });
+    for (const model of models) {
+      // The filter is the query's; checked again so a looser store never marks another provider's model.
+      if (model.providerKey !== providerKey) continue;
+      const modelId = typeof model.modelId === 'string' ? model.modelId.trim() : '';
+      if (!modelId || !model.key) continue;
+      const keys = byModelId.get(modelId);
+      if (keys) keys.push(model.key);
+      else byModelId.set(modelId, [model.key]);
+    }
+  } catch (error) {
+    logger.warn('Could not read the project models for the catalog', {
+      providerKey,
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+  return byModelId;
+}
+
+/**
+ * The model catalog of a provider of the project. Throws `ProviderCatalogNotFoundError` (404) and
+ * `ProviderCatalogDisabledError` (409); everything about the listing itself, including credentials that cannot be
+ * opened, is answered in the catalog's `error`.
+ */
+export async function getProviderModelCatalog(
+  params: { tenantDbName: string; tenantId: string; projectId: string; providerKey: string },
+  deps?: DiscoveryDeps,
+): Promise<ProviderModelCatalog> {
+  const { tenantDbName, tenantId, projectId, providerKey } = params;
+
+  const config = await getProviderConfigByKey(tenantDbName, tenantId, providerKey, projectId);
+  if (!config || config.tenantId !== tenantId || !MODEL_PROVIDER_TYPES.has(config.type)) {
+    throw new ProviderCatalogNotFoundError(providerKey);
+  }
+  if (config.status === 'disabled') throw new ProviderCatalogDisabledError(providerKey);
+
+  const provider = { key: config.key, label: config.label, driver: config.driver, status: config.status };
+  const allowedCategories = allowedCategoriesOf(config.driver);
+
+  let result: DiscoveryResult;
+  try {
+    const { record, credentials } = await loadProviderRuntimeData(tenantDbName, { key: providerKey, tenantId, projectId });
+    result = await discoverProviderModels(
+      {
+        driver: record.driver,
+        type: record.type,
+        credentials: credentials ?? {},
+        settings: record.settings ?? {},
+        tenantId,
+        allowedCategories,
+      },
+      deps,
+    );
+  } catch (error) {
+    if (!(error instanceof ProviderCredentialDecryptError)) throw error;
+    const now = deps?.now?.() ?? new Date();
+    result = {
+      source: 'live',
+      supported: true,
+      models: [],
+      fetchedAt: now.toISOString(),
+      latencyMs: 0,
+      error: {
+        code: 'credentials_unavailable',
+        message: 'The stored credentials of this provider could not be opened. Enter them again in the provider settings.',
+      },
+    };
+  }
+
+  const registered = await registeredKeysByModelId(tenantDbName, projectId, providerKey);
+  const models = result.models.map((model) => {
+    const keys = registered.get(model.id.trim());
+    return keys ? { ...model, registeredModelKeys: keys } : model;
+  });
+
+  logger.info('Provider model catalog listed', {
+    providerKey,
+    driver: provider.driver,
+    source: result.source,
+    count: models.length,
+    latencyMs: result.latencyMs,
+    ...(result.error ? { errorCode: result.error.code, status: result.error.status } : {}),
+  });
+
+  return { provider, ...result, models };
+}

@@ -62,6 +62,8 @@ import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
 import PiiProtectionField from '@/components/pii/PiiProtectionField';
 import { piiPolicyKeyOf, piiProtectionPayload } from '@/components/pii/piiProtectionForm';
 import type { GuardrailBindingRow } from '@/components/guardrails/GuardrailBindingList';
+import { useProviderModelCatalog } from '@/components/models/catalog/useProviderModelCatalog';
+import type { ModelIdSuggestion } from '@/components/models/modelFormSections/ProviderSection';
 
 
 interface ModelProviderOption {
@@ -285,6 +287,23 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     form.values.modelId ?? '',
     model?.category === 'llm' &&
       promptCachingSupport(selectedProvider?.driver, form.values.modelId).support === 'explicit',
+  );
+
+  // The provider's model ids offered in the Model ID field. Listing them calls the provider, so it waits until
+  // someone goes to the field instead of running on every opening of the form.
+  const [modelIdSuggestionsWanted, setModelIdSuggestionsWanted] = useState(false);
+  useEffect(() => {
+    if (!opened) setModelIdSuggestionsWanted(false);
+  }, [opened]);
+  const modelCatalog = useProviderModelCatalog(form.values.providerKey || undefined, {
+    enabled: opened && modelIdSuggestionsWanted,
+  });
+  const modelIdSuggestions = useMemo<ModelIdSuggestion[]>(
+    () =>
+      (modelCatalog.data?.models ?? [])
+        .filter((entry) => entry.category === model?.category)
+        .map((entry) => ({ value: entry.id, label: entry.name })),
+    [modelCatalog.data, model?.category],
   );
 
   // What the model id is known to accept — the boxes start from it until someone ticks one.
@@ -784,8 +803,16 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           providers={modelProviders}
           providerKey={form.values.providerKey}
           onProviderChange={(key) => form.setFieldValue('providerKey', key)}
-          modelIdProps={form.getInputProps('modelId')}
+          modelIdProps={{
+            ...form.getInputProps('modelId'),
+            onFocus: () => {
+              setModelIdSuggestionsWanted(true);
+              form.getInputProps('modelId').onFocus?.();
+            },
+          }}
           modelIdPlaceholder={providerDefinition?.modelIdHint || tWizard('fields.modelId.placeholder')}
+          modelIdSuggestions={modelIdSuggestions}
+          modelIdLoading={modelCatalog.loading || modelCatalog.refreshing}
         />
 
         <CapabilitiesSection
