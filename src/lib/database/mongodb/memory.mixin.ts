@@ -150,10 +150,11 @@ export function MemoryMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
 
     async deleteMemoryItems(
       storeKey: string,
-      filter?: { scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
+      filter?: { projectId?: string; scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
     ): Promise<number> {
       const db = this.getTenantDb();
       const query: Record<string, unknown> = { storeKey };
+      if (filter?.projectId) query.projectId = filter.projectId;
       if (filter?.scope) query.scope = filter.scope;
       if (filter?.scopeId) query.scopeId = filter.scopeId;
       if (filter?.tags?.length) query.tags = { $in: filter.tags };
@@ -174,13 +175,27 @@ export function MemoryMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       return { ...doc, _id: doc._id?.toString() } as IMemoryItem;
     }
 
-    async findMemoryItemByHash(storeKey: string, contentHash: string): Promise<IMemoryItem | null> {
+    async findMemoryItemByHash(storeKey: string, contentHash: string, projectId?: string): Promise<IMemoryItem | null> {
       const db = this.getTenantDb();
+      const query: Record<string, unknown> = { storeKey, contentHash };
+      if (projectId) query.projectId = projectId;
       const doc = await db
         .collection<IMemoryItem>(COLLECTIONS.memoryItems)
-        .findOne({ storeKey, contentHash } as Filter<IMemoryItem>);
+        .findOne(query as Filter<IMemoryItem>);
       if (!doc) return null;
       return { ...doc, _id: doc._id?.toString() } as IMemoryItem;
+    }
+
+    async findMemoryItemsByVectorIds(storeKey: string, vectorIds: string[], projectId?: string): Promise<IMemoryItem[]> {
+      if (vectorIds.length === 0) return [];
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = { storeKey, vectorId: { $in: vectorIds } };
+      if (projectId) query.projectId = projectId;
+      const docs = await db
+        .collection<IMemoryItem>(COLLECTIONS.memoryItems)
+        .find(query as Filter<IMemoryItem>)
+        .toArray();
+      return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IMemoryItem);
     }
 
     async listMemoryItems(
@@ -192,12 +207,15 @@ export function MemoryMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
         tags?: string[];
         status?: MemoryItemStatus;
         search?: string;
+        notExpiredAt?: Date;
         limit?: number;
         skip?: number;
       },
     ): Promise<{ items: IMemoryItem[]; total: number }> {
       const db = this.getTenantDb();
       const query: Record<string, unknown> = { storeKey };
+      // `null` matches a missing field too: items written without a TTL never expire.
+      if (filters?.notExpiredAt) query.$or = [{ expiresAt: null }, { expiresAt: { $gt: filters.notExpiredAt } }];
       if (filters?.projectId) query.projectId = filters.projectId;
       if (filters?.scope) query.scope = filters.scope;
       if (filters?.scopeId) query.scopeId = filters.scopeId;

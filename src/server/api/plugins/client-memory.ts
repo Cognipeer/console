@@ -14,6 +14,8 @@ import {
   getMemoryStore,
   listMemoryItems,
   listMemoryStores,
+  MemoryItemNotFoundError,
+  MemoryStoreFullError,
   MemoryStoreInputError,
   recallForChat,
   searchMemories,
@@ -185,6 +187,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      if (error instanceof MemoryStoreFullError) {
+        return reply.code(409).send({ error: error.message });
+      }
       logger.error('Add client memory item error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -256,10 +261,13 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/memory/stores/:storeKey/memories/:memoryId', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const { memoryId } = request.params as { memoryId: string; storeKey: string };
-      const item = await getMemoryItem(ctx.tenantDbName, memoryId);
+      const { memoryId, storeKey } = request.params as { memoryId: string; storeKey: string };
+      const item = await getMemoryItem(ctx.tenantDbName, ctx.projectId, storeKey, memoryId);
       return reply.code(200).send(item);
     } catch (error) {
+      if (error instanceof MemoryItemNotFoundError) {
+        return reply.code(404).send({ error: error.message });
+      }
       logger.error('Get client memory item error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

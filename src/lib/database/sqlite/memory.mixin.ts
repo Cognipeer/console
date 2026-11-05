@@ -218,11 +218,12 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
 
     async deleteMemoryItems(
       storeKey: string,
-      filter?: { scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
+      filter?: { projectId?: string; scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
     ): Promise<number> {
       const db = this.getTenantDb();
       const clauses: string[] = ['storeKey = @storeKey'];
       const params: Record<string, unknown> = { storeKey };
+      if (filter?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filter.projectId; }
       if (filter?.scope) { clauses.push('scope = @scope'); params.scope = filter.scope; }
       if (filter?.scopeId) { clauses.push('scopeId = @scopeId'); params.scopeId = filter.scopeId; }
       if (filter?.tags?.length) {
@@ -246,12 +247,31 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       return row ? this.mapItemRow(row) : null;
     }
 
-    async findMemoryItemByHash(storeKey: string, contentHash: string): Promise<IMemoryItem | null> {
+    async findMemoryItemByHash(storeKey: string, contentHash: string, projectId?: string): Promise<IMemoryItem | null> {
       const db = this.getTenantDb();
+      const clauses: string[] = ['storeKey = @storeKey', 'contentHash = @contentHash'];
+      const params: Record<string, unknown> = { storeKey, contentHash };
+      if (projectId) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
       const row = db.prepare(
-        `SELECT * FROM ${TABLES.memoryItems} WHERE storeKey = @storeKey AND contentHash = @contentHash`,
-      ).get({ storeKey, contentHash }) as SqliteRow | undefined;
+        `SELECT * FROM ${TABLES.memoryItems} WHERE ${clauses.join(' AND ')}`,
+      ).get(params) as SqliteRow | undefined;
       return row ? this.mapItemRow(row) : null;
+    }
+
+    async findMemoryItemsByVectorIds(storeKey: string, vectorIds: string[], projectId?: string): Promise<IMemoryItem[]> {
+      if (vectorIds.length === 0) return [];
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = { storeKey };
+      const placeholders = vectorIds.map((vectorId, i) => {
+        params[`v${i}`] = vectorId;
+        return `@v${i}`;
+      });
+      const clauses: string[] = ['storeKey = @storeKey', `vectorId IN (${placeholders.join(', ')})`];
+      if (projectId) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.memoryItems} WHERE ${clauses.join(' AND ')}`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapItemRow(r));
     }
 
     async listMemoryItems(
@@ -263,6 +283,7 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         tags?: string[];
         status?: MemoryItemStatus;
         search?: string;
+        notExpiredAt?: Date;
         limit?: number;
         skip?: number;
       },
@@ -270,6 +291,10 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       const db = this.getTenantDb();
       const clauses: string[] = ['storeKey = @storeKey'];
       const params: Record<string, unknown> = { storeKey };
+      if (filters?.notExpiredAt) {
+        clauses.push('(expiresAt IS NULL OR expiresAt > @notExpiredAt)');
+        params.notExpiredAt = filters.notExpiredAt.toISOString();
+      }
 
       if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.scope) { clauses.push('scope = @scope'); params.scope = filters.scope; }

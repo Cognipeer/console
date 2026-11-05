@@ -55,6 +55,45 @@ function getRecordId(record: { _id?: unknown }): string {
 }
 
 /**
+ * The metadata a memory's vector carries. Searches filter on scope and scopeId
+ * here, so every upsert writes all of it: an upsert replaces the metadata.
+ */
+function vectorMetadata(
+  storeKey: string,
+  item: Pick<IMemoryItem, 'scope' | 'scopeId' | 'source' | 'tags' | 'importance'>,
+): Record<string, unknown> {
+  return {
+    storeKey,
+    scope: item.scope,
+    scopeId: item.scopeId ?? '',
+    source: item.source ?? 'api',
+    tags: (item.tags ?? []).join(','),
+    importance: item.importance ?? 0.5,
+  };
+}
+
+/** When a memory written now expires under the store's `ttlDays`; undefined when the store sets none. */
+function expiresAtFor(store: IMemoryStore, from: Date = new Date()): Date | undefined {
+  const days = store.config?.ttlDays;
+  if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) return undefined;
+  return new Date(from.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function isExpired(item: Pick<IMemoryItem, 'expiresAt'>, now: Date): boolean {
+  if (!item.expiresAt) return false;
+  return new Date(item.expiresAt).getTime() <= now.getTime();
+}
+
+/** Raised when a store already holds its `maxMemories`; routes answer it with a 409. */
+export class MemoryStoreFullError extends Error {
+  readonly statusCode = 409;
+  constructor(storeKey: string, maxMemories: number) {
+    super(`Memory store "${storeKey}" is full (maxMemories: ${maxMemories}).`);
+    this.name = 'MemoryStoreFullError';
+  }
+}
+
+/**
  * Resolve a memory item by id within the store and project the caller addressed.
  *
  * findMemoryItemById is scoped only by the tenant database, so an id taken from
@@ -224,8 +263,8 @@ export async function deleteMemoryStore(
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');
 
-  // Delete all memory items
-  await db.deleteMemoryItems(storeKey);
+  // Delete all memory items. Another project may have a store with the same key.
+  await db.deleteMemoryItems(storeKey, { projectId });
 
   // Try to delete the backing vector index
   try {
@@ -262,12 +301,18 @@ export async function addMemory(
   // Dedup check
   const contentHash = hashContent(request.content);
   if (store.config.deduplication) {
-    const existing = await db.findMemoryItemByHash(storeKey, contentHash);
+    const existing = await db.findMemoryItemByHash(storeKey, contentHash, projectId);
     if (existing) {
       // Update access and return existing
       await db.incrementMemoryAccess(getRecordId(existing));
       return existing;
     }
+  }
+
+  const maxMemories = store.config.maxMemories;
+  if (typeof maxMemories === 'number' && maxMemories > 0) {
+    const count = await db.countMemoryItems(storeKey, projectId);
+    if (count >= maxMemories) throw new MemoryStoreFullError(storeKey, maxMemories);
   }
 
   // Generate embedding
@@ -285,6 +330,7 @@ export async function addMemory(
 
   // Generate a unique vector ID
   const vectorId = `mem-${crypto.randomUUID()}`;
+  const scope = request.scope ?? store.config.defaultScope;
 
   // Upsert into vector DB
   await upsertVectors(tenantDbName, tenantId, projectId, {
@@ -294,17 +340,18 @@ export async function addMemory(
       {
         id: vectorId,
         values: embedding,
-        metadata: {
-          storeKey,
-          scope: request.scope ?? store.config.defaultScope,
-          scopeId: request.scopeId ?? '',
+        metadata: vectorMetadata(storeKey, {
+          scope,
+          scopeId: request.scopeId,
           source: request.source ?? 'api',
-          tags: (request.tags ?? []).join(','),
+          tags: request.tags ?? [],
           importance: request.importance ?? 0.5,
-        },
+        }),
       },
     ],
   });
+
+  const expiresAt = expiresAtFor(store);
 
   // Save to MongoDB
   const item = await db.createMemoryItem({
@@ -313,7 +360,7 @@ export async function addMemory(
     storeKey,
     content: request.content,
     contentHash,
-    scope: request.scope ?? store.config.defaultScope,
+    scope,
     scopeId: request.scopeId,
     metadata: request.metadata ?? {},
     tags: request.tags ?? [],
@@ -322,6 +369,7 @@ export async function addMemory(
     accessCount: 0,
     embeddingVersion: store.embeddingModelKey,
     vectorId,
+    ...(expiresAt ? { expiresAt } : {}),
     status: 'active',
   });
 
@@ -348,7 +396,7 @@ export async function addMemoryBatch(
     try {
       const db = await withTenantDb(tenantDbName);
       const hash = hashContent(mem.content);
-      const existing = await db.findMemoryItemByHash(storeKey, hash);
+      const existing = await db.findMemoryItemByHash(storeKey, hash, projectId);
       if (existing) {
         duplicates++;
         continue;
@@ -373,6 +421,8 @@ export async function listMemoryItems(
     tags?: string[];
     status?: IMemoryItem['status'];
     search?: string;
+    /** Leaves out items whose store TTL ran out by this moment. */
+    notExpiredAt?: Date;
     limit?: number;
     skip?: number;
   },
@@ -381,13 +431,24 @@ export async function listMemoryItems(
   return db.listMemoryItems(storeKey, { projectId, ...filters });
 }
 
+/** Raised for a memory id that is not in the addressed store and project; routes answer it with a 404. */
+export class MemoryItemNotFoundError extends Error {
+  readonly statusCode = 404;
+  constructor() {
+    super('Memory item not found.');
+    this.name = 'MemoryItemNotFoundError';
+  }
+}
+
 export async function getMemoryItem(
   tenantDbName: string,
+  projectId: string,
+  storeKey: string,
   id: string,
 ): Promise<IMemoryItem> {
   const db = await withTenantDb(tenantDbName);
-  const item = await db.findMemoryItemById(id);
-  if (!item) throw new Error('Memory item not found.');
+  const item = await findMemoryItemInScope(db, storeKey, id, projectId);
+  if (!item) throw new MemoryItemNotFoundError();
   await db.incrementMemoryAccess(id);
   return item;
 }
@@ -427,12 +488,27 @@ export async function updateMemoryItem(
     const embedding = embeddingResponse.response.data[0]?.embedding;
     if (!embedding) throw new Error('Failed to generate embedding.');
 
-    // Update vector
+    // The upsert replaces the vector's metadata, so it carries all of it again:
+    // with only the store key left, scoped searches no longer found the item.
     await upsertVectors(tenantDbName, tenantId, projectId, {
       providerKey: store.vectorProviderKey,
       indexKey: store.vectorIndexKey,
-      vectors: [{ id: item.vectorId, values: embedding, metadata: { storeKey } }],
+      vectors: [{
+        id: item.vectorId,
+        values: embedding,
+        metadata: vectorMetadata(storeKey, {
+          scope: item.scope,
+          scopeId: item.scopeId,
+          source: item.source,
+          tags: updates.tags ?? item.tags,
+          importance: updates.importance ?? item.importance,
+        }),
+      }],
     });
+
+    // New content is a fresh memory as far as the store's TTL goes.
+    const expiresAt = expiresAtFor(store);
+    if (expiresAt) payload.expiresAt = expiresAt;
   }
 
   const updated = await db.updateMemoryItem(memoryId, payload);
@@ -486,10 +562,10 @@ export async function deleteMemoryItemsBulk(
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');
 
-  const deleted = await db.deleteMemoryItems(storeKey, filter);
+  const deleted = await db.deleteMemoryItems(storeKey, { ...filter, projectId });
 
   if (deleted > 0) {
-    const newCount = await db.countMemoryItems(storeKey);
+    const newCount = await db.countMemoryItems(storeKey, projectId);
     await db.updateMemoryStore(getRecordId(store), {
       memoryCount: newCount,
       lastActivityAt: new Date(),
@@ -525,6 +601,9 @@ export async function searchMemories(
   if (!queryVector) throw new Error('Failed to embed search query.');
 
   const topK = request.topK ?? 10;
+  // Archived, expired and (when asked) untagged items are dropped after the
+  // vector query, so it asks for more than topK to still fill the page.
+  const candidateK = Math.max(topK, Math.min(topK * 3, 100));
 
   // Build vector filter
   const filter: Record<string, unknown> = {};
@@ -537,66 +616,47 @@ export async function searchMemories(
     indexKey: store.vectorIndexKey,
     query: {
       vector: queryVector,
-      topK,
+      topK: candidateK,
       filter: Object.keys(filter).length > 0 ? filter : undefined,
     },
   });
 
-  const matches = queryResult.matches ?? [];
   const minScore = request.minScore ?? 0;
+  const matches = (queryResult.matches ?? []).filter((match) => match.score >= minScore);
 
-  // Pre-load all memory items for this store so we can match by vectorId efficiently
-  const allItems = await db.listMemoryItems(storeKey, { projectId, limit: 1000 });
-  const vectorIdMap = new Map<string, IMemoryItem>();
-  for (const i of allItems.items) {
-    if (i.vectorId) vectorIdMap.set(i.vectorId, i);
-  }
+  // Load exactly the items behind these vectors: a store can hold far more
+  // items than one page of a listing.
+  const items = await db.findMemoryItemsByVectorIds(storeKey, matches.map((match) => match.id), projectId);
+  const byVectorId = new Map(items.map((item) => [item.vectorId, item]));
 
-  // Enrich with MongoDB data
+  const now = new Date();
   const memories: MemorySearchMatch[] = [];
   for (const match of matches) {
-    if (match.score < minScore) continue;
-
-    const memoryItem = vectorIdMap.get(match.id) ?? null;
-
-    if (memoryItem) {
-      await db.incrementMemoryAccess(getRecordId(memoryItem));
-      memories.push({
-        id: getRecordId(memoryItem),
-        content: memoryItem.content,
-        score: match.score,
-        scope: memoryItem.scope,
-        scopeId: memoryItem.scopeId,
-        metadata: memoryItem.metadata,
-        tags: memoryItem.tags,
-        source: memoryItem.source,
-        importance: memoryItem.importance,
-        createdAt: memoryItem.createdAt,
-      });
-    } else {
-      // Return from vector metadata if DB item not found
-      memories.push({
-        id: match.id,
-        content: '',
-        score: match.score,
-        scope: (match.metadata?.scope as string as IMemoryItem['scope']) ?? 'global',
-        scopeId: match.metadata?.scopeId as string,
-        metadata: match.metadata ?? {},
-        tags: ((match.metadata?.tags as string) ?? '').split(',').filter(Boolean),
-        importance: (match.metadata?.importance as number) ?? 0.5,
-      });
-    }
+    if (memories.length >= topK) break;
+    const memoryItem = byVectorId.get(match.id);
+    // A vector with no item behind it was deleted; it has no content to return.
+    if (!memoryItem) continue;
+    // Forgotten (archived) and expired memories are not recalled.
+    if (memoryItem.status !== 'active' || isExpired(memoryItem, now)) continue;
+    if (request.tags?.length && !request.tags.some((tag) => memoryItem.tags.includes(tag))) continue;
+    memories.push({
+      id: getRecordId(memoryItem),
+      content: memoryItem.content,
+      score: match.score,
+      scope: memoryItem.scope,
+      scopeId: memoryItem.scopeId,
+      metadata: memoryItem.metadata,
+      tags: memoryItem.tags,
+      source: memoryItem.source,
+      importance: memoryItem.importance,
+      createdAt: memoryItem.createdAt,
+    });
   }
 
-  // Filter by tags if specified
-  const filteredMemories = request.tags?.length
-    ? memories.filter((m) =>
-        request.tags!.some((t) => m.tags.includes(t)),
-      )
-    : memories;
+  await Promise.all(memories.map((memory) => db.incrementMemoryAccess(memory.id)));
 
   return {
-    memories: filteredMemories,
+    memories,
     query: request.query,
     storeKey,
   };

@@ -10,6 +10,7 @@ import {
   getMemoryStore,
   listMemoryItems,
   listMemoryStores,
+  MemoryStoreFullError,
   MemoryStoreInputError,
   recallForChat,
   searchMemories,
@@ -221,6 +222,9 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      if (error instanceof MemoryStoreFullError) {
+        return reply.code(409).send({ error: error.message });
+      }
       logger.error('Add memory item error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
