@@ -40,6 +40,12 @@ import {
   parseDashboardDateFilterFromSearchParams,
 } from '@/lib/utils/dashboardDateFilter';
 import { createLogger } from '@/lib/core/logger';
+import { authz } from '@/lib/iam/routeAuthz';
+import {
+  getProviderModelCatalog,
+  ProviderCatalogDisabledError,
+  ProviderCatalogNotFoundError,
+} from '@/lib/services/models/catalog';
 import { calcCacheHitRate } from '@/lib/utils/tracingUtils';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
@@ -154,6 +160,19 @@ function mergeSettings(
 
 function buildDate(value?: string): Date | undefined {
   return value ? new Date(value) : undefined;
+}
+
+const MAX_PROVIDER_KEY_LENGTH = 200;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+/**
+ * A provider key from the path. The router has already decoded it, so an encoded control character arrives here
+ * as itself; such a key, an empty one or an overlong one cannot name a provider and is refused before any lookup.
+ */
+function readProviderKeyParam(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  if (raw.length > MAX_PROVIDER_KEY_LENGTH || CONTROL_CHARACTERS.test(raw)) return null;
+  return raw;
 }
 
 /**
@@ -307,6 +326,49 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal server error',
         });
+    }
+  }));
+
+  /**
+   * The models a provider of the active project can serve, asked from the provider itself (or taken from the
+   * reference or built-in list of a driver without a list API), for the "Add model" catalog and the Model ID
+   * suggestions. It needs write although it only reads: every call spends the provider's stored credentials on an
+   * upstream request, and only the create and edit flows, which need write anyway, use it.
+   *
+   * A listing the provider refused or could not answer is still a 200: the catalog carries the reason in `error`, so
+   * the dashboard can offer custom entry. Only a provider outside the project (404) or a disabled one (409) is an
+   * HTTP error.
+   */
+  app.get('/models/providers/:providerKey/catalog', { config: authz.service('models', 'write') }, withApiRequestContext(async (request, reply) => {
+    // The listing is live and per caller, so neither the browser nor a proxy may keep a copy.
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const providerKey = readProviderKeyParam((request.params as { providerKey?: unknown }).providerKey);
+      if (!providerKey) {
+        return reply.code(400).send({ error: 'Invalid provider key' });
+      }
+
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const catalog = await getProviderModelCatalog({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        providerKey,
+      });
+
+      return reply.code(200).send(catalog);
+    } catch (error) {
+      if (error instanceof ProviderCatalogNotFoundError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      if (error instanceof ProviderCatalogDisabledError) {
+        return reply.code(409).send({ error: error.message, code: error.code });
+      }
+      const projectReply = sendProjectError(reply, error);
+      if (projectReply) return projectReply;
+      // The message of an unexpected failure is not for the caller: it may name stores or settings of the provider.
+      logger.error('Provider model catalog error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
 

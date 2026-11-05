@@ -2,8 +2,9 @@
 
 A model in Console is a named, project-scoped endpoint that binds one provider
 credential to one upstream model id, plus the pricing used to account for every
-call. Creating it takes about five minutes: pick a provider, name the model,
-set the price, call it.
+call. Creating it takes about five minutes: pick a provider, pick the model
+from the provider's catalog (or enter it yourself), check the name and the
+price, call it.
 
 This page walks the dashboard path first, then the same operation over the
 client API. For the reference material behind each screen see
@@ -27,9 +28,9 @@ client API. For the reference material behind each screen see
 |---|---|
 | The right project selected | The header **project pill** (`aria-label="Switch project"`). Models and providers are strictly project-scoped. |
 | A model provider available in that project | Model Hub → **Browse providers**, or the **Add provider** button in the create form's empty state. |
-| Model Hub permission | RBAC service `models` — `read` to list, `write` to create. Enforced on the token owner. |
-| The upstream model id | Your provider's documentation, e.g. `gpt-4o-mini`. |
-| The upstream prices | Your provider's price list — or **Fill from catalog**, described below. |
+| Model Hub permission | RBAC service `models` — `read` to list, `write` to create. The provider catalog needs `write` too. Enforced on the token owner. |
+| The upstream model id | Picked from the provider catalog, or, for a model the catalog does not list, your provider's documentation, e.g. `gpt-4o-mini`. |
+| The upstream prices | Filled in from the provider catalog when the price is known, otherwise your provider's price list or **Fill from catalog**, described below. |
 | An API token, for the API path only | **Settings → API Tokens** → **Create Token**. See [Authentication](/guide/authentication). |
 
 A provider that exists at tenant level but is not assigned to the active project
@@ -52,8 +53,9 @@ Two buttons sit in the header: **Browse providers** (jumps to
 
 ## Step 2 — Add a provider, if you have none
 
-Open **Create Model**. If the project has no model providers, section 1 shows an
-explanatory card with an **Add provider** button instead of the picker.
+Open **Create Model**. If the project has no model providers, the **Add model**
+catalog says "No model providers in this project" and offers an **Add provider**
+button instead of the provider picker.
 
 **Add provider** opens the **Add Model Provider** modal:
 
@@ -65,16 +67,44 @@ explanatory card with an **Add provider** button instead of the picker.
 | **Description** | Optional. |
 | **Active** | "Inactive providers cannot be used to create models." |
 
-**Create Provider** saves it and reopens the create-model form with the new
-provider ready to pick. Credentials are encrypted at rest and never returned to
-the UI.
+**Create Provider** saves it and opens the model catalog of the new provider.
+Credentials are encrypted at rest and never returned to the UI.
 
-## Step 3 — Deploy the model
+## Step 3 — Pick the model from the catalog
 
-**Create Model** opens the full-screen **Deploy model** form — "Add a new
-inference endpoint backed by a configured provider." The right-hand column
-carries a live summary and a **Pre-flight** checklist; the footer counts
-progress as *N* of 4 ready.
+**Create Model** opens the full-screen **Add model** catalog — "Pick a model
+your provider serves, or enter one yourself." It asks the selected provider which
+models it serves, in real time and with the provider's stored credentials, and
+lists them with their category, context window, capabilities and price where
+known. Drivers without a list API show a reference or built-in list instead; the
+line under the provider says which. [Model Hub](/guide/model-hub#add-a-model-from-the-provider-catalog)
+lists what each driver offers.
+
+1. Check the **Provider** at the top. The catalog opens on the provider you just
+   added, otherwise on the first active one.
+2. Find the model: search by name or model ID, or narrow by category. A model
+   the project already has is marked **Added**.
+3. Select it and choose **Continue**, or use **Configure** on its row. The
+   deploy form opens filled in from the catalog.
+
+Two other ways out of the catalog:
+
+- **Enter custom model** opens the empty deploy form with the provider
+  preselected. Use it for a model the list does not show (a fine-tune, a private
+  deployment), or for a provider that has no list, such as an OpenAI-compatible
+  server without a `/models` route. When the listing fails, the catalog shows the
+  reason with **Try again** and **Enter a model manually**.
+- Selecting several models turns the button into **Add *N* models**, which
+  creates them all with the default settings after a confirmation. A model
+  without a known price is created with 0 prices; see the first catch below.
+
+## Step 4 — Review and deploy the model
+
+The full-screen **Deploy model** form — "Add a new inference endpoint backed by
+a configured provider." — opens filled in when you came from the catalog, and
+empty for a custom model. **Back to catalog** returns to the list. The
+right-hand column carries a live summary and a **Pre-flight** checklist; the
+footer counts progress as *N* of 4 ready.
 
 ### 1 · Provider
 
@@ -87,7 +117,7 @@ its label, status, driver and key.
 |---|---|
 | **Display name** | Required. Shows in the table and in tracing. |
 | **Key** | "Leave blank to generate from the display name." Slugified to lower case; dots and hyphens survive, other punctuation is stripped. A collision within the project is suffixed `-2`, `-3`, and so on. |
-| **Model ID** | Required. The provider-side identifier (placeholder `gpt-4o-mini`), forwarded upstream verbatim. |
+| **Model ID** | Required. The provider-side identifier (placeholder `gpt-4o-mini`), forwarded upstream verbatim. Suggests the provider's models of the chosen category as you type; any other value is accepted. |
 | **Category** | Chips: **LLM**, **Embedding**, **Rerank**, **Speech-to-Text**, **Text-to-Speech**, **OCR**. The list is narrowed to what the selected driver declares; a driver that declares nothing offers LLM and Embedding. |
 | **Description · optional** | Free text. |
 
@@ -118,6 +148,11 @@ optional **Extraction prompt**.
 | **Input · per 1M characters** | Text-to-Speech only. |
 | **Pages · per 1K** | OCR only. Token fields still apply in Vision LLM mode. |
 
+A model picked from the provider catalog arrives with its price filled in when
+the provider lists one, or when the market reference catalog matches the model
+exactly or after normalization. An approximate match is never filled in. Check
+the figures either way.
+
 **Fill from catalog** queries the model price catalog and fills input, output and
 cached in one go. It matches on the **Model ID** field, not the display name, so
 fill it in first — with the field empty you get "Enter a model ID first". A
@@ -141,7 +176,7 @@ The checklist has four items: **Provider selected**, **Display name and Model ID
 set**, **Pricing configured**, **Category chosen**. When all four are green,
 **Create model** is enabled.
 
-## Step 4 — Find the key and make the first call
+## Step 5 — Find the key and make the first call
 
 In the list, the **Name** column shows the display name with the key in small
 monospace beneath it. That string is the only accepted `model` value.
@@ -206,6 +241,11 @@ against the token owner and further narrowed by the token's own service
 permissions. Provider CRUD under `/api/client/v1/providers` is an admin service
 and needs `admin` for writes.
 
+The provider catalog of Step 3 is a dashboard feature: it is served by
+`GET /api/models/providers/{providerKey}/catalog` to a signed-in session with
+`models` `write`, and the client API has no catalog route. Over the API you name
+the `modelId` yourself.
+
 ### Create a model
 
 `POST /api/client/v1/models` requires `name`, `providerKey`, `category`,
@@ -259,10 +299,12 @@ is the full Console record. OpenAI-compatible clients read `data`.
 
 This is the single most common setup mistake.
 
-The create form starts at `0` for input, output and cached. The pre-flight item
-**Pricing configured** only checks that the fields are not blank, and zero is not
-blank, so the checklist goes green and **Create model** is enabled on a model
-that will never cost anything.
+The create form starts at `0` for input, output and cached unless the catalog
+filled in a price. The pre-flight item **Pricing configured** only checks that
+the fields are not blank, and zero is not blank, so the checklist goes green and
+**Create model** is enabled on a model that will never cost anything. **Add *N*
+models** in the catalog does the same for every selected model without a known
+price; its confirmation says how many there are.
 
 Cost is computed per request, from the model's pricing as it stands at that
 moment, and stored on the usage record. Correcting the price later applies to
@@ -274,8 +316,9 @@ Every spend figure that reads from those rows — the Model Hub **Spend** column
 cost reports, agent cost attribution, evaluation run costs — stays at zero for
 that window, permanently.
 
-Set the price before the first call. **Fill from catalog** is the fastest route;
-otherwise type the rates in by hand. If you genuinely want a free model — a
+Set the price before the first call. A price taken over from the provider
+catalog, or **Fill from catalog**, is the fastest route; otherwise type the rates
+in by hand. If you genuinely want a free model — a
 local runtime, say — leave the zeros deliberately and write it in the
 **Description** so the next operator does not read the flat spend line as a bug.
 
