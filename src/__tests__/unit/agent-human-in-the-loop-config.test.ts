@@ -202,6 +202,13 @@ describe('which tools are asked about', () => {
     expect(isReadOnlyTool('memory_write')).toBe(false);
   });
 
+  it('a channel listing is read-only, a channel send is a write', () => {
+    expect(isReadOnlyTool('slack_list_channels')).toBe(true);
+    expect(isReadOnlyTool('teams_list_channels')).toBe(true);
+    expect(isReadOnlyTool('slack_send_channel_message')).toBe(false);
+    expect(isReadOnlyTool('teams_send_direct_message')).toBe(false);
+  });
+
   it('a policy stored for a tool `read` replaced carries over to `read` (the stricter one wins)', () => {
     const cfg = (tools: Record<string, 'always' | 'never'>) => resolveHitlConfig({ toolApproval: { enabled: true, defaultPolicy: 'always', tools } });
     expect(toolApprovalPolicy(cfg({ sandbox_read_file: 'always' }), 'read')).toBe('always');

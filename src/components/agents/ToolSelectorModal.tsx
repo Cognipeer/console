@@ -35,6 +35,7 @@ import {
 import { useTranslations } from '@/lib/i18n';
 import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
 import { useFlowToolSource } from '@/components/enterprise/EnterpriseFlowAgentUi';
+import { useChannelToolGroup } from '@/components/enterprise/EnterpriseChannelToolsUi';
 
 export type ToolBinding = IAgentToolBinding;
 
@@ -137,6 +138,8 @@ export function ToolSelectorModal({
   const tm = useTranslations('managedTools');
   // Flows as a tool source, where Flows are available (Enterprise): null otherwise.
   const flowTools = useFlowToolSource();
+  // Tools that write to Slack / Teams as the agent's own bot, where Channels are available (Enterprise): null otherwise.
+  const channelToolGroup = useChannelToolGroup();
 
   // Data
   const [sources, setSources] = useState<ToolSourceGroup[]>([]);
@@ -290,6 +293,7 @@ export function ToolSelectorModal({
         typeLabel: 'System',
         tools: [{ name: tool.sourceKey, description: tool.toolDescription }],
       })));
+      if (channelToolGroup) allGroups.splice(SYSTEM_TOOLS.length, 0, channelToolGroup);
 
       setSources(allGroups);
 
@@ -312,7 +316,7 @@ export function ToolSelectorModal({
     } finally {
       setLoading(false);
     }
-  }, [value, flowTools]);
+  }, [value, flowTools, channelToolGroup]);
 
   useEffect(() => {
     if (opened) loadSources();

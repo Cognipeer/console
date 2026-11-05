@@ -89,6 +89,17 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
       },
       saved: 'Kişi eşleştirme güncellendi',
     },
+    outbound: {
+      title: 'Agent mesajları',
+      label: 'Agent kendiliğinden yazabilir',
+      hint: 'Kanal tool\'larıyla agent bu bot olarak kişilere mesaj atabilir ve kanallara yazabilir; örneğin yaptığı bir işin durumunu bildirmek için. Tool\'ları yine agent sahibinin vermesi gerekir; gönderimler agent\'ın onay ayarlarına uyar.',
+      rules: {
+        slack: 'Yalnızca bu çalışma alanında botun davet edildiği public kanallara yazar (private ya da paylaşılan kanallara yazmaz) ve kimin adına yazdığını belirtir.',
+        teams: 'Yalnızca botun kurulu olduğu ekiplerin kanallarına ve app\'i olan kişilere yazar; kimin adına yazdığını belirtir.',
+      },
+      on: 'Agent artık kendiliğinden yazabilir',
+      off: 'Agent artık kendiliğinden yazmıyor',
+    },
     connection: {
       title: 'Bağlantı',
       changeTokens: "Token'ları değiştir",
@@ -170,6 +181,17 @@ export const agentChannelsListTr: typeof agentChannelsListEn = {
     moreAria: '{count} tane daha: {names}',
   },
   // Agent'ın Ship sekmesindeki Kanallar bölümü.
+  toolGroup: {
+    name: 'Kanallar (Slack / Teams)',
+    description: 'Agent\'ın kendi botu olarak Slack ya da Teams\'e yazar. Agent\'ın deploy edildiği ve yöneticinin kendiliğinden yazmaya izin verdiği kanallarda çalışır.',
+    typeLabel: 'Sistem',
+    tools: {
+      list_channels: 'Botun yazabileceği kanalları listeler (yalnızca okur).',
+      send_direct_message: 'E-postayla bulunan bir kişiye doğrudan mesaj atar.',
+      send_channel_message: 'Bir kanala ya da agent\'ın attığı bir mesajın thread\'ine yazar.',
+      update_message: 'Agent\'ın attığı bir mesajı düzenler.',
+    },
+  },
   ship: {
     title: 'Kanallar',
     description: 'Bu agent\'ın Slack ve Microsoft Teams\'te yanıt verdiği kanallar.',

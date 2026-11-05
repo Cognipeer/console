@@ -15,6 +15,7 @@
  */
 
 import { getFlowsHost } from '@/enterprise/flows';
+import { CHANNEL_TOOL_NAMES, isChannelToolName } from '@/enterprise/channel-tools';
 import { getConfig } from '@/lib/core/config';
 import { normalizeOcrSettings } from '@/lib/services/extraction/settings';
 import { REMINDER_INSTRUCTIONS_MAX_CHARS } from './agentRemindersConfig';
@@ -60,7 +61,7 @@ const PLANNING_MODES = new Set(['off', 'todo', 'planner_executor', 'reasoning_th
 const REPLAN_POLICIES = new Set(['never', 'on_failure', 'on_conflict', 'every_n_steps']);
 const PROFILES = new Set(['fast', 'balanced', 'deep', 'research']);
 const TOOL_RESPONSE_POLICIES = new Set(['keep_full', 'keep_structured', 'summarize_archive', 'drop']);
-const SYSTEM_TOOLS = new Set(['browser_use', 'web_search', 'crawler']);
+const SYSTEM_TOOLS = new Set(['browser_use', 'web_search', 'crawler', 'channel']);
 
 type Issues = AgentConfigValidation;
 
@@ -555,6 +556,16 @@ function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBin
             issues.errors.push({ field: `${field}.config.browserId`, message: 'Pick the browser the agent should use' });
         } else if (binding.sourceKey === 'crawler' && typeof binding.config?.crawlerKey !== 'string') {
             issues.errors.push({ field: `${field}.config.crawlerKey`, message: 'Pick the crawler the agent should fetch pages with' });
+        } else if (binding.sourceKey === 'channel') {
+            const names = Array.isArray(binding.toolNames) ? binding.toolNames : [];
+            if (names.length === 0) {
+                issues.errors.push({ field: `${field}.toolNames`, message: 'Select at least one channel tool' });
+            } else {
+                const unknown = names.filter((name) => !isChannelToolName(name));
+                if (unknown.length > 0) {
+                    issues.errors.push({ field: `${field}.toolNames`, message: `Unknown channel tool: ${unknown.join(', ')} (one of ${CHANNEL_TOOL_NAMES.join(', ')})` });
+                }
+            }
         }
         return;
     }

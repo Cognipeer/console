@@ -25,6 +25,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IMcpServer, ITool } from '@/lib/database';
+import { __resetChannelToolsHostForTests, registerChannelToolsHost, type ChannelToolsBuildInput } from '@/enterprise/channel-tools';
 import {
   GUARDRAIL_CONTRACT_VERSION,
   allowVerdict,
@@ -720,5 +721,88 @@ describe('web search system tools', () => {
     const { tools } = await build([WEB_SEARCH_BINDING], ARMED);
 
     expect(tools[0]).toEqual({ name: 'web_search_broken' });
+  });
+});
+
+describe('channel system tools', () => {
+  function channelTool(name: string, run: (args: Record<string, unknown>) => Promise<unknown>) {
+    return { name, description: `${name} description`, invoke: run, call: run, run, func: run };
+  }
+
+  const CHANNEL_BINDING = {
+    source: 'system',
+    sourceKey: 'channel',
+    toolNames: ['send_direct_message', 'not_a_channel_tool'],
+  };
+
+  beforeEach(() => __resetChannelToolsHostForTests());
+
+  async function buildFor(bindings: Array<{ source: string; sourceKey: string; toolNames: string[] }>) {
+    const { createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+    return buildBoundTools(
+      SCOPE.tenantDbName,
+      SCOPE.tenantId,
+      SCOPE.projectId,
+      bindings,
+      createTool,
+      z,
+      guardFor(ARMED),
+      { source: 'trigger' },
+      { agentKey: 'agent-1', userId: 'user-1', projectId: SCOPE.projectId },
+      { conversationId: 'conv-1', accountableUserId: 'owner-1' },
+    );
+  }
+
+  it('binds nothing in an edition without the Channels module', async () => {
+    const { tools } = await buildFor([CHANNEL_BINDING]);
+    expect(tools).toEqual([]);
+  });
+
+  it('hands the host the run it builds for, with only the known tool names', async () => {
+    const seen: ChannelToolsBuildInput[] = [];
+    registerChannelToolsHost({
+      buildTools: async (input) => {
+        seen.push(input);
+        return [channelTool('slack_send_direct_message', async () => ({ ok: true }))];
+      },
+    });
+
+    const { tools } = await buildFor([CHANNEL_BINDING]);
+
+    expect(tools).toHaveLength(1);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      tenantDbName: SCOPE.tenantDbName,
+      projectId: SCOPE.projectId,
+      agentKey: 'agent-1',
+      toolNames: ['send_direct_message'],
+      // The accountable person of an unattended run wins over the caller.
+      userId: 'owner-1',
+      conversationId: 'conv-1',
+      runtimeContext: { source: 'trigger' },
+    });
+  });
+
+  it('evaluates a channel tool under agent.channel.<name> and blocks it like any other', async () => {
+    const executor = vi.fn(async () => ({ ok: true }));
+    registerChannelToolsHost({ buildTools: async () => [channelTool('slack_send_channel_message', executor)] });
+    hoisted.runHook.mockImplementation(async ({ hook }: HookCall) =>
+      hook === 'tool.pre' ? blockVerdict(hook, 'Posting is not permitted.') : pass(hook),
+    );
+
+    const { tools } = await buildFor([CHANNEL_BINDING]);
+    const record = tools[0] as unknown as Record<string, (args: Record<string, unknown>) => Promise<unknown>>;
+    for (const alias of ['invoke', 'call', 'func', 'run']) {
+      expect(await record[alias]({ channel: '#general', text: 'hi' })).toContain('Posting is not permitted.');
+    }
+    expect(executor).not.toHaveBeenCalled();
+    expect(evaluations()[0]).toEqual(['tool.pre', 'agent.channel.slack_send_channel_message']);
+  });
+
+  it('skips the binding when the host fails, without failing the run', async () => {
+    registerChannelToolsHost({ buildTools: async () => { throw new Error('boom'); } });
+    const { tools } = await buildFor([CHANNEL_BINDING]);
+    expect(tools).toEqual([]);
   });
 });

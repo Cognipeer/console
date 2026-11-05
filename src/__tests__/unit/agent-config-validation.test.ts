@@ -76,6 +76,23 @@ beforeEach(() => {
 const validate = (config: IAgentConfig) => validateAgentConfig({ tenantDbName: 't', projectId: 'p', config, agentKey: 'me' });
 const fields = (issues: Array<{ field: string }>) => issues.map((issue) => issue.field);
 
+describe('channel system tool binding', () => {
+    const bind = (toolNames: string[]) => ({
+        modelKey: 'gpt-main',
+        toolBindings: [{ source: 'system' as const, sourceKey: 'channel', toolNames }],
+    });
+
+    it('accepts the known channel tools', () => {
+        expect(validateAgentConfigShape(bind(['list_channels', 'send_direct_message', 'send_channel_message', 'update_message']) as IAgentConfig).errors).toEqual([]);
+    });
+
+    it('needs at least one tool and refuses unknown ones', () => {
+        expect(fields(validateAgentConfigShape(bind([]) as IAgentConfig).errors)).toContain('toolBindings[0].toolNames');
+        const errors = validateAgentConfigShape(bind(['send_direct_message', 'delete_everything']) as IAgentConfig).errors;
+        expect(errors.some((e) => e.field === 'toolBindings[0].toolNames' && e.message.includes('delete_everything'))).toBe(true);
+    });
+});
+
 describe('web_fetch (crawler system tool) binding', () => {
     const bind = (crawlerKey?: string) => ({
         modelKey: 'gpt-main',

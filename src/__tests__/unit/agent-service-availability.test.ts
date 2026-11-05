@@ -95,6 +95,7 @@ describe('bindings of a switched-off service are dropped', () => {
     expect(bindingServiceOf({ source: 'system', sourceKey: 'browser_use' })).toBe('browser');
     expect(bindingServiceOf({ source: 'system', sourceKey: 'web_search' })).toBe('websearch');
     expect(bindingServiceOf({ source: 'system', sourceKey: 'crawler' })).toBe('crawler');
+    expect(bindingServiceOf({ source: 'system', sourceKey: 'channel' })).toBe('channels');
     expect(bindingServiceOf({ source: 'system', sourceKey: 'something_else' })).toBeNull();
   });
 
