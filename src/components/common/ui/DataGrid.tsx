@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, ReactNode, useMemo, type MouseEvent } from 'react';
+import { Fragment, ReactNode, useMemo, useRef, type MouseEvent, type PointerEvent } from 'react';
 import {
   ActionIcon,
   Button,
@@ -155,6 +155,13 @@ export interface DataGridProps<T> {
   footerRight?: ReactNode;
 }
 
+/**
+ * A press that moves more than this many px (or scrolls the row on screen) is a
+ * scroll/drag, not a tap: it must not open the row. Browsers still fire `click`
+ * for small finger movements, which made touch scrolling open detail pages.
+ */
+const ROW_TAP_MOVE_THRESHOLD = 10;
+
 export default function DataGrid<T>({
   records,
   rowKey,
@@ -206,8 +213,34 @@ export default function DataGrid<T>({
     };
   }, [onRowClick, rowHref, navigate]);
 
+  const pressRef = useRef<{ x: number; y: number; rowTop: number } | null>(null);
+
+  const handleRowPointerDown = (event: PointerEvent<HTMLTableRowElement>) => {
+    pressRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      rowTop: event.currentTarget.getBoundingClientRect().top,
+    };
+  };
+
+  /** True when the press that produced this click was a scroll or drag. */
+  const wasScrollGesture = (event: MouseEvent<HTMLTableRowElement>) => {
+    const press = pressRef.current;
+    pressRef.current = null;
+    if (!press) return false;
+    const moved =
+      Math.abs(event.clientX - press.x) > ROW_TAP_MOVE_THRESHOLD ||
+      Math.abs(event.clientY - press.y) > ROW_TAP_MOVE_THRESHOLD;
+    // The page or the table wrapper scrolled under the finger.
+    const scrolled =
+      Math.abs(event.currentTarget.getBoundingClientRect().top - press.rowTop) >
+      ROW_TAP_MOVE_THRESHOLD;
+    return moved || scrolled;
+  };
+
   const handleRowClick = (event: MouseEvent<HTMLTableRowElement>, row: T) => {
     if (!activateRow) return;
+    if (wasScrollGesture(event)) return;
     // A real link inside the row handles its own click (incl. Cmd/Ctrl-click).
     const anchor = (event.target as Element | null)?.closest?.('a[href]');
     if (anchor && event.currentTarget.contains(anchor)) return;
@@ -421,6 +454,10 @@ export default function DataGrid<T>({
                       onClick={activateRow ? (event) => handleRowClick(event, row) : undefined}
                       data-pending={isRowPending || undefined}
                       {...(href && rowPrefetch !== false ? getIntentProps(href) : null)}
+                      onPointerDown={(event) => {
+                        if (href && rowPrefetch !== false) getIntentProps(href).onPointerDown();
+                        handleRowPointerDown(event);
+                      }}
                     >
                       {selectable ? (
                         <td
