@@ -43,6 +43,12 @@ import {
   updateMemoryStore,
   deleteMemoryStore,
   addMemory,
+  deleteMemoryItemsBulk,
+  getMemoryItem,
+  MemoryItemNotFoundError,
+  MemoryStoreFullError,
+  searchMemories,
+  updateMemoryItem,
 } from '@/lib/services/memory/memoryService';
 import type { IMemoryStore } from '@/lib/database';
 
@@ -363,7 +369,8 @@ describe('deleteMemoryStore', () => {
 
   it('deletes memory items before deleting the store', async () => {
     await deleteMemoryStore(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY);
-    expect(db.deleteMemoryItems).toHaveBeenCalledWith(STORE_KEY);
+    // Another project may have a store with the same key: only this project's items go.
+    expect(db.deleteMemoryItems).toHaveBeenCalledWith(STORE_KEY, { projectId: PROJECT_ID });
     expect(db.deleteMemoryStore).toHaveBeenCalledTimes(1);
   });
 
@@ -480,5 +487,231 @@ describe('addMemory', () => {
     expect(db.createMemoryItem).not.toHaveBeenCalled();
     expect(db.incrementMemoryAccess).toHaveBeenCalledTimes(1);
     expect(result).toEqual(existingItem);
+  });
+});
+
+// ── Project scoping, TTL, capacity, search filtering ─────────────────────────
+
+function makeItem(overrides: Partial<import('@/lib/database').IMemoryItem> = {}): import('@/lib/database').IMemoryItem {
+  return {
+    _id: 'item-1',
+    tenantId: TENANT_ID,
+    projectId: PROJECT_ID,
+    storeKey: STORE_KEY,
+    content: 'Prefers short answers',
+    contentHash: 'hash-1',
+    scope: 'user',
+    scopeId: 'user-42',
+    metadata: {},
+    tags: [],
+    source: 'agent',
+    importance: 0.7,
+    accessCount: 0,
+    embeddingVersion: 'text-embedding-3-small',
+    vectorId: 'vec-1',
+    status: 'active',
+    ...overrides,
+  };
+}
+
+describe('memory items stay inside their project', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
+    (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
+      response: { data: [{ embedding: [0.1, 0.2] }] },
+    });
+  });
+
+  it('getMemoryItem returns an item of the addressed store and project', async () => {
+    db.findMemoryItemById.mockResolvedValue(makeItem());
+    await expect(getMemoryItem(TENANT_DB, PROJECT_ID, STORE_KEY, 'item-1')).resolves.toMatchObject({ _id: 'item-1' });
+    expect(db.incrementMemoryAccess).toHaveBeenCalledWith('item-1');
+  });
+
+  it('getMemoryItem treats an item of another project as missing', async () => {
+    db.findMemoryItemById.mockResolvedValue(makeItem({ projectId: 'proj-other' }));
+    await expect(getMemoryItem(TENANT_DB, PROJECT_ID, STORE_KEY, 'item-1')).rejects.toBeInstanceOf(MemoryItemNotFoundError);
+    expect(db.incrementMemoryAccess).not.toHaveBeenCalled();
+  });
+
+  it('getMemoryItem treats an item of another store as missing', async () => {
+    db.findMemoryItemById.mockResolvedValue(makeItem({ storeKey: 'mem-other' }));
+    await expect(getMemoryItem(TENANT_DB, PROJECT_ID, STORE_KEY, 'item-1')).rejects.toBeInstanceOf(MemoryItemNotFoundError);
+  });
+
+  it('addMemory deduplicates within the project only', async () => {
+    db.findMemoryItemByHash.mockResolvedValue(null);
+    db.createMemoryItem.mockResolvedValue(makeItem());
+    await addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' });
+    expect(db.findMemoryItemByHash).toHaveBeenCalledWith(STORE_KEY, expect.any(String), PROJECT_ID);
+  });
+
+  it('deleteMemoryItemsBulk deletes and recounts within the project', async () => {
+    db.deleteMemoryItems.mockResolvedValue(2);
+    db.countMemoryItems.mockResolvedValue(3);
+    await deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { scope: 'user' });
+    expect(db.deleteMemoryItems).toHaveBeenCalledWith(STORE_KEY, { scope: 'user', projectId: PROJECT_ID });
+    expect(db.countMemoryItems).toHaveBeenCalledWith(STORE_KEY, PROJECT_ID);
+  });
+});
+
+describe('store ttlDays and maxMemories', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    db.findMemoryItemByHash.mockResolvedValue(null);
+    db.createMemoryItem.mockImplementation(async (item) => ({ _id: 'item-1', ...item }));
+    (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
+      response: { data: [{ embedding: [0.1, 0.2] }] },
+    });
+  });
+
+  it('stamps expiresAt from ttlDays', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ config: { ...makeStore().config, ttlDays: 2 } }));
+    const before = Date.now();
+    const item = await addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' });
+    const expiresAt = (item.expiresAt as Date).getTime();
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 2 * 86_400_000);
+    expect(expiresAt).toBeLessThanOrEqual(Date.now() + 2 * 86_400_000);
+  });
+
+  it('writes no expiresAt without ttlDays', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
+    const item = await addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' });
+    expect(item.expiresAt).toBeUndefined();
+  });
+
+  it('refuses a memory once the store holds maxMemories', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ config: { ...makeStore().config, maxMemories: 3 } }));
+    db.countMemoryItems.mockResolvedValue(3);
+    await expect(addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' })).rejects.toBeInstanceOf(MemoryStoreFullError);
+    expect(db.countMemoryItems).toHaveBeenCalledWith(STORE_KEY, PROJECT_ID);
+    expect(upsertVectors).not.toHaveBeenCalled();
+    expect(db.createMemoryItem).not.toHaveBeenCalled();
+  });
+
+  it('accepts a memory below maxMemories', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ config: { ...makeStore().config, maxMemories: 3 } }));
+    db.countMemoryItems.mockResolvedValue(2);
+    await expect(addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' })).resolves.toBeDefined();
+  });
+});
+
+describe('updateMemoryItem', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ config: { ...makeStore().config, ttlDays: 1 } }));
+    db.findMemoryItemById.mockResolvedValue(makeItem({ tags: ['pref'] }));
+    db.updateMemoryItem.mockImplementation(async (_id: string, data: Record<string, unknown>) => ({ ...makeItem(), ...data }));
+    (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
+      response: { data: [{ embedding: [0.3, 0.4] }] },
+    });
+  });
+
+  it('keeps scope and scopeId on the vector when the content changes', async () => {
+    await updateMemoryItem(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, 'item-1', { content: 'Prefers long answers', importance: 0.9 });
+    const vector = (upsertVectors as ReturnType<typeof vi.fn>).mock.calls[0][3].vectors[0];
+    expect(vector).toMatchObject({
+      id: 'vec-1',
+      metadata: { storeKey: STORE_KEY, scope: 'user', scopeId: 'user-42', source: 'agent', tags: 'pref', importance: 0.9 },
+    });
+  });
+
+  it('refreshes expiresAt when the content changes', async () => {
+    await updateMemoryItem(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, 'item-1', { content: 'Prefers long answers' });
+    const payload = db.updateMemoryItem.mock.calls[0][1] as Record<string, unknown>;
+    expect(payload.expiresAt).toBeInstanceOf(Date);
+  });
+
+  it('does not touch the vector when only the status changes', async () => {
+    await updateMemoryItem(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, 'item-1', { status: 'archived' });
+    expect(upsertVectors).not.toHaveBeenCalled();
+  });
+});
+
+describe('searchMemories', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
+    (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
+      response: { data: [{ embedding: [0.1, 0.2] }] },
+    });
+  });
+
+  it('loads only the matched items and leaves out archived, expired and vector-only matches', async () => {
+    (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      matches: [
+        { id: 'vec-archived', score: 0.95 },
+        { id: 'vec-expired', score: 0.93 },
+        { id: 'vec-orphan', score: 0.92 },
+        { id: 'vec-ok', score: 0.9 },
+      ],
+    });
+    db.findMemoryItemsByVectorIds.mockResolvedValue([
+      makeItem({ _id: 'a', vectorId: 'vec-archived', status: 'archived' }),
+      makeItem({ _id: 'e', vectorId: 'vec-expired', expiresAt: new Date(Date.now() - 1000) }),
+      makeItem({ _id: 'ok', vectorId: 'vec-ok', expiresAt: new Date(Date.now() + 60_000) }),
+    ]);
+
+    const result = await searchMemories(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { query: 'answers', topK: 5 });
+
+    expect(result.memories.map((m) => m.id)).toEqual(['ok']);
+    expect(db.findMemoryItemsByVectorIds).toHaveBeenCalledWith(
+      STORE_KEY,
+      ['vec-archived', 'vec-expired', 'vec-orphan', 'vec-ok'],
+      PROJECT_ID,
+    );
+    expect(db.listMemoryItems).not.toHaveBeenCalled();
+    expect(db.incrementMemoryAccess).toHaveBeenCalledTimes(1);
+    expect(db.incrementMemoryAccess).toHaveBeenCalledWith('ok');
+  });
+
+  it('asks the index for more than topK and stops at topK after filtering by tag', async () => {
+    (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      matches: [
+        { id: 'v1', score: 0.9 },
+        { id: 'v2', score: 0.8 },
+        { id: 'v3', score: 0.7 },
+        { id: 'v4', score: 0.6 },
+      ],
+    });
+    db.findMemoryItemsByVectorIds.mockResolvedValue([
+      makeItem({ _id: 'i1', vectorId: 'v1', tags: ['other'] }),
+      makeItem({ _id: 'i2', vectorId: 'v2', tags: ['pref'] }),
+      makeItem({ _id: 'i3', vectorId: 'v3', tags: ['pref'] }),
+      makeItem({ _id: 'i4', vectorId: 'v4', tags: ['pref'] }),
+    ]);
+
+    const result = await searchMemories(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { query: 'q', topK: 2, tags: ['pref'] });
+
+    expect((queryVectorIndex as ReturnType<typeof vi.fn>).mock.calls[0][3].query.topK).toBe(6);
+    expect(result.memories.map((m) => m.id)).toEqual(['i2', 'i3']);
+  });
+
+  it('drops matches under minScore before loading items', async () => {
+    (queryVectorIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      matches: [{ id: 'v1', score: 0.9 }, { id: 'v2', score: 0.2 }],
+    });
+    db.findMemoryItemsByVectorIds.mockResolvedValue([makeItem({ _id: 'i1', vectorId: 'v1' })]);
+
+    await searchMemories(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { query: 'q', minScore: 0.5 });
+
+    expect(db.findMemoryItemsByVectorIds).toHaveBeenCalledWith(STORE_KEY, ['v1'], PROJECT_ID);
   });
 });

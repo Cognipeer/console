@@ -13,8 +13,11 @@ export interface IMemoryStoreConfig {
   metric: 'cosine' | 'euclidean' | 'dotproduct';
   defaultScope: MemoryScope;
   deduplication: boolean;
+  /** Stored for compatibility; nothing summarizes memories yet. */
   autoSummarize: boolean;
+  /** New memories are refused (`MemoryStoreFullError`) once the store holds this many. */
   maxMemories?: number;
+  /** A memory expires this many days after it is written or its content changes; expired ones are not recalled. */
   ttlDays?: number;
 }
 

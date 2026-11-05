@@ -8636,6 +8636,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The store already holds its `config.maxMemories`.
         "500":
           $ref: "#/components/responses/InternalError"
     delete:
@@ -23987,7 +23989,11 @@ components:
         config:
           type: object
           additionalProperties: true
-          description: Store-specific configuration.
+          description: >-
+            Store-specific configuration. `deduplication` (default true) returns the existing item for identical content.
+            `defaultScope` is the scope of an item written without one. `ttlDays` expires memories that many days after they
+            are written or their content changes; expired memories are no longer recalled. `maxMemories` refuses new
+            memories with a 409 once the store holds that many. `autoSummarize` is stored but has no effect yet.
         createdBy:
           type: string
         createdAt:

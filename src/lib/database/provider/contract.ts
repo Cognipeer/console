@@ -1738,12 +1738,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     data: Partial<Omit<IMemoryItem, 'tenantId' | 'storeKey'>>,
   ): Promise<IMemoryItem | null>;
   deleteMemoryItem(id: string): Promise<boolean>;
+  /**
+   * Store keys are unique only within a project, so every item query takes the
+   * project as well: two projects may each have a store called `mem-notes`.
+   */
   deleteMemoryItems(
     storeKey: string,
-    filter?: { scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
+    filter?: { projectId?: string; scope?: MemoryScope; scopeId?: string; tags?: string[]; before?: Date },
   ): Promise<number>;
   findMemoryItemById(id: string): Promise<IMemoryItem | null>;
-  findMemoryItemByHash(storeKey: string, contentHash: string): Promise<IMemoryItem | null>;
+  findMemoryItemByHash(storeKey: string, contentHash: string, projectId?: string): Promise<IMemoryItem | null>;
+  /** The items behind these vector ids, in no particular order; ids with no item are left out. */
+  findMemoryItemsByVectorIds(storeKey: string, vectorIds: string[], projectId?: string): Promise<IMemoryItem[]>;
   listMemoryItems(
     storeKey: string,
     filters?: {
@@ -1753,6 +1759,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       tags?: string[];
       status?: MemoryItemStatus;
       search?: string;
+      /** Leaves out items whose `expiresAt` is at or before this moment. */
+      notExpiredAt?: Date;
       limit?: number;
       skip?: number;
     },

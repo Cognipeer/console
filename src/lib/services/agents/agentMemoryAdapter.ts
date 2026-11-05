@@ -136,6 +136,8 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                     scope,
                     scopeId,
                     status: options?.includeObsolete ? undefined : 'active',
+                    // An expired fact is as gone as a forgotten one.
+                    ...(options?.includeObsolete ? {} : { notExpiredAt: new Date() }),
                     limit: options?.limit ?? SCAN_LIMIT,
                 });
                 return items.map(toFact);

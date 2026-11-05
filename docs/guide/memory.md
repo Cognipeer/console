@@ -144,7 +144,7 @@ The recall function is optimized for chat contexts. It returns a compact `contex
 | `scope` | Categorization (e.g., `user`, `session`, `global`) |
 | `source` | Origin identifier |
 | `tags` | Array of string tags for filtering |
-| `importance` | Float 0-1, influences ranking |
+| `importance` | Float 0-1, stored and returned with the memory; it does not change the ranking |
 | `metadata` | Arbitrary key-value pairs |
 
 ## Pipeline
@@ -158,8 +158,20 @@ Content → Embed (via inference service) → Vector Upsert → Store metadata
 **Searching memories:**
 
 ```
-Query → Embed → Vector Search → Rank by score + importance → Return
+Query → Embed → Vector Search → Drop archived, expired and (if asked) untagged items → Rank by similarity score → Return
 ```
+
+`importance` is stored with each memory and returned with it, but it does not change the ranking.
+
+## Store Settings
+
+| Setting | Effect |
+|---------|--------|
+| `deduplication` | Default `true`. Adding content the store already holds returns the existing memory. |
+| `defaultScope` | The scope of a memory written without one. |
+| `ttlDays` | A memory expires this many days after it is written or its content changes. Expired memories are no longer recalled or searched; they stay listed until deleted. Memories written before the setting was added do not expire. |
+| `maxMemories` | Once the store holds this many memories, adding one is refused with `409`. |
+| `autoSummarize` | Stored, but has no effect yet. |
 
 ## Dependencies
 
@@ -171,7 +183,7 @@ Query → Embed → Vector Search → Rank by score + importance → Return
 An agent's **Memory** section picks one store from this module. The agent reads and writes facts there in the scope you choose:
 
 - **session** - this conversation only.
-- **user** - follows the caller across conversations.
+- **user** - follows the caller across conversations. The caller is the signed-in person, or the person a delegated user token names. A plain API key is one caller: every end user of an app that calls with the same key shares its `user` memory.
 - **workspace** - this agent only (the default).
 - **tenant** - shared by every agent that uses the store. Pick it when several agents should share memory.
 
