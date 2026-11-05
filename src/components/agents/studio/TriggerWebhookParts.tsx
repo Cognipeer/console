@@ -36,6 +36,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconCheck, IconCopy, IconInfoCircle, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { FormField } from '@/components/common/ui/FormShell';
+import { NO_AUTOFILL_FIELD, NO_AUTOFILL_SECRET } from '@/components/common/noCredentialAutofill';
 import { useConfirm } from '@/components/common/confirm';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import {
@@ -105,12 +106,13 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
                 </FormField>
                 {form.webhookAuth === 'header' ? (
                     <FormField label={t('webhookHeaderName')} hint={t('webhookHeaderNameHint')} required>
-                        <TextInput ff="monospace" value={form.webhookHeaderName} onChange={(event) => set('webhookHeaderName', event.currentTarget.value)} />
+                        <TextInput {...NO_AUTOFILL_FIELD} ff="monospace" value={form.webhookHeaderName} onChange={(event) => set('webhookHeaderName', event.currentTarget.value)} />
                     </FormField>
                 ) : null}
                 {form.webhookAuth === 'standard_webhooks' ? (
                     <FormField label={t('webhookStandardSecret')} hint={t('webhookStandardSecretHint')} required={!storedStandardSecret}>
                         <PasswordInput
+                            {...NO_AUTOFILL_SECRET}
                             value={form.webhookSecret}
                             placeholder={storedStandardSecret ? t('callbackSecretStored') : 'whsec_…'}
                             error={errorOf('webhookSecret')}
@@ -352,7 +354,7 @@ export function WebhookConnectCard({ agentId, triggerId, webhook, revealedSecret
                             data={GRACE_OPTIONS.map((option) => ({ value: option.value, label: t(option.key) }))}
                         />
                         {standard ? (
-                            <PasswordInput size="xs" w={260} placeholder="whsec_…" aria-label={t('webhookStandardSecret')} value={standardSecret} onChange={(event) => setStandardSecret(event.currentTarget.value)} />
+                            <PasswordInput {...NO_AUTOFILL_SECRET} size="xs" w={260} placeholder="whsec_…" aria-label={t('webhookStandardSecret')} value={standardSecret} onChange={(event) => setStandardSecret(event.currentTarget.value)} />
                         ) : null}
                         <Button size="xs" variant="light" color="orange" leftSection={<IconRefresh size={14} />} loading={rotating} disabled={standard && !standardSecret.trim()} onClick={() => void rotate()}>
                             {t('rotate')}
