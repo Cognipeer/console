@@ -108,6 +108,8 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       embeddingUsage = usage;
     } else {
       const result = await handleChatCompletion({
+        // Counted against the llm limits when the batch was submitted.
+        quotaChecked: true,
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         modelKey,

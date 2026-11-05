@@ -13,6 +13,7 @@
  * Future cache layer wraps this service's run() without strategy changes.
  */
 
+import { enforceServiceQuota, type ServiceCallOptions } from '@/lib/quota/serviceQuota';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
@@ -198,6 +199,7 @@ export async function runReranker(
   projectId: string | undefined,
   rerankerKey: string,
   request: RerankerRunRequest,
+  options: ServiceCallOptions = {},
 ): Promise<RerankerRunResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'reranker');
   const start = Date.now();
@@ -221,6 +223,13 @@ export async function runReranker(
   }
   if (!Array.isArray(request.documents) || request.documents.length === 0) {
     throw new Error('Reranker run: `documents` must be a non-empty array.');
+  }
+
+  if (options.quota !== false) {
+    await enforceServiceQuota(
+      { tenantDbName, tenantId, projectId },
+      { domain: 'rerank', resourceKey: reranker.key, cost: { requests: 1, units: request.documents.length } },
+    );
   }
 
   const cfg = reranker.config ?? {};

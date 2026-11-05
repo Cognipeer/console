@@ -164,6 +164,7 @@ export async function runModelChatCompletion(
   }
 
   const result = await handleChatCompletion({
+    quotaChecked: true,
     body,
     modelKey,
     projectId: auth.projectId,

@@ -1,3 +1,4 @@
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import type { MemoryScope, MemorySource, MemoryStoreStatus } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -189,6 +190,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('List memory items error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -225,6 +227,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });
       }
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Add memory item error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -296,6 +299,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Recall memories error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({

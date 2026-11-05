@@ -114,7 +114,8 @@ export const retentionApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const session = requireSessionContext(request);
       const cfg = getConfig().retention;
-      const policy = await runWithTenantScope(session.tenantDbName, (db) => loadPolicy(db));
+      // Read-only: a due pending policy is applied in memory; persisting it here would make the page fail on a read-only DB.
+      const policy = await runWithTenantScope(session.tenantDbName, (db) => loadPolicy(db, new Date(), false));
       const resolved = resolveClasses(policy);
       const editable = policyDrivenClasses();
       const deployment = resolveClasses({ preset: 'custom', classes: {}, projects: {} });

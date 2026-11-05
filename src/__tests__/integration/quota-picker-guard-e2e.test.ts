@@ -455,6 +455,10 @@ describeForEachProvider('a limit made from the pickers applies to the calls it n
   });
 
   it('is written for every service there is', () => {
-    expect([...RESOURCE_SERVICES.map((s) => s.domain), 'global'].sort()).toEqual([...QUOTA_DOMAINS].sort());
+    // Services added with the domain registry pick registry rows this test does not
+    // seed (web search providers, knowledge modules, MCP servers...); their sources
+    // are held by unit/quota-targets.test.ts and their guard calls by each service's tests.
+    const registryOnly: QuotaDomain[] = ['websearch', 'rag', 'mcp', 'rerank', 'memory', 'browser', 'crawler', 'guardrail', 'jobs', 'sandbox'];
+    expect([...RESOURCE_SERVICES.map((s) => s.domain), ...registryOnly, 'global'].sort()).toEqual([...QUOTA_DOMAINS].sort());
   });
 });

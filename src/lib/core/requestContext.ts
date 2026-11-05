@@ -40,6 +40,12 @@ export interface RequestContext {
   actorType?: RequestActorType;
   source?: RequestSource;
   via?: RequestVia;
+  /**
+   * The caller's address, resolved through the proxy trust boundary
+   * (`getAuthzClientIp`): what IP-scoped quota limits count. Absent outside an
+   * HTTP request (schedules, workers, system work).
+   */
+  clientIp?: string;
   startedAt: number;
 }
 
@@ -63,6 +69,7 @@ export function runWithRequestContext<T>(
     actorType: partial.actorType,
     source: partial.source,
     via: partial.via,
+    clientIp: partial.clientIp,
     startedAt: partial.startedAt ?? Date.now(),
   };
   return storage.run(ctx, fn);

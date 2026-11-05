@@ -1,3 +1,4 @@
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { createHash, randomUUID } from 'crypto';
@@ -2368,9 +2369,27 @@ export async function executeMcpTool(
    * and a knowledge base with access control answers with what that person may read.
    */
   identity?: ConsoleIdentityCaller,
+  /**
+   * The caller's address, for a call made outside the request-context wrapper (the public route);
+   * everywhere else the request context carries it.
+   */
+  caller?: { clientIp?: string },
 ): Promise<McpToolOutcome> {
   // Refuse before queuing a remote call and before a failure row is logged.
   await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
+  // One check per call, here: routes, agent tools and flows all arrive through this function.
+  const quotaDb = await getDatabase();
+  await enforceServiceQuota(
+    {
+      tenantDbName: quotaDb.getCurrentTenantDbName?.(),
+      tenantId: server.tenantId,
+      projectId: server.projectId ?? identity?.projectId,
+      userId: identity?.userId,
+      tokenId: identity?.tokenId,
+      clientIp: caller?.clientIp,
+    },
+    { domain: 'mcp', resourceKey: server.key, cost: { requests: 1 } },
+  );
   const startedAt = Date.now();
   try {
     let outcome: McpToolOutcome;

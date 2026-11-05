@@ -21,6 +21,7 @@ vi.mock('@/lib/database', () => ({
   }),
 }));
 vi.mock('@/lib/services/crawler/engine', () => ({ crawl: crawlMock }));
+vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota: vi.fn().mockResolvedValue(null) }));
 vi.mock('@/lib/core/cluster', () => ({ routeInstanceCall: vi.fn(), queueNameFor: vi.fn() }));
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn() }));
 

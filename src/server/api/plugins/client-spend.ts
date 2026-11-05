@@ -19,6 +19,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { QuotaDomain, QuotaPolicy, QuotaScope } from '@/lib/quota/types';
+import { ENFORCED_QUOTA_DOMAINS, QUOTA_DOMAIN_SPECS } from '@/lib/quota/domains';
 import { getBudgetUsage } from '@/lib/quota';
 import {
   createQuotaPolicy,
@@ -42,9 +43,8 @@ import {
 
 const logger = createLogger('api:client-spend');
 
-const VALID_DOMAINS: QuotaDomain[] = [
-  'global', 'llm', 'embedding', 'vector', 'file', 'tracing', 'stt', 'tts', 'ocr',
-];
+// The domains a budget can be set on: those that debit a realized cost (domains.ts).
+const VALID_DOMAINS: QuotaDomain[] = ENFORCED_QUOTA_DOMAINS.filter((domain) => QUOTA_DOMAIN_SPECS[domain].budget);
 const VALID_SCOPES: QuotaScope[] = ['tenant', 'user', 'token', 'resource', 'provider'];
 const VALID_GROUP_BY = ['hour', 'day', 'month'] as const;
 const VALID_GROUP_BY_ENTITY: SpendGroupByEntity[] = ['user', 'agent'];

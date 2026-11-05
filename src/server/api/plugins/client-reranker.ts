@@ -17,6 +17,7 @@
  *   { query, documents: string[] | { text }[], top_n? }
  */
 
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import type { IRerankerConfig, RerankerStrategy } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -204,6 +205,7 @@ export const clientRerankerApiPlugin: FastifyPluginAsync = async (app) => {
           },
         });
       } catch (error) {
+        if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
         logger.error('Run client reranker error', { error });
         return reply.code(400).send({
           error: error instanceof Error ? error.message : 'Internal error',

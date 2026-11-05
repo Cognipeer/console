@@ -5,11 +5,13 @@ const ragService = vi.hoisted(() => ({
   getRagModule: vi.fn(),
   listRagDocuments: vi.fn(),
   getRagDocument: vi.fn(),
-  ingestDocument: vi.fn(),
+  ingestDocumentUnchecked: vi.fn(),
 }));
 const ragSource = vi.hoisted(() => ({ loadSourceText: vi.fn() }));
+const serviceQuota = vi.hoisted(() => ({ enforceServiceQuota: vi.fn() }));
 
 vi.mock('@/lib/services/rag/ragService', () => ragService);
+vi.mock('@/lib/quota/serviceQuota', () => serviceQuota);
 vi.mock('@/lib/services/rag/ragSource', () => ragSource);
 
 import {
@@ -159,7 +161,7 @@ describe('importRagModuleJsonl', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     ragService.getRagModule.mockResolvedValue(activeModule);
-    ragService.ingestDocument.mockResolvedValue({ _id: 'new' });
+    ragService.ingestDocumentUnchecked.mockResolvedValue({ _id: 'new' });
   });
 
   it('round-trips an export: header is skipped and each document is ingested deferred', async () => {
@@ -171,7 +173,7 @@ describe('importRagModuleJsonl', () => {
     const result = await importRagModuleJsonl('tenant', 'tid', 'proj', 'faq', 'user-1', data);
 
     expect(result).toEqual({ total: 1, imported: 1, failed: 0, errors: [] });
-    expect(ragService.ingestDocument).toHaveBeenCalledWith(
+    expect(ragService.ingestDocumentUnchecked).toHaveBeenCalledWith(
       'tenant',
       'tid',
       'proj',
@@ -208,7 +210,25 @@ describe('importRagModuleJsonl', () => {
     const result = await importRagModuleJsonl('tenant', 'tid', undefined, 'faq', 'u', data);
 
     expect(result).toEqual({ total: 1, imported: 1, failed: 0, errors: [] });
-    expect(ragService.ingestDocument.mock.calls[0][3]).toMatchObject({ chunkConfig: undefined, metadata: undefined });
+    expect(ragService.ingestDocumentUnchecked.mock.calls[0][3]).toMatchObject({ chunkConfig: undefined, metadata: undefined });
+  });
+
+  it('checks the rag quota once for the whole import, one unit per document, and imports nothing when refused', async () => {
+    const data = [
+      JSON.stringify({ fileName: 'a.txt', content: 'a' }),
+      JSON.stringify({ fileName: 'b.txt', content: 'b' }),
+    ].join('\n');
+    await importRagModuleJsonl('tenant', 'tid', 'proj', 'faq', 'u', data);
+    expect(serviceQuota.enforceServiceQuota).toHaveBeenCalledTimes(1);
+    expect(serviceQuota.enforceServiceQuota).toHaveBeenCalledWith(
+      { tenantDbName: 'tenant', tenantId: 'tid', projectId: 'proj' },
+      { domain: 'rag', resourceKey: 'faq', cost: { requests: 1, units: 2 } },
+    );
+
+    vi.clearAllMocks();
+    serviceQuota.enforceServiceQuota.mockRejectedValueOnce(Object.assign(new Error('Rate limit'), { name: 'QuotaExceededError' }));
+    await expect(importRagModuleJsonl('tenant', 'tid', 'proj', 'faq', 'u', data)).rejects.toThrow('Rate limit');
+    expect(ragService.ingestDocumentUnchecked).not.toHaveBeenCalled();
   });
 
   it('rejects an unsupported export version before ingesting anything', async () => {
@@ -216,7 +236,7 @@ describe('importRagModuleJsonl', () => {
     await expect(importRagModuleJsonl('tenant', 'tid', undefined, 'faq', 'u', data)).rejects.toThrow(
       'Unsupported export version',
     );
-    expect(ragService.ingestDocument).not.toHaveBeenCalled();
+    expect(ragService.ingestDocumentUnchecked).not.toHaveBeenCalled();
   });
 
   it('rejects imports above the document cap', async () => {

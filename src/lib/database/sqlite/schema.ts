@@ -441,6 +441,8 @@ export const TENANT_SCHEMA_SQL = `
     scope TEXT NOT NULL,
     scopeId TEXT,
     groupMode TEXT,
+    ipRanges TEXT,
+    ipMode TEXT,
     domain TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 100,
     enabled INTEGER NOT NULL DEFAULT 1,

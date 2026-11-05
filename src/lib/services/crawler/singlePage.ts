@@ -11,6 +11,7 @@
  * otherwise a prompt-injected URL would receive the crawler's secrets.
  */
 
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawler } from '@/lib/database';
@@ -94,6 +95,11 @@ export async function fetchPageWithCrawler(
 
   const refusal = refuseCrawlerUrl(crawler, url);
   if (refusal) throw new Error(refusal);
+
+  await enforceServiceQuota(
+    { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+    { domain: 'crawler', resourceKey: crawler.key, cost: { requests: 1, units: 1 } },
+  );
 
   const plan = {
     ...snapshotToPlan(snapshotCrawlerPlan(crawler, { seeds: [url] })),

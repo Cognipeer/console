@@ -18,6 +18,7 @@
  * is enforced per item on behalf of the submitting API token.
  */
 
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
@@ -181,6 +182,7 @@ export const clientBatchesApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(201).send(toClientBatch(job));
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Client batch create error', { error });
       return sendApiTokenError(reply, error)
         ?? sendBatchError(reply, error)

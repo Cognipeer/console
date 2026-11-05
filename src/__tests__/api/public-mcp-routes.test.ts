@@ -31,6 +31,7 @@ import {
   McpUnknownToolError,
   McpUpstreamError,
 } from '@/lib/services/mcp';
+import { QuotaExceededError } from '@/lib/quota/serviceQuota';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 import { sseSessionCount } from '@/lib/services/mcp/sseSessionManager';
 import { publicMcpApiPlugin } from '@/server/api/plugins/public-mcp';
@@ -519,7 +520,15 @@ describe('public MCP routes', () => {
       await start();
       const response = await post(callTool('echo', { text: 'hi' }));
       expect(json(response).result).toEqual({ content: [{ text: '{"echoed":true}', type: 'text' }], isError: false });
-      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { text: 'hi' });
+      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { text: 'hi' }, undefined, undefined, { clientIp: expect.any(String) });
+    });
+
+    it('answers 429 when a quota refuses the call, and does not log it as a tool failure', async () => {
+      await start();
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new QuotaExceededError('Request quota exceeded', 'mcp'));
+      const response = await post(callTool('echo', { text: 'hi' }));
+      expect(response.statusCode).toBe(429);
+      expect(json(response).error?.message).toBe('Request quota exceeded');
     });
   });
 
@@ -569,7 +578,7 @@ describe('public MCP routes', () => {
     it('drops arguments the tool does not declare', async () => {
       await start();
       await post(callTool('echo', { text: 'hi', extra: { nested: true } }));
-      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { text: 'hi' });
+      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { text: 'hi' }, undefined, undefined, { clientIp: expect.any(String) });
     });
 
     it('keeps undeclared arguments when the schema accepts extra keys', async () => {
@@ -578,7 +587,7 @@ describe('public MCP routes', () => {
       } as Partial<IMcpServer>);
       await start();
       await post(callTool('echo', { extra: 1 }));
-      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { extra: 1 });
+      expect(executeMcpTool).toHaveBeenCalledWith(expect.anything(), 'echo', { extra: 1 }, undefined, undefined, { clientIp: expect.any(String) });
     });
 
     it('refuses a string longer than MCP_PUBLIC_MAX_ARGUMENT_CHARS, at any depth', async () => {

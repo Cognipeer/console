@@ -5465,6 +5465,8 @@ paths:
               - stt
               - tts
               - ocr
+              - image
+              - decision
             default: llm
         - name: model
           in: query
@@ -27489,6 +27491,8 @@ components:
             - stt
             - tts
             - ocr
+            - image
+            - decision
         scope:
           type: string
           enum:
@@ -27551,6 +27555,8 @@ components:
             - stt
             - tts
             - ocr
+            - image
+            - decision
           default: llm
         scope:
           type: string
@@ -27622,6 +27628,8 @@ components:
             - stt
             - tts
             - ocr
+            - image
+            - decision
         configured:
           type: boolean
           description: False when no budget exists for the resolved scope.

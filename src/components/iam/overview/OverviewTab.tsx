@@ -37,7 +37,7 @@ import {
 import { emptyAuditFilters, fetchAudit, type AuditItem, type AuditPage } from '../audit/client';
 import { formatAuditText } from '../audit/summaryText';
 import { checkHref, iamHref, newPolicyHref, policyHref } from '../links';
-import { fetchPrincipals, isAbortError, type PrincipalPage, type PrincipalType } from '../principals/client';
+import { fetchPrincipals, isAbortError, type PrincipalPage } from '../principals/client';
 import { formatRelativeTime, shortId } from '../principals/format';
 import { PrincipalAvatar } from '../principals/visuals';
 import classes from './overview.module.css';
@@ -169,18 +169,21 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
     const controller = new AbortController();
     const { signal } = controller;
     setRefreshing(true);
-    const page = (type: PrincipalType) => settle(fetchPrincipals({ type, limit: COUNT_PAGE }, signal));
+    // Each card shows its answer as soon as it arrives: the recent denials read the audit
+    // table and can take seconds, and must not hold up the policy, engine and principal cards.
+    const load = <K extends keyof OverviewData>(key: K, work: Promise<OverviewData[K] extends Loaded<infer T> ? T : never>) =>
+      settle(work).then((state) => {
+        if (!signal.aborted) setData((prev) => ({ ...prev, [key]: state }));
+      });
     void Promise.all([
-      settle(iamApi.listPolicies(signal)),
-      settle(iamApi.getEngineStats(signal)),
-      settle(fetchAudit(emptyAuditFilters('denials'), { limit: RECENT_DENIALS }, signal)),
-      page('user'),
-      page('group'),
-      page('token'),
-    ]).then(([policies, stats, denials, users, groups, tokens]) => {
-      if (signal.aborted) return;
-      setData({ policies, stats, denials, users, groups, tokens });
-      setRefreshing(false);
+      load('policies', iamApi.listPolicies(signal)),
+      load('stats', iamApi.getEngineStats(signal)),
+      load('denials', fetchAudit(emptyAuditFilters('denials'), { limit: RECENT_DENIALS }, signal)),
+      load('users', fetchPrincipals({ type: 'user', limit: COUNT_PAGE }, signal)),
+      load('groups', fetchPrincipals({ type: 'group', limit: COUNT_PAGE }, signal)),
+      load('tokens', fetchPrincipals({ type: 'token', limit: COUNT_PAGE }, signal)),
+    ]).then(() => {
+      if (!signal.aborted) setRefreshing(false);
     });
     return () => controller.abort();
   }, [reload]);

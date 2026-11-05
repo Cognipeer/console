@@ -6,10 +6,14 @@ import type { LicenseType } from '@/lib/license/license-manager';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { onIamInvalidation } from '@/lib/iam/events';
 import { formatUsd } from '@/lib/utils/formatUsd';
+import { getRequestContext } from '@/lib/core/requestContext';
+import { domainFallsBackToGlobal } from '@/lib/quota/domains';
+import { addressMatchesRanges, parseClientIp, quotaAddressKey, type ParsedIp } from '@/lib/quota/ipScope';
 
 const logger = createLogger('quota-guard');
 import {
   isTenantWideKind,
+  quotaIpMode,
   type QuotaDomain,
   type QuotaLimits,
   type QuotaRateLimit,
@@ -38,6 +42,13 @@ export interface QuotaContext {
   // Resource identification (model key, index key, bucket key, session id)
   resourceKey?: string;
   providerKey?: string;
+  /**
+   * The caller's address, which `ip`-scoped policies match and count. Left out,
+   * the guard reads it from the request context (set by the request wrappers
+   * from `getAuthzClientIp`); a call with neither — a schedule, a worker, system
+   * work — is not checked against IP limits at all.
+   */
+  clientIp?: string;
 }
 
 export interface QuotaCheckResult {
@@ -74,6 +85,7 @@ function matchesScope(
   policy: IQuotaPolicy,
   context: QuotaContext,
   groupIds: readonly string[],
+  client: ClientAddress | null,
 ): boolean {
   if (!policy.enabled) return false;
 
@@ -90,24 +102,40 @@ function matchesScope(
       return policy.scopeId === context.resourceKey;
     case 'provider':
       return policy.scopeId === context.providerKey;
+    case 'ip':
+      return client !== null && addressMatchesRanges(client.ip, policy.ipRanges);
     default:
       return false;
   }
 }
 
-/**
- * Domains whose checks ignore `global` policies. A `global` policy is written
- * for "everything a project does" — rate limits and budgets sized for model
- * calls — and the agent domain is new: applying those to agent runs would start
- * refusing runs for tenants that never configured an agent limit.
- */
-const DOMAINS_WITHOUT_GLOBAL_FALLBACK: ReadonlySet<QuotaDomain> = new Set<QuotaDomain>(['agent']);
+/** The caller's address as the guard counts it; null when the call has no address at all. */
+interface ClientAddress {
+  /** Null when an address was given but could not be read: it counts in the shared `invalid` bucket. */
+  ip: ParsedIp | null;
+  key: string;
+}
 
+function clientAddressOf(context: QuotaContext): ClientAddress | null {
+  const raw = context.clientIp ?? getRequestContext()?.clientIp;
+  if (raw === undefined || raw === null || raw === '') return null;
+  const ip = parseClientIp(raw);
+  return { ip, key: quotaAddressKey(ip) };
+}
+
+/**
+ * Whether a policy's domain reaches a check in `context.domain`. A `global`
+ * policy is written for "everything a project does" — rate limits and budgets
+ * sized for model calls — so it only reaches the domains that existed when it
+ * was the catch-all (`globalFallback` in domains.ts): applying it to agent runs
+ * or to a service added later would start refusing calls for tenants that never
+ * configured a limit on them.
+ */
 function matchesDomain(
   policy: IQuotaPolicy,
   context: QuotaContext,
 ): boolean {
-  if (policy.domain === 'global') return !DOMAINS_WITHOUT_GLOBAL_FALLBACK.has(context.domain);
+  if (policy.domain === 'global') return context.domain === 'global' || domainFallsBackToGlobal(context.domain);
   return policy.domain === context.domain;
 }
 
@@ -133,6 +161,9 @@ function mergeLimits(base: QuotaLimits, override: QuotaLimits): QuotaLimits {
       storage: override.rateLimit.storage
         ? { ...merged.rateLimit?.storage, ...override.rateLimit.storage }
         : merged.rateLimit?.storage,
+      units: override.rateLimit.units
+        ? { ...merged.rateLimit?.units, ...override.rateLimit.units }
+        : merged.rateLimit?.units,
     };
   }
 
@@ -161,6 +192,8 @@ const SCOPE_SPECIFICITY: Record<IQuotaPolicy['scope'], number> = {
   provider: 2,
   user: 3,
   token: 4,
+  // Never merged with the others (see ipBuckets); listed for completeness.
+  ip: 0,
 };
 
 const isSharedGroupPolicy = (policy: IQuotaPolicy): boolean =>
@@ -509,7 +542,15 @@ async function resolveLimits(context: QuotaContext): Promise<ResolvedLimits> {
   };
 
   const groupIds = await callerGroupIds(context, policies);
-  const matching = policies.filter((p) => matchesScope(p, context, groupIds) && matchesDomain(p, context));
+  const client = policies.some((p) => p.enabled && p.scope === 'ip') ? clientAddressOf(context) : null;
+  const matchingAll = policies.filter((p) => matchesScope(p, context, groupIds, client) && matchesDomain(p, context));
+  // IP limits count the address, not the caller: they keep counters of their
+  // own and never join the merge below, so they cannot loosen or tighten what a
+  // user, token or group policy says.
+  const ipPolicies = matchingAll.filter((p) => p.scope === 'ip');
+  const matching = ipPolicies.length === 0 ? matchingAll : matchingAll.filter((p) => p.scope !== 'ip');
+  const withIp = (resolved: ResolvedLimits): ResolvedLimits =>
+    ipPolicies.length === 0 || !client ? resolved : { ...resolved, buckets: [...resolved.buckets, ...ipBuckets(ipPolicies, client)] };
 
   const agentDomain = context.domain === 'agent';
   const hasGroupPolicy = matching.some((p) => p.scope === 'group');
@@ -527,7 +568,7 @@ async function resolveLimits(context: QuotaContext): Promise<ResolvedLimits> {
 
   if (!agentDomain && !hasGroupPolicy) {
     const effective = mergePolicies(base, applicable);
-    return { effective, buckets: [subjectBucket(context, effective)] };
+    return withIp({ effective, buckets: [subjectBucket(context, effective)] });
   }
 
   // Agent domain: a policy narrowed to one agent (scope 'resource') is counted
@@ -583,7 +624,42 @@ async function resolveLimits(context: QuotaContext): Promise<ResolvedLimits> {
     });
   }
 
-  return { effective, buckets };
+  return withIp({ effective, buckets });
+}
+
+/**
+ * The counters of the IP limits that matched. Only their `rateLimit` is read:
+ * an IP limit carries no budget, per-request limit or cap (the policy API
+ * refuses those). Every `perAddress` policy that matched folds, by priority,
+ * into one counter per client address; every `shared` policy is a pool of its
+ * own that all the addresses in its ranges draw from.
+ */
+function ipBuckets(policies: readonly IQuotaPolicy[], client: ClientAddress): LimitBucket[] {
+  const ordered = [...policies].sort((a, b) => a.priority - b.priority);
+  const buckets: LimitBucket[] = [];
+  const unscoped = { provider: false, resource: false };
+
+  const perAddress = ordered.filter((policy) => quotaIpMode(policy) === 'perAddress' && policy.limits?.rateLimit);
+  if (perAddress.length > 0) {
+    const limits = perAddress.reduce<QuotaLimits>(
+      (acc, policy) => mergeLimits(acc, { rateLimit: policy.limits.rateLimit }),
+      {},
+    );
+    buckets.push({ id: 'ip', limits, identity: `ip:${client.key}`, scoped: unscoped, reasonPrefix: 'IP rate limit exceeded for' });
+  }
+
+  for (const policy of ordered) {
+    if (quotaIpMode(policy) !== 'shared' || !policy.limits?.rateLimit) continue;
+    const id = String(policy._id);
+    buckets.push({
+      id: `iprange:${id}`,
+      limits: { rateLimit: policy.limits.rateLimit },
+      identity: `iprange:${id}`,
+      scoped: unscoped,
+      reasonPrefix: 'IP range rate limit exceeded for',
+    });
+  }
+  return buckets;
 }
 
 export async function resolveEffectiveLimits(
@@ -790,12 +866,36 @@ export async function checkPerRequestLimits(
   return { allowed: true, effectiveLimits };
 }
 
+/**
+ * Whether one more concurrent session fits under `perRequest.maxConcurrentRequests`.
+ * The caller counts the sessions it has open (browser sessions, sandbox
+ * instances) and passes the number in: no counter is kept here, so a crashed
+ * session cannot leave a slot taken.
+ */
+export async function checkConcurrency(
+  context: QuotaContext,
+  activeCount: number,
+): Promise<QuotaCheckResult> {
+  const effectiveLimits = await resolveEffectiveLimits(context);
+  const limit = effectiveLimits.perRequest?.maxConcurrentRequests;
+  if (limit !== undefined && limit !== -1 && activeCount >= limit) {
+    return {
+      allowed: false,
+      reason: `Concurrent ${context.domain} limit reached (${activeCount}/${limit})`,
+      effectiveLimits,
+    };
+  }
+  return { allowed: true, effectiveLimits };
+}
+
 export interface RateLimitCost {
   requests?: number;
   tokens?: number;
   vectors?: number;
   files?: number;
   storageBytes?: number;
+  /** What the domain's `units` counter counts (pages, documents, minutes). */
+  units?: number;
 }
 
 export interface CheckRateLimitOptions {
@@ -806,6 +906,12 @@ export interface CheckRateLimitOptions {
    * front; the usage itself is recorded when it is known.
    */
   headroom?: ReadonlyArray<keyof RateLimitCost>;
+  /**
+   * First segment of the counter keys. `rate_limit` (the default) is what every
+   * limit is enforced on; another prefix counts the same limits on counters of
+   * their own, which no enforced check reads (shadow mode).
+   */
+  counterPrefix?: string;
 }
 
 /** Per-kind wiring: where the limit sits, what the counter is called, which cost feeds it. */
@@ -819,6 +925,7 @@ const RATE_KINDS: ReadonlyArray<{
   { limit: 'vectors', counter: 'vectors', cost: 'vectors' },
   { limit: 'files', counter: 'files', cost: 'files' },
   { limit: 'storage', counter: 'storageBytes', cost: 'storageBytes' },
+  { limit: 'units', counter: 'units', cost: 'units' },
 ];
 
 const RATE_WINDOWS = [
@@ -864,7 +971,7 @@ export async function checkRateLimit(
     if (inspectOnly && !options.headroom?.includes(kind.cost)) return;
 
     const key = [
-      'rate_limit',
+      options.counterPrefix ?? 'rate_limit',
       context.domain,
       kind.counter,
       windowName,

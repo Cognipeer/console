@@ -1,3 +1,4 @@
+import { isQuotaExceededError } from '@/lib/quota/serviceQuota';
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
@@ -976,7 +977,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           transport: 'rest',
           sourceType: resolveSourceType(server),
         }, secretValues);
-        return reply.code(500).send({ error: message });
+        return reply.code(isQuotaExceededError(execError) ? 429 : 500).send({ error: message });
       }
     } catch (error) {
       logger.error('Execute MCP tool error', { error });

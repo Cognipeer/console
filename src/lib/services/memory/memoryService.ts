@@ -1,3 +1,4 @@
+import { enforceServiceQuota, type ServiceCallOptions } from '@/lib/quota/serviceQuota';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'crypto';
 import slugify from 'slugify';
@@ -291,6 +292,25 @@ export async function addMemory(
   projectId: string,
   storeKey: string,
   request: AddMemoryRequest,
+  options: ServiceCallOptions = {},
+): Promise<IMemoryItem> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
+  if (options.quota !== false) {
+    await enforceServiceQuota(
+      { tenantDbName, tenantId, projectId },
+      { domain: 'memory', resourceKey: storeKey, cost: { requests: 1 } },
+    );
+  }
+  return addMemoryUnchecked(tenantDbName, tenantId, projectId, storeKey, request);
+}
+
+/** `addMemory` without the quota check, for a batch that counted the call once. */
+async function addMemoryUnchecked(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  storeKey: string,
+  request: AddMemoryRequest,
 ): Promise<IMemoryItem> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
   const db = await withTenantDb(tenantDbName);
@@ -390,6 +410,10 @@ export async function addMemoryBatch(
   memories: AddMemoryRequest[],
 ): Promise<{ added: number; duplicates: number }> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
+  await enforceServiceQuota(
+    { tenantDbName, tenantId, projectId },
+    { domain: 'memory', resourceKey: storeKey, cost: { requests: 1 } },
+  );
   let added = 0;
   let duplicates = 0;
   for (const mem of memories) {
@@ -401,7 +425,7 @@ export async function addMemoryBatch(
         duplicates++;
         continue;
       }
-      await addMemory(tenantDbName, tenantId, projectId, storeKey, mem);
+      await addMemoryUnchecked(tenantDbName, tenantId, projectId, storeKey, mem);
       added++;
     } catch (err) {
       logger.error('Failed to add memory in batch', { error: err });
@@ -583,8 +607,15 @@ export async function searchMemories(
   projectId: string,
   storeKey: string,
   request: MemorySearchRequest,
+  options: ServiceCallOptions = {},
 ): Promise<MemorySearchResponse> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
+  if (options.quota !== false) {
+    await enforceServiceQuota(
+      { tenantDbName, tenantId, projectId },
+      { domain: 'memory', resourceKey: storeKey, cost: { requests: 1 } },
+    );
+  }
   const db = await withTenantDb(tenantDbName);
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');

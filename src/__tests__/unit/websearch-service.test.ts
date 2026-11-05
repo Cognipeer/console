@@ -37,6 +37,9 @@ vi.mock('@/lib/services/models/inferenceService', () => ({
   handleChatCompletion: vi.fn(),
 }));
 
+const { enforceServiceQuota } = vi.hoisted(() => ({ enforceServiceQuota: vi.fn() }));
+vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota }));
+
 import { runWebSearch, listWebSearchProviders, listWebSearchRunLogs } from '@/lib/services/webSearch/webSearchService';
 import {
   listProviderConfigs,
@@ -60,6 +63,26 @@ beforeEach(() => {
   (loadProviderRuntimeData as ReturnType<typeof vi.fn>).mockResolvedValue({
     record: RECORD,
     credentials: { apiKey: 'k' },
+  });
+});
+
+describe('runWebSearch quota', () => {
+  it('checks the instance key once with one request', async () => {
+    (callWebSearchProvider as ReturnType<typeof vi.fn>).mockResolvedValue({ results: [] });
+    await runWebSearch('tenant_acme', 'tenant-1', 'proj-1', { query: 'hello', providerKey: 'brave-main', source: 'dashboard' });
+    expect(enforceServiceQuota).toHaveBeenCalledTimes(1);
+    expect(enforceServiceQuota).toHaveBeenCalledWith(
+      { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' },
+      { domain: 'websearch', resourceKey: 'brave-main', cost: { requests: 1 } },
+    );
+  });
+
+  it('refuses before calling the provider when the guard refuses', async () => {
+    enforceServiceQuota.mockRejectedValueOnce(Object.assign(new Error('Request quota exceeded'), { name: 'QuotaExceededError' }));
+    await expect(
+      runWebSearch('tenant_acme', 'tenant-1', 'proj-1', { query: 'hello', providerKey: 'brave-main', source: 'dashboard' }),
+    ).rejects.toMatchObject({ name: 'QuotaExceededError' });
+    expect(callWebSearchProvider).not.toHaveBeenCalled();
   });
 });
 
