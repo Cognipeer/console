@@ -6,6 +6,7 @@
  * endpoint that overrides a machine verdict (and recomputes the aggregate).
  */
 
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { BUILTIN_PROBE_KEYS, listProbeCatalog } from '@/lib/services/redteam/probes';
@@ -527,6 +528,10 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const customKeys = await loadCustomProbeKeys(session.tenantDbName, projectId);
       const optionsResult = sanitizeRunOptions(body, customKeys);
       if ('error' in optionsResult) return reply.code(400).send({ error: optionsResult.error });
+      await enforceServiceQuota(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        { domain: 'jobs', resourceKey: 'redteam', cost: { requests: 1 } },
+      );
       const run = await enqueueCampaignRun({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
@@ -542,6 +547,7 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       // Before the message checks below: a refusal must never be read as a 404 or a 409.
       const refused = sendAgentTestRefusal(reply, error);
       if (refused) return refused;
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Run red-team scan error', { error });
       if (error instanceof AgentRevisionError) {
         return reply.code(400).send({ error: error.message });

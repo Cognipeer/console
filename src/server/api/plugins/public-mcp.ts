@@ -57,7 +57,8 @@ import {
   getRemoteSseSessionFor,
 } from '@/lib/services/mcp/sseSessionManager';
 import { authz } from '@/lib/iam/routeAuthz';
-import { getClientIp } from '../fastify-utils';
+import { getAuthzClientIp, getClientIp } from '../fastify-utils';
+import { isQuotaExceededError } from '@/lib/quota/serviceQuota';
 import {
   hasJsonContentType,
   jsonRpcErrorBody as jsonRpcError,
@@ -138,7 +139,7 @@ type PublicToolOutcome =
    * `inputError`: the call itself was wrong (unknown tool, bad argument); `message` is safe to show.
    * `unknownTool`: the input error is a tool name the server does not advertise.
    */
-  | { ok: false; inputError: boolean; unknownTool: boolean; message: string };
+  | { ok: false; inputError: boolean; unknownTool: boolean; message: string; quotaExceeded?: boolean };
 
 /**
  * What an anonymous caller is told about a failed call. The tool-input errors
@@ -165,6 +166,8 @@ async function runPublicToolCall(
   transport: 'jsonrpc' | 'sse',
   sessionId: string | undefined,
   client: McpRequestClientInfo,
+  /** The address quota limits count: this route runs outside the request-context wrapper. */
+  authzClientIp?: string,
 ): Promise<PublicToolOutcome> {
   const db = await getDatabase();
   // Public surface forwards no runtime headers, but the server's own static
@@ -178,7 +181,7 @@ async function runPublicToolCall(
     const inputSchema = listMcpToolDescriptors(server).find((tool) => tool.name === toolName)?.inputSchema;
     const fittedArgs = fitPublicToolArguments(inputSchema, args, getConfig().mcp.public.maxArgumentChars);
     const { result, latencyMs } = await withTenantDb(db, tenant.dbName, () =>
-      executeMcpTool(server, toolName, fittedArgs));
+      executeMcpTool(server, toolName, fittedArgs, undefined, undefined, { clientIp: authzClientIp }));
     void logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
@@ -198,6 +201,10 @@ async function runPublicToolCall(
     }, secretValues, logOptions);
     return { ok: true, result };
   } catch (error) {
+    if (isQuotaExceededError(error)) {
+      // A quota refusal is written for any caller and is not a fault of the tool: no failure row, tell the caller.
+      return { ok: false, inputError: false, unknownTool: false, message: error.message, quotaExceeded: true };
+    }
     const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
     const failure = describePublicFailure(error);
     // The log row holds the full detail; its id is what the caller can quote.
@@ -346,6 +353,7 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
         sessionId,
         // The host's `_meta` is handed over raw; the log write bounds and scrubs it.
         { ...clientInfoOf(request), meta: body.params?._meta },
+        getAuthzClientIp(request),
       );
     } finally {
       releaseSlot();
@@ -364,6 +372,13 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
         ],
         isError: false,
       }));
+    }
+    if (outcome.quotaExceeded) {
+      // Over a quota: 429 on a plain call; on an SSE session the answer goes down the stream as a failed call.
+      if (isSse) {
+        return respond(jsonRpcOk(id, { content: [{ text: outcome.message, type: 'text' }], isError: true }));
+      }
+      return reply.code(429).send(jsonRpcError(id, -32000, outcome.message));
     }
     // An unknown tool is a malformed call. Anything else — a bad argument
     // included — is a failed call whose message the model reads and can act on.

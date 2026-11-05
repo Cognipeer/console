@@ -21,6 +21,7 @@ import {
   recordUsageEvent,
   resolveUsageAttribution,
 } from '@/lib/services/usage/usageEvents';
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { browserManager } from './browserManager';
 import { readBrowserStorageState } from './browserProfileService';
 import { browserEntityId } from './entityId';
@@ -153,6 +154,25 @@ export async function createBrowserSession(
     delete config.storageState;
   }
   const artifactBucketKey = input.artifactBucketKey ?? browser.artifactBucketKey ?? cfg.defaultArtifactBucketKey;
+
+  // Quota, BEFORE anything is launched. "Open" sessions are counted per caller
+  // (same user, else same API token) from the persisted rows; a caller with
+  // neither is counted against the whole project.
+  const caller = resolveUsageAttribution();
+  // Only the open statuses are read: the project's session history can be long.
+  const openRows = (await Promise.all(
+    (['pending', 'running', 'idle'] as const).map((status) =>
+      db.listBrowserSessions(ctx.tenantId, { projectId: ctx.projectId, status })),
+  )).flat();
+  const active = openRows.filter((row) => {
+    if (caller.userId) return row.userId === caller.userId;
+    if (caller.apiTokenId) return row.apiTokenId === caller.apiTokenId;
+    return true;
+  }).length;
+  await enforceServiceQuota(
+    { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+    { domain: 'browser', resourceKey: browser.key, cost: { requests: 1 }, concurrency: { active } },
+  );
 
   // What the session ROW stores is not what the context gets. `storageState`
   // is a live login and `proxy`/`httpCredentials` carry passwords; the row is

@@ -15,6 +15,7 @@ import { crawl } from './engine';
 import type { CrawlPlan, PageResult } from './engine';
 import { openHttpConfig } from './httpConfigSecrets';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { recordServiceUsage, serviceQuotaContext } from '@/lib/quota/serviceQuota';
 import { sendCrawlerWebhook } from './crawlerWebhook';
 import { ingestCrawlPage } from './crawlerRagBridge';
 import { crawlerExtractionDeps } from './ocrExtractor';
@@ -320,6 +321,25 @@ async function runCrawlJobInner(
         actorType: job.actorType,
       },
     });
+
+    // Pages actually fetched count against the caller's page window. The
+    // runner is outside the request context, so the caller comes from the job
+    // row. Scheduler runs were not checked at start and are not counted.
+    if (job.trigger !== 'schedule' && pagesProcessed > 0) {
+      await recordServiceUsage(
+        serviceQuotaContext(
+          {
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: job.projectId,
+            userId: job.userId,
+            tokenId: job.apiTokenId,
+          },
+          { domain: 'crawler', resourceKey: job.crawlerKey },
+        ),
+        { units: pagesProcessed },
+      );
+    }
 
     const event = status === 'failed' ? 'failed' : 'completed';
     await fireSummaryWebhook(job, status, {

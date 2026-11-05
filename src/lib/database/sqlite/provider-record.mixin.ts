@@ -6,6 +6,21 @@ import type { IProviderLastTest, IProviderRecord, ProviderDomain } from '../prov
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
+/** At most one sweep of ended rate-limit windows per tenant database per this many ms. */
+const RATE_LIMIT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const lastRateLimitSweep = new WeakMap<object, number>();
+
+function sweepExpiredRateLimits(db: { prepare: (sql: string) => { run: (params: Record<string, unknown>) => unknown } }, nowIso: string): void {
+  const now = Date.now();
+  if (now - (lastRateLimitSweep.get(db) ?? 0) < RATE_LIMIT_SWEEP_INTERVAL_MS) return;
+  lastRateLimitSweep.set(db, now);
+  try {
+    db.prepare(`DELETE FROM ${TABLES.rateLimits} WHERE resetAt < @nowIso`).run({ nowIso });
+  } catch {
+    /* best effort: the next sweep tries again */
+  }
+}
+
 export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class ProviderRecordOps extends Base {
 
@@ -140,6 +155,9 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
       ).get({ key }) as { count: number; resetAt: string } | undefined;
 
       if (!existing || existing.resetAt < nowIso) {
+        // Counters whose window ended are never read again (an increment resets
+        // them); drop them now and then so per-address keys do not pile up.
+        sweepExpiredRateLimits(db, nowIso);
         // Expired or not found → upsert with new window
         db.prepare(`
           INSERT INTO ${TABLES.rateLimits} (key, count, resetAt) VALUES (@key, @amount, @resetAt)

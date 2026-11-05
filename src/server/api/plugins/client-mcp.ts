@@ -48,6 +48,7 @@ import {
   type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { mcpSandboxRunner } from '@/enterprise/registry';
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   authorizeServiceForRequest,
@@ -262,7 +263,7 @@ async function runToolCall(
    * `unknownTool`: the input error is a tool name the server does not advertise.
    * `refused`: the server takes Console identity and there was no person to mint a token for.
    */
-  | { ok: false; error: string; inputError: boolean; unknownTool: boolean; refused: boolean }
+  | { ok: false; error: string; inputError: boolean; unknownTool: boolean; refused: boolean; quotaExceeded?: boolean }
 > {
   const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
   // Header names only — values never reach the log payload.
@@ -336,6 +337,7 @@ async function runToolCall(
       inputError: isMcpToolInputError(error),
       unknownTool: isMcpUnknownToolError(error),
       refused: isConsoleIdentityRefusal(error),
+      ...(isQuotaExceededError(error) ? { quotaExceeded: true } : {}),
     };
   }
 }
@@ -506,6 +508,9 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         isError: false,
       }));
     }
+    if (outcome.quotaExceeded && !(session && sessionId)) {
+      return reply.code(429).send(jsonRpcError(id, -32000, outcome.error));
+    }
     // An unknown tool is a malformed call. Anything else — a bad argument
     // included — is a failed call whose message the model reads and can act on.
     if (outcome.unknownTool) {
@@ -573,6 +578,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       if (!outcome.ok) {
+        if (outcome.quotaExceeded) return reply.code(429).send(quotaExceededBody({ message: outcome.error }));
         return reply.code(outcome.refused ? 403 : outcome.inputError ? 400 : 502).send({ error: outcome.error });
       }
 

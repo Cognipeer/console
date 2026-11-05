@@ -1,3 +1,4 @@
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IRerankerConfig, RerankerStrategy } from '@/lib/database';
@@ -254,6 +255,7 @@ export const rerankerApiPlugin: FastifyPluginAsync = async (app) => {
         );
         return reply.code(200).send({ result });
       } catch (error) {
+        if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
         logger.error('Run reranker error', { error });
         return (
           sendProjectContextError(reply, error)

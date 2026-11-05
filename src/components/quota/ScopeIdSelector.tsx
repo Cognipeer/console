@@ -3,6 +3,7 @@
 import { useMemo, type ReactNode } from 'react';
 import { Stack, Text } from '@mantine/core';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
+import { QUOTA_JOB_KINDS } from '@/lib/quota/domains';
 import { quotaTargetSource } from '@/lib/quota/targets';
 import { useTranslations } from '@/lib/i18n';
 import { PrincipalSelect } from './PrincipalSelect';
@@ -59,6 +60,7 @@ export function ScopeIdSelector({
   const t = useTranslations('settings.quotaSection.form');
   const tTarget = useTranslations('settings.quotaSection.target');
   const tDomains = useTranslations('settings.quotaSection.domains');
+  const tJobs = useTranslations('settings.quotaSection.jobKinds');
   // One object per (service, kind of target): the picker below is keyed by its id.
   const source = useMemo(() => quotaTargetSource(domain ?? 'global', scope), [domain, scope]);
 
@@ -145,6 +147,20 @@ export function ScopeIdSelector({
           onLabelChange={onLabelChange}
           disabled={disabled}
         />,
+      );
+    }
+    // In the jobs domain a resource limit names a KIND of job, from a fixed list.
+    if (domain === 'jobs') {
+      return (
+        <SearchableSelect
+          placeholder={t('selectResource')}
+          data={QUOTA_JOB_KINDS.map((kind) => ({ value: kind, label: tJobs(kind) }))}
+          value={value || null}
+          onChange={(v) => onChange(v || undefined)}
+          clearable
+          disabled={disabled}
+          nothingFoundMessage={t('noResourcesFound')}
+        />
       );
     }
     if (resourceOptions.length > 0) {

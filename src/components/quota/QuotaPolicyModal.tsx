@@ -1,6 +1,6 @@
 'use client';
 
-import { NumberInput, Select, Switch, Text, TextInput, Textarea } from '@mantine/core';
+import { Alert, NumberInput, Select, Switch, Text, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { useEffect, useMemo, useState } from 'react';
 import { IconBolt, IconGauge } from '@tabler/icons-react';
@@ -20,11 +20,14 @@ import {
   isTenantWideKind,
   type QuotaDomain,
   type QuotaGroupMode,
+  type QuotaIpMode,
   type QuotaScope,
   type QuotaLimits,
   type QuotaRateLimit,
 } from '@/lib/quota/types';
+import { ENFORCED_QUOTA_DOMAINS, QUOTA_DOMAIN_GROUP_ORDER, quotaDomainSpec } from '@/lib/quota/domains';
 import { isSameTargetKind, quotaTargetSource } from '@/lib/quota/targets';
+import CidrInput from '@/components/iam/pickers/CidrInput';
 import { tryTranslate } from '@/components/resources/i18nLookup';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { ScopeIdSelector } from './ScopeIdSelector';
@@ -58,6 +61,10 @@ export interface QuotaPolicyFormData {
   scopeId?: string;
   /** Group scope only: count each member separately (default) or the group as one. */
   groupMode?: QuotaGroupMode;
+  /** IP scope only: the CIDR ranges the caller's address is matched against. */
+  ipRanges?: string[];
+  /** IP scope only: one counter per address (default) or one for all the ranges. */
+  ipMode?: QuotaIpMode;
   domain: QuotaDomain;
   priority: number;
   enabled: boolean;
@@ -99,7 +106,7 @@ const hasAnyValue = (obj?: object | null) =>
     (v) => v !== undefined && v !== null && v !== '',
   );
 
-const RATE_KINDS = ['requests', 'tokens', 'vectors', 'files', 'storage'] as const;
+const RATE_KINDS = ['requests', 'tokens', 'vectors', 'files', 'storage', 'units'] as const;
 
 const anyDefined = (o?: object) => !!o && Object.values(o).some((v) => v !== undefined);
 
@@ -142,6 +149,8 @@ export function QuotaPolicyModal({
       scope: 'tenant',
       scopeId: '',
       groupMode: 'perMember',
+      ipRanges: [],
+      ipMode: 'perAddress',
       projectId: '',
       domain: defaultDomain,
       priority: 0,
@@ -168,6 +177,8 @@ export function QuotaPolicyModal({
         scope: policy.scope,
         scopeId: policy.scopeId || '',
         groupMode: policy.groupMode ?? 'perMember',
+        ipRanges: Array.isArray(policy.ipRanges) ? [...policy.ipRanges] : [],
+        ipMode: policy.ipMode === 'shared' ? 'shared' : 'perAddress',
         projectId: policy.projectId ? String(policy.projectId) : '',
         domain: policy.domain,
         priority: policy.priority || 0,
@@ -184,6 +195,7 @@ export function QuotaPolicyModal({
         form.setValues({
           ...seed,
           scopeId: seed.scopeId ?? '',
+          ipRanges: seed.ipRanges ?? [],
           projectId: seed.projectId ?? '',
           limits: seed.limits ? { ...emptyLimits, ...structuredClone(seed.limits) } : emptyLimits,
         });
@@ -200,19 +212,22 @@ export function QuotaPolicyModal({
     const rates = Object.fromEntries(
       RATE_KINDS.map((k) => [k, rateLimit?.[k]] as const).filter(([, w]) => anyDefined(w)),
     );
+    // An IP limit carries rate limits only (the server refuses anything else).
+    const rateOnly = values.scope === 'ip';
     const cleanLimits: QuotaLimits = {
       ...(Object.keys(rates).length > 0 ? { rateLimit: rates } : {}),
-      ...(anyDefined(quotas) ? { quotas } : {}),
-      ...(anyDefined(perRequest) ? { perRequest } : {}),
-      ...(anyDefined(budget) ? { budget } : {}),
+      ...(!rateOnly && anyDefined(quotas) ? { quotas } : {}),
+      ...(!rateOnly && anyDefined(perRequest) ? { perRequest } : {}),
+      ...(!rateOnly && anyDefined(budget) ? { budget } : {}),
     };
 
-    const { projectId, groupMode, ...rest } = values;
+    const { projectId, groupMode, ipRanges, ipMode, ...rest } = values;
     await onSubmit({
       ...rest,
-      scopeId: values.scope === 'tenant' ? undefined : values.scopeId || undefined,
+      scopeId: values.scope === 'tenant' || values.scope === 'ip' ? undefined : values.scopeId || undefined,
       limits: cleanLimits,
       ...(values.scope === 'group' ? { groupMode: groupMode ?? 'perMember' } : {}),
+      ...(values.scope === 'ip' ? { ipRanges: ipRanges ?? [], ipMode: ipMode ?? 'perAddress' } : {}),
       // A new limit with no project is tenant-wide, which the server takes as
       // "no projectId"; an edit must say '' to move one out of its project.
       ...(projects ? (isEditing ? { projectId: projectId || '' } : projectId ? { projectId } : {}) : {}),
@@ -220,35 +235,60 @@ export function QuotaPolicyModal({
   };
 
   const scopeOptions = (allowedScopes ||
-    (['tenant', 'group', 'user', 'token', 'resource', 'provider'] as QuotaScope[])).map((s) => ({
+    (['tenant', 'group', 'user', 'token', 'resource', 'provider', 'ip'] as QuotaScope[])).map((s) => ({
     value: s,
     label: tScopes(s),
   }));
 
-  const domainOptions = (allowedDomains ||
-    (['global', 'llm', 'embedding', 'vector', 'file', 'tracing', 'agent'] as QuotaDomain[])).map((d) => ({
-    value: d,
-    label: tDomains(d),
-  }));
+  // Services grouped as the registry groups them; only those with a guarded call site.
+  const offeredDomains = allowedDomains || [...ENFORCED_QUOTA_DOMAINS];
+  const domainOptions = QUOTA_DOMAIN_GROUP_ORDER
+    .map((group) => ({
+      group: tl(`domainGroups.${group}`),
+      items: offeredDomains
+        .filter((d) => quotaDomainSpec(d).group === group)
+        .map((d) => ({ value: d, label: tDomains(d) })),
+    }))
+    .filter((group) => group.items.length > 0);
 
-  const showScopeId = form.values.scope !== 'tenant';
+  const showScopeId = form.values.scope !== 'tenant' && form.values.scope !== 'ip';
   const currentDomain = form.values.domain;
   const currentScope = form.values.scope;
   const values = form.values;
   const limits = values.limits;
 
-  // Agent runs are limited by requests and tokens per person (optionally per
-  // agent): none of the model, vector, file, tracing, budget or resource-cap
-  // fields apply to them.
+  // Which sections apply is the service's registry entry (domains.ts). An IP
+  // limit counts the address, so it only ever has rate-limit windows.
+  const spec = quotaDomainSpec(currentDomain);
+  const isIpScope = currentScope === 'ip';
   const isAgentDomain = currentDomain === 'agent';
-  const showTokens =
-    currentDomain === 'global' || currentDomain === 'llm' || currentDomain === 'embedding';
-  const showTokenWindows = showTokens || isAgentDomain;
-  const showVectors = currentDomain === 'global' || currentDomain === 'vector';
-  // Storage limits belong to the file domain, so showFiles also gates them.
-  const showFiles = currentDomain === 'global' || currentDomain === 'file';
-  const showTracing = currentDomain === 'global' || currentDomain === 'tracing';
+  const showTokens = spec.perRequest.includes('maxInputTokens') && !isIpScope;
+  const showTokenWindows = spec.rateKinds.includes('tokens');
+  const showVectors = spec.rateKinds.includes('vectors');
+  const showFiles = spec.rateKinds.includes('files');
+  const showStorage = spec.rateKinds.includes('storage');
+  const showUnits = spec.rateKinds.includes('units') && !!spec.unit;
+  const showTracing = spec.perRequest.includes('maxEventsPerSession') && !isIpScope;
+  const showConcurrency = spec.perRequest.includes('maxConcurrentRequests') && !isIpScope;
+  const showResourceCaps = spec.resourceCaps && !isIpScope;
+  const showBudget = spec.budget && !isIpScope;
   const showCreationQuotas = currentScope === 'tenant' || currentScope === 'user';
+
+  // Behind a reverse proxy with no TRUSTED_PROXIES every caller has the proxy's address: say so on an IP limit.
+  const [trustedProxiesUnset, setTrustedProxiesUnset] = useState(false);
+  useEffect(() => {
+    if (!opened || !isIpScope) return;
+    let cancelled = false;
+    fetch('/api/quota/defaults', { credentials: 'same-origin' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (!cancelled) setTrustedProxiesUnset(body?.ipScope?.trustedProxiesUnset === true);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [opened, isIpScope]);
 
   // Where the limit lives. Group and agent-run limits may be tenant-wide; every
   // other kind only exists inside a project (see isTenantWideKind).
@@ -272,7 +312,9 @@ export function QuotaPolicyModal({
   const identityDone = !!values.label && !!values.domain;
   const projectDone = !projectRequired || !!values.projectId;
   const scopeDone =
-    !!values.scope && (currentScope === 'tenant' || !!values.scopeId);
+    !!values.scope
+    && (currentScope === 'tenant'
+      || (currentScope === 'ip' ? (values.ipRanges?.length ?? 0) > 0 : !!values.scopeId));
   const limitsDone = [
     ...RATE_KINDS.map((k) => limits.rateLimit?.[k]),
     limits.perRequest,
@@ -381,6 +423,19 @@ export function QuotaPolicyModal({
             value={values.groupMode === 'shared' ? tl('shared') : tl('perMember')}
           />
         ) : null}
+        {isIpScope ? (
+          <>
+            <SummaryKV
+              label={tl('ip.rangesLabel')}
+              value={(values.ipRanges?.length ?? 0) > 0 ? values.ipRanges!.join(', ') : <span className="ds-faint">—</span>}
+              mono
+            />
+            <SummaryKV
+              label={tl('summaryCounting')}
+              value={values.ipMode === 'shared' ? tl('ip.shared') : tl('ip.perAddress')}
+            />
+          </>
+        ) : null}
         {showProjectField ? (
           <SummaryKV
             label={tl('project')}
@@ -421,7 +476,7 @@ export function QuotaPolicyModal({
             />
           </>
         ) : null}
-        {showFiles ? (
+        {showFiles && !isIpScope ? (
           <SummaryKV
             label={te('summary.maxFileSize')}
             value={
@@ -432,7 +487,7 @@ export function QuotaPolicyModal({
             mono
           />
         ) : null}
-        {isAgentDomain ? null : (
+        {showBudget ? (
           <>
             <SummaryKV
               label={te('summary.dailySpend')}
@@ -445,7 +500,7 @@ export function QuotaPolicyModal({
               mono
             />
           </>
-        )}
+        ) : null}
       </SummaryGroup>
 
       <SummaryGroup title={te('summary.preflight')}>
@@ -532,7 +587,13 @@ export function QuotaPolicyModal({
             <FormField
               label={t('domain')}
               required
-              hint={values.domain === 'global' ? tl('globalAgentNote') : undefined}
+              hint={
+                values.domain === 'global'
+                  ? tl('globalAgentNote')
+                  : !spec.globalFallback && !isAgentDomain
+                    ? tl('noGlobalFallbackNote')
+                    : undefined
+              }
             >
               <Select
                 data={domainOptions}
@@ -592,6 +653,42 @@ export function QuotaPolicyModal({
               </FormField>
             </FormRow>
           ) : null}
+          {isIpScope ? (
+            <>
+              <FormRow cols={1}>
+                <FormField label={tl('ip.rangesLabel')} required hint={tl('ip.rangesHint')}>
+                  <CidrInput
+                    value={values.ipRanges ?? []}
+                    onChange={(next) => form.setFieldValue('ipRanges', next)}
+                  />
+                </FormField>
+              </FormRow>
+              <FormRow cols={1}>
+                <FormField
+                  label={tl('summaryCounting')}
+                  required
+                  hint={values.ipMode === 'shared' ? tl('ip.sharedHint') : tl('ip.perAddressHint')}
+                >
+                  <ChipPicker<QuotaIpMode>
+                    options={[
+                      { value: 'perAddress', label: tl('ip.perAddress') },
+                      { value: 'shared', label: tl('ip.shared') },
+                    ]}
+                    value={values.ipMode ?? 'perAddress'}
+                    onChange={(v) => form.setFieldValue('ipMode', v as QuotaIpMode)}
+                  />
+                </FormField>
+              </FormRow>
+              {trustedProxiesUnset ? (
+                <Alert color="yellow" variant="light" title={tl('ip.proxyWarningTitle')}>
+                  {tl('ip.proxyWarning')}
+                </Alert>
+              ) : null}
+              <Text size="xs" c="dimmed">
+                {tl('ip.rateOnlyNote')}
+              </Text>
+            </>
+          ) : null}
           {currentScope === 'group' ? (
             <FormRow cols={1}>
               <FormField label={tl('groupMode')} required hint={values.groupMode === 'shared' ? tl('sharedHint') : tl('perMemberHint')}>
@@ -648,7 +745,7 @@ export function QuotaPolicyModal({
           description={isAgentDomain ? tl('agentRequestsDescription') : te('sections.requestsDescription')}
         >
           {rateWindowRows('requests')}
-          {isAgentDomain ? null : (
+          {showConcurrency ? (
             <FormRow cols={1}>
               {limitField(
                 t('perRequest.maxConcurrentRequests'),
@@ -656,7 +753,7 @@ export function QuotaPolicyModal({
                 limits.perRequest?.maxConcurrentRequests,
               )}
             </FormRow>
-          )}
+          ) : null}
         </FormSection>
 
         {showTokenWindows ? (
@@ -699,7 +796,7 @@ export function QuotaPolicyModal({
             description={te('sections.vectorsDescription')}
           >
             {rateWindowRows('vectors')}
-            <FormRow cols={2}>
+            {isIpScope ? null : <FormRow cols={2}>
               {limitField(
                 t('perRequest.maxVectorsPerUpsert'),
                 'limits.perRequest.maxVectorsPerUpsert',
@@ -710,7 +807,7 @@ export function QuotaPolicyModal({
                 'limits.perRequest.maxQueryResults',
                 limits.perRequest?.maxQueryResults,
               )}
-            </FormRow>
+            </FormRow>}
           </FormSection>
         ) : null}
 
@@ -721,7 +818,7 @@ export function QuotaPolicyModal({
             description={te('sections.filesDescription')}
           >
             {rateWindowRows('files')}
-            <FormRow cols={2}>
+            {isIpScope ? null : <FormRow cols={2}>
               {limitField(
                 t('perRequest.maxFileSizeMB'),
                 'limits.perRequest.maxFileSize',
@@ -733,17 +830,27 @@ export function QuotaPolicyModal({
                 'limits.perRequest.maxFilesPerRequest',
                 limits.perRequest?.maxFilesPerRequest,
               )}
-            </FormRow>
+            </FormRow>}
           </FormSection>
         ) : null}
 
-        {showFiles ? (
+        {showStorage ? (
           <FormSection
             number={section()}
             title={t('rateLimits.storage')}
             description={te('sections.storageDescription')}
           >
             {rateWindowRows('storage')}
+          </FormSection>
+        ) : null}
+
+        {showUnits ? (
+          <FormSection
+            number={section()}
+            title={tl(`units.${spec.unit}.title`)}
+            description={tl(`units.${spec.unit}.description`)}
+          >
+            {rateWindowRows('units')}
           </FormSection>
         ) : null}
 
@@ -769,7 +876,7 @@ export function QuotaPolicyModal({
           </FormSection>
         ) : null}
 
-        {isAgentDomain ? null : (
+        {showResourceCaps ? (
           <FormSection
             number={section()}
             title={te('sections.quotasTitle')}
@@ -900,9 +1007,9 @@ export function QuotaPolicyModal({
               )}
             </FormRow>
           </FormSection>
-        )}
+        ) : null}
 
-        {isAgentDomain ? null : (
+        {showBudget ? (
           <FormSection
             number={section()}
             title={t('tabs.budget')}
@@ -923,7 +1030,7 @@ export function QuotaPolicyModal({
               )}
             </FormRow>
           </FormSection>
-        )}
+        ) : null}
 
         <FormSection
           number={section()}

@@ -6,6 +6,7 @@
  * the queue consumer).
  */
 
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
@@ -375,6 +376,23 @@ export function snapshotCrawlerPlan(
 }
 
 /**
+ * Quota at run start: one request, and the caller's page window must have room
+ * (the pages themselves are counted when the run ends). The scheduler's runs
+ * are system work with no caller and are not checked.
+ */
+async function checkCrawlRunQuota(
+  ctx: CrawlerContext,
+  crawlerKey: string | undefined,
+  trigger: string | undefined,
+): Promise<void> {
+  if (trigger === 'schedule') return;
+  await enforceServiceQuota(
+    { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+    { domain: 'crawler', resourceKey: crawlerKey, cost: { requests: 1 }, headroom: ['units'] },
+  );
+}
+
+/**
  * Run a saved crawler. Creates a CrawlJob in `queued` state, then routes
  * execution to the assigned node (or runs locally on single-node setups).
  */
@@ -399,6 +417,7 @@ export async function runCrawler(
   }
 
   const plan = snapshotCrawlerPlan(crawler, { seeds: urls });
+  await checkCrawlRunQuota(ctx, crawler.key, options.trigger);
   // Attribution is stamped at creation (request ALS in scope); the rollup
   // event is emitted at job completion by the runner.
   const attribution = resolveUsageAttribution();
@@ -453,6 +472,7 @@ export async function runAdhocCrawl(
     webhook: input.webhook,
   };
 
+  await checkCrawlRunQuota(ctx, undefined, 'adhoc');
   // Attribution is stamped at creation (request ALS in scope); the rollup
   // event is emitted at job completion by the runner.
   const attribution = resolveUsageAttribution();

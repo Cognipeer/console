@@ -25,6 +25,7 @@ import type {
 } from '@/lib/providers';
 import { providerRegistry } from '@/lib/providers';
 import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
+import { shadowInternalLlmUsage } from '@/lib/quota/shadowLlmQuota';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 import {
   TTS_PCM_SAMPLE_RATE,
@@ -176,8 +177,20 @@ export async function handleChatCompletion(params: {
   /** Usage row route and attribution for an in-process caller. Defaults to the gateway's own route. */
   route?: string;
   attribution?: NonNullable<ModelCallInput['context']>['attribution'];
+  /**
+   * The caller enforced the `llm` limits for this call (the gateway routes, a
+   * batch). Any other call is the application's own, counted in shadow mode
+   * (see `shadowLlmQuota`).
+   */
+  quotaChecked?: boolean;
 }): Promise<ChatCompletionOutcome> {
   const { tenantDbName, tenantId, modelKey, projectId, stream, body } = params;
+  const onUsageSettled: typeof params.onUsageSettled = params.quotaChecked
+    ? params.onUsageSettled
+    : (cost, usage) => {
+        params.onUsageSettled?.(cost, usage);
+        shadowInternalLlmUsage({ tenantDbName, tenantId, projectId, modelKey, route: params.route }, usage);
+      };
 
   if (!Array.isArray(body?.messages)) {
     throw new Error('`messages` array is required');
@@ -198,7 +211,7 @@ export async function handleChatCompletion(params: {
     stream,
     context: {
       callerContext: params.callerContext,
-      onUsageSettled: params.onUsageSettled,
+      onUsageSettled,
       signal,
       route: params.route,
       attribution: params.attribution,

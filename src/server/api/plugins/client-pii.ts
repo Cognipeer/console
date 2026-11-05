@@ -23,6 +23,7 @@
  * persisted server-side.
  */
 
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import type { PiiAction } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -97,6 +98,11 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
           actionOverride = body.action as PiiAction;
         }
 
+        await enforceServiceQuota(
+          { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+          { domain: 'guardrail', resourceKey: policyKey, cost: { requests: 1 } },
+        );
+
         const result = await scanWithPolicy({
           tenantDbName: ctx.tenantDbName,
           policyKey,
@@ -112,6 +118,7 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
           ...toClientResult(result),
         });
       } catch (error) {
+        if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
         logger.error(`Client PII ${op} error`, { error });
         const message = error instanceof Error ? error.message : 'Internal error';
         return sendApiTokenError(reply, error)

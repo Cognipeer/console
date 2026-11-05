@@ -12,6 +12,7 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import {
   ModerationRequestError,
   runModeration,
@@ -42,6 +43,12 @@ export const clientModerationsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // The caller (token, user) and address come from the request context.
+      await enforceServiceQuota(
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        { domain: 'moderation', resourceKey: typeof body.model === 'string' ? body.model : undefined },
+      );
+
       const result = await runModeration(
         {
           tenantDbName: ctx.tenantDbName,
@@ -69,6 +76,9 @@ export const clientModerationsApiPlugin: FastifyPluginAsync = async (app) => {
         })),
       });
     } catch (error) {
+      if (isQuotaExceededError(error)) {
+        return reply.code(429).send(quotaExceededBody(error));
+      }
       if (error instanceof ModerationRequestError) {
         return reply.code(400).send({
           error: { message: error.message, type: 'invalid_request_error' },

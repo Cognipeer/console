@@ -11,6 +11,7 @@
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { getDatabase, type IWebSearchRunLog } from '@/lib/database';
 import {
   listProviderConfigs,
@@ -302,6 +303,11 @@ export async function runWebSearch(
   if (record.status !== 'active') {
     throw new Error(`Provider "${providerKey}" is not active.`);
   }
+
+  await enforceServiceQuota(
+    { tenantDbName, tenantId, projectId },
+    { domain: 'websearch', resourceKey: providerKey, cost: { requests: 1 } },
+  );
 
   // An answer is a best-effort extra on top of the search, never a reason to
   // fail it: agents set `includeAnswer` on their own and API callers cannot see

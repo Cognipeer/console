@@ -23,6 +23,17 @@ import {
   IconScale,
   IconRobot,
   IconUsersGroup,
+  IconNetwork,
+  IconWorldWww,
+  IconBooks,
+  IconPlug,
+  IconArrowsSort,
+  IconBrain,
+  IconBrowser,
+  IconSpider,
+  IconShieldLock,
+  IconBriefcase,
+  IconBox,
 } from '@tabler/icons-react';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
@@ -43,6 +54,7 @@ const SCOPE_ICONS: Record<QuotaScope, React.ReactNode> = {
   token: <IconKey size={14} />,
   resource: <IconPackage size={14} />,
   provider: <IconServer size={14} />,
+  ip: <IconNetwork size={14} />,
 };
 
 const DOMAIN_ICONS: Record<QuotaDomain, React.FC<{ size?: number }>> = {
@@ -59,6 +71,16 @@ const DOMAIN_ICONS: Record<QuotaDomain, React.FC<{ size?: number }>> = {
   moderation: IconShieldCheck,
   decision: IconScale,
   agent: IconRobot,
+  websearch: IconWorldWww,
+  rag: IconBooks,
+  mcp: IconPlug,
+  rerank: IconArrowsSort,
+  memory: IconBrain,
+  browser: IconBrowser,
+  crawler: IconSpider,
+  guardrail: IconShieldLock,
+  jobs: IconBriefcase,
+  sandbox: IconBox,
 };
 
 export function QuotaPolicyCard({ policy, onEdit, onDelete, showDomain = true, compact = false }: QuotaPolicyCardProps) {

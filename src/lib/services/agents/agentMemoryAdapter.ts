@@ -181,7 +181,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                             importance: fact.confidence,
                             source: 'agent',
                             metadata: { factKey: fact.key, sourceTurn: fact.sourceTurn },
-                        });
+                        }, { quota: false });
                     }
                 }
             } catch (error) {
@@ -216,12 +216,13 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
             if (!(await storeIsActive(ctx))) return [];
             const { scope, scopeId } = where(sdkScope);
             try {
+                // The agent's own memory work is part of its turn, which the agent limits count.
                 const result = await searchMemories(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
                     query,
                     scope,
                     scopeId,
                     topK: options?.limit ?? 5,
-                });
+                }, { quota: false });
                 return result.memories.map((match) =>
                     toFact({
                         _id: match.id,

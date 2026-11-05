@@ -1,3 +1,4 @@
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type { IRagChunkConfig } from '@/lib/database';
@@ -341,6 +342,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const accessRefusal = sendRagAccessError(reply, error);
       if (accessRefusal) return accessRefusal;
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Ingest client RAG document error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -542,6 +544,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const accessRefusal = sendRagAccessError(reply, error);
       if (accessRefusal) return accessRefusal;
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Reingest client RAG document error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -581,6 +584,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof RagModuleInactiveError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Query client RAG module error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',

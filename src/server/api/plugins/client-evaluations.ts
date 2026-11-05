@@ -20,6 +20,7 @@
  * (`lib/services/evaluation/clientEvaluationShared.ts`) (one envelope).
  */
 
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getRun, listRuns, listSuites, runSuite } from '@/lib/services/evaluation/service';
@@ -49,6 +50,7 @@ function clampLimit(raw: unknown): number | undefined {
 }
 
 function fail(reply: import('fastify').FastifyReply, error: unknown, scope: string) {
+  if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
   // A refusal (403, or the 503 when the engine cannot decide) is answered as the gate answers it, never as a 404 or a 500.
   const refused = sendAgentTestRefusal(reply, error);
   if (refused) return refused;
@@ -86,6 +88,10 @@ export const clientEvaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const revision = parseAgentRunOverride(body.agent_version, 'agent_version');
       if (!revision.ok) return reply.code(400).send({ error: revision.error });
+      await enforceServiceQuota(
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        { domain: 'jobs', resourceKey: 'evaluation', cost: { requests: 1 } },
+      );
       const run = await runSuite({
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,

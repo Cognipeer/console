@@ -5,6 +5,7 @@
  * retrieval (query → embed → vector query) using existing services.
  */
 
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { assertServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import {
   RagDocumentGoneError,
@@ -1057,6 +1058,26 @@ export async function ingestDocument(
   projectId: string | undefined,
   request: RagIngestInput,
 ): Promise<RagDocument> {
+  // The crawler's own ingest is background work with no caller to refuse; the crawl has its own quota.
+  if (!request.sentByCrawler) {
+    await enforceServiceQuota(
+      { tenantDbName, tenantId, projectId },
+      { domain: 'rag', resourceKey: request.ragModuleKey, cost: { requests: 1, units: 1 } },
+    );
+  }
+  return ingestDocumentUnchecked(tenantDbName, tenantId, projectId, request);
+}
+
+/**
+ * `ingestDocument` without the quota check, for entries that already counted
+ * the call (`ingestFile`, the transfer import) so a document is not counted twice.
+ */
+export async function ingestDocumentUnchecked(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  request: RagIngestInput,
+): Promise<RagDocument> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -1590,6 +1611,10 @@ export async function ingestFile(
   },
 ): Promise<RagDocument> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
+  await enforceServiceQuota(
+    { tenantDbName, tenantId, projectId },
+    { domain: 'rag', resourceKey: request.ragModuleKey, cost: { requests: 1, units: 1 } },
+  );
   const isPlainText = isPlainTextFile(request.fileName, request.contentType);
 
   const plan = await planFileExtraction(tenantDbName, projectId, request);
@@ -1600,7 +1625,7 @@ export async function ingestFile(
     content: string,
     extraction: IRagDocumentExtraction | undefined,
     deferred: boolean,
-  ) => ingestDocument(tenantDbName, tenantId, projectId, {
+  ) => ingestDocumentUnchecked(tenantDbName, tenantId, projectId, {
     ragModuleKey: request.ragModuleKey,
     fileName: request.fileName,
     content,
@@ -1896,6 +1921,10 @@ export async function queryRag(
   options?: RagQueryOptions,
 ): Promise<RagQueryResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
+  await enforceServiceQuota(
+    { tenantDbName, tenantId, projectId },
+    { domain: 'rag', resourceKey: request.ragModuleKey, cost: { requests: 1 } },
+  );
   const startTime = Date.now();
   const state: RagQueryState = { moduleFound: false };
   try {
@@ -2155,6 +2184,8 @@ async function runRagQuery(
             source: 'rag',
             ragModuleKey: request.ragModuleKey,
           },
+          // Part of the query, which the `rag` limits already counted.
+          { quota: false },
         );
         rerankLatencyMs = rerankResult.latencyMs;
         // Re-build matches in reranker-determined order. Preserve original

@@ -1,7 +1,8 @@
+import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import JSZip from 'jszip';
 import { createLogger } from '@/lib/core/logger';
 import type { IRagChunkConfig, IRagDocument } from '@/lib/database';
-import { listRagDocuments, getRagDocument, getRagModule, ingestDocument } from './ragService';
+import { listRagDocuments, getRagDocument, getRagModule, ingestDocumentUnchecked } from './ragService';
 import { loadSourceText } from './ragSource';
 import { validateChunkConfig } from './chunking';
 import type { RagAccessScope } from './access/scope';
@@ -230,6 +231,12 @@ export async function importRagModuleJsonl(
 
   result.total = entries.length;
 
+  // One check for the whole import: one request, one unit per document.
+  await enforceServiceQuota(
+    { tenantDbName, tenantId, projectId },
+    { domain: 'rag', resourceKey: ragModuleKey, cost: { requests: 1, units: entries.length } },
+  );
+
   for (const entry of entries) {
     let parsed: RagExportDocumentLine;
     try {
@@ -241,7 +248,7 @@ export async function importRagModuleJsonl(
     }
 
     try {
-      await ingestDocument(tenantDbName, tenantId, projectId, {
+      await ingestDocumentUnchecked(tenantDbName, tenantId, projectId, {
         ragModuleKey,
         fileName: parsed.fileName,
         content: parsed.content,

@@ -16,8 +16,8 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       db.prepare(`
         INSERT INTO ${TABLES.quotaPolicies}
-        (id, tenantId, projectId, scope, scopeId, groupMode, domain, priority, enabled, label, description, limits, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @scope, @scopeId, @groupMode, @domain, @priority, @enabled, @label, @description, @limits, @createdBy, @updatedBy, @createdAt, @updatedAt)
+        (id, tenantId, projectId, scope, scopeId, groupMode, ipRanges, ipMode, domain, priority, enabled, label, description, limits, createdBy, updatedBy, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @scope, @scopeId, @groupMode, @ipRanges, @ipMode, @domain, @priority, @enabled, @label, @description, @limits, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: policy.tenantId,
@@ -25,6 +25,8 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         scope: policy.scope,
         scopeId: policy.scopeId ?? null,
         groupMode: policy.groupMode ?? null,
+        ipRanges: Array.isArray(policy.ipRanges) ? this.toJson(policy.ipRanges) : null,
+        ipMode: policy.ipMode ?? null,
         domain: policy.domain,
         priority: policy.priority ?? 100,
         enabled: this.toBoolInt(policy.enabled ?? true),
@@ -72,6 +74,11 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.scope !== undefined) { sets.push('scope = @scope'); params.scope = data.scope; }
       if (data.scopeId !== undefined) { sets.push('scopeId = @scopeId'); params.scopeId = data.scopeId ?? null; }
       if (data.groupMode !== undefined) { sets.push('groupMode = @groupMode'); params.groupMode = data.groupMode ?? null; }
+      if (data.ipRanges !== undefined) {
+        sets.push('ipRanges = @ipRanges');
+        params.ipRanges = Array.isArray(data.ipRanges) ? this.toJson(data.ipRanges) : null;
+      }
+      if (data.ipMode !== undefined) { sets.push('ipMode = @ipMode'); params.ipMode = data.ipMode ?? null; }
       // Moving a policy to another project (or to none = tenant-wide). Named
       // apart from `@projectId`, which is the WHERE filter below.
       if (data.projectId !== undefined) { sets.push('projectId = @nextProjectId'); params.nextProjectId = data.projectId || null; }
@@ -108,6 +115,8 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         scopeId: r.scopeId as string | undefined,
         // NULL on every row written before group scope existed -> undefined.
         groupMode: (r.groupMode ?? undefined) as IQuotaPolicy['groupMode'],
+        ipRanges: r.ipRanges ? this.parseJson<string[]>(r.ipRanges, []) : undefined,
+        ipMode: (r.ipMode ?? undefined) as IQuotaPolicy['ipMode'],
         domain: r.domain as IQuotaPolicy['domain'],
         priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : 100,
         enabled: r.enabled === undefined || r.enabled === null ? true : this.fromBoolInt(r.enabled),

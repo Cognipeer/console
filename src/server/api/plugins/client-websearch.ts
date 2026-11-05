@@ -19,6 +19,7 @@
  *   when the instance has caching enabled.
  */
 
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { listWebSearchProviders, runWebSearch } from '@/lib/services/webSearch';
@@ -121,6 +122,7 @@ export const clientWebSearchApiPlugin: FastifyPluginAsync = async (app) => {
         latency_ms: result.latencyMs,
       });
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Run client web search error', { error });
       return reply.code(400).send({
         error: error instanceof Error ? error.message : 'Internal error',

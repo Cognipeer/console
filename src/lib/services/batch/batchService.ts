@@ -14,6 +14,8 @@ import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
 import { downloadFile } from '@/lib/services/files/fileService';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
+import { checkRateLimit } from '@/lib/quota/quotaGuard';
+import { QuotaExceededError } from '@/lib/quota/serviceQuota';
 import type { BatchContext, BatchRequestLine, CreateBatchInput } from './types';
 
 const logger = createLogger('batch:service');
@@ -121,6 +123,40 @@ export function parseBatchJsonl(content: string, endpoint: BatchJobEndpoint): Ba
  * rejected on the first invalid line), persist the job + items, then fan out
  * one queue job per item.
  */
+/**
+ * Rate check at submit: every item is one request on its model, so the batch
+ * is counted per model with that model's item count and refused whole (429)
+ * before anything is stored. Same domain/resource as the runner's per-item
+ * budget context (`llm`, or `embedding` for the embeddings endpoint). A model
+ * whose window has room for fewer items than the batch holds refuses it.
+ */
+async function checkBatchRateLimit(
+  ctx: BatchContext,
+  endpoint: BatchJobEndpoint,
+  requests: BatchRequestLine[],
+): Promise<void> {
+  if (!ctx.projectId) return;
+  const perModel = new Map<string, number>();
+  for (const line of requests) {
+    const model = String(line.body.model ?? '');
+    perModel.set(model, (perModel.get(model) ?? 0) + 1);
+  }
+  const domain = endpoint === '/v1/embeddings' ? ('embedding' as const) : ('llm' as const);
+  for (const [model, count] of perModel) {
+    const result = await checkRateLimit({
+      domain,
+      licenseType: ctx.licenseType,
+      projectId: ctx.projectId,
+      resourceKey: model,
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      tokenId: ctx.tokenId,
+      userId: ctx.userId,
+    }, { requests: count });
+    if (!result.allowed) throw new QuotaExceededError(result.reason || 'Quota exceeded', domain);
+  }
+}
+
 export async function createBatch(ctx: BatchContext, input: CreateBatchInput): Promise<IBatchJob> {
   if (!isSupportedBatchEndpoint(input.endpoint)) {
     throw new BatchValidationError(
@@ -169,6 +205,8 @@ export async function createBatch(ctx: BatchContext, input: CreateBatchInput): P
     );
   }
   requests.forEach((line, index) => validateRequestLine(input.endpoint, line, index));
+
+  await checkBatchRateLimit(ctx, input.endpoint, requests);
 
   const db = await withTenantDb(ctx.tenantDbName);
   // Attribution is stamped at creation (request ALS in scope); the rollup

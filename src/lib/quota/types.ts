@@ -2,7 +2,11 @@
 //
 // `group` (scopeId = a user-group id) applies to every member of the group; how
 // the group's counters are kept is `QuotaPolicy.groupMode`.
-export type QuotaScope = 'tenant' | 'group' | 'user' | 'token' | 'resource' | 'provider';
+//
+// `ip` matches the caller's address against `QuotaPolicy.ipRanges` (CIDR). It
+// never joins the merge of the other scopes: an IP limit keeps counters of its
+// own (`QuotaPolicy.ipMode`), checked next to the caller's — see quotaGuard.ts.
+export type QuotaScope = 'tenant' | 'group' | 'user' | 'token' | 'resource' | 'provider' | 'ip';
 
 // Domains: service areas
 //
@@ -22,7 +26,19 @@ export type QuotaDomain =
   | 'image'
   | 'moderation'
   | 'decision'
-  | 'agent';
+  | 'agent'
+  // Services added with the domain registry (domains.ts). None of them falls
+  // back to `global` policies: a limit on them has to name them.
+  | 'websearch'
+  | 'rag'
+  | 'mcp'
+  | 'rerank'
+  | 'memory'
+  | 'browser'
+  | 'crawler'
+  | 'guardrail'
+  | 'jobs'
+  | 'sandbox';
 
 /**
  * How a `group`-scoped policy counts.
@@ -31,6 +47,14 @@ export type QuotaDomain =
  */
 export type QuotaGroupMode = 'perMember' | 'shared';
 
+/**
+ * How an `ip`-scoped policy counts.
+ *  - perAddress (default): every client address in the ranges has its own
+ *    counter (an IPv6 address is counted by its /64).
+ *  - shared: the whole range list draws from ONE counter.
+ */
+export type QuotaIpMode = 'perAddress' | 'shared';
+
 export const QUOTA_SCOPES: readonly QuotaScope[] = [
   'tenant',
   'group',
@@ -38,6 +62,7 @@ export const QUOTA_SCOPES: readonly QuotaScope[] = [
   'token',
   'resource',
   'provider',
+  'ip',
 ];
 
 export const QUOTA_DOMAINS: readonly QuotaDomain[] = [
@@ -54,9 +79,24 @@ export const QUOTA_DOMAINS: readonly QuotaDomain[] = [
   'moderation',
   'decision',
   'agent',
+  'websearch',
+  'rag',
+  'mcp',
+  'rerank',
+  'memory',
+  'browser',
+  'crawler',
+  'guardrail',
+  'jobs',
+  'sandbox',
 ];
 
 export const QUOTA_GROUP_MODES: readonly QuotaGroupMode[] = ['perMember', 'shared'];
+
+export const QUOTA_IP_MODES: readonly QuotaIpMode[] = ['perAddress', 'shared'];
+
+/** Most CIDR ranges one `ip` policy may list (the token allowlist uses the same bound). */
+export const MAX_QUOTA_IP_RANGES = 100;
 
 // Human-readable labels for UI
 export const QUOTA_SCOPE_LABELS: Record<QuotaScope, string> = {
@@ -66,6 +106,7 @@ export const QUOTA_SCOPE_LABELS: Record<QuotaScope, string> = {
   token: 'API Token',
   resource: 'Resource',
   provider: 'Provider',
+  ip: 'IP address',
 };
 
 export const QUOTA_DOMAIN_LABELS: Record<QuotaDomain, string> = {
@@ -82,6 +123,16 @@ export const QUOTA_DOMAIN_LABELS: Record<QuotaDomain, string> = {
   moderation: 'Moderation',
   decision: 'Decision',
   agent: 'Agent runs',
+  websearch: 'Web Search',
+  rag: 'Knowledge (RAG)',
+  mcp: 'MCP tools',
+  rerank: 'Reranker',
+  memory: 'Memory',
+  browser: 'Browser',
+  crawler: 'Crawler',
+  guardrail: 'Guardrails',
+  jobs: 'Jobs',
+  sandbox: 'Sandbox',
 };
 
 export interface QuotaRequestWindow {
@@ -98,6 +149,8 @@ export interface QuotaRateLimit {
   vectors?: QuotaRequestWindow;
   files?: QuotaRequestWindow;
   storage?: QuotaRequestWindow;
+  /** What a service counts besides requests (pages, documents, minutes); see `QUOTA_DOMAIN_SPECS[domain].unit`. */
+  units?: QuotaRequestWindow;
 }
 
 export interface QuotaPerRequestLimits {
@@ -185,6 +238,10 @@ export interface QuotaPolicy {
   scopeId?: string;
   /** Only meaningful for `scope: 'group'`; absent means `perMember`. */
   groupMode?: QuotaGroupMode;
+  /** `scope: 'ip'` only: the CIDR ranges the caller's address is matched against. */
+  ipRanges?: string[];
+  /** `scope: 'ip'` only; absent means `perAddress`. */
+  ipMode?: QuotaIpMode;
   domain: QuotaDomain;
   priority: number;
   limits: QuotaLimits;
@@ -201,7 +258,8 @@ export type QuotaPolicyInput = Omit<QuotaPolicy, '_id' | 'tenantId' | 'createdAt
 
 /**
  * Kinds of policy that may omit `projectId` and then apply tenant-wide: group
- * limits (a group spans projects) and everything in the agent domain.
+ * limits (a group spans projects), IP limits (an address spans projects) and
+ * everything in the agent domain.
  *
  * Deliberately NOT "every policy without a project": the guard has only ever
  * loaded project-bound policies, so a legacy tenant-wide row of an older kind
@@ -210,11 +268,17 @@ export type QuotaPolicyInput = Omit<QuotaPolicy, '_id' | 'tenantId' | 'createdAt
  * not do.
  */
 export function isTenantWideKind(policy: Pick<QuotaPolicy, 'scope' | 'domain'>): boolean {
-  return policy.scope === 'group' || policy.domain === 'agent';
+  return policy.scope === 'group' || policy.scope === 'ip' || policy.domain === 'agent';
 }
 
 /** The effective group mode of a policy (`perMember` unless it says `shared`). */
 export function quotaGroupMode(policy: Pick<QuotaPolicy, 'scope' | 'groupMode'>): QuotaGroupMode | undefined {
   if (policy.scope !== 'group') return undefined;
   return policy.groupMode === 'shared' ? 'shared' : 'perMember';
+}
+
+/** The effective IP mode of a policy (`perAddress` unless it says `shared`). */
+export function quotaIpMode(policy: Pick<QuotaPolicy, 'scope' | 'ipMode'>): QuotaIpMode | undefined {
+  if (policy.scope !== 'ip') return undefined;
+  return policy.ipMode === 'shared' ? 'shared' : 'perAddress';
 }

@@ -137,7 +137,7 @@ describe('quota / limits UI strings', () => {
         : [[prefix.slice(0, -1), String(node)]];
     const en = new Map(leaves(messages.en.iamLimits));
     // A few words are the same in both languages (units, product names).
-    const sameOnPurpose = new Set(['columns.limit', 'amounts.kind.tokens', 'form.targetLabel.model']);
+    const sameOnPurpose = new Set(['columns.limit', 'amounts.kind.tokens', 'form.targetLabel.model', 'form.domainGroups.platform']);
     const untranslated = leaves(messages.tr.iamLimits)
       .filter(([key, value]) => value === en.get(key) && !sameOnPurpose.has(key))
       .map(([key]) => key);

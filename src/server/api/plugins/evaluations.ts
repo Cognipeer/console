@@ -1,3 +1,4 @@
+import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync } from 'fastify';
 import type {
@@ -773,6 +774,10 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!definitionKey) return reply.code(400).send({ error: 'definitionKey is required' });
       const selection = sanitizeLabelSelection(body.selection);
 
+      await enforceServiceQuota(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        { domain: 'jobs', resourceKey: 'analysis', cost: { requests: 1 } },
+      );
       const run = await enqueueDefinitionRun({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
@@ -794,6 +799,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(202).send({ run });
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Label dataset error', { error });
       const message = error instanceof Error ? error.message : '';
       if (message.toLowerCase().includes('not found')) return reply.code(404).send({ error: message });
@@ -944,6 +950,10 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       // Enqueue + return immediately (status 'pending'); the queue consumer runs
       // it in the background so the dashboard never blocks on a long run. The UI
       // polls the run detail endpoint to watch progress.
+      await enforceServiceQuota(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        { domain: 'jobs', resourceKey: 'evaluation', cost: { requests: 1 } },
+      );
       const run = await enqueueSuiteRun({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
@@ -959,6 +969,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       // Before the message checks below: a refusal must never be read as a 404 or a 409.
       const refused = sendAgentTestRefusal(reply, error);
       if (refused) return refused;
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Run evaluation suite error', { error });
       if (error instanceof AgentRevisionError) return reply.code(400).send({ error: error.message });
       if (error instanceof Error && error.message.toLowerCase().includes('not found')) {

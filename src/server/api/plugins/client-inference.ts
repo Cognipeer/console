@@ -702,6 +702,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const result = await handleChatCompletion({
+        quotaChecked: true,
         body,
         modelKey,
         projectId: auth.projectId,

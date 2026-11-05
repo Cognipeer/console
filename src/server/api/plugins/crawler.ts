@@ -5,6 +5,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { ZodError } from 'zod';
 import { createLogger } from '@/lib/core/logger';
+import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import {
   addCrawlerUrls,
   cancelCrawlJob,
@@ -51,6 +52,7 @@ function sendError(
   if (error instanceof ZodError) {
     return reply.code(400).send({ error: formatCrawlerValidationError(error) });
   }
+  if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
   const message = error instanceof Error ? error.message : fallback;
   // An error that says it is a bad input is a 400 whatever its wording ("model not found" included).
   const badInput = (error as { statusCode?: unknown } | null)?.statusCode === 400;
