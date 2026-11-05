@@ -1,7 +1,8 @@
-import { useMemo, type ReactNode } from 'react';
+import { useId, useMemo, type ReactNode } from 'react';
 import { Autocomplete, Loader, Select, TextInput, type ComboboxStringItem, type OptionsFilter } from '@mantine/core';
 import { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import FieldWithAction from './FieldWithAction';
 import type { FieldProps } from './types';
 
 export interface ProviderSummary {
@@ -36,7 +37,7 @@ interface ProviderSectionProps {
   modelIdSuggestions?: ModelIdSuggestion[];
   /** The suggestions are being listed. */
   modelIdLoading?: boolean;
-  /** Shown at the end of the Model ID label (e.g. a link back to the model catalog). */
+  /** Shown at the end of the Model ID label row, next to the label (e.g. a link back to the model catalog). */
   modelIdAction?: ReactNode;
   /** Shown instead of the picker when the project has no provider. */
   emptyState?: ReactNode;
@@ -60,6 +61,18 @@ export default function ProviderSection({
   emptyState,
 }: ProviderSectionProps) {
   const selected = providers.find((p) => p.key === providerKey);
+  const modelIdInputId = useId();
+  const modelIdInput = modelIdSuggestions ? (
+    <ModelIdAutocomplete
+      id={modelIdInputId}
+      placeholder={modelIdPlaceholder}
+      suggestions={modelIdSuggestions}
+      loading={modelIdLoading}
+      inputProps={modelIdProps}
+    />
+  ) : (
+    <TextInput id={modelIdInputId} placeholder={modelIdPlaceholder} {...modelIdProps} />
+  );
   return (
     <FormSection
       number={number}
@@ -104,18 +117,17 @@ export default function ProviderSection({
         </>
       )}
       <FormRow cols={1}>
-        <FormField label="Model ID" required action={modelIdAction}>
-          {modelIdSuggestions ? (
-            <ModelIdAutocomplete
-              placeholder={modelIdPlaceholder}
-              suggestions={modelIdSuggestions}
-              loading={modelIdLoading}
-              inputProps={modelIdProps}
-            />
-          ) : (
-            <TextInput placeholder={modelIdPlaceholder} {...modelIdProps} />
-          )}
-        </FormField>
+        {modelIdAction ? (
+          // Not FormField's `action`: inside its <label> the button became the label's control, so clicking
+          // "Model ID" pressed "Back to catalog" and closed the form.
+          <FieldWithAction label="Model ID" required htmlFor={modelIdInputId} action={modelIdAction}>
+            {modelIdInput}
+          </FieldWithAction>
+        ) : (
+          <FormField label="Model ID" required>
+            {modelIdInput}
+          </FormField>
+        )}
       </FormRow>
     </FormSection>
   );
@@ -126,11 +138,13 @@ export default function ProviderSection({
  * display name, so "sonnet" finds `claude-sonnet-4-5`.
  */
 function ModelIdAutocomplete({
+  id,
   placeholder,
   suggestions,
   loading,
   inputProps,
 }: {
+  id: string;
   placeholder: string;
   suggestions: ModelIdSuggestion[];
   loading: boolean;
@@ -181,6 +195,7 @@ function ModelIdAutocomplete({
 
   return (
     <Autocomplete
+      id={id}
       placeholder={placeholder}
       data={data}
       filter={filter}

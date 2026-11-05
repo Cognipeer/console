@@ -10,11 +10,19 @@ import type { ProviderModelCatalog } from '@/lib/services/models/catalog/types';
  *
  * Every listing calls the provider's own API with its stored credentials, so one listing is kept in memory per
  * provider for a few minutes and shared by every caller on the page: the catalog and the form it opens make one
- * call between them. `refresh()` always lists again. The memo lives as long as the page does; switching projects
- * reloads the page, which drops it.
+ * call between them. A listing the provider refused or could not answer (`data.error`) is kept only briefly, so the
+ * next opening asks the provider again (after the credentials were fixed, or a timeout passed). `refresh()` always
+ * lists again. Models created on the page are added to the remembered listing (`noteCatalogModelsCreated`); a model
+ * deleted or re-pointed makes it stale (`invalidateProviderModelCatalog`). The memo lives as long as the page does;
+ * switching projects reloads the page, which drops it.
  */
 
 const TTL_MS = 5 * 60_000;
+/**
+ * A listing that came back with `error` (refused credentials, timeout …) is kept only long enough for the catalog and
+ * the form it opens straight away to share it; a later opening lists again.
+ */
+const FAILED_LISTING_TTL_MS = 30_000;
 
 interface Entry {
   data?: ProviderModelCatalog;
@@ -49,7 +57,8 @@ function subscribe(providerKey: string, listener: () => void): () => void {
 }
 
 function isFresh(entry: Entry | undefined, now = Date.now()): boolean {
-  return Boolean(entry?.data && entry.loadedAt !== undefined && now - entry.loadedAt < TTL_MS && entry.errorStatus === undefined);
+  if (!entry?.data || entry.loadedAt === undefined || entry.errorStatus !== undefined) return false;
+  return now - entry.loadedAt < (entry.data.error ? FAILED_LISTING_TTL_MS : TTL_MS);
 }
 
 function looksLikeCatalog(value: unknown): value is ProviderModelCatalog {
@@ -102,7 +111,9 @@ function load(providerKey: string, force: boolean) {
 
 /**
  * Marks catalog entries as added to the project, so the catalog's "Added" badges are right without listing the
- * provider again. Called after a model was created from the catalog or the form.
+ * provider again. Called after a model was created from the catalog or the form. A delete or an edit cannot be
+ * patched in the same way (the page does not know every entry a model matched), so it goes through
+ * `invalidateProviderModelCatalog`.
  */
 export function noteCatalogModelsCreated(providerKey: string, created: ReadonlyArray<{ modelId: string; key: string }>) {
   const entry = entries.get(providerKey);
@@ -123,6 +134,23 @@ export function noteCatalogModelsCreated(providerKey: string, created: ReadonlyA
   if (!changed) return;
   entries.set(providerKey, { ...entry, data: { ...entry.data, models } });
   notify(providerKey);
+}
+
+/**
+ * Forgets that a listing is current (one provider's, or all), so its "Added" badges are listed again: after a model
+ * was deleted, or an edit may have changed its provider or model ID. The listing stays on screen until the new one
+ * arrives; one shown right now is listed again at once, any other on its next opening.
+ */
+export function invalidateProviderModelCatalog(providerKey?: string) {
+  const keys = providerKey ? [providerKey] : [...entries.keys()];
+  for (const key of keys) {
+    const entry = entries.get(key);
+    if (!entry) continue;
+    // A listing on its way may have been answered before the change: it is dropped too, not kept as current.
+    entry.controller?.abort();
+    entries.set(key, { ...entry, loadedAt: undefined, controller: undefined });
+    if (listeners.has(key)) load(key, true);
+  }
 }
 
 /** Drops every remembered listing (tests; a page that must not reuse one). */

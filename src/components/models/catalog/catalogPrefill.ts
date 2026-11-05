@@ -86,6 +86,17 @@ export function providerSupportsToolCalls(provider?: Pick<CatalogProviderRef, 'd
   return Boolean(provider?.driverCapabilities?.['model.supports.tool_calls']);
 }
 
+/**
+ * The catalog categories whose ids the Model ID field of a model of this category (and OCR / decision mode) can take.
+ * OCR in VLM mode and structured decision run on a chat model of the provider, and listings name those as chat
+ * models (`llm`), so they fit as well as the category's own entries (mistral-ocr, a native decision model ...).
+ */
+export function modelIdSuggestionCategories(category: ModelCategory, mode?: string): ModelCategory[] {
+  if (category === 'ocr' && mode === 'vlm') return ['ocr', 'llm'];
+  if (category === 'decision' && mode === 'structured') return ['decision', 'llm'];
+  return [category];
+}
+
 /** What the create form opens with when a model is picked from the catalog. */
 export interface CreateModelPrefill {
   providerKey: string;

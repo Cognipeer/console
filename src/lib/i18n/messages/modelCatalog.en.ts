@@ -11,7 +11,9 @@ export const modelCatalogEn = {
     sectionDescription: 'The models below come from this provider: from its own API where it has a list, otherwise from a reference or built-in list.',
     label: 'Provider',
     placeholder: 'Select a model provider',
+    active: 'Active',
     disabled: 'Disabled',
+    errored: 'Error',
     pickHint: 'Select an active provider to see the models it serves.',
     empty: {
       title: 'No model providers in this project',

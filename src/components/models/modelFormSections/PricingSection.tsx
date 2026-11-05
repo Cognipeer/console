@@ -1,7 +1,8 @@
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { NumberInput, TextInput } from '@mantine/core';
 import { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import CatalogPriceFill, { type CatalogFillMeta } from '@/components/models/CatalogPriceFill';
+import FieldWithAction from './FieldWithAction';
 import { PRICING_SECTION_ID } from './promptCachingIds';
 import type { FieldProps } from './types';
 
@@ -43,18 +44,21 @@ export default function PricingSection({
   onApplyCatalog,
   children,
 }: PricingSectionProps) {
+  const inputPriceId = useId();
   return (
     <FormSection id={PRICING_SECTION_ID} number={number} title="Pricing" description={description} done={done}>
       <FormRow cols={2}>
         <FormField label="Currency">
           <TextInput placeholder="USD" {...currencyProps} />
         </FormField>
-        <FormField
+        {/* Not FormField's `action`: inside its <label> a click on the label text pressed "Fill from catalog". */}
+        <FieldWithAction
           label="Input · per 1M tokens"
+          htmlFor={inputPriceId}
           action={<CatalogPriceFill modelId={modelId} onApply={onApplyCatalog} />}
         >
-          <NumberInput min={0} decimalScale={4} {...inputProps} />
-        </FormField>
+          <NumberInput id={inputPriceId} min={0} decimalScale={4} {...inputProps} />
+        </FieldWithAction>
       </FormRow>
       <FormRow cols={2}>
         <FormField label="Output · per 1M tokens">

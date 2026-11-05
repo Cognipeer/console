@@ -89,11 +89,15 @@ function dedupe(models: ParsedModel[]): ParsedModel[] {
   });
 }
 
-/** The list of an answer: `{ data: [...] }`, or a bare array (Together). */
-function listOf(body: unknown, key = 'data'): unknown[] {
-  if (Array.isArray(body)) return body;
-  const list = isObject(body) ? body[key] : undefined;
-  return Array.isArray(list) ? list : [];
+/**
+ * The list of an answer: `{ data: [...] }`, or a bare array (Together). At most `limit` raw entries are returned, so a
+ * reader never maps more of a huge answer than the catalog could keep.
+ */
+function listOf(body: unknown, key = 'data', limit = Infinity): unknown[] {
+  const list = Array.isArray(body) ? body : isObject(body) ? body[key] : undefined;
+  if (!Array.isArray(list)) return [];
+  const max = Math.max(0, limit);
+  return list.length > max ? list.slice(0, max) : list;
 }
 
 /** Rounds a price to 6 decimals, which sheds the float noise of per-token × 1e6. */
@@ -235,7 +239,8 @@ function parseOpenAiShapedEntry(item: unknown): ParsedModel | null {
   const has = (...names: string[]) => (supportedParameters ? names.some((name) => supportedParameters.includes(name)) : undefined);
   const supportsToolCalls = has('tools') ?? bool(capabilities?.function_calling) ?? bool(item.supports_tools);
   const supportsReasoning = has('reasoning', 'include_reasoning');
-  const supportsStructuredOutputs = has('structured_outputs', 'response_format');
+  // OpenRouter: `response_format` alone is JSON mode; `structured_outputs` is the JSON-schema capability this flag means.
+  const supportsStructuredOutputs = has('structured_outputs');
 
   let providerPricing: CatalogModelPricing | undefined;
   if (pricing && 'prompt' in pricing) providerPricing = openRouterPricing(pricing);
@@ -266,20 +271,21 @@ function parseOpenAiShapedEntry(item: unknown): ParsedModel | null {
 
 /**
  * Any OpenAI-shaped list: `{ data: [...] }` or a bare array, with whatever extra fields the server adds (see
- * `parseOpenAiShapedEntry`). Used for OpenAI, Together and every OpenAI-compatible server.
+ * `parseOpenAiShapedEntry`). Used for OpenAI, Together and every OpenAI-compatible server. Only the first `limit`
+ * raw entries are read.
  */
-export function parseOpenAiCompatibleModels(body: unknown): ParsedModel[] {
-  return dedupe(listOf(body).map(parseOpenAiShapedEntry).filter((model): model is ParsedModel => model !== null));
+export function parseOpenAiCompatibleModels(body: unknown, limit?: number): ParsedModel[] {
+  return dedupe(listOf(body, 'data', limit).map(parseOpenAiShapedEntry).filter((model): model is ParsedModel => model !== null));
 }
 
 /** OpenAI: `{ data: [{ id, created, owned_by }] }`. */
-export function parseOpenAiModels(body: unknown): ParsedModel[] {
-  return parseOpenAiCompatibleModels(isObject(body) ? body : {});
+export function parseOpenAiModels(body: unknown, limit?: number): ParsedModel[] {
+  return parseOpenAiCompatibleModels(isObject(body) ? body : {}, limit);
 }
 
 /** Together: a bare array of `{ id, type, display_name, context_length, pricing: { input, output } }`. */
-export function parseTogetherModels(body: unknown): ParsedModel[] {
-  return parseOpenAiCompatibleModels(body);
+export function parseTogetherModels(body: unknown, limit?: number): ParsedModel[] {
+  return parseOpenAiCompatibleModels(body, limit);
 }
 
 export interface AnthropicModelPage {
@@ -288,13 +294,22 @@ export interface AnthropicModelPage {
   lastId?: string;
 }
 
-/** Anthropic: `{ data: [{ id, display_name, created_at, type }], has_more, last_id }`. */
-export function parseAnthropicModels(body: unknown): AnthropicModelPage {
+/**
+ * Anthropic: `{ data: [{ id, display_name, created_at, max_input_tokens, max_tokens, lifecycle, deprecated_at }],
+ * has_more, last_id }`. A `deprecated` model is closed to new adopters and headed for retirement, so it is marked
+ * deprecated; a `retired` one answers no request and is left out. Only the first `limit` raw entries are read.
+ */
+export function parseAnthropicModels(body: unknown, limit?: number): AnthropicModelPage {
   const models: ParsedModel[] = [];
-  for (const item of listOf(body)) {
+  for (const item of listOf(body, 'data', limit)) {
     if (!isObject(item)) continue;
     const id = str(item.id);
     if (!id) continue;
+    const lifecycle = str(item.lifecycle)?.toLowerCase();
+    // Retired models are listed only on request, and every call to them fails.
+    if (lifecycle === 'retired') continue;
+    // `lifecycle` is authoritative; an older or proxied answer without it falls back to `deprecated_at`.
+    const deprecated = lifecycle !== undefined ? lifecycle === 'deprecated' : str(item.deprecated_at) !== undefined;
     const contextWindow = positiveInt(item.max_input_tokens);
     const maxOutputTokens = positiveInt(item.max_tokens);
     models.push({
@@ -304,6 +319,7 @@ export function parseAnthropicModels(body: unknown): AnthropicModelPage {
       ...(timestamp(item.created_at) ? { createdAt: timestamp(item.created_at) } : {}),
       ...(contextWindow ? { contextWindow } : {}),
       ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(deprecated ? { deprecated: true } : {}),
     });
   }
   const record = isObject(body) ? body : {};
@@ -313,11 +329,12 @@ export function parseAnthropicModels(body: unknown): AnthropicModelPage {
 /**
  * Azure OpenAI deployments: `{ data: [{ id, model, status, created_at, object: 'deployment' }] }`. The deployment
  * name is what a request addresses, so it is the id; the model it serves is `upstreamModel` and decides the category.
- * A deployment that is still being created or failed (`status` other than `succeeded`) is left out.
+ * A deployment that is still being created or failed (`status` other than `succeeded`) is left out. Only the first
+ * `limit` raw entries are read.
  */
-export function parseAzureDeployments(body: unknown): ParsedModel[] {
+export function parseAzureDeployments(body: unknown, limit?: number): ParsedModel[] {
   const models: ParsedModel[] = [];
-  for (const item of listOf(body)) {
+  for (const item of listOf(body, 'data', limit)) {
     if (!isObject(item)) continue;
     const id = str(item.id);
     if (!id) continue;
@@ -406,7 +423,8 @@ export function foundationModelIdOfArn(arn: string): string | undefined {
  * Bedrock `ListInferenceProfiles`: `{ inferenceProfileSummaries: [{ inferenceProfileId, inferenceProfileName,
  * description, status, type, models: [{ modelArn }] }], nextToken }`. A profile id (`us.anthropic.claude-…`) is what a
  * request names; the foundation model behind it (from the first model ARN) gives the category and vision when the
- * foundation-model list knows it, otherwise the id is read like any other.
+ * foundation-model list knows it, otherwise the id is read like any other. Only `SYSTEM_DEFINED` profiles are listed:
+ * an application profile (`APPLICATION`) is addressed by its ARN, not by the bare id the list carries.
  */
 export function parseBedrockInferenceProfiles(
   body: unknown,
@@ -419,6 +437,9 @@ export function parseBedrockInferenceProfiles(
     if (!id) continue;
     const status = str(item.status);
     if (status !== undefined && status.toUpperCase() !== 'ACTIVE') continue;
+    // The request asks for system-defined profiles only; this holds even if an endpoint ignores that filter.
+    const type = str(item.type);
+    if (type !== undefined && type.toUpperCase() !== 'SYSTEM_DEFINED') continue;
 
     const firstModel = Array.isArray(item.models) ? item.models.find(isObject) : undefined;
     const arn = firstModel ? str(firstModel.modelArn) : undefined;
@@ -469,10 +490,13 @@ export interface AzureDocumentModelPage {
   nextLink?: string;
 }
 
-/** Azure Document Intelligence: `{ value: [{ modelId, description, createdDateTime }], nextLink }`, all OCR models. */
-export function parseAzureDocumentModels(body: unknown): AzureDocumentModelPage {
+/**
+ * Azure Document Intelligence: `{ value: [{ modelId, description, createdDateTime }], nextLink }`, all OCR models.
+ * Only the first `limit` raw entries are read.
+ */
+export function parseAzureDocumentModels(body: unknown, limit?: number): AzureDocumentModelPage {
   const models: ParsedModel[] = [];
-  for (const item of listOf(body, 'value')) {
+  for (const item of listOf(body, 'value', limit)) {
     if (!isObject(item)) continue;
     const id = str(item.modelId);
     if (!id) continue;

@@ -15,6 +15,7 @@ import {
   catalogModelToPrefill,
   createModelBodyFromPrefill,
   filterCatalogModels,
+  modelIdSuggestionCategories,
   resolveDecisionModes,
   resolveOcrModes,
   resolveProviderCategories,
@@ -244,6 +245,16 @@ describe('provider rules shared with the create form', () => {
     expect(resolveOcrModes({ driverCapabilities: { 'ocr.modes': ['native', 'other'] } })).toEqual(['native']);
     expect(resolveDecisionModes({ driverCapabilities: { 'model.categories': ['rerank'] } })).toEqual(['structured']);
     expect(resolveDecisionModes({ driverCapabilities: { 'model.categories': ['llm'], 'decision.native': true } })).toEqual(['structured', 'native']);
+  });
+
+  it('offers chat models to the Model ID of OCR in VLM mode and structured decision, which run on one', () => {
+    expect(modelIdSuggestionCategories('ocr', 'vlm')).toEqual(['ocr', 'llm']);
+    expect(modelIdSuggestionCategories('decision', 'structured')).toEqual(['decision', 'llm']);
+    // The provider's own OCR / decision endpoint takes only its own models.
+    expect(modelIdSuggestionCategories('ocr', 'native')).toEqual(['ocr']);
+    expect(modelIdSuggestionCategories('decision', 'native')).toEqual(['decision']);
+    expect(modelIdSuggestionCategories('llm')).toEqual(['llm']);
+    expect(modelIdSuggestionCategories('embedding', 'vlm')).toEqual(['embedding']);
   });
 });
 

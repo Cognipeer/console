@@ -7,6 +7,7 @@ import { IconArrowLeft, IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm/ConfirmProvider';
 import {
+  modelIdSuggestionCategories,
   providerSupportsToolCalls,
   resolveDecisionModes,
   resolveOcrModes,
@@ -179,9 +180,6 @@ function toNumber(value: number | '' | undefined): number | undefined {
   return value;
 }
 
-/** What the dirty check compares: the identity fields, as typed (or as the catalog filled them in). */
-const identityOf = (name: string, key: string, modelId: string) => JSON.stringify([name, key, modelId]);
-
 const isLlmCategory = (category: ModelCategory) => CAPABILITY_CATEGORIES.includes(category);
 const definedOnly = (patch: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
@@ -209,6 +207,10 @@ export default function CreateModelModal({
   // Off on the render the modal opens, while the form still holds the previous provider: the Model ID suggestions
   // list the provider the open effects settle on, not a provider that is about to be replaced.
   const [suggestionsActive, setSuggestionsActive] = useState(false);
+  // The form as the catalog's pick left it, once the provider clamps have settled on it: what "edited" is measured
+  // from. The version counts the picks written, so the snapshot is taken again for each one.
+  const [prefillVersion, setPrefillVersion] = useState(0);
+  const [prefillBaseline, setPrefillBaseline] = useState<string | null>(null);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -408,6 +410,7 @@ export default function CreateModelModal({
     if (!opened) {
       appliedPrefillRef.current = null;
       setSuggestionsActive(false);
+      setPrefillBaseline(null);
       return;
     }
     setSuggestionsActive(true);
@@ -437,20 +440,33 @@ export default function CreateModelModal({
       setFieldValue('pricing.cachedTokenPer1M', prefill.pricing.cachedTokenPer1M ?? '');
       setFieldValue('pricing.cacheWriteTokenPer1M', prefill.pricing.cacheWriteTokenPer1M ?? '');
     }
+    setPrefillVersion((version) => version + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, prefill]);
+
+  // Declared after the clamps: on the render after the pick lands they run first and write their values at once
+  // (setFieldValue updates what getValues reads synchronously), so the snapshot is the pick as the selected provider
+  // allows it, and a clamp does not count as an edit. Not `form.resetDirty()`: that moves the snapshot the close-time
+  // `reset()` goes back to, which must stay the blank form.
+  useEffect(() => {
+    if (prefillVersion > 0) setPrefillBaseline(JSON.stringify(form.getValues()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillVersion]);
 
   // The models the selected provider serves, offered while typing the Model ID (same listing as the catalog's).
   const modelCatalog = useProviderModelCatalog(formValues.providerKey || undefined, {
     enabled: opened && suggestionsActive,
   });
-  const modelIdSuggestions = useMemo<ModelIdSuggestion[]>(
-    () =>
-      (modelCatalog.data?.models ?? [])
-        .filter((model) => model.category === formValues.category)
-        .map((model) => ({ value: model.id, label: model.name })),
-    [modelCatalog.data, formValues.category],
-  );
+  // OCR in VLM mode and structured decision are served by a chat model, so the provider's chat models are offered.
+  const suggestionMode = formValues.category === 'ocr'
+    ? formValues.ocr.mode
+    : formValues.category === 'decision' ? formValues.decision.mode : undefined;
+  const modelIdSuggestions = useMemo<ModelIdSuggestion[]>(() => {
+    const categories = modelIdSuggestionCategories(formValues.category, suggestionMode);
+    return (modelCatalog.data?.models ?? [])
+      .filter((model) => categories.includes(model.category))
+      .map((model) => ({ value: model.id, label: model.name }));
+  }, [modelCatalog.data, formValues.category, suggestionMode]);
 
   const backToCatalog = () => {
     if (!onBackToCatalog) return;
@@ -469,10 +485,11 @@ export default function CreateModelModal({
     });
   };
 
-  // A form the catalog filled in is not "edited" until someone changes what it filled in.
-  const dirty = opened
-    && Boolean(formValues.name || formValues.key || formValues.modelId)
-    && (!prefill || identityOf(formValues.name, formValues.key, formValues.modelId) !== identityOf(prefill.name, '', prefill.modelId));
+  // A form the catalog filled in is not "edited" until someone changes anything in it (a description or a price
+  // counts as much as the name); a blank form is edited once it has a name, key or model ID.
+  const dirty = opened && (prefill
+    ? prefillBaseline !== null && prefillBaseline !== JSON.stringify(formValues)
+    : Boolean(formValues.name || formValues.key || formValues.modelId));
   const validProvider = Boolean(formValues.providerKey);
   const validIdentity = Boolean(formValues.name && formValues.modelId);
   const validPricing =

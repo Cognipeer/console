@@ -15,6 +15,10 @@ describe('inferCatalogCategory', () => {
     ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'llm'],
     ['claude-sonnet-4-20250514', 'llm'],
     ['us.anthropic.claude-3-5-sonnet-20240620-v1:0', 'llm'],
+    // Perplexity's deep research model is served over Chat Completions, unlike OpenAI's.
+    ['sonar-deep-research', 'llm'],
+    ['llama-3.3-70b-versatile', 'llm'],
+    ['openai/gpt-oss-120b', 'llm'],
   ])('%s is a chat model', (id, category) => {
     expect(inferCatalogCategory(id)).toBe(category);
   });
@@ -54,6 +58,12 @@ describe('inferCatalogCategory', () => {
     ['tts-1-hd', 'tts'],
     ['gpt-4o-mini-tts', 'tts'],
     ['playai-tts', 'tts'],
+    ['canopylabs/orpheus-v1-english', 'tts'],
+    ['canopylabs/orpheus-arabic-saudi', 'tts'],
+    ['kokoro', 'tts'],
+    ['hexgrad/Kokoro-82M', 'tts'],
+    ['speaches-ai/Kokoro-82M-v1.0-ONNX', 'tts'],
+    ['coqui/XTTS-v2', 'tts'],
     ['dall-e-3', 'image'],
     ['gpt-image-1', 'image'],
     ['black-forest-labs/FLUX.1-schnell', 'image'],
@@ -76,6 +86,9 @@ describe('inferCatalogCategory', () => {
     'babbage-002',
     'gpt-3.5-turbo-instruct',
     'computer-use-preview',
+    'o3-deep-research',
+    'o4-mini-deep-research-2025-06-26',
+    'azure/o3-deep-research',
     'gemini-2.0-flash-live-001',
     'gemini-live-2.5-flash-preview',
     'gemini-2.5-flash-preview-native-audio-dialog',

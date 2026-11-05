@@ -214,6 +214,22 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   (`POST /prompts/{key}/render`) and the Prompt Studio preview no longer turn `&`, `<`, `>` and quotes into HTML entities
   (`Tom & Jerry` used to reach the model as `Tom &amp; Jerry`); `{{x}}`, `{{{x}}}` and `{{&x}}` give the same text.
 
+### Model catalog
+
+- **Create Model** in the Model Hub opens an **Add model** catalog first: the models the selected provider can serve,
+  listed in real time from the provider's own list API with its stored credentials (OpenAI, OpenAI-compatible servers,
+  Together, Anthropic, Azure OpenAI deployments, Bedrock, Cohere, Mistral OCR, Azure Document Intelligence), from the
+  market reference catalog (Vertex AI) or from a built-in list (drivers without a list API). Each row shows the
+  category, context window, capabilities, price where known and whether the project already has the model. Picking
+  one opens the create form filled in, picking several creates them with default settings after a confirmation that
+  says how many have no known price (they get 0 prices), and **Enter custom model** opens the empty form with the
+  provider preselected. The **Model ID** field of the create and edit forms suggests the same models. A listing
+  follows the outbound rules of **Test connection** and never shows a credential or the provider's response
+  body. New dashboard route `GET /api/models/providers/{providerKey}/catalog`, which needs models **write** although
+  it only reads, because each call spends the provider's credentials; a provider outside the project answers `404`, a
+  disabled one `409 provider_disabled`, and a listing the provider refused is a `200` with the reason in `error`. See
+  [Add a model from the provider catalog](docs/guide/model-hub.md#add-a-model-from-the-provider-catalog).
+
 ### A2A
 
 - `message/send` can answer without waiting (`blocking: false`), `message/stream` streams status and artifact updates,

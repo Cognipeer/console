@@ -97,6 +97,9 @@ const REFERENCE: ModelPriceCatalogEntry[] = [
   { key: 'chat-bison', provider: 'vertex_ai-language-models', mode: 'chat', pricing: { currency: 'USD', inputTokenPer1M: 0.5, outputTokenPer1M: 0.5 } },
   { key: 'vertex_ai/gemini-2.5-flash@001', provider: 'vertex_ai-language-models', mode: 'chat', pricing: { currency: 'USD', inputTokenPer1M: 0.3, outputTokenPer1M: 2.5 } },
   { key: 'vertex_ai/claude-sonnet-4@20250514', provider: 'vertex_ai-anthropic_models', mode: 'chat', pricing: { currency: 'USD', inputTokenPer1M: 3, outputTokenPer1M: 15 } },
+  // Newer Gemini entries carry plain `vertex_ai`; a partner model under it is not a Vertex model id.
+  { key: 'vertex_ai/gemini-3-pro-preview', provider: 'vertex_ai', mode: 'chat', pricing: { currency: 'USD', inputTokenPer1M: 2, outputTokenPer1M: 12 } },
+  { key: 'vertex_ai/deepseek-ai/deepseek-v3.1-maas', provider: 'vertex_ai', mode: 'chat', pricing: { currency: 'USD', inputTokenPer1M: 1.35, outputTokenPer1M: 5.4 } },
 ];
 
 function input(overrides: Partial<DiscoveryInput>): DiscoveryInput {
@@ -354,6 +357,21 @@ describe('OpenAI-compatible', () => {
     expect(result.notices).toContainEqual({ code: 'truncated', count: CATALOG_MAX_MODELS });
   });
 
+  it('reads only so many entries of a huge list: the rest is never parsed, the result is capped and says so', async () => {
+    const data: Array<Record<string, unknown>> = Array.from({ length: CATALOG_MAX_MODELS * 10 }, (_, i) => ({ id: `model-${String(i).padStart(5, '0')}` }));
+    // Past the ceiling: it would sort first if it were read.
+    data.push({ id: 'a-newest', created: 1790000000 });
+    const result = await discoverProviderModels(
+      input({ driver: 'openai-compatible', settings: { baseUrl: 'https://93.184.216.34/v1' } }),
+      deps(fetchMap([['https://93.184.216.34/v1/models', json(200, { data })]]), { referenceEntries: async () => [] }),
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.models).toHaveLength(CATALOG_MAX_MODELS);
+    expect(result.models[0].id).toBe('model-00000');
+    expect(result.models.some((m) => m.id === 'a-newest')).toBe(false);
+    expect(result.notices).toContainEqual({ code: 'truncated', count: CATALOG_MAX_MODELS });
+  });
+
   it('orders current models before deprecated ones, then by category', async () => {
     const result = await discoverProviderModels(
       input({ driver: 'openai-compatible', settings: { baseUrl: 'https://93.184.216.34/v1' } }),
@@ -371,6 +389,87 @@ describe('OpenAI-compatible', () => {
       ]]), { referenceEntries: async () => [] }),
     );
     expect(result.models.map((m) => m.id)).toEqual(['alpha', 'zeta', 'nomic-embed-text', 'tts-1', 'b-old']);
+  });
+});
+
+describe('OpenAI-compatible: reference prices from another vendor', () => {
+  const entry = (key: string, provider: string, input: number): ModelPriceCatalogEntry => ({
+    key,
+    provider,
+    mode: 'chat',
+    pricing: { currency: 'USD', inputTokenPer1M: input, outputTokenPer1M: input * 4 },
+    maxInputTokens: 131072,
+  });
+
+  it('a self-hosted server\'s model priced only under another host is approximate, never trusted', async () => {
+    const result = await discoverProviderModels(
+      input({ driver: 'openai-compatible', settings: { baseUrl: 'https://93.184.216.34/v1' } }),
+      deps(fetchMap([['https://93.184.216.34/v1/models', json(200, { data: [{ id: 'openai/gpt-oss-120b' }] })]]), {
+        referenceEntries: async () => [entry('kyma/gpt-oss-120b', 'kyma', 0.05)],
+      }),
+    );
+    expect(result.models[0].pricing).toMatchObject({ catalogKey: 'kyma/gpt-oss-120b', confidence: 'fuzzy' });
+    // A fuzzy match takes no limits from the other vendor's entry either.
+    expect(result.models[0].contextWindow).toBeUndefined();
+  });
+
+  it('a known vendor without its own key does not take another vendor\'s price as its own', async () => {
+    dns.hosts.set('api.groq.com', ['104.18.2.205']);
+    const result = await discoverProviderModels(
+      input({ driver: 'openai-compatible', settings: { baseUrl: 'https://api.groq.com/openai/v1' } }),
+      deps(fetchMap([['https://api.groq.com/openai/v1/models', json(200, { data: [{ id: 'qwen/qwen3-32b' }, { id: 'openai/gpt-oss-120b' }] })]]), {
+        referenceEntries: async () => [entry('ovhcloud/Qwen3-32B', 'ovhcloud', 0.08), entry('groq/openai/gpt-oss-120b', 'groq', 0.15)],
+      }),
+    );
+    const byId = Object.fromEntries(result.models.map((m) => [m.id, m]));
+    expect(byId['qwen/qwen3-32b'].pricing).toMatchObject({ catalogKey: 'ovhcloud/Qwen3-32B', confidence: 'fuzzy' });
+    expect(byId['openai/gpt-oss-120b'].pricing).toMatchObject({ catalogKey: 'groq/openai/gpt-oss-120b', confidence: 'exact' });
+  });
+});
+
+describe('OpenAI-compatible on an Azure OpenAI base', () => {
+  const settings = { baseUrl: 'https://my-res.openai.azure.com/openai/v1' };
+
+  it('lists the resource\'s deployments, never its base-model catalog', async () => {
+    dns.hosts.set('my-res.openai.azure.com', ['20.50.2.3']);
+    const fetchImpl = fetchMap([
+      [
+        'https://my-res.openai.azure.com/openai/deployments?api-version=2023-03-15-preview',
+        json(200, { data: [{ id: 'chat-prod', model: 'gpt-4o', status: 'succeeded', object: 'deployment' }] }),
+      ],
+      ['https://my-res.openai.azure.com/openai/v1/models', json(200, { data: [{ id: 'gpt-4o-2024-08-06' }, { id: 'dall-e-3-3.0' }] })],
+    ]);
+    const result = await discoverProviderModels(input({ driver: 'openai-compatible', settings }), deps(fetchImpl));
+    const calls = callsOf(fetchImpl);
+    expect(calls.map((c) => c[0])).toEqual(['https://my-res.openai.azure.com/openai/deployments?api-version=2023-03-15-preview']);
+    expect(headersOf(calls[0])).toMatchObject({ 'api-key': SECRET });
+    expect(result).toMatchObject({ source: 'live', supported: true });
+    expect(result.models.map((m) => [m.id, m.category, m.upstreamModel])).toEqual([['chat-prod', 'llm', 'gpt-4o']]);
+    expect(result.models[0].pricing).toMatchObject({ catalogKey: 'azure/gpt-4o', confidence: 'exact' });
+  });
+
+  it('a resource without the deployments route, or no key to ask with, goes to custom entry', async () => {
+    dns.hosts.set('my-res.openai.azure.com', ['20.50.2.3']);
+    for (const status of [404, 400]) {
+      const fetchImpl = fetchMap([['https://my-res.openai.azure.com/openai/deployments', json(status, {})]]);
+      const result = await discoverProviderModels(input({ driver: 'openai-compatible', settings }), deps(fetchImpl));
+      expect(result).toMatchObject({ supported: false, source: 'none', models: [] });
+      expect(result.error).toBeUndefined();
+      expect(callsOf(fetchImpl).map((c) => c[0]).some((url) => url.includes('/models'))).toBe(false);
+    }
+    const keyless = fetchMap([]);
+    const result = await discoverProviderModels(input({ driver: 'openai-compatible', credentials: {}, settings }), deps(keyless));
+    expect(result).toMatchObject({ supported: false, source: 'none', models: [] });
+    expect(keyless).not.toHaveBeenCalled();
+  });
+
+  it('a rejected key is the listing\'s error', async () => {
+    dns.hosts.set('my-res.openai.azure.com', ['20.50.2.3']);
+    const result = await discoverProviderModels(
+      input({ driver: 'openai-compatible', settings }),
+      deps(fetchMap([['https://my-res.openai.azure.com/openai/deployments', json(401, {})]])),
+    );
+    expect(result.error).toMatchObject({ code: 'auth_failed', status: 401 });
   });
 });
 
@@ -429,6 +528,41 @@ describe('Anthropic', () => {
     const result = await discoverProviderModels(input({ driver: 'anthropic', allowedCategories: ['llm'] }), deps(fetchImpl));
     expect(fetchImpl).toHaveBeenCalledTimes(5);
     expect(result.models).toHaveLength(5);
+  });
+
+  it('a first page past the entry ceiling ends the listing: no further page is fetched', async () => {
+    const data = Array.from({ length: CATALOG_MAX_MODELS * 5 }, (_, i) => ({ id: `claude-${String(i).padStart(5, '0')}` }));
+    const fetchImpl = vi.fn(async () => json(200, { data, has_more: true, last_id: data[data.length - 1].id }));
+    const result = await discoverProviderModels(input({ driver: 'anthropic', allowedCategories: ['llm'] }), deps(fetchImpl, { referenceEntries: async () => [] }));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.error).toBeUndefined();
+    expect(result.models).toHaveLength(CATALOG_MAX_MODELS);
+    expect(result.notices).toContainEqual({ code: 'truncated', count: CATALOG_MAX_MODELS });
+  });
+
+  it('a page far longer than any model list is read without overflowing the call stack', async () => {
+    const data = Array.from({ length: 200_000 }, (_, i) => ({ id: `c-${i}` }));
+    const result = await discoverProviderModels(
+      input({ driver: 'anthropic', allowedCategories: ['llm'] }),
+      deps(fetchMap([['https://api.anthropic.com/v1/models', json(200, { data, has_more: false })]]), { referenceEntries: async () => [] }),
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.models).toHaveLength(CATALOG_MAX_MODELS);
+  });
+
+  it('a deprecated model is marked and listed after the current ones', async () => {
+    const result = await discoverProviderModels(
+      input({ driver: 'anthropic', allowedCategories: ['llm'] }),
+      deps(fetchMap([['https://api.anthropic.com/v1/models', json(200, {
+        data: [
+          { id: 'claude-old', created_at: '2025-09-01T00:00:00Z', lifecycle: 'deprecated', deprecated_at: '2026-08-01T00:00:00Z' },
+          { id: 'claude-new', created_at: '2025-01-01T00:00:00Z', lifecycle: 'active', deprecated_at: null },
+          { id: 'claude-gone', lifecycle: 'retired' },
+        ],
+        has_more: false,
+      })]]), { referenceEntries: async () => [] }),
+    );
+    expect(result.models.map((m) => [m.id, m.deprecated ?? false])).toEqual([['claude-new', false], ['claude-old', true]]);
   });
 
   it('a gateway without the models route (404) is "unsupported"; the base URL is normalized', async () => {
@@ -515,8 +649,9 @@ describe('Bedrock', () => {
     const calls = callsOf(fetchImpl);
     expect(calls.map((c) => c[0]).sort()).toEqual([
       'https://bedrock.us-east-1.amazonaws.com/foundation-models',
-      'https://bedrock.us-east-1.amazonaws.com/inference-profiles?maxResults=1000&typeEquals=SYSTEM_DEFINED',
-      'https://bedrock.us-east-1.amazonaws.com/inference-profiles?maxResults=1000&typeEquals=SYSTEM_DEFINED&nextToken=page%2B2%3D',
+      // `type` is the wire name of ListInferenceProfiles' `typeEquals` filter.
+      'https://bedrock.us-east-1.amazonaws.com/inference-profiles?maxResults=1000&type=SYSTEM_DEFINED',
+      'https://bedrock.us-east-1.amazonaws.com/inference-profiles?maxResults=1000&type=SYSTEM_DEFINED&nextToken=page%2B2%3D',
     ]);
     for (const call of calls) {
       const headers = headersOf(call);
@@ -562,6 +697,57 @@ describe('Bedrock', () => {
       deps(fetchImpl, { referenceEntries: async () => [] }),
     );
     expect(result.error).toMatchObject({ code: 'auth_failed', status: 403 });
+  });
+
+  describe('reference prices of the provider\'s region', () => {
+    const regional = {
+      modelSummaries: [
+        { modelId: 'meta.llama3-70b-instruct-v1:0', modelName: 'Llama 3 70B Instruct', providerName: 'Meta', inputModalities: ['TEXT'], outputModalities: ['TEXT'], inferenceTypesSupported: ['ON_DEMAND'] },
+        { modelId: 'anthropic.claude-3-haiku-20240307-v1:0', modelName: 'Claude 3 Haiku', providerName: 'Anthropic', inputModalities: ['TEXT', 'IMAGE'], outputModalities: ['TEXT'], inferenceTypesSupported: ['ON_DEMAND'] },
+      ],
+    };
+    const price = (key: string, inputTokenPer1M: number, outputTokenPer1M: number): ModelPriceCatalogEntry => ({
+      key,
+      provider: 'bedrock',
+      mode: 'chat',
+      pricing: { currency: 'USD', inputTokenPer1M, outputTokenPer1M },
+      maxInputTokens: 8192,
+    });
+    const reference = [
+      // The bare key is the us-east-1 price.
+      price('meta.llama3-70b-instruct-v1:0', 2.65, 3.5),
+      price('bedrock/eu-west-2/meta.llama3-70b-instruct-v1:0', 3.45, 4.55),
+      price('bedrock/eu-west-2/1-month-commitment/meta.llama3-70b-instruct-v1:0', 1, 1),
+      // Only a GovCloud price for this one.
+      price('bedrock/us-gov-east-1/anthropic.claude-3-haiku-20240307-v1:0', 0.3, 1.5),
+    ];
+    const list = (region: string) => discoverProviderModels(
+      input({ driver: 'bedrock', credentials, settings: { region }, allowedCategories: ['llm'] }),
+      deps(fetchMap([
+        [`https://bedrock.${region}.amazonaws.com/foundation-models`, json(200, regional)],
+        [`https://bedrock.${region}.amazonaws.com/inference-profiles`, json(200, { inferenceProfileSummaries: [] })],
+      ]), { referenceEntries: async () => reference }),
+    );
+
+    it('the regional price comes first; the bare (us-east-1) key is the fallback', async () => {
+      const eu = Object.fromEntries((await list('eu-west-2')).models.map((m) => [m.id, m]));
+      expect(eu['meta.llama3-70b-instruct-v1:0'].pricing).toMatchObject({
+        catalogKey: 'bedrock/eu-west-2/meta.llama3-70b-instruct-v1:0',
+        confidence: 'exact',
+        inputTokenPer1M: 3.45,
+        outputTokenPer1M: 4.55,
+      });
+      const us = Object.fromEntries((await list('us-east-1')).models.map((m) => [m.id, m]));
+      expect(us['meta.llama3-70b-instruct-v1:0'].pricing).toMatchObject({ catalogKey: 'meta.llama3-70b-instruct-v1:0', confidence: 'exact', inputTokenPer1M: 2.65 });
+    });
+
+    it('another region\'s price never stands in for this one', async () => {
+      for (const region of ['us-east-1', 'eu-west-2']) {
+        const haiku = (await list(region)).models.find((m) => m.id === 'anthropic.claude-3-haiku-20240307-v1:0');
+        expect(haiku?.pricing).toBeUndefined();
+        expect(haiku?.contextWindow).toBeUndefined();
+      }
+    });
   });
 
   it('a region that is not an AWS region id is a settings problem', async () => {
@@ -650,10 +836,12 @@ describe('drivers without a list API', () => {
     expect(result).toMatchObject({ source: 'reference', supported: true, notices: [{ code: 'reference_listing' }] });
     expect(result.models.map((m) => [m.id, m.category, m.deprecated ?? false])).toEqual([
       ['gemini-2.5-pro', 'llm', false],
+      ['gemini-3-pro-preview', 'llm', false],
       ['text-embedding-005', 'embedding', false],
       ['chat-bison', 'llm', true],
     ]);
     expect(result.models[0]).toMatchObject({ source: 'reference', contextWindow: 1048576, pricing: { catalogKey: 'vertex_ai/gemini-2.5-pro', confidence: 'exact' } });
+    expect(result.models[1].pricing).toMatchObject({ catalogKey: 'vertex_ai/gemini-3-pro-preview', confidence: 'exact', inputTokenPer1M: 2 });
   });
 
   it('Vertex: without the reference catalog, the built-in list', async () => {

@@ -70,10 +70,16 @@ export const CATALOG_OVERALL_TIMEOUT_MS = 20_000;
  * the listing is answered without reference prices and the download goes on, so the next listing has them.
  */
 export const CATALOG_REFERENCE_WAIT_MS = 2_500;
-/** OpenRouter and Bedrock lists are a few MB; anything far beyond that is not a model list. */
-export const CATALOG_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+/** OpenRouter and Bedrock lists are a few MB at most; anything far beyond that is not a model list. */
+export const CATALOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 /** Paged lists (Anthropic, Bedrock inference profiles, Azure Document Intelligence) are read up to this many pages. */
 const MAX_PAGES = 5;
+/**
+ * How many raw entries a listing reads, across all its pages. Real lists (OpenRouter, Together, Bedrock) hold well under
+ * 1000 models; past this the rest of an answer is not parsed, sorted or paged through, since the catalog would cut it
+ * to `CATALOG_MAX_MODELS` anyway and the work runs on the shared event loop.
+ */
+const MAX_LISTED_ENTRIES = CATALOG_MAX_MODELS * 4;
 /**
  * Fuzzy reference matching scans every catalog key per name. Past this many names a listing keeps its exact and
  * normalized matches only, which keeps the CPU time of a very long list bounded.
@@ -128,6 +134,8 @@ interface Listing {
   notices: CatalogNotice[];
   /** Candidate keys a model is looked up under in the reference catalog, best first. */
   referenceKeys?: (model: ParsedModel) => string[];
+  /** Whether a reference entry may price this listing's models (Bedrock: not another region's key). Default: any. */
+  acceptsReference?: (entry: ModelPriceCatalogEntry) => boolean;
 }
 
 interface Context {
@@ -357,7 +365,7 @@ async function listOpenAi(ctx: Context): Promise<Listing> {
     Authorization: `Bearer ${apiKey}`,
     ...(organization ? { 'OpenAI-Organization': organization } : {}),
   });
-  return live(parseOpenAiModels(body));
+  return live(parseOpenAiModels(body, MAX_LISTED_ENTRIES));
 }
 
 /**
@@ -386,18 +394,47 @@ function hostOf(url: string): string {
   }
 }
 
+/**
+ * Azure's OpenAI base (`https://<res>.openai.azure.com/openai[/v1]`), the same shape `azureAudioOverrides` serves in
+ * modelContracts.ts. There `model` is a deployment name, and `/models` lists the resource's base-model catalog
+ * (`gpt-4o-2024-08-06`, `dall-e-3-3.0` …), not its deployments: none of those ids would answer a request.
+ */
+const AZURE_OPENAI_BASE = /^(https:\/\/[^/]+\.(?:openai\.azure\.com|cognitiveservices\.azure\.com))\/openai(?:\/v1)?$/i;
+
+/** The deployments route of an Azure OpenAI resource; it only exists in this preview version, newer ones dropped it. */
+const azureDeploymentsUrl = (origin: string) => `${origin}/openai/deployments?api-version=2023-03-15-preview`;
+
+/** An Azure deployment is priced as the model it serves, under Azure's own key first. */
+const azureReferenceKeys = (model: ParsedModel): string[] => [
+  `azure/${model.upstreamModel ?? model.id}`,
+  model.id,
+  ...(model.upstreamModel ? [model.upstreamModel] : []),
+];
+
 async function listOpenAiCompatible(ctx: Context): Promise<Listing> {
   const base = trimSlash(asString(ctx.input.settings.baseUrl));
   if (!base) throw new ListingError('invalid_settings', 'The provider has no base URL.');
   // A local server may run without a key; the headers are sent only when one is stored.
   const apiKey = asString(ctx.input.credentials.apiKey);
+
+  const azure = AZURE_OPENAI_BASE.exec(base);
+  if (azure) {
+    // The deployments are what a request can name; the resource's `/models` is never offered in their place.
+    if (!apiKey) return unsupported();
+    const deployments = await getJson(ctx, azureDeploymentsUrl(azure[1]), { 'api-key': apiKey });
+    // A resource that does not list deployments (the route was dropped, or is not offered here): custom entry.
+    if (deployments.status === 400 || deployments.status === 404 || deployments.status === 405) return unsupported();
+    if (deployments.status < 200 || deployments.status >= 300) throw statusError(deployments.status);
+    return live(parseAzureDeployments(deployments.body, MAX_LISTED_ENTRIES), { referenceKeys: azureReferenceKeys });
+  }
+
   const answer = await getJson(ctx, `${base}/models`, apiKey ? { Authorization: `Bearer ${apiKey}`, 'api-key': apiKey } : {});
   // No list route on this server: the dashboard goes straight to custom entry.
   if (answer.status === 404 || answer.status === 405 || answer.status === 501) return unsupported();
   if (answer.status < 200 || answer.status >= 300) throw statusError(answer.status);
 
   const prefix = COMPATIBLE_REFERENCE_PREFIXES.get(hostOf(base));
-  return live(parseOpenAiCompatibleModels(answer.body), {
+  return live(parseOpenAiCompatibleModels(answer.body, MAX_LISTED_ENTRIES), {
     referenceKeys: (model) => {
       // Gemini's OpenAI endpoint names models `models/gemini-…`; the catalog keys them without the path.
       const bare = prefix === 'gemini' ? model.id.replace(/^models\//, '') : model.id;
@@ -409,7 +446,7 @@ async function listOpenAiCompatible(ctx: Context): Promise<Listing> {
 async function listTogether(ctx: Context): Promise<Listing> {
   const apiKey = requireCredential(ctx, 'apiKey');
   const body = await getListJson(ctx, 'https://api.together.xyz/v1/models', { Authorization: `Bearer ${apiKey}` });
-  return live(parseTogetherModels(body), { referenceKeys: (model) => [`together_ai/${model.id}`, model.id] });
+  return live(parseTogetherModels(body, MAX_LISTED_ENTRIES), { referenceKeys: (model) => [`together_ai/${model.id}`, model.id] });
 }
 
 async function listAnthropic(ctx: Context): Promise<Listing> {
@@ -424,8 +461,11 @@ async function listAnthropic(ctx: Context): Promise<Listing> {
     // A gateway that serves the Messages API without the models route (Azure AI Foundry).
     if (page === 0 && answer.status === 404) return unsupported();
     if (answer.status < 200 || answer.status >= 300) throw statusError(answer.status);
-    const parsed = parseAnthropicModels(answer.body);
-    models.push(...parsed.models);
+    const parsed = parseAnthropicModels(answer.body, MAX_LISTED_ENTRIES - models.length);
+    // One by one: spreading a very long page into `push` overflows the call stack.
+    for (const model of parsed.models) models.push(model);
+    // A listing this long is cut by the catalog anyway: no further page is fetched.
+    if (models.length >= MAX_LISTED_ENTRIES) break;
     if (!parsed.hasMore || !parsed.lastId || parsed.lastId === afterId) break;
     afterId = parsed.lastId;
   }
@@ -446,10 +486,7 @@ function azureInstanceOf(ctx: Context): string {
 async function listAzure(ctx: Context): Promise<Listing> {
   const instance = azureInstanceOf(ctx);
   const apiKey = requireCredential(ctx, 'apiKey');
-  // The deployments route only exists in this preview version; newer versions dropped it.
-  const answer = await getJson(ctx, `https://${instance}.openai.azure.com/openai/deployments?api-version=2023-03-15-preview`, {
-    'api-key': apiKey,
-  });
+  const answer = await getJson(ctx, azureDeploymentsUrl(`https://${instance}.openai.azure.com`), { 'api-key': apiKey });
   if (answer.status === 404 || answer.status === 400) {
     // The resource does not list deployments: the one the provider is configured with is all that is known.
     const deployment = asString(ctx.input.settings.deploymentName);
@@ -465,13 +502,7 @@ async function listAzure(ctx: Context): Promise<Listing> {
     };
   }
   if (answer.status < 200 || answer.status >= 300) throw statusError(answer.status);
-  return live(parseAzureDeployments(answer.body), {
-    referenceKeys: (model) => [
-      `azure/${model.upstreamModel ?? model.id}`,
-      model.id,
-      ...(model.upstreamModel ? [model.upstreamModel] : []),
-    ],
-  });
+  return live(parseAzureDeployments(answer.body, MAX_LISTED_ENTRIES), { referenceKeys: azureReferenceKeys });
 }
 
 const AWS_REGION_ID = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
@@ -503,7 +534,8 @@ async function listBedrock(ctx: Context): Promise<Listing> {
     const pages: unknown[] = [];
     let nextToken: string | undefined;
     for (let page = 0; page < MAX_PAGES; page += 1) {
-      const query = awsQuery({ maxResults: '1000', typeEquals: 'SYSTEM_DEFINED', nextToken });
+      // The API's `typeEquals` member is the `type` query parameter on the wire.
+      const query = awsQuery({ maxResults: '1000', type: 'SYSTEM_DEFINED', nextToken });
       const body = await signedGet(`${origin}/inference-profiles?${query}`);
       pages.push(body);
       const token = parseBedrockInferenceProfiles(body).nextToken;
@@ -521,9 +553,22 @@ async function listBedrock(ctx: Context): Promise<Listing> {
   ]);
   const foundation = parseBedrockFoundationModels(foundationBody);
   const models = [...foundation.onDemand];
-  for (const page of profiles) models.push(...parseBedrockInferenceProfiles(page, foundation.byId).models);
+  for (const page of profiles) {
+    for (const model of parseBedrockInferenceProfiles(page, foundation.byId).models) models.push(model);
+  }
   return live(models, {
-    referenceKeys: (model) => [model.id, ...(model.upstreamModel ? [model.upstreamModel] : [])],
+    // The reference catalog keeps regional prices as `bedrock/<region>/<id>`; the bare key is the us-east-1 price.
+    referenceKeys: (model) => [
+      `bedrock/${region}/${model.id}`,
+      ...(model.upstreamModel ? [`bedrock/${region}/${model.upstreamModel}`] : []),
+      model.id,
+      ...(model.upstreamModel ? [model.upstreamModel] : []),
+    ],
+    // A price kept for another region (GovCloud, eu-…) or a commitment price never stands in for this region's.
+    acceptsReference: (entry) => {
+      const scoped = /^bedrock\/([^/]+)\//.exec(entry.key);
+      return !scoped || (scoped[1] === region && !entry.key.includes('-commitment/'));
+    },
   });
 }
 
@@ -540,7 +585,7 @@ async function listMistralOcr(ctx: Context): Promise<Listing> {
   const base = trimSlash(asString(ctx.input.settings.baseUrl) || 'https://api.mistral.ai/v1');
   const body = await getListJson(ctx, `${base}/models`, { Authorization: `Bearer ${apiKey}` });
   // The OCR endpoint takes the OCR models only; Mistral's list holds every model of the account.
-  const models = parseOpenAiCompatibleModels(body)
+  const models = parseOpenAiCompatibleModels(body, MAX_LISTED_ENTRIES)
     .filter((model) => model.id.toLowerCase().includes('ocr'))
     .map((model) => ({ ...model, category: 'ocr' as const }));
   return live(models);
@@ -563,10 +608,12 @@ async function listAzureDocumentIntelligence(ctx: Context): Promise<Listing> {
   const models: ParsedModel[] = [];
   let url: string | undefined = `${endpoint}/documentintelligence/documentModels?api-version=${encodeURIComponent(apiVersion)}`;
   for (let page = 0; page < MAX_PAGES && url; page += 1) {
-    const parsed = parseAzureDocumentModels(await getListJson(ctx, url, headers));
-    models.push(...parsed.models);
+    const parsed = parseAzureDocumentModels(await getListJson(ctx, url, headers), MAX_LISTED_ENTRIES - models.length);
+    // One by one: spreading a very long page into `push` overflows the call stack.
+    for (const model of parsed.models) models.push(model);
     url = undefined;
-    if (parsed.nextLink) {
+    // A listing this long is cut by the catalog anyway: no further page is fetched.
+    if (parsed.nextLink && models.length < MAX_LISTED_ENTRIES) {
       // The key goes only where it was configured to go: a next page on another origin is not fetched.
       try {
         const next = new URL(parsed.nextLink, origin);
@@ -579,6 +626,12 @@ async function listAzureDocumentIntelligence(ctx: Context): Promise<Listing> {
   return live(models);
 }
 
+/**
+ * The reference catalog's providers of Vertex's own Google models. Newer Gemini entries (`vertex_ai/gemini-3-pro-preview`)
+ * carry plain `vertex_ai`; partner models under it (`vertex_ai/deepseek-ai/…`) are left out by their path below.
+ */
+const VERTEX_REFERENCE_PROVIDERS: ReadonlySet<string> = new Set(['vertex_ai', 'vertex_ai-language-models', 'vertex_ai-embedding-models']);
+
 /** Vertex has no list route the console can call with a key: the reference catalog's Vertex models are the list. */
 async function listVertex(ctx: Context): Promise<Listing> {
   const entries = await ctx.reference.wait(Math.min(ctx.timeoutMs, ctx.deadline - Date.now()));
@@ -586,7 +639,7 @@ async function listVertex(ctx: Context): Promise<Listing> {
 
   const models: ParsedModel[] = [];
   for (const entry of entries) {
-    if (entry.provider !== 'vertex_ai-language-models' && entry.provider !== 'vertex_ai-embedding-models') continue;
+    if (!entry.provider || !VERTEX_REFERENCE_PROVIDERS.has(entry.provider)) continue;
     const id = entry.key.replace(/^vertex_ai\//, '');
     // Region- or publisher-scoped keys and pinned `@version` keys are not model ids a Vertex request names.
     if (!id || id.includes('/') || id.includes('@')) continue;
@@ -642,7 +695,8 @@ function categoryRank(category: ModelCategory): number {
 function compareModels(a: CatalogModel, b: CatalogModel): number {
   return (Number(a.deprecated === true) - Number(b.deprecated === true))
     || (categoryRank(a.category) - categoryRank(b.category))
-    || (b.createdAt ?? '').localeCompare(a.createdAt ?? '')
+    // ISO timestamps order as plain strings.
+    || ((a.createdAt ?? '') < (b.createdAt ?? '') ? 1 : (a.createdAt ?? '') > (b.createdAt ?? '') ? -1 : 0)
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
@@ -652,16 +706,35 @@ function modeFits(category: ModelCategory, entry: ModelPriceCatalogEntry): boole
   return category === 'embedding' ? entry.mode === 'embedding' : CHAT_MODES.has(entry.mode);
 }
 
+/** The vendor segment of a catalog key or candidate name (`groq/llama-…` → `groq`), '' for a bare one. */
+function vendorOf(key: string): string {
+  const slash = key.indexOf('/');
+  return slash > 0 ? key.slice(0, slash).toLowerCase() : '';
+}
+
 /** The best match among the candidate keys: the best tier wins, and within a tier the earlier key. */
 function findReference(
   index: ModelPriceCatalogIndex,
   category: ModelCategory,
   keys: readonly string[],
   allowFuzzy: boolean,
+  accepts?: (entry: ModelPriceCatalogEntry) => boolean,
 ): CatalogEntryMatch | undefined {
-  const fitting = (match: CatalogEntryMatch | undefined) => (match && modeFits(category, match.entry) ? match : undefined);
-  const strict = keys.map((key) => fitting(matchCatalogEntry(index, key, { fuzzy: false }))).filter(Boolean) as CatalogEntryMatch[];
-  const best = strict.find((match) => match.confidence === 'exact') ?? strict[0];
+  const fitting = (match: CatalogEntryMatch | undefined) =>
+    (match && modeFits(category, match.entry) && (accepts?.(match.entry) ?? true) ? match : undefined);
+  const strict: CatalogEntryMatch[] = [];
+  for (const key of keys) {
+    const match = fitting(matchCatalogEntry(index, key, { fuzzy: false }));
+    if (!match) continue;
+    // A normalized hit under another vendor's prefix is some other host's price for the model (`kyma/gpt-oss-120b` for
+    // a vLLM `openai/gpt-oss-120b`, `ovhcloud/Qwen3-32B` on Groq): shown as approximate, never filled in.
+    strict.push(match.confidence === 'normalized' && vendorOf(match.entry.key) !== vendorOf(key)
+      ? { ...match, confidence: 'fuzzy' }
+      : match);
+  }
+  const best = strict.find((match) => match.confidence === 'exact')
+    ?? strict.find((match) => match.confidence === 'normalized')
+    ?? strict[0];
   if (best || !allowFuzzy) return best;
   for (const key of keys) {
     const match = fitting(matchCatalogEntry(index, key));
@@ -796,7 +869,7 @@ export async function discoverProviderModels(input: DiscoveryInput, deps: Discov
         if (!needsReference(model)) return model;
         const keys = [...new Set(keysOf(model))];
         const allowFuzzy = fuzzyLookups < MAX_FUZZY_LOOKUPS;
-        const match = findReference(index, model.category, keys, allowFuzzy);
+        const match = findReference(index, model.category, keys, allowFuzzy, listing.acceptsReference);
         if (!match || match.confidence === 'fuzzy') fuzzyLookups += allowFuzzy ? 1 : 0;
         return match ? enrich(model, match) : model;
       });

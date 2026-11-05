@@ -62,6 +62,7 @@ import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
 import PiiProtectionField from '@/components/pii/PiiProtectionField';
 import { piiPolicyKeyOf, piiProtectionPayload } from '@/components/pii/piiProtectionForm';
 import type { GuardrailBindingRow } from '@/components/guardrails/GuardrailBindingList';
+import { modelIdSuggestionCategories } from '@/components/models/catalog/catalogPrefill';
 import { useProviderModelCatalog } from '@/components/models/catalog/useProviderModelCatalog';
 import type { ModelIdSuggestion } from '@/components/models/modelFormSections/ProviderSection';
 
@@ -298,13 +299,20 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
   const modelCatalog = useProviderModelCatalog(form.values.providerKey || undefined, {
     enabled: opened && modelIdSuggestionsWanted,
   });
-  const modelIdSuggestions = useMemo<ModelIdSuggestion[]>(
-    () =>
-      (modelCatalog.data?.models ?? [])
-        .filter((entry) => entry.category === model?.category)
-        .map((entry) => ({ value: entry.id, label: entry.name })),
-    [modelCatalog.data, model?.category],
-  );
+  // OCR in VLM mode and structured decision are served by a chat model, so the provider's chat models are offered.
+  // The mode is not edited here: the stored one, or the one the create form stores by default.
+  const storedMode = model?.category === 'ocr'
+    ? ((model.settings?.ocr as { mode?: string } | undefined)?.mode ?? 'vlm')
+    : model?.category === 'decision'
+      ? ((model.settings?.decision as { mode?: string } | undefined)?.mode ?? 'structured')
+      : undefined;
+  const modelIdSuggestions = useMemo<ModelIdSuggestion[]>(() => {
+    if (!model) return [];
+    const categories = modelIdSuggestionCategories(model.category, storedMode);
+    return (modelCatalog.data?.models ?? [])
+      .filter((entry) => categories.includes(entry.category))
+      .map((entry) => ({ value: entry.id, label: entry.name }));
+  }, [modelCatalog.data, model, storedMode]);
 
   // What the model id is known to accept — the boxes start from it until someone ticks one.
   const inferredModalities = useMemo(

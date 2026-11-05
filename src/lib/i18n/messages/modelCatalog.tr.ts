@@ -9,7 +9,9 @@ export const modelCatalogTr: typeof modelCatalogEn = {
     sectionDescription: 'Aşağıdaki modeller bu sağlayıcıdan gelir: listesi olan sağlayıcılarda kendi API’sinden, diğerlerinde referans ya da yerleşik bir listeden.',
     label: 'Sağlayıcı',
     placeholder: 'Bir model sağlayıcısı seçin',
+    active: 'Etkin',
     disabled: 'Devre dışı',
+    errored: 'Hata',
     pickHint: 'Sunduğu modelleri görmek için etkin bir sağlayıcı seçin.',
     empty: {
       title: 'Bu projede model sağlayıcısı yok',

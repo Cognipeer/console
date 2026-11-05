@@ -98,6 +98,30 @@ describe('OpenAI-compatible servers', () => {
     expect(models[2].category).toBe('embedding');
   });
 
+  it('OpenRouter: `response_format` alone is JSON mode, not JSON-schema structured outputs', () => {
+    const [jsonModeOnly, schema, unsaid] = parseOpenAiCompatibleModels({
+      data: [
+        { id: 'x/json-mode-only', supported_parameters: ['tools', 'response_format'] },
+        { id: 'x/schema', supported_parameters: ['response_format', 'structured_outputs'] },
+        { id: 'x/no-parameter-list' },
+      ],
+    });
+    expect(jsonModeOnly).toMatchObject({ supportsStructuredOutputs: false });
+    expect(schema).toMatchObject({ supportsStructuredOutputs: true });
+    expect(unsaid.supportsStructuredOutputs).toBeUndefined();
+  });
+
+  it('reads at most `limit` raw entries', () => {
+    const data = Array.from({ length: 10 }, (_, i) => ({ id: `m-${i}` }));
+    expect(parseOpenAiCompatibleModels({ data }, 3).map((m) => m.id)).toEqual(['m-0', 'm-1', 'm-2']);
+    expect(parseOpenAiCompatibleModels(data, 2)).toHaveLength(2);
+    expect(parseOpenAiCompatibleModels({ data }, 0)).toEqual([]);
+    expect(parseOpenAiCompatibleModels({ data })).toHaveLength(10);
+    expect(parseAnthropicModels({ data, has_more: true, last_id: 'm-9' }, 4)).toMatchObject({ hasMore: true, lastId: 'm-9' });
+    expect(parseAnthropicModels({ data }, 4).models).toHaveLength(4);
+    expect(parseAzureDocumentModels({ value: data.map((d) => ({ modelId: d.id })) }, 5).models).toHaveLength(5);
+  });
+
   it('Groq: context_window, max_completion_tokens; an inactive model is marked deprecated', () => {
     const models = parseOpenAiCompatibleModels({
       object: 'list',
@@ -217,6 +241,28 @@ describe('Anthropic', () => {
     expect(page.models[0]).toEqual({ id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', category: 'llm', createdAt: '2025-05-22T00:00:00.000Z' });
     expect(page.models[1]).toMatchObject({ contextWindow: 200000, maxOutputTokens: 8192 });
     expect(parseAnthropicModels({})).toEqual({ models: [], hasMore: false, lastId: undefined });
+  });
+
+  it('marks deprecated models by `lifecycle` (or `deprecated_at` without it) and leaves retired ones out', () => {
+    const { models } = parseAnthropicModels({
+      data: [
+        { type: 'model', id: 'claude-deprecated', lifecycle: 'deprecated', deprecated_at: '2026-08-01T00:00:00Z', retires_at: '2027-02-01T00:00:00Z' },
+        // `lifecycle` decides: an active model is current whatever `deprecated_at` says.
+        { type: 'model', id: 'claude-active', lifecycle: 'active', deprecated_at: '2026-08-01T00:00:00Z' },
+        { type: 'model', id: 'claude-active-null', lifecycle: 'active', deprecated_at: null },
+        // An older or proxied answer without `lifecycle`.
+        { type: 'model', id: 'claude-dated', deprecated_at: '2026-08-01T00:00:00Z' },
+        { type: 'model', id: 'claude-plain' },
+        { type: 'model', id: 'claude-retired', lifecycle: 'retired', deprecated_at: '2025-08-01T00:00:00Z' },
+      ],
+    });
+    expect(models.map((m) => [m.id, m.deprecated ?? false])).toEqual([
+      ['claude-deprecated', true],
+      ['claude-active', false],
+      ['claude-active-null', false],
+      ['claude-dated', true],
+      ['claude-plain', false],
+    ]);
   });
 });
 
@@ -355,6 +401,14 @@ describe('Bedrock', () => {
             type: 'SYSTEM_DEFINED',
           },
           { inferenceProfileId: 'us.retired', status: 'INACTIVE', models: [] },
+          // An application profile is addressed by its ARN, not by this bare id.
+          {
+            inferenceProfileName: 'team-claude',
+            inferenceProfileId: 'a1b2c3d4e5f6',
+            status: 'ACTIVE',
+            type: 'APPLICATION',
+            models: [{ modelArn: 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0' }],
+          },
         ],
         nextToken: 'token-2',
       },

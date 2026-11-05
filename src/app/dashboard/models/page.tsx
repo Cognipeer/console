@@ -53,7 +53,7 @@ import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelCatalogModal from '@/components/models/catalog/ModelCatalogModal';
 import type { CreateModelPrefill } from '@/components/models/catalog/catalogPrefill';
-import { noteCatalogModelsCreated } from '@/components/models/catalog/useProviderModelCatalog';
+import { invalidateProviderModelCatalog, noteCatalogModelsCreated } from '@/components/models/catalog/useProviderModelCatalog';
 import EditModelModal from '@/components/models/EditModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { modelTakesImages } from '@/components/models/inputModalities';
@@ -474,6 +474,8 @@ export default function ModelsPage() {
       });
       if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
+      // The catalog's remembered listing still marks the model "Added": it is listed again on its next opening.
+      invalidateProviderModelCatalog(model.providerKey);
       void loadDashboard();
       notifications.show({
         color: 'green',
@@ -1025,6 +1027,9 @@ export default function ModelsPage() {
         opened={editModelId !== null}
         onClose={() => setEditModelId(null)}
         onSaved={() => {
+          // The edit may have moved the model to another provider or model ID, which the catalog's "Added" badges
+          // follow; the form does not say what changed, so every remembered listing is listed again when next shown.
+          invalidateProviderModelCatalog();
           void loadModels();
           void loadDashboard();
         }}

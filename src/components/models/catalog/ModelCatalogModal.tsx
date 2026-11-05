@@ -337,7 +337,7 @@ export default function ModelCatalogModal({
           <>
             <SummaryKV label={t('summary.name')} value={provider.label || provider.key} />
             <SummaryKV label={t('summary.driver')} value={provider.driver} mono />
-            <SummaryKV label={t('summary.status')} value={<StatusBadge status={provider.status} />} />
+            <SummaryKV label={t('summary.status')} value={<ProviderStatusBadge status={provider.status} t={t} />} />
           </>
         ) : (
           <SummaryKV label="—" value={<span className="ds-faint">{t('provider.pickHint')}</span>} />
@@ -434,8 +434,16 @@ export default function ModelCatalogModal({
           text={errorHint(data, t)}
           detail={errorDetail(data, t)}
         >
-          <div className="ds-row" style={{ justifyContent: 'center' }}>
-            <Button size="sm" variant="default" leftSection={<IconRefresh size={14} />} onClick={catalog.refresh}>
+          {/* The refused listing stays on screen while the next one is on its way (`refreshing`, not `loading`): the
+              button shows it and takes no second click, which would start another listing at the provider. */}
+          <div className="ds-row" style={{ justifyContent: 'center' }} aria-busy={catalog.refreshing || undefined}>
+            <Button
+              size="sm"
+              variant="default"
+              leftSection={<IconRefresh size={14} />}
+              loading={catalog.refreshing}
+              onClick={catalog.refresh}
+            >
               {t('states.retry')}
             </Button>
             {enterManually}
@@ -708,6 +716,19 @@ function priceHint(model: CatalogModel, t: Translate): string {
   if (pricing.source === 'provider') return t('row.priceProvider');
   const key = pricing.catalogKey ?? model.id;
   return pricing.confidence === 'fuzzy' ? t('row.priceFuzzy', { key }) : t('row.priceReference', { key });
+}
+
+/** StatusBadge's style for each provider status, with the label from this screen's messages (its own are English). */
+const PROVIDER_STATUS_BADGES: Record<string, { status: string; key: string }> = {
+  active: { status: 'active', key: 'provider.active' },
+  disabled: { status: 'paused', key: 'provider.disabled' },
+  errored: { status: 'err', key: 'provider.errored' },
+};
+
+function ProviderStatusBadge({ status, t }: { status: string; t: Translate }) {
+  const badge = PROVIDER_STATUS_BADGES[status];
+  // A status this screen has no message for is shown as stored, as StatusBadge does.
+  return badge ? <StatusBadge status={badge.status} label={t(badge.key)} /> : <StatusBadge status={status} />;
 }
 
 /** Where the listing came from and when, with "List again". */

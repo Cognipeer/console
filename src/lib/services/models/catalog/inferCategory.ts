@@ -30,6 +30,9 @@ const UNSERVABLE: readonly RegExp[] = [
   /(^|\/)text-(davinci|curie|babbage|ada)-/,
   /gpt-3\.5-turbo-instruct/,
   /computer-use/,
+  // OpenAI deep research: Responses-only, and refuses a request without a web_search_preview / mcp / file_search tool,
+  // which no route here sends. Narrow on purpose: Perplexity's `sonar-deep-research` is a Chat Completions model.
+  /(^|[-_/.])o\d+(-mini)?-deep-research/,
   // Gemini Live API models: a bidirectional session, not a request.
   /(^|[-_.])live([-_.]|$)/,
   /native-audio/,
@@ -53,7 +56,13 @@ const EMBEDDING: readonly RegExp[] = [
 
 const STT: readonly RegExp[] = [/whisper/, /transcribe/, /(^|[-_/.])stt([-_/.:]|$)/, /speech-to-text/];
 
-const TTS: readonly RegExp[] = [/(^|[-_/.])tts([-_/.:\d]|$)/, /text-to-speech/];
+const TTS: readonly RegExp[] = [
+  /(^|[-_/.])tts([-_/.:\d]|$)/,
+  /text-to-speech/,
+  // Speech models whose ids carry no `tts`: Groq's Canopy Labs Orpheus, Kokoro (speaches, Kokoro-FastAPI), Piper, XTTS,
+  // Chatterbox, Parler.
+  /(^|[-_/.])(orpheus|kokoro|piper|xtts|chatterbox|parler)([-_/.:\d]|$)/,
+];
 
 const IMAGE: readonly RegExp[] = [
   /dall-e/,

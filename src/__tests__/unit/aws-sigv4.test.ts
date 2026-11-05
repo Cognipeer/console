@@ -72,7 +72,8 @@ describe('signAwsGetRequest', () => {
 
   it('signs exactly as the AWS SDK does: a query string, temporary credentials, the payload hash header', async () => {
     const now = new Date('2026-03-04T05:06:07Z');
-    const query = awsQuery({ maxResults: '1000', typeEquals: 'SYSTEM_DEFINED', nextToken: 'eyJh+b/c=d e!*' });
+    // The query Bedrock's ListInferenceProfiles is sent with (`typeEquals` is `type` on the wire).
+    const query = awsQuery({ maxResults: '1000', type: 'SYSTEM_DEFINED', nextToken: 'eyJh+b/c=d e!*' });
     const url = `https://bedrock.us-west-2.amazonaws.com/inference-profiles?${query}`;
     for (const sessionToken of [undefined, 'FwoGZXIvYXdzEJr//////////wEaDOiXsessiontoken==']) {
       for (const signContentSha256 of [false, true]) {
