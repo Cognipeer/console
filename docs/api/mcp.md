@@ -4,6 +4,38 @@ Connect to external MCP (Model Context Protocol) servers and execute tools throu
 
 ## Direct Tool Execution
 
+### Optional Parallel Search MCP setup
+
+Parallel Search MCP can be added as a separate, optional remote server alongside existing servers such as Tavily. In the dashboard, create a new MCP server with these settings:
+
+| Field | Value |
+|-------|-------|
+| Source type | Remote |
+| Name | `parallel-search` |
+| Key | `parallel-search` |
+| MCP server URL | `https://search.parallel.ai/mcp` |
+| Upstream transport | Streamable HTTP (`streamable-http`) |
+| Upstream authentication | None |
+
+The default Parallel endpoint requires no upstream API key, but this does not remove Cognipeer gateway authentication. Calls to `/api/client/v1/mcp/parallel-search/*` still require the gateway `Authorization` header shown below and remain subject to the gateway's existing security and access controls. Adding the server and invoking its tools are explicit user choices; this setup does not change any provider or default.
+
+When Parallel tools are used, user-provided search objectives, search queries, and requested URLs are sent to Parallel. See the [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp) for details.
+
+For example, after adding the server, invoke `web_search` through the authenticated gateway:
+
+```bash
+curl -X POST https://gateway.example.com/api/client/v1/mcp/parallel-search/execute \
+  -H "Authorization: Bearer cpeer_your_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tool": "web_search",
+    "arguments": {
+      "objective": "Find the latest official Model Context Protocol specification updates.",
+      "search_queries": ["site:modelcontextprotocol.io specification updates"]
+    }
+  }'
+```
+
 ### List Server Tools
 
 ```
