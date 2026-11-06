@@ -56,7 +56,7 @@ describe('custom categories', () => {
       detect(text, {
         categories: {},
         languages: ['global'],
-        customPatterns: [{ categoryId: '2fa_code', label: '2FA', pattern: '\\b\\d{6}\\b', enabled: true }],
+        customPatterns: [{ id: 'p-2fa', categoryId: '2fa_code', label: '2FA', pattern: '\\b\\d{6}\\b', enabled: true }],
       });
     const rt = new PiiRoundTrip({ key: deriveRoundTripKey('secret', 'tenant-1', 'session:1'), version: 'policy@1', scan: customScan });
     const protectedText = await rt.protectText('my code is 123456');
