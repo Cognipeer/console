@@ -1,5 +1,5 @@
 /**
- * Unit tests — the batch add.
+ * Unit tests — memory writes next to expired items.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -24,7 +24,7 @@ import { getDatabase } from '@/lib/database';
 import { upsertVectors } from '@/lib/services/vector/vectorService';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { createMockDb } from '../helpers/db.mock';
-import { addMemoryBatch, MemoryStoreFullError } from '@/lib/services/memory/memoryService';
+import { addMemory, MemoryStoreFullError } from '@/lib/services/memory/memoryService';
 import type { IMemoryItem, IMemoryStore } from '@/lib/database';
 
 const TENANT_DB = 'tenant_acme';
@@ -78,82 +78,61 @@ function makeItem(overrides: Partial<IMemoryItem> = {}): IMemoryItem {
   } as unknown as IMemoryItem;
 }
 
-describe('addMemoryBatch', () => {
+describe('adding a memory next to expired items', () => {
   let db: ReturnType<typeof createMockDb>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     db = createMockDb();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
-    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
     db.findMemoryItemByHash.mockResolvedValue(null);
     db.listMemoryItems.mockResolvedValue({ items: [], total: 0 });
     db.countMemoryItems.mockResolvedValue(0);
     db.createMemoryItem.mockImplementation(async (item) => ({ _id: 'new-item', ...item }) as IMemoryItem);
+    db.updateMemoryItem.mockImplementation(async (id: string, data: Record<string, unknown>) => ({ ...makeItem({ _id: id }), ...data }) as IMemoryItem);
     (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
       response: { data: [{ embedding: [0.1, 0.2] }] },
     });
     (upsertVectors as ReturnType<typeof vi.fn>).mockResolvedValue({ upsertedCount: 1 });
   });
 
-  it('adds every item and reports none failed', async () => {
-    const result = await addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }, { content: 'b' }]);
-    expect(result).toEqual({ added: 2, duplicates: 0, failed: 0 });
+  it('gives an expired duplicate a new expiry instead of answering with the hidden item', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ ttlDays: 2 }));
+    db.findMemoryItemByHash.mockResolvedValue(makeItem({ expiresAt: new Date(Date.now() - DAY) }));
+    const before = Date.now();
+    const item = await addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'Prefers long answers' });
+    expect(db.updateMemoryItem).toHaveBeenCalledTimes(1);
+    expect(db.updateMemoryItem.mock.calls[0][0]).toBe('old-item');
+    const expiresAt = (item.expiresAt as Date).getTime();
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 2 * DAY);
+    expect(db.incrementMemoryAccess).not.toHaveBeenCalled();
   });
 
-  it('does not report success when the store does not exist', async () => {
-    db.findMemoryStoreByKey.mockResolvedValue(null);
-    await expect(addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }])).rejects.toThrow('Memory store not found.');
+  it('still answers with the item when the duplicate has not expired', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ ttlDays: 2 }));
+    const live = makeItem({ expiresAt: new Date(Date.now() + DAY) });
+    db.findMemoryItemByHash.mockResolvedValue(live);
+    const item = await addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'Prefers long answers' });
+    expect(item).toBe(live);
+    expect(db.incrementMemoryAccess).toHaveBeenCalledWith('old-item');
+    expect(db.updateMemoryItem).not.toHaveBeenCalled();
   });
 
-  it('does not report success when the store is inactive', async () => {
-    db.findMemoryStoreByKey.mockResolvedValue(makeStore({}, { status: 'inactive' as IMemoryStore['status'] }));
-    await expect(addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }])).rejects.toThrow('Memory store is not active.');
+  it('counts only memories that have not expired against maxMemories', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ ttlDays: 2, maxMemories: 3 }));
+    // three rows exist, but two of them are past their TTL
+    db.countMemoryItems.mockResolvedValue(3);
+    db.listMemoryItems.mockImplementation(async (_key: string, filters?: { notExpiredAt?: Date }) => ({
+      items: [],
+      total: filters?.notExpiredAt ? 1 : 3,
+    }));
+    await expect(addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'new fact' })).resolves.toBeDefined();
+    expect(db.createMemoryItem).toHaveBeenCalledTimes(1);
   });
 
-  it('does not report success when the store is full and nothing could be stored', async () => {
-    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ maxMemories: 2 }));
-    db.listMemoryItems.mockResolvedValue({ items: [], total: 2 });
-    db.countMemoryItems.mockResolvedValue(2);
-    await expect(addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }, { content: 'b' }])).rejects.toBeInstanceOf(MemoryStoreFullError);
-  });
-
-  it('does not report success when the embedding model fails for every item', async () => {
-    (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('embedding down'));
-    await expect(addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }])).rejects.toThrow('embedding down');
-  });
-
-  it('counts the items that failed when others went through', async () => {
-    (handleEmbeddingRequest as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new Error('embedding down'))
-      .mockResolvedValue({ response: { data: [{ embedding: [0.1, 0.2] }] } });
-    const result = await addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }, { content: 'b' }]);
-    expect(result).toEqual({ added: 1, duplicates: 0, failed: 1 });
-  });
-
-  it('stops and counts the rest as failed when the store fills up part way', async () => {
-    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ maxMemories: 1 }));
-    db.listMemoryItems.mockResolvedValueOnce({ items: [], total: 0 }).mockResolvedValue({ items: [], total: 1 });
-    db.countMemoryItems.mockResolvedValueOnce(0).mockResolvedValue(1);
-    const result = await addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }, { content: 'b' }, { content: 'c' }]);
-    expect(result).toEqual({ added: 1, duplicates: 0, failed: 2 });
-  });
-
-  it('skips the duplicate lookup when deduplication is off', async () => {
-    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ deduplication: false }));
-    db.findMemoryItemByHash.mockResolvedValue(makeItem());
-    const result = await addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }]);
-    expect(db.findMemoryItemByHash).not.toHaveBeenCalled();
-    expect(result).toEqual({ added: 1, duplicates: 0, failed: 0 });
-  });
-
-  it('counts a live duplicate but not an expired one', async () => {
-    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ ttlDays: 1 }));
-    db.findMemoryItemByHash
-      .mockResolvedValueOnce(makeItem({ expiresAt: new Date(Date.now() + DAY) }))
-      .mockResolvedValueOnce(makeItem({ _id: 'old-2', expiresAt: new Date(Date.now() - DAY) }));
-    db.updateMemoryItem.mockImplementation(async (id: string, data: Record<string, unknown>) => ({ ...makeItem({ _id: id }), ...data }) as IMemoryItem);
-    const result = await addMemoryBatch(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, [{ content: 'a' }, { content: 'b' }]);
-    expect(result).toEqual({ added: 1, duplicates: 1, failed: 0 });
+  it('still refuses a memory when maxMemories live items exist', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore({ ttlDays: 2, maxMemories: 3 }));
+    db.listMemoryItems.mockResolvedValue({ items: [], total: 3 });
+    await expect(addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'new fact' })).rejects.toBeInstanceOf(MemoryStoreFullError);
   });
 });

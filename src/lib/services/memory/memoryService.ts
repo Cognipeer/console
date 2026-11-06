@@ -323,16 +323,25 @@ async function addMemoryUnchecked(
   if (store.config.deduplication) {
     const existing = await db.findMemoryItemByHash(storeKey, contentHash, projectId);
     if (existing) {
-      // Update access and return existing
-      await db.incrementMemoryAccess(getRecordId(existing));
-      return existing;
+      if (isExpired(existing, new Date())) {
+        // Search and recall hide an expired item, so answering with it would lose the fact:
+        // the same content gets a fresh expiry (its vector is still in the index).
+        const expiresAt = expiresAtFor(store);
+        const renewed = await db.updateMemoryItem(getRecordId(existing), { expiresAt });
+        if (renewed) return renewed;
+      } else {
+        // Update access and return existing
+        await db.incrementMemoryAccess(getRecordId(existing));
+        return existing;
+      }
     }
   }
 
   const maxMemories = store.config.maxMemories;
   if (typeof maxMemories === 'number' && maxMemories > 0) {
-    const count = await db.countMemoryItems(storeKey, projectId);
-    if (count >= maxMemories) throw new MemoryStoreFullError(storeKey, maxMemories);
+    // Expired memories are not visible to anyone, so they do not take a place in the store.
+    const { total } = await db.listMemoryItems(storeKey, { projectId, notExpiredAt: new Date(), limit: 1 });
+    if (total >= maxMemories) throw new MemoryStoreFullError(storeKey, maxMemories);
   }
 
   // Generate embedding
