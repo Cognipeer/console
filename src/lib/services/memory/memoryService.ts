@@ -572,9 +572,39 @@ export async function deleteMemoryItem(
   await db.deleteMemoryItem(memoryId);
 }
 
+const VECTOR_LIST_PAGE = 500;
+const VECTOR_DELETE_CHUNK = 100;
+
+/** The vector ids of the items a bulk delete with this filter removes. */
+async function collectVectorIds(
+  db: Awaited<ReturnType<typeof withTenantDb>>,
+  storeKey: string,
+  projectId: string,
+  filter?: { scope?: IMemoryItem['scope']; scopeId?: string; tags?: string[]; before?: Date },
+): Promise<string[]> {
+  const before = filter?.before ? new Date(filter.before).getTime() : undefined;
+  const ids: string[] = [];
+  for (let skip = 0; ; skip += VECTOR_LIST_PAGE) {
+    const { items } = await db.listMemoryItems(storeKey, {
+      projectId,
+      ...(filter?.scope ? { scope: filter.scope } : {}),
+      ...(filter?.scopeId ? { scopeId: filter.scopeId } : {}),
+      ...(filter?.tags?.length ? { tags: filter.tags } : {}),
+      limit: VECTOR_LIST_PAGE,
+      skip,
+    });
+    for (const item of items) {
+      const created = item.createdAt ? new Date(item.createdAt).getTime() : Number.NaN;
+      if (before !== undefined && !(created < before)) continue;
+      if (item.vectorId) ids.push(item.vectorId);
+    }
+    if (items.length < VECTOR_LIST_PAGE) return ids;
+  }
+}
+
 export async function deleteMemoryItemsBulk(
   tenantDbName: string,
-  _tenantId: string,
+  tenantId: string,
   projectId: string,
   storeKey: string,
   filter?: { scope?: IMemoryItem['scope']; scopeId?: string; tags?: string[]; before?: Date },
@@ -585,6 +615,20 @@ export async function deleteMemoryItemsBulk(
   // keeps the counter update on the store the caller actually owns.
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');
+
+  // The rows go with their vectors, as in deleteMemoryItem: the ids are read first because the delete only returns a count.
+  const vectorIds = await collectVectorIds(db, storeKey, projectId, filter);
+  for (let i = 0; i < vectorIds.length; i += VECTOR_DELETE_CHUNK) {
+    try {
+      await deleteVectors(tenantDbName, tenantId, projectId, {
+        providerKey: store.vectorProviderKey,
+        indexKey: store.vectorIndexKey,
+        ids: vectorIds.slice(i, i + VECTOR_DELETE_CHUNK),
+      });
+    } catch (err) {
+      logger.warn('Failed to remove vectors', { error: err });
+    }
+  }
 
   const deleted = await db.deleteMemoryItems(storeKey, { ...filter, projectId });
 

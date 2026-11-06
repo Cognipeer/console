@@ -33,6 +33,7 @@ import {
   deleteVectorIndex,
   upsertVectors,
   queryVectorIndex,
+  deleteVectors,
 } from '@/lib/services/vector/vectorService';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { createMockDb } from '../helpers/db.mock';
@@ -552,11 +553,95 @@ describe('memory items stay inside their project', () => {
   });
 
   it('deleteMemoryItemsBulk deletes and recounts within the project', async () => {
+    db.listMemoryItems.mockResolvedValue({ items: [], total: 0 });
     db.deleteMemoryItems.mockResolvedValue(2);
     db.countMemoryItems.mockResolvedValue(3);
     await deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { scope: 'user' });
     expect(db.deleteMemoryItems).toHaveBeenCalledWith(STORE_KEY, { scope: 'user', projectId: PROJECT_ID });
     expect(db.countMemoryItems).toHaveBeenCalledWith(STORE_KEY, PROJECT_ID);
+  });
+});
+
+describe('deleteMemoryItemsBulk and the vector index', () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
+    db.countMemoryItems.mockResolvedValue(0);
+  });
+
+  it('removes the vectors of the memories it deletes', async () => {
+    db.listMemoryItems.mockResolvedValue({
+      items: [makeItem({ _id: 'a', vectorId: 'vec-a' }), makeItem({ _id: 'b', vectorId: 'vec-b' })],
+      total: 2,
+    });
+    db.deleteMemoryItems.mockResolvedValue(2);
+
+    await deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { scope: 'user', scopeId: 'user-42' });
+
+    expect(db.listMemoryItems).toHaveBeenCalledWith(
+      STORE_KEY,
+      expect.objectContaining({ projectId: PROJECT_ID, scope: 'user', scopeId: 'user-42' }),
+    );
+    expect(deleteVectors).toHaveBeenCalledWith(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: 'pinecone-main',
+      indexKey: 'memory-mem-my-memories',
+      ids: ['vec-a', 'vec-b'],
+    });
+  });
+
+  it('only removes the vectors of items older than the before filter', async () => {
+    db.listMemoryItems.mockResolvedValue({
+      items: [
+        makeItem({ _id: 'old', vectorId: 'vec-old', createdAt: new Date('2026-01-01T00:00:00Z') }),
+        makeItem({ _id: 'new', vectorId: 'vec-new', createdAt: new Date('2026-03-01T00:00:00Z') }),
+      ],
+      total: 2,
+    });
+    db.deleteMemoryItems.mockResolvedValue(1);
+
+    await deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { before: new Date('2026-02-01T00:00:00Z') });
+
+    expect(deleteVectors).toHaveBeenCalledWith(
+      TENANT_DB,
+      TENANT_ID,
+      PROJECT_ID,
+      expect.objectContaining({ ids: ['vec-old'] }),
+    );
+  });
+
+  it('pages through every matching item', async () => {
+    const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => makeItem({ _id: `i${from + i}`, vectorId: `vec-${from + i}` }));
+    db.listMemoryItems
+      .mockResolvedValueOnce({ items: page(0, 500), total: 520 })
+      .mockResolvedValueOnce({ items: page(500, 20), total: 520 });
+    db.deleteMemoryItems.mockResolvedValue(520);
+
+    await deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY);
+
+    const ids = (deleteVectors as ReturnType<typeof vi.fn>).mock.calls.flatMap((c) => c[3].ids as string[]);
+    expect(ids).toHaveLength(520);
+    expect(new Set(ids).size).toBe(520);
+  });
+
+  it('still deletes the rows when the vector index cannot be reached', async () => {
+    db.listMemoryItems.mockResolvedValue({ items: [makeItem()], total: 1 });
+    db.deleteMemoryItems.mockResolvedValue(1);
+    (deleteVectors as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('index down'));
+
+    await expect(deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY)).resolves.toBe(1);
+    expect(db.deleteMemoryItems).toHaveBeenCalled();
+  });
+
+  it('does not call the vector index when nothing matches', async () => {
+    db.listMemoryItems.mockResolvedValue({ items: [], total: 0 });
+    db.deleteMemoryItems.mockResolvedValue(0);
+
+    await deleteMemoryItemsBulk(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY);
+    expect(deleteVectors).not.toHaveBeenCalled();
   });
 });
 
