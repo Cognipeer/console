@@ -253,7 +253,13 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send(result);
     } catch (error) {
+      if (error instanceof MemoryStoreFullError) {
+        return reply.code(409).send({ error: error.message });
+      }
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
+      if (error instanceof Error && error.message === 'Memory store not found.') {
+        return reply.code(404).send({ error: error.message });
+      }
       logger.error('Batch add client memory items error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

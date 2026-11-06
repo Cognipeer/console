@@ -87,7 +87,7 @@ POST /api/client/v1/memory/stores/:storeKey/memories/batch
 }
 ```
 
-Maximum 100 items per batch. **Status:** 201
+Maximum 100 items per batch. **Status:** 201 with `{ "added": 2, "duplicates": 0, "failed": 0 }`. `failed` counts the items that could not be stored. When nothing was stored and nothing was a duplicate, the call answers with the error instead: 404 for an unknown store, 409 for a store that holds `maxMemories`, 500 for other failures.
 
 ### List Memories
 
