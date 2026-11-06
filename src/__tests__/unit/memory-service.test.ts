@@ -591,16 +591,16 @@ describe('store ttlDays and maxMemories', () => {
 
   it('refuses a memory once the store holds maxMemories', async () => {
     db.findMemoryStoreByKey.mockResolvedValue(makeStore({ config: { ...makeStore().config, maxMemories: 3 } }));
-    db.countMemoryItems.mockResolvedValue(3);
+    db.listMemoryItems.mockResolvedValue({ items: [], total: 3 });
     await expect(addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' })).rejects.toBeInstanceOf(MemoryStoreFullError);
-    expect(db.countMemoryItems).toHaveBeenCalledWith(STORE_KEY, PROJECT_ID);
+    expect(db.listMemoryItems).toHaveBeenCalledWith(STORE_KEY, expect.objectContaining({ projectId: PROJECT_ID, notExpiredAt: expect.any(Date) }));
     expect(upsertVectors).not.toHaveBeenCalled();
     expect(db.createMemoryItem).not.toHaveBeenCalled();
   });
 
   it('accepts a memory below maxMemories', async () => {
     db.findMemoryStoreByKey.mockResolvedValue(makeStore({ config: { ...makeStore().config, maxMemories: 3 } }));
-    db.countMemoryItems.mockResolvedValue(2);
+    db.listMemoryItems.mockResolvedValue({ items: [], total: 2 });
     await expect(addMemory(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, { content: 'x' })).resolves.toBeDefined();
   });
 });
