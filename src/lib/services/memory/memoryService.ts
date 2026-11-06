@@ -408,30 +408,47 @@ export async function addMemoryBatch(
   projectId: string,
   storeKey: string,
   memories: AddMemoryRequest[],
-): Promise<{ added: number; duplicates: number }> {
+): Promise<{ added: number; duplicates: number; failed: number }> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
   await enforceServiceQuota(
     { tenantDbName, tenantId, projectId },
     { domain: 'memory', resourceKey: storeKey, cost: { requests: 1 } },
   );
+  const db = await withTenantDb(tenantDbName);
+  const store = await db.findMemoryStoreByKey(storeKey, projectId);
+  if (!store) throw new Error('Memory store not found.');
+  if (store.status !== 'active') throw new Error('Memory store is not active.');
+
   let added = 0;
   let duplicates = 0;
-  for (const mem of memories) {
+  let failed = 0;
+  let firstError: unknown;
+  for (let i = 0; i < memories.length; i++) {
+    const mem = memories[i];
     try {
-      const db = await withTenantDb(tenantDbName);
-      const hash = hashContent(mem.content);
-      const existing = await db.findMemoryItemByHash(storeKey, hash, projectId);
-      if (existing) {
-        duplicates++;
-        continue;
+      if (store.config.deduplication) {
+        const existing = await db.findMemoryItemByHash(storeKey, hashContent(mem.content), projectId);
+        if (existing && !isExpired(existing, new Date())) {
+          duplicates++;
+          continue;
+        }
       }
       await addMemoryUnchecked(tenantDbName, tenantId, projectId, storeKey, mem);
       added++;
     } catch (err) {
       logger.error('Failed to add memory in batch', { error: err });
+      failed++;
+      firstError ??= err;
+      if (err instanceof MemoryStoreFullError) {
+        // Nothing after this one fits either.
+        failed += memories.length - i - 1;
+        break;
+      }
     }
   }
-  return { added, duplicates };
+  // Nothing went in and nothing was already there: answer with the error, as the single add does.
+  if (added === 0 && duplicates === 0 && failed > 0) throw firstError;
+  return { added, duplicates, failed };
 }
 
 export async function listMemoryItems(
