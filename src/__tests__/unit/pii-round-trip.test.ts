@@ -50,6 +50,25 @@ describe('tokens', () => {
   });
 });
 
+describe('custom categories', () => {
+  it('restores the value of a category whose id starts with a digit, in text and in a stream', async () => {
+    const customScan = async (text: string) =>
+      detect(text, {
+        categories: {},
+        languages: ['global'],
+        customPatterns: [{ categoryId: '2fa_code', label: '2FA', pattern: '\\b\\d{6}\\b', enabled: true }],
+      });
+    const rt = new PiiRoundTrip({ key: deriveRoundTripKey('secret', 'tenant-1', 'session:1'), version: 'policy@1', scan: customScan });
+    const protectedText = await rt.protectText('my code is 123456');
+    expect(protectedText).not.toContain('123456');
+    expect(rt.restoreText(protectedText)).toBe('my code is 123456');
+
+    const restorer = rt.streamRestorer();
+    const pieces = [...protectedText].map((ch) => restorer.push(ch));
+    expect(pieces.join('') + restorer.flush()).toBe('my code is 123456');
+  });
+});
+
 describe('restore', () => {
   it('turns tokens back into values, with or without the brackets, and leaves unknown tokens alone', async () => {
     const rt = roundTrip();

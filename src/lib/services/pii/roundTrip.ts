@@ -72,7 +72,9 @@ export function deriveRoundTripKey(secret: string, tenant: string, scope: string
 }
 
 function tokenPrefix(category: string): string {
-  return category.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'PII';
+  const prefix = category.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'PII';
+  // TOKEN_PATTERN and PENDING_TAIL need a token to start with a letter, so a category id that starts with a digit gets one.
+  return /^[0-9]/.test(prefix) ? `C_${prefix}` : prefix;
 }
 
 function letters(mac: Buffer, from: number, count: number): string {
