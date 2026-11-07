@@ -47,3 +47,32 @@
   color: var(--mantine-color-dimmed);
   flex-shrink: 0;
 }
+
+.attention {
+  border-color: var(--mantine-color-orange-3);
+}
+
+.attentionIcon {
+  color: var(--mantine-color-orange-6);
+}
+
+.attentionRow {
+  padding: 8px 0;
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+
+.attentionRow:first-child {
+  border-top: 0;
+}
+
+.attentionDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--mantine-color-orange-5);
+}
+
+.attentionDot[data-tone='error'] {
+  background: var(--mantine-color-red-6);
+}

@@ -43,6 +43,9 @@ import {
     IconTool,
 } from '@tabler/icons-react';
 import SectionCard from '@/components/common/SectionCard';
+import type { ResourceEdgeView } from '@/components/resources/ResourceUsagePanel';
+import { tryTranslate } from '@/components/resources/i18nLookup';
+import { useTranslations } from '@/lib/i18n';
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
 import { chatCompletionsCurl, sampleVariables } from '../agentUsageSnippets';
@@ -93,9 +96,74 @@ export interface AgentOverviewPanelProps {
     sessionCount: number;
     onStartSession: () => void;
     onGoToTab: (tab: string) => void;
+    /** Saved-but-unpublished sections (their headings), for "Needs attention". Empty when nothing differs. */
+    unpublishedSections?: string[];
+    /** References of this agent that do not resolve (missing, inactive, another project…), from the usage check. */
+    brokenReferences?: ResourceEdgeView[];
+}
+
+/** Where in Build a reference of the given type is set, as a deep-link name (see the agent page's tab aliases). */
+const REFERENCE_SECTION: Record<string, string> = {
+    model: 'basic',
+    guardrail: 'guardrails',
+    'pii-policy': 'pii',
+    'rag-module': 'knowledge',
+    tool: 'tools',
+    'mcp-server': 'tools',
+    prompt: 'prompt',
+    'memory-store': 'memory',
+    skill: 'skills',
+    agent: 'subagents',
+    'file-bucket': 'files',
+};
+
+interface AttentionItem {
+    key: string;
+    tone: 'warn' | 'error';
+    title: string;
+    hint?: string;
+    action: string;
+    onAction: () => void;
+}
+
+/**
+ * The few things on this page that ask for a decision, gathered at the top: changes not published yet, tools that
+ * fail, runs that ended in an error, references that no longer resolve. Only signals the page already loads — no new
+ * checks. Nothing to show, no card.
+ */
+function AttentionCard({ items, title }: { items: AttentionItem[]; title: string }) {
+    if (items.length === 0) return null;
+    return (
+        <Card withBorder padding="md" radius="md" className={classes.attention} data-testid="agent-attention">
+            <Group gap={8} mb="xs">
+                <IconAlertTriangle size={16} className={classes.attentionIcon} />
+                <Text fw={600} size="sm">{title}</Text>
+                <Badge size="xs" variant="light" color="orange">{items.length}</Badge>
+            </Group>
+            <Stack gap={0}>
+                {items.map((item) => (
+                    <Group key={item.key} justify="space-between" wrap="nowrap" gap="md" className={classes.attentionRow}>
+                        <Group gap={10} wrap="nowrap" style={{ minWidth: 0 }}>
+                            <span className={classes.attentionDot} data-tone={item.tone} aria-hidden="true" />
+                            <Stack gap={0} style={{ minWidth: 0 }}>
+                                <Text size="sm" fw={500} truncate>{item.title}</Text>
+                                {item.hint ? <Text size="xs" c="dimmed" truncate>{item.hint}</Text> : null}
+                            </Stack>
+                        </Group>
+                        <Button size="compact-xs" variant="default" onClick={item.onAction} style={{ flexShrink: 0 }}>
+                            {item.action}
+                        </Button>
+                    </Group>
+                ))}
+            </Stack>
+        </Card>
+    );
 }
 
 type WindowDays = '7' | '30';
+
+/** Stat tiles by the width of the column they sit in (Overview has a right column), not by the window's. */
+const STAT_COLS = { base: 1, '420px': 2, '620px': 3, '960px': 5 };
 
 function StatCard({
     icon,
@@ -146,7 +214,11 @@ export default function AgentOverviewPanel({
     sessionCount,
     onStartSession,
     onGoToTab,
+    unpublishedSections = [],
+    brokenReferences = [],
 }: AgentOverviewPanelProps) {
+    const t = useTranslations('agents.overview.attention');
+    const tResources = useTranslations('resources');
     const [windowDays, setWindowDays] = useState<WindowDays>('30');
     const [overview, setOverview] = useState<TracingOverview | null>(null);
     const [loading, setLoading] = useState(true);
@@ -180,6 +252,69 @@ export default function AgentOverviewPanel({
     const models = (overview?.analytics.models ?? []).slice(0, 4);
 
     const boundTools = (agent.config?.toolBindings ?? []).reduce((sum, b) => sum + (b.toolNames?.length ?? 0), 0);
+
+    const attention: AttentionItem[] = [];
+    if (!isConnected && agent.config?.kind !== 'flow' && !agent.publishedVersion) {
+        attention.push({
+            key: 'never-published',
+            tone: 'warn',
+            title: t('neverPublished'),
+            hint: t('neverPublishedHint'),
+            action: t('review'),
+            onAction: () => onGoToTab('versions'),
+        });
+    } else if (unpublishedSections.length > 0) {
+        attention.push({
+            key: 'unpublished',
+            tone: 'warn',
+            title: unpublishedSections.length === 1
+                ? t('unpublishedOne')
+                : t('unpublishedMany', { count: unpublishedSections.length }),
+            hint: unpublishedSections.join(', '),
+            action: t('review'),
+            onAction: () => onGoToTab('versions'),
+        });
+    }
+    if (!loading) {
+        (overview?.analytics.tools.items ?? [])
+            .filter((tool) => tool.errorCalls > 0)
+            .sort((a, b) => b.errorCalls - a.errorCalls)
+            .slice(0, 3)
+            .forEach((tool) => attention.push({
+                key: `tool:${tool.toolName}`,
+                tone: 'error',
+                title: tool.errorCalls === 1
+                    ? t('toolFailedOnce', { tool: tool.toolName })
+                    : t('toolFailed', { tool: tool.toolName, count: tool.errorCalls }),
+                hint: t('lastDays', { days: windowDays }),
+                action: t('openTools'),
+                onAction: () => onGoToTab('tools'),
+            }));
+        if (failed > 0) {
+            attention.push({
+                key: 'runs-failed',
+                tone: 'error',
+                title: failed === 1 ? t('runsFailedOne') : t('runsFailedMany', { count: failed }),
+                hint: t('lastDays', { days: windowDays }),
+                action: t('openSessions'),
+                onAction: () => onGoToTab('sessions'),
+            });
+        }
+    }
+    brokenReferences.forEach((edge, index) => {
+        const type = tryTranslate(tResources, `types.${edge.other.type}`) ?? edge.other.type;
+        attention.push({
+            key: `ref:${edge.other.type}:${edge.other.key ?? edge.other.id ?? index}:${edge.field}`,
+            tone: edge.severity === 'error' ? 'error' : 'warn',
+            title: t('reference', {
+                type,
+                name: edge.other.name ?? edge.other.key ?? edge.other.id ?? '—',
+                status: tryTranslate(tResources, `usage.status.${edge.status}`) ?? edge.status,
+            }),
+            action: t('openBuild'),
+            onAction: () => onGoToTab(REFERENCE_SECTION[edge.other.type] ?? 'settings'),
+        });
+    });
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com';
     // The same call the Usage tab shows (`agent:<key>`, the variables the agent declares), here answered as one JSON.
     const quickCurl = chatCompletionsCurl({
@@ -191,6 +326,7 @@ export default function AgentOverviewPanel({
 
     return (
         <Stack gap="lg">
+            <AttentionCard items={attention} title={t('title')} />
             <Group justify="space-between">
                 <Text size="sm" c="dimmed">
                     Every run on every channel — API, OpenAI-compatible, A2A, triggers and sessions.
@@ -204,11 +340,11 @@ export default function AgentOverviewPanel({
             </Group>
 
             {loading ? (
-                <SimpleGrid cols={{ base: 1, sm: 2, md: 5 }} spacing="md">
+                <SimpleGrid type="container" cols={STAT_COLS} spacing="md">
                     {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} height={84} radius="md" />)}
                 </SimpleGrid>
             ) : (
-                <SimpleGrid cols={{ base: 1, sm: 2, md: 5 }} spacing="md">
+                <SimpleGrid type="container" cols={STAT_COLS} spacing="md">
                     <StatCard
                         icon={<IconActivity size={17} />}
                         label="Runs"

@@ -35,7 +35,14 @@ import {
   type AttachmentBucketOption,
   type AttachmentsSettings,
 } from '@/components/agents/studio/filesSettings';
-import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections, configSectionTitle } from '@/components/agents/studio/configSections';
+import {
+  BUILD_SECTION_GROUPS,
+  BUILD_SECTION_ORDER,
+  CONFIG_SECTION_KEYS,
+  CONFIG_SECTION_TITLES,
+  changedConfigSections,
+  configSectionTitle,
+} from '@/components/agents/studio/configSections';
 import {
   applySessionFilter,
   bucketRefusalMessage,
@@ -246,9 +253,9 @@ describe('Configure → Files', () => {
     render(h(AgentFilesPanelView, { value, onChange: noop, agentKey: 'support', buckets, ...extra }), locale);
   const ready = (...list: AttachmentBucketOption[]): BucketsState => ({ status: 'ready', buckets: list });
 
-  it('is a section of its own, right after Callback & budget, owning config.attachments', () => {
-    const keys = Object.keys(CONFIG_SECTION_KEYS);
-    expect(keys[keys.indexOf('callback') + 1]).toBe('files');
+  it('is a section of its own among the capabilities, right before Sandbox, owning config.attachments', () => {
+    expect(BUILD_SECTION_ORDER[BUILD_SECTION_ORDER.indexOf('files') + 1]).toBe('sandbox');
+    expect(BUILD_SECTION_GROUPS.find((group) => group.sections.includes('files'))?.id).toBe('capabilities');
     expect(CONFIG_SECTION_KEYS.files).toEqual(['attachments']);
     expect(CONFIG_SECTION_TITLES.files).toBe('Files');
     const translate = (language: typeof en) => (key: string) =>

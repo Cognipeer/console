@@ -735,6 +735,26 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - A Knowledge Engine module created from its page opens on the Documents tab.
 - With forms stacked, Escape closes only the top one (it used to close all of them).
 
+### Agent page: Build, Overview and Ship
+
+- **Build** lists its sections in a fixed order — Essentials (General, Prompt), Capabilities (Delegation, Skills,
+  Memory, Files, Sandbox, Client tools), Behavior (Approvals & questions, Callback & budget, Runtime, Variables,
+  Structured output) — with a sticky index beside them on wide screens. The index marks a section that differs from
+  the published version (●) and one the agent does not use (○), follows the page as it scrolls, and jumps to the parts
+  of General (Knowledge Engine, Guardrails, PII protection, Tools).
+- A section the agent does not use is one line, "Not set", with **Set up** to open it. A link to such a section opens
+  it. Sections that differ from the published version or hold unsaved edits always stay open.
+- The save bar says how many sections have **unsaved changes** and which ones, and offers **Discard** (asks first,
+  then reloads the saved draft). Opening a tab no longer scrolls past the header to its first section.
+- The header shows **Draft · N changes** while the saved draft differs from the published version. Compare, Update
+  from file and Export moved into a **⋯** menu.
+- **Overview** opens with **Needs attention** when there is something to act on: changes not published (or nothing
+  published yet), tools that failed, runs that ended in an error, references that no longer resolve — each with a
+  button to where it is fixed. A right column shows **Where it runs** (API, A2A, triggers and the portals, channels and
+  voice models that use the agent) and **Uses and used by**, which used to sit at the bottom of the page.
+- **Ship** opens with a summary: the published version and its date, what publishing would change, where the agent
+  runs, and Compare and Publish.
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept
