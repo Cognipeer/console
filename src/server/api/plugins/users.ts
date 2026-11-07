@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IUser } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
 import { isDelegationIssuer, listDelegationIssuers } from '@/lib/iam/delegationIssuers';
@@ -80,6 +80,8 @@ import {
   withApiRequestContext,
   type ApiSessionContext,
 } from '../fastify-utils';
+import { sendPlanLimitRefusal } from '../planLimitReply';
+import { assertSeatForReEnable, assertSeats, planLimitsActive } from '@/lib/limits';
 import { resolveRequestedTokenScope } from './tokens';
 
 const logger = createLogger('api:users');
@@ -320,6 +322,10 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       if (patch.role !== undefined) {
         const verdict = checkRoleChange(actor, person, patch.role);
         if (!verdict.ok) return refuse(reply, verdict);
+        // A portal user who becomes a console role takes a console seat (hosted deployments only).
+        if (target.role === 'portal_user' && patch.role !== 'portal_user' && target.canLogin !== false && target.kind !== 'external' && target.status !== 'disabled') {
+          await assertSeats({ tenantId: session.tenantId, kind: 'console', source: { type: 'user', id: session.userId } });
+        }
       }
 
       if (patch.email) {
@@ -345,6 +351,8 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
+      const refusal = sendPlanLimitRefusal(reply, error);
+      if (refusal) return refusal;
       logger.error('Update user error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
@@ -439,6 +447,14 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
           if (typeof body.reason === 'string') reason = body.reason;
         }
 
+        // Re-enabling a disabled account takes a seat again (hosted deployments only; a no-op elsewhere).
+        if (action === 'enable' && planLimitsActive()) {
+          const target = await runWithTenantScope(session.tenantDbName, (db) => db.findUserById(id));
+          if (target && (!target.tenantId || String(target.tenantId) === String(session.tenantId))) {
+            await assertSeatForReEnable({ tenantId: session.tenantId, user: target, source: { type: 'user', id: session.userId } });
+          }
+        }
+
         const result = await setUserStatus({
           actor: {
             email: session.userEmail,
@@ -470,6 +486,8 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         if (error instanceof SyntaxError) {
           return reply.code(400).send({ error: 'Invalid request body' });
         }
+        const refusal = sendPlanLimitRefusal(reply, error);
+        if (refusal) return refusal;
         logger.error(`${action} user error`, { error });
         return reply.code(500).send({ error: 'Internal server error' });
       }
@@ -933,6 +951,15 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // The plan's seats (hosted deployments only; a no-op elsewhere). Accounts that cannot sign in are not seats.
+      if (canLogin) {
+        await assertSeats({
+          tenantId: session.tenantId,
+          kind: body.role === 'portal_user' ? 'portal' : 'console',
+          source: { type: 'user', id: session.userId },
+        });
+      }
+
       const initialProjectIds = grants.length > 0 ? grants.map((grant) => grant.projectId) : undefined;
 
       // Clamped to the inviting admin's own effective permission — an admin
@@ -1020,6 +1047,8 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
+      const refusal = sendPlanLimitRefusal(reply, error);
+      if (refusal) return refusal;
       logger.error('Invite user error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }

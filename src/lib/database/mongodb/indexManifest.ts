@@ -48,6 +48,13 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
   nodes: [{ key: { lastHeartbeatAt: 1 }, options: { name: 'idx_heartbeat' } }],
   // Signup gating: codes are claimed atomically by exact value.
   beta_access_codes: [{ key: { code: 1 }, options: { name: 'idx_code', unique: true } }],
+  // Plan limits: monthly meters are listed per period; events per tenant newest-first and swept by age.
+  plan_usage_monthly: [{ key: { period: 1, tenantId: 1 }, options: { name: 'idx_period_tenant' } }],
+  plan_limit_events: [
+    { key: { tenantId: 1, at: -1 }, options: { name: 'idx_tenant_at' } },
+    { key: { at: 1 }, options: { name: 'idx_at' } },
+  ],
+  plan_usage_peaks: [{ key: { tenantId: 1, day: 1 }, options: { name: 'idx_tenant_day' } }],
 };
 
 /**

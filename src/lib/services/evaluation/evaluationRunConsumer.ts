@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { EVALUATION_RUN_JOB, EVALUATION_RUN_QUEUE, runSuiteJob, type EvaluationRunJobPayload } from './evaluationRunJob';
 
@@ -24,8 +25,17 @@ export async function startEvaluationRunQueueConsumer(): Promise<void> {
     EVALUATION_RUN_QUEUE,
     async (ctx: JobContext<QueuePayload>) => {
       if (ctx.name === EVALUATION_RUN_JOB) {
-        await runSuiteJob(ctx.data as unknown as EvaluationRunJobPayload);
-        return { ok: true };
+        const payload = ctx.data as unknown as EvaluationRunJobPayload;
+        // Plan limit (background jobs): one 'job' lease per run; a full pool requeues the run with a delay.
+        const leased = await runJobUnderLease({
+          tenantId: payload.tenantId,
+          holderId: payload.runId,
+          queueName: EVALUATION_RUN_QUEUE,
+          jobName: EVALUATION_RUN_JOB,
+          payload,
+          run: () => runSuiteJob(payload),
+        });
+        return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
       }
       throw new Error(`Unknown evaluation job: ${ctx.name}`);
     },

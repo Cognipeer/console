@@ -54,6 +54,27 @@ export interface AppConfig {
     isOnPrem: boolean;
   };
 
+  /**
+   * Plan limits read from the tenant license (`plan` claim). Hosted (saas)
+   * deployments only: on an onprem deployment the effective mode is always
+   * `off`, whatever is set here.
+   */
+  planLimits: {
+    /**
+     * PLAN_LIMITS_MODE: off (default) = nothing is measured or refused;
+     * shadow = everything is measured and every would-be refusal is recorded,
+     * nothing is refused; on = refusals apply (a tenant may still be held in
+     * shadow by its license or by `defaultEnforcement`).
+     */
+    mode: 'off' | 'shadow' | 'on';
+    /**
+     * PLAN_LIMITS_DEFAULT_ENFORCEMENT: how tenants whose license sets no
+     * `plan.enforcement` (including tenants without a license) are treated when
+     * the mode is `on`. Default shadow.
+     */
+    defaultEnforcement: 'shadow' | 'on';
+  };
+
   docs: {
     /**
      * Root of the docs site the docs panel and every docs link open (DOCS_BASE_URL): the public
@@ -935,6 +956,11 @@ function buildConfig(source: ConfigSource): AppConfig {
     deployment: {
       mode: deploymentMode,
       isOnPrem: deploymentMode === 'onprem',
+    },
+
+    planLimits: {
+      mode: oneOf(source, 'PLAN_LIMITS_MODE', ['off', 'shadow', 'on'], 'off'),
+      defaultEnforcement: oneOf(source, 'PLAN_LIMITS_DEFAULT_ENFORCEMENT', ['shadow', 'on'], 'shadow'),
     },
 
     docs: {

@@ -2,6 +2,7 @@
  * Client-facing browser API (token-authenticated).
  * Routes are registered under `/client/v1/browser/*`.
  */
+import { isPlanLimitError, planLimitErrorBody } from '@/lib/limits/errors';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
@@ -65,6 +66,8 @@ function parseDateParam(value: string | undefined): Date | undefined {
 
 function sendBrowserError(reply: { code: (statusCode: number) => { send: (body: Record<string, unknown>) => unknown } }, error: unknown, fallback: string) {
   if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
+  // A plan limit (browser sessions in use): the code is the contract.
+  if (isPlanLimitError(error)) return reply.code(error.status).send(planLimitErrorBody(error));
   const status = getBrowserErrorStatus(error);
   return reply.code(status).send({ error: getBrowserErrorMessage(error, fallback) });
 }

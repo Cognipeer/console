@@ -28,6 +28,7 @@ import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getConfig } from '@/lib/core/config';
+import { gatePublicRequestRate } from '../publicRpmGate';
 import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
@@ -251,6 +252,8 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
   // Counted under the stored record's ids, not under the URL's path parameters.
   const rate = await checkPublicEndpointRate({ server, clientAddress: getClientIp(request) });
   if (!rate.allowed) return sendRateLimited(reply, rate);
+  const planRefused = await gatePublicRequestRate(request, reply, { tenantId: server.tenantId, sourceType: 'mcp', sourceId: server.key });
+  if (planRefused) return planRefused;
 
   // A message that names an SSE session is delivered into that stream — only
   // when the session was opened on this endpoint, by an anonymous caller.
@@ -449,6 +452,8 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const clientAddress = getClientIp(request);
       const rate = await checkPublicEndpointRate({ server, clientAddress });
       if (!rate.allowed) return sendRateLimited(reply, rate);
+      const planRefused = await gatePublicRequestRate(request, reply, { tenantId: server.tenantId, sourceType: 'mcp', sourceId: server.key });
+      if (planRefused) return planRefused;
 
       return startMcpSseResponse(request, reply, {
         messagePath: `/api/public/mcp/${encodeURIComponent(tenantId)}/${encodeURIComponent(endpointSlug)}/message`,

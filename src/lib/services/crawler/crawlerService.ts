@@ -7,6 +7,7 @@
  */
 
 import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
+import { assertMonthlyAllowance } from '@/lib/limits';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
@@ -385,6 +386,9 @@ async function checkCrawlRunQuota(
   crawlerKey: string | undefined,
   trigger: string | undefined,
 ): Promise<void> {
+  // The plan's monthly crawler-page allowance (hosted deployments only; a no-op elsewhere): refuse a new run when it
+  // is used up, scheduled runs included (the runner also stops a running crawl at the limit).
+  await assertMonthlyAllowance({ tenantId: ctx.tenantId, meter: 'crawlerPages', source: { type: trigger === 'schedule' ? 'schedule' : 'user' } });
   if (trigger === 'schedule') return;
   await enforceServiceQuota(
     { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },

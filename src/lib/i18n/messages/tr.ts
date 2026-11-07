@@ -14,6 +14,8 @@ import { agentChannelsListTr } from './agentChannelsList.tr';
 import { agentChannelsSetupTr } from './agentChannelsSetup.tr';
 import { agentTemplatesTr } from './agentTemplates.tr';
 import { alertsTr, incidentsTr } from './alerts.tr';
+import { usageTr } from './usage.tr';
+import { usageLimitsTr } from './usageLimits.tr';
 import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
@@ -1368,6 +1370,8 @@ export const tr: typeof en = {
   iamDirectory: iamDirectoryTr,
   directorySync: directorySyncTr,
   alerts: alertsTr,
+  usage: usageTr,
+  usageLimits: usageLimitsTr,
   incidents: incidentsTr,
   tracingHealth: tracingHealthTr,
   entityHealth: entityHealthTr,
@@ -1777,6 +1781,8 @@ export const tr: typeof en = {
   },
   navigation: {
     ...en.navigation,
+    usage: 'Kullanım',
+    usageDescription: 'Plan limitleri, kapasite, aylık haklar ve krediler',
     portalsYours: 'Portallarınız',
     settingsDescription: 'Çalışma alanı, kimlik ve erişim, yönetişim ve platform',
     settingsWorkspace: 'Çalışma alanı',
@@ -2767,6 +2773,7 @@ export const tr: typeof en = {
     resources: 'Kaynaklar',
     portals: 'Portallar',
     connectors: 'Bağlayıcılar',
+    usage: 'Kullanım',
     sso: 'Tek Oturum Açma (SSO)',
     ldap: 'LDAP Dizini',
     iamPeople: 'Kişiler',

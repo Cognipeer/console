@@ -7,6 +7,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { RED_TEAM_JOB, RED_TEAM_QUEUE, runCampaignJob, type RedTeamJobPayload } from './campaignJob';
 
@@ -23,8 +24,17 @@ export async function startRedTeamQueueConsumer(): Promise<void> {
     RED_TEAM_QUEUE,
     async (ctx: JobContext<QueuePayload>) => {
       if (ctx.name === RED_TEAM_JOB) {
-        await runCampaignJob(ctx.data as unknown as RedTeamJobPayload);
-        return { ok: true };
+        const payload = ctx.data as unknown as RedTeamJobPayload;
+        // Plan limit (background jobs): one 'job' lease per scan; a full pool requeues the scan with a delay.
+        const leased = await runJobUnderLease({
+          tenantId: payload.tenantId,
+          holderId: payload.runId,
+          queueName: RED_TEAM_QUEUE,
+          jobName: RED_TEAM_JOB,
+          payload,
+          run: () => runCampaignJob(payload),
+        });
+        return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
       }
       throw new Error(`Unknown red-team job: ${ctx.name}`);
     },

@@ -22,6 +22,7 @@ import mime from 'mime-types';
 import { getDatabase, type DatabaseProvider, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
+import { assertStorageStock, noteStoredBytes } from '@/lib/limits';
 import { checkResourceQuota, resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { bucketClosedError } from './bucketRules';
 import { mapLimit } from './concurrency';
@@ -117,6 +118,13 @@ async function assertRoomFor(
       `Importing ${incoming.files} files would pass the limit of ${limit} files for this project (${used} in use).`,
     );
   }
+
+  // The plan's tenant-wide storage (hosted deployments only; a no-op elsewhere): 413 'storage_quota_exceeded'.
+  await assertStorageStock({
+    tenantId: context.tenantId,
+    incomingBytes: incoming.bytes,
+    source: context.userId ? { type: 'user', id: context.userId } : undefined,
+  });
 
   const byteLimit = (await resolveEffectiveLimits(context)).quotas?.maxStorageBytes;
   if (byteLimit !== undefined && byteLimit !== -1) {
@@ -248,6 +256,7 @@ export async function importFromStorage(input: ImportFromStorageInput): Promise<
       });
 
       await withdrawIfBucketClosed(db, bucket, projectId, createdIds);
+      noteStoredBytes(tenantId, fresh.reduce((sum, candidate) => sum + Math.max(candidate.handle.size ?? 0, 0), 0));
     }
 
     return {

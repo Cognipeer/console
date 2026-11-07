@@ -91,6 +91,45 @@ export const MAIN_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_beta_access_codes_status ON beta_access_codes(status);
+
+  -- Plan limits usage (monthly meters, limit events, capacity peaks)
+  CREATE TABLE IF NOT EXISTS plan_usage_monthly (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    period TEXT NOT NULL,
+    searches INTEGER NOT NULL DEFAULT 0,
+    flowRuns INTEGER NOT NULL DEFAULT 0,
+    crawlerPages INTEGER NOT NULL DEFAULT 0,
+    sandboxSeconds INTEGER NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_plan_usage_monthly_period ON plan_usage_monthly(period, tenantId);
+
+  CREATE TABLE IF NOT EXISTS plan_limit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenantId TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    dimension TEXT,
+    outcome TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    "limit" REAL,
+    used REAL,
+    waitMs INTEGER,
+    source TEXT,
+    count INTEGER NOT NULL DEFAULT 1,
+    at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_plan_limit_events_tenant_at ON plan_limit_events(tenantId, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_plan_limit_events_at ON plan_limit_events(at);
+
+  CREATE TABLE IF NOT EXISTS plan_usage_peaks (
+    tenantId TEXT NOT NULL,
+    day TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    value REAL NOT NULL,
+    PRIMARY KEY (tenantId, day, dimension, hour)
+  );
 `;
 
 /**

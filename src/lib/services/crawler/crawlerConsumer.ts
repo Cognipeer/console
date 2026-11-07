@@ -14,6 +14,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
 import { runCrawlJobLocal } from './crawlerJobService';
@@ -42,8 +43,16 @@ export async function startCrawlerQueueConsumer(): Promise<void> {
   queue.consume(queueNameFor('crawler'), async (ctx: JobContext<QueuePayload>) => {
     if (ctx.name === 'crawler.run') {
       const payload = ctx.data as unknown as RunPayload;
-      await runCrawlJobLocal(payload.ctx, payload.jobId);
-      return { ok: true };
+      // Plan limit (background jobs): one 'job' lease per crawl job; a full pool requeues it with a delay.
+      const leased = await runJobUnderLease({
+        tenantId: payload.ctx.tenantId,
+        holderId: payload.jobId,
+        queueName: queueNameFor('crawler'),
+        jobName: 'crawler.run',
+        payload: payload as unknown as QueuePayload,
+        run: () => runCrawlJobLocal(payload.ctx, payload.jobId),
+      });
+      return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
     }
     throw new Error(`Unknown crawler job: ${ctx.name}`);
   }, { concurrency: CONCURRENCY });

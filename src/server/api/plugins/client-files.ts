@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
+import { assertStorageStock, noteStoredBytes } from '@/lib/limits';
 import { getDatabase } from '@/lib/database';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
@@ -279,6 +280,13 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
+      // The plan's tenant-wide storage (hosted deployments only; a no-op elsewhere): 413 'storage_quota_exceeded'.
+      await assertStorageStock({
+        tenantId: ctx.tenantId,
+        incomingBytes: estimatedFileBytes,
+        source: { type: 'api_token', id: tokenId },
+      });
+
       const result = await uploadFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         bucketKey,
         contentType: body.contentType as string | undefined,
@@ -293,6 +301,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
       });
 
+      noteStoredBytes(ctx.tenantId, result.record.size ?? estimatedFileBytes);
       return reply.code(201).send({
         file: result.record,
         message: 'File uploaded successfully',

@@ -59,6 +59,7 @@ import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
+import { assertStorageStock, isPlanLimitError, noteStoredBytes } from '@/lib/limits';
 import { AgentAttachmentError } from './agentErrors';
 import {
     FILE_OUTPUT_TYPES,
@@ -328,6 +329,19 @@ async function assertFileQuotas(db: DatabaseProvider, check: FileQuotaCheck): Pr
             throw new AgentAttachmentError(429, 'quota_exceeded', `storageBytes limit exceeded (${projected}/${storageLimit})`);
         }
     }
+    // The plan's tenant-wide storage (hosted deployments only; a no-op elsewhere): 413 `storage_quota_exceeded`.
+    try {
+        await assertStorageStock({
+            tenantId: scope.tenantId,
+            incomingBytes: Math.max(0, check.addedBytes),
+            source: { type: 'user', id: actor.userId },
+        });
+    } catch (error) {
+        if (isPlanLimitError(error) && error.code === 'storage_quota_exceeded') {
+            throw new AgentAttachmentError(error.status, error.code, error.message);
+        }
+        throw error;
+    }
 }
 
 export interface UploadSessionFileInput {
@@ -418,6 +432,7 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
             uploadedBy: actor.userId,
         },
     });
+    noteStoredBytes(scope.tenantId, buffer.length);
     return toSessionFileView(result.record);
 }
 
@@ -493,6 +508,7 @@ export async function saveAgentOutputFile(input: {
             origin: 'agent_output',
         },
     });
+    noteStoredBytes(input.scope.tenantId, input.data.length);
     if (input.turn) input.turn.saved += 1;
     return { ...toMessageAttachment(result.record), origin: 'agent_output' };
 }
@@ -540,6 +556,7 @@ export async function appendAgentOutputFile(input: {
         updatedBy: input.actorId,
         convertToMarkdown: false,
     });
+    noteStoredBytes(input.scope.tenantId, input.data.length);
     return { ...toMessageAttachment(updated), origin: 'agent_output' };
 }
 

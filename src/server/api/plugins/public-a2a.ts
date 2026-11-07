@@ -22,6 +22,7 @@ import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
 import { resolveA2aExposure } from '@/lib/services/agents/a2aExposure';
 import { buildAgentCard, externalBaseUrl, handleA2aRpc } from './client-a2a';
+import { gatePublicRequestRate } from '../publicRpmGate';
 
 const logger = createLogger('api:public-a2a');
 
@@ -100,6 +101,9 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
       const { tenant, agent } = resolved;
+
+      const refused = await gatePublicRequestRate(request, reply, { tenantId: agent.tenantId, sourceType: 'a2a', sourceId: agent.key });
+      if (refused) return refused;
 
       const db = await getDatabase();
       return await withTenantDb(db, tenant.dbName, () => handleA2aRpc(

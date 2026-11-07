@@ -12,7 +12,7 @@
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IGroup, IUser } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
 import type { LicenseType } from '@/lib/license/license-manager';
@@ -31,6 +31,8 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
 import { isDirectoryManaged, isGroupDirectoryManaged } from '@/lib/iam/identity';
 import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { sendPlanLimitRefusal } from '../planLimitReply';
+import { assertSeatForReEnable, assertSeats, planLimitsActive } from '@/lib/limits';
 
 const logger = createLogger('api:client-members');
 
@@ -173,6 +175,18 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
           if (typeof body.reason === 'string') reason = body.reason;
         }
 
+        // Re-enabling a disabled account takes a seat again (hosted deployments only; a no-op elsewhere).
+        if (action === 'enable' && planLimitsActive()) {
+          const target = await runWithTenantScope(auth.tenantDbName, (db) => db.findUserById(id));
+          if (target && (!target.tenantId || String(target.tenantId) === String(auth.tenantId))) {
+            await assertSeatForReEnable({
+              tenantId: auth.tenantId,
+              user: target,
+              source: { type: 'api_token', id: String(auth.tokenRecord._id ?? '') || undefined },
+            });
+          }
+        }
+
         const result = await setUserStatus({
           actor: {
             apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
@@ -197,6 +211,8 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(200).send({ user: serializeUser(result.user) });
       } catch (error) {
         if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Invalid request body' });
+        const refusal = sendPlanLimitRefusal(reply, error);
+        if (refusal) return refusal;
         logger.error(`Client ${action} member error`, { error });
         return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
       }
@@ -243,6 +259,9 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         await db.iamCountUsers({ tenantId: auth.tenantId }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
+
+      // The plan's seats (hosted deployments only; a no-op elsewhere).
+      await assertSeats({ tenantId: auth.tenantId, kind: 'console', source: { type: 'api_token', id: String(auth.tokenRecord._id ?? '') || undefined } });
 
       const tempPassword = generateSecurePassword();
       const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_ROUNDS);
@@ -301,7 +320,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       });
     } catch (error) {
       logger.error('Client invite member error', { error });
-      return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
+      return sendPlanLimitRefusal(reply, error) ?? sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
     }
   }));
 

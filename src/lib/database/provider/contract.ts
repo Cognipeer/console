@@ -219,6 +219,7 @@ import type {
   AnalysisRunStatus,
 } from './types';
 import type { EnterpriseDbMethods } from '@/enterprise/registry';
+import type { MonthlyMeter, PlanLimitEvent, PlanLimitKind } from '@/lib/limits/types';
 
 // `EnterpriseDbMethods` is EMPTY in the community edition and augmented by the
 // enterprise overlay (gpu-fleet + sandbox methods). See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
@@ -2865,6 +2866,38 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   consumeBetaAccessCode(code: string, usedBy: { email: string }): Promise<boolean>;
   /** Revert a used code back to active (rollback when registration fails after the claim). */
   releaseBetaAccessCode(code: string): Promise<boolean>;
+
+  // ── Plan limits usage (main database) ──
+  /** Atomically add to the tenant's monthly meters for a period (`YYYY-MM`, UTC). */
+  incrementPlanUsageMonthly(
+    tenantId: string,
+    period: string,
+    deltas: Partial<Record<MonthlyMeter, number>>,
+  ): Promise<void>;
+  getPlanUsageMonthly(tenantId: string, period: string): Promise<Partial<Record<MonthlyMeter, number>>>;
+  listPlanUsageMonthly(
+    period: string,
+    opts?: { tenantIds?: string[] },
+  ): Promise<Array<{ tenantId: string; period: string } & Partial<Record<MonthlyMeter, number>>>>;
+  insertPlanLimitEvents(events: PlanLimitEvent[]): Promise<void>;
+  /** Newest first. */
+  listPlanLimitEvents(
+    tenantId: string,
+    opts: { since?: Date; kind?: PlanLimitKind; limit: number },
+  ): Promise<PlanLimitEvent[]>;
+  deletePlanLimitEventsBefore(cutoff: Date): Promise<number>;
+  /** Keep the highest value seen for a tenant/day/dimension/hour. Dimension must match [a-zA-Z0-9_]+. */
+  maxPlanUsagePeak(
+    tenantId: string,
+    day: string,
+    dimension: string,
+    hour: number,
+    value: number,
+  ): Promise<void>;
+  getPlanUsagePeaks(
+    tenantId: string,
+    days: string[],
+  ): Promise<Array<{ day: string; dimension: string; hour: number; value: number }>>;
 
   // ── IAM document store (tenant-scoped; collections/tables created lazily) ──
   /** One document by id, or null. */

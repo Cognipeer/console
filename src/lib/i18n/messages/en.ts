@@ -5,6 +5,8 @@ import { agentChannelsListEn } from './agentChannelsList.en';
 import { agentChannelsSetupEn } from './agentChannelsSetup.en';
 import { agentTemplatesEn } from './agentTemplates.en';
 import { alertsEn, incidentsEn } from './alerts.en';
+import { usageEn } from './usage.en';
+import { usageLimitsEn } from './usageLimits.en';
 import { analyticsDashboardsEn } from './analyticsDashboards.en';
 import { directorySyncEn } from './directorySync.en';
 import { entityHealthEn } from './entityHealth.en';
@@ -376,6 +378,8 @@ export const en = {
     alertChannels: 'Notification channels',
     license: 'License',
     licenseDescription: 'Apply and inspect the offline enterprise license',
+    usage: 'Usage',
+    usageDescription: 'Plan limits, capacity, monthly allowances and credits',
     sso: 'Single Sign-On',
     ssoDescription: 'OIDC connection, attribute mapping and JIT provisioning',
     ldap: 'LDAP Directory',
@@ -528,6 +532,7 @@ export const en = {
     webhooks: 'Webhooks',
     channels: 'Channels',
     license: 'License',
+    usage: 'Usage',
     sso: 'Single Sign-On',
     ldap: 'LDAP Directory',
     audit: 'Audit Log',
@@ -4159,6 +4164,8 @@ export const en = {
     serverDeleted: 'Server deleted successfully',
   },
   alerts: alertsEn,
+  usage: usageEn,
+  usageLimits: usageLimitsEn,
   incidents: incidentsEn,
   tracingHealth: tracingHealthEn,
   entityHealth: entityHealthEn,

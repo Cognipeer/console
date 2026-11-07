@@ -58,6 +58,7 @@ import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import { assertAgentsEnabled } from './agentServiceAvailability';
 import { ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { abortLocalTurns, watchTurnCancellation } from './turnWatch';
+import { agentRunOrigin, tryAcquireAgentSessionSlot, type AgentSessionSlot } from './agentSessionLease';
 
 export { agentDefaultCallback } from './agentCallbackConfig';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
@@ -610,6 +611,12 @@ interface AgentRunJobPayload extends QueuePayload {
   tenantDbName: string;
   /** Set on deferred-queue jobs: the worker checks the class's running cap before it claims. */
   runClass?: AgentRunClass;
+  /**
+   * The surface that created the run (`IAgentRun.channel`), carried so the worker can tell, before it
+   * claims, whether the run takes a plan-limit agent-session slot. Absent (a job queued before this
+   * field existed) = no slot is taken for it.
+   */
+  channel?: IAgentRun['channel'];
 }
 
 function idempotencyRequestHash(
@@ -1861,7 +1868,7 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
   const { runId } = payload;
   let release: (() => void) | undefined;
   const settled = new Promise<void>((resolve) => { release = resolve; });
-  const progress = { claimed: false };
+  const progress: AgentJobProgress = { claimed: false };
   try {
     await runAgentJobInTenant(payload, settled, progress);
   } catch (error) {
@@ -1874,12 +1881,21 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
       error: error instanceof Error ? error.message : String(error),
     });
   } finally {
+    // The plan-limit slot lives exactly as long as the job: every exit (finalized, failed, canceled,
+    // timed out, paused for a person, duplicate delivery) passes through here.
+    await progress.slot?.release();
     activeLocalRuns.delete(runId);
     release?.();
   }
 }
 
-async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise<void>, progress: { claimed: boolean }): Promise<void> {
+interface AgentJobProgress {
+  claimed: boolean;
+  /** The plan-limit agent-session slot this job holds (released by `runAgentJobLocal`). */
+  slot?: AgentSessionSlot;
+}
+
+async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise<void>, progress: AgentJobProgress): Promise<void> {
   const { runId, tenantId, tenantDbName } = payload;
   return runWithTenantDb(tenantDbName, async (db) => {
     const cfg = getConfig();
@@ -1894,6 +1910,24 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
         logger.info('Deferred run cap reached; leaving the run queued', { runId });
         return;
       }
+    }
+
+    // Plan limit (agent sessions). A run from a schedule, a channel or the console takes a slot before it
+    // is claimed; with none free it stays queued and asks again shortly (never failed). Client API runs
+    // take none (see agentSessionLease.ts for the origin mapping). A paused run holds no slot: its
+    // resume is a new job and takes one here.
+    if ('channel' in payload) {
+      const slot = await tryAcquireAgentSessionSlot({
+        tenantId,
+        holderId: `${runId}:${crypto.randomUUID().slice(0, 8)}`,
+        origin: agentRunOrigin({ channel: payload.channel }),
+      });
+      if (slot.refused) {
+        logger.info('No free agent session; leaving the run queued', { runId });
+        await requeueRunJobLater(payload);
+        return;
+      }
+      progress.slot = slot.slot;
     }
 
     let claimed = await db.claimAgentRun(runId, tenantId, workerId, startedAt);
@@ -2509,6 +2543,7 @@ export async function publishAgentRunJob(run: IAgentRun, options: { republish?: 
     tenantId: run.tenantId,
     tenantDbName: run.tenantDbName,
     ...(deferred ? { runClass: 'deferred' as const } : {}),
+    channel: run.channel ?? null,
   } satisfies AgentRunJobPayload, {
     attempts: 1,
     // A deferred job the claim guard skipped has completed, and BullMQ keeps a
@@ -2520,6 +2555,30 @@ export async function publishAgentRunJob(run: IAgentRun, options: { republish?: 
   });
   await runWithTenantDb(run.tenantDbName, (db) => db.markAgentRunPublished(String(run._id), run.tenantId, new Date()))
     .catch(() => undefined);
+}
+
+/** Delay before a run that found no free agent session is offered to a worker again. */
+const RUN_SLOT_RETRY_DELAY_MS = 30_000;
+
+/**
+ * Publishes the run's job again, delayed, after the plan limit left it without a slot. The row stays
+ * `queued`; if the publish fails the reconciler republishes it (it republishes every old queued row).
+ */
+async function requeueRunJobLater(payload: AgentRunJobPayload): Promise<void> {
+  try {
+    const queue = await getQueue();
+    // runClass stays on the payload so a deferred job keeps its running-cap guard on the retry.
+    await queue.publish(payload.runClass === 'deferred' ? AGENT_RUN_DEFERRED_QUEUE : AGENT_RUN_QUEUE, 'run', payload, {
+      attempts: 1,
+      delayMs: RUN_SLOT_RETRY_DELAY_MS,
+      dedupKey: `plim_ar_${payload.runId}_${Math.floor(Date.now() / RUN_SLOT_RETRY_DELAY_MS)}`,
+    });
+  } catch (error) {
+    logger.warn('Could not requeue a run that had no free agent session; the reconciler republishes it', {
+      runId: payload.runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 // ── §4.8: drain on shutdown ──────────────────────────────────────────────
