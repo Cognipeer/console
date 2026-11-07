@@ -48,6 +48,8 @@ interface TopbarV2Props {
   onNavigate: (href: string) => void;
   onMobileNavClick: () => void;
   settingsHref?: string;
+  /** Leaves out the "Services" launcher button (the single left menu does, for someone with few services). */
+  hideLauncher?: boolean;
 }
 
 export default function TopbarV2({
@@ -62,6 +64,7 @@ export default function TopbarV2({
   onNavigate,
   onMobileNavClick,
   settingsHref = '/dashboard/tokens',
+  hideLauncher = false,
 }: TopbarV2Props) {
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const tNav = useTranslations('navigation');
@@ -106,20 +109,22 @@ export default function TopbarV2({
         />
       </Link>
 
-      <button
-        type="button"
-        onClick={onLauncherClick}
-        className={classes.svcTrigger}
-        aria-label={tNav('servicesLabel')}
-      >
-        <span className={classes.dotGridSm} aria-hidden="true">
-          {Array.from({ length: 9 }).map((_, i) => (
-            <i key={i} />
-          ))}
-        </span>
-        <span>{tNav('services')}</span>
-        <IconChevronDown size={13} stroke={2} />
-      </button>
+      {hideLauncher ? null : (
+        <button
+          type="button"
+          onClick={onLauncherClick}
+          className={classes.svcTrigger}
+          aria-label={tNav('servicesLabel')}
+        >
+          <span className={classes.dotGridSm} aria-hidden="true">
+            {Array.from({ length: 9 }).map((_, i) => (
+              <i key={i} />
+            ))}
+          </span>
+          <span>{tNav('services')}</span>
+          <IconChevronDown size={13} stroke={2} />
+        </button>
+      )}
 
       <UnstyledButton
         onClick={onSearchClick}

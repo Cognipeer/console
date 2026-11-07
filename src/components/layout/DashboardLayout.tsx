@@ -18,6 +18,9 @@ import ServiceSubNav, {
   type SubNavItem,
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
+import Sidebar from './launcher/Sidebar';
+import { SIDEBAR_NAV, isFlatSidebar } from './launcher/sidebarNav';
+import sidebarClasses from './launcher/Sidebar.module.css';
 import { useEffectivePermissions } from './useEffectivePermissions';
 import { LauncherProvider } from './launcher/LauncherContext';
 import { DashboardUserProvider, type DashboardUser } from './DashboardUserContext';
@@ -425,7 +428,8 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
         }}
       >
         <AppShell.Main>
-          <div className={`${classes.shell} ${hasSubnav ? classes.shellWithSubnav : ''}`}>
+          {/* SIDEBAR_NAV (sidebarNav.ts) picks the single left menu or the icon rail with the service sub-nav. */}
+          <div className={SIDEBAR_NAV ? sidebarClasses.shell : `${classes.shell} ${hasSubnav ? classes.shellWithSubnav : ''}`}>
             <TopbarV2
               user={defaultUser}
               isTenantAdmin={isTenantAdmin}
@@ -438,29 +442,48 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               onNavigate={handleNavigate}
               onMobileNavClick={() => setMobileNavOpen(true)}
               settingsHref={settingsHref}
+              // With few services the menu is one plain list and the launcher is left out.
+              hideLauncher={SIDEBAR_NAV && isFlatSidebar(allowedServices)}
             />
 
-            <SlimRail
-              pinned={pinnedServices}
-              recents={recentServices}
-              activeServiceId={isSettingsActive ? null : (activeService?.id ?? null)}
-              onLauncherClick={() => setLauncherOpen(true)}
-              onHelpClick={openServiceDocs}
-              settingsHref={settingsHref}
-              settingsActive={isSettingsActive}
-            />
-
-            {activeService && hasSubnav ? (
-              <ServiceSubNav
-                service={isSettingsActive ? SETTINGS_NAV_SECTION : activeService}
+            {SIDEBAR_NAV ? (
+              <Sidebar
+                services={allowedServices}
+                activeService={isSettingsActive ? null : activeService}
+                activeItems={serviceSubnavItems}
+                settingsItems={settingsNavItems}
+                settingsHref={settingsHref}
+                settingsActive={isSettingsActive}
+                pinnedIds={pinned}
+                onTogglePin={togglePin}
+                onHelpClick={openServiceDocs}
                 pathname={pathname}
-                isPinned={pinned.has(activeService.id)}
-                onTogglePin={() => togglePin(activeService.id)}
-                onOpenDocs={openServiceDocs}
-                items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
-                hidePin={isSettingsActive}
               />
-            ) : null}
+            ) : (
+              <>
+                <SlimRail
+                  pinned={pinnedServices}
+                  recents={recentServices}
+                  activeServiceId={isSettingsActive ? null : (activeService?.id ?? null)}
+                  onLauncherClick={() => setLauncherOpen(true)}
+                  onHelpClick={openServiceDocs}
+                  settingsHref={settingsHref}
+                  settingsActive={isSettingsActive}
+                />
+
+                {activeService && hasSubnav ? (
+                  <ServiceSubNav
+                    service={isSettingsActive ? SETTINGS_NAV_SECTION : activeService}
+                    pathname={pathname}
+                    isPinned={pinned.has(activeService.id)}
+                    onTogglePin={() => togglePin(activeService.id)}
+                    onOpenDocs={openServiceDocs}
+                    items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
+                    hidePin={isSettingsActive}
+                  />
+                ) : null}
+              </>
+            )}
 
             <main className={classes.main}>
               <div className={classes.mainBreadcrumb}>

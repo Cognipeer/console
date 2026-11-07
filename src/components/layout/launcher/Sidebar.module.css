@@ -1,0 +1,345 @@
+/* ============================================================
+   Single left menu (Sidebar.tsx). Same tokens as the rail and the
+   sub-nav it replaces (LauncherShell.module.css), so both themes match.
+   ============================================================ */
+
+/* The shell grid with the menu: its column is as wide as the menu (labelled or icon-only); the middle column of the
+   rail layout stays empty, so the main area keeps its place (grid column 3). */
+.shell {
+  display: grid;
+  grid-template-columns: auto 0px minmax(0, 1fr);
+  grid-template-rows: 60px minmax(0, 1fr);
+  height: 100vh;
+  position: relative;
+  background: transparent;
+}
+
+.sidebar {
+  grid-column: 1;
+  grid-row: 2;
+  width: 248px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--ds-surface-raised);
+  border-right: 1px solid var(--ds-border-soft);
+}
+
+.collapsed {
+  width: 60px;
+  align-items: center;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px;
+  gap: 1px;
+  scrollbar-width: thin;
+}
+
+.collapsed .scroll {
+  align-items: center;
+  padding: 10px 0;
+  gap: 4px;
+  width: 100%;
+}
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px;
+  border-top: 1px solid var(--ds-border-soft);
+}
+
+.collapsed .footer {
+  align-items: center;
+  padding: 8px 0;
+  gap: 4px;
+  width: 100%;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 10px;
+}
+
+.sectionHeading {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+  padding: 4px 10px 4px;
+}
+
+.spacer {
+  flex: 1;
+  min-height: 12px;
+}
+
+/* ── Rows ─────────────────────────────────────────────────────── */
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.item:hover {
+  background: var(--ds-surface-2);
+  color: var(--ds-text);
+}
+
+.itemActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+.item[data-pending='true'],
+.page[data-pending='true'],
+.iconBtn[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: sidebarPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
+.label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  margin-left: auto;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ds-surface-2);
+  color: var(--ds-text-muted);
+  font-weight: 500;
+}
+
+/* The pin shows on hover or keyboard focus; in the pinned list it stays shown. */
+.pin {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ds-text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--ds-m-fast),
+    background-color var(--ds-m-fast);
+}
+
+.row:hover .pin,
+.pin:focus-visible,
+.pinStay {
+  opacity: 1;
+}
+
+.pin:hover {
+  background: var(--ds-surface-1);
+  color: var(--ds-text);
+}
+
+.pinned {
+  color: var(--ds-accent);
+}
+
+.row:hover .item,
+.row:focus-within .item {
+  padding-right: 32px;
+}
+
+/* ── Categories ───────────────────────────────────────────────── */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  margin-top: 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+
+.groupHeader:hover {
+  background: var(--ds-surface-2);
+  color: var(--ds-text-muted);
+}
+
+/* ── Pages of the service in view ─────────────────────────────── */
+
+.pages {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 6px 18px;
+  padding-left: 8px;
+  border-left: 1px solid var(--ds-border-soft);
+}
+
+.pagesHeading {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+  padding: 8px 8px 2px;
+}
+
+.page {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: var(--ds-text-muted);
+  font-size: 12.5px;
+  text-decoration: none;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.page:hover {
+  background: var(--ds-surface-2);
+  color: var(--ds-text);
+}
+
+.pageActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+/* ── Icon-only strip ──────────────────────────────────────────── */
+
+.iconBtn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ds-text-muted);
+  cursor: pointer;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.iconBtnSmall {
+  width: 32px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.iconBtn:hover {
+  background: var(--ds-surface-2);
+  color: var(--ds-text);
+}
+
+.iconBtnActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+}
+
+.iconDivider {
+  width: 24px;
+  height: 1px;
+  margin: 6px 0;
+  flex-shrink: 0;
+  background: var(--ds-border-soft);
+}
+
+/* Development only: React Query's devtools button sits in the bottom-left corner, over the menu's last rows. */
+:global(body:has(.tsqd-parent-container)) .footer {
+  padding-bottom: 64px;
+}
+
+@keyframes sidebarPendingPulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.6;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .item[data-pending='true'],
+  .page[data-pending='true'],
+  .iconBtn[data-pending='true'] {
+    animation: none;
+  }
+}
+
+/* Phones keep the menu drawer of the top bar (MobileNavDrawer). */
+@media (max-width: 48em) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    display: none;
+  }
+}

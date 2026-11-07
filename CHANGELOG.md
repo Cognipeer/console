@@ -788,6 +788,18 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - In a phone's browser the dashboard fits the visible screen: the browser's bars had covered the bottom of every page
   (the last rows of a list, a form's buttons).
 
+### One left menu
+
+- The icon rail and the second column with the pages of the service in view are one labelled menu. It lists Home,
+  the pinned services, and every service the person can open under Build, Data and Operate (each folds, with a count;
+  a category with nothing to open is left out). The service in view opens its pages in place, filtered as before
+  (Webhooks only with access to Webhooks), and Settings opens its pages by group while one of them is in view.
+- With seven services or fewer the menu is one plain list, without categories, pins or the Services launcher.
+- "Collapse menu" turns it into an icon strip that still shows the pages of the service in view. The folded categories
+  and the icon strip are remembered in the browser. Phones keep the menu drawer.
+- Service names, addresses and the ⌘K search are unchanged. `SIDEBAR_NAV` in `sidebarNav.ts` switches back to the
+  rail and the sub-nav, which are kept.
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept
