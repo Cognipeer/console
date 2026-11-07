@@ -27,7 +27,7 @@ import type {
 } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
 import VectorProviderModal from '@/components/vector/VectorProviderModal';
-import { useEffectivePermissions } from '@/components/layout/useEffectivePermissions';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -73,8 +73,7 @@ export default function VectorIndexPage() {
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   // Adding a provider is a write to Vector (POST /api/vector/providers). Unknown until the session answers:
   // the empty state then explains instead of offering a button that may be refused.
-  const levels = useEffectivePermissions();
-  const canAddProvider = levels?.vector === 'write' || levels?.vector === 'admin';
+  const canAddProvider = useCanWriteService('vector');
   const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(
     null,
   );

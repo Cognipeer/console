@@ -1222,6 +1222,21 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             mode={configForm.values.knowledgeToolMode}
             onBindingsChange={(next) => configForm.setFieldValue('knowledgeBindings', next)}
             onModeChange={(mode) => configForm.setFieldValue('knowledgeToolMode', mode)}
+            onModuleCreated={(created) =>
+              setRagModules((current) =>
+                current.some((m) => m.key === created.key)
+                  ? current
+                  : [
+                      ...current,
+                      {
+                        _id: String(created._id ?? created.key),
+                        key: created.key,
+                        name: created.name,
+                        status: String(created.status ?? 'active'),
+                      },
+                    ],
+              )
+            }
           />
         </ConfigBlock>
 
@@ -1625,7 +1640,16 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             {buildSection(
               'memory',
               'What this agent remembers across runs, backed by a store from the Memory module.',
-              <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />,
+              <AgentMemoryPanel
+                value={memoryConfig}
+                onChange={setMemoryConfig}
+                stores={memoryStores}
+                onStoreCreated={(store) =>
+                  setMemoryStores((current) =>
+                    current.some((s) => s.key === store.key) ? current : [...current, store],
+                  )
+                }
+              />,
               memoryConfig?.enabled ? (
                 <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
               ) : null,

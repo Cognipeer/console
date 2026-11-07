@@ -83,10 +83,19 @@ describe('the field', () => {
     expect(disabled).toContain(piiProtectionEn.policy.disabled);
   });
 
-  it('offers to create a policy when the project has none', () => {
+  it('offers to create a policy in place when the project has none (no link away from the unsaved form)', () => {
     const html = render(h(PiiProtectionField, { surface: 'model', value: null, onChange: noop, policies: NO_PII_POLICIES }));
+    expect(html).toContain(piiProtectionEn.policy.none);
+    expect(html).toContain('data-testid="pii-policy-create-inline"');
     expect(html).toContain(piiProtectionEn.policy.create);
-    expect(html).toContain('href="/dashboard/pii"');
+    expect(html).not.toContain('href="/dashboard/pii"');
+  });
+
+  it('a project with policies still offers a new one; a disabled field offers none', () => {
+    const html = render(h(PiiProtectionField, { surface: 'model', value: null, onChange: noop, policies }));
+    expect(html).toContain(piiProtectionEn.policy.new);
+    const off = render(h(PiiProtectionField, { surface: 'model', value: null, onChange: noop, policies, disabled: true }));
+    expect(off).not.toContain('data-testid="pii-policy-create-inline"');
   });
 
   it('an agent shows the main model’s policy: inherited when it picks none, replaced when it picks one', () => {

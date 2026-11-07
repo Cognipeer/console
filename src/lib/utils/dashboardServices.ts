@@ -241,6 +241,18 @@ export function canUseDashboardService(
   return serviceLevelOf(options, id) !== 'none';
 }
 
+/**
+ * Whether the person may create and change things in a permission service (write or admin), with the same level
+ * the services are judged by. A picker offers "+ New …" only then; the gates still decide the request.
+ */
+export function canWriteDashboardService(
+  options: Pick<DashboardServicesOptions, 'role' | 'servicePermissions' | 'effectivePermissions'>,
+  id: PermissionService,
+): boolean {
+  const level = serviceLevelOf(options, id);
+  return level === 'write' || level === 'admin';
+}
+
 export function getDashboardServices(
   options: DashboardServicesOptions = {},
 ): DashboardServiceDefinition[] {

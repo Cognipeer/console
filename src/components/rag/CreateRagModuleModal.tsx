@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Button,
   NumberInput,
   Select,
   Slider,
@@ -11,7 +12,12 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconBook, IconCheck } from '@tabler/icons-react';
+import { IconBook, IconCheck, IconPlus } from '@tabler/icons-react';
+import InlineModelCreate from '@/components/models/InlineModelCreate';
+import VectorProviderModal from '@/components/vector/VectorProviderModal';
+import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
+import type { VectorProviderView } from '@/lib/services/vector';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import { englishOcrText } from '@/components/extraction/ocrEnglish';
 import { describeOcr, type OcrSettings } from '@/components/extraction/ocrForm';
 import FormShell, {
@@ -41,6 +47,15 @@ import {
 } from './ragModuleForm';
 
 const MODE = 'create';
+
+/** "+ Add …" next to a picker, for a dependency the form can create in place. */
+function AddAction({ label, onClick, testId }: { label: string; onClick: () => void; testId: string }) {
+  return (
+    <Button variant="subtle" size="compact-xs" leftSection={<IconPlus size={12} />} onClick={onClick} data-testid={testId}>
+      {label}
+    </Button>
+  );
+}
 
 interface EmbeddingModel {
   key: string;
@@ -96,6 +111,15 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
   const [vectorIndexes, setVectorIndexes] = useState<VectorIndex[]>([]);
   const [rerankers, setRerankers] = useState<RerankerOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  // The dependencies this form can create in place, each for someone who can add it (the API decides anyway):
+  // an embedding model (Model Hub), a vector provider and an index (Knowledge Index).
+  const canAddModel = useCanWriteService('models');
+  const canAddVector = useCanWriteService('vector');
+  const [addModelOpen, setAddModelOpen] = useState(false);
+  const [addProviderOpen, setAddProviderOpen] = useState(false);
+  const [addIndexOpen, setAddIndexOpen] = useState(false);
+  // The providers as the API sent them: the index form needs their capabilities.
+  const [providerViews, setProviderViews] = useState<VectorProviderView[]>([]);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -162,6 +186,7 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
       const res = await fetch('/api/vector/providers', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
+        setProviderViews((data.providers ?? []) as VectorProviderView[]);
         setVectorProviders((data.providers ?? []).map((p: Record<string, unknown>) => ({
           key: p.key as string,
           label: (p.label as string) || (p.key as string),
@@ -223,6 +248,12 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
   useEffect(() => {
     void loadVectorIndexes();
   }, [loadVectorIndexes]);
+
+  // The index form creates on the provider chosen here.
+  const indexProviders = useMemo(
+    () => providerViews.filter((p) => p.key === selectedProvider),
+    [providerViews, selectedProvider],
+  );
 
   const selectedEmbedding = useMemo(
     () => embeddingModels.find((m) => m.key === form.values.embeddingModelKey),
@@ -487,7 +518,22 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         description="Used to turn document chunks into vectors."
         done={validEmbedding}
       >
-        <FormField label="Embedding model" required>
+        <FormField
+          label="Embedding model"
+          required
+          action={
+            canAddModel ? (
+              <AddAction label="Add embedding model" onClick={() => setAddModelOpen(true)} testId="rag-add-embedding-model" />
+            ) : undefined
+          }
+          hint={
+            embeddingModels.length === 0
+              ? canAddModel
+                ? 'This project has no embedding model yet. Add one here; it is saved to Model Hub.'
+                : 'This project has no embedding model yet. Someone who can edit Model Hub has to add one.'
+              : undefined
+          }
+        >
           <Select
             placeholder="Select an embedding model"
             data={embeddingModels.map((m) => ({ value: m.key, label: m.name }))}
@@ -504,7 +550,22 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         done={validVector}
       >
         <FormRow cols={2}>
-          <FormField label="Vector provider" required>
+          <FormField
+            label="Vector provider"
+            required
+            action={
+              canAddVector ? (
+                <AddAction label="Add provider" onClick={() => setAddProviderOpen(true)} testId="rag-add-vector-provider" />
+              ) : undefined
+            }
+            hint={
+              vectorProviders.every((p) => p.status !== 'active')
+                ? canAddVector
+                  ? 'This project has no vector provider yet. Add one here; it is saved to Knowledge Index.'
+                  : 'This project has no vector provider yet. Someone who can edit Knowledge Index has to add one.'
+                : undefined
+            }
+          >
             <Select
               placeholder="Select a vector provider"
               data={vectorProviders
@@ -518,7 +579,22 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
               }}
             />
           </FormField>
-          <FormField label="Vector index" required>
+          <FormField
+            label="Vector index"
+            required
+            action={
+              canAddVector && selectedProvider ? (
+                <AddAction label="Create index" onClick={() => setAddIndexOpen(true)} testId="rag-add-vector-index" />
+              ) : undefined
+            }
+            hint={
+              selectedProvider && vectorIndexes.length === 0
+                ? canAddVector
+                  ? 'This provider has no index yet. Create one here, with the embedding model’s dimension.'
+                  : 'This provider has no index yet. Someone who can edit Knowledge Index has to create one.'
+                : undefined
+            }
+          >
             <Select
               placeholder="Select an index"
               data={vectorIndexes.map((i) => ({
@@ -663,6 +739,53 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
           </FormField>
         </FormRow>
       </FormSection>
+      <InlineModelCreate
+        opened={addModelOpen}
+        onClose={() => setAddModelOpen(false)}
+        category="embedding"
+        onCreated={(model) => {
+          if (model.category && model.category !== 'embedding') return;
+          setEmbeddingModels((current) => [
+            ...current.filter((m) => m.key !== model.key),
+            { key: model.key, name: model.name },
+          ]);
+          form.setFieldValue('embeddingModelKey', model.key);
+        }}
+      />
+      {canAddVector ? (
+        <>
+          <VectorProviderModal
+            opened={addProviderOpen}
+            onClose={() => setAddProviderOpen(false)}
+            onCreated={(provider) => {
+              setProviderViews((current) => [...current.filter((p) => p.key !== provider.key), provider]);
+              setVectorProviders((current) => [
+                ...current.filter((p) => p.key !== provider.key),
+                {
+                  key: provider.key,
+                  label: provider.label || provider.key,
+                  status: provider.status ?? 'active',
+                  driverCapabilities: provider.driverCapabilities as Record<string, unknown> | undefined,
+                },
+              ]);
+              form.setFieldValue('vectorProviderKey', provider.key);
+              form.setFieldValue('vectorIndexKey', '');
+            }}
+          />
+          <CreateVectorIndexModal
+            opened={addIndexOpen}
+            onClose={() => setAddIndexOpen(false)}
+            providers={indexProviders}
+            onCreated={({ index }) => {
+              setVectorIndexes((current) => [
+                ...current.filter((i) => i.key !== index.key),
+                { key: index.key, name: index.name, providerKey: index.providerKey, dimension: index.dimension },
+              ]);
+              form.setFieldValue('vectorIndexKey', index.key);
+            }}
+          />
+        </>
+      ) : null}
     </FormShell>
   );
 }

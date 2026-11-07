@@ -1,13 +1,15 @@
 'use client';
 
-import { useState } from 'react';
-import { Select, Textarea, TextInput } from '@mantine/core';
+import { useMemo, useState } from 'react';
+import { Button, Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconPlus, IconRobot } from '@tabler/icons-react';
 import FormShell, { FormField, FormSection } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
 import { useFlowAgentCreate } from '@/components/enterprise/EnterpriseFlowAgentUi';
+import InlineModelCreate from '@/components/models/InlineModelCreate';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 
 interface ModelOption {
   key: string;
@@ -33,6 +35,14 @@ export default function CreateAgentModal({
   // The FlowBase choice, where Flows are available (Enterprise): null otherwise.
   const flowCreate = useFlowAgentCreate();
   const [submitting, setSubmitting] = useState(false);
+  // "+ Add model": Model Hub's create form over this one, for someone who can add models.
+  const canAddModel = useCanWriteService('models');
+  const [addModelOpen, setAddModelOpen] = useState(false);
+  const [addedModels, setAddedModels] = useState<ModelOption[]>([]);
+  const modelOptions = useMemo(
+    () => [...models, ...addedModels.filter((added) => !models.some((m) => m.key === added.key))],
+    [models, addedModels],
+  );
   const form = useForm({
     initialValues: { name: '', description: '', modelKey: '' },
     validate: {
@@ -148,16 +158,51 @@ export default function CreateAgentModal({
           description={t('createModal.modelDesc')}
           done={Boolean(form.values.modelKey)}
         >
-          <FormField label={t('createModal.model')} required>
+          <FormField
+            label={t('createModal.model')}
+            required
+            action={
+              canAddModel ? (
+                <Button
+                  variant="subtle"
+                  size="compact-xs"
+                  leftSection={<IconPlus size={12} />}
+                  onClick={() => setAddModelOpen(true)}
+                  data-testid="agent-create-add-model"
+                >
+                  {t('createModal.addModel')}
+                </Button>
+              ) : undefined
+            }
+            hint={
+              modelOptions.length === 0
+                ? t(canAddModel ? 'createModal.noModels' : 'createModal.noModelsReadOnly')
+                : undefined
+            }
+          >
             <Select
               placeholder={t('createModal.modelPlaceholder')}
-              data={models.map((m) => ({ value: m.key, label: `${m.name} (${m.modelId})` }))}
+              data={modelOptions.map((m) => ({ value: m.key, label: `${m.name} (${m.modelId})` }))}
               searchable
               {...form.getInputProps('modelKey')}
             />
           </FormField>
         </FormSection>
       )}
+
+      <InlineModelCreate
+        opened={addModelOpen}
+        onClose={() => setAddModelOpen(false)}
+        category="llm"
+        onCreated={(model) => {
+          if (model.category && model.category !== 'llm') return;
+          setAddedModels((current) => [
+            ...current.filter((m) => m.key !== model.key),
+            { key: model.key, name: model.name, modelId: model.modelId },
+          ]);
+          form.setFieldValue('modelKey', model.key);
+        }}
+      />
     </FormShell>
   );
 }

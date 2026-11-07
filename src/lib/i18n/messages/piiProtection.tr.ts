@@ -18,6 +18,8 @@ export const piiProtectionTr = {
     failed: 'PII politikaları yüklenemedi.',
     none: 'Bu projede henüz PII politikası yok.',
     create: 'PII politikası oluştur',
+    new: 'Yeni PII politikası',
+    noneReadOnly: 'PII’yi düzenleyebilen biri oluşturmalı.',
     open: 'Politikayı aç',
     missing: '“{key}” politikası artık bu projede yok. Başka bir politika seçilene ya da koruma kapatılana kadar çağrılar hata verir.',
     disabled: 'Bu politika kapalı; yeniden açılana kadar çağrılar korumasız gider.',

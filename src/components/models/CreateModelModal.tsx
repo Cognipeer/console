@@ -837,8 +837,9 @@ export default function CreateModelModal({
                   size="xs"
                   color="teal"
                   onClick={() => {
-                    onClose();
+                    // The provider flow first, so a caller can tell this close from a cancel (InlineModelCreate).
                     onAddProvider();
+                    onClose();
                   }}
                 >
                   Add provider

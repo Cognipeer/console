@@ -9,9 +9,13 @@
  * own structured-summarization memory pipeline.
  */
 
-import { Alert, Anchor, Code, Group, Select, Stack, Switch, Text } from '@mantine/core';
-import { IconInfoCircle } from '@tabler/icons-react';
+import { useState } from 'react';
+import { Alert, Button, Code, Group, Select, Stack, Switch, Text } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
+import { IconInfoCircle, IconPlus } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
+import CreateMemoryStoreModal from '@/components/memory/CreateMemoryStoreModal';
 import type {
     AgentMemoryReadPolicy,
     AgentMemoryScope,
@@ -31,10 +35,18 @@ export interface AgentMemoryPanelProps {
     value: IAgentMemoryConfig | undefined;
     onChange: (next: IAgentMemoryConfig | undefined) => void;
     stores: MemoryStoreOption[];
+    /**
+     * A store created from here ("New memory store"): the caller adds it to `stores`, and it is chosen at once.
+     * Without it the panel offers no create.
+     */
+    onStoreCreated?: (store: MemoryStoreOption) => void;
 }
 
-export default function AgentMemoryPanel({ value: stored, onChange, stores }: AgentMemoryPanelProps) {
+export default function AgentMemoryPanel({ value: stored, onChange, stores, onStoreCreated }: AgentMemoryPanelProps) {
     const t = useTranslations('agents.memoryStore');
+    const tMemory = useTranslations('memory');
+    const canCreate = useCanWriteService('memory') && Boolean(onStoreCreated);
+    const [createOpen, setCreateOpen] = useState(false);
     // A config saved with several stores is shown, and saved on the next edit, as its first one.
     const value = stored ? toSingleStoreMemoryConfig(stored) : stored;
     const ignoredStoreKeys = resolveAgentMemoryStore(stored)?.ignoredStoreKeys ?? [];
@@ -56,13 +68,8 @@ export default function AgentMemoryPanel({ value: stored, onChange, stores }: Ag
             {enabled ? (
                 <>
                     {stores.length === 0 ? (
-                        <Alert variant="light" color="yellow" icon={<IconInfoCircle size={16} />}>
-                            <Text size="sm">
-                                No memory stores exist yet. Create one from{' '}
-                                <Anchor href="/dashboard/memory" target="_blank">the Memory module</Anchor>{' '}
-                                first — it needs a vector provider and an embedding model, the same as a
-                                Knowledge Engine.
-                            </Text>
+                        <Alert variant="light" color="yellow" icon={<IconInfoCircle size={16} />} data-testid="memory-store-none">
+                            <Text size="sm">{canCreate ? t('none') : t('noneReadOnly')}</Text>
                         </Alert>
                     ) : (
                         <Select
@@ -76,6 +83,20 @@ export default function AgentMemoryPanel({ value: stored, onChange, stores }: Ag
                             searchable
                         />
                     )}
+
+                    {canCreate ? (
+                        <Group gap="xs">
+                            <Button
+                                variant="subtle"
+                                size="compact-xs"
+                                leftSection={<IconPlus size={12} />}
+                                onClick={() => setCreateOpen(true)}
+                                data-testid="memory-store-create-inline"
+                            >
+                                {t('create')}
+                            </Button>
+                        </Group>
+                    ) : null}
 
                     {ignoredStoreKeys.length > 0 ? (
                         <Alert variant="light" color="yellow" icon={<IconInfoCircle size={16} />}>
@@ -189,6 +210,24 @@ export default function AgentMemoryPanel({ value: stored, onChange, stores }: Ag
                         )}
                     </Alert>
                 </>
+            ) : null}
+
+            {canCreate ? (
+                <CreateMemoryStoreModal
+                    opened={createOpen}
+                    onClose={() => setCreateOpen(false)}
+                    onCreated={(store) => {
+                        setCreateOpen(false);
+                        notifications.show({
+                            title: tMemory('storeCreated'),
+                            message: tMemory('storeCreatedMessage'),
+                            color: 'teal',
+                        });
+                        if (!store) return;
+                        onStoreCreated?.({ key: store.key, name: store.name || store.key, status: store.status ?? 'active' });
+                        patch({ memoryStoreKey: store.key, sharedWorkspace: undefined });
+                    }}
+                />
             ) : null}
         </Stack>
     );

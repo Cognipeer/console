@@ -36,10 +36,19 @@ interface ModelOption {
   modelId?: string;
 }
 
+/** What `POST /api/memory/stores` answers with: the store. */
+export interface CreatedMemoryStore {
+  key: string;
+  name: string;
+  status?: string;
+  [field: string]: unknown;
+}
+
 interface CreateMemoryStoreModalProps {
   opened: boolean;
   onClose: () => void;
-  onCreated: () => void;
+  /** The created store, when the answer could be read (a caller that only reloads can ignore it). */
+  onCreated: (store?: CreatedMemoryStore) => void;
 }
 
 interface FormValues {
@@ -153,8 +162,9 @@ export default function CreateMemoryStoreModal({
         throw new Error(err?.error || 'Failed to create store');
       }
 
+      const created = (await res.json().catch(() => null)) as CreatedMemoryStore | null;
       form.reset();
-      onCreated();
+      onCreated(created && typeof created.key === 'string' ? created : undefined);
     } catch (error) {
       notifications.show({
         title: t('error'),

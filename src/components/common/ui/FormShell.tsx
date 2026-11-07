@@ -119,6 +119,7 @@ export default function FormShell({
   const [summaryOpen, setSummaryOpen] = useState(false);
   const t = useTranslations('formShell');
   const titleId = useId();
+  const overlayRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open || disableEscape) return;
@@ -132,6 +133,9 @@ export default function FormShell({
         const dialog = e.target.closest('[role="dialog"]');
         if (dialog && !dialog.classList.contains('form-overlay')) return;
       }
+      // So does a form opened over this one (a picker's "+ New …"): only the top form closes.
+      const overlays = document.querySelectorAll('.form-overlay');
+      if (overlays.length > 0 && overlays[overlays.length - 1] !== overlayRef.current) return;
       onClose();
     };
     // Capture phase: the dropdown's own handler runs later and closes the list, which drops the mark.
@@ -157,7 +161,7 @@ export default function FormShell({
   if (!open || !mounted) return null;
 
   return createPortal(
-    <div className="form-overlay" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+    <div ref={overlayRef} className="form-overlay" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div className="form-header">
         <ActionIcon
           variant="subtle"

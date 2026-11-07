@@ -21,6 +21,8 @@ export const piiProtectionEn = {
     failed: 'The PII policies could not be loaded.',
     none: 'No PII policy in this project yet.',
     create: 'Create a PII policy',
+    new: 'New PII policy',
+    noneReadOnly: 'Someone who can edit PII has to create one.',
     open: 'Open the policy',
     missing: 'The policy “{key}” is not in this project any more. Calls fail until another one is chosen or protection is turned off.',
     disabled: 'This policy is turned off, so calls go out unprotected until it is turned on again.',

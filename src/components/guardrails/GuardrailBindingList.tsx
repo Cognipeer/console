@@ -26,11 +26,12 @@
  * `GuardrailHooksMatrix`.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   ActionIcon,
   Badge,
+  Button,
   Checkbox,
   Group,
   Paper,
@@ -41,11 +42,15 @@ import {
 } from '@mantine/core';
 import {
   IconAlertTriangle,
+  IconPlus,
   IconShieldOff,
   IconTrash,
 } from '@tabler/icons-react';
 import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
 import type { GuardrailHooksConfig, HookId } from '@/lib/services/guardrail/hooks/contract';
+import type { GuardrailView } from '@/lib/services/guardrail/types';
+import CreateGuardrailModal from '@/components/guardrails/CreateGuardrailModal';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 
 // ── vocabulary ────────────────────────────────────────────────────────────
 
@@ -248,12 +253,67 @@ export function effectiveHooks(
 
 // ── component ─────────────────────────────────────────────────────────────
 
+/** A guardrail created from the list ("+ New guardrail"), as a binding option. */
+export function bindingOptionFromView(guardrail: GuardrailView): GuardrailBindingOption {
+  return {
+    key: guardrail.key,
+    name: guardrail.name,
+    type: guardrail.type === 'custom' ? 'custom' : 'preset',
+    action: guardrail.action,
+    enabled: guardrail.enabled,
+    hooks: guardrail.hooks as GuardrailHooksConfig | undefined,
+    hooksVersion: guardrail.hooksVersion,
+  };
+}
+
 export default function GuardrailBindingList({
-  options,
+  options: givenOptions,
   value,
   onChange,
   surface,
 }: GuardrailBindingListProps) {
+  // "+ New guardrail": the Guardrails create form over this one, for someone who can add guardrails. What it
+  // creates is listed here at once and attached; the caller's list catches up on its next load.
+  const canCreate = useCanWriteService('guardrails');
+  const [createOpen, setCreateOpen] = useState(false);
+  const [created, setCreated] = useState<Array<{ option: GuardrailBindingOption; id: string }>>([]);
+  const options = useMemo(
+    () => [
+      ...givenOptions,
+      ...created
+        .map((entry) => entry.option)
+        .filter((option) => !givenOptions.some((given) => given.key === option.key)),
+    ],
+    [givenOptions, created],
+  );
+
+  const handleCreated = (guardrail: GuardrailView) => {
+    const option = bindingOptionFromView(guardrail);
+    setCreated((current) => [...current.filter((entry) => entry.option.key !== option.key), { option, id: guardrail.id }]);
+    if (!value.some((row) => row.key === option.key)) {
+      onChange([...value, { key: option.key, hooks: declaredHooks(option) }]);
+    }
+  };
+
+  const createButton = canCreate ? (
+    <Button
+      variant="subtle"
+      size="compact-xs"
+      leftSection={<IconPlus size={12} />}
+      onClick={() => setCreateOpen(true)}
+      data-testid="guardrail-create-inline"
+    >
+      New guardrail
+    </Button>
+  ) : null;
+
+  const createModal = canCreate ? (
+    <CreateGuardrailModal
+      opened={createOpen}
+      onClose={() => setCreateOpen(false)}
+      onCreated={handleCreated}
+    />
+  ) : null;
 
   const byKey = useMemo(() => {
     const map = new Map<string, GuardrailBindingOption>();
@@ -297,14 +357,15 @@ export default function GuardrailBindingList({
   // guardrail list failed to load.
   if (options.length === 0 && value.length === 0) {
     return (
-      <Stack align="center" gap="sm" py="md">
+      <Stack align="center" gap="sm" py="md" data-testid="guardrail-bindings-empty">
         <IconShieldOff size={20} />
         <Text size="sm" c="dimmed" ta="center">
-          No guardrails defined yet.{' '}
-          <Text component={Link} href="/dashboard/guardrails" size="sm" c="teal">
-            Create one first.
-          </Text>
+          {canCreate
+            ? 'No guardrails defined yet in this project.'
+            : 'No guardrails defined yet in this project. Someone who can edit Guardrails has to create one.'}
         </Text>
+        {createButton}
+        {createModal}
       </Stack>
     );
   }
@@ -504,6 +565,27 @@ export default function GuardrailBindingList({
           searchable
         />
       )}
+
+      {createButton ? <Group gap="xs">{createButton}</Group> : null}
+
+      {created
+        .filter((entry) => value.some((row) => row.key === entry.option.key))
+        .map((entry) => (
+          <Text key={entry.option.key} size="xs" c="dimmed" data-testid="guardrail-created-note">
+            {`"${entry.option.name}" starts in monitor mode: it records what it would block and lets the request through. `}
+            <Text
+              component={Link}
+              href={`/dashboard/guardrails/${encodeURIComponent(entry.id)}?tab=hooks`}
+              target="_blank"
+              rel="noopener noreferrer"
+              size="xs"
+              c="teal"
+            >
+              Set its policies in Guardrails
+            </Text>
+          </Text>
+        ))}
+      {createModal}
     </Stack>
   );
 }

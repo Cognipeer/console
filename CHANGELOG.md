@@ -724,6 +724,17 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   provider" (a full-screen form); the index form opens with the new provider selected.
 - In a two-column row, a card left alone takes the whole row.
 
+### Create what a form needs, in place
+
+- A picker whose list is empty, or missing what you need, offers to create it over the form and selects the result,
+  instead of a link that leaves the unsaved form: "Add model" when creating an agent; "New knowledge engine", "New
+  guardrail", "New PII policy", "New memory store" and "New tool" on the agent's Build tab; "Add embedding model",
+  "Add provider" and "Create index" in the Knowledge Engine create form. A new guardrail is attached with the hooks
+  it declares and starts in monitor mode, which the list says.
+- Each action shows only to someone who can write to that service; everyone else reads one line saying who can add it.
+- A Knowledge Engine module created from its page opens on the Documents tab.
+- With forms stacked, Escape closes only the top one (it used to close all of them).
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept

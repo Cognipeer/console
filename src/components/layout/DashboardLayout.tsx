@@ -31,6 +31,7 @@ import { useNavigationFeedback } from '@/components/common/navigation/useNavigat
 import { isDocId, normalizeDocsBaseUrl, resolveDoc, type DocTarget } from '@/lib/docs/docsLinks';
 import {
   canUseDashboardService,
+  canWriteDashboardService,
   enterpriseModuleForPath,
   getDashboardServices,
   SETTINGS_NAV_SECTION,
@@ -189,6 +190,14 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const canUseService = useCallback(
     (service: PermissionService) =>
       canUseDashboardService(
+        { role: defaultUser.role, servicePermissions: defaultUser.servicePermissions, effectivePermissions },
+        service,
+      ),
+    [defaultUser.role, defaultUser.servicePermissions, effectivePermissions],
+  );
+  const canWriteService = useCallback(
+    (service: PermissionService) =>
+      canWriteDashboardService(
         { role: defaultUser.role, servicePermissions: defaultUser.servicePermissions, effectivePermissions },
         service,
       ),
@@ -370,6 +379,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       openLauncher: () => setLauncherOpen(true),
       hydrated,
       canUseService,
+      canWriteService,
     }),
     [
       pinned,
@@ -382,6 +392,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       isTenantAdmin,
       hydrated,
       canUseService,
+      canWriteService,
     ],
   );
 

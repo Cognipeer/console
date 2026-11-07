@@ -1,9 +1,13 @@
 'use client';
 
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Group, List, Select, Stack, Text } from '@mantine/core';
+import { Button, Group, List, Select, Stack, Text } from '@mantine/core';
+import { IconPlus } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import { piiPolicyState, type PiiPolicyOptions } from './piiProtectionForm';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
+import CreatePiiPolicyModal from './CreatePiiPolicyModal';
+import { piiPolicyState, type PiiPolicyOption, type PiiPolicyOptions } from './piiProtectionForm';
 import { usePiiPolicyOptions } from './usePiiPolicyOptions';
 
 export interface PiiProtectionFieldProps {
@@ -36,7 +40,22 @@ export default function PiiProtectionField({
 }: PiiProtectionFieldProps) {
   const t = useTranslations('piiProtection');
   const ownPolicies = usePiiPolicyOptions(policies === undefined);
-  const options = policies ?? ownPolicies;
+  // "+ New PII policy": the PII create form over this one, for someone who can add policies. The new policy is
+  // listed at once and chosen.
+  const canCreate = useCanWriteService('pii') && !disabled;
+  const [createOpen, setCreateOpen] = useState(false);
+  const [created, setCreated] = useState<PiiPolicyOption[]>([]);
+  const loaded = policies ?? ownPolicies;
+  const options = useMemo<PiiPolicyOptions>(
+    () => ({
+      ...loaded,
+      policies: [
+        ...loaded.policies,
+        ...created.filter((policy) => !loaded.policies.some((p) => p.key === policy.key)),
+      ],
+    }),
+    [loaded, created],
+  );
   const state = piiPolicyState(value, options);
   const chosen = value ? options.policies.find((policy) => policy.key === value) : undefined;
   const policyName = (key: string) => options.policies.find((policy) => policy.key === key)?.name ?? key;
@@ -87,12 +106,36 @@ export default function PiiProtectionField({
           </Link>
         ) : null}
         {!options.loading && !options.failed && options.policies.length === 0 ? (
-          <Text size="xs" c="dimmed">
-            {t('policy.none')}{' '}
-            <Link href="/dashboard/pii">{t('policy.create')}</Link>
+          <Text size="xs" c="dimmed" data-testid="pii-policy-none">
+            {canCreate ? t('policy.none') : `${t('policy.none')} ${t('policy.noneReadOnly')}`}
           </Text>
         ) : null}
+        {canCreate && !options.loading ? (
+          <Button
+            variant="subtle"
+            size="compact-xs"
+            leftSection={<IconPlus size={12} />}
+            onClick={() => setCreateOpen(true)}
+            data-testid="pii-policy-create-inline"
+          >
+            {options.policies.length === 0 ? t('policy.create') : t('policy.new')}
+          </Button>
+        ) : null}
       </Group>
+
+      {canCreate ? (
+        <CreatePiiPolicyModal
+          opened={createOpen}
+          onClose={() => setCreateOpen(false)}
+          onCreated={(policy) => {
+            setCreated((current) => [
+              ...current.filter((p) => p.key !== policy.key),
+              { id: policy.id, key: policy.key, name: policy.name || policy.key, enabled: true },
+            ]);
+            onChange(policy.key);
+          }}
+        />
+      ) : null}
 
       {value ? (
         <List size="xs" c="dimmed" spacing={2}>
