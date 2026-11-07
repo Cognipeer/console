@@ -836,11 +836,9 @@ export default function CreateModelModal({
                 <Button
                   size="xs"
                   color="teal"
-                  onClick={() => {
-                    // The provider flow first, so a caller can tell this close from a cancel (InlineModelCreate).
-                    onAddProvider();
-                    onClose();
-                  }}
+                  // The model form stays open under the provider form: what was typed here is kept, and the new
+                  // provider is selected when the caller hands it back (a new `providers` / `defaultProviderKey`).
+                  onClick={() => onAddProvider()}
                 >
                   Add provider
                 </Button>

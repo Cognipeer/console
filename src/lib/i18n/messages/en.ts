@@ -4782,6 +4782,8 @@ export const en = {
       changed: 'Changed',
       unchanged: 'Unchanged',
       noDifferences: 'No differences found',
+      showing: 'Showing {from}–{to} of {total}',
+      selected: 'Selected: {versions}',
     },
     sandboxSecrets: {
       unreadableTitle: 'Stored secrets cannot be decrypted',

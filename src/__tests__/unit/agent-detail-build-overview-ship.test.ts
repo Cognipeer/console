@@ -22,6 +22,7 @@ import ConfigSection, { ConfigBlock } from '@/components/agents/studio/ConfigSec
 import BuildSectionIndex, { type BuildIndexGroup } from '@/components/agents/studio/BuildSectionIndex';
 import AgentOverviewAside, { splitAgentUsedBy } from '@/components/agents/studio/AgentOverviewAside';
 import AgentOverviewPanel from '@/components/agents/studio/AgentOverviewPanel';
+import { toolNameBreaks } from '@/components/agents/studio/AgentHumanInTheLoopPanel';
 import type { ResourceEdgeView } from '@/components/resources/ResourceUsagePanel';
 import type { ResourceUsageResponse } from '@/components/common/confirm';
 import { en } from '@/lib/i18n/messages/en';
@@ -64,7 +65,7 @@ describe('messages', () => {
   it('English and Turkish carry the same keys and placeholders for the new agent-page texts', () => {
     const agentsEn = en.agents as unknown as Record<string, unknown>;
     const agentsTr = tr.agents as unknown as Record<string, unknown>;
-    for (const block of ['build', 'header', 'overview', 'ship']) {
+    for (const block of ['build', 'header', 'overview', 'ship', 'versions']) {
       const a = flatten(agentsEn[block]);
       const b = flatten(agentsTr[block]);
       expect(Object.keys(b).sort(), block).toEqual(Object.keys(a).sort());
@@ -330,5 +331,34 @@ describe('agent page wiring', () => {
 
   it('Ship opens with what is live and what publishing would change', () => {
     expect(page).toContain('data-testid="ship-summary"');
+  });
+
+  it('lists the versions five at a time; the two picked for Compare stay picked across pages', () => {
+    expect(page).toContain('const VERSIONS_PAGE_SIZE = 5;');
+    expect(page).toContain('records={versions.slice((shownVersionsPage - 1) * VERSIONS_PAGE_SIZE, shownVersionsPage * VERSIONS_PAGE_SIZE)}');
+    expect(page).toContain('hasMore: shownVersionsPage < versionPageCount');
+    // The selection is shown above the list, as one of the two can be on another page.
+    expect(page).toContain('data-testid="versions-compare-selection"');
+    // A reload (after a publish) starts on the page with the newest version.
+    expect(page).toMatch(/setVersionsTotal\(data\.total \?\? 0\);[\s\S]{0,120}setVersionsPage\(1\);/);
+  });
+});
+
+describe('fitting the section', () => {
+  it('a section stacks its heading above its fields by the width it gets, not the window', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/agents/studio/ConfigSection.module.css'), 'utf8');
+    expect(css).toMatch(/\.frame \{\s*container-type: inline-size;/);
+    expect(css).toContain('@container (max-width: 60rem)');
+    expect(css).not.toContain('@media (max-width: 62em)');
+  });
+
+  it('the per-tool approvals table scrolls inside its section and wraps tool names between words', () => {
+    const panel = readFileSync(join(process.cwd(), 'src/components/agents/studio/AgentHumanInTheLoopPanel.tsx'), 'utf8');
+    expect(panel).toContain('<Table.ScrollContainer minWidth={600} type="native">');
+    expect(panel).not.toContain('<Table.Th w={300}>');
+    expect(toolNameBreaks('get_resource_labels')).toEqual(['get_', 'resource_', 'labels']);
+    expect(toolNameBreaks('mcp__crm__search.v2')).toEqual(['mcp__', 'crm__', 'search.', 'v2']);
+    expect(toolNameBreaks('search')).toEqual(['search']);
+    expect(toolNameBreaks('a-b')).toEqual(['a-', 'b']);
   });
 });

@@ -3281,6 +3281,8 @@ export const tr: typeof en = {
       changed: 'Değişti',
       unchanged: 'Değişmedi',
       noDifferences: 'Fark bulunamadı',
+      showing: '{total} sürümden {from}–{to} arası',
+      selected: 'Seçili: {versions}',
     },
     sandboxSecrets: {
       unreadableTitle: 'Kayıtlı gizli değerler çözülemiyor',

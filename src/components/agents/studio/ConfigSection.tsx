@@ -116,61 +116,65 @@ export default function ConfigSection({
         return (
             <>
                 {!first ? <Divider my="md" /> : null}
-                <Group
-                    id={`config-${id}`}
-                    data-unset="true"
-                    gap="xl"
-                    wrap="nowrap"
-                    className={classes.section}
-                >
-                    <Stack gap={2} className={classes.label}>
-                        <Text fw={600}>{title}</Text>
-                    </Stack>
-                    <Group justify="space-between" wrap="nowrap" className={classes.content} gap="md">
-                        <Text size="sm" c="dimmed" lineClamp={2}>
-                            {t('notSet')}{description ? ` · ${description}` : ''}
-                        </Text>
-                        {onSetUp ? (
-                            <Button
-                                size="xs"
-                                variant="default"
-                                leftSection={<IconPlus size={13} />}
-                                onClick={onSetUp}
-                                data-testid={`config-setup-${id}`}
-                                style={{ flexShrink: 0 }}
-                            >
-                                {t('setUp')}
-                            </Button>
-                        ) : null}
+                <div className={classes.frame}>
+                    <Group
+                        id={`config-${id}`}
+                        data-unset="true"
+                        gap="xl"
+                        wrap="nowrap"
+                        className={classes.section}
+                    >
+                        <Stack gap={2} className={classes.label}>
+                            <Text fw={600}>{title}</Text>
+                        </Stack>
+                        <Group justify="space-between" wrap="nowrap" className={classes.content} gap="md">
+                            <Text size="sm" c="dimmed" lineClamp={2}>
+                                {t('notSet')}{description ? ` · ${description}` : ''}
+                            </Text>
+                            {onSetUp ? (
+                                <Button
+                                    size="xs"
+                                    variant="default"
+                                    leftSection={<IconPlus size={13} />}
+                                    onClick={onSetUp}
+                                    data-testid={`config-setup-${id}`}
+                                    style={{ flexShrink: 0 }}
+                                >
+                                    {t('setUp')}
+                                </Button>
+                            ) : null}
+                        </Group>
                     </Group>
-                </Group>
+                </div>
             </>
         );
     }
     return (
         <>
             {!first ? <Divider my="xl" /> : null}
-            <Group
-                id={`config-${id}`}
-                align="flex-start"
-                gap="xl"
-                wrap="nowrap"
-                className={classes.section}
-            >
-                <Stack gap={4} className={classes.label}>
-                    <Group gap={6} wrap="nowrap">
-                        <Text fw={600}>{title}</Text>
-                        {changed ? (
-                            <Badge size="xs" variant="light" color="orange">{t('changedBadge')}</Badge>
-                        ) : null}
-                    </Group>
-                    {description ? <Text size="sm" c="dimmed">{description}</Text> : null}
-                    {meta}
-                </Stack>
-                <Box className={classes.content}>
-                    {children}
-                </Box>
-            </Group>
+            <div className={classes.frame}>
+                <Group
+                    id={`config-${id}`}
+                    align="flex-start"
+                    gap="xl"
+                    wrap="nowrap"
+                    className={classes.section}
+                >
+                    <Stack gap={4} className={classes.label}>
+                        <Group gap={6} wrap="nowrap">
+                            <Text fw={600}>{title}</Text>
+                            {changed ? (
+                                <Badge size="xs" variant="light" color="orange">{t('changedBadge')}</Badge>
+                            ) : null}
+                        </Group>
+                        {description ? <Text size="sm" c="dimmed">{description}</Text> : null}
+                        {meta}
+                    </Stack>
+                    <Box className={classes.content}>
+                        {children}
+                    </Box>
+                </Group>
+            </div>
         </>
     );
 }

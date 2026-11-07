@@ -734,6 +734,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Each action shows only to someone who can write to that service; everyone else reads one line saying who can add it.
 - A Knowledge Engine module created from its page opens on the Documents tab.
 - With forms stacked, Escape closes only the top one (it used to close all of them).
+- "Add provider" in the model form (Model Hub's "Enter custom model", and "Add model" inside another form) opens the
+  provider form over the model form and comes back to it with the new provider selected. From Model Hub's custom model
+  form it used to close the form and open the catalog.
+- Vector's "Create index" (header and empty list) shows only to someone who can write to Vector; anyone else reads who
+  creates indexes.
 
 ### Agent page: Build, Overview and Ship
 
@@ -753,7 +758,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   button to where it is fixed. A right column shows **Where it runs** (API, A2A, triggers and the portals, channels and
   voice models that use the agent) and **Uses and used by**, which used to sit at the bottom of the page.
 - **Ship** opens with a summary: the published version and its date, what publishing would change, where the agent
-  runs, and Compare and Publish.
+  runs, and Compare and Publish. Its version history lists five versions per page; the two picked for Compare stay
+  picked across pages and are named above the list.
+- A section lays out by the width it gets rather than the window's: below 60rem its heading goes above its fields. The
+  per-tool approvals table no longer runs out of its section — its columns take what they need, tool names wrap
+  between words, and on a narrow screen the table scrolls inside the section.
 
 ### Entity health and alerting
 

@@ -6,6 +6,8 @@
  * anyone else reads one line saying who can. A form opened over another one closes alone on Escape.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createElement as h, type ComponentProps, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -15,6 +17,7 @@ import {
   installDomStubs,
   mount,
   q,
+  qa,
   settle,
   text,
   type Mounted,
@@ -138,6 +141,34 @@ describe('agent create: + Add model', () => {
     expect(text()).toContain('Add Model Provider');
     expect(onClose).not.toHaveBeenCalled();
     expect(text()).toContain(en.agents.createModal.title);
+    // The provider form is on top of the model form, which stays open (it selects the provider created there).
+    const overlays = qa('.form-overlay');
+    expect(overlays.length).toBe(3);
+    expect(overlays[2].textContent).toContain('Add Model Provider');
+    expect(overlays[1].textContent).toContain('No model providers are available in this project yet');
+  });
+});
+
+describe('Model Hub: a provider added from the model form', () => {
+  const page = readFileSync(join(process.cwd(), 'src/app/dashboard/models/page.tsx'), 'utf8');
+  const form = readFileSync(join(process.cwd(), 'src/components/models/CreateModelModal.tsx'), 'utf8');
+
+  it('comes back to the model form, selected, instead of opening the catalog', () => {
+    // "Add provider" no longer closes the model form; the page knows which form asked.
+    expect(form).toContain('onClick={() => onAddProvider()}');
+    expect(page).toContain("setProviderReturnTo('model');");
+    expect(page).toContain("setProviderReturnTo('catalog');");
+    expect(page).toMatch(/if \(providerReturnTo === 'model'\) \{\s*setPresetProviderKey\(provider\.key\);\s*return;\s*\}\s*openCatalog\(provider\.key\);/);
+  });
+});
+
+describe('Vector: Create index', () => {
+  const page = readFileSync(join(process.cwd(), 'src/app/dashboard/vector/page.tsx'), 'utf8');
+
+  it('is offered only to someone who can write to Vector, in the header and in the empty list', () => {
+    expect(page).toContain("const canWriteVector = useCanWriteService('vector');");
+    expect(page).toMatch(/\{canWriteVector \? \(\s*<Button[\s\S]*?Create index\s*<\/Button>\s*\) : null\}/);
+    expect(page).toMatch(/primaryAction: canWriteVector\s*\?\s*\{\s*label: 'Create index'/);
   });
 });
 

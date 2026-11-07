@@ -293,6 +293,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
 /** Build sections that make no sense for a flow-owned agent: it is never called by URL, callback or a chat client. */
 const OWNED_HIDDEN_SECTIONS: ReadonlySet<string> = new Set(['callback', 'clienttools']);
 
+/** Versions per page in Ship's version history. */
+const VERSIONS_PAGE_SIZE = 5;
+
 function resolveTabFromQuery(raw: string | null): string {
   return TAB_ALIASES[raw ?? '']?.top ?? 'overview';
 }
@@ -446,6 +449,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [compareVersionA, setCompareVersionA] = useState<string | null>(null);
   const [compareVersionB, setCompareVersionB] = useState<string | null>(null);
+  // Ship lists the versions five at a time (newest first); the two picked for Compare stay picked across pages.
+  const [versionsPage, setVersionsPage] = useState(1);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
 
   // Sessions list (for the Sessions tab — the actual chat now lives at its
@@ -563,6 +568,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         const data = await res.json();
         setVersions(data.versions ?? []);
         setVersionsTotal(data.total ?? 0);
+        // A reload follows a publish: the new version is on the first page.
+        setVersionsPage(1);
       }
     } catch (err) {
       console.error('Failed to load versions', err);
@@ -1457,6 +1464,9 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const showBuildIndex = !(isConnected || isFlow) && buildIndexGroups.reduce((sum, group) => sum + group.items.length, 0) > 2;
   const unsavedTitles = BUILD_SECTION_ORDER.filter((id) => unsavedSections.has(id)).map((id) => configSectionTitle(id, t));
   const changedTitles = BUILD_SECTION_ORDER.filter((id) => changedSections.has(id)).map((id) => configSectionTitle(id, t));
+  const versionPageCount = Math.max(1, Math.ceil(versions.length / VERSIONS_PAGE_SIZE));
+  // Clamped: the list can shrink under the page asked for (a reload with fewer versions).
+  const shownVersionsPage = Math.min(versionsPage, versionPageCount);
   const publishedVersionRecord = agent.publishedVersion
     ? versions.find((version) => version.version === agent.publishedVersion) ?? null
     : null;
@@ -2093,6 +2103,13 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
               <Stack gap="md">
                 <Group justify="flex-end" align="center">
                   <Group gap="xs">
+                    {compareVersionA || compareVersionB ? (
+                      <Text size="xs" c="dimmed" data-testid="versions-compare-selection">
+                        {t('versions.selected', {
+                          versions: [compareVersionA, compareVersionB].filter(Boolean).map((v) => `v${v}`).join(' ↔ '),
+                        })}
+                      </Text>
+                    ) : null}
                     <Badge size="sm" variant="light">{versionsTotal} total</Badge>
                     <Button
                       size="xs"
@@ -2117,8 +2134,28 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
                   />
                 ) : (
                   <DataGrid<AgentVersion>
-                    records={versions}
+                    records={versions.slice((shownVersionsPage - 1) * VERSIONS_PAGE_SIZE, shownVersionsPage * VERSIONS_PAGE_SIZE)}
                     rowKey={(v) => String(v.version)}
+                    footerLeft={
+                      versions.length > VERSIONS_PAGE_SIZE
+                        ? t('versions.showing', {
+                          from: (shownVersionsPage - 1) * VERSIONS_PAGE_SIZE + 1,
+                          to: Math.min(shownVersionsPage * VERSIONS_PAGE_SIZE, versions.length),
+                          total: versions.length,
+                        })
+                        : undefined
+                    }
+                    pagination={
+                      versions.length > VERSIONS_PAGE_SIZE
+                        ? {
+                          page: shownVersionsPage,
+                          onPageChange: setVersionsPage,
+                          pageSize: VERSIONS_PAGE_SIZE,
+                          total: versions.length,
+                          hasMore: shownVersionsPage < versionPageCount,
+                        }
+                        : undefined
+                    }
                     columns={[
                       {
                         key: 'select',

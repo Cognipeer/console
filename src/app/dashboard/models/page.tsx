@@ -208,6 +208,8 @@ export default function ModelsPage() {
   const [catalogProviderKey, setCatalogProviderKey] = useState<string | undefined>(undefined);
   const [createPrefill, setCreatePrefill] = useState<CreateModelPrefill | null>(null);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
+  // Which form asked for a new provider: the catalog reopens on it, the model form selects it.
+  const [providerReturnTo, setProviderReturnTo] = useState<'catalog' | 'model'>('catalog');
   const [dynamicModalOpen, setDynamicModalOpen] = useState(false);
   const [editModelId, setEditModelId] = useState<string | null>(null);
   const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
@@ -362,7 +364,12 @@ export default function ModelsPage() {
     setProviders((current) =>
       current.some((p) => p.key === provider.key) ? current : [...current, provider],
     );
-    // Chain straight into the freshly-added provider's model catalog.
+    // Added from the model form ("Enter custom model"): that form is still open under the provider form, and
+    // selects the new provider. Otherwise chain straight into the freshly-added provider's model catalog.
+    if (providerReturnTo === 'model') {
+      setPresetProviderKey(provider.key);
+      return;
+    }
     openCatalog(provider.key);
   };
 
@@ -998,6 +1005,7 @@ export default function ModelsPage() {
           void loadDashboard();
         }}
         onAddProvider={() => {
+          setProviderReturnTo('catalog');
           setCatalogOpen(false);
           setProviderModalOpen(true);
         }}
@@ -1019,7 +1027,10 @@ export default function ModelsPage() {
           openCatalog(providerKey ?? presetProviderKey);
         }}
         onCreated={handleModelCreated}
-        onAddProvider={() => setProviderModalOpen(true)}
+        onAddProvider={() => {
+          setProviderReturnTo('model');
+          setProviderModalOpen(true);
+        }}
       />
 
       <EditModelModal

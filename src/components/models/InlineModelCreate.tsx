@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
+import { useEffect, useMemo, useState, type ComponentProps } from 'react';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { resolveProviderCategories } from '@/components/models/catalog/catalogPrefill';
@@ -11,9 +11,9 @@ type ModelCategory = NonNullable<ComponentProps<typeof CreateModelModal>['defaul
 
 /**
  * "+ Add model" inside another form (an agent's model, a knowledge base's embedding model): Model Hub's own create
- * form, opened over the form the person is filling. A project without a provider gets "Add provider" on top, then
- * comes back to the model form with that provider chosen. The created model is handed back so the picker can list
- * and select it at once.
+ * form, opened over the form the person is filling. A project without a provider gets "Add provider", whose form
+ * opens on top of the model form (which stays as it was); the provider created there is selected in the model form.
+ * The created model is handed back so the picker can list and select it at once.
  */
 export default function InlineModelCreate({
   opened,
@@ -27,10 +27,8 @@ export default function InlineModelCreate({
   onCreated: (model: IModel) => void;
 }) {
   const [providers, setProviders] = useState<ModelProviderView[]>([]);
-  const [step, setStep] = useState<'model' | 'provider'>('model');
+  const [addingProvider, setAddingProvider] = useState(false);
   const [providerKey, setProviderKey] = useState<string | undefined>();
-  // Set by "Add provider", which closes the model form too: that close is not a cancel.
-  const switchingRef = useRef(false);
   // The form starts on the first provider, which may not serve the category asked for (an embedding model on an
   // Anthropic provider): start on one that does, unless a provider was just added here.
   const startProviderKey = useMemo(() => {
@@ -41,7 +39,7 @@ export default function InlineModelCreate({
 
   useEffect(() => {
     if (!opened) return;
-    setStep('model');
+    setAddingProvider(false);
     setProviderKey(undefined);
     let cancelled = false;
     void (async () => {
@@ -61,32 +59,24 @@ export default function InlineModelCreate({
   return (
     <>
       <CreateModelModal
-        opened={opened && step === 'model'}
-        onClose={() => {
-          if (switchingRef.current) {
-            switchingRef.current = false;
-            return;
-          }
-          onClose();
-        }}
+        opened={opened}
+        onClose={onClose}
         providers={providers}
         defaultCategory={category}
         defaultProviderKey={startProviderKey}
-        onAddProvider={() => {
-          switchingRef.current = true;
-          setStep('provider');
-        }}
+        onAddProvider={() => setAddingProvider(true)}
         onCreated={({ model }) => onCreated(model)}
       />
+      {/* Rendered after the model form, so its overlay is the top one (Escape closes it alone). */}
       <ModelProviderModal
-        opened={opened && step === 'provider'}
-        onClose={() => setStep('model')}
+        opened={opened && addingProvider}
+        onClose={() => setAddingProvider(false)}
         onCreated={(provider) => {
           setProviders((current) =>
             current.some((p) => p.key === provider.key) ? current : [...current, provider],
           );
           setProviderKey(provider.key);
-          setStep('model');
+          setAddingProvider(false);
         }}
       />
     </>
