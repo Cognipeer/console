@@ -3341,6 +3341,11 @@ export const en = {
       activeSessions: 'Active Sessions',
       vectorIndexes: 'Knowledge Indexes',
       models: 'Model Hub',
+      // The home's tiles: each from one service, shown only to people who can open it.
+      sessions: 'Agent sessions',
+      tokens: 'Tokens',
+      modelsTotal: 'Models',
+      indexes: 'Vector indexes',
     },
     activity: {
       title: 'Recent Activity',
@@ -3365,61 +3370,80 @@ export const en = {
       docsDesc: 'Reference the API surface and examples',
       sdk: 'Agent SDK',
       sdkDesc: 'Instrument agents with the SDK',
+      alerts: 'Alerts',
+      alertsDesc: 'Threshold alerts on service metrics',
+      license: 'License',
+    },
+    // The project's latest agent sessions (from Tracing).
+    recentSessions: {
+      title: 'Recent agent sessions',
+      viewAll: 'View all in Tracing',
+      empty: 'No agent sessions yet.',
+      unnamed: 'Unnamed agent',
+      tokens: '{count} tokens',
+    },
+    // The first steps of a project, ticked from what it already has.
+    getStarted: {
+      title: 'Get started',
+      progress: '{done} of {total} done',
+      hide: 'Hide',
+      optional: 'optional',
+      done: 'Done',
+      steps: {
+        model: {
+          title: 'Connect a model',
+          description: 'Add an LLM to this project. The form adds its provider too.',
+          action: 'Add model',
+        },
+        knowledge: {
+          title: 'Add knowledge',
+          description: 'An embedding model and a vector index, so answers can come from your documents.',
+          action: 'Start',
+        },
+        agent: {
+          title: 'Build an agent and try it',
+          description: 'Done after the first agent session in this project.',
+          action: 'Open Agents',
+        },
+      },
     },
     // The page's own headings and quick links.
     home: {
       eyebrow: 'Overview',
       welcome: 'Welcome back, {name}',
-      summary: '{pinned} pinned · {total} services available',
-      summaryOne: '{pinned} pinned · {total} service available',
       deployModel: 'Deploy model',
-      trend: '{value}% vs last 24h',
+      trend: '{value}% vs previous 7 days',
+      // What the numbers cover, under the title.
+      scope: {
+        withProject: '{project} · {range}',
+        total: 'All time',
+        last_day: 'Last 24 hours',
+        last_7_days: 'Last 7 days',
+        last_30_days: 'Last 30 days',
+        custom: '{from} – {to}',
+      },
+      // Counts under a service on its card (instead of its description).
+      serviceCounts: {
+        models: '{llm} LLM · {embedding} embedding',
+        indexOne: '{count} index',
+        indexMany: '{count} indexes',
+        sessionOne: '{count} session',
+        providerOne: '{count} provider',
+        providerMany: '{count} providers',
+        sessionMany: '{count} sessions',
+      },
+      recentlyOpened: 'Recently opened:',
       pinned: {
-        title: 'Your pinned services',
+        title: 'Your services',
         summary: '{pinned} pinned · {more} more available',
         pinMore: 'Pin more',
         addService: 'Add service',
       },
-      activityHeading: 'Activity',
-      topResources: {
-        title: 'Top resources',
-        subtitle: 'Quick links into your build surface',
-        allModels: 'All models',
-        models: 'Models',
-        vectorIndexes: 'Vector indexes',
-        traceSessions: 'Trace sessions',
-        modelsHint: '{llm} LLM · {embedding} embedding',
-        providerOne: '{count} provider',
-        providerMany: '{count} providers',
-        tokens: '{count} tokens',
-      },
-      planModels: '{count} Models',
-      planIndexes: '{count} Indexes',
       ago: {
         justNow: 'just now',
         minutes: '{count}m ago',
         hours: '{count}h ago',
         days: '{count}d ago',
-      },
-    },
-    // The first steps of a project: links into the services the person can open in it.
-    quickStart: {
-      title: 'Get started',
-      subtitle: 'Quick paths into your project',
-      step: 'Step {number}',
-      steps: {
-        models: {
-          title: 'Deploy a model',
-          description: 'Choose a provider and create an inference endpoint.',
-        },
-        prompts: {
-          title: 'Publish a prompt',
-          description: 'Version-controlled templates with test cases.',
-        },
-        agents: {
-          title: 'Wire up an agent',
-          description: 'Connect tools and memory into a runnable agent.',
-        },
       },
     },
     statsError: 'Couldn’t load workspace stats.',

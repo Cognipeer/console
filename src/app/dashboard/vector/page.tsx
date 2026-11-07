@@ -26,6 +26,8 @@ import type {
   VectorProviderView,
 } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
+import VectorProviderModal from '@/components/vector/VectorProviderModal';
+import { useEffectivePermissions } from '@/components/layout/useEffectivePermissions';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -68,6 +70,11 @@ export default function VectorIndexPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
+  // Adding a provider is a write to Vector (POST /api/vector/providers). Unknown until the session answers:
+  // the empty state then explains instead of offering a button that may be refused.
+  const levels = useEffectivePermissions();
+  const canAddProvider = levels?.vector === 'write' || levels?.vector === 'admin';
   const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(
     null,
   );
@@ -199,6 +206,13 @@ export default function VectorIndexPage() {
     }
     setCreateModalOpen(false);
     router.push(`/dashboard/vector/${provider.key}/${index.key}`);
+  };
+
+  /** A provider was added from the empty state: the index form comes next, with it selected. */
+  const handleProviderCreated = (provider: VectorProviderView) => {
+    setProviders((current) => (current.some((p) => p.key === provider.key) ? current : [...current, provider]));
+    setProviderModalOpen(false);
+    setCreateModalOpen(true);
   };
 
   const columns: DataGridColumn<VectorIndexRow>[] = [
@@ -341,20 +355,33 @@ export default function VectorIndexPage() {
         ]}
         onRefresh={loadProvidersAndIndexes}
         refreshing={refreshing}
-        empty={{
-          icon: <IconDatabase size={26} stroke={1.7} />,
-          title:
-            providers.length === 0 ? 'No vector providers' : 'No indexes yet',
-          description:
-            providers.length === 0
-              ? 'Configure a vector provider first to start creating indexes.'
-              : 'Create your first vector index to store and query embeddings.',
-          primaryAction: {
-            label: 'Create index',
-            icon: <IconPlus size={14} stroke={1.7} />,
-            onClick: () => setCreateModalOpen(true),
-          },
-        }}
+        empty={
+          providers.length === 0
+            ? {
+                icon: <IconDatabase size={26} stroke={1.7} />,
+                title: 'No vector provider in this project',
+                description: canAddProvider
+                  ? 'Indexes live in a vector provider. Add one, then create the index.'
+                  : 'Indexes live in a vector provider. Someone with write access to Vector in this project adds one; after that you can create indexes here.',
+                primaryAction: canAddProvider
+                  ? {
+                      label: 'Add vector provider',
+                      icon: <IconPlus size={14} stroke={1.7} />,
+                      onClick: () => setProviderModalOpen(true),
+                    }
+                  : undefined,
+              }
+            : {
+                icon: <IconDatabase size={26} stroke={1.7} />,
+                title: 'No indexes yet',
+                description: 'Create your first vector index to store and query embeddings.',
+                primaryAction: {
+                  label: 'Create index',
+                  icon: <IconPlus size={14} stroke={1.7} />,
+                  onClick: () => setCreateModalOpen(true),
+                },
+              }
+        }
         footerLeft={`Showing ${filtered.length} of ${rows.length} indexes`}
         rowActions={(r) => [
           {
@@ -380,6 +407,12 @@ export default function VectorIndexPage() {
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
         onCreated={handleIndexCreated}
+      />
+
+      <VectorProviderModal
+        opened={providerModalOpen}
+        onClose={() => setProviderModalOpen(false)}
+        onCreated={handleProviderCreated}
       />
     </PageContainer>
   );

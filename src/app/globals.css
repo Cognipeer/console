@@ -1551,6 +1551,10 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   gap: 16px;
 }
+/* A card left alone (its neighbour hid itself, e.g. without access) takes the whole row. */
+.ds-grid-two > :only-child {
+  grid-column: 1 / -1;
+}
 @media (max-width: 960px) {
   .ds-grid-two {
     grid-template-columns: 1fr;

@@ -7,7 +7,6 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { messages } from '@/lib/i18n/messages';
-import { QUICK_START_SERVICES } from '@/components/dashboard/quickStartModel';
 
 const ROOT = path.resolve(__dirname, '../..');
 
@@ -27,38 +26,44 @@ const leaves = (node: unknown, prefix = ''): Array<[string, string]> =>
 
 const tokens = (value: string) => [...value.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
 
-describe('dashboard quick start strings', () => {
-  it('has a title and a sentence for every step, in both languages', () => {
-    for (const service of QUICK_START_SERVICES) {
-      for (const field of ['title', 'description']) {
-        const key = `dashboardOverview.quickStart.steps.${service}.${field}`;
+describe('dashboard home strings', () => {
+  const STEPS = ['model', 'knowledge', 'agent'];
+  const TRANSLATED = ['dashboardOverview.getStarted', 'dashboardOverview.recentSessions', 'dashboardOverview.home.scope'];
+
+  it('has a title, a sentence and an action for every get-started step, in both languages', () => {
+    for (const step of STEPS) {
+      for (const field of ['title', 'description', 'action']) {
+        const key = `dashboardOverview.getStarted.steps.${step}.${field}`;
         expect(typeof lookup('en', key), key).toBe('string');
         expect(typeof lookup('tr', key), `tr:${key}`).toBe('string');
       }
     }
   });
 
-  it('has the same keys and placeholders in both languages', () => {
-    const en = leaves(lookup('en', 'dashboardOverview.quickStart'));
-    const tr = leaves(lookup('tr', 'dashboardOverview.quickStart'));
-    expect(tr.map(([k]) => k).sort()).toEqual(en.map(([k]) => k).sort());
-    const trByKey = new Map(tr);
-    for (const [key, value] of en) expect(tokens(trByKey.get(key)!), key).toEqual(tokens(value));
-  });
+  it.each([...TRANSLATED, 'dashboardOverview.home', 'dashboardOverview.stats', 'dashboardOverview.resources'])(
+    '%s has the same keys and placeholders in both languages',
+    (root) => {
+      const en = leaves(lookup('en', root));
+      const tr = leaves(lookup('tr', root));
+      expect(tr.map(([k]) => k).sort()).toEqual(en.map(([k]) => k).sort());
+      const trByKey = new Map(tr);
+      for (const [key, value] of en) expect(tokens(trByKey.get(key)!), key).toEqual(tokens(value));
+    },
+  );
 
-  it('translates them instead of repeating the English', () => {
-    const en = new Map(leaves(lookup('en', 'dashboardOverview.quickStart')));
-    const untranslated = leaves(lookup('tr', 'dashboardOverview.quickStart'))
-      .filter(([key, value]) => value === en.get(key))
+  it.each(TRANSLATED)('%s is translated instead of repeating the English', (root) => {
+    const en = new Map(leaves(lookup('en', root)));
+    const untranslated = leaves(lookup('tr', root))
+      .filter(([key, value]) => value === en.get(key) && !/^[\s·–]*$/.test(value.replace(/\{\w+\}/g, '')))
       .map(([key]) => key);
     expect(untranslated).toEqual([]);
   });
 
   it('is read through the keys the component builds', () => {
-    const source = readFileSync(path.join(ROOT, 'components/dashboard/QuickStart.tsx'), 'utf8');
-    expect(source).toContain("useTranslations('dashboardOverview.quickStart')");
-    for (const key of ['title', 'subtitle', 'step']) {
-      expect(typeof lookup('en', `dashboardOverview.quickStart.${key}`), key).toBe('string');
+    const source = readFileSync(path.join(ROOT, 'components/dashboard/GetStarted.tsx'), 'utf8');
+    expect(source).toContain("useTranslations('dashboardOverview.getStarted')");
+    for (const key of ['title', 'progress', 'hide', 'optional', 'done']) {
+      expect(typeof lookup('en', `dashboardOverview.getStarted.${key}`), key).toBe('string');
       expect(source).toContain(`t('${key}'`);
     }
   });
@@ -130,8 +135,14 @@ describe('the quota editor and its cards in Turkish', () => {
 });
 
 describe('the dashboard home in Turkish', () => {
-  // Product names and a figure line that reads the same.
-  const SAME_ON_PURPOSE = new Set(['stats.models', 'resources.sdk', 'home.topResources.modelsHint']);
+  // Product names, and figure lines that read the same.
+  const SAME_ON_PURPOSE = new Set([
+    'stats.models',
+    'resources.sdk',
+    'home.serviceCounts.models',
+    'home.scope.withProject',
+    'home.scope.custom',
+  ]);
 
   it('translates every string of the page instead of falling back to the English', () => {
     const en = new Map(leaves(lookup('en', 'dashboardOverview')));

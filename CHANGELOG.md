@@ -703,6 +703,27 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   labelled **Notification channels**, and the IAM center's Audit tab (denials and policy changes) is now
   **Authorization log**.
 
+### Overview and empty states
+
+- The Overview shows a number only to someone who can read its service, so a person without access sees no tile
+  instead of a zero. The tiles are Agent sessions, Tokens, Models and Vector indexes. "API Requests" counted agent
+  sessions, and "Active Sessions" could count at most the 10 most recent ones. The session and token lines come from
+  the daily series the API already returns; they were placeholder curves before.
+- "Get started" ticks its steps from what the project already has: an LLM, knowledge (an embedding model and a vector
+  index, optional) and the first agent session. It offers only steps whose service the person can open and whose
+  progress they can read. It disappears once the required steps are done, and "Hide" removes it in this browser.
+- "Activity" is now "Recent agent sessions". Each row opens its session and shows the duration and tokens instead of
+  an API path.
+- The counts moved onto the service cards ("4 LLM · 0 embedding", "12 indexes", "1,240 sessions"). "Top resources"
+  and the plan badges are gone, and "Recently opened" lists the services visited last.
+- The subtitle names the project and the period the numbers cover. The Alerts link shows only to people who can open
+  Alerts.
+- Enterprise: the person's own sections come first, and the dashboards grid moves to the end. The grid card is left out
+  when the person has no dashboard, and the health card is left out while no entity has reported anything.
+- Vector: with no provider in the project, the empty state says why. Someone who can write to Vector gets "Add vector
+  provider" (a full-screen form); the index form opens with the new provider selected.
+- In a two-column row, a card left alone takes the whole row.
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept

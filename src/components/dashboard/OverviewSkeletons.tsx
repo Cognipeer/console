@@ -89,7 +89,7 @@ function ServiceTileBones() {
   );
 }
 
-/** Tiles of the "Your pinned services" grid (pinned services + "Add service"). */
+/** Tiles of the "Your services" grid (pinned services + "Add service"). */
 export function PinnedServiceTilesSkeleton({ count = 6 }: { count?: number }) {
   return (
     <>
@@ -114,7 +114,7 @@ export function PinnedServiceTilesSkeleton({ count = 6 }: { count?: number }) {
   );
 }
 
-/** "Your pinned services" card while launcher preferences are restored. */
+/** "Your services" card while launcher preferences are restored. */
 export function PinnedServicesSkeleton({ count = 6 }: { count?: number }) {
   return (
     <SkeletonRegion className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
@@ -129,30 +129,6 @@ export function PinnedServicesSkeleton({ count = 6 }: { count?: number }) {
         <PinnedServiceTilesSkeleton count={count} />
       </div>
     </SkeletonRegion>
-  );
-}
-
-function QuickStartTileBones() {
-  return (
-    <div className="ds-card ds-card-pad-sm" style={TILE_CARD}>
-      <div className="ds-row ds-gap-sm" style={{ marginBottom: 10 }}>
-        <IconBone />
-        <span className="ds-eyebrow">
-          <SkeletonText width={52} />
-        </span>
-      </div>
-      <div className="ds-h4" style={{ marginBottom: 4 }}>
-        <SkeletonText width="62%" />
-      </div>
-      <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>
-        <div>
-          <SkeletonText width="94%" />
-        </div>
-        <div>
-          <SkeletonText width="56%" />
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -221,50 +197,22 @@ export function OverviewSkeleton() {
       <StatGridSkeleton count={4} spark style={{ marginBottom: 16 }} />
       <PinnedServicesSkeleton />
 
-      <div className="ds-grid-two" style={{ ...TWO_COLUMN_GRID, marginBottom: 16 }}>
-        <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={110} action="text" />
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
-              gap: 12,
-            }}
-          >
-            {Array.from({ length: 3 }, (_, index) => (
-              <QuickStartTileBones key={index} />
-            ))}
-          </div>
-        </div>
-        <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={80} action="button" actionWidth={89} marginBottom={12} />
-          <ActivityListSkeleton />
-        </div>
-      </div>
-
       <div className="ds-grid-two" style={TWO_COLUMN_GRID}>
         <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={130} subtitle action="button" actionWidth={103} />
-          <Stack gap="xs">
-            {Array.from({ length: 3 }, (_, index) => (
-              <ResourceRowBones key={index} />
-            ))}
-          </Stack>
+          <CardHeaderBones titleWidth={170} action="button" actionWidth={140} marginBottom={12} />
+          <ActivityListSkeleton rows={5} />
         </div>
         <div className="ds-card ds-card-pad-lg">
           <CardHeaderBones titleWidth={100} marginBottom={12} />
           <Stack gap="xs">
             <ResourceRowBones />
             <ResourceRowBones />
-            <div style={{ marginTop: 4 }}>
-              <Text size="xs" component="div" mb={6}>
-                <SkeletonText width={36} />
+            <Group gap={8} mt={4}>
+              <Text size="xs" component="div">
+                <SkeletonText width={44} />
               </Text>
-              <Group gap={6}>
-                <Skeleton width={52} height={18} radius="xl" />
-                <Skeleton width={72} height={18} radius="xl" />
-              </Group>
-            </div>
+              <Skeleton width={72} height={18} radius="xl" />
+            </Group>
           </Stack>
         </div>
       </div>
