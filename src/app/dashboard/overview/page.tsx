@@ -22,7 +22,7 @@ import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLauncher } from '@/components/layout/launcher/LauncherContext';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { CardLink } from '@/components/dashboard/CardLink';
-import { ActivityListSkeleton, HomeServicesSkeleton } from '@/components/dashboard/OverviewSkeletons';
+import { ActivityListSkeleton, HOME_SERVICE_GRID, HomeServicesSkeleton } from '@/components/dashboard/OverviewSkeletons';
 import HomeAttention from '@/components/dashboard/HomeAttention';
 import { GetStarted, useGetStartedHidden } from '@/components/dashboard/GetStarted';
 import { useActiveProjectName } from '@/components/dashboard/OverviewSubtitle';
@@ -117,7 +117,7 @@ export default function DashboardOverviewPage() {
   const firstLoad = data === null && !failed;
   const stats = data?.stats;
   const userName =
-    data?.user?.name || emailLocalPart(data?.user?.email) || emailLocalPart(shellUser?.email);
+    data?.user?.name || shellUser?.name || emailLocalPart(data?.user?.email) || emailLocalPart(shellUser?.email);
 
   // What the person can open in the ACTIVE project (the launcher's list is the navigation's: roles, group grants,
   // custom policies and project limits, as the engine decides them).
@@ -239,7 +239,7 @@ export default function DashboardOverviewPage() {
               </span>
             ) : null}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 10 }}>
+          <div style={HOME_SERVICE_GRID}>
             {yours.shown.map((svc) => {
               const Icon = svc.icon;
               const counts = serviceCounts(String(svc.id));

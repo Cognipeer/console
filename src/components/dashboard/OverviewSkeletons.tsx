@@ -11,6 +11,16 @@ import { PageHeaderSkeleton, SkeletonRegion, SkeletonText } from '@/components/c
 
 const TILE_CARD: CSSProperties = { background: 'var(--ds-surface-1)' };
 
+/**
+ * The home's "Your services" grid: three across on a wide screen (six cards, two rows), two on a tablet, one on a
+ * phone. Shared by the page and its placeholder.
+ */
+export const HOME_SERVICE_GRID: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 280px), 1fr))',
+  gap: 10,
+};
+
 function IconBone({ size = 32 }: { size?: number }) {
   return <Skeleton width={size} height={size} radius={8} style={{ flexShrink: 0 }} />;
 }
@@ -50,13 +60,7 @@ export function HomeServicesSkeleton({ count = 6 }: { count?: number }) {
   return (
     <SkeletonRegion className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
       <CardHeaderBones titleWidth={130} />
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))',
-          gap: 10,
-        }}
-      >
+      <div style={HOME_SERVICE_GRID}>
         {Array.from({ length: count }, (_, index) => (
           <ServiceTileBones key={index} />
         ))}
