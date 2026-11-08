@@ -20,6 +20,8 @@ import type { IModel } from '@/lib/database';
 import type { IAgentConfig, IAgentRuntimeConfig } from '@/lib/database/provider/types.domain';
 import { effortsOfRule, resolveRuleForDriver } from '@/lib/services/models/modelRules';
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
+import { isManagedModel } from '@/enterprise/managed-credits';
+import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
 import {
   normalizeReasoning,
   readModelReasoning,
@@ -208,6 +210,16 @@ export function titleReasoning(driver?: string, modelId?: string): NormalizedRea
   return { effort: 'minimal' };
 }
 
+/**
+ * A managed model as its first live route, so a driver-keyed rule below reads the driver and model id that actually
+ * serve the call. Any other model (a partial one with no provider key, or a tenant model with its own replicas) comes
+ * back unchanged: those planners have always read the model row itself.
+ */
+function servingModel<T extends object>(model: T): T {
+  const ref = model as { providerKey?: string; providerDriver?: string };
+  return isManagedModel(ref) ? (primaryReplicaModel(model as unknown as IModel) as unknown as T) : model;
+}
+
 const OPENAI_FAMILY_DRIVERS: ReadonlySet<string> = new Set(['openai', 'azure', 'openai-compatible', 'together']);
 /** Drivers whose Claude models are driven by adaptive thinking (`thinking: {type:'adaptive'}` + `output_config.effort`). */
 const CLAUDE_DRIVERS: ReadonlySet<string> = new Set(['anthropic', 'bedrock']);
@@ -236,8 +248,9 @@ export function sideCallReasoning(
   options: { dynamic?: boolean } = {},
 ): NormalizedReasoning | undefined {
   if (options.dynamic) return undefined;
-  const driver = model.providerDriver;
-  const id = (model.modelId ?? '').toLowerCase();
+  const served = servingModel(model);
+  const driver = served.providerDriver;
+  const id = (served.modelId ?? '').toLowerCase();
   const rule = driver ? resolveRuleForDriver(driver, id) : undefined;
   // A model only a permissive default matched is left to the configured-reasoning rule below.
   if (driver && rule && !rule.isDefault) {
@@ -247,8 +260,8 @@ export function sideCallReasoning(
     const lowest = sendsLowest ? effortsOfRule(rule)[0] : undefined;
     if (lowest) return { effort: lowest };
   }
-  const configured = readModelReasoning(model.settings);
-  if (configured?.effort || configured?.budgetTokens) return titleReasoning(driver, model.modelId);
+  const configured = readModelReasoning(served.settings);
+  if (configured?.effort || configured?.budgetTokens) return titleReasoning(driver, served.modelId);
   return undefined;
 }
 
@@ -287,12 +300,13 @@ export function sideCallThinkingUncontrolled(
   options: { dynamic?: boolean } = {},
 ): boolean {
   if (options.dynamic) return false;
-  const driver = model.providerDriver;
+  const served = servingModel(model);
+  const driver = served.providerDriver;
   if (!driver) return false;
-  const rule = resolveRuleForDriver(driver, (model.modelId ?? '').toLowerCase());
+  const rule = resolveRuleForDriver(driver, (served.modelId ?? '').toLowerCase());
   if (!rule || rule.isDefault || rule.reasoning.style === 'none') return false;
   if (driver === 'vertex') return true;
-  if (sideCallReasoning(model, options)) return false;
+  if (sideCallReasoning(served, options)) return false;
   return rule.reasoning.style !== 'budget';
 }
 
@@ -305,10 +319,11 @@ export function sideCallLimits(
   model: { modelId?: string; settings?: unknown; metadata?: unknown },
   floor: number,
 ): { limit: number; retry?: number } {
-  const settings: Record<string, unknown> = model.settings && typeof model.settings === 'object'
-    ? (model.settings as Record<string, unknown>)
+  const served = servingModel(model);
+  const settings: Record<string, unknown> = served.settings && typeof served.settings === 'object'
+    ? (served.settings as Record<string, unknown>)
     : {};
-  const modelMax = modelMaxOutputTokens(model as IModel);
+  const modelMax = modelMaxOutputTokens(served as IModel);
   const configured = positiveNumber(settings.maxCompletionTokens, settings.maxTokens);
   const limit = Math.max(modelMax !== undefined ? Math.min(floor, modelMax) : floor, configured ?? 0);
   return { limit, retry: raisedSideCallLimit(limit, modelMax) };
@@ -328,11 +343,12 @@ export function sideCallPlan(
   floor: number,
   options: { dynamic?: boolean } = {},
 ): { limit?: number; retryAfter: (observedOutputTokens?: number) => number | undefined } {
-  if (!sideCallThinkingUncontrolled(model, options)) {
-    const { limit, retry } = sideCallLimits(model, floor);
+  const served = servingModel(model);
+  if (!sideCallThinkingUncontrolled(served, options)) {
+    const { limit, retry } = sideCallLimits(served, floor);
     return { limit, retryAfter: () => retry };
   }
-  const modelMax = modelMaxOutputTokens(model as IModel);
+  const modelMax = modelMaxOutputTokens(served as IModel);
   return {
     retryAfter: (observed) => (observed !== undefined && Number.isFinite(observed) && observed > 0
       ? raisedSideCallLimit(observed, modelMax)

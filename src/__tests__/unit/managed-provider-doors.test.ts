@@ -68,7 +68,7 @@ const record = (overrides: Record<string, unknown> = {}) => ({
 const host = (): ManagedCreditsHost => ({
   isManagedProvider: (ref) => ref.settings?.managed === true || ref.driver === 'managed-driver',
   reserve: vi.fn(),
-  resolveCredentials: () => ({ apiKey: 'operator-secret' }),
+  resolveConnection: () => ({ driver: 'openai', settings: { region: 'r1' }, credentials: { apiKey: 'operator-secret' } }),
 });
 
 beforeEach(() => {
@@ -94,9 +94,31 @@ describe('buildModelRuntime', () => {
 
   it('builds it for the metered gateway path (allowManaged: true) and returns the record', async () => {
     registerManagedCreditsHost(host());
-    const built = await buildModelRuntime('db', 'tenant-1', 'managed-chat', undefined, { allowManaged: true });
+    const built = await buildModelRuntime('db', 'tenant-1', 'managed-chat', undefined, { allowManaged: true, managedConnectionId: 'conn-a' });
     expect(built.record.key).toBe('managed-chat');
+    expect(built.managedConnectionId).toBe('conn-a');
     expect(hoisted.createRuntime).toHaveBeenCalledTimes(1);
+    // The runtime comes from the connection (driver, settings, credentials), never from the record.
+    expect(hoisted.createRuntime).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({ providerKey: 'managed-chat', settings: { region: 'r1' }, credentials: { apiKey: 'operator-secret' }, metadata: {} }),
+    );
+  });
+
+  it('builds the runtime with the connection driver, not the record driver, and one runtime per connection', async () => {
+    registerManagedCreditsHost({
+      ...host(),
+      resolveConnection: (_ref, id) => ({ driver: id === 'conn-a' ? 'driver-a' : 'driver-b', settings: {}, credentials: { apiKey: id } }),
+    });
+    await buildModelRuntime('db', 'tenant-1', 'managed-chat', undefined, { allowManaged: true, managedConnectionId: 'conn-a' });
+    await buildModelRuntime('db', 'tenant-1', 'managed-chat', undefined, { allowManaged: true, managedConnectionId: 'conn-b' });
+    expect(hoisted.createRuntime.mock.calls.map((call) => call[0])).toEqual(['driver-a', 'driver-b']);
+  });
+
+  it('refuses a metered build with no connection id', async () => {
+    registerManagedCreditsHost(host());
+    await expect(buildModelRuntime('db', 'tenant-1', 'managed-chat', undefined, { allowManaged: true })).rejects.toBeInstanceOf(ManagedProviderError);
+    expect(hoisted.createRuntime).not.toHaveBeenCalled();
   });
 
   it('is unchanged without a host, and for a record the host does not call managed', async () => {
@@ -122,7 +144,11 @@ describe('credential-reading doors (loadProviderRuntimeData)', () => {
 
   it('opens it only for an explicit allowManaged caller', async () => {
     registerManagedCreditsHost(host());
-    const loaded = await loadProviderRuntimeData('db', { key: 'managed-chat', tenantId: 'tenant-1' }, { allowManaged: true });
+    const loaded = await loadProviderRuntimeData(
+      'db',
+      { key: 'managed-chat', tenantId: 'tenant-1' },
+      { allowManaged: true, managedConnectionId: 'conn-a' },
+    );
     expect(loaded.credentials).toEqual({ apiKey: 'operator-secret' });
   });
 

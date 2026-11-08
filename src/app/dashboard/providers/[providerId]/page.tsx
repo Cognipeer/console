@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
+  Alert,
   Button,
   Center,
   CopyButton,
@@ -237,6 +238,9 @@ export default function ProviderDetailPage() {
     label: provider.label,
   });
 
+  // Platform record: supplied by the deployment, read-only for the tenant (the API redacts its metadata, so allProjects is the signal).
+  const isPlatform = provider.allProjects === true;
+  const canEditProvider = canManage && !isPlatform;
   const assignedIds = effectiveProjectIds(provider);
   const summary = usage.entries.length > 0
     ? usageSummary(usage.entries)
@@ -256,6 +260,7 @@ export default function ProviderDetailPage() {
       >
         Refresh
       </Button>
+      {isPlatform ? null : (
       <Button
         variant="default"
         size="sm"
@@ -264,6 +269,8 @@ export default function ProviderDetailPage() {
       >
         Edit
       </Button>
+      )}
+      {isPlatform ? null : (
       <Menu withinPortal position="bottom-end" withArrow>
         <Menu.Target>
           <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
@@ -281,6 +288,7 @@ export default function ProviderDetailPage() {
           </Menu.Item>
         </Menu.Dropdown>
       </Menu>
+      )}
     </>
   );
 
@@ -348,6 +356,11 @@ export default function ProviderDetailPage() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
     >
+      {isPlatform ? (
+        <Alert variant="light" color="blue" title="Platform-managed provider" mb="md">
+          This provider is supplied by the platform and billed with credits. It cannot be edited, tested, assigned or deleted here.
+        </Alert>
+      ) : null}
       {activeTab === 'projects' ? (
         <ProviderProjectsTab
           providerId={String(provider._id)}
@@ -355,7 +368,7 @@ export default function ProviderDetailPage() {
           entries={usage.entries}
           loading={usage.loading}
           error={usage.error}
-          canEdit={canManage}
+          canEdit={canEditProvider}
           onChanged={reloadAll}
         />
       ) : (
@@ -364,7 +377,7 @@ export default function ProviderDetailPage() {
           <ProviderConnectionCard
             providerId={String(provider._id)}
             lastTest={provider.lastTest}
-            canTest={canManage}
+            canTest={canEditProvider}
             onTested={reloadAll}
           />
           <DetailCard>
@@ -536,10 +549,10 @@ export default function ProviderDetailPage() {
               mt="sm"
               style={{ paddingLeft: 0 }}
               onClick={() =>
-                summary.assigned === 0 && canManage ? setAssignOpen(true) : setActiveTab('projects')
+                summary.assigned === 0 && canEditProvider ? setAssignOpen(true) : setActiveTab('projects')
               }
             >
-              {summary.assigned === 0 && canManage ? tList('assign') : t('tabProjects')}
+              {summary.assigned === 0 && canEditProvider ? tList('assign') : t('tabProjects')}
             </Button>
           </DetailCard>
 

@@ -213,39 +213,61 @@ describe('createModel on a platform provider', () => {
   });
 });
 
-describe('operator credentials for managed records', () => {
+describe('operator connections for managed records', () => {
   const managed = () => provider({ key: 'platform', settings: { managed: true }, credentialsEnc: 'not-decryptable' });
-  const load = () => loadProviderRuntimeData('db', { key: 'platform', tenantId: 'tenant-1' }, { allowManaged: true });
+  const load = (withConnectionId = true) =>
+    loadProviderRuntimeData(
+      'db',
+      { key: 'platform', tenantId: 'tenant-1' },
+      { allowManaged: true, ...(withConnectionId ? { managedConnectionId: 'conn-a' } : {}) },
+    );
+  const connection = { driver: 'driver-a', settings: { region: 'r1' }, credentials: { apiKey: 'operator' } };
 
-  it('uses the host credentials and never decrypts the stored blob', async () => {
+  it('uses the host connection and never decrypts the stored blob', async () => {
     const { decryptObject } = await import('@/lib/utils/crypto');
     hoisted.db.findProviderByKey.mockResolvedValue(managed());
-    const resolveCredentials = vi.fn(() => ({ apiKey: 'operator' }));
-    registerManagedCreditsHost(host({ resolveCredentials }));
+    const resolveConnection = vi.fn(() => connection);
+    registerManagedCreditsHost(host({ resolveConnection }));
     const loaded = await load();
     expect(loaded.credentials).toEqual({ apiKey: 'operator' });
-    expect(resolveCredentials).toHaveBeenCalledWith(expect.objectContaining({ key: 'platform' }));
+    expect(loaded.managedConnection).toEqual({ id: 'conn-a', driver: 'driver-a', settings: { region: 'r1' } });
+    // No secret travels in the connection descriptor.
+    expect(JSON.stringify(loaded.managedConnection)).not.toContain('operator');
+    expect(resolveConnection).toHaveBeenCalledWith(expect.objectContaining({ key: 'platform' }), 'conn-a');
     expect(decryptObject).not.toHaveBeenCalled();
   });
 
-  it('refuses with a generic message when credentials are null, missing or throw', async () => {
+  it('refuses a managed record with no connection id, without asking the host', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(managed());
+    const resolveConnection = vi.fn(() => connection);
+    registerManagedCreditsHost(host({ resolveConnection }));
+    await expect(load(false)).rejects.toBeInstanceOf(ManagedProviderError);
+    expect(resolveConnection).not.toHaveBeenCalled();
+  });
+
+  it('refuses with a generic message when the connection is null, missing, malformed or the host throws', async () => {
     hoisted.db.findProviderByKey.mockResolvedValue(managed());
     for (const h of [
-      host({ resolveCredentials: () => null }),
+      host({ resolveConnection: () => null }),
       host(),
-      host({ resolveCredentials: () => { throw new Error('SEARCH_API_KEY missing'); } }),
+      host({ resolveConnection: () => { throw new Error('SEARCH_API_KEY missing'); } }),
+      host({ resolveConnection: () => ({ driver: '', settings: {}, credentials: {} }) }),
+      host({ resolveConnection: () => ({ driver: 'driver-a', settings: {}, credentials: 'oops' as never }) }),
+      host({ resolveConnection: () => ({ driver: 'driver-a', settings: [] as never, credentials: {} }) }),
     ]) {
       registerManagedCreditsHost(h);
       const error = await load().catch((e: unknown) => e);
       expect(error).toBeInstanceOf(ManagedProviderError);
-      expect((error as Error).message).not.toMatch(/SEARCH|env|KEY/);
+      expect((error as Error).message).toBe('This provider is not available right now.');
     }
   });
 
   it('leaves a non-managed record and a no-host deployment unchanged', async () => {
-    registerManagedCreditsHost(host({ resolveCredentials: () => ({ apiKey: 'operator' }) }));
+    registerManagedCreditsHost(host({ resolveConnection: () => connection }));
     hoisted.db.findProviderByKey.mockResolvedValue(provider());
-    expect((await load()).credentials).toEqual({ apiKey: 'tenant-secret' });
+    const own = await load();
+    expect(own.credentials).toEqual({ apiKey: 'tenant-secret' });
+    expect(own.managedConnection).toBeUndefined();
     resetManagedCreditsHostForTests();
     hoisted.db.findProviderByKey.mockResolvedValue(provider({ key: 'platform', settings: { managed: true } }));
     expect((await load()).credentials).toEqual({ apiKey: 'tenant-secret' });

@@ -26,7 +26,8 @@ import type {
 import { providerRegistry } from '@/lib/providers';
 import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { shadowInternalLlmUsage } from '@/lib/quota/shadowLlmQuota';
-import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
+import { InvalidRequestError, UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
+import { isPlanLimitError } from '@/lib/limits/errors';
 import {
   TTS_PCM_SAMPLE_RATE,
   alignPcm16Chunks,
@@ -34,7 +35,7 @@ import {
   ttsMimeType,
 } from '@/lib/providers/contracts/audioStream';
 import { getModelByKey } from './modelService';
-import { primaryReplicaModel } from './replicaPool';
+import { listReplicas, modelForReplica, primaryReplicaModel, replicaBreakerKey, shouldTryNextReplica } from './replicaPool';
 import {
   openAIStreamRoleChunk,
   openAIStreamStopChunk,
@@ -52,7 +53,7 @@ import type { RoutingCallerContext } from './routingCallerContext';
 import { buildModelRuntime } from './runtimeService';
 import {
   getManagedCreditsHost,
-  isManagedProviderRecord,
+  isManagedModel,
   type ManagedCreditLease,
 } from '@/enterprise/managed-credits';
 import { executeModelCall } from './gatewayCore';
@@ -71,7 +72,7 @@ export { describeRequestContract, resolveModelInvocationConfig } from './gateway
 export type { LoggedRequestContract } from './gatewayRequest';
 export { executeModelCall } from './gatewayCore';
 
-import type { NativeEmbedOptions } from '@/lib/providers/domains/model';
+import type { NativeEmbedOptions, NativeEmbedder } from '@/lib/providers/domains/model';
 
 const encoder = new TextEncoder();
 
@@ -367,6 +368,19 @@ async function getServingModel(
   return model ? primaryReplicaModel(model) : null;
 }
 
+const MANAGED_MODEL_UNAVAILABLE = 'This model is not available right now.';
+
+/**
+ * A managed embedding failure reaches the caller as a generic message that keeps only the status: the raw text can
+ * quote the operator's endpoint, deployment or vendor. Our own refusals (plan limits, bad requests, a caller's abort)
+ * are untouched.
+ */
+function managedEmbeddingError(error: unknown, signal?: AbortSignal): unknown {
+  if (isPlanLimitError(error) || error instanceof InvalidRequestError || signal?.aborted) return error;
+  const status = normalizeInferenceError(error).status;
+  return new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
+}
+
 export async function handleEmbeddingRequest(params: {
   tenantDbName: string;
   modelKey: string;
@@ -384,36 +398,49 @@ export async function handleEmbeddingRequest(params: {
   const requestId = body?.request_id || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
+  const loaded = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!loaded) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
 
-  ensureEmbeddingModel(model);
+  ensureEmbeddingModel(loaded);
 
-  const { runtime, record } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-    { allowManaged: true },
-  );
-  const managed = isManagedProviderRecord(record);
-
-  if (!runtime.createNativeEmbedder) {
-    throw new Error('Model provider does not support embeddings');
+  // A managed model keeps its public pool identity (reserve, response `model`, usage row); only the embedder is built
+  // from the route that serves it. An unmanaged model is served by its first enabled replica, as before.
+  const managed = isManagedModel(loaded);
+  const model = managed ? loaded : primaryReplicaModel(loaded);
+  const routes = managed ? listReplicas(loaded) : [];
+  if (managed && routes.length === 0) {
+    // No live route: refused with nothing reserved and nothing dialled.
+    throw new UpstreamRequestError(MANAGED_MODEL_UNAVAILABLE, 503);
   }
 
-  const embedder = await runtime.createNativeEmbedder({
-    modelId: model.modelId,
-    category: model.category,
-    modelSettings: model.settings,
-    // `withResilience` owns retry and circuit-breaking here.
-    options: { maxRetries: 0 },
-  });
-  if (!embedder || typeof embedder.embed !== 'function') {
-    throw new Error('Model provider returned an invalid embedding runtime.');
-  }
+  // One upstream attempt: the runtime and embedder of `served`, built from a managed route's connection when given.
+  const prepareEmbedder = async (served: IModel, managedConnectionId?: string) => {
+    const { runtime } = await buildModelRuntime(
+      tenantDbName,
+      model.tenantId,
+      served.providerKey,
+      projectId,
+      managed ? { allowManaged: true, managedConnectionId } : { allowManaged: true },
+    );
+    if (!runtime.createNativeEmbedder) {
+      throw new Error('Model provider does not support embeddings');
+    }
+    const created = await runtime.createNativeEmbedder({
+      modelId: served.modelId,
+      category: served.category,
+      modelSettings: served.settings,
+      // `withResilience` owns retry and circuit-breaking here.
+      options: { maxRetries: 0 },
+    });
+    if (!created || typeof created.embed !== 'function') {
+      throw new Error('Model provider returned an invalid embedding runtime.');
+    }
+    return created;
+  };
+
+  const firstEmbedder = managed ? undefined : await prepareEmbedder(model);
   const rawInput = body.input;
   const inputsArray = Array.isArray(rawInput) ? rawInput : [rawInput];
   const inputs = inputsArray.map((value) => {
@@ -428,9 +455,9 @@ export async function handleEmbeddingRequest(params: {
   if (body.encoding_format === 'float' || body.encoding_format === 'base64') embedOptions.encodingFormat = body.encoding_format;
   if (typeof body.input_type === 'string' && body.input_type) embedOptions.inputType = body.input_type;
 
-  // A managed provider is paid with credits: reserved before the upstream call (a refusal surfaces as it is, with no
-  // request made), booked with the real usage after it, returned on any failure. The caller's own token count is
-  // ignored there: it must not lower the bill.
+  // A managed provider is paid with credits: reserved ONCE before the first upstream call (a refusal surfaces as it is,
+  // with no request made), booked with the real usage after it, returned on any failure. The caller's own token count
+  // is ignored there: it must not lower the bill.
   let lease: ManagedCreditLease | undefined;
   const inputEstimate = managed ? inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0) : 0;
   if (managed) {
@@ -441,30 +468,58 @@ export async function handleEmbeddingRequest(params: {
         tenantDbName,
         projectId,
         providerKey: model.providerKey,
-        driver: record.driver,
+        driver: model.providerDriver,
         modelKey,
         modelId: model.modelId,
         kind: 'embedding',
         requestId,
         estimate: { inputTokens: inputEstimate },
         attribution: { route: 'embeddings' },
+        // Operator-side attribution only: the first route attempted.
+        routeId: routes[0]?.routeId,
       });
     }
   }
 
-  let embedded: Awaited<ReturnType<typeof embedder.embed>>;
+  let result: Awaited<ReturnType<NativeEmbedder['embed']>> | undefined;
   try {
-    embedded = await withResilience(
-      () => embedder.embed(inputs, embedOptions),
-      { key: `embedding:${tenantDbName}:${model.providerKey}`, ...(signal ? { signal } : {}) },
-    );
+    if (!managed) {
+      result = await withResilience(
+        () => firstEmbedder!.embed(inputs, embedOptions),
+        { key: `embedding:${tenantDbName}:${model.providerKey}`, ...(signal ? { signal } : {}) },
+      );
+    } else {
+      let lastError: unknown;
+      for (let i = 0; i < routes.length; i += 1) {
+        const replica = routes[i];
+        try {
+          const embedder = await prepareEmbedder(modelForReplica(model, replica), replica.connectionId);
+          result = await withResilience(
+            () => embedder.embed(inputs, embedOptions),
+            { key: replicaBreakerKey('embedding', tenantDbName, replica), ...(signal ? { signal } : {}) },
+          );
+          break;
+        } catch (error) {
+          lastError = error;
+          if (i === routes.length - 1 || !shouldTryNextReplica(error)) throw error;
+          // Server log only: the route id and the upstream error text never reach the tenant.
+          logger.warn('Managed embedding route failed, trying the next one', {
+            modelKey,
+            routeId: replica.routeId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      if (!result) throw lastError;
+    }
   } catch (error) {
     if (lease) {
       const held = lease;
       fireAndForget('managed-credit-release', () => held.release(signal?.aborted ? 'cancelled' : 'error'));
     }
-    throw error;
+    throw managed ? managedEmbeddingError(error, signal) : error;
   }
+  const embedded = result!;
   const embeddings = embedded.vectors;
   const latencyMs = Date.now() - start;
 

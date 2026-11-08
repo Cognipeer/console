@@ -75,7 +75,17 @@ class ProviderRegistry {
     return contract.createRuntime(context);
   }
 
+  /** True when a contract is registered for the id and it is internal (operator-side, never offered to a tenant). */
+  isInternal(id: string): boolean {
+    this.ensureInitialised();
+    return this.contracts.get(id)?.internal === true;
+  }
+
   getFormSchema(id: string) {
+    // An internal driver answers like an unknown one.
+    if (this.isInternal(id)) {
+      throw new Error(`Provider contract with id "${id}" not found.`);
+    }
     const contract = this.getContract(id);
     return contract.form;
   }

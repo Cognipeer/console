@@ -14,6 +14,8 @@ import {
   resetManagedCreditsHostForTests,
   type ManagedCallInfo,
   type ManagedCreditLease,
+  type ManagedRoute,
+  type ManagedRouteQuery,
 } from '@/enterprise/managed-credits';
 import { flush } from '../helpers/nativeGateway';
 
@@ -47,6 +49,7 @@ vi.mock('@/lib/services/guardrail', () => ({
 
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
+import { logModelUsage } from '@/lib/services/models/usageLogger';
 
 const model = (overrides: object = {}) => ({
   _id: 'm1',
@@ -74,7 +77,15 @@ type Lease = ManagedCreditLease & { settle: ReturnType<typeof vi.fn>; release: R
 let leases: Lease[] = [];
 let reserveCalls: ManagedCallInfo[] = [];
 
-function installHost(options: { cap?: number; refuse?: Error; managed?: (ref: { driver?: string; key?: string }) => boolean } = {}) {
+const ROUTE_A: ManagedRoute = { id: 'route-a', connectionId: 'conn-a', driver: 'openai' };
+const ROUTE_B: ManagedRoute = { id: 'route-b', connectionId: 'conn-b', driver: 'anthropic', modelId: 'upstream-b' };
+
+function installHost(options: {
+  cap?: number;
+  refuse?: Error;
+  managed?: (ref: { driver?: string; key?: string }) => boolean;
+  routes?: ManagedRoute[];
+} = {}) {
   const reserve = vi.fn(async (call: ManagedCallInfo) => {
     reserveCalls.push(call);
     if (options.refuse) throw options.refuse;
@@ -88,8 +99,9 @@ function installHost(options: { cap?: number; refuse?: Error; managed?: (ref: { 
     return lease;
   });
   const isManagedProvider = vi.fn(options.managed ?? (() => true));
-  registerManagedCreditsHost({ isManagedProvider, reserve });
-  return { reserve, isManagedProvider };
+  const listRoutes = vi.fn((_query: ManagedRouteQuery) => options.routes ?? [ROUTE_A]);
+  registerManagedCreditsHost({ isManagedProvider, reserve, listRoutes });
+  return { reserve, isManagedProvider, listRoutes };
 }
 
 type Chunk = Record<string, unknown>;
@@ -268,20 +280,18 @@ describe('managed chat call', () => {
     expect(leases[0].release).not.toHaveBeenCalled();
   });
 
-  it('a failed attempt releases its hold before the next replica reserves its own; only the serving one settles', async () => {
-    installHost();
-    stubModel(model({
-      providerKey: 'a',
-      replicas: [{ providerKey: 'a', modelId: 'gpt-4o', weight: 1000 }, { providerKey: 'b', modelId: 'gpt-4o', weight: 1 }],
-    }));
+  it('a failed route releases its hold before the next route reserves its own; only the serving one settles', async () => {
+    installHost({ routes: [ROUTE_A, ROUTE_B] });
     const originalRandom = Math.random;
     Math.random = () => 0;
     try {
       const down = wire({ complete: [Object.assign(new Error('overloaded'), { status: 503 })] });
       const up = wire();
-      (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (_db: string, _tenant: string, providerKey: string) => ({
-        runtime: { createNativeChatClient: vi.fn().mockResolvedValue(providerKey === 'a' ? down.client : up.client) },
-        record: { key: providerKey, driver: 'openai', type: 'model' },
+      (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (
+        _db: string, _tenant: string, _providerKey: string, _project: unknown, options?: { managedConnectionId?: string },
+      ) => ({
+        runtime: { createNativeChatClient: vi.fn().mockResolvedValue(options?.managedConnectionId === 'conn-a' ? down.client : up.client) },
+        record: { key: 'prov', driver: 'openai', type: 'model' },
       }));
 
       const outcome = await executeModelCall({ ...BASE, request: ASK });
@@ -291,7 +301,11 @@ describe('managed chat call', () => {
     } finally {
       Math.random = originalRandom;
     }
-    expect(reserveCalls.map((call) => call.providerKey)).toEqual(['a', 'b']);
+    // The hold is made under the PUBLIC identity; the route that serves it rides separately.
+    expect(reserveCalls.map((call) => [call.providerKey, call.modelId, call.routeId])).toEqual([
+      ['prov', 'gpt-4o', 'route-a'],
+      ['prov', 'gpt-4o', 'route-b'],
+    ]);
     expect(leases).toHaveLength(2);
     expect(leases[0].release).toHaveBeenCalledWith('error');
     expect(leases[0].settle).not.toHaveBeenCalled();
@@ -616,7 +630,7 @@ describe('managed accounting hardening', () => {
 });
 
 describe('managed upstream error text', () => {
-  const leaky = Object.assign(new Error('Azure OpenAI error: deployment ops-secret-eastus at https://ops.openai.azure.com failed'), { status: 429 });
+  const leaky = Object.assign(new Error('Upstream error: deployment ops-secret-east at https://ops.example.test failed'), { status: 429 });
 
   it('is not shown to the tenant for a non-streamed call', async () => {
     installHost();
@@ -624,7 +638,7 @@ describe('managed upstream error text', () => {
     const failure = await executeModelCall({ ...BASE, request: ASK }).catch((error) => error);
     const body = normalizeInferenceError(failure);
     expect(body.status).toBe(429);
-    expect(JSON.stringify(body)).not.toMatch(/ops-secret|azure/i);
+    expect(JSON.stringify(body)).not.toMatch(/ops-secret|example\.test/i);
   });
 
   it('is not shown for a streamed failure either', async () => {
@@ -632,12 +646,163 @@ describe('managed upstream error text', () => {
     wire({ stream: async function* () { yield { id: 'c1', model: 'gpt-4o', delta: { content: 'x' } }; throw leaky; } });
     const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true });
     const events = await collect(outcome.stream!);
-    expect(JSON.stringify(events)).not.toMatch(/ops-secret|azure/i);
+    expect(JSON.stringify(events)).not.toMatch(/ops-secret|example\.test/i);
   });
 
   it('is unchanged for a call that is not managed', async () => {
     wire({ complete: [leaky] });
     const failure = await executeModelCall({ ...BASE, request: ASK }).catch((error) => error);
     expect(normalizeInferenceError(failure).error.message).toMatch(/ops-secret/);
+  });
+});
+
+// ── managed routes ───────────────────────────────────────────────────────
+
+describe('managed routes', () => {
+  const usageRows = () => (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2] as Record<string, unknown>);
+
+  /**
+   * Route A answers with `first` (an error or a result), route B with `second`. Each runtime is told apart by the
+   * connection id it was built for; `created` records what each client was created for.
+   */
+  function wireRoutes(first: Record<string, unknown> | Error, second: Record<string, unknown> = {}) {
+    const down = wire({ complete: [first] });
+    const up = wire({ complete: [second] });
+    const created: Array<{ connectionId?: string; modelId: string }> = [];
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (
+      _db: string, _tenant: string, _providerKey: string, _project: unknown, options?: { managedConnectionId?: string },
+    ) => ({
+      runtime: {
+        createNativeChatClient: vi.fn(async (args: { modelId: string }) => {
+          created.push({ connectionId: options?.managedConnectionId, modelId: args.modelId });
+          return options?.managedConnectionId === 'conn-a' ? down.client : up.client;
+        }),
+      },
+      record: { key: 'prov', driver: 'openai', type: 'model' },
+    }));
+    return { created };
+  }
+
+  /** Route order is the host's order when the draw is 0. */
+  async function callInOrder(request: Record<string, unknown> = ASK) {
+    const originalRandom = Math.random;
+    Math.random = () => 0;
+    try {
+      const outcome = await executeModelCall({ ...BASE, request: request as never });
+      await flush();
+      return outcome;
+    } finally {
+      Math.random = originalRandom;
+    }
+  }
+
+  it('the first route fails with 429 and the second serves it, built from its own connection and upstream model id', async () => {
+    installHost({ routes: [ROUTE_A, ROUTE_B] });
+    const { created } = wireRoutes(Object.assign(new Error('rate limited'), { status: 429 }));
+
+    const outcome = await callInOrder();
+
+    expect(outcome.result?.response.content).toBe('hi');
+    expect(created).toEqual([
+      { connectionId: 'conn-a', modelId: 'gpt-4o' },
+      { connectionId: 'conn-b', modelId: 'upstream-b' },
+    ]);
+    // Every build is the metered kind.
+    for (const call of (buildModelRuntime as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(call[4]).toMatchObject({ allowManaged: true });
+    }
+    expect(reserveCalls.map((call) => [call.providerKey, call.modelId, call.routeId])).toEqual([
+      ['prov', 'gpt-4o', 'route-a'],
+      ['prov', 'gpt-4o', 'route-b'],
+    ]);
+  });
+
+  it('an empty route list refuses with 503, makes no upstream call and reserves nothing', async () => {
+    const host = installHost({ routes: [] });
+    const { client } = wire();
+
+    const failure = await executeModelCall({ ...BASE, request: ASK }).catch((error) => error);
+
+    expect(failure).toMatchObject({ status: 503, message: 'This model is not available right now.' });
+    expect(host.reserve).not.toHaveBeenCalled();
+    expect(buildModelRuntime).not.toHaveBeenCalled();
+    expect(client.complete).not.toHaveBeenCalled();
+
+    const streamFailure = await executeModelCall({ ...BASE, request: ASK, stream: true }).catch((error) => error);
+    expect(streamFailure).toMatchObject({ status: 503, message: 'This model is not available right now.' });
+    expect(host.reserve).not.toHaveBeenCalled();
+  });
+
+  it('a runtime that cannot be built for a route never shows its cause', async () => {
+    installHost();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockRejectedValue(
+      Object.assign(new Error('connection conn-a refused at https://ops.example.test'), { status: 502 }),
+    );
+
+    const failure = await executeModelCall({ ...BASE, request: ASK }).catch((error) => error);
+
+    expect(normalizeInferenceError(failure).error.message).toBe('Managed model provider request failed.');
+    expect(JSON.stringify(normalizeInferenceError(failure))).not.toMatch(/conn-a|example\.test/);
+  });
+
+  it('usage rows and the wire response carry the public identity and nothing about the route', async () => {
+    installHost({ routes: [ROUTE_A, ROUTE_B] });
+    wireRoutes(
+      Object.assign(new Error('overloaded'), { status: 503 }),
+      { providerFields: { system_fingerprint: 'fp_upstream', service_tier: 'tier-x' } },
+    );
+
+    const outcome = await callInOrder();
+
+    expect(JSON.stringify(usageRows())).not.toMatch(/route-a|route-b|conn-a|conn-b|upstream-b|fp_upstream|failedOver/);
+    const wireBody = outcome.wire as Record<string, unknown>;
+    expect(wireBody.model).toBe('gpt-4o');
+    expect(wireBody.system_fingerprint).not.toBe('fp_upstream');
+    expect(wireBody).not.toHaveProperty('service_tier');
+    expect(usageRows().every((row) => (row.providerRequest as { model?: string }).model === 'm')).toBe(true);
+  });
+
+  it('stored replicas of a managed model are ignored', async () => {
+    installHost({ routes: [ROUTE_A] });
+    stubModel(model({ replicas: [{ providerKey: 'other', modelId: 'x', weight: 1 }] }));
+    wire();
+
+    await executeModelCall({ ...BASE, request: ASK });
+    await flush();
+
+    expect(reserveCalls.map((call) => call.providerKey)).toEqual(['prov']);
+    expect(JSON.stringify(usageRows())).not.toMatch(/other|"replica"/);
+  });
+
+  it('a provider error finish of a managed call names no upstream reason', async () => {
+    installHost();
+    wire({ complete: [{ finishReason: 'error', rawFinishReason: 'MALFORMED_FUNCTION_CALL', content: null }] });
+
+    const failure = await executeModelCall({ ...BASE, request: ASK }).catch((error) => error);
+    await flush();
+
+    expect(failure.message).toBe('The model stopped before completing the response.');
+    expect(failure.code).toBe('provider_error');
+    expect(JSON.stringify(usageRows())).not.toMatch(/MALFORMED|malformed_function_call/i);
+  });
+
+  it('an unmanaged model with stored replicas fails over as before and passes no connection id', async () => {
+    installHost({ managed: () => false });
+    stubModel(model({
+      replicas: [{ providerKey: 'a', modelId: 'gpt-4o', weight: 1000 }, { providerKey: 'b', modelId: 'gpt-4o', weight: 1 }],
+    }));
+    const down = wire({ complete: [Object.assign(new Error('overloaded'), { status: 503 })] });
+    const up = wire();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (_db: string, _tenant: string, providerKey: string) => ({
+      runtime: { createNativeChatClient: vi.fn().mockResolvedValue(providerKey === 'a' ? down.client : up.client) },
+      record: { key: providerKey, driver: 'openai', type: 'model' },
+    }));
+
+    const outcome = await callInOrder();
+
+    expect(outcome.result?.response.content).toBe('hi');
+    const calls = (buildModelRuntime as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.map((call) => call[2])).toEqual(['a', 'b']);
+    for (const call of calls) expect(call[4].managedConnectionId).toBeUndefined();
   });
 });

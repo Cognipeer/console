@@ -15,7 +15,7 @@ import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuot
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
-import { getProviderConfigByKey } from '@/lib/services/providers/providerService';
+import { getProviderConfigByKey, redactPlatformProvider } from '@/lib/services/providers/providerService';
 import {
   listWebSearchProviders,
   listWebSearchRunLogs,
@@ -53,7 +53,7 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         { credentialFields: true },
       );
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });
@@ -76,7 +76,7 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
       if (!provider || provider.type !== 'websearch') {
         return reply.code(404).send({ error: 'Web search instance not found' });
       }
-      return reply.code(200).send({ provider });
+      return reply.code(200).send({ provider: redactPlatformProvider(provider) });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Internal server error' });

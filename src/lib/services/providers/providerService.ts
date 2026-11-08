@@ -12,6 +12,7 @@ import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
 import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
 import { isSafePathSegment } from '@/lib/providers/pathSegments';
+import { providerRegistry } from '@/lib/providers/registry';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
 import { settingsValidatorOf, validateProviderSettings } from './providerSettingsValidation';
 
@@ -233,6 +234,13 @@ function assertKeyIsAFolderName(key: unknown): void {
   );
 }
 
+/** Refuses a driver whose contract is internal (operator-side): a tenant cannot create a record with it. */
+function assertDriverIsCreatable(driver: string): void {
+  if (providerRegistry.isInternal(driver)) {
+    throw new ProviderSettingsError('driver', 'This provider type cannot be created.');
+  }
+}
+
 /** Refuses a change to a managed record. Without a registered host nothing is managed and nothing is read. */
 async function assertNotManagedById(
   db: Awaited<ReturnType<typeof withTenantDb>>,
@@ -257,6 +265,7 @@ export async function createProviderConfig(
   if (isManagedProviderRecord({ key: payload.key, driver: payload.driver, type: payload.type, settings: payload.settings })) {
     throw new ManagedProviderReadOnlyError();
   }
+  assertDriverIsCreatable(payload.driver);
   assertKeyIsAFolderName(payload.key);
   // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
   // would say about the same value.
@@ -648,6 +657,8 @@ export async function deleteProviderConfig(
 export interface ProviderRuntimeData<TCredentials = Record<string, unknown>> {
   record: IProviderRecord;
   credentials: TCredentials;
+  /** Managed call only: the route connection the runtime is built from (no secrets; those are in `credentials`). */
+  managedConnection?: { id: string; driver: string; settings: Record<string, unknown> };
 }
 
 export async function loadProviderRuntimeData<TCredentials = Record<string, unknown>>(
@@ -658,7 +669,7 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     tenantId: string;
     projectId?: string;
   },
-  options?: { allowManaged?: boolean; managedMessage?: string },
+  options?: { allowManaged?: boolean; managedMessage?: string; managedConnectionId?: string },
 ): Promise<ProviderRuntimeData<TCredentials>> {
   const db = await withTenantDb(tenantDbName);
   let record: IProviderRecord | null = null;
@@ -701,10 +712,39 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     throw new ManagedProviderError(options?.managedMessage);
   }
 
-  // A managed record never opens its stored credentials: the operator supplies them. Missing method, null or a throw
-  // refuses the call with a generic message.
+  // A managed record never opens its stored credentials: the operator supplies the connection of the chosen route.
+  // No connection id, a missing method, null, a throw or a malformed result refuses the call with a generic message.
   if (options?.allowManaged === true && isManagedProviderRecord(record)) {
-    return { record, credentials: resolveManagedCredentials(record) as TCredentials };
+    const connectionId = options.managedConnectionId;
+    if (!connectionId) throw new ManagedProviderError('This provider is not available right now.');
+    let connection: unknown = null;
+    try {
+      connection = getManagedCreditsHost()?.resolveConnection?.(record, connectionId) ?? null;
+    } catch (error) {
+      logger.error('Managed connection could not be resolved', {
+        providerKey: record.key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const resolved = connection as { driver?: unknown; settings?: unknown; credentials?: unknown } | null;
+    if (
+      !resolved
+      || typeof resolved.driver !== 'string'
+      || !resolved.driver
+      || !isPlainRecord(resolved.credentials)
+      || (resolved.settings !== undefined && !isPlainRecord(resolved.settings))
+    ) {
+      throw new ManagedProviderError('This provider is not available right now.');
+    }
+    return {
+      record,
+      credentials: resolved.credentials as TCredentials,
+      managedConnection: {
+        id: connectionId,
+        driver: resolved.driver,
+        settings: (resolved.settings as Record<string, unknown> | undefined) ?? {},
+      },
+    };
   }
 
   let credentials: TCredentials;
@@ -735,17 +775,8 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
   };
 }
 
-function resolveManagedCredentials(record: IProviderRecord): Record<string, unknown> {
-  let resolved: Record<string, unknown> | null = null;
-  try {
-    resolved = getManagedCreditsHost()?.resolveCredentials?.(record) ?? null;
-  } catch (error) {
-    logger.error('Managed credentials could not be resolved', { providerKey: record.key, error });
-  }
-  if (!resolved || typeof resolved !== 'object') {
-    throw new ManagedProviderError('This provider is not available right now.');
-  }
-  return resolved;
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function tryRecoverLegacyPlaintextCredentials<T>(value: string): T | null {

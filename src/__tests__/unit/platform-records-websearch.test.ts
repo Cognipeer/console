@@ -1,6 +1,6 @@
 /**
  * Web search with a platform-provided (tenant-wide) instance: it is listed and run from a project it was never
- * assigned to, and its key comes from the operator (resolveCredentials) through the existing driver.
+ * assigned to, and its connection comes from the operator (route + resolveConnection), never the stored blob.
  * Real SQLite database and real provider service; only the outbound call is mocked.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -56,11 +56,31 @@ describe('web search over a tenant-wide record', () => {
     registerManagedCreditsHost({
       isManagedProvider: (ref) => ref.settings?.managed === true,
       reserve: vi.fn(async () => lease),
-      resolveCredentials: () => ({ apiKey: 'operator-key' }),
+      listRoutes: (query) => (query.providerKey === 'platform-search' ? [{ id: 'route-a', connectionId: 'conn-a', driver: 'search-up' }] : []),
+      resolveConnection: (_ref, connectionId) => (
+        connectionId === 'conn-a' ? { driver: 'search-up', settings: {}, credentials: { apiKey: 'operator-key' } } : null
+      ),
     });
     hoisted.call.mockResolvedValue({ results: [], provider: 'tavily' });
-    await runWebSearch('platform_websearch_tenant', 't1', 'project-never-assigned', { query: 'hello' });
+    const result = await runWebSearch('platform_websearch_tenant', 't1', 'project-never-assigned', { query: 'hello' });
     expect(hoisted.call).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(hoisted.call.mock.calls[0])).toContain('operator-key');
+    expect(hoisted.call.mock.calls[0][0].driver).toBe('search-up');
+    // The tenant still sees the public record's driver.
+    expect(result.driver).toBe('tavily');
+    expect(JSON.stringify(result)).not.toMatch(/search-up|conn-a|route-a/);
+  });
+
+  it('is refused when the host has no live route', async () => {
+    registerManagedCreditsHost({
+      isManagedProvider: (ref) => ref.settings?.managed === true,
+      reserve: vi.fn(),
+      listRoutes: () => [],
+      resolveConnection: () => null,
+    });
+    hoisted.call.mockClear();
+    await expect(runWebSearch('platform_websearch_tenant', 't1', 'project-never-assigned', { query: 'hello' }))
+      .rejects.toThrow('This provider is not available right now.');
+    expect(hoisted.call).not.toHaveBeenCalled();
   });
 });

@@ -19,7 +19,14 @@ import {
   type ProviderConfigView,
   type ProviderViewOptions,
 } from '@/lib/services/providers/providerService';
-import { getManagedCreditsHost, isManagedProviderRecord, type ManagedCreditLease } from '@/enterprise/managed-credits';
+import {
+  getManagedCreditsHost,
+  isManagedProviderRecord,
+  listManagedRoutes,
+  type ManagedCreditLease,
+  type ManagedRoute,
+} from '@/enterprise/managed-credits';
+import { shouldTryNextReplica } from '@/lib/services/models/replicaPool';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { callWebSearchProvider } from './webSearchAdapter';
 import { resolveWebSearchCacheSettings } from './cacheSettings';
@@ -44,7 +51,11 @@ export interface RunWebSearchOptions extends WebSearchInput {
   providerKey?: string;
   /** Attribution only (dashboard test vs API). */
   source?: 'dashboard' | 'api';
+  /** Depth of one search; a managed provider takes it from here only (advanced = 2 credit units). */
+  searchDepth?: string;
 }
+
+const MANAGED_UNAVAILABLE = 'This provider is not available right now.';
 
 export async function listWebSearchProviders(
   tenantDbName: string,
@@ -114,6 +125,71 @@ function loggableResults(results: WebSearchResultItem[]): IWebSearchRunLog['resu
 function searchUnitsOf(settings: Record<string, unknown> | undefined): number {
   const depth = typeof settings?.searchDepth === 'string' ? settings.searchDepth.toLowerCase() : 'basic';
   return depth === 'advanced' || depth === 'deep' ? 2 : 1;
+}
+
+/** Units of a managed search: from the request only, never from route or connection settings. */
+function requestedSearchUnits(depth: string | undefined): number {
+  return searchUnitsOf({ searchDepth: depth });
+}
+
+type ProviderRuntime = Awaited<ReturnType<typeof loadProviderRuntimeData>>;
+
+/**
+ * Calls a managed search through its routes in order: the first live route, then the next one only when the failure
+ * is a capacity or availability fault. The adapter sees a synthetic record built from the route's connection; the
+ * public record stays the one logged, cached and returned.
+ */
+async function callManagedRoutes(params: {
+  routes: ManagedRoute[];
+  first: ProviderRuntime;
+  load: (connectionId: string) => Promise<ProviderRuntime>;
+  options: WebSearchInput;
+  depth: string;
+  tenantId: string;
+  projectId?: string;
+  providerKey: string;
+}): Promise<Awaited<ReturnType<typeof callWebSearchProvider>>> {
+  const { routes } = params;
+  let lastError: unknown;
+  for (let i = 0; i < routes.length; i += 1) {
+    const route = routes[i];
+    try {
+      const runtime = i === 0 ? params.first : await params.load(route.connectionId);
+      const connection = runtime.managedConnection;
+      if (!connection) throw new Error(MANAGED_UNAVAILABLE);
+      const synthetic = {
+        ...runtime.record,
+        driver: connection.driver,
+        settings: { ...connection.settings, ...(route.settings ?? {}), searchDepth: params.depth },
+      };
+      const result = await callWebSearchProvider(
+        synthetic,
+        runtime.credentials as Record<string, unknown>,
+        params.options,
+        { breakerScope: route.id },
+      );
+      // One shape whichever route served: fields only some upstreams return (a native score, a metasearch engine
+      // name) would tell the routes apart.
+      return {
+        ...result,
+        results: result.results.map(({ title, url, snippet, position, publishedAt }) => ({
+          title, url, snippet, position, ...(publishedAt ? { publishedAt } : {}),
+        })),
+      };
+    } catch (error) {
+      lastError = error;
+      if (i === routes.length - 1 || !shouldTryNextReplica(error)) throw error;
+      // Server log only: the route id and the upstream error text never reach the tenant.
+      logger.warn('Managed search route failed, trying the next one', {
+        tenantId: params.tenantId,
+        projectId: params.projectId,
+        providerKey: params.providerKey,
+        routeId: route.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  throw lastError;
 }
 
 async function resolveProviderKey(
@@ -305,11 +381,20 @@ export async function runWebSearch(
     options.providerKey,
   );
 
-  const { record, credentials } = await loadProviderRuntimeData(tenantDbName, {
+  // A managed provider is served by the operator's live routes; the host knows none for a tenant's own instance.
+  const routes = listManagedRoutes({ providerKey, kind: 'search' });
+  const loadRuntime = (managedConnectionId?: string) => loadProviderRuntimeData(tenantDbName, {
     tenantId,
     key: providerKey,
     projectId,
-  }, { allowManaged: true });
+  }, { allowManaged: true, ...(managedConnectionId ? { managedConnectionId } : {}) });
+  const loaded = await loadRuntime(routes[0]?.connectionId);
+  const { record, credentials } = loaded;
+  const managed = isManagedProviderRecord(record);
+  // No live route: refused before anything is reserved or dialled.
+  if (managed && (routes.length === 0 || !loaded.managedConnection)) {
+    throw new Error(MANAGED_UNAVAILABLE);
+  }
 
   if (record.type !== 'websearch') {
     throw new Error(`Provider "${providerKey}" is not a web search provider.`);
@@ -372,8 +457,10 @@ export async function runWebSearch(
       // A cache hit is free: nothing is reserved.
       providerResult = cacheSession.hit;
     } else {
-      const host = isManagedProviderRecord(record) ? getManagedCreditsHost() : null;
-      const units = searchUnitsOf(record.settings as Record<string, unknown> | undefined);
+      const host = managed ? getManagedCreditsHost() : null;
+      const units = managed
+        ? requestedSearchUnits(options.searchDepth)
+        : searchUnitsOf(record.settings as Record<string, unknown> | undefined);
       if (host) {
         lease = await host.reserve({
           tenantId,
@@ -385,14 +472,27 @@ export async function runWebSearch(
           requestId: crypto.randomUUID(),
           estimate: { units },
           attribution: { source: options.source ?? 'api' },
+          // Operator-side attribution only: the first route attempted.
+          ...(routes[0] ? { routeId: routes[0].id } : {}),
         });
       }
       try {
-        providerResult = await callWebSearchProvider(
-          record,
-          credentials as Record<string, unknown>,
-          { ...options, query },
-        );
+        providerResult = managed
+          ? await callManagedRoutes({
+            routes,
+            first: loaded,
+            load: (connectionId) => loadRuntime(connectionId),
+            options: { ...options, query },
+            depth: units > 1 ? 'advanced' : 'basic',
+            tenantId,
+            projectId,
+            providerKey,
+          })
+          : await callWebSearchProvider(
+            record,
+            credentials as Record<string, unknown>,
+            { ...options, query },
+          );
       } catch (error) {
         void lease?.release('error').catch(() => undefined);
         if (host) {

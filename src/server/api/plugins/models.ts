@@ -31,7 +31,7 @@ import {
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota, type QuotaContext } from '@/lib/quota';
 import { providerRegistry } from '@/lib/providers';
-import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
@@ -276,7 +276,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       logger.error('List model providers error', { error });
       return sendProjectError(reply, error)
@@ -550,12 +550,12 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.includeProviders === 'true') {
-        payload.providers = await listModelProviders(
+        payload.providers = (await listModelProviders(
           session.tenantDbName,
           session.tenantId,
           projectId,
           {},
-        );
+        )).map(redactPlatformProvider);
       }
 
       return reply.code(200).send(payload);

@@ -31,12 +31,15 @@ interface DriverCallInput extends WebSearchInput {
   settings: Record<string, unknown>;
   /** Aborts the provider request (the agent turn's Stop). */
   signal?: AbortSignal;
+  /** Separates the circuit breaker of one route or connection from another of the same driver. */
+  breakerScope?: string;
 }
 
 export async function callWebSearchProvider(
   record: IProviderRecord,
   credentials: Record<string, unknown>,
   input: WebSearchInput,
+  options: { breakerScope?: string } = {},
 ): Promise<AdapterCallResult> {
   const settings = (record.settings ?? {}) as Record<string, unknown>;
   const call: DriverCallInput = {
@@ -47,6 +50,7 @@ export async function callWebSearchProvider(
     safeSearch: input.safeSearch ?? asSafeSearch(settings.safeSearch),
     credentials,
     settings,
+    breakerScope: options.breakerScope,
     // A search an agent runs ends with its turn: a Stop aborts the provider request in flight.
     signal: input.signal ?? currentTurnSignal(),
   };
@@ -98,10 +102,10 @@ async function callBing(input: DriverCallInput): Promise<AdapterCallResult> {
 
   const response = await withResilience(
     () => fetch(url, { headers: { 'Ocp-Apim-Subscription-Key': apiKey }, signal: input.signal }),
-    { key: 'websearch:bing' },
+    { key: breakerKey('bing', input) },
   );
   if (!response.ok) {
-    throw new Error(`Bing search failed (${response.status}): ${await safeReadText(response)}`);
+    throw await searchFailure('Bing', response);
   }
   const json = (await response.json()) as {
     webPages?: { value?: Array<{ name?: string; url?: string; snippet?: string; datePublished?: string }> };
@@ -136,10 +140,10 @@ async function callBrave(input: DriverCallInput): Promise<AdapterCallResult> {
         headers: { Accept: 'application/json', 'X-Subscription-Token': apiKey },
         signal: input.signal,
       }),
-    { key: 'websearch:brave' },
+    { key: breakerKey('brave', input) },
   );
   if (!response.ok) {
-    throw new Error(`Brave search failed (${response.status}): ${await safeReadText(response)}`);
+    throw await searchFailure('Brave', response);
   }
   const json = (await response.json()) as {
     web?: { results?: Array<{ title?: string; url?: string; description?: string; page_age?: string }> };
@@ -178,10 +182,10 @@ async function callSerper(input: DriverCallInput): Promise<AdapterCallResult> {
         body: JSON.stringify(body),
         signal: input.signal,
       }),
-    { key: 'websearch:serper' },
+    { key: breakerKey('serper', input) },
   );
   if (!response.ok) {
-    throw new Error(`Serper search failed (${response.status}): ${await safeReadText(response)}`);
+    throw await searchFailure('Serper', response);
   }
   const json = (await response.json()) as {
     organic?: Array<{ title?: string; link?: string; snippet?: string; date?: string; position?: number }>;
@@ -219,10 +223,10 @@ async function callTavily(input: DriverCallInput): Promise<AdapterCallResult> {
         body: JSON.stringify(body),
         signal: input.signal,
       }),
-    { key: 'websearch:tavily' },
+    { key: breakerKey('tavily', input) },
   );
   if (!response.ok) {
-    throw new Error(`Tavily search failed (${response.status}): ${await safeReadText(response)}`);
+    throw await searchFailure('Tavily', response);
   }
   const json = (await response.json()) as {
     results?: Array<{ title?: string; url?: string; content?: string; score?: number; published_date?: string }>;
@@ -270,10 +274,10 @@ async function callSearxng(input: DriverCallInput): Promise<AdapterCallResult> {
 
   const response = await withResilience(
     () => safeFetch(url.toString(), { headers, signal: input.signal }),
-    { key: 'websearch:searxng' },
+    { key: breakerKey('searxng', input) },
   );
   if (!response.ok) {
-    throw new Error(`SearxNG search failed (${response.status}): ${await safeReadText(response)}`);
+    throw await searchFailure('SearxNG', response);
   }
   const json = (await response.json()) as {
     results?: Array<{ title?: string; url?: string; content?: string; publishedDate?: string; engine?: string; score?: number }>;
@@ -322,10 +326,10 @@ async function callDuckDuckGo(input: DriverCallInput): Promise<AdapterCallResult
         },
         signal: input.signal,
       }),
-    { key: 'websearch:duckduckgo' },
+    { key: breakerKey('duckduckgo', input) },
   );
   if (!response.ok) {
-    throw new Error(`DuckDuckGo search failed (${response.status}): ${await safeReadText(response)}`);
+    throw await searchFailure('DuckDuckGo', response);
   }
   const html = await response.text();
   return { results: parseDuckDuckGoHtml(html, input.count ?? DEFAULT_RESULTS) };
@@ -387,6 +391,16 @@ function stripHtml(value: string): string {
     .replace(/&#x?\d+;|&#\d+;/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** The failed-search error; it carries the HTTP status so a caller can tell a capacity fault from a caller-side one. */
+async function searchFailure(label: string, response: Response): Promise<Error> {
+  const error = new Error(`${label} search failed (${response.status}): ${await safeReadText(response)}`);
+  return Object.assign(error, { status: response.status });
+}
+
+function breakerKey(driver: string, input: DriverCallInput): string {
+  return input.breakerScope ? `websearch:${driver}:${input.breakerScope}` : `websearch:${driver}`;
 }
 
 async function safeReadText(response: Response): Promise<string> {

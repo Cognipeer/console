@@ -13,6 +13,8 @@ const MANAGED_GATEWAY_ONLY = 'This model can only be used through the model gate
 export interface ModelRuntimeContext {
   runtime: ModelProviderRuntime;
   record: IProviderRecord;
+  /** Managed call only: the connection the runtime was built from. */
+  managedConnectionId?: string;
 }
 
 export async function buildModelRuntime(
@@ -20,17 +22,21 @@ export async function buildModelRuntime(
   tenantId: string,
   providerKey: string,
   projectId?: string,
-  options?: { allowManaged?: boolean },
+  options?: { allowManaged?: boolean; managedConnectionId?: string },
 ): Promise<ModelRuntimeContext> {
   // Every model call from any service ends up here, so this is where an
   // internal caller (agents, RAG, evaluations) meets a switched-off service.
   await assertServiceEnabled({ tenantId, tenantDbName }, 'models');
 
-  const { record, credentials } = await loadProviderRuntimeData(
+  const { record, credentials, managedConnection } = await loadProviderRuntimeData(
     tenantDbName,
     { tenantId, key: providerKey, projectId },
     // Refused before the credentials are opened; the gateway path (allowManaged) meters the call.
-    { allowManaged: options?.allowManaged === true, managedMessage: MANAGED_GATEWAY_ONLY },
+    {
+      allowManaged: options?.allowManaged === true,
+      managedMessage: MANAGED_GATEWAY_ONLY,
+      managedConnectionId: options?.managedConnectionId,
+    },
   );
 
   assertProviderEnabled(record);
@@ -44,10 +50,15 @@ export async function buildModelRuntime(
     throw new Error('Provider configuration is not a model/audio/ocr provider.');
   }
 
-  const cacheKey = `model:${tenantId}:${record.key}`;
+  // A managed call is built from the route's connection, not the record: one pooled runtime per connection.
+  const runtimeDriver = managedConnection?.driver ?? record.driver;
+  const runtimeSettings = managedConnection?.settings ?? record.settings ?? {};
+  const cacheKey = managedConnection
+    ? `model:${tenantId}:${record.key}:${managedConnection.id}`
+    : `model:${tenantId}:${record.key}`;
   // The settings (a baseUrl, a region, an API version, ...) shape the runtime as much as the credentials do: hashed
   // with the credentials only, an edited setting would go unseen until the pooled runtime expired.
-  const configHash = hashRuntimeConfig({ driver: record.driver, credentials, settings: record.settings ?? {} });
+  const configHash = hashRuntimeConfig({ driver: runtimeDriver, credentials, settings: runtimeSettings });
 
   const runtime = await runtimePool.getOrCreate<ModelProviderRuntime>(
     cacheKey,
@@ -55,14 +66,14 @@ export async function buildModelRuntime(
     async () => {
       const providerLog = createLogger(`model:${record.key}`);
       return providerRegistry.createRuntime<ModelProviderRuntime>(
-        record.driver,
+        runtimeDriver,
         {
           tenantId,
           projectId,
           providerKey: record.key,
           credentials,
-          settings: record.settings ?? {},
-          metadata: record.metadata ?? {},
+          settings: runtimeSettings,
+          metadata: managedConnection ? {} : record.metadata ?? {},
           logger: providerLog,
         },
       );
@@ -72,5 +83,6 @@ export async function buildModelRuntime(
   return {
     runtime,
     record,
+    ...(managedConnection ? { managedConnectionId: managedConnection.id } : {}),
   };
 }

@@ -96,6 +96,22 @@ describe('sideCallReasoning', () => {
   });
 });
 
+describe('a tenant model with stored replicas is read as its own row', () => {
+  // No managed host is registered, so this is a tenant model: its first replica (another driver) must not be read.
+  const withReplicas = {
+    providerKey: 'azure-main',
+    providerDriver: 'anthropic',
+    modelId: 'claude-sonnet-5-5',
+    settings: { maxTokens: 1000 },
+    replicas: [{ providerKey: 'bedrock-x', providerDriver: 'openai', modelId: 'gpt-4o', settings: { maxTokens: 9000 } }],
+  };
+
+  it('reasoning and limits come from the model row, not replicas[0]', () => {
+    expect(sideCallReasoning(withReplicas)).toEqual({ effort: 'none' });
+    expect(sideCallLimits(withReplicas, 500).limit).toBe(1000);
+  });
+});
+
 describe('raisedSideCallLimit', () => {
   it('doubles the limit that was sent', () => {
     expect(raisedSideCallLimit(1024)).toBe(2048);

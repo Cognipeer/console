@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getManagedCreditsHost,
+  isManagedModel,
   isManagedProviderRecord,
+  listManagedRoutes,
   registerManagedCreditsHost,
   resetManagedCreditsHostForTests,
   type ManagedCreditsHost,
@@ -44,6 +46,39 @@ describe('managed credits seam', () => {
     registerManagedCreditsHost(host(() => { throw new Error('boom'); }));
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(isManagedProviderRecord({ driver: 'x' })).toBe(true);
+    spy.mockRestore();
+  });
+});
+
+describe('managed models and routes', () => {
+  const route = { id: 'route-a', connectionId: 'conn-a', driver: 'driver-a' };
+
+  it('isManagedModel asks the host by key and driver, and is false without a host or a key', () => {
+    expect(isManagedModel({ providerKey: 'managed', providerDriver: 'driver-a' })).toBe(false);
+    const registered = host((ref) => ref.driver === 'driver-a');
+    registerManagedCreditsHost(registered);
+    expect(isManagedModel({ providerKey: 'managed', providerDriver: 'driver-a' })).toBe(true);
+    expect(isManagedModel({ providerKey: 'managed', providerDriver: 'openai' })).toBe(false);
+    expect(isManagedModel({ providerDriver: 'driver-a' })).toBe(false);
+    expect(isManagedModel(null)).toBe(false);
+  });
+
+  it('listManagedRoutes returns the host routes, dropping malformed ones', () => {
+    const query = { providerKey: 'managed', kind: 'chat' as const };
+    expect(listManagedRoutes(query)).toEqual([]);
+    registerManagedCreditsHost({ ...host(() => true), listRoutes: () => [route, { id: '', connectionId: 'c', driver: 'd' }] });
+    expect(listManagedRoutes(query)).toEqual([route]);
+  });
+
+  it('listManagedRoutes is empty without the method, on a throw and on a non-array', () => {
+    const query = { providerKey: 'managed', kind: 'chat' as const };
+    registerManagedCreditsHost(host(() => true));
+    expect(listManagedRoutes(query)).toEqual([]);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    registerManagedCreditsHost({ ...host(() => true), listRoutes: () => { throw new Error('boom'); } });
+    expect(listManagedRoutes(query)).toEqual([]);
+    registerManagedCreditsHost({ ...host(() => true), listRoutes: () => 'x' as never });
+    expect(listManagedRoutes(query)).toEqual([]);
     spy.mockRestore();
   });
 });

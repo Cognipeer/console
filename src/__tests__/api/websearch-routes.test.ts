@@ -25,6 +25,7 @@ vi.mock('@/lib/services/webSearch', () => ({
 
 vi.mock('@/lib/services/providers/providerService', () => ({
   getProviderConfigByKey: vi.fn(),
+  redactPlatformProvider: (view: unknown) => view,
 }));
 
 vi.mock('@/lib/services/projects/projectContext', () => {

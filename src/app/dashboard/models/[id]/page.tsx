@@ -153,6 +153,7 @@ interface ModelDetailDto {
   /** @deprecated See `inputGuardrailKey`. */
   outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
+  allProjects?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -1709,7 +1710,7 @@ function OverviewTab({
           </Stack>
         </div>
 
-        {model.category === 'llm' ? (
+        {model.category === 'llm' && !(model.allProjects === true && model.metadata?.platform === true) ? (
           <ReasoningSummary
             settings={model.settings}
             driver={model.providerDriver}
@@ -1718,7 +1719,7 @@ function OverviewTab({
           />
         ) : null}
 
-        {model.category === 'llm' && onEditPromptCaching ? (
+        {model.category === 'llm' && onEditPromptCaching && !(model.allProjects === true && model.metadata?.platform === true) ? (
           <PromptCachingSummary
             settings={model.settings}
             driver={model.providerDriver}
@@ -1727,7 +1728,7 @@ function OverviewTab({
           />
         ) : null}
 
-        {model.category === 'llm' ? (
+        {model.category === 'llm' && !(model.allProjects === true && model.metadata?.platform === true) ? (
           <UpstreamApiSummary settings={model.settings} driver={model.providerDriver} />
         ) : null}
 

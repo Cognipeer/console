@@ -34,7 +34,7 @@ import {
   type ModelCategory,
 } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
-import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   createDynamicModel,
   createModel,
@@ -172,7 +172,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
         driver: query.driver,
         status: query.status,
       });
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       logger.error('Client list model providers error', { error });
       return sendApiTokenError(reply, error)
@@ -275,7 +275,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.includeProviders === 'true' && readsModels) {
-        payload.providers = await listModelProviders(auth.tenantDbName, auth.tenantId, projectId, {});
+        payload.providers = (await listModelProviders(auth.tenantDbName, auth.tenantId, projectId, {})).map(redactPlatformProvider);
       }
 
       return reply.code(200).send(payload);
