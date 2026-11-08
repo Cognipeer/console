@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 /**
- * The dashboard home (Overview) shows a person only what they can open and read in the ACTIVE project: a stat
- * tile only for a service whose number they can read (the API sends 0 for the others), the get-started steps only
- * for services they can open and whose progress they can read, the recent agent sessions only with Tracing, and no
- * link into a service they cannot open. The list of services it goes by is the navigation's
- * (`GET /api/auth/session` -> `effectivePermissions`, as the engine decides it).
+ * The dashboard home shows a person only what they can open and read in the ACTIVE project, and each block only when it
+ * has something: the get-started steps of a new project, what needs attention (open incidents, with Alerts), the
+ * services this browser opened last with the latest agent sessions (with Tracing), and the person's services, the
+ * recently opened first. Numbers over time are in Reports: the home has no stat tiles, no date range and no pins. The
+ * list of services it goes by is the navigation's (`GET /api/auth/session` -> `effectivePermissions`, as the engine
+ * decides it).
  */
 import { createElement, type ComponentProps } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,7 @@ import {
   click,
   installApiMock,
   installDomStubs,
+  jsonResponse,
   mount,
   q,
   qa,
@@ -32,12 +34,13 @@ vi.mock('next/navigation', () => ({
 import DashboardOverviewPage from '@/app/dashboard/overview/page';
 import { GetStarted } from '@/components/dashboard/GetStarted';
 import {
-  dailyLine,
   getStartedComplete,
   getStartedSteps,
-  overviewTiles,
+  homeServices,
+  recentlyOpenedServices,
   type OverviewStats,
 } from '@/components/dashboard/overviewModel';
+import type { IncidentDto } from '@/components/alerts/alertTypes';
 import { LauncherProvider, type LauncherContextValue } from '@/components/layout/launcher/LauncherContext';
 import { getDashboardServices } from '@/lib/utils/dashboardServices';
 import type { ServicePermissionLevel } from '@/lib/security/rbac';
@@ -91,27 +94,53 @@ const SESSIONS = [
   { sessionId: 's/2', agentName: 'Orders Bot', status: 'error', startedAt: new Date(Date.now() - 14 * 60_000).toISOString(), durationMs: 800, totalTokens: 410, totalEvents: 3 },
 ];
 
-const DAILY = [
-  { date: '2026-11-05', sessionsCount: 10, totalTokens: 1_000_000 },
-  { date: '2026-11-06', sessionsCount: 21, totalTokens: 2_400_000 },
-];
+const INCIDENT: IncidentDto = {
+  _id: 'i1',
+  ruleName: 'Agent error rate',
+  ruleId: 'r1',
+  alertEventId: 'e-i1',
+  metric: 'agent_error_rate',
+  threshold: 5,
+  actualValue: 9.5,
+  severity: 'critical',
+  status: 'open',
+  notes: [],
+  firedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+  entityType: 'agent',
+  entityKey: 'refund-bot',
+  module: 'agents',
+  metadata: { operator: 'gt' },
+};
 
 const ALL: Levels = { models: 'write', prompts: 'read', agents: 'write', vector: 'read', rag: 'write', tracing: 'read' };
 
 async function renderHome(
   levels: Levels,
   locale = 'en',
-  options: { stats?: OverviewStats; sessions?: unknown[]; daily?: unknown[]; pinned?: number | string[]; recents?: string[]; project?: string } = {},
+  options: {
+    stats?: OverviewStats;
+    sessions?: unknown[];
+    recents?: string[];
+    project?: string;
+    incidents?: IncidentDto[];
+    /** Answers `GET /api/dashboard` in place of the stats and sessions above. */
+    dashboard?: () => unknown;
+  } = {},
 ) {
   const api = installApiMock([
-    ['GET', '/api/dashboard', () => ({
-      stats: options.stats ?? ESTABLISHED,
-      recentActivity: [],
-      recentSessions: options.sessions ?? [],
-      daily: options.daily ?? [],
-      user: { email: 'ann@acme.test', licenseType: 'ENTERPRISE' },
-    })],
-    ['GET', '/api/alerts/incidents', () => ({ incidents: [] })],
+    [
+      'GET',
+      '/api/dashboard',
+      options.dashboard ??
+        (() => ({
+          stats: options.stats ?? ESTABLISHED,
+          recentActivity: [],
+          recentSessions: options.sessions ?? [],
+          daily: [],
+          user: { email: 'ann@acme.test', licenseType: 'ENTERPRISE' },
+        })),
+    ],
+    ['GET', '/api/alerts/incidents', () => ({ incidents: options.incidents ?? [], openCount: options.incidents?.length ?? 0 })],
   ]);
   if (options.project) {
     api.on('GET', '/api/projects', () => ({ projects: [{ _id: 'p1', name: options.project, key: 'cs' }], activeProjectId: 'p1' }));
@@ -119,14 +148,12 @@ async function renderHome(
   const services = offeredTo(levels);
   const value: LauncherContextValue = {
     pinned: new Set(),
-    recents: [],
+    recents: options.recents ?? [],
     togglePin: () => {},
     recordVisit: () => {},
     services,
-    pinnedServices: Array.isArray(options.pinned)
-      ? services.filter((s) => (options.pinned as string[]).includes(String(s.id)))
-      : services.slice(0, options.pinned ?? 0),
-    recentServices: services.filter((s) => (options.recents ?? []).includes(String(s.id))),
+    pinnedServices: [],
+    recentServices: [],
     isTenantAdmin: false,
     openLauncher: () => {},
     hydrated: true,
@@ -136,26 +163,51 @@ async function renderHome(
   return api;
 }
 
-const hrefs = (scope: ParentNode = document.body) => qa<HTMLAnchorElement>('a', scope).map((a) => a.getAttribute('href'));
-const tileLabels = () => qa('.ds-stat-label').map((el) => el.textContent ?? '');
+const hrefs = (scope: ParentNode | null = document.body) =>
+  qa<HTMLAnchorElement>('a', scope ?? undefined).map((a) => a.getAttribute('href'));
 const stepIds = () => qa('[data-testid="get-started"] li').map((li) => li.getAttribute('data-step'));
-const card = (heading: string) => qa('.ds-card').find((el) => el.querySelector('.ds-h3')?.textContent === heading);
+const block = (id: string) => q(`[data-testid="${id}"]`);
 
-describe('overviewTiles', () => {
-  it('has a tile only for a service whose number the person can read', () => {
-    expect(overviewTiles(new Set(['tracing', 'models', 'vector']))).toEqual(['sessions', 'tokens', 'models', 'indexes']);
-    expect(overviewTiles(new Set(['tracing']))).toEqual(['sessions', 'tokens']);
-    expect(overviewTiles(new Set(['vector', 'agents']))).toEqual(['indexes']);
-    expect(overviewTiles(new Set(['agents', 'prompts']))).toEqual([]);
+describe('recentlyOpenedServices and homeServices', () => {
+  const service = (id: string, extra: { defaultPinned?: boolean; isSettings?: boolean } = {}) => ({
+    id,
+    href: `/dashboard/${id}`,
+    ...extra,
   });
-});
+  const SERVICES = [
+    service('services-home'),
+    service('models', { defaultPinned: true }),
+    service('prompts', { defaultPinned: true }),
+    service('vector'),
+    service('agents', { defaultPinned: true }),
+    service('tracing'),
+    service('cost'),
+    service('alerts'),
+    service('tokens', { isSettings: true }),
+  ];
+  const ids = (list: Array<{ id: string }>) => list.map((s) => s.id);
 
-describe('dailyLine', () => {
-  it('draws the daily series the API returns, and nothing for fewer than two days', () => {
-    expect(dailyLine(DAILY, 'sessionsCount')).toEqual([10, 21]);
-    expect(dailyLine(DAILY, 'totalTokens')).toEqual([1_000_000, 2_400_000]);
-    expect(dailyLine(DAILY.slice(0, 1), 'sessionsCount')).toBeUndefined();
-    expect(dailyLine(undefined, 'sessionsCount')).toBeUndefined();
+  it('keeps the services opened last that the person can still open, the latest first, without Settings', () => {
+    expect(ids(recentlyOpenedServices(SERVICES, ['tracing', 'tokens', 'gone', 'models']))).toEqual(['tracing', 'models']);
+    expect(recentlyOpenedServices(SERVICES, [])).toEqual([]);
+  });
+
+  it('lists the recently opened first, then the usual ones, then the others, up to six', () => {
+    const fresh = homeServices(SERVICES, []);
+    expect(ids(fresh.shown)).toEqual(['models', 'prompts', 'agents', 'vector', 'tracing', 'cost']);
+    expect(fresh.more).toBe(1);
+    const used = homeServices(SERVICES, ['cost', 'agents']);
+    expect(ids(used.shown)).toEqual(['cost', 'agents', 'models', 'prompts', 'vector', 'tracing']);
+    expect(used.more).toBe(1);
+  });
+
+  it('shows them all when there are six or fewer, never Home itself nor a Settings page', () => {
+    const few = homeServices(
+      SERVICES.filter((s) => ['services-home', 'agents', 'prompts', 'tokens'].includes(s.id)),
+      [],
+    );
+    expect(ids(few.shown)).toEqual(['prompts', 'agents']);
+    expect(few.more).toBe(0);
   });
 });
 
@@ -233,13 +285,12 @@ describe('GetStarted', () => {
 });
 
 describe('the dashboard home: get started', () => {
-  it('leads a new project with the steps, above the numbers', async () => {
-    await renderHome(ALL, 'en', { stats: EMPTY });
+  it('leads a new project with the steps, above everything else', async () => {
+    await renderHome(ALL, 'en', { stats: EMPTY, recents: ['agents'] });
     expect(stepIds()).toEqual(['model', 'knowledge', 'agent']);
     expect(text()).toContain('0 of 3 done');
     const getStarted = q('[data-testid="get-started"]')!;
-    const tiles = q('.ds-stat-grid')!;
-    expect(getStarted.compareDocumentPosition(tiles) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(getStarted.compareDocumentPosition(block('home-pick-up')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(hrefs(getStarted)).toEqual(['/dashboard/models', '/dashboard/rag', '/dashboard/agents']);
   });
 
@@ -257,10 +308,11 @@ describe('the dashboard home: get started', () => {
     expect(q('[data-testid="get-started"]')).toBeNull();
   });
 
-  it('is not shown under a date range, whose counts do not cover the whole project', async () => {
+  it('reads the whole project: the home has no date range, and one in the address changes nothing', async () => {
     nav.params = new URLSearchParams('period=last_7_days');
-    await renderHome(ALL, 'en', { stats: EMPTY });
-    expect(q('[data-testid="get-started"]')).toBeNull();
+    const api = await renderHome(ALL, 'en', { stats: EMPTY });
+    expect(api.to('GET', '/api/dashboard').map((call) => call.query)).toEqual([{ period: 'total' }]);
+    expect(stepIds()).toEqual(['model', 'knowledge', 'agent']);
   });
 
   it('offers only the steps a person can open and tick', async () => {
@@ -272,45 +324,29 @@ describe('the dashboard home: get started', () => {
   });
 });
 
-describe('the dashboard home: numbers', () => {
-  it('shows the four tiles to someone who can read all of their services, with the real daily lines', async () => {
-    await renderHome(ALL, 'en', { daily: DAILY });
-    expect(tileLabels()).toEqual(['Agent sessions', 'Tokens', 'Models', 'Vector indexes']);
-    const tiles = qa('.ds-stat');
-    expect(tiles[0].textContent).toContain('31');
-    expect(tiles[0].textContent).toContain('+12.5% vs previous 7 days');
-    expect(tiles[1].textContent).toContain('3.4M');
-    expect(tiles[2].textContent).toContain('5 LLM · 2 embedding');
-    expect(tiles[3].textContent).toContain('2 providers');
-    // Lines only where there is a series: sessions and tokens.
-    expect(tiles.map((tile) => Boolean(tile.querySelector('.ds-stat-spark')))).toEqual([true, true, false, false]);
-  });
-
-  it('draws no line without at least two days of data', async () => {
-    await renderHome(ALL, 'en', { daily: DAILY.slice(0, 1) });
-    expect(q('.ds-stat-spark')).toBeNull();
-  });
-
-  it('shows no tile, and no zero, for a service the person cannot read', async () => {
-    await renderHome({ tracing: 'read', prompts: 'read' });
-    expect(tileLabels()).toEqual(['Agent sessions', 'Tokens']);
+describe('the dashboard home: what needs attention', () => {
+  it('shows the open incidents, and only while there are some', async () => {
+    await renderHome({ ...ALL, alerts: 'read' }, 'en', { incidents: [INCIDENT] });
+    const attention = block('home-attention')!;
+    expect(attention.querySelector('[data-testid="active-incidents-card"]')?.textContent).toContain('Agent error rate');
+    expect(hrefs(attention)).toContain('/dashboard/alerts/incidents/i1');
     await mounted.unmount();
-    await renderHome({ prompts: 'read', agents: 'read' });
-    expect(q('.ds-stat-grid')).toBeNull();
-    expect(text()).not.toContain('Deploy model');
+    await renderHome({ ...ALL, alerts: 'read' }, 'en', { incidents: [] });
+    expect(block('home-attention')!.childElementCount).toBe(0);
   });
 
-  it('marks the stat tiles as Turkish, for their upper-cased labels', async () => {
-    await renderHome(ALL, 'tr');
-    expect(q('.ds-stat-label')?.closest('[lang]')?.getAttribute('lang')).toBe('tr');
-    expect(tileLabels()).toEqual(['Ajan oturumları', 'Token', 'Modeller', 'Vektör indeksleri']);
+  it('asks nothing without Alerts', async () => {
+    const api = await renderHome(ALL);
+    expect(api.to('GET', '/api/alerts/incidents')).toHaveLength(0);
+    expect(block('home-attention')!.childElementCount).toBe(0);
   });
 });
 
-describe('the dashboard home: sessions, services and resources', () => {
-  it('lists the latest agent sessions, each a link to its session', async () => {
-    await renderHome(ALL, 'en', { sessions: SESSIONS });
-    const sessions = card('Recent agent sessions')!;
+describe('the dashboard home: pick up where you left off', () => {
+  it('lists the services opened last, then the latest agent sessions, each a link', async () => {
+    await renderHome(ALL, 'en', { recents: ['rag', 'models'], sessions: SESSIONS });
+    expect(hrefs(block('recently-opened'))).toEqual(['/dashboard/rag', '/dashboard/models']);
+    const sessions = block('home-sessions')!;
     expect(sessions.textContent).toContain('Help Center Assistant');
     expect(sessions.textContent).toContain('3.2 s · 1,180 tokens');
     expect(sessions.textContent).toContain('2m ago');
@@ -318,69 +354,109 @@ describe('the dashboard home: sessions, services and resources', () => {
     expect(hrefs(sessions)).toEqual(['/dashboard/tracing', '/dashboard/tracing/sessions/s-1', '/dashboard/tracing/sessions/s%2F2']);
   });
 
-  it('leaves the sessions out without Tracing, and the resources take the row', async () => {
-    await renderHome({ prompts: 'read', agents: 'read' });
-    expect(card('Recent agent sessions')).toBeUndefined();
-    expect(hrefs()).not.toContain('/dashboard/tracing');
-    expect(card('Resources')!.style.gridColumn).toBe('1 / -1');
+  it('leaves out a service the person can no longer open', async () => {
+    await renderHome(ALL, 'en', { recents: ['cost', 'agents'] });
+    expect(hrefs(block('recently-opened'))).toEqual(['/dashboard/agents']);
   });
 
-  it('puts the counts on the service cards and lists recently opened services', async () => {
-    await renderHome(ALL, 'en', { pinned: ['models', 'vector', 'tracing', 'agents'], recents: ['rag', 'models'] });
-    const services = card('Your services')!;
+  it('leaves the sessions out without Tracing', async () => {
+    await renderHome({ prompts: 'read', agents: 'read' }, 'en', { recents: ['agents'], sessions: SESSIONS });
+    expect(block('home-sessions')).toBeNull();
+    expect(hrefs()).not.toContain('/dashboard/tracing');
+    expect(hrefs(block('recently-opened'))).toEqual(['/dashboard/agents']);
+  });
+
+  it('is not there when there is nothing to pick up', async () => {
+    await renderHome(ALL, 'en', { recents: [], sessions: [] });
+    expect(block('home-pick-up')).toBeNull();
+  });
+
+  it('says so when the sessions could not be loaded, and tries again', async () => {
+    let calls = 0;
+    await renderHome(ALL, 'en', {
+      dashboard: () => {
+        calls += 1;
+        return calls === 1
+          ? jsonResponse({ error: 'boom' }, 500)
+          : { stats: ESTABLISHED, recentSessions: SESSIONS, user: { email: 'ann@acme.test', licenseType: 'ENTERPRISE' } };
+      },
+    });
+    expect(block('home-sessions')!.textContent).toContain('Couldn’t load recent activity.');
+    await click(buttonByText('Retry'));
+    await settle(100);
+    expect(block('home-sessions')!.textContent).toContain('Help Center Assistant');
+  });
+});
+
+describe('the dashboard home: your services', () => {
+  it('puts the counts on the cards of the services the page has numbers for, and what the others are for', async () => {
+    await renderHome(ALL);
+    const services = block('home-services')!;
     const countsOf = (id: string) => services.querySelector(`[data-counts="${id}"]`)?.textContent;
     expect(countsOf('models')).toBe('5 LLM · 2 embedding');
     expect(countsOf('vector')).toBe('4 indexes');
     expect(countsOf('tracing')).toBe('31 sessions');
     expect(countsOf('agents')).toBeUndefined();
-    // Recently opened: the ones not already pinned.
-    expect(hrefs(q('[data-testid="recently-opened"]')!)).toEqual(['/dashboard/rag']);
-    expect(text()).not.toContain('Top resources');
+    expect(hrefs(services)).toContain('/dashboard/agents');
   });
 
-  it('links to Alerts only for someone who can open it, and names the license', async () => {
+  it('lists the recently opened first, at most six; the others are in the menu', async () => {
+    await renderHome({ ...ALL, cost: 'read', alerts: 'read', guardrails: 'read' }, 'en', { recents: ['tracing', 'rag'] });
+    const links = hrefs(block('home-services'));
+    expect(links).toHaveLength(6);
+    expect(links.slice(0, 2)).toEqual(['/dashboard/tracing', '/dashboard/rag']);
+    expect(links).not.toContain('/dashboard/cost');
+    expect(block('home-services')!.textContent).toContain('3 more in the menu');
+  });
+
+  it('has nothing to pin or add', async () => {
     await renderHome(ALL);
-    expect(hrefs(card('Resources')!)).not.toContain('/dashboard/alerts');
-    expect(card('Resources')!.textContent).toContain('ENTERPRISE');
-    await mounted.unmount();
-    await renderHome({ ...ALL, alerts: 'read' });
-    expect(hrefs(card('Resources')!)).toContain('/dashboard/alerts');
+    for (const words of ['Pin more', 'Add service', 'pinned']) expect(text(), words).not.toContain(words);
+  });
+});
+
+describe('the dashboard home: what it leaves to Reports and the menu', () => {
+  it('has no stat tiles, no quick deploy and no resources', async () => {
+    await renderHome(ALL);
+    expect(q('.ds-stat-grid')).toBeNull();
+    for (const words of ['Deploy model', 'Resources', 'API Documentation', 'License', 'Tokens']) {
+      expect(text(), words).not.toContain(words);
+    }
   });
 
-  it('says which project and period the numbers cover', async () => {
+  it('names the project under the greeting', async () => {
     await renderHome(ALL, 'en', { project: 'Customer Support' });
-    expect(q('[data-testid="overview-scope"]')?.textContent).toBe('Customer Support · All time');
+    expect(block('home-project')?.textContent).toBe('Project: Customer Support');
     await mounted.unmount();
-    nav.params = new URLSearchParams('period=last_7_days');
     await renderHome(ALL, 'tr', { project: 'Müşteri Destek' });
-    expect(q('[data-testid="overview-scope"]')?.textContent).toBe('Müşteri Destek · Son 7 gün');
+    expect(block('home-project')?.textContent).toBe('Proje: Müşteri Destek');
   });
 });
 
 describe('the dashboard home, in both languages', () => {
   it('reads in English', async () => {
-    await renderHome(ALL, 'en', { pinned: 2, sessions: SESSIONS, stats: EMPTY });
+    await renderHome(ALL, 'en', { recents: ['agents'], sessions: SESSIONS, stats: EMPTY });
     const t = text();
     for (const words of [
-      'Welcome back, ann', 'Deploy model', 'Get started', 'Connect a model', 'Your services', '2 pinned · ', 'Pin more',
-      'Add service', 'Recent agent sessions', 'View all in Tracing', 'Resources', 'API Documentation', 'License',
+      'Welcome back, ann', 'Get started', 'Connect a model', 'Pick up where you left off', 'Recently opened',
+      'Recent agent sessions', 'View all in Tracing', 'Your services',
     ]) {
       expect(t, words).toContain(words);
     }
   });
 
   it('reads in Turkish, with nothing left in English', async () => {
-    await renderHome(ALL, 'tr', { pinned: 2, sessions: SESSIONS, stats: EMPTY });
+    await renderHome(ALL, 'tr', { recents: ['agents'], sessions: SESSIONS, stats: EMPTY });
     const t = text();
     for (const words of [
-      'Tekrar hoş geldiniz, ann', 'Model dağıt', 'Başlayın', 'Bir model bağlayın', 'Servisleriniz', '2 sabitlenmiş · ',
-      'Daha fazla sabitle', 'Servis ekle', 'Son ajan oturumları', 'Kaynaklar', 'API dokümantasyonu', 'Lisans', '2 dk önce',
+      'Tekrar hoş geldiniz, ann', 'Başlayın', 'Bir model bağlayın', 'Kaldığınız yerden devam edin', 'Son açılanlar',
+      'Son ajan oturumları', 'Servisleriniz', '2 dk önce',
     ]) {
       expect(t, words).toContain(words);
     }
     for (const words of [
-      'Welcome back', 'Deploy model', 'Get started', 'Your services', 'Pin more', 'Recent agent sessions', 'View all', 'ago',
-      'API Documentation', 'License',
+      'Welcome back', 'Get started', 'Your services', 'Pick up', 'Recently opened', 'Recent agent sessions', 'View all',
+      'ago',
     ]) {
       expect(t, words).not.toContain(words);
     }

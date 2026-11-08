@@ -1,0 +1,12 @@
+/* The home page's needs-attention row: one card takes the whole width, two sit side by side where they fit. A card
+   with nothing to say renders nothing, and a row left empty takes no space at all. */
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.row:empty {
+  display: none;
+}

@@ -19,6 +19,11 @@ export interface ActiveIncidentsCardProps {
   limit?: number;
   /** Tighter rows without the metric line. */
   compact?: boolean;
+  /**
+   * Nothing at all unless an incident is open: no placeholder while loading, no error and no "all clear" line (the
+   * home page's needs-attention row, which is there only when something needs attention).
+   */
+  hideWhenEmpty?: boolean;
 }
 
 /**
@@ -26,7 +31,7 @@ export interface ActiveIncidentsCardProps {
  * its own data (`GET /alerts/incidents?status=open`). A viewer without access to the
  * alerts service sees nothing at all, so the card can sit on any overview page.
  */
-export default function ActiveIncidentsCard({ limit = 5, compact = false }: ActiveIncidentsCardProps) {
+export default function ActiveIncidentsCard({ limit = 5, compact = false, hideWhenEmpty = false }: ActiveIncidentsCardProps) {
   const t = useTranslations('alerts');
   const locale = useLocale();
   const { catalog } = useAlertMeta();
@@ -67,6 +72,7 @@ export default function ActiveIncidentsCard({ limit = 5, compact = false }: Acti
   }, [load]);
 
   if (hidden) return null;
+  if (hideWhenEmpty && (error || incidents.length === 0)) return null;
   if (loading && incidents.length === 0 && !error) return <CardSkeleton lines={compact ? 2 : 3} />;
 
   return (

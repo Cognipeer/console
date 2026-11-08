@@ -3351,17 +3351,6 @@ export const en = {
   dashboardOverview: {
     title: 'Dashboard Overview',
     subtitle: 'Operational highlights across your workspace.',
-    stats: {
-      apiRequests: 'API Requests',
-      activeSessions: 'Active Sessions',
-      vectorIndexes: 'Knowledge Indexes',
-      models: 'Model Hub',
-      // The home's tiles: each from one service, shown only to people who can open it.
-      sessions: 'Agent sessions',
-      tokens: 'Tokens',
-      modelsTotal: 'Models',
-      indexes: 'Vector indexes',
-    },
     activity: {
       title: 'Recent Activity',
       viewAll: 'View All',
@@ -3378,16 +3367,6 @@ export const en = {
       status: 'Active',
       usage: 'API Usage',
       features: 'Active Features',
-    },
-    resources: {
-      title: 'Resources',
-      docs: 'API Documentation',
-      docsDesc: 'Reference the API surface and examples',
-      sdk: 'Agent SDK',
-      sdkDesc: 'Instrument agents with the SDK',
-      alerts: 'Alerts',
-      alertsDesc: 'Threshold alerts on service metrics',
-      license: 'License',
     },
     // The project's latest agent sessions (from Tracing).
     recentSessions: {
@@ -3422,12 +3401,11 @@ export const en = {
         },
       },
     },
-    // The page's own headings and quick links.
+    // The page's own headings.
     home: {
-      eyebrow: 'Overview',
       welcome: 'Welcome back, {name}',
-      deployModel: 'Deploy model',
-      trend: '{value}% vs previous 7 days',
+      // Under the greeting: the project the page is about.
+      project: 'Project: {project}',
       // What the numbers cover, under the title.
       scope: {
         withProject: '{project} · {range}',
@@ -3443,16 +3421,17 @@ export const en = {
         indexOne: '{count} index',
         indexMany: '{count} indexes',
         sessionOne: '{count} session',
-        providerOne: '{count} provider',
-        providerMany: '{count} providers',
         sessionMany: '{count} sessions',
       },
-      recentlyOpened: 'Recently opened:',
-      pinned: {
+      // The services this browser opened last and the project's latest agent sessions.
+      pickUp: {
+        title: 'Pick up where you left off',
+        recentlyOpened: 'Recently opened',
+      },
+      // The services the person can open, the recently opened first; the others are in the menu.
+      services: {
         title: 'Your services',
-        summary: '{pinned} pinned · {more} more available',
-        pinMore: 'Pin more',
-        addService: 'Add service',
+        more: '{count} more in the menu',
       },
       ago: {
         justNow: 'just now',
@@ -3461,7 +3440,6 @@ export const en = {
         days: '{count}d ago',
       },
     },
-    statsError: 'Couldn’t load workspace stats.',
     activityError: 'Couldn’t load recent activity.',
   },
   models: {

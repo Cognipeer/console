@@ -40,7 +40,7 @@ describe('dashboard home strings', () => {
     }
   });
 
-  it.each([...TRANSLATED, 'dashboardOverview.home', 'dashboardOverview.stats', 'dashboardOverview.resources'])(
+  it.each([...TRANSLATED, 'dashboardOverview.home'])(
     '%s has the same keys and placeholders in both languages',
     (root) => {
       const en = leaves(lookup('en', root));
@@ -137,8 +137,6 @@ describe('the quota editor and its cards in Turkish', () => {
 describe('the dashboard home in Turkish', () => {
   // Product names, and figure lines that read the same.
   const SAME_ON_PURPOSE = new Set([
-    'stats.models',
-    'resources.sdk',
     'home.serviceCounts.models',
     'home.scope.withProject',
     'home.scope.custom',

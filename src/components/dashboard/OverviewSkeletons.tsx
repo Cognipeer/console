@@ -1,25 +1,13 @@
 'use client';
 
 import type { CSSProperties } from 'react';
-import { Group, Skeleton, Stack, Text } from '@mantine/core';
-import {
-  PageHeaderSkeleton,
-  SkeletonRegion,
-  SkeletonText,
-  StatGridSkeleton,
-} from '@/components/common/ui/Skeletons';
+import { Group, Skeleton, Stack } from '@mantine/core';
+import { PageHeaderSkeleton, SkeletonRegion, SkeletonText } from '@/components/common/ui/Skeletons';
 
 /*
- * Placeholders for the community Overview page. They mirror the real card
- * structure (same classes, paddings, grids and Mantine text sizes) so the
- * page can swap regions in place without moving its neighbours.
+ * Placeholders for the dashboard home. They mirror the real card structure (same classes, paddings, grids and
+ * Mantine text sizes) so the page can swap regions in place without moving its neighbours.
  */
-
-const TWO_COLUMN_GRID: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
-  gap: 16,
-};
 
 const TILE_CARD: CSSProperties = { background: 'var(--ds-surface-1)' };
 
@@ -27,38 +15,11 @@ function IconBone({ size = 32 }: { size?: number }) {
   return <Skeleton width={size} height={size} radius={8} style={{ flexShrink: 0 }} />;
 }
 
-function CardHeaderBones({
-  titleWidth = 150,
-  subtitle = false,
-  action,
-  actionWidth = 90,
-  marginBottom = 14,
-}: {
-  titleWidth?: number;
-  subtitle?: boolean;
-  action?: 'button' | 'text';
-  /** Width of the `xs` header button (28px tall). */
-  actionWidth?: number;
-  marginBottom?: number;
-}) {
+/** A card's heading (`ds-h3`). */
+function CardHeaderBones({ titleWidth = 150, marginBottom = 14 }: { titleWidth?: number; marginBottom?: number }) {
   return (
-    <div className="ds-row-between" style={{ marginBottom }}>
-      <div>
-        <div className="ds-h3">
-          <SkeletonText width={titleWidth} />
-        </div>
-        {subtitle ? (
-          <div style={{ fontSize: 12.5, marginTop: 2 }}>
-            <SkeletonText width={190} />
-          </div>
-        ) : null}
-      </div>
-      {action === 'button' ? <Skeleton width={actionWidth} height={28} radius="md" /> : null}
-      {action === 'text' ? (
-        <Text size="xs" component="div">
-          <SkeletonText width={150} />
-        </Text>
-      ) : null}
+    <div className="ds-h3" style={{ marginBottom }}>
+      <SkeletonText width={titleWidth} />
     </div>
   );
 }
@@ -68,13 +29,8 @@ function ServiceTileBones() {
     <div className="ds-card ds-card-pad-sm" style={TILE_CARD}>
       <div className="ds-row ds-gap-sm" style={{ marginBottom: 8 }}>
         <IconBone />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13 }}>
-            <SkeletonText width="70%" />
-          </div>
-          <div style={{ fontSize: 10.5 }}>
-            <SkeletonText width="40%" />
-          </div>
+        <div style={{ minWidth: 0, flex: 1, fontSize: 13 }}>
+          <SkeletonText width="70%" />
         </div>
       </div>
       <div style={{ fontSize: 11.5, lineHeight: 1.4 }}>
@@ -89,36 +45,11 @@ function ServiceTileBones() {
   );
 }
 
-/** Tiles of the "Your services" grid (pinned services + "Add service"). */
-export function PinnedServiceTilesSkeleton({ count = 6 }: { count?: number }) {
-  return (
-    <>
-      {Array.from({ length: count }, (_, index) => (
-        <ServiceTileBones key={index} />
-      ))}
-      {/* "Add service": one line of `Text size="sm"`, centred. */}
-      <div
-        className="ds-card ds-card-pad-sm"
-        style={{
-          background: 'transparent',
-          borderStyle: 'dashed',
-          display: 'grid',
-          placeItems: 'center',
-        }}
-      >
-        <Text size="sm" component="div">
-          <SkeletonText width={96} />
-        </Text>
-      </div>
-    </>
-  );
-}
-
-/** "Your services" card while launcher preferences are restored. */
-export function PinnedServicesSkeleton({ count = 6 }: { count?: number }) {
+/** The home's "Your services" card while the services opened last are restored. */
+export function HomeServicesSkeleton({ count = 6 }: { count?: number }) {
   return (
     <SkeletonRegion className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
-      <CardHeaderBones subtitle action="button" actionWidth={95} />
+      <CardHeaderBones titleWidth={130} />
       <div
         style={{
           display: 'grid',
@@ -126,7 +57,9 @@ export function PinnedServicesSkeleton({ count = 6 }: { count?: number }) {
           gap: 10,
         }}
       >
-        <PinnedServiceTilesSkeleton count={count} />
+        {Array.from({ length: count }, (_, index) => (
+          <ServiceTileBones key={index} />
+        ))}
       </div>
     </SkeletonRegion>
   );
@@ -134,7 +67,7 @@ export function PinnedServicesSkeleton({ count = 6 }: { count?: number }) {
 
 const ACTIVITY_TEXT_WIDTHS = ['88%', '74%', '92%', '68%', '84%', '78%'];
 
-/** Rows of the Overview "Activity" card while its first load is pending. */
+/** Rows of the home's recent agent sessions while their first load is pending. */
 export function ActivityListSkeleton({ rows = 6 }: { rows?: number }) {
   return (
     <SkeletonRegion>
@@ -161,61 +94,21 @@ export function ActivityListSkeleton({ rows = 6 }: { rows?: number }) {
   );
 }
 
-function ResourceRowBones() {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '10px 12px',
-        border: '1px solid var(--ds-border-soft)',
-        borderRadius: 'var(--ds-r-sm)',
-      }}
-    >
-      <IconBone />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <Text size="sm" component="div">
-          <SkeletonText width="42%" />
-        </Text>
-        <Text size="xs" component="div">
-          <SkeletonText width="64%" />
-        </Text>
-      </div>
-      <Text size="lg" component="div">
-        <SkeletonText width={28} />
-      </Text>
-    </div>
-  );
-}
-
-/** Route-level placeholder for `/dashboard/overview`. */
+/** Route-level placeholder for `/dashboard/overview` (the home). */
 export function OverviewSkeleton() {
   return (
     <SkeletonRegion className="ds-page">
-      <PageHeaderSkeleton actions={[140, 220, 140]} titleWidth={300} />
-      <StatGridSkeleton count={4} spark style={{ marginBottom: 16 }} />
-      <PinnedServicesSkeleton />
-
-      <div className="ds-grid-two" style={TWO_COLUMN_GRID}>
-        <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={170} action="button" actionWidth={140} marginBottom={12} />
-          <ActivityListSkeleton rows={5} />
-        </div>
-        <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={100} marginBottom={12} />
-          <Stack gap="xs">
-            <ResourceRowBones />
-            <ResourceRowBones />
-            <Group gap={8} mt={4}>
-              <Text size="xs" component="div">
-                <SkeletonText width={44} />
-              </Text>
-              <Skeleton width={72} height={18} radius="xl" />
-            </Group>
-          </Stack>
-        </div>
+      <PageHeaderSkeleton eyebrow={false} actions={0} titleWidth={300} subtitleWidth={180} />
+      <div className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
+        <CardHeaderBones titleWidth={220} marginBottom={12} />
+        <Group gap={6} mb={18}>
+          {[92, 132, 104, 120].map((width) => (
+            <Skeleton key={width} width={width} height={26} radius="xl" />
+          ))}
+        </Group>
+        <ActivityListSkeleton rows={3} />
       </div>
+      <HomeServicesSkeleton />
     </SkeletonRegion>
   );
 }

@@ -2643,16 +2643,6 @@ export const tr: typeof en = {
     ...en.dashboardOverview,
     title: 'Panel genel bakışı',
     subtitle: 'Çalışma alanınızdaki operasyonel özet.',
-    stats: {
-      apiRequests: 'API istekleri',
-      activeSessions: 'Etkin oturumlar',
-      vectorIndexes: 'Bilgi indeksleri',
-      models: 'Model Hub',
-      sessions: 'Ajan oturumları',
-      tokens: 'Token',
-      modelsTotal: 'Modeller',
-      indexes: 'Vektör indeksleri',
-    },
     activity: {
       title: 'Son etkinlik',
       viewAll: 'Tümünü gör',
@@ -2669,16 +2659,6 @@ export const tr: typeof en = {
       status: 'Aktif',
       usage: 'API kullanımı',
       features: 'Etkin özellikler',
-    },
-    resources: {
-      title: 'Kaynaklar',
-      docs: 'API dokümantasyonu',
-      docsDesc: 'API yüzeyine ve örneklere göz atın',
-      sdk: 'Agent SDK',
-      sdkDesc: 'Agent\'lara SDK ile izleme ekleyin',
-      alerts: 'Alarmlar',
-      alertsDesc: 'Servis metrikleri için eşik alarmları',
-      license: 'Lisans',
     },
     recentSessions: {
       title: 'Son ajan oturumları',
@@ -2712,10 +2692,8 @@ export const tr: typeof en = {
       },
     },
     home: {
-      eyebrow: 'Genel bakış',
       welcome: 'Tekrar hoş geldiniz, {name}',
-      deployModel: 'Model dağıt',
-      trend: 'Önceki 7 güne göre {value}%',
+      project: 'Proje: {project}',
       scope: {
         withProject: '{project} · {range}',
         total: 'Tüm zamanlar',
@@ -2729,16 +2707,15 @@ export const tr: typeof en = {
         indexOne: '{count} indeks',
         indexMany: '{count} indeks',
         sessionOne: '{count} oturum',
-        providerOne: '{count} sağlayıcı',
-        providerMany: '{count} sağlayıcı',
         sessionMany: '{count} oturum',
       },
-      recentlyOpened: 'Son açılanlar:',
-      pinned: {
+      pickUp: {
+        title: 'Kaldığınız yerden devam edin',
+        recentlyOpened: 'Son açılanlar',
+      },
+      services: {
         title: 'Servisleriniz',
-        summary: '{pinned} sabitlenmiş · {more} servis daha kullanılabilir',
-        pinMore: 'Daha fazla sabitle',
-        addService: 'Servis ekle',
+        more: '{count} servis daha menüde',
       },
       ago: {
         justNow: 'az önce',
@@ -2747,7 +2724,6 @@ export const tr: typeof en = {
         days: '{count} gün önce',
       },
     },
-    statsError: 'Çalışma alanı istatistikleri yüklenemedi.',
     activityError: 'Son etkinlikler yüklenemedi.',
   },
   breadcrumbs: {

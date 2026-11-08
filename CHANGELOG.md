@@ -817,6 +817,17 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   style (folding categories, the pages of the service in view under it); `SIDEBAR_NAV` switches back to the rail and
   the sub-nav. Both are kept.
 
+### A simpler home page
+
+- The home is where a person starts, not a report. Each block is there only when it has something to show: the first
+  steps of a new project (until they are done), what needs attention now (open incidents; in Enterprise also entity
+  health over the last 24 hours, only while something is critical, warning or degraded), "Pick up where you left off"
+  (the services this browser opened last and the project's latest agent sessions) and "Your services" (the recently
+  opened first, at most six, with their counts or what they are for; the others are in the menu).
+- The stat tiles, the date range, the "Deploy model" button, Resources and the pinned services are gone from it, and
+  in Enterprise the key metrics and the grid of report cards too: numbers over time are in Reports, the docs under
+  Help in the menu. The greeting names the project the page is about.
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept
