@@ -785,6 +785,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Sandbox overview: By state and Recent sandboxes stack on a narrow screen and the list scrolls in its card.
   Telephony: the test call's fields stack on a phone, and the public URL ends in an ellipsis (copy button beside it)
   instead of being cut off.
+- In a phone's browser the dashboard fits the visible screen: the browser's bars had covered the bottom of every page
+  (the last rows of a list, a form's buttons).
 
 ### Entity health and alerting
 

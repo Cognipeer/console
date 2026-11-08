@@ -8,6 +8,8 @@
   grid-template-columns: 56px var(--subnav-w, 0px) 1fr;
   grid-template-rows: 60px minmax(0, 1fr);
   height: 100vh;
+  /* The visible screen: on a phone the browser's bars cover the bottom of a 100vh box (only the main area scrolls). */
+  height: 100dvh;
   position: relative;
   background: transparent;
 }

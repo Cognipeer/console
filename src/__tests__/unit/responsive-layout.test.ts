@@ -119,3 +119,14 @@ describe('detail pages on a narrow screen', () => {
     expect(css).toMatch(/\.ds-page-header > :first-child \{ flex: 1 1 320px; min-width: 0; \}/);
   });
 });
+
+describe('the dashboard on a phone browser', () => {
+  it('fills the visible screen, so the browser bars do not cover the bottom of the page', () => {
+    const layout = read('src/components/layout/DashboardLayout.tsx');
+    expect(layout).toContain("height: '100dvh',");
+    expect(layout).toContain("minHeight: '100dvh',");
+    expect(layout).not.toContain("height: '100vh'");
+    const shell = read('src/components/layout/launcher/LauncherShell.module.css');
+    expect(shell).toMatch(/\.shell \{[^}]*height: 100vh;[^}]*height: 100dvh;/);
+  });
+});

@@ -416,8 +416,10 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
             paddingBottom: 0,
             paddingLeft: 0,
             paddingRight: 0,
-            height: '100vh',
-            minHeight: '100vh',
+            // The visible screen (dvh), not the tallest one (vh): on a phone the browser's bars stay out while only
+            // the main area scrolls, and 100vh put the bottom of every page under them.
+            height: '100dvh',
+            minHeight: '100dvh',
             overflow: 'hidden',
           },
         }}
