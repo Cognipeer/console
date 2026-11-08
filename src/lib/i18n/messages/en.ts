@@ -470,6 +470,7 @@ export const en = {
     iam: 'IAM center',
     dashboard: 'Dashboard',
     overview: 'Overview',
+    reports: 'Reports',
     tracing: 'Agent Observability',
     health: 'Health',
     flows: 'Flows',

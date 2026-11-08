@@ -191,8 +191,8 @@ export const analyticsDashboardsTr: typeof analyticsDashboardsEn = {
   },
   // --- reports (generated) ---
   summaryTitle: 'Raporlar',
-  summarySubtitle: '{scope}, {period}',
-  summarySubtitleCompare: '{scope}, {period}, önceki dönemle karşılaştırmalı',
+  summarySubtitle: '{scope} · {period}',
+  summarySubtitleCompare: '{scope} · {period} · önceki dönemle karşılaştırmalı',
   summaryError: 'Rapor özeti yüklenemedi.',
   compare: 'Karşılaştır',
   executiveSummary: 'Yönetici özeti',

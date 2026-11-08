@@ -2717,6 +2717,7 @@ export const tr: typeof en = {
   },
   breadcrumbs: {
     ...en.breadcrumbs,
+    reports: 'Raporlar',
     automations: 'Arka plan işleri',
     iam: 'IAM merkezi',
     health: 'Sağlık',

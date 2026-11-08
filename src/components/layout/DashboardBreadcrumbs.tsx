@@ -23,6 +23,8 @@ const SEGMENT_KEYS: Record<string, string> = {
   dashboard: 'dashboard',
   iam: 'iam',
   overview: 'overview',
+  // Reports live under /dashboard/analytics.
+  analytics: 'reports',
   tracing: 'tracing',
   health: 'health',
   flows: 'flows',
@@ -176,6 +178,7 @@ const IAM_CRUMB_KEYS: Record<IamCrumbLabel, string> = {
 export default function DashboardBreadcrumbs() {
   const pathname = usePathname();
   const t = useTranslations('breadcrumbs');
+  const tReports = useTranslations('analyticsDashboards');
 
   const cacheRef = useRef<Map<string, string>>(new Map());
   // The principals list view a person's page was opened from (session storage: unknown until mounted).
@@ -234,11 +237,17 @@ export default function DashboardBreadcrumbs() {
         if (resolved) return resolved;
         const override = pathOverrideLabel(segments, index);
         if (override) return override;
+        // A report (/dashboard/analytics/<key>) by its title, as on the page; a missing key resolves to its own path.
+        if (index === 2 && segments[1] === 'analytics') {
+          const key = `dashboards.${decodeURIComponent(segment)}.title`;
+          const title = tReports(key);
+          if (title && title !== `analyticsDashboards.${key}`) return title;
+        }
         return isLikelyId(segment)
           ? shortenId(segment)
           : formatSegment(segment, t);
       }),
-    [segments, resolvedLabels, t],
+    [segments, resolvedLabels, t, tReports],
   );
 
   // IAM pages have their own trail (IAM / People / <name>): the folders between are not pages.

@@ -198,8 +198,8 @@ export const analyticsDashboardsEn = {
   },
   // --- reports (generated) ---
   summaryTitle: 'Reports',
-  summarySubtitle: '{scope}, {period}',
-  summarySubtitleCompare: '{scope}, {period} compared with the previous period',
+  summarySubtitle: '{scope} · {period}',
+  summarySubtitleCompare: '{scope} · {period} · compared with the previous period',
   summaryError: 'The reports summary could not be loaded.',
   compare: 'Compare',
   executiveSummary: 'Executive summary',
