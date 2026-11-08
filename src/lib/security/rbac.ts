@@ -326,9 +326,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // which `enforceSessionRbac` treats as "not a gated surface".
   { prefix: '/api/skills', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
-  // Reports (enterprise): the service gate; which report a person sees, exports, sees across all projects
-  // or with its people breakdowns is decided per report (`report.*` on `Report::"<key>"`) in the handler.
-  { prefix: '/api/reports', service: 'reports' },
   // NOTE (entity health): '/api/entity-health' is deliberately NOT mapped. The scoreboard covers
   // agents, models, knowledge bases, MCP servers and tools, so the plugin declares its read routes
   // `authz.authenticated()` and authorizes each entity type against its own service in the handler
