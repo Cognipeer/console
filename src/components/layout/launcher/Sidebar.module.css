@@ -10,6 +10,8 @@
   grid-template-columns: auto 0px minmax(0, 1fr);
   grid-template-rows: 60px minmax(0, 1fr);
   height: 100vh;
+  /* The visible screen: on a phone the browser's bars cover the bottom of a 100vh box (only the main area scrolls). */
+  height: 100dvh;
   position: relative;
   background: transparent;
 }
@@ -311,6 +313,75 @@
   background: var(--ds-border-soft);
 }
 
+/* ── Phone drawer (variant="drawer", inside MobileNavDrawer) ──── */
+
+/* The drawer's panel holds it: full width and height, its list scrolls and the footer stays at the bottom. */
+.drawer {
+  grid-column: auto;
+  grid-row: auto;
+  width: 100%;
+  flex: 1;
+  border-right: none;
+  background: transparent;
+}
+
+/* Rows a finger can hit (the side menu's are sized for a pointer). */
+.drawer .scroll {
+  padding: 8px 10px 12px;
+}
+
+.drawer .item {
+  padding: 10px 12px;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.drawer .sectionHeading {
+  padding: 8px 12px 4px;
+}
+
+.drawer .groupHeader {
+  padding: 10px 12px;
+  font-size: 11px;
+}
+
+.drawer .pages {
+  margin-left: 20px;
+}
+
+.drawer .pagesHeading {
+  padding: 10px 10px 4px;
+}
+
+.drawer .page {
+  padding: 9px 10px;
+  gap: 10px;
+  font-size: 13.5px;
+}
+
+.drawer .count {
+  font-size: 11px;
+}
+
+/* Above the phone's home indicator. */
+.drawer .footer {
+  padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+}
+
+/* A touch screen has no hover: the pin stays shown with room to tap it (unseen, it could be tapped by accident). */
+@media (hover: none) {
+  .pin {
+    opacity: 1;
+    width: 32px;
+    height: 32px;
+    right: 2px;
+  }
+
+  .row:has(> .pin) .item {
+    padding-right: 38px;
+  }
+}
+
 /* Development only: React Query's devtools button sits in the bottom-left corner, over the menu's last rows. */
 :global(body:has(.tsqd-parent-container)) .footer {
   padding-bottom: 64px;
@@ -333,7 +404,7 @@
   }
 }
 
-/* Phones keep the menu drawer of the top bar (MobileNavDrawer). */
+/* Phones have no side column: the top bar's drawer (MobileNavDrawer) shows this menu as `variant="drawer"`. */
 @media (max-width: 48em) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
@@ -341,5 +412,9 @@
 
   .sidebar {
     display: none;
+  }
+
+  .sidebar.drawer {
+    display: flex;
   }
 }

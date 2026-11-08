@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useEffect } from 'react';
+import { Fragment, useEffect, useRef, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { ActionIcon, Text } from '@mantine/core';
@@ -32,6 +32,13 @@ interface MobileNavDrawerProps {
   subnavOverride?: { title: string; items: SubNavItem[] } | null;
   settingsHref: string;
   settingsActive: boolean;
+  /**
+   * The menu to show in place of the lists below: the single left menu (SIDEBAR_NAV), so a phone gets the same
+   * Home, pinned services, categories, pages and Settings as the side column. Without it, the lists below.
+   */
+  menu?: ReactNode;
+  /** The panel's title with `menu` (the lists below keep "Navigation"). */
+  menuTitle?: string;
 }
 
 export default function MobileNavDrawer({
@@ -46,11 +53,22 @@ export default function MobileNavDrawer({
   subnavOverride = null,
   settingsHref,
   settingsActive,
+  menu,
+  menuTitle,
 }: MobileNavDrawerProps) {
   const rawSearchParams = useSearchParams();
   const pendingKey = usePendingNavigationKey();
   const searchParams = new URLSearchParams(rawSearchParams?.toString() ?? '');
   const tNav = useTranslations('navigation');
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Focus moves into the panel when it opens and back to what opened it (the menu button) when it closes.
+  useEffect(() => {
+    if (!open) return undefined;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+    return () => opener?.focus();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -67,6 +85,43 @@ export default function MobileNavDrawer({
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const title = menu ? (menuTitle ?? tNav('sidebarLabel')) : 'Navigation';
+  const header = (
+    <div className={classes.mobileNavHeader}>
+      <Text fw={600} size="sm">
+        {title}
+      </Text>
+      <ActionIcon
+        ref={closeRef}
+        variant="subtle"
+        color="gray"
+        radius="md"
+        onClick={onClose}
+        aria-label="Close navigation"
+      >
+        <IconX size={16} />
+      </ActionIcon>
+    </div>
+  );
+
+  if (menu) {
+    return (
+      <div className={classes.mobileNavOverlay} role="dialog" aria-modal="true" aria-label={title}>
+        <button
+          type="button"
+          className={classes.mobileNavBackdrop}
+          onClick={onClose}
+          aria-label="Close navigation"
+          tabIndex={-1}
+        />
+        <div className={`${classes.mobileNavPanel} ${classes.mobileNavPanelMenu}`} data-testid="mobile-nav-menu">
+          {header}
+          {menu}
+        </div>
+      </div>
+    );
+  }
 
   const pendingAttr = (href: string, active: boolean) =>
     !active && isNavigationPendingFor(pendingKey, href, window.location.href)
@@ -117,20 +172,7 @@ export default function MobileNavDrawer({
         tabIndex={-1}
       />
       <nav className={classes.mobileNavPanel}>
-        <div className={classes.mobileNavHeader}>
-          <Text fw={600} size="sm">
-            Navigation
-          </Text>
-          <ActionIcon
-            variant="subtle"
-            color="gray"
-            radius="md"
-            onClick={onClose}
-            aria-label="Close navigation"
-          >
-            <IconX size={16} />
-          </ActionIcon>
-        </div>
+        {header}
 
         <button
           type="button"

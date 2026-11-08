@@ -109,6 +109,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const docsBaseUrl = useMemo(() => normalizeDocsBaseUrl(configuredDocsBaseUrl), [configuredDocsBaseUrl]);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
   const t = useTranslations('layout');
   const locale = useLocale();
   const tNotifications = useTranslations('notifications');
@@ -508,7 +509,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
           {hydrated ? (
             <MobileNavDrawer
               open={mobileNavOpen}
-              onClose={() => setMobileNavOpen(false)}
+              onClose={closeMobileNav}
               pathname={pathname}
               pinned={pinnedServices}
               recents={recentServices}
@@ -524,6 +525,26 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               }
               settingsHref={settingsHref}
               settingsActive={isSettingsActive}
+              // A phone gets the single left menu itself, with the same filtered lists (SIDEBAR_NAV).
+              menu={
+                SIDEBAR_NAV ? (
+                  <Sidebar
+                    variant="drawer"
+                    onNavigate={closeMobileNav}
+                    services={allowedServices}
+                    activeService={isSettingsActive ? null : activeService}
+                    activeItems={serviceSubnavItems}
+                    settingsItems={settingsNavItems}
+                    settingsHref={settingsHref}
+                    settingsActive={isSettingsActive}
+                    pinnedIds={pinned}
+                    onTogglePin={togglePin}
+                    onHelpClick={openServiceDocs}
+                    pathname={pathname}
+                  />
+                ) : undefined
+              }
+              menuTitle={SIDEBAR_NAV ? tNavigation('sidebarLabel') : undefined}
             />
           ) : null}
         </AppShell.Main>

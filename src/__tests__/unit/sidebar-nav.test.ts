@@ -3,7 +3,7 @@
  * person can open, under the launcher's categories (Build, Data, Operate; an empty one is left out), opens the pages of
  * the service in view in place (filtered like the sub-nav), and Settings with its grouped pages. Someone with seven
  * services or fewer gets one plain list, without categories, pins or the launcher. SIDEBAR_NAV switches back to the
- * rail and the sub-nav, which are kept.
+ * rail and the sub-nav, which are kept. A phone gets the same menu in the top bar's drawer.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -35,6 +35,7 @@ vi.mock('@/components/common/navigation/useNavigationFeedback', () => ({
 
 import { I18nProvider } from '@/lib/i18n';
 import Sidebar, { type SidebarProps } from '@/components/layout/launcher/Sidebar';
+import MobileNavDrawer from '@/components/layout/launcher/MobileNavDrawer';
 import { SIDEBAR_FLAT_MAX, isFlatSidebar, sidebarGroups, sidebarServices } from '@/components/layout/launcher/sidebarNav';
 import { SUBNAV_CONFIG, visibleSubNavItems, type SubNavItem } from '@/components/layout/launcher/ServiceSubNav';
 import { findDashboardService, getDashboardServices, type DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
@@ -180,6 +181,78 @@ describe('the menu', () => {
     expect(html).toContain('Ana sayfa');
     expect(html).toContain('Tüm servisler');
     expect(html).toContain('Menüyü daralt');
+  });
+});
+
+describe('the menu on a phone', () => {
+  const drawerProps = {
+    open: true,
+    onClose: () => undefined,
+    pathname: '/dashboard/agents',
+    pinned: [],
+    recents: [],
+    activeService: agents,
+    onOpenLauncher: () => undefined,
+    onOpenDocs: () => undefined,
+    settingsHref: '/dashboard/projects',
+    settingsActive: false,
+  };
+
+  it('is the same menu, labelled although a phone is narrow, without the collapse toggle', () => {
+    media.narrow = true;
+    try {
+      const html = sidebar({ services: owner, variant: 'drawer', activeService: agents, activeItems: SUBNAV_CONFIG.agents, settingsItems });
+      expect(html).toContain('data-testid="sidebar-drawer"');
+      expect(html).not.toContain('data-collapsed="true"');
+      expect(html).toContain('data-testid="sidebar-group-build"');
+      expect(html).toContain(`data-testid="sidebar-subitem-${SUBNAV_CONFIG.agents[0].id}"`);
+      expect(html).toContain('data-testid="sidebar-settings"');
+      expect(html).toContain('data-testid="sidebar-help"');
+      expect(html).not.toContain('data-testid="sidebar-toggle"');
+    } finally {
+      media.narrow = false;
+    }
+  });
+
+  it('for few services: the same plain list as the side menu', () => {
+    const member = memberServices(['agents', 'prompts', 'rag']);
+    const html = sidebar({ services: member, variant: 'drawer' });
+    expect(html).toContain('data-flat="true"');
+    expect(html).not.toContain('data-testid="sidebar-group-');
+  });
+
+  it('the drawer shows the menu it is given, under the menu title, and none of its old lists', () => {
+    const html = render(
+      h(MobileNavDrawer, { ...drawerProps, menu: h('nav', { 'data-testid': 'given-menu' }), menuTitle: 'Main menu' }),
+    );
+    expect(html).toContain('data-testid="mobile-nav-menu"');
+    expect(html).toContain('data-testid="given-menu"');
+    expect(html).toContain('aria-label="Main menu"');
+    expect(html).not.toContain('Browse all services');
+    expect(html).not.toContain('>Navigation<');
+    // Without a menu (SIDEBAR_NAV off) the drawer keeps its lists (rendered in connectors-nav / agent-sessions-nav).
+    const drawerSource = readFileSync(join(process.cwd(), 'src/components/layout/launcher/MobileNavDrawer.tsx'), 'utf8');
+    expect(drawerSource.indexOf('Browse all services')).toBeGreaterThan(drawerSource.indexOf('if (menu) {'));
+  });
+
+  it('every link of the menu and its help close the drawer', () => {
+    const source = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.tsx'), 'utf8');
+    const links = source.match(/<Link\b/g) ?? [];
+    expect(links.length).toBeGreaterThan(0);
+    expect((source.match(/onNavigate=\{onNavigate\}/g) ?? []).length).toBe(links.length);
+    expect(source).toMatch(/const openHelp = \(\) => \{\s*onNavigate\?\.\(\);\s*onHelpClick\(\);/);
+    expect(source).toContain('const collapsed = drawer ? false : prefs.collapsed;');
+  });
+
+  it('the shell hands the drawer the same filtered lists as the side menu', () => {
+    const layout = readFileSync(join(process.cwd(), 'src/components/layout/DashboardLayout.tsx'), 'utf8');
+    expect(layout).toMatch(
+      /menu=\{\s*SIDEBAR_NAV \? \(\s*<Sidebar\s+variant="drawer"\s+onNavigate=\{closeMobileNav\}\s+services=\{allowedServices\}[\s\S]*?activeItems=\{serviceSubnavItems\}\s+settingsItems=\{settingsNavItems\}/,
+    );
+    const css = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.module.css'), 'utf8');
+    expect(css).toMatch(/\.sidebar\.drawer \{\s*display: flex;/);
+    // No hover on a touch screen: the pin stays shown instead of waiting to be tapped unseen.
+    expect(css).toMatch(/@media \(hover: none\) \{\s*\.pin \{\s*opacity: 1;/);
   });
 });
 

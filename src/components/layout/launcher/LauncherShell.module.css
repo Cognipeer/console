@@ -960,6 +960,11 @@
   animation: mobileNavSlideIn 0.2s cubic-bezier(0.3, 0.7, 0.4, 1);
 }
 
+/* With the single left menu inside: the menu scrolls its own list and keeps its footer at the bottom. */
+.mobileNavPanelMenu {
+  overflow: hidden;
+}
+
 @keyframes mobileNavSlideIn {
   from {
     transform: translateX(-12px);

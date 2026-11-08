@@ -9,6 +9,9 @@
  * What it lists is decided by the shell, the same way as the rail and the sub-nav it replaces: `services` holds only
  * what the person may open (role, the engine's levels for the active project, tenant-admin pages, deployment), and
  * `activeItems` / `settingsItems` are the sub-nav entries already filtered for them.
+ *
+ * A phone has no side column: the top bar's drawer shows this same menu (`variant="drawer"`), always labelled, without
+ * the collapse toggle, and closing when a link in it is followed (`onNavigate`).
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -132,6 +135,10 @@ export interface SidebarProps {
   /** Opens the docs panel on the page of the service in view. */
   onHelpClick: () => void;
   pathname: string;
+  /** `drawer`: inside the phone's menu drawer, always labelled and without the collapse toggle. */
+  variant?: 'side' | 'drawer';
+  /** Called when a link in the menu is followed or help is opened (the drawer closes). */
+  onNavigate?: () => void;
 }
 
 export default function Sidebar({
@@ -145,13 +152,23 @@ export default function Sidebar({
   onTogglePin,
   onHelpClick,
   pathname,
+  variant = 'side',
+  onNavigate,
 }: SidebarProps) {
+  const drawer = variant === 'drawer';
   const tNav = useTranslations('navigation');
   const rawSearchParams = useSearchParams();
   const searchParams = useMemo(() => new URLSearchParams(rawSearchParams?.toString() ?? ''), [rawSearchParams]);
   const pendingKey = usePendingNavigationKey();
   const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
-  const { collapsed, toggleCollapsed, closedGroups, toggleGroup } = useSidebarPrefs(activeService?.category);
+  const prefs = useSidebarPrefs(activeService?.category);
+  const { toggleCollapsed, closedGroups, toggleGroup } = prefs;
+  // The drawer is the phone's whole menu: never the icon strip (a phone is "narrow", which starts the side menu folded).
+  const collapsed = drawer ? false : prefs.collapsed;
+  const openHelp = () => {
+    onNavigate?.();
+    onHelpClick();
+  };
 
   const flat = isFlatSidebar(services);
   const listed = useMemo(() => sidebarServices(services), [services]);
@@ -200,6 +217,7 @@ export default function Sidebar({
             aria-current={active ? 'page' : undefined}
             data-pending={pendingFor(href, active)}
             data-testid={testId}
+            onNavigate={onNavigate}
             {...getIntentProps(href)}
           >
             <ItemIcon size={small ? 15 : 18} stroke={1.7} />
@@ -244,7 +262,7 @@ export default function Sidebar({
         </div>
         <div className={classes.footer}>
           <Tooltip label={tNav('sidebarHelp')} position="right" withArrow offset={8} openDelay={120}>
-            <button type="button" className={classes.iconBtn} aria-label={tNav('sidebarHelp')} onClick={onHelpClick}>
+            <button type="button" className={classes.iconBtn} aria-label={tNav('sidebarHelp')} onClick={openHelp}>
               <IconBook size={17} stroke={1.7} />
             </button>
           </Tooltip>
@@ -282,6 +300,7 @@ export default function Sidebar({
                 aria-current={active ? 'page' : undefined}
                 data-pending={pendingFor(item.href, active)}
                 data-testid={`sidebar-subitem-${item.id}`}
+                onNavigate={onNavigate}
                 {...getIntentProps(item.href)}
               >
                 <ItemIcon size={14} stroke={1.7} />
@@ -308,6 +327,7 @@ export default function Sidebar({
             aria-current={active ? 'true' : undefined}
             data-pending={pendingFor(service.href, active)}
             data-testid={`sidebar-${opts.testScope}-${service.id}`}
+            onNavigate={onNavigate}
             {...getIntentProps(service.href)}
           >
             <ServiceIcon size={16} stroke={1.7} />
@@ -332,7 +352,12 @@ export default function Sidebar({
   };
 
   return (
-    <nav className={classes.sidebar} aria-label={tNav('sidebarLabel')} data-testid="sidebar-nav" data-flat={flat ? 'true' : undefined}>
+    <nav
+      className={`${classes.sidebar} ${drawer ? classes.drawer : ''}`}
+      aria-label={tNav('sidebarLabel')}
+      data-testid={drawer ? 'sidebar-drawer' : 'sidebar-nav'}
+      data-flat={flat ? 'true' : undefined}
+    >
       <div className={classes.scroll} ref={scrollRef}>
         <div className={classes.row}>
           <Link
@@ -341,6 +366,7 @@ export default function Sidebar({
             aria-current={homeActive ? 'page' : undefined}
             data-pending={pendingFor(HOME_HREF, homeActive)}
             data-testid="sidebar-home"
+            onNavigate={onNavigate}
             {...getIntentProps(HOME_HREF)}
           >
             <IconLayoutDashboard size={16} stroke={1.7} />
@@ -406,6 +432,7 @@ export default function Sidebar({
                 aria-current={settingsActive ? 'true' : undefined}
                 data-pending={pendingFor(settingsHref, settingsActive)}
                 data-testid="sidebar-settings"
+                onNavigate={onNavigate}
                 {...getIntentProps(settingsHref)}
               >
                 <IconSettings size={16} stroke={1.7} />
@@ -419,20 +446,22 @@ export default function Sidebar({
       </div>
 
       <div className={classes.footer}>
-        <button type="button" className={classes.item} onClick={onHelpClick} data-testid="sidebar-help">
+        <button type="button" className={classes.item} onClick={openHelp} data-testid="sidebar-help">
           <IconBook size={16} stroke={1.7} />
           <span className={classes.label}>{tNav('sidebarHelp')}</span>
         </button>
-        <button
-          type="button"
-          className={classes.item}
-          onClick={toggleCollapsed}
-          aria-expanded
-          data-testid="sidebar-toggle"
-        >
-          <IconLayoutSidebarLeftCollapse size={16} stroke={1.7} />
-          <span className={classes.label}>{tNav('sidebarCollapse')}</span>
-        </button>
+        {drawer ? null : (
+          <button
+            type="button"
+            className={classes.item}
+            onClick={toggleCollapsed}
+            aria-expanded
+            data-testid="sidebar-toggle"
+          >
+            <IconLayoutSidebarLeftCollapse size={16} stroke={1.7} />
+            <span className={classes.label}>{tNav('sidebarCollapse')}</span>
+          </button>
+        )}
       </div>
     </nav>
   );
