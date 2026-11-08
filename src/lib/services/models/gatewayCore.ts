@@ -31,10 +31,11 @@ import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import type { IModel } from '@/lib/database';
-import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
+import { sourceForActor, type UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { createInlineReasoningSplitter, splitInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
-import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
+import { InvalidRequestError, UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
+import { isPlanLimitError } from '@/lib/limits/errors';
 import { OPENAI_SCHEMA_DRIVERS, hasUnreplayableToolTurn, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import type { NativeChatClient, NativeChatRequest } from '@/lib/providers/domains/model';
 import { createStreamGate } from '@/lib/services/guardrail';
@@ -44,6 +45,12 @@ import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
+import {
+  getManagedCreditsHost,
+  isManagedProviderRecord,
+  type ManagedCreditLease,
+  type ManagedUsage,
+} from '@/enterprise/managed-credits';
 import { replicaOrder, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
 import { MAX_ROUTING_DEPTH, getDynamicRoutingConfig } from './dynamicRouting';
 import {
@@ -158,6 +165,7 @@ function buildLimitError(
   const dialect = limitDialect(state.route);
   return new OutputTokenLimitError(limit, {
     ...billing,
+    ...(state.hardCap ? { hardCap: true } : {}),
     ...(rawFinishReason ? { rawFinishReason } : {}),
     ...(dialect ? { dialect } : {}),
   });
@@ -434,6 +442,12 @@ interface CallState {
   includeReasoning: boolean;
   /** What a usage row records of the prompt: the messages, or just their count when the caller opted out (`logPrompt: false`). */
   loggedMessages: unknown;
+  /** Managed providers only: the credit hold of the CURRENT attempt (attempts are sequential). Cleared once settled or released. */
+  creditLease?: ManagedCreditLease;
+  /** The output limit the current attempt was sent with is the managed credit cap: a raised retry would be clamped to it. */
+  hardCap?: boolean;
+  /** The call runs on a managed provider (set before the credit reservation): upstream error text is the operator's, not the tenant's. */
+  managedCall?: boolean;
 }
 
 /** The caller's tags ride along on every usage row's request. */
@@ -474,21 +488,110 @@ function settleUsage(
   label: string,
   usage: TokenUsage,
   row: Omit<Parameters<typeof logModelUsage>[2], 'usage'>,
+  /** The counts are the gateway's own estimate (a cancelled stream, an upstream that sent no usage), not the provider's. */
+  estimated?: boolean,
 ): UsageCostResult {
   const cost = calculateCost(state.model.pricing, usage, state.model);
+  if (state.creditLease) settleLease(state, usage, estimated);
   state.context.onUsageSettled?.(cost, usage);
   usageRow(state, label, { ...row, usage } as Parameters<typeof logModelUsage>[2]);
   return cost;
 }
 
+/** A managed provider's credit hold takes the call's real usage. Fire-and-forget: never on the response path, never throws. */
+function settleLease(state: CallState, usage: TokenUsage, estimated?: boolean): void {
+  const lease = state.creditLease;
+  if (!lease) return;
+  state.creditLease = undefined;
+  const booked: ManagedUsage = {
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+    ...(usage.cachedInputTokens ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(estimated ? { estimated: true } : {}),
+  };
+  fireAndForget('managed-credit-settle', () => lease.settle(booked));
+}
+
+/** Returns a managed provider's credit hold (the attempt failed, or the call produced nothing billable). Idempotent. */
+function releaseLease(state: CallState, reason: 'error' | 'cancelled' | 'no_usage'): void {
+  const lease = state.creditLease;
+  if (!lease) return;
+  state.creditLease = undefined;
+  state.hardCap = undefined;
+  fireAndForget('managed-credit-release', () => lease.release(reason));
+}
+
+/**
+ * An upstream failure of a MANAGED provider reaches the tenant as a generic message that keeps only the status: the
+ * raw text can quote the operator's endpoint, deployment, org id or vendor. Our own refusals (plan limits, bad
+ * requests, output-limit and finish errors, a caller's abort) are untouched.
+ */
+function managedSafeError(state: CallState, error: unknown): unknown {
+  if (!state.managedCall) return error;
+  if (
+    isPlanLimitError(error)
+    || error instanceof InvalidRequestError
+    || error instanceof OutputTokenLimitError
+    || error instanceof UpstreamFinishError
+    || error instanceof GuardrailBlockError
+    || state.context.signal?.aborted
+  ) return error;
+  const status = normalizeInferenceError(error).status;
+  return new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
+}
+
+/** Why an attempt ended without usage: the caller walked away, or it failed. */
+function failureReason(state: CallState): 'error' | 'cancelled' {
+  return state.context.signal?.aborted ? 'cancelled' : 'error';
+}
+
+/** The tag names a managed provider's PASSTHROUGH can carry an output or thinking budget under: a tenant must not raise the cap with them. */
+const MANAGED_LIMIT_KEYS = [
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'maxTokens',
+  'maxOutputTokens',
+  'thinking',
+  'thinking_budget',
+  'thinkingBudget',
+  'thinkingConfig',
+  'thinking_config',
+  'budget_tokens',
+  'max_thinking_tokens',
+  'max_new_tokens',
+  'num_predict',
+  'generationConfig',
+  'generation_config',
+  'n',
+  'best_of',
+];
+
+function withoutLimitKeys(extraBody: unknown): unknown {
+  if (!extraBody || typeof extraBody !== 'object' || Array.isArray(extraBody)) return extraBody;
+  const out: AnyRecord = { ...(extraBody as AnyRecord) };
+  for (const key of MANAGED_LIMIT_KEYS) delete out[key];
+  const reasoning = out.reasoning;
+  if (reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)) {
+    const { max_tokens: _maxTokens, budget_tokens: _budgetTokens, ...rest } = reasoning as AnyRecord;
+    void _maxTokens;
+    void _budgetTokens;
+    out.reasoning = rest;
+  }
+  return out;
+}
+
 /** Everything needed to place ONE call, resolved for the replica that will serve it. */
 async function prepareCall(state: CallState, activeModel: IModel) {
-  const { runtime } = await buildModelRuntime(
+  const { runtime, record } = await buildModelRuntime(
     state.tenantDbName,
     activeModel.tenantId,
     activeModel.providerKey,
     state.projectId,
+    { allowManaged: true },
   );
+  // A managed provider (a host is registered and says so) is paid with credits. Without a host this is one null check.
+  const managed = isManagedProviderRecord(record);
 
   if (!runtime.createNativeChatClient) {
     throw new InvalidRequestError('Model provider does not support chat completions');
@@ -500,12 +603,24 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // replica's own provider credentials. The cache variant key and the quota
   // context are resolved once from the pool model - a pool must not fork the
   // cache or split a budget.
-  const call = resolveModelInvocationConfig(activeModel, state.invocationBody);
+  // A managed call takes no caller passthrough at all: vendor-specific limit keys (num_predict, max_new_tokens,
+  // generationConfig ...) are an open set, so only the operator's own defaults and explicit extraBody remain.
+  const invocationModel = managed
+    ? {
+        settings: { ...asRecord(activeModel.settings), allowUnknownPassthrough: false },
+        modelId: activeModel.modelId,
+        providerDriver: activeModel.providerDriver,
+        metadata: activeModel.metadata,
+      }
+    : activeModel;
+  const call = resolveModelInvocationConfig(invocationModel, state.invocationBody);
   const { overrides } = call;
   // `extraBody` is the sanitized merge of the operator's request defaults and the
   // caller's passthrough (reserved keys removed). The raw `requestDefaults` stays
   // out of the client's settings: the client would fall back to it, unsanitized.
   const modelSettings: Record<string, unknown> = { ...call.modelSettings, requestDefaults: undefined };
+  // A tenant's passthrough must not raise a managed call's output or thinking budget past the credit cap.
+  if (managed && modelSettings.extraBody !== undefined) modelSettings.extraBody = withoutLimitKeys(modelSettings.extraBody);
   // Thought text is requested from the provider only when someone will see it.
   const visibleReasoning = withReasoningVisibility(
     normalizeNativeReasoning(modelSettings.reasoning),
@@ -542,12 +657,53 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // the thinking headroom on top, capped by the model maximum): the one number the error, the stream
   // event and the agent's raised retry all work from. `reasoning` is what the client derives thinking
   // from; `stream` is the transport actually used (a non-streamed request has a lower default cap).
-  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings, {
+  const limitContext = {
     driver,
     model: activeModel,
     stream: Boolean(state.input.stream) && !disableProviderStreaming,
     reasoning: runsWithoutThinking ? undefined : modelSettings.reasoning,
-  });
+  };
+  let outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings, limitContext);
+
+  state.managedCall = managed || undefined;
+  if (managed) {
+    const host = getManagedCreditsHost();
+    if (host) {
+      // BEFORE the provider call and outside `withResilience`: a refusal (402 / 413 / 503) surfaces as it is, with
+      // no upstream request made. The retries inside `withResilience` are one reservation, one booking.
+      const lease = await host.reserve({
+        tenantId: activeModel.tenantId,
+        tenantDbName: state.tenantDbName,
+        projectId: state.projectId,
+        providerKey: activeModel.providerKey,
+        driver: record.driver,
+        modelKey: state.modelKey,
+        modelId: activeModel.modelId,
+        kind: 'chat',
+        requestId: state.requestId,
+        estimate: {
+          inputTokens: estimateInputTokens(state.wire.messages, state.wire.tools),
+          ...(outputTokenLimit !== undefined ? { maxOutputTokens: outputTokenLimit } : {}),
+        },
+        attribution: {
+          ...(callerAgentKey(state) ? { agentKey: callerAgentKey(state) } : {}),
+          ...(state.context.callerContext?.run?.runId ? { runId: state.context.callerContext.run.runId } : {}),
+          route: state.route,
+          ...(sourceForActor(state.attribution?.actorType) ? { source: sourceForActor(state.attribution?.actorType) } : {}),
+        },
+      });
+      state.creditLease = lease;
+      state.hardCap = undefined;
+      const cap = lease.maxOutputTokens;
+      if (cap !== undefined && cap > 0 && (outputTokenLimit === undefined || outputTokenLimit > cap)) {
+        // Sent exactly as the client reads it: the call-level `maxTokens` beats every setting and is a hard cap (no
+        // thinking headroom on top, the thinking budget is fitted under it). The reported limit is what it resolves to.
+        request.maxTokens = cap;
+        outputTokenLimit = resolveOutputTokenLimit({}, { ...modelSettings, requestMaxTokens: cap }, limitContext);
+        state.hardCap = outputTokenLimit === cap;
+      }
+    }
+  }
 
   return {
     client,
@@ -831,6 +987,8 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
  * has its own record already.
  */
 function logFailedCall(state: CallState, error: unknown): void {
+  // Whatever hold is still open (an error after the provider answered, before usage was booked) goes back.
+  if (state.creditLease) releaseLease(state, failureReason(state));
   if (error instanceof GuardrailBlockError) return;
   // Booked already, with the tokens the provider billed for it (an output-limit hit,
   // a call the provider ended in an error finish): a second, empty row would double
@@ -857,16 +1015,22 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
   const { model, context, wire, requestId, modelKey, tenantDbName, projectId, tenantId } = state;
 
   const completed = await runAcrossReplicas(model, 'chat', async (candidate) => {
-    const prepared = await prepareCall(state, candidate);
-    const response = await withResilience(
-      (signal) => prepared.client.complete({ ...prepared.request, signal }),
-      {
-        key: chatResilienceKey('chat', tenantDbName, candidate),
-        ...(context.signal ? { signal: context.signal } : {}),
-      },
-    );
-    return { prepared, response };
-  });
+    try {
+      const prepared = await prepareCall(state, candidate);
+      const response = await withResilience(
+        (signal) => prepared.client.complete({ ...prepared.request, signal }),
+        {
+          key: chatResilienceKey('chat', tenantDbName, candidate),
+          ...(context.signal ? { signal: context.signal } : {}),
+        },
+      );
+      return { prepared, response };
+    } catch (error) {
+      // This attempt's hold goes back before the next replica reserves its own.
+      releaseLease(state, failureReason(state));
+      throw error;
+    }
+  }).catch((error) => { throw managedSafeError(state, error); });
 
   const servingReplica = completed.replica;
   const { prepared, response: native } = completed.value;
@@ -910,7 +1074,18 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     }
   }
 
-  const usage = toGatewayUsage(client.driver, native.usage);
+  let usage = toGatewayUsage(client.driver, native.usage);
+  // A managed upstream that sent no usage (or all zeros) still billed the operator: the call is booked at the
+  // gateway's own estimate, flagged as such, never as free.
+  let usageEstimated: boolean | undefined;
+  if (state.creditLease && !(usage.inputTokens ?? 0) && !(usage.outputTokens ?? 0)) {
+    const inputTokens = estimateInputTokens(wire.messages, wire.tools);
+    const outputTokens = estimateTokensFromText(
+      (native.content ?? '') + (native.reasoning ? String(native.reasoning) : '') + native.toolCalls.map((call) => call.arguments).join(''),
+    );
+    usage = { ...usage, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+    usageEstimated = true;
+  }
 
   // The provider ended the call in its OWN error finish (Gemini MALFORMED_FUNCTION_CALL, Bedrock
   // malformed_tool_use ...): what it produced is unusable, and a `stop` on the wire would hand the caller
@@ -940,7 +1115,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
       latencyMs,
       cacheHit: false,
       finishReason: failure.rawFinishReason ?? 'error',
-    });
+    }, usageEstimated);
     throw new UpstreamFinishError(native.rawFinishReason, { usage, cost, usageBooked: true });
   }
 
@@ -979,7 +1154,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
       latencyMs,
       cacheHit: false,
       finishReason: 'length',
-    });
+    }, usageEstimated);
     throw buildLimitError(state, outputTokenLimit, native.rawFinishReason, { usage, cost, usageBooked: true });
   }
 
@@ -1015,7 +1190,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     latencyMs,
     cacheHit: false,
     finishReason: wireFinish,
-  });
+  }, usageEstimated);
 
   // Output guardrails: check the assistant response before returning it
   // (streamed responses are gated in real time and audited post-hoc after the
@@ -1106,6 +1281,16 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
   // failures (the first provider event is awaited inside the attempt), and a
   // mid-stream fault stays a mid-stream fault.
   const opened = await runAcrossReplicas(model, 'chat-stream', async (activeModel) => {
+    try {
+      return await openAttempt(activeModel);
+    } catch (error) {
+      // This attempt's hold goes back before the next replica reserves its own.
+      releaseLease(state, failureReason(state));
+      throw error;
+    }
+  }).catch((error) => { throw managedSafeError(state, error); });
+
+  async function openAttempt(activeModel: IModel) {
     const prepared = await prepareCall(state, activeModel);
 
     if (prepared.disableProviderStreaming) {
@@ -1134,7 +1319,7 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
       },
     );
     return { activeModel, prepared, gen, first };
-  });
+  }
 
   const completionId = newCompletionId();
   const created = Math.floor(Date.now() / 1000);
@@ -1197,9 +1382,32 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
     created,
   });
 
+  // The generator's try/finally only runs once it is started: a consumer that drops the outcome before the first
+  // next() would leave the credit hold frozen and the upstream open (return() on an unstarted generator skips the
+  // body). This wrapper releases and aborts in that case.
+  let started = false;
+  const dropUnstarted = () => {
+    if (started) return;
+    started = true;
+    blockCtl.abort();
+    releaseLease(state, failureReason(state));
+  };
+  const guarded: AsyncGenerator<ModelStreamEvent, void, void> = {
+    next: (...a: [] | [void]) => { started = true; return generator.next(...a); },
+    return: (value?: void | PromiseLike<void>) => {
+      dropUnstarted();
+      return generator.return(value as void);
+    },
+    throw: (err?: unknown) => {
+      dropUnstarted();
+      return generator.throw(err);
+    },
+    [Symbol.asyncIterator]() { return guarded; },
+  } as AsyncGenerator<ModelStreamEvent, void, void>;
+
   return {
     requestId,
-    stream: generator,
+    stream: guarded,
     streamHeaders,
     wireModel: model.modelId,
     includeReasoning: state.includeReasoning,
@@ -1428,6 +1636,10 @@ async function* streamEvents(args: {
     settled = true;
     const latencyMs = Date.now() - startedAt;
     const booking = partialBooking();
+    // Nothing was generated and the provider reported nothing: no estimate of an input it may never have billed.
+    if (state.creditLease && !assembler.usage && !assembler.content && !assembler.reasoningSummary && assembler.toolCallCount === 0) {
+      releaseLease(state, 'no_usage');
+    }
     settleUsage(state, 'log-stream-cancelled', booking.usage, {
       requestId,
       route: state.route,
@@ -1444,7 +1656,7 @@ async function* streamEvents(args: {
         ...(booking.estimated ? { output_tokens_estimated: true, usage_estimated: true } : {}),
       }),
       latencyMs,
-    });
+    }, booking.estimated);
     auditStreamedOutput(`${state.route}:stream:cancelled`);
   };
 
@@ -1491,7 +1703,7 @@ async function* streamEvents(args: {
     if (!settled) {
       settled = true;
       // The same estimator the cancel path uses, for the same reason.
-      settleUsage(state, 'log-stream-guardrail-block', blocked.usage, blockRow);
+      settleUsage(state, 'log-stream-guardrail-block', blocked.usage, blockRow, blocked.estimated);
     } else {
       // Whatever settled first already wrote the tokens on its own row.
       usageRow(state, 'log-stream-guardrail-block', { ...blockRow, usage: {} });
@@ -1542,7 +1754,7 @@ async function* streamEvents(args: {
       errorMessage: outputLimitError?.message,
       latencyMs,
       finishReason: finish,
-    });
+    }, estimated);
 
     auditStreamedOutput(`${state.route}:stream`);
   };
@@ -1708,6 +1920,7 @@ async function* streamEvents(args: {
         error: normalizeInferenceError(outputLimitError).error,
         ...(outputLimitError.limit !== undefined ? { limit: outputLimitError.limit } : {}),
         ...(outputLimitError.rawFinishReason ? { rawFinishReason: outputLimitError.rawFinishReason } : {}),
+        ...(outputLimitError.hardCap ? { hardCap: true } : {}),
       };
     }
 
@@ -1774,7 +1987,7 @@ async function* streamEvents(args: {
       return;
     }
 
-    const normalized = normalizeInferenceError(error);
+    const normalized = normalizeInferenceError(managedSafeError(state, error));
     // The provider bills what it generated before it failed, so a stream that had
     // already produced output (or reported usage) is booked. One that failed
     // before its first chunk generated nothing: no estimate of an input it never
@@ -1801,8 +2014,10 @@ async function* streamEvents(args: {
     } satisfies Omit<Parameters<typeof logModelUsage>[2], 'usage'>;
     if (booking && !settled && !donePending) {
       settled = true;
-      settleUsage(state, 'log-stream-error', booking.usage, errorRow);
+      settleUsage(state, 'log-stream-error', booking.usage, errorRow, booking.estimated);
     } else {
+      // Nothing was produced: the hold goes back (a stream that already settled has no hold left).
+      if (!booking && !settled && !donePending) releaseLease(state, 'error');
       usageRow(state, 'log-stream-error', { ...errorRow, usage: {} });
     }
     yield {

@@ -227,7 +227,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/models/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'model');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'model');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List model provider drivers error', { error });
@@ -240,7 +240,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
       const descriptor = providerRegistry
-        .listDescriptors('model')
+        .listTenantDescriptors('model')
         .find((item) => item.id === driverId);
 
       return reply.code(200).send({

@@ -172,7 +172,7 @@ describe('instance resolution without an explicit key', () => {
       tenantId: 'tenant-1',
       key: 'only-one',
       projectId: 'proj-1',
-    });
+    }, { allowManaged: true });
   });
 
   it('errors when multiple active instances exist', async () => {

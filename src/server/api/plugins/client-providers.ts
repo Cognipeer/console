@@ -89,14 +89,14 @@ function isAssignedToProject(provider: { projectId?: unknown; projectIds?: unkno
 export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/providers/drivers', withClientApiRequestContext(async (request, reply) => {
     const query = (request.query ?? {}) as { domain?: ProviderDomain };
-    return reply.code(200).send({ drivers: providerRegistry.listDescriptors(query.domain) });
+    return reply.code(200).send({ drivers: providerRegistry.listTenantDescriptors(query.domain) });
   }));
 
   app.get('/client/v1/providers/drivers/:driverId/form', withClientApiRequestContext(async (request, reply) => {
     try {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
-      const descriptor = providerRegistry.listDescriptors().find((item) => item.id === driverId);
+      const descriptor = providerRegistry.listTenantDescriptors().find((item) => item.id === driverId);
       return reply.code(200).send({ descriptor, driverId, schema });
     } catch (error) {
       return reply.code(404).send({ error: error instanceof Error ? error.message : 'Failed to load form schema' });
@@ -219,6 +219,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!deleted) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ success: true });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       logger.error('Client delete provider error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
     }

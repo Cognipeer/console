@@ -62,7 +62,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/vector/providers/drivers', withClientApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'vector');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'vector');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List client vector provider drivers error', { error });
@@ -74,7 +74,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
-      const descriptor = providerRegistry.listDescriptors('vector').find((item) => item.id === driverId);
+      const descriptor = providerRegistry.listTenantDescriptors('vector').find((item) => item.id === driverId);
       return reply.code(200).send({ descriptor, driverId, schema });
     } catch (error) {
       logger.error('Get client vector provider driver form error', { error });

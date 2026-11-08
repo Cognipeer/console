@@ -8,6 +8,8 @@ import { createLogger } from '@/lib/core/logger';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { runtimePool, hashRuntimeConfig } from '@/lib/core/runtimePool';
 
+const MANAGED_GATEWAY_ONLY = 'This model can only be used through the model gateway.';
+
 export interface ModelRuntimeContext {
   runtime: ModelProviderRuntime;
   record: IProviderRecord;
@@ -18,6 +20,7 @@ export async function buildModelRuntime(
   tenantId: string,
   providerKey: string,
   projectId?: string,
+  options?: { allowManaged?: boolean },
 ): Promise<ModelRuntimeContext> {
   // Every model call from any service ends up here, so this is where an
   // internal caller (agents, RAG, evaluations) meets a switched-off service.
@@ -26,9 +29,15 @@ export async function buildModelRuntime(
   const { record, credentials } = await loadProviderRuntimeData(
     tenantDbName,
     { tenantId, key: providerKey, projectId },
+    // Refused before the credentials are opened; the gateway path (allowManaged) meters the call.
+    { allowManaged: options?.allowManaged === true, managedMessage: MANAGED_GATEWAY_ONLY },
   );
 
   assertProviderEnabled(record);
+
+  // A managed record is paid with credits, which only the gateway call path meters (it passes allowManaged). Every other
+  // caller (audio, image, moderation, OCR, decisions, evaluators) fails closed in loadProviderRuntimeData, before the
+  // credentials are opened. No host registered: never managed.
 
   const allowedTypes = new Set(['model', 'embedding', 'stt', 'tts', 'ocr']);
   if (!allowedTypes.has(record.type)) {

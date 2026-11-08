@@ -34,7 +34,7 @@ const logger = createLogger('api:websearch');
 export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/websearch/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
-      const drivers = providerRegistry.listDescriptors('websearch');
+      const drivers = providerRegistry.listTenantDescriptors('websearch');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List websearch drivers error', { error });

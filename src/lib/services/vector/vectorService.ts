@@ -311,7 +311,7 @@ async function resolveVectorIndexRecord(
 }
 
 export async function listVectorDrivers() {
-  return providerRegistry.listDescriptors('vector');
+  return providerRegistry.listTenantDescriptors('vector');
 }
 
 type ProviderFilters = NonNullable<Parameters<typeof listProviderConfigs>[2]>;

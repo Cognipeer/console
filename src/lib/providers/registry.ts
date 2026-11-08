@@ -49,7 +49,13 @@ class ProviderRegistry {
         domains: contract.domains,
         display: contract.display,
         capabilities: contract.capabilities,
+        ...(contract.internal ? { internal: true } : {}),
       }));
+  }
+
+  /** The drivers a tenant may see and pick: `listDescriptors` without the internal (operator-side) ones. */
+  listTenantDescriptors(domain?: ProviderDomain): ProviderDescriptor[] {
+    return this.listDescriptors(domain).filter((descriptor) => !descriptor.internal);
   }
 
   getContract<TContract extends ProviderContract>(id: string): TContract {

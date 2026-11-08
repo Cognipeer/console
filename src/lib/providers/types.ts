@@ -81,6 +81,8 @@ export interface ProviderContract<TRuntime = unknown, TCredentials = Record<stri
   display: ProviderDisplayConfig;
   form: ProviderFormSchema;
   capabilities?: ProviderCapabilityFlags;
+  /** An operator-side driver (e.g. a managed provider): never listed to tenants, never creatable by them. */
+  internal?: boolean;
   createRuntime: (
     context: ProviderContext<TCredentials, TSettings>,
   ) => Promise<TRuntime> | TRuntime;
@@ -124,6 +126,8 @@ export interface ProviderDescriptor {
   domains: ProviderDomain[];
   display: ProviderDisplayConfig;
   capabilities?: ProviderCapabilityFlags;
+  /** Set on operator-side drivers; tenant-facing listings filter these out (see `listTenantDescriptors`). */
+  internal?: boolean;
 }
 
 export type LooseProviderContract = ProviderContract<unknown, unknown, unknown>;

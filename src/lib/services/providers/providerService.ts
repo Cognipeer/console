@@ -4,6 +4,10 @@ import {
   IProviderRecord,
   ProviderDomain,
 } from '@/lib/database';
+import { getManagedCreditsHost, isManagedProviderRecord } from '@/enterprise/managed-credits';
+import { ManagedProviderError, ManagedProviderReadOnlyError } from './managedProviderErrors';
+
+export { ManagedProviderError, ManagedProviderReadOnlyError };
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
 import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
@@ -209,11 +213,25 @@ function assertKeyIsAFolderName(key: unknown): void {
   );
 }
 
+/** Refuses a change to a managed record. Without a registered host nothing is managed and nothing is read. */
+async function assertNotManagedById(
+  db: Awaited<ReturnType<typeof withTenantDb>>,
+  providerId: string,
+): Promise<void> {
+  if (!getManagedCreditsHost()) return;
+  const record = await db.findProviderById(providerId);
+  if (record && isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
+  // A driver the host reports as managed cannot be created by a tenant.
+  if (isManagedProviderRecord({ key: payload.key, driver: payload.driver, type: payload.type, settings: payload.settings })) {
+    throw new ManagedProviderReadOnlyError();
+  }
   assertKeyIsAFolderName(payload.key);
   // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
   // would say about the same value.
@@ -394,6 +412,7 @@ export async function updateProviderConfig(
   options?: { projectId?: string },
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
+  await assertNotManagedById(db, providerId);
   const updates: Partial<IProviderRecord> = {};
 
   // The stored "last test" describes the connection as it was tested: once the connection settings or
@@ -536,6 +555,7 @@ export async function resolveProviderTestTarget(
   if (!record || record.tenantId !== provider.tenantId) {
     throw new Error(`Provider configuration "${provider.id}" not found.`);
   }
+  if (isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
   const { merged } = mergeCredentials(record, overrides.credentials ?? {});
   return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
 }
@@ -593,6 +613,7 @@ export async function deleteProviderConfig(
   providerId: string,
 ): Promise<boolean> {
   const db = await withTenantDb(tenantDbName);
+  await assertNotManagedById(db, providerId);
   return db.deleteProvider(providerId);
 }
 
@@ -609,6 +630,7 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     tenantId: string;
     projectId?: string;
   },
+  options?: { allowManaged?: boolean; managedMessage?: string },
 ): Promise<ProviderRuntimeData<TCredentials>> {
   const db = await withTenantDb(tenantDbName);
   let record: IProviderRecord | null = null;
@@ -643,6 +665,12 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     throw new Error(
       `Provider configuration "${providerIdOrKey.key ?? providerIdOrKey.id}" not found.`,
     );
+  }
+
+  // Fail closed before any decryption: every credential-reading door refuses a managed record unless its caller
+  // meters the call itself. No host registered: never managed.
+  if (options?.allowManaged !== true && isManagedProviderRecord(record)) {
+    throw new ManagedProviderError(options?.managedMessage);
   }
 
   let credentials: TCredentials;

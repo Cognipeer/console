@@ -691,7 +691,7 @@ function truncateError(error: unknown): string {
 }
 
 export async function listFileDrivers() {
-    return providerRegistry.listDescriptors('file');
+    return providerRegistry.listTenantDescriptors('file');
 }
 
 type ProviderFilters = NonNullable<Parameters<typeof listProviderConfigs>[2]>;

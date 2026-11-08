@@ -294,7 +294,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/files/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'file');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'file');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List file provider drivers error', { error });

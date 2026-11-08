@@ -220,6 +220,8 @@ export type ModelStreamEvent =
     error: { message: string; type: string; code?: string | null; param?: string | null };
     limit?: number;
     rawFinishReason?: string;
+    /** The limit is a ceiling the caller cannot raise (a managed provider's credit cap): do not retry with a raised one. */
+    hardCap?: boolean;
   }
   /**
    * An output guardrail blocked the answer mid-stream. The consumer writes its

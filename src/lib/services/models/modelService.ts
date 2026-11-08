@@ -881,5 +881,5 @@ export async function createModelProvider(
 }
 
 export function listModelDriverDescriptors() {
-  return providerRegistry.listDescriptors('model');
+  return providerRegistry.listTenantDescriptors('model');
 }

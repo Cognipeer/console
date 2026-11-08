@@ -19,6 +19,7 @@ import {
   type ProviderConfigView,
   type ProviderViewOptions,
 } from '@/lib/services/providers/providerService';
+import { getManagedCreditsHost, isManagedProviderRecord, type ManagedCreditLease } from '@/enterprise/managed-credits';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { callWebSearchProvider } from './webSearchAdapter';
 import { resolveWebSearchCacheSettings } from './cacheSettings';
@@ -109,6 +110,12 @@ function loggableResults(results: WebSearchResultItem[]): IWebSearchRunLog['resu
   }));
 }
 
+/** Credit units of one search: an advanced (deep) search costs 2, a basic one 1. */
+function searchUnitsOf(settings: Record<string, unknown> | undefined): number {
+  const depth = typeof settings?.searchDepth === 'string' ? settings.searchDepth.toLowerCase() : 'basic';
+  return depth === 'advanced' || depth === 'deep' ? 2 : 1;
+}
+
 async function resolveProviderKey(
   tenantDbName: string,
   tenantId: string,
@@ -118,7 +125,14 @@ async function resolveProviderKey(
   if (explicitKey) return explicitKey;
 
   const providers = await listWebSearchProviders(tenantDbName, tenantId, projectId);
-  const active = providers.filter((p) => p.status === 'active');
+  const allActive = providers.filter((p) => p.status === 'active');
+  // The tenant's own instances win over managed ones (no host registered: every instance is the tenant's own).
+  const own = allActive.filter((p) => !isManagedProviderRecord(p));
+  const managed = allActive
+    .filter((p) => isManagedProviderRecord(p))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  if (own.length === 0 && managed.length > 0) return managed[0].key;
+  const active = own;
   if (active.length === 0) {
     throw new Error(
       'No active web search instance is configured. Create one under Data → Web Search.',
@@ -295,7 +309,7 @@ export async function runWebSearch(
     tenantId,
     key: providerKey,
     projectId,
-  });
+  }, { allowManaged: true });
 
   if (record.type !== 'websearch') {
     throw new Error(`Provider "${providerKey}" is not a web search provider.`);
@@ -352,12 +366,45 @@ export async function runWebSearch(
     });
     warnings.push(...(cacheSession?.warnings ?? []));
 
-    const { results, answer: providerAnswer } = cacheSession?.hit
-      ?? await callWebSearchProvider(
-        record,
-        credentials as Record<string, unknown>,
-        { ...options, query },
-      );
+    let lease: ManagedCreditLease | undefined;
+    let providerResult: Awaited<ReturnType<typeof callWebSearchProvider>>;
+    if (cacheSession?.hit) {
+      // A cache hit is free: nothing is reserved.
+      providerResult = cacheSession.hit;
+    } else {
+      const host = isManagedProviderRecord(record) ? getManagedCreditsHost() : null;
+      const units = searchUnitsOf(record.settings as Record<string, unknown> | undefined);
+      if (host) {
+        lease = await host.reserve({
+          tenantId,
+          tenantDbName,
+          projectId,
+          providerKey,
+          driver: record.driver,
+          kind: 'search',
+          requestId: crypto.randomUUID(),
+          estimate: { units },
+          attribution: { source: options.source ?? 'api' },
+        });
+      }
+      try {
+        providerResult = await callWebSearchProvider(
+          record,
+          credentials as Record<string, unknown>,
+          { ...options, query },
+        );
+      } catch (error) {
+        void lease?.release('error').catch(() => undefined);
+        if (host) {
+          // The upstream account is the operator's: its error text stays in the server log, the tenant gets a generic one.
+          logger.warn('Managed web search request failed', { tenantId, projectId, providerKey, driver: record.driver, error });
+          throw new Error('Managed web search request failed.');
+        }
+        throw error;
+      }
+      void lease?.settle({ units }).catch(() => undefined);
+    }
+    const { results, answer: providerAnswer } = providerResult;
 
     const storeWarning = await cacheSession?.store(results, providerAnswer);
     if (storeWarning) warnings.push(storeWarning);

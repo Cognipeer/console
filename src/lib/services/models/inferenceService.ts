@@ -50,6 +50,11 @@ import { logModelUsage, TokenUsage, UsageCostResult } from './usageLogger';
 import type { IModelUsageRouting } from '@/lib/database';
 import type { RoutingCallerContext } from './routingCallerContext';
 import { buildModelRuntime } from './runtimeService';
+import {
+  getManagedCreditsHost,
+  isManagedProviderRecord,
+  type ManagedCreditLease,
+} from '@/enterprise/managed-credits';
 import { executeModelCall } from './gatewayCore';
 import { sanitizeForLogging } from './gatewayRequest';
 import type { ModelCallInput, ModelCallOutcome } from './gatewayTypes';
@@ -386,12 +391,14 @@ export async function handleEmbeddingRequest(params: {
 
   ensureEmbeddingModel(model);
 
-  const { runtime } = await buildModelRuntime(
+  const { runtime, record } = await buildModelRuntime(
     tenantDbName,
     model.tenantId,
     model.providerKey,
     projectId,
+    { allowManaged: true },
   );
+  const managed = isManagedProviderRecord(record);
 
   if (!runtime.createNativeEmbedder) {
     throw new Error('Model provider does not support embeddings');
@@ -421,10 +428,43 @@ export async function handleEmbeddingRequest(params: {
   if (body.encoding_format === 'float' || body.encoding_format === 'base64') embedOptions.encodingFormat = body.encoding_format;
   if (typeof body.input_type === 'string' && body.input_type) embedOptions.inputType = body.input_type;
 
-  const embedded = await withResilience(
-    () => embedder.embed(inputs, embedOptions),
-    { key: `embedding:${tenantDbName}:${model.providerKey}`, ...(signal ? { signal } : {}) },
-  );
+  // A managed provider is paid with credits: reserved before the upstream call (a refusal surfaces as it is, with no
+  // request made), booked with the real usage after it, returned on any failure. The caller's own token count is
+  // ignored there: it must not lower the bill.
+  let lease: ManagedCreditLease | undefined;
+  const inputEstimate = managed ? inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0) : 0;
+  if (managed) {
+    const host = getManagedCreditsHost();
+    if (host) {
+      lease = await host.reserve({
+        tenantId: model.tenantId,
+        tenantDbName,
+        projectId,
+        providerKey: model.providerKey,
+        driver: record.driver,
+        modelKey,
+        modelId: model.modelId,
+        kind: 'embedding',
+        requestId,
+        estimate: { inputTokens: inputEstimate },
+        attribution: { route: 'embeddings' },
+      });
+    }
+  }
+
+  let embedded: Awaited<ReturnType<typeof embedder.embed>>;
+  try {
+    embedded = await withResilience(
+      () => embedder.embed(inputs, embedOptions),
+      { key: `embedding:${tenantDbName}:${model.providerKey}`, ...(signal ? { signal } : {}) },
+    );
+  } catch (error) {
+    if (lease) {
+      const held = lease;
+      fireAndForget('managed-credit-release', () => held.release(signal?.aborted ? 'cancelled' : 'error'));
+    }
+    throw error;
+  }
   const embeddings = embedded.vectors;
   const latencyMs = Date.now() - start;
 
@@ -433,8 +473,9 @@ export async function handleEmbeddingRequest(params: {
   // ~4 chars/token, the rule the chat gateway uses for its pre-flight
   // estimate. Never 0, which showed embedding calls with no usage in Model Hub.
   const providerTokens = embedded.usage?.inputTokens || embedded.usage?.totalTokens || 0;
-  const tokenEstimate =
-    typeof body.input_tokens === 'number'
+  const tokenEstimate = managed
+    ? (providerTokens > 0 ? providerTokens : inputEstimate)
+    : typeof body.input_tokens === 'number'
       ? body.input_tokens
       : typeof body.inputTokenCount === 'number'
         ? body.inputTokenCount
@@ -447,6 +488,12 @@ export async function handleEmbeddingRequest(params: {
     outputTokens: 0,
     totalTokens: tokenEstimate,
   };
+
+  if (lease) {
+    const held = lease;
+    const booked = { inputTokens: tokenEstimate, outputTokens: 0, ...(providerTokens > 0 ? {} : { estimated: true }) };
+    fireAndForget('managed-credit-settle', () => held.settle(booked));
+  }
 
   fireAndForget('log-embedding-usage', () =>
     logModelUsage(tenantDbName, model, {
