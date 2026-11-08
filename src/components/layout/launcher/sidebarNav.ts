@@ -17,6 +17,15 @@ import {
 export const SIDEBAR_NAV = true;
 
 /**
+ * The labelled menu's style (Sidebar.tsx): `drill` shows one level at a time — the services, then the pages of the one
+ * chosen, with a way back; `tree` lists the services and opens the pages of the one in view under it.
+ */
+export type SidebarStyle = 'tree' | 'drill';
+
+/** The menu goes step by step; `'tree'` brings back the nested style, which is kept. */
+export const SIDEBAR_STYLE: SidebarStyle = 'drill';
+
+/**
  * Someone who can open at most this many services gets one plain list: no category headings, no pinned list and no
  * launcher (an enterprise user typically sees three to five services).
  */

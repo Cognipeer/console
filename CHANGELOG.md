@@ -790,20 +790,25 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ### One left menu
 
-- The icon rail and the second column with the pages of the service in view are one labelled menu. It lists Home,
-  the pinned services, and every service the person can open under Build, Data and Operate (each folds, with a count;
-  a category with nothing to open is left out). The service in view opens its pages in place, filtered as before
-  (Webhooks only with access to Webhooks), and Settings opens its pages by group while one of them is in view.
-- With seven services or fewer the menu is one plain list, without categories, pins or the Services launcher.
-- "Collapse menu" turns it into an icon strip that still shows the pages of the service in view. The folded categories
-  and the icon strip are remembered in the browser.
+- The icon rail and the second column with the pages of the service in view are one labelled menu that goes step by
+  step. Its first level lists Home, the pinned services and every service the person can open under Build, Data and
+  Operate (a category with nothing to open is left out). A service with several pages opens a level of its own: a way
+  back under the service's name, its pin, and its pages, filtered as before (Webhooks only with access to Webhooks); the
+  page under the service's own name is "All {service}" there (All Agents, not Agents › Agents). A service with one page
+  is a plain link, and Settings is a level of its own with its pages by group.
+- The menu opens at the level of the page in view, and the first level names that page next to its service
+  ("Agents  Tools ›"). One row is marked as the page in view; a pinned shortcut to its service is only named.
+- With seven services or fewer the first level is one plain list, without categories, pins or the Services launcher.
+- "Collapse menu" turns it into an icon strip that still shows the pages of the service in view; the browser
+  remembers it.
 - On a phone the menu button opens this same menu in a drawer, in place of the old one with Browse all services,
-  Pinned and Recent: Home, the pinned services, the categories, the pages of the service in view and Settings, with
-  rows sized for a finger. Following a link closes it. On a touch screen the pins stay shown (there is no hover).
+  Pinned and Recent, with rows sized for a finger. Following a link closes it; moving between levels does not. A
+  tapped row does not stay highlighted (there is no hover on a touch screen).
 - On a narrow window or a tablet (992px and below) the menu starts as the icon strip, whatever was chosen on a wide
   screen, so the page keeps its width; opening it there lasts for the visit.
-- Service names, addresses and the ⌘K search are unchanged. `SIDEBAR_NAV` in `sidebarNav.ts` switches back to the
-  rail and the sub-nav, which are kept.
+- Service names, addresses and the ⌘K search are unchanged. `SIDEBAR_STYLE` in `sidebarNav.ts` brings back the nested
+  style (folding categories, the pages of the service in view under it); `SIDEBAR_NAV` switches back to the rail and
+  the sub-nav. Both are kept.
 
 ### Entity health and alerting
 

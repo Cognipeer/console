@@ -98,6 +98,11 @@ export interface SubNavItem {
   requiresService?: PermissionService;
   /** Shown to tenant owners and admins only (OAuth apps, in Connectors). */
   tenantAdminOnly?: boolean;
+  /**
+   * The service's own page under the service's own name (Agents › Agents). The single left menu does not repeat it
+   * under the service (the service's row is that page); its step-by-step style calls it "All {service}".
+   */
+  sameAsService?: boolean;
 }
 
 /**
@@ -123,6 +128,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
     {
       id: 'browsers',
       label: 'Browsers',
+      sameAsService: true,
       href: '/dashboard/browser',
       icon: IconWorld,
       // A browser's own detail page belongs to this entry, but the sibling
@@ -663,6 +669,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
     {
       id: 'list',
       label: 'Agents',
+      sameAsService: true,
       href: '/dashboard/agents',
       icon: IconLayoutDashboard,
       matcher: (p) =>

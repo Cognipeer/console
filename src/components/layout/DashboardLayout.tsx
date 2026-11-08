@@ -38,6 +38,7 @@ import {
   enterpriseModuleForPath,
   getDashboardServices,
   SETTINGS_NAV_SECTION,
+  type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { EnterpriseUpsell } from '@/components/enterprise/EnterpriseUpsell';
 import type { PermissionService, UserServicePermissions } from '@/lib/security/rbac';
@@ -308,6 +309,12 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const hasSubnav = Boolean(
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
   );
+  // Any service's pages, filtered the same way: the single left menu's step-by-step style opens a service not in view.
+  const sidebarPagesFor = useCallback(
+    (service: DashboardServiceDefinition) =>
+      visibleSubNavItems(SUBNAV_CONFIG[service.id], (permission) => canUseService(permission), isTenantAdmin),
+    [canUseService, isTenantAdmin],
+  );
 
   // The Documentation entries (top bar, rail, service menu, mobile menu) open the page of the
   // service in view; outside any service, the start of the guide.
@@ -453,6 +460,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                 activeService={isSettingsActive ? null : activeService}
                 activeItems={serviceSubnavItems}
                 settingsItems={settingsNavItems}
+                pagesFor={sidebarPagesFor}
                 settingsHref={settingsHref}
                 settingsActive={isSettingsActive}
                 pinnedIds={pinned}
@@ -535,6 +543,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                     activeService={isSettingsActive ? null : activeService}
                     activeItems={serviceSubnavItems}
                     settingsItems={settingsNavItems}
+                    pagesFor={sidebarPagesFor}
                     settingsHref={settingsHref}
                     settingsActive={isSettingsActive}
                     pinnedIds={pinned}

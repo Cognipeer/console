@@ -1833,6 +1833,8 @@ export const tr: typeof en = {
     sidebarExpand: 'Menüyü genişlet',
     sidebarPin: '{service} sabitle',
     sidebarUnpin: '{service} sabitlemesini kaldır',
+    sidebarBack: 'Ana menüye dön',
+    sidebarAllOf: 'Tüm {service}',
   },
   navigationFeedback: {
     loadingPage: 'Sayfa yükleniyor…',

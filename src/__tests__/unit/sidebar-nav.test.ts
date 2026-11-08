@@ -1,9 +1,10 @@
 /**
  * The single left menu: one labelled column instead of the icon rail plus the service sub-nav. It lists only what the
- * person can open, under the launcher's categories (Build, Data, Operate; an empty one is left out), opens the pages of
- * the service in view in place (filtered like the sub-nav), and Settings with its grouped pages. Someone with seven
- * services or fewer gets one plain list, without categories, pins or the launcher. SIDEBAR_NAV switches back to the
- * rail and the sub-nav, which are kept. A phone gets the same menu in the top bar's drawer.
+ * person can open, under the launcher's categories (Build, Data, Operate; an empty one is left out), and goes step by
+ * step: a service's pages (filtered like the sub-nav) and Settings' grouped pages are levels of their own. The nested
+ * style is kept behind SIDEBAR_STYLE. Someone with seven services or fewer gets one plain list, without categories,
+ * pins or the launcher. SIDEBAR_NAV switches back to the rail and the sub-nav, which are kept. A phone gets the same
+ * menu in the top bar's drawer.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -112,9 +113,15 @@ describe('what the menu lists', () => {
 });
 
 describe('the menu', () => {
-  it('for many services: pinned, categories with counts, and the pages of the service in view', () => {
+  it('nested style, many services: pinned, categories with counts, and the pages of the service in view', () => {
     const activeItems = visibleSubNavItems(SUBNAV_CONFIG.agents, () => true, true);
-    const html = sidebar({ services: owner, activeService: agents, activeItems, pinnedIds: new Set(['models', 'agents']) });
+    const html = sidebar({
+      services: owner,
+      activeService: agents,
+      activeItems,
+      pinnedIds: new Set(['models', 'agents']),
+      menuStyle: 'tree',
+    });
     expect(html).toContain('data-testid="sidebar-pinned"');
     expect(html).toContain('data-testid="sidebar-pinned-models"');
     for (const group of sidebarGroups(owner)) {
@@ -179,8 +186,9 @@ describe('the menu', () => {
   it('speaks the viewer’s language', () => {
     const html = sidebar({ services: owner }, 'tr');
     expect(html).toContain('Ana sayfa');
-    expect(html).toContain('Tüm servisler');
     expect(html).toContain('Menüyü daralt');
+    expect(sidebar({ services: owner, activeService: agents, activeItems: SUBNAV_CONFIG.agents }, 'tr')).toContain('Ana menüye dön');
+    expect(sidebar({ services: owner, menuStyle: 'tree' }, 'tr')).toContain('Tüm servisler');
   });
 });
 
@@ -201,14 +209,18 @@ describe('the menu on a phone', () => {
   it('is the same menu, labelled although a phone is narrow, without the collapse toggle', () => {
     media.narrow = true;
     try {
-      const html = sidebar({ services: owner, variant: 'drawer', activeService: agents, activeItems: SUBNAV_CONFIG.agents, settingsItems });
-      expect(html).toContain('data-testid="sidebar-drawer"');
-      expect(html).not.toContain('data-collapsed="true"');
-      expect(html).toContain('data-testid="sidebar-group-build"');
-      expect(html).toContain(`data-testid="sidebar-subitem-${SUBNAV_CONFIG.agents[0].id}"`);
-      expect(html).toContain('data-testid="sidebar-settings"');
-      expect(html).toContain('data-testid="sidebar-help"');
-      expect(html).not.toContain('data-testid="sidebar-toggle"');
+      const level = sidebar({ services: owner, variant: 'drawer', activeService: agents, activeItems: SUBNAV_CONFIG.agents, settingsItems });
+      expect(level).toContain('data-testid="sidebar-drawer"');
+      expect(level).not.toContain('data-collapsed="true"');
+      expect(level).toContain('data-testid="sidebar-level-agents"');
+      expect(level).toContain('data-testid="sidebar-back"');
+      expect(level).toContain('data-testid="sidebar-subitem-tools"');
+      expect(level).toContain('data-testid="sidebar-help"');
+      expect(level).not.toContain('data-testid="sidebar-toggle"');
+      const first = sidebar({ services: owner, variant: 'drawer', settingsItems, pathname: '/dashboard/overview' });
+      expect(first).toContain('data-testid="sidebar-category-build"');
+      expect(first).toContain('data-testid="sidebar-settings"');
+      expect(first).not.toContain('data-testid="sidebar-toggle"');
     } finally {
       media.narrow = false;
     }
@@ -284,7 +296,10 @@ describe('the switch and the old menu', () => {
   });
 
   it('has its words in both languages, with the same placeholders', () => {
-    const keys = ['sidebarLabel', 'sidebarHome', 'sidebarPinned', 'sidebarAllServices', 'sidebarHelp', 'sidebarCollapse', 'sidebarExpand', 'sidebarPin', 'sidebarUnpin'] as const;
+    const keys = [
+      'sidebarLabel', 'sidebarHome', 'sidebarPinned', 'sidebarAllServices', 'sidebarHelp', 'sidebarCollapse',
+      'sidebarExpand', 'sidebarPin', 'sidebarUnpin', 'sidebarBack', 'sidebarAllOf',
+    ] as const;
     const enNav = en.navigation as Record<string, string>;
     const trNav = tr.navigation as Record<string, string>;
     for (const key of keys) {
@@ -293,5 +308,142 @@ describe('the switch and the old menu', () => {
       expect(trNav[key], key).not.toBe(enNav[key]);
       expect(trNav[key].match(/\{\w+\}/g) ?? [], key).toEqual(enNav[key].match(/\{\w+\}/g) ?? []);
     }
+  });
+});
+
+describe('no page twice, and the step-by-step menu', () => {
+  const layout = readFileSync(join(process.cwd(), 'src/components/layout/DashboardLayout.tsx'), 'utf8');
+  const model = readFileSync(join(process.cwd(), 'src/components/layout/launcher/sidebarNav.ts'), 'utf8');
+  const source = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.tsx'), 'utf8');
+  const css = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.module.css'), 'utf8');
+  const allAgentPages = visibleSubNavItems(SUBNAV_CONFIG.agents, () => true, true);
+  const pagesFor = (service: DashboardServiceDefinition) => visibleSubNavItems(SUBNAV_CONFIG[service.id], () => true, true);
+  /** The opening tag of the element with this test id. */
+  const tag = (html: string, testId: string) => html.match(new RegExp(`<[^>]*data-testid="${testId}"[^>]*>`))?.[0] ?? '';
+
+  it('nested style: the page under the service’s own name is not listed again under it (Agents › Agents)', () => {
+    expect(SUBNAV_CONFIG.agents.filter((item) => item.sameAsService).map((item) => item.id)).toEqual(['list']);
+    expect(SUBNAV_CONFIG.browser.filter((item) => item.sameAsService).map((item) => item.id)).toEqual(['browsers']);
+    const html = sidebar({
+      services: owner,
+      activeService: agents,
+      activeItems: allAgentPages,
+      pathname: '/dashboard/agents',
+      menuStyle: 'tree',
+    });
+    expect(html).not.toContain('data-testid="sidebar-subitem-list"');
+    expect(html).toContain('data-testid="sidebar-subitem-tools"');
+    expect(tag(html, 'sidebar-service-agents')).toContain('aria-current="page"');
+  });
+
+  it('nested style: one row is marked as the page; the service and its pinned shortcut are only named', () => {
+    const html = sidebar({
+      services: owner,
+      activeService: agents,
+      activeItems: allAgentPages,
+      pathname: '/dashboard/agents/tools',
+      pinnedIds: new Set(['agents']),
+      menuStyle: 'tree',
+    });
+    expect(tag(html, 'sidebar-subitem-tools')).toContain('aria-current="page"');
+    expect(tag(html, 'sidebar-service-agents')).toContain('aria-current="true"');
+    expect(tag(html, 'sidebar-pinned-agents')).toContain('aria-current="true"');
+    expect(html.match(/aria-current="page"/g)).toHaveLength(1);
+  });
+
+  it('step by step: the services first; one with several pages opens its level, one with a single page is a link', () => {
+    const html = sidebar({ services: owner, pagesFor, settingsItems, menuStyle: 'drill', pathname: '/dashboard/overview' });
+    expect(html).toContain('data-style="drill"');
+    expect(html).toContain('data-testid="sidebar-level-root"');
+    expect(html).toContain('data-testid="sidebar-category-build"');
+    expect(html).not.toContain('data-testid="sidebar-group-');
+    expect(tag(html, 'sidebar-service-agents')).toMatch(/^<button[^>]*data-opens="level"/);
+    expect(tag(html, 'sidebar-service-files')).toMatch(/^<a\b/);
+    expect(tag(html, 'sidebar-service-files')).toContain('href="/dashboard/files"');
+    expect(tag(html, 'sidebar-settings')).toMatch(/^<button[^>]*data-opens="level"/);
+    expect(html).not.toContain('data-testid="sidebar-subitem-');
+    expect(html).not.toContain('data-testid="sidebar-back"');
+  });
+
+  it('step by step: opens at the level of the page in view, with the way back, its pin and "All {service}"', () => {
+    const html = sidebar({
+      services: owner,
+      activeService: agents,
+      activeItems: allAgentPages,
+      pagesFor,
+      menuStyle: 'drill',
+      pathname: '/dashboard/agents/tools',
+    });
+    expect(html).toContain('data-testid="sidebar-level-agents"');
+    expect(tag(html, 'sidebar-back')).toMatch(/^<button/);
+    expect(html).toContain('Back to the main menu');
+    expect(html).toContain('data-testid="sidebar-level-pin"');
+    expect(html).toMatch(/data-testid="sidebar-subitem-list"[^>]*>.*?<span[^>]*>All Agents<\/span>/);
+    expect(tag(html, 'sidebar-subitem-tools')).toContain('aria-current="page"');
+    expect(html).toContain('>Sessions<');
+    expect(html).not.toContain('data-testid="sidebar-home"');
+    expect(html).not.toContain('data-testid="sidebar-service-');
+  });
+
+  it('step by step: Settings is a level of its own while one of its pages is in view, in the viewer’s language', () => {
+    const html = sidebar(
+      { services: owner, settingsItems, settingsActive: true, menuStyle: 'drill', pathname: '/dashboard/projects' },
+      'tr',
+    );
+    expect(html).toContain('data-testid="sidebar-level-settings"');
+    expect(html).toContain('Ana menüye dön');
+    expect(tag(html, 'sidebar-subitem-projects')).toContain('aria-current="page"');
+    expect(html).not.toContain('data-testid="sidebar-level-pin"');
+  });
+
+  it('step by step with few services: one plain list, and no pin on a service’s level', () => {
+    const member = memberServices(['agents', 'prompts', 'rag']);
+    const first = sidebar({ services: member, pagesFor, menuStyle: 'drill', pathname: '/dashboard/overview' });
+    expect(first).toContain('data-flat="true"');
+    expect(first).not.toContain('data-testid="sidebar-category-');
+    const level = sidebar({
+      services: member,
+      pagesFor,
+      menuStyle: 'drill',
+      activeService: agents,
+      activeItems: allAgentPages,
+      pathname: '/dashboard/agents/tools',
+    });
+    expect(level).toContain('data-testid="sidebar-level-agents"');
+    expect(level).not.toContain('data-testid="sidebar-level-pin"');
+  });
+
+  it('the menu goes step by step; the nested style is kept behind one constant, and no choice is offered', () => {
+    const html = sidebar({ services: owner, pagesFor });
+    expect(html).toContain('data-style="drill"');
+    expect(html).toContain('data-testid="sidebar-level-root"');
+    expect(html).not.toContain('data-testid="sidebar-style');
+    expect(sidebar({ services: owner, menuStyle: 'tree' })).toContain('data-style="tree"');
+    expect(model).toContain("export const SIDEBAR_STYLE: SidebarStyle = 'drill';");
+    expect(source).toContain('const style: SidebarStyle = menuStyle ?? SIDEBAR_STYLE;');
+    expect(source).not.toContain('cgn:sidebar:style');
+    // Both menus (the side one and the phone's drawer) get every service's pages, filtered like the one in view.
+    expect(layout.match(/pagesFor=\{sidebarPagesFor\}/g) ?? []).toHaveLength(2);
+    expect(layout).toMatch(/visibleSubNavItems\(SUBNAV_CONFIG\[service\.id\], \(permission\) => canUseService\(permission\), isTenantAdmin\)/);
+  });
+
+  it('a touch screen keeps no row "hovered" after a tap: every hover rule is for a pointer only', () => {
+    const start = css.indexOf('@media (hover: hover) {');
+    expect(start).toBeGreaterThan(-1);
+    let depth = 0;
+    let end = -1;
+    for (let i = css.indexOf('{', start); i < css.length; i += 1) {
+      if (css[i] === '{') depth += 1;
+      if (css[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    const outside = [...css.matchAll(/:hover/g)].filter((match) => match.index < start || match.index > end);
+    expect(outside).toHaveLength(0);
+    expect(css).toMatch(/@media \(hover: hover\) \{\s*\.item:hover/);
   });
 });

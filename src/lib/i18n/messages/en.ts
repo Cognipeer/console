@@ -419,6 +419,8 @@ export const en = {
     sidebarExpand: 'Expand menu',
     sidebarPin: 'Pin {service}',
     sidebarUnpin: 'Unpin {service}',
+    sidebarBack: 'Back to the main menu',
+    sidebarAllOf: 'All {service}',
   },
   navigationFeedback: {
     loadingPage: 'Loading page…',
