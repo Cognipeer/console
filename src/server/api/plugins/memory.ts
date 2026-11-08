@@ -19,7 +19,7 @@ import {
 } from '@/lib/services/memory/memoryService';
 import {
   parseCsvQuery,
-  readJsonBody,
+  readJsonObjectBody,
   requireProjectContextForRequest,
   sendProjectContextError,
   withApiRequestContext,
@@ -50,7 +50,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/memory/stores', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (
         typeof body.name !== 'string'
@@ -73,6 +73,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send(store);
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       logger.error('Create memory store error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -100,7 +101,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { storeKey } = request.params as { storeKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       const store = await updateMemoryStore(
         session.tenantDbName,
         session.tenantId,
@@ -114,6 +115,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(store);
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (error instanceof MemoryStoreInputError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
@@ -203,7 +205,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { storeKey } = request.params as { storeKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (typeof body.content !== 'string' || !body.content.trim()) {
         return reply.code(400).send({ error: 'content is required' });
@@ -224,6 +226,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });
       }
@@ -283,7 +286,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { storeKey } = request.params as { storeKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
 
       if (typeof body.query !== 'string' || !body.query.trim()) {
         return reply.code(400).send({ error: 'query is required' });
@@ -299,6 +302,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Recall memories error', { error });
       return sendProjectContextError(reply, error)
