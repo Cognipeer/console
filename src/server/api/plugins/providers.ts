@@ -18,6 +18,7 @@ import {
   loadProviderRuntimeData,
   ProviderCredentialDecryptError,
   recordProviderTest,
+  redactPlatformProvider,
   resolveProviderTestTarget,
   resolveTenantProjectIds,
   updateProviderConfig,
@@ -255,7 +256,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           type: query.type || undefined,
         });
 
-        return reply.code(200).send({ providers });
+        return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
@@ -266,7 +267,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         type: query.type || undefined,
       });
 
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? sendProviderError(reply, error);
@@ -459,13 +460,14 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Not found' });
         }
 
-        return reply.code(200).send({ provider });
+        return reply.code(200).send({ provider: redactPlatformProvider(provider) });
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
       const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
       const assigned = provider && (
-        String(provider.projectId) === String(projectId)
+        provider.allProjects === true
+        || String(provider.projectId) === String(projectId)
         || (
           Array.isArray(provider.projectIds)
           && provider.projectIds.map(String).includes(String(projectId))
@@ -476,7 +478,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
 
-      return reply.code(200).send({ provider });
+      return reply.code(200).send({ provider: redactPlatformProvider(provider) });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? sendProviderError(reply, error);
@@ -528,7 +530,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = await requireProjectContextForRequest(request);
       const existing = await getProviderConfigById(session.tenantDbName, id);
       const assigned = existing && (
-        String(existing.projectId) === String(projectId)
+        existing.allProjects === true
+        || String(existing.projectId) === String(projectId)
         || (
           Array.isArray(existing.projectIds)
           && existing.projectIds.map(String).includes(String(projectId))
@@ -578,7 +581,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = await requireProjectContextForRequest(request);
       const existing = await getProviderConfigById(session.tenantDbName, id);
       const assigned = existing && (
-        String(existing.projectId) === String(projectId)
+        existing.allProjects === true
+        || String(existing.projectId) === String(projectId)
         || (
           Array.isArray(existing.projectIds)
           && existing.projectIds.map(String).includes(String(projectId))

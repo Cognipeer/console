@@ -29,3 +29,19 @@ export class ManagedProviderError extends Error {
     this.name = 'ManagedProviderError';
   }
 }
+
+/**
+ * A platform-provided record (one visible in every project of the tenant, written only by the deployment) was the
+ * target of a change made through a tenant API: update, delete, project assignment, replica or status change, test.
+ * HTTP 403.
+ */
+export class PlatformRecordReadOnlyError extends Error {
+  readonly status = 403;
+
+  readonly code = 'platform_record_read_only';
+
+  constructor(message = 'This item is provided by the platform and cannot be changed.') {
+    super(message);
+    this.name = 'PlatformRecordReadOnlyError';
+  }
+}

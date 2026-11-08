@@ -21,6 +21,8 @@ import {
   type ProviderConfigView,
   type ProviderStatus,
 } from '@/lib/services/providers/providerService';
+import { PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import { isManagedProviderRecord } from '@/enterprise/managed-credits';
 import {
   getUsageBreakdown,
   type UsageBreakdown,
@@ -228,6 +230,10 @@ export async function createModel(
     payload.providerKey,
     projectId,
   );
+
+  if (provider.allProjects || isManagedProviderRecord(provider)) {
+    throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+  }
 
   ensureProviderSupportsCategory(provider, payload.category);
   assertUpstreamApi(payload.settings, provider.driver);
@@ -624,9 +630,12 @@ export async function updateModel(
   if (!existing) {
     return null;
   }
+  if (existing.allProjects) throw new PlatformRecordReadOnlyError();
 
   const { capabilities, ...modelUpdates } = updates;
   const updatePayload: UpdateModelInput & { updatedBy?: string } = { ...modelUpdates };
+  // Tenant-wide is set by the deployment only: never taken from a caller's payload.
+  delete (updatePayload as { allProjects?: unknown }).allProjects;
   if (capabilities !== undefined) {
     updatePayload.metadata = applyModelCapabilityOverrides(
       updates.metadata ?? existing.metadata,
@@ -649,6 +658,9 @@ export async function updateModel(
       projectId,
     );
 
+    if (provider.allProjects || isManagedProviderRecord(provider)) {
+      throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+    }
     ensureProviderSupportsCategory(provider, updates.category ?? existing.category);
 
     updatePayload.providerKey = provider.key;
@@ -656,6 +668,22 @@ export async function updateModel(
     updatePayload.supportsToolCalls =
       updates.supportsToolCalls ??
       Boolean(provider.driverCapabilities?.['model.supports.tool_calls']);
+  }
+
+  // A replica names a provider by key; it must not route a tenant model onto a platform provider.
+  if (Array.isArray(updatePayload.replicas)) {
+    for (const replica of updatePayload.replicas) {
+      if (!replica?.providerKey || replica.providerKey === existing.providerKey) continue;
+      const target = await getProviderConfigByKey(
+        tenantDbName,
+        existing.tenantId,
+        replica.providerKey,
+        projectId,
+      );
+      if (target && (target.allProjects || isManagedProviderRecord(target))) {
+        throw new PlatformRecordReadOnlyError('Replicas cannot use a platform provider.');
+      }
+    }
   }
 
   if (userId) {
@@ -707,6 +735,7 @@ export async function deleteModel(
   if (!existing) {
     return false;
   }
+  if (existing.allProjects) throw new PlatformRecordReadOnlyError();
   const deleted = await db.deleteModel(modelId);
   await invalidateModelMetaCache(tenantDbName, projectId, [existing.key]);
   return deleted;

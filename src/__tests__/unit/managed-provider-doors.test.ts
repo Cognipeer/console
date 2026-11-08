@@ -68,6 +68,7 @@ const record = (overrides: Record<string, unknown> = {}) => ({
 const host = (): ManagedCreditsHost => ({
   isManagedProvider: (ref) => ref.settings?.managed === true || ref.driver === 'managed-driver',
   reserve: vi.fn(),
+  resolveCredentials: () => ({ apiKey: 'operator-secret' }),
 });
 
 beforeEach(() => {
@@ -172,10 +173,10 @@ describe('provider CRUD and test', () => {
     expect(hoisted.db.createProvider).not.toHaveBeenCalled();
   });
 
-  it('deletes and updates as before without a host (no extra record read)', async () => {
+  it('deletes and updates as before without a host (one record read for the platform-record check)', async () => {
     hoisted.db.deleteProvider.mockResolvedValue(true);
     await expect(deleteProviderConfig('db', 'prov-1')).resolves.toBe(true);
-    expect(hoisted.db.findProviderById).not.toHaveBeenCalled();
+    expect(hoisted.db.findProviderById).toHaveBeenCalledTimes(1);
   });
 
   it('maps the refusals: read-only is 403 { error }, restricted is 400', () => {

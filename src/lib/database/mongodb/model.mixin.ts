@@ -162,7 +162,8 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       const query: Record<string, unknown> = {};
 
       if (filters?.projectId) {
-        query.projectId = filters.projectId;
+        // Platform-provided records are visible in every project.
+        query.$or = [{ projectId: filters.projectId }, { allProjects: true }];
       }
 
       if (filters?.category) {
@@ -199,7 +200,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         _id: ObjectId.isValid(id) ? new ObjectId(id) : id,
       };
       if (projectId) {
-        query.projectId = projectId;
+        query.$or = [{ projectId }, { allProjects: true }];
       }
       const model = await db
         .collection<IModel>(COLLECTIONS.models)
@@ -218,7 +219,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       const db = this.getTenantDb();
       const query: Record<string, unknown> = { key };
       if (projectId) {
-        query.projectId = projectId;
+        query.$or = [{ projectId }, { allProjects: true }];
       }
       const model = await db.collection<IModel>(COLLECTIONS.models).findOne(query);
       if (!model) {

@@ -113,6 +113,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 function sanitizeModel(model: IModel) {
   return {
     ...model,
+    allProjects: Boolean(model.allProjects),
     capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
   };
@@ -318,6 +319,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Client create model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelKeyConflictError) {
         return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
       }
@@ -446,6 +448,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Client update model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -473,6 +476,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Client delete model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
     }

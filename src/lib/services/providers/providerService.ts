@@ -5,9 +5,9 @@ import {
   ProviderDomain,
 } from '@/lib/database';
 import { getManagedCreditsHost, isManagedProviderRecord } from '@/enterprise/managed-credits';
-import { ManagedProviderError, ManagedProviderReadOnlyError } from './managedProviderErrors';
+import { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadOnlyError } from './managedProviderErrors';
 
-export { ManagedProviderError, ManagedProviderReadOnlyError };
+export { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadOnlyError };
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
 import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
@@ -148,9 +148,29 @@ function sanitize(record: IProviderRecord, options?: ProviderViewOptions): Provi
   const { credentialsEnc, ...rest } = record;
   return {
     ...rest,
+    allProjects: Boolean(rest.allProjects),
     hasCredentials: Boolean(credentialsEnc),
     ...(options?.credentialFields ? { credentialFields: storedCredentialNames(record) } : {}),
   };
+}
+
+/**
+ * What a tenant user may see of a platform-provided record: identity and capability fields only. Settings, metadata,
+ * description and credential field names belong to the deployment. Applied to API replies; server-side readers keep
+ * the full view because they need `settings` to route and meter the record.
+ */
+export function redactPlatformProvider<T extends ProviderConfigView>(view: T): T {
+  if (!view.allProjects) return view;
+  const {
+    _id, tenantId, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
+  } = view;
+  return {
+    _id, tenantId, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
+    allProjects: true,
+    hasCredentials: true,
+    settings: {},
+    createdBy: '',
+  } as unknown as T;
 }
 
 async function withTenantDb(tenantDbName: string) {
@@ -218,9 +238,14 @@ async function assertNotManagedById(
   db: Awaited<ReturnType<typeof withTenantDb>>,
   providerId: string,
 ): Promise<void> {
-  if (!getManagedCreditsHost()) return;
   const record = await db.findProviderById(providerId);
-  if (record && isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
+  assertNotPlatformRecord(record);
+  if (record && getManagedCreditsHost() && isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
+}
+
+/** Refuses a change to a platform-provided (tenant-wide) record. */
+function assertNotPlatformRecord(record: Pick<IProviderRecord, 'allProjects'> | null | undefined): void {
+  if (record?.allProjects) throw new PlatformRecordReadOnlyError();
 }
 
 export async function createProviderConfig(
@@ -547,6 +572,7 @@ export async function resolveProviderTestTarget(
     if (record.tenantId !== provider.tenantId) {
       throw new Error(`Provider configuration "${provider.id}" not found.`);
     }
+    assertNotPlatformRecord(record);
     return { record, credentials, settings: overrides.settings ?? record.settings ?? {} };
   }
 
@@ -555,6 +581,7 @@ export async function resolveProviderTestTarget(
   if (!record || record.tenantId !== provider.tenantId) {
     throw new Error(`Provider configuration "${provider.id}" not found.`);
   }
+  assertNotPlatformRecord(record);
   if (isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
   const { merged } = mergeCredentials(record, overrides.credentials ?? {});
   return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
@@ -567,6 +594,7 @@ export async function recordProviderTest(
   lastTest: IProviderLastTest,
 ): Promise<void> {
   const db = await withTenantDb(tenantDbName);
+  assertNotPlatformRecord(await db.findProviderById(providerId));
   await db.updateProvider(providerId, { lastTest });
 }
 
@@ -673,6 +701,12 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     throw new ManagedProviderError(options?.managedMessage);
   }
 
+  // A managed record never opens its stored credentials: the operator supplies them. Missing method, null or a throw
+  // refuses the call with a generic message.
+  if (options?.allowManaged === true && isManagedProviderRecord(record)) {
+    return { record, credentials: resolveManagedCredentials(record) as TCredentials };
+  }
+
   let credentials: TCredentials;
   try {
     credentials = decryptObject<TCredentials>(record.credentialsEnc);
@@ -699,6 +733,19 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     record,
     credentials,
   };
+}
+
+function resolveManagedCredentials(record: IProviderRecord): Record<string, unknown> {
+  let resolved: Record<string, unknown> | null = null;
+  try {
+    resolved = getManagedCreditsHost()?.resolveCredentials?.(record) ?? null;
+  } catch (error) {
+    logger.error('Managed credentials could not be resolved', { providerKey: record.key, error });
+  }
+  if (!resolved || typeof resolved !== 'object') {
+    throw new ManagedProviderError('This provider is not available right now.');
+  }
+  return resolved;
 }
 
 function tryRecoverLegacyPlaintextCredentials<T>(value: string): T | null {

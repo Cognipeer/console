@@ -1,0 +1,295 @@
+/**
+ * Platform-provided records (`allProjects`) through the tenant-facing services: read-only everywhere a tenant could
+ * change them, never set from a payload, operator credentials for managed records, key uniqueness, route mapping.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const hoisted = vi.hoisted(() => ({
+  db: {
+    switchToTenant: vi.fn(),
+    findProviderById: vi.fn(),
+    findProviderByKey: vi.fn(),
+    listProviders: vi.fn(),
+    updateProvider: vi.fn(),
+    deleteProvider: vi.fn(),
+    createProvider: vi.fn(),
+    findModelById: vi.fn(),
+    findModelByKey: vi.fn(),
+    updateModel: vi.fn(),
+    deleteModel: vi.fn(),
+    createModel: vi.fn(),
+  },
+}));
+
+vi.mock('@/lib/database', () => ({ getDatabase: async () => hoisted.db }));
+vi.mock('@/lib/utils/crypto', () => ({
+  encryptObject: vi.fn((value: unknown) => `enc:${JSON.stringify(value)}`),
+  decryptObject: vi.fn((blob: string) => JSON.parse(blob.slice(4))),
+}));
+vi.mock('@/lib/core/cache', () => ({ getCache: async () => ({ del: vi.fn(), get: vi.fn(), set: vi.fn() }) }));
+vi.mock('@/lib/services/providers/providerEndpointGuard', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  assertProviderEndpointsAllowed: vi.fn(),
+}));
+vi.mock('@/lib/services/providers/providerSettingsValidation', () => ({
+  settingsValidatorOf: vi.fn(),
+  validateProviderSettings: vi.fn(),
+}));
+
+import {
+  registerManagedCreditsHost,
+  resetManagedCreditsHostForTests,
+  type ManagedCreditsHost,
+} from '@/enterprise/managed-credits';
+import {
+  createProviderConfig,
+  deleteProviderConfig,
+  loadProviderRuntimeData,
+  recordProviderTest,
+  resolveProviderTestTarget,
+  updateProviderConfig,
+  listProviderConfigs,
+  redactPlatformProvider,
+} from '@/lib/services/providers/providerService';
+import { ManagedProviderError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import { createModel, deleteModel, updateModel } from '@/lib/services/models/modelService';
+import { sendProviderConfigError } from '@/server/api/providerConfigErrors';
+
+const provider = (overrides: Record<string, unknown> = {}) => ({
+  _id: 'prov-1',
+  tenantId: 'tenant-1',
+  key: 'own',
+  type: 'model',
+  driver: 'openai',
+  label: 'Own',
+  status: 'active',
+  credentialsEnc: `enc:${JSON.stringify({ apiKey: 'tenant-secret' })}`,
+  settings: {},
+  ...overrides,
+});
+const wideProvider = (overrides: Record<string, unknown> = {}) =>
+  provider({ _id: 'prov-wide', key: 'platform', label: 'Platform', allProjects: true, settings: { managed: true }, ...overrides });
+const model = (overrides: Record<string, unknown> = {}) => ({
+  _id: 'model-1', tenantId: 'tenant-1', projectId: 'p1', name: 'M', key: 'm', providerKey: 'own',
+  providerDriver: 'openai', category: 'llm', modelId: 'x', pricing: {}, settings: {}, ...overrides,
+});
+
+const host = (extra: Partial<ManagedCreditsHost> = {}): ManagedCreditsHost => ({
+  isManagedProvider: (ref) => ref.settings?.managed === true,
+  reserve: vi.fn(),
+  ...extra,
+});
+
+const modelInput = {
+  name: 'M', providerKey: 'own', category: 'llm', modelId: 'x', pricing: { inputTokenPer1M: 1, outputTokenPer1M: 1 },
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  hoisted.db.findProviderById.mockReset().mockResolvedValue(provider());
+  hoisted.db.findProviderByKey.mockReset().mockResolvedValue(provider());
+  hoisted.db.createProvider.mockReset().mockImplementation(async (p: object) => ({ ...p, _id: 'new' }));
+  hoisted.db.createModel.mockReset().mockImplementation(async (m: object) => ({ ...m, _id: 'new-model', key: (m as { key: string }).key }));
+  hoisted.db.findModelByKey.mockReset().mockResolvedValue(null);
+  hoisted.db.findModelById.mockReset().mockResolvedValue(model());
+  hoisted.db.updateModel.mockReset().mockImplementation(async (_id: string, d: object) => ({ ...model(), ...d }));
+});
+afterEach(() => resetManagedCreditsHostForTests());
+
+describe('provider mutations on a tenant-wide record', () => {
+  beforeEach(() => hoisted.db.findProviderById.mockResolvedValue(wideProvider({ settings: {} })));
+
+  it('refuses update, delete and test writes, with no host registered', async () => {
+    for (const payload of [
+      { label: 'x' }, { projectIds: ['p1'] }, { status: 'disabled' as const },
+      { credentials: { apiKey: 'k' } }, { settings: { a: 1 } },
+    ]) {
+      await expect(updateProviderConfig('db', 'prov-wide', payload)).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    }
+    await expect(deleteProviderConfig('db', 'prov-wide')).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    await expect(
+      resolveProviderTestTarget('db', { id: 'prov-wide', tenantId: 'tenant-1' }, { credentials: { apiKey: 'typed' } }),
+    ).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    await expect(
+      resolveProviderTestTarget('db', { id: 'prov-wide', tenantId: 'tenant-1' }, {}),
+    ).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    await expect(recordProviderTest('db', 'prov-wide', { ok: true } as never)).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    expect(hoisted.db.updateProvider).not.toHaveBeenCalled();
+    expect(hoisted.db.deleteProvider).not.toHaveBeenCalled();
+  });
+
+  it('still updates and deletes an ordinary record', async () => {
+    hoisted.db.findProviderById.mockResolvedValue(provider());
+    hoisted.db.updateProvider.mockResolvedValue(provider({ label: 'y' }));
+    hoisted.db.deleteProvider.mockResolvedValue(true);
+    await expect(updateProviderConfig('db', 'prov-1', { label: 'y' })).resolves.toMatchObject({ label: 'y', allProjects: false });
+    await expect(deleteProviderConfig('db', 'prov-1')).resolves.toBe(true);
+  });
+
+  it('maps to 403 with error and code for dashboard and client routes alike', () => {
+    const send = vi.fn();
+    const reply = { code: vi.fn(() => ({ send })) };
+    expect(sendProviderConfigError(reply as never, new PlatformRecordReadOnlyError())).toBe(true);
+    expect(reply.code).toHaveBeenLastCalledWith(403);
+    expect(send).toHaveBeenLastCalledWith({
+      error: 'This item is provided by the platform and cannot be changed.',
+      code: 'platform_record_read_only',
+    });
+  });
+});
+
+describe('allProjects is never taken from a tenant payload', () => {
+  it('createProviderConfig ignores it', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(null);
+    const view = await createProviderConfig('db', 'tenant-1', {
+      key: 'mine', type: 'model', driver: 'openai', label: 'x', credentials: { apiKey: 'k' }, createdBy: 'u',
+      allProjects: true,
+    } as never);
+    expect(hoisted.db.createProvider.mock.calls[0][0]).not.toHaveProperty('allProjects');
+    expect(view.allProjects).toBe(false);
+  });
+
+  it('updateProviderConfig ignores it', async () => {
+    hoisted.db.updateProvider.mockResolvedValue(provider());
+    await updateProviderConfig('db', 'prov-1', { label: 'x', allProjects: true } as never);
+    expect(hoisted.db.updateProvider.mock.calls[0][1]).not.toHaveProperty('allProjects');
+  });
+
+  it('createModel and updateModel ignore it', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(provider());
+    await createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, allProjects: true } as never);
+    expect(hoisted.db.createModel.mock.calls[0][0]).not.toHaveProperty('allProjects');
+    await updateModel('db', 'p1', 'model-1', { name: 'n', allProjects: true } as never);
+    expect(hoisted.db.updateModel.mock.calls[0][1]).not.toHaveProperty('allProjects');
+  });
+});
+
+describe('model mutations on a tenant-wide model', () => {
+  beforeEach(() => hoisted.db.findModelById.mockResolvedValue(model({ allProjects: true, projectId: 'other' })));
+
+  it('refuses update (including replicas and settings) and delete', async () => {
+    await expect(updateModel('db', 'p1', 'model-1', { name: 'x' })).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    await expect(updateModel('db', 'p1', 'model-1', { replicas: [] } as never)).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    await expect(updateModel('db', 'p1', 'model-1', { settings: { a: 1 } })).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    await expect(deleteModel('db', 'p1', 'model-1')).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    expect(hoisted.db.updateModel).not.toHaveBeenCalled();
+    expect(hoisted.db.deleteModel).not.toHaveBeenCalled();
+  });
+
+  it('a missing model is still null or false', async () => {
+    hoisted.db.findModelById.mockResolvedValue(null);
+    await expect(updateModel('db', 'p1', 'nope', { name: 'x' })).resolves.toBeNull();
+    await expect(deleteModel('db', 'p1', 'nope')).resolves.toBe(false);
+  });
+
+  it('refuses re-pointing an own model to a platform provider', async () => {
+    hoisted.db.findModelById.mockResolvedValue(model());
+    hoisted.db.findProviderByKey.mockResolvedValue(wideProvider());
+    await expect(updateModel('db', 'p1', 'model-1', { providerKey: 'platform' })).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+  });
+});
+
+describe('createModel on a platform provider', () => {
+  it('refuses a tenant-wide provider', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(wideProvider({ settings: {} }));
+    await expect(createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, providerKey: 'platform' } as never))
+      .rejects.toThrow('Models cannot be added to a platform provider.');
+    expect(hoisted.db.createModel).not.toHaveBeenCalled();
+  });
+
+  it('refuses a provider the managed host recognises, even when not tenant-wide', async () => {
+    registerManagedCreditsHost(host());
+    hoisted.db.findProviderByKey.mockResolvedValue(provider({ key: 'platform', settings: { managed: true } }));
+    await expect(createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, providerKey: 'platform' } as never))
+      .rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+  });
+
+  it('suffixes the key of a tenant-wide model instead of a duplicate-key error', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(provider());
+    hoisted.db.findModelByKey.mockImplementation(async (key: string) => (key === 'shared' ? model({ key: 'shared', allProjects: true }) : null));
+    const created = await createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, name: 'Shared' } as never);
+    expect(created.key).toBe('shared-2');
+    expect(hoisted.db.findModelByKey).toHaveBeenCalledWith('shared', 'p1');
+  });
+});
+
+describe('operator credentials for managed records', () => {
+  const managed = () => provider({ key: 'platform', settings: { managed: true }, credentialsEnc: 'not-decryptable' });
+  const load = () => loadProviderRuntimeData('db', { key: 'platform', tenantId: 'tenant-1' }, { allowManaged: true });
+
+  it('uses the host credentials and never decrypts the stored blob', async () => {
+    const { decryptObject } = await import('@/lib/utils/crypto');
+    hoisted.db.findProviderByKey.mockResolvedValue(managed());
+    const resolveCredentials = vi.fn(() => ({ apiKey: 'operator' }));
+    registerManagedCreditsHost(host({ resolveCredentials }));
+    const loaded = await load();
+    expect(loaded.credentials).toEqual({ apiKey: 'operator' });
+    expect(resolveCredentials).toHaveBeenCalledWith(expect.objectContaining({ key: 'platform' }));
+    expect(decryptObject).not.toHaveBeenCalled();
+  });
+
+  it('refuses with a generic message when credentials are null, missing or throw', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(managed());
+    for (const h of [
+      host({ resolveCredentials: () => null }),
+      host(),
+      host({ resolveCredentials: () => { throw new Error('SEARCH_API_KEY missing'); } }),
+    ]) {
+      registerManagedCreditsHost(h);
+      const error = await load().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ManagedProviderError);
+      expect((error as Error).message).not.toMatch(/SEARCH|env|KEY/);
+    }
+  });
+
+  it('leaves a non-managed record and a no-host deployment unchanged', async () => {
+    registerManagedCreditsHost(host({ resolveCredentials: () => ({ apiKey: 'operator' }) }));
+    hoisted.db.findProviderByKey.mockResolvedValue(provider());
+    expect((await load()).credentials).toEqual({ apiKey: 'tenant-secret' });
+    resetManagedCreditsHostForTests();
+    hoisted.db.findProviderByKey.mockResolvedValue(provider({ key: 'platform', settings: { managed: true } }));
+    expect((await load()).credentials).toEqual({ apiKey: 'tenant-secret' });
+  });
+});
+
+describe('listProviderConfigs view', () => {
+  it('carries allProjects with a default of false', async () => {
+    hoisted.db.listProviders.mockResolvedValue([provider(), wideProvider()]);
+    const views = await listProviderConfigs('db', 'tenant-1', { projectId: 'p1' });
+    expect(views.map((v) => v.allProjects)).toEqual([false, true]);
+  });
+});
+
+describe('replicas cannot route a tenant model onto a platform provider', () => {
+  it('refuses a replica naming a tenant-wide provider, accepts an ordinary one', async () => {
+    hoisted.db.findProviderByKey.mockImplementation(async (_t: string, key: string) =>
+      key === 'platform' ? wideProvider({ settings: {} }) : provider({ key }));
+    await expect(
+      updateModel('db', 'p1', 'model-1', { replicas: [{ providerKey: 'platform' }] } as never),
+    ).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    expect(hoisted.db.updateModel).not.toHaveBeenCalled();
+    await expect(
+      updateModel('db', 'p1', 'model-1', { replicas: [{ providerKey: 'second' }] } as never),
+    ).resolves.toBeTruthy();
+  });
+
+  it('refuses a replica naming a managed provider with no allProjects flag', async () => {
+    registerManagedCreditsHost(host());
+    hoisted.db.findProviderByKey.mockResolvedValue(provider({ key: 'm', settings: { managed: true } }));
+    await expect(
+      updateModel('db', 'p1', 'model-1', { replicas: [{ providerKey: 'm' }] } as never),
+    ).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+  });
+});
+
+describe('redactPlatformProvider', () => {
+  it('keeps identity fields of a tenant-wide view and passes an ordinary view through', () => {
+    const wide = { ...wideProvider(), hasCredentials: true, description: 'd', metadata: { a: 1 } } as never;
+    const out = redactPlatformProvider(wide) as unknown as Record<string, unknown>;
+    expect(out).toMatchObject({ key: 'platform', allProjects: true, settings: {} });
+    expect(out).not.toHaveProperty('metadata');
+    expect(out).not.toHaveProperty('description');
+    const plain = { ...provider(), allProjects: false, hasCredentials: true } as never;
+    expect(redactPlatformProvider(plain)).toBe(plain);
+  });
+});

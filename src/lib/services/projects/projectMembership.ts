@@ -176,6 +176,10 @@ export async function applyProjectExtras(
         warnings.push(`Provider "${providerId}" was skipped: provider not found.`);
         continue;
       }
+      if (provider.allProjects) {
+        warnings.push(`Provider "${provider.label}" was skipped: it is provided by the platform.`);
+        continue;
+      }
       // A provider created for one specific project (legacy single `projectId`) is not shareable.
       if (provider.projectId) {
         warnings.push(`Provider "${provider.label}" was skipped: it belongs to another project.`);

@@ -32,6 +32,7 @@ import {
   deleteProviderConfig,
   getProviderConfigById,
   listProviderConfigs,
+  redactPlatformProvider,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
@@ -79,9 +80,13 @@ function sanitizeUpdatePayload(body: unknown): UpdateProviderConfigInput {
 }
 
 /** True when the provider row belongs to this project (direct or via projectIds). */
-function isAssignedToProject(provider: { projectId?: unknown; projectIds?: unknown }, projectId: string): boolean {
+function isAssignedToProject(
+  provider: { allProjects?: boolean; projectId?: unknown; projectIds?: unknown },
+  projectId: string,
+): boolean {
   return (
-    String(provider.projectId) === String(projectId)
+    provider.allProjects === true
+    || String(provider.projectId) === String(projectId)
     || (Array.isArray(provider.projectIds) && provider.projectIds.map(String).includes(String(projectId)))
   );
 }
@@ -113,7 +118,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
         ...(query.scope === 'tenant' ? {} : { projectId: auth.projectId }),
       };
       const providers = await listProviderConfigs(auth.tenantDbName, auth.tenantId, filters);
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       logger.error('Client list providers error', { error });
       return sendApiTokenError(reply, error)
@@ -169,7 +174,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
         && provider.tenantId === auth.tenantId
         && (query.scope === 'tenant' || (auth.projectId && isAssignedToProject(provider, auth.projectId)));
       if (!ok) return reply.code(404).send({ error: 'Not found' });
-      return reply.code(200).send({ provider });
+      return reply.code(200).send({ provider: redactPlatformProvider(provider) });
     } catch (error) {
       logger.error('Client get provider error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });

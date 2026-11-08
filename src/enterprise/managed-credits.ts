@@ -69,6 +69,10 @@ export interface ManagedCreditsHost {
    * credits_unavailable 503, plan_feature_unavailable 402) to refuse the call.
    */
   reserve(call: ManagedCallInfo): Promise<ManagedCreditLease>;
+  /**
+   * Upstream credentials of a managed record, supplied by the operator. null = not configured; the call is refused.
+   */
+  resolveCredentials?(ref: ManagedProviderRef): Record<string, unknown> | null;
 }
 
 let host: ManagedCreditsHost | null = null;

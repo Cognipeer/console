@@ -839,6 +839,11 @@ export interface IProviderRecord
   tenantId: string;
   projectId?: string;
   projectIds?: string[];
+  /**
+   * Platform-provided record: visible in every project of the tenant, written
+   * only by the deployment (never by tenant APIs) and read-only through tenant APIs.
+   */
+  allProjects?: boolean;
   key: string;
   type: ProviderDomain;
   driver: string;
@@ -1106,6 +1111,11 @@ export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
+  /**
+   * Platform-provided record: visible in every project of the tenant, written
+   * only by the deployment (never by tenant APIs) and read-only through tenant APIs.
+   */
+  allProjects?: boolean;
   name: string;
   description?: string;
   key: string;

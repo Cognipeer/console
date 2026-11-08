@@ -126,6 +126,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 function sanitizeModel(model: IModel) {
   return {
     ...model,
+    allProjects: Boolean(model.allProjects),
     capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
   };
@@ -633,6 +634,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Create model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelKeyConflictError) {
         return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
       }
@@ -991,6 +993,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Update model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -1014,6 +1017,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Delete model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

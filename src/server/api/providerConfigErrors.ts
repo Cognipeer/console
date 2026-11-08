@@ -1,6 +1,6 @@
 import type { FastifyReply } from 'fastify';
 import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
-import { ManagedProviderError, ManagedProviderReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 
 /** A provider configuration the console refuses: an endpoint the outbound guard does not allow, or a setting the driver cannot work with. */
@@ -24,6 +24,10 @@ export function sendProviderConfigError(reply: FastifyReply, error: unknown): bo
   }
   if (error instanceof ManagedProviderReadOnlyError) {
     void reply.code(403).send({ error: error.message });
+    return true;
+  }
+  if (error instanceof PlatformRecordReadOnlyError) {
+    void reply.code(403).send({ error: error.message, code: error.code });
     return true;
   }
   if (error instanceof ManagedProviderError) {

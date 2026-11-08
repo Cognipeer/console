@@ -28,6 +28,7 @@ import {
   ensureDefaultProject,
 } from '@/lib/services/projects/projectService';
 import { defaultAlertRulesOnCreate, seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
+import { notifyTenantCreated } from '@/enterprise/tenant-lifecycle';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { authz } from '@/lib/iam/routeAuthz';
 import { computeSessionEffectivePermissions } from '@/lib/iam/effective';
@@ -634,6 +635,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           tenantIdStr,
           userIdStr,
         );
+        void notifyTenantCreated({ tenantId: tenantIdStr, tenantSlug: slug, tenantDbName: dbName });
         const defaultProjectId =
           typeof defaultProject._id === 'string'
             ? defaultProject._id

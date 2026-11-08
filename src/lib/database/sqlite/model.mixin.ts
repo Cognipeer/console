@@ -24,16 +24,17 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       db.prepare(`
         INSERT INTO ${TABLES.models}
-        (id, tenantId, projectId, name, description, key, providerKey, providerDriver, provider,
+        (id, tenantId, projectId, allProjects, name, description, key, providerKey, providerDriver, provider,
          category, modelId, isMultimodal, supportsToolCalls, settings, pricing, semanticCache,
          inputGuardrailKey, outputGuardrailKey, guardrails, replicas, piiProtection, metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @name, @description, @key, @providerKey, @providerDriver, @provider,
+        VALUES (@id, @tenantId, @projectId, @allProjects, @name, @description, @key, @providerKey, @providerDriver, @provider,
          @category, @modelId, @isMultimodal, @supportsToolCalls, @settings, @pricing, @semanticCache,
          @inputGuardrailKey, @outputGuardrailKey, @guardrails, @replicas, @piiProtection, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: model.tenantId,
         projectId: model.projectId ?? null,
+        allProjects: model.allProjects ? 1 : 0,
         name: model.name,
         description: model.description ?? null,
         key: model.key,
@@ -93,6 +94,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
+      if (data.allProjects !== undefined) { sets.push('allProjects = @allProjects'); params.allProjects = data.allProjects ? 1 : 0; }
 
       db.prepare(`UPDATE ${TABLES.models} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findModelById(id);
@@ -114,7 +116,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
 
-      if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters?.projectId) { clauses.push('(projectId = @projectId OR allProjects = 1)'); params.projectId = filters.projectId; }
       if (filters?.category) { clauses.push('category = @category'); params.category = filters.category; }
       if (filters?.provider) { clauses.push('provider = @provider'); params.provider = filters.provider; }
       if (filters?.providerKey) { clauses.push('providerKey = @providerKey'); params.providerKey = filters.providerKey; }
@@ -130,7 +132,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const db = this.getTenantDb();
       let sql = `SELECT * FROM ${TABLES.models} WHERE id = @id`;
       const params: Record<string, unknown> = { id };
-      if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
+      if (projectId) { sql += ' AND (projectId = @projectId OR allProjects = 1)'; params.projectId = projectId; }
       const row = db.prepare(sql).get(params) as SqliteRow | undefined;
       return row ? this.mapModelRow(row) : null;
     }
@@ -139,7 +141,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const db = this.getTenantDb();
       let sql = `SELECT * FROM ${TABLES.models} WHERE key = @key`;
       const params: Record<string, unknown> = { key };
-      if (projectId) { sql += ' AND projectId = @projectId'; params.projectId = projectId; }
+      if (projectId) { sql += ' AND (projectId = @projectId OR allProjects = 1)'; params.projectId = projectId; }
       const row = db.prepare(sql).get(params) as SqliteRow | undefined;
       return row ? this.mapModelRow(row) : null;
     }
@@ -416,6 +418,7 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         _id: r.id as string,
         tenantId: r.tenantId as string,
         projectId: r.projectId as string | undefined,
+        allProjects: r.allProjects === 1 || r.allProjects === true ? true : undefined,
         name: r.name as string,
         description: r.description as string | undefined,
         key: r.key as string,
