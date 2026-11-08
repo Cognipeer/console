@@ -72,6 +72,46 @@ describe('the account menu', () => {
     await settle(80);
     expect(qa('[role="menuitem"]').map((i) => i.textContent)).toContain('Hesabım');
   });
+
+  it('the slim bar (single left menu) has no launcher, theme or docs button: the theme and the portals are in this menu', async () => {
+    installApiMock([
+      ['GET', '/api/portal/my', () => jsonResponse({ portals: [{ key: 'support desk', name: 'Support Portal' }] })],
+    ]);
+    mounted = await mount(
+      createElement(TopbarV2, {
+        user: { name: 'Ann Lee', email: 'ann@example.com', licenseType: 'ENTERPRISE' },
+        isTenantAdmin: false,
+        onSearchClick: noop,
+        onLauncherClick: noop,
+        onDocsClick: noop,
+        onLogout: noop,
+        onNavigate: vi.fn(),
+        onMobileNavClick: noop,
+        variant: 'slim',
+      } as never),
+      'en',
+    );
+    await settle(80);
+    expect(q('button[aria-label="All services"]')).toBeNull();
+    expect(q('button[aria-label="Toggle theme"]')).toBeNull();
+    expect(q('button[aria-label="Docs"]')).toBeNull();
+    expect(q('button[aria-label="Portals"]')).toBeNull();
+    await click(q('button[aria-label="Account menu"]'));
+    await settle(80);
+    const items = qa('[role="menuitem"]');
+    expect(items.map((i) => i.textContent)).toContain('Dark theme');
+    const portal = q('[data-testid="topbar-portal"]');
+    expect(portal?.textContent).toContain('Support Portal');
+    expect(portal?.getAttribute('href')).toBe('/p/support%20desk');
+    expect(portal?.getAttribute('target')).toBe('_blank');
+  });
+
+  it('the full bar (the icon rail) keeps its launcher, theme and docs buttons', async () => {
+    await renderTopbar(vi.fn());
+    expect(q('button[aria-label="All services"]')).not.toBeNull();
+    expect(q('button[aria-label="Toggle theme"]')).not.toBeNull();
+    expect(q('button[aria-label="Docs"]')).not.toBeNull();
+  });
 });
 
 describe('the personal tokens page', () => {

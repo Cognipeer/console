@@ -1156,3 +1156,48 @@
     animation: none;
   }
 }
+
+/* The slim bar (with the single left menu): logo, project, search and the account. With nothing else in the bar, search
+   keeps its field on a narrow window or a tablet, and on a phone it is an icon that opens it (the full bar hides it
+   there). After the rules above, which it overrides. */
+.searchBoxWide {
+  max-width: 640px;
+}
+
+@media (max-width: 68em) {
+  .searchBoxWide {
+    flex: 1;
+    width: auto;
+    min-width: 160px;
+    padding: 0 14px;
+    margin: 0 auto;
+    justify-content: flex-start;
+    cursor: text;
+  }
+
+  .searchBoxWide .searchPlaceholder {
+    display: block;
+  }
+
+  .searchBoxWide .kbd {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 48em) {
+  .searchBoxWide {
+    display: inline-flex;
+    flex: 0 0 36px;
+    width: 36px;
+    min-width: 0;
+    padding: 0;
+    margin: 0 0 0 auto;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .searchBoxWide .searchPlaceholder,
+  .searchBoxWide .kbd {
+    display: none;
+  }
+}

@@ -26,10 +26,13 @@ export type SidebarStyle = 'tree' | 'drill';
 export const SIDEBAR_STYLE: SidebarStyle = 'drill';
 
 /**
- * Someone who can open at most this many services gets one plain list: no category headings, no pinned list and no
- * launcher (an enterprise user typically sees three to five services).
+ * Someone who can open at most this many services gets one plain list without category headings (an enterprise user
+ * typically sees three to five services).
  */
 export const SIDEBAR_FLAT_MAX = 7;
+
+/** The reports' summary; each report is under it (`/dashboard/analytics/<key>`). */
+export const REPORTS_HREF = '/dashboard/analytics';
 
 /**
  * A window this narrow (a tablet, a small laptop window) gets the icon-only menu by default: the labelled one takes

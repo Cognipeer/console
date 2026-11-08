@@ -1,10 +1,10 @@
 /**
  * The single left menu: one labelled column instead of the icon rail plus the service sub-nav. It lists only what the
  * person can open, under the launcher's categories (Build, Data, Operate; an empty one is left out), and goes step by
- * step: a service's pages (filtered like the sub-nav) and Settings' grouped pages are levels of their own. The nested
- * style is kept behind SIDEBAR_STYLE. Someone with seven services or fewer gets one plain list, without categories,
- * pins or the launcher. SIDEBAR_NAV switches back to the rail and the sub-nav, which are kept. A phone gets the same
- * menu in the top bar's drawer.
+ * step: a service's pages (filtered like the sub-nav), the reports and Settings' grouped pages are levels of their own.
+ * Nothing is pinned. The nested style is kept behind SIDEBAR_STYLE. Someone with seven services or fewer gets one plain
+ * list, without categories. The top bar beside it is slim (no launcher). SIDEBAR_NAV switches back to the rail and the
+ * sub-nav, which are kept. A phone gets the same menu in the top bar's drawer.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -38,6 +38,7 @@ import { I18nProvider } from '@/lib/i18n';
 import Sidebar, { type SidebarProps } from '@/components/layout/launcher/Sidebar';
 import MobileNavDrawer from '@/components/layout/launcher/MobileNavDrawer';
 import { SIDEBAR_FLAT_MAX, isFlatSidebar, sidebarGroups, sidebarServices } from '@/components/layout/launcher/sidebarNav';
+import { isReportsPath, reportsNavItems, type ListedReport } from '@/components/layout/launcher/reportsNav';
 import { SUBNAV_CONFIG, visibleSubNavItems, type SubNavItem } from '@/components/layout/launcher/ServiceSubNav';
 import { findDashboardService, getDashboardServices, type DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import type { PermissionService, ServicePermissionLevel } from '@/lib/security/rbac';
@@ -75,8 +76,6 @@ function sidebar(props: Partial<SidebarProps> & Pick<SidebarProps, 'services'>, 
       settingsItems: [],
       settingsHref: '/dashboard/projects',
       settingsActive: false,
-      pinnedIds: new Set<string>(),
-      onTogglePin: () => undefined,
       onHelpClick: () => undefined,
       pathname: '/dashboard/agents',
       ...props,
@@ -84,6 +83,16 @@ function sidebar(props: Partial<SidebarProps> & Pick<SidebarProps, 'services'>, 
     locale,
   );
 }
+
+/** Reports as the reports API lists them (in its order, which is not the menu's). */
+const listedReports: ListedReport[] = [
+  { key: 'overview', title: 'Overview', icon: 'gauge' },
+  { key: 'guardrails', title: 'Guardrails', icon: 'shield', group: 'safety' },
+  { key: 'cost-spend', title: 'Cost & spend', icon: 'coin', group: 'usage' },
+  { key: 'agents', title: 'Agent sessions', icon: 'robot', group: 'quality' },
+  { key: 'models', title: 'Model operations', icon: 'bolt', group: 'usage' },
+];
+const reportItems = reportsNavItems(listedReports, (report) => report.title);
 
 describe('what the menu lists', () => {
   it('the launcher categories in the order Build, Data, Operate, without Settings pages or the services home', () => {
@@ -113,25 +122,39 @@ describe('what the menu lists', () => {
 });
 
 describe('the menu', () => {
-  it('nested style, many services: pinned, categories with counts, and the pages of the service in view', () => {
+  it('nested style, many services: categories with counts, and the pages of the service in view', () => {
     const activeItems = visibleSubNavItems(SUBNAV_CONFIG.agents, () => true, true);
-    const html = sidebar({
-      services: owner,
-      activeService: agents,
-      activeItems,
-      pinnedIds: new Set(['models', 'agents']),
-      menuStyle: 'tree',
-    });
-    expect(html).toContain('data-testid="sidebar-pinned"');
-    expect(html).toContain('data-testid="sidebar-pinned-models"');
+    const html = sidebar({ services: owner, activeService: agents, activeItems, menuStyle: 'tree' });
     for (const group of sidebarGroups(owner)) {
       expect(html).toContain(`data-testid="sidebar-group-${group.category}"`);
     }
     expect(html).toMatch(/data-testid="sidebar-group-build"[^>]*>.*?<span[^>]*>Build<\/span><span[^>]*>7<\/span>/);
     expect(html).toContain('data-testid="sidebar-subitem-tools"');
     expect(html).toContain('data-testid="sidebar-subitem-webhooks"');
-    expect(html).toContain('aria-label="Unpin Agent');
-    expect(html).toContain('aria-label="Pin Prompt Studio"');
+  });
+
+  it('nothing is pinned: no pinned list and no pin button, in either style, side menu or drawer', () => {
+    for (const menuStyle of ['tree', 'drill'] as const) {
+      for (const variant of ['side', 'drawer'] as const) {
+        const first = sidebar({ services: owner, menuStyle, variant, pathname: '/dashboard/overview' });
+        const level = sidebar({
+          services: owner,
+          menuStyle,
+          variant,
+          activeService: agents,
+          activeItems: visibleSubNavItems(SUBNAV_CONFIG.agents, () => true, true),
+          pathname: '/dashboard/agents/tools',
+        });
+        for (const html of [first, level]) {
+          expect(html).not.toContain('data-testid="sidebar-pinned');
+          expect(html).not.toContain('data-testid="sidebar-level-pin"');
+          expect(html).not.toMatch(/aria-label="(Un)?[Pp]in /);
+          expect(html).not.toContain('>Pinned<');
+        }
+      }
+    }
+    const source = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.tsx'), 'utf8');
+    expect(source).not.toMatch(/pinnedIds|onTogglePin|IconPin/);
   });
 
   it('a page the person cannot use is not offered under its service (Webhooks without the Webhooks service)', () => {
@@ -144,7 +167,7 @@ describe('the menu', () => {
 
   it('for few services: one plain list, no categories, no pins', () => {
     const member = memberServices(['agents', 'prompts', 'rag']);
-    const html = sidebar({ services: member, pinnedIds: new Set(['agents']) });
+    const html = sidebar({ services: member });
     expect(html).toContain('data-flat="true"');
     expect(html).not.toContain('data-testid="sidebar-group-');
     expect(html).not.toContain('data-testid="sidebar-pinned"');
@@ -188,7 +211,7 @@ describe('the menu', () => {
     expect(html).toContain('Ana sayfa');
     expect(html).toContain('Menüyü daralt');
     expect(sidebar({ services: owner, activeService: agents, activeItems: SUBNAV_CONFIG.agents }, 'tr')).toContain('Ana menüye dön');
-    expect(sidebar({ services: owner, menuStyle: 'tree' }, 'tr')).toContain('Tüm servisler');
+    expect(sidebar({ services: owner, reportsItems: reportItems }, 'tr')).toContain('Raporlar');
   });
 });
 
@@ -263,8 +286,9 @@ describe('the menu on a phone', () => {
     );
     const css = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.module.css'), 'utf8');
     expect(css).toMatch(/\.sidebar\.drawer \{\s*display: flex;/);
-    // No hover on a touch screen: the pin stays shown instead of waiting to be tapped unseen.
-    expect(css).toMatch(/@media \(hover: none\) \{\s*\.pin \{\s*opacity: 1;/);
+    expect(css).not.toMatch(/\.(pin|levelPin|pinned|pinStay)\b/);
+    // The drawer gets the reports too.
+    expect(layout).toMatch(/<Sidebar\s+variant="drawer"[\s\S]*?reportsItems=\{reportsItems\}\s+reportsActive=\{reportsActive\}/);
   });
 });
 
@@ -290,15 +314,19 @@ describe('the switch and the old menu', () => {
     expect(layout).toMatch(/<Sidebar\s+services=\{allowedServices\}[\s\S]*?activeItems=\{serviceSubnavItems\}[\s\S]*?settingsItems=\{settingsNavItems\}/);
   });
 
-  it('with few services the top bar leaves out the launcher', () => {
-    expect(layout).toContain('hideLauncher={SIDEBAR_NAV && isFlatSidebar(allowedServices)}');
-    expect(topbar).toContain('{hideLauncher ? null : (');
+  it('with the single menu the top bar is slim: no launcher, portals, theme or docs button (the old bar keeps them)', () => {
+    expect(layout).toContain("variant={SIDEBAR_NAV ? 'slim' : 'full'}");
+    expect(topbar).toContain('{slim ? null : (');
+    // Launcher, then portals + theme + docs: each behind the slim switch.
+    expect(topbar.match(/\{slim \? null : \(/g) ?? []).toHaveLength(2);
+    expect(topbar).toMatch(/\{slim \? null : \(\s*<>\s*<PortalSwitcher \/>[\s\S]*?toggleColorScheme[\s\S]*?onClick=\{onDocsClick\}/);
   });
 
   it('has its words in both languages, with the same placeholders', () => {
     const keys = [
-      'sidebarLabel', 'sidebarHome', 'sidebarPinned', 'sidebarAllServices', 'sidebarHelp', 'sidebarCollapse',
-      'sidebarExpand', 'sidebarPin', 'sidebarUnpin', 'sidebarBack', 'sidebarAllOf',
+      'sidebarLabel', 'sidebarHome', 'sidebarReports', 'sidebarHelp', 'sidebarCollapse', 'sidebarExpand', 'sidebarBack',
+      'sidebarAllOf', 'reportsSummary', 'reportsGroupUsage', 'reportsGroupQuality', 'reportsGroupSafety',
+      'reportsGroupInfrastructure',
     ] as const;
     const enNav = en.navigation as Record<string, string>;
     const trNav = tr.navigation as Record<string, string>;
@@ -307,6 +335,16 @@ describe('the switch and the old menu', () => {
       expect(trNav[key], key).toBeTruthy();
       expect(trNav[key], key).not.toBe(enNav[key]);
       expect(trNav[key].match(/\{\w+\}/g) ?? [], key).toEqual(enNav[key].match(/\{\w+\}/g) ?? []);
+    }
+    for (const key of ['sidebarPinned', 'sidebarAllServices', 'sidebarPin', 'sidebarUnpin']) {
+      expect(enNav[key], key).toBeUndefined();
+    }
+    const enAccount = en.account as Record<string, string>;
+    const trAccount = tr.account as Record<string, string>;
+    for (const key of ['themeDark', 'themeLight']) {
+      expect(enAccount[key], key).toBeTruthy();
+      expect(trAccount[key], key).toBeTruthy();
+      expect(trAccount[key], key).not.toBe(enAccount[key]);
     }
   });
 });
@@ -336,18 +374,16 @@ describe('no page twice, and the step-by-step menu', () => {
     expect(tag(html, 'sidebar-service-agents')).toContain('aria-current="page"');
   });
 
-  it('nested style: one row is marked as the page; the service and its pinned shortcut are only named', () => {
+  it('nested style: one row is marked as the page; the service it is under is only named', () => {
     const html = sidebar({
       services: owner,
       activeService: agents,
       activeItems: allAgentPages,
       pathname: '/dashboard/agents/tools',
-      pinnedIds: new Set(['agents']),
       menuStyle: 'tree',
     });
     expect(tag(html, 'sidebar-subitem-tools')).toContain('aria-current="page"');
     expect(tag(html, 'sidebar-service-agents')).toContain('aria-current="true"');
-    expect(tag(html, 'sidebar-pinned-agents')).toContain('aria-current="true"');
     expect(html.match(/aria-current="page"/g)).toHaveLength(1);
   });
 
@@ -365,7 +401,7 @@ describe('no page twice, and the step-by-step menu', () => {
     expect(html).not.toContain('data-testid="sidebar-back"');
   });
 
-  it('step by step: opens at the level of the page in view, with the way back, its pin and "All {service}"', () => {
+  it('step by step: opens at the level of the page in view, with the way back and "All {service}"', () => {
     const html = sidebar({
       services: owner,
       activeService: agents,
@@ -377,7 +413,7 @@ describe('no page twice, and the step-by-step menu', () => {
     expect(html).toContain('data-testid="sidebar-level-agents"');
     expect(tag(html, 'sidebar-back')).toMatch(/^<button/);
     expect(html).toContain('Back to the main menu');
-    expect(html).toContain('data-testid="sidebar-level-pin"');
+    expect(html).not.toContain('data-testid="sidebar-level-pin"');
     expect(html).toMatch(/data-testid="sidebar-subitem-list"[^>]*>.*?<span[^>]*>All Agents<\/span>/);
     expect(tag(html, 'sidebar-subitem-tools')).toContain('aria-current="page"');
     expect(html).toContain('>Sessions<');
@@ -445,5 +481,126 @@ describe('no page twice, and the step-by-step menu', () => {
     const outside = [...css.matchAll(/:hover/g)].filter((match) => match.index < start || match.index > end);
     expect(outside).toHaveLength(0);
     expect(css).toMatch(/@media \(hover: hover\) \{\s*\.item:hover/);
+  });
+});
+
+describe('Reports in the menu', () => {
+  const tag = (html: string, testId: string) => html.match(new RegExp(`<[^>]*data-testid="${testId}"[^>]*>`))?.[0] ?? '';
+  const pagesFor = (service: DashboardServiceDefinition) => visibleSubNavItems(SUBNAV_CONFIG[service.id], () => true, true);
+
+  it('the entries: the summary first, then the reports group by group under their headings; the summary’s own data is not one', () => {
+    expect(reportItems.map((item) => item.id)).toEqual([
+      'reports-summary',
+      'report-cost-spend',
+      'report-models',
+      'report-agents',
+      'report-guardrails',
+    ]);
+    expect(reportItems.map((item) => item.sectionKey)).toEqual([
+      undefined,
+      'reportsGroupUsage',
+      undefined,
+      'reportsGroupQuality',
+      'reportsGroupSafety',
+    ]);
+    expect(reportItems[0]).toMatchObject({ href: '/dashboard/analytics', labelKey: 'reportsSummary' });
+    expect(reportItems[1].href).toBe('/dashboard/analytics/cost-spend');
+    const search = new URLSearchParams();
+    expect(reportItems[0].matcher?.('/dashboard/analytics', search)).toBe(true);
+    expect(reportItems[0].matcher?.('/dashboard/analytics/cost-spend', search)).toBe(false);
+    expect(reportItems[1].matcher?.('/dashboard/analytics/cost-spend', search)).toBe(true);
+    expect(isReportsPath('/dashboard/analytics/cost-spend')).toBe(true);
+    expect(isReportsPath('/dashboard/analyticsx')).toBe(false);
+  });
+
+  it('an older reports API without groups: the reports as listed, without headings; none: no entries', () => {
+    const ungrouped = reportsNavItems(
+      listedReports.map((report) => ({ ...report, group: undefined })),
+      (report) => report.title,
+    );
+    expect(ungrouped.map((item) => item.id)).toEqual([
+      'reports-summary',
+      'report-guardrails',
+      'report-cost-spend',
+      'report-agents',
+      'report-models',
+    ]);
+    expect(ungrouped.some((item) => item.sectionKey)).toBe(false);
+    expect(reportsNavItems([], (report) => report.title)).toEqual([]);
+    expect(reportsNavItems([{ key: 'overview', title: 'Overview' }], (report) => report.title)).toEqual([]);
+  });
+
+  it('step by step: a row under Home that opens the reports’ own level; none without reports (community, no license)', () => {
+    const first = sidebar({ services: owner, pagesFor, reportsItems: reportItems, pathname: '/dashboard/overview' });
+    expect(tag(first, 'sidebar-reports')).toMatch(/^<button[^>]*data-opens="level"/);
+    expect(first.indexOf('data-testid="sidebar-reports"')).toBeGreaterThan(first.indexOf('data-testid="sidebar-home"'));
+    expect(first.indexOf('data-testid="sidebar-reports"')).toBeLessThan(first.indexOf('data-testid="sidebar-category-build"'));
+    expect(sidebar({ services: owner, pagesFor, pathname: '/dashboard/overview' })).not.toContain('data-testid="sidebar-reports"');
+    const member = memberServices(['agents', 'prompts', 'rag']);
+    expect(sidebar({ services: member, pagesFor, reportsItems: reportItems })).toContain('data-testid="sidebar-reports"');
+  });
+
+  it('step by step: a report in view opens the reports’ level, marks it, and names its group', () => {
+    const html = sidebar({
+      services: owner,
+      pagesFor,
+      reportsItems: reportItems,
+      reportsActive: true,
+      pathname: '/dashboard/analytics/cost-spend',
+    });
+    expect(html).toContain('data-testid="sidebar-level-reports"');
+    expect(html).toContain('data-testid="sidebar-back"');
+    expect(tag(html, 'sidebar-subitem-report-cost-spend')).toContain('aria-current="page"');
+    expect(html.match(/aria-current="page"/g)).toHaveLength(1);
+    expect(html).toContain('>Usage &amp; cost<');
+    expect(html).toContain('>Summary<');
+    const tr = sidebar(
+      { services: owner, pagesFor, reportsItems: reportItems, reportsActive: true, pathname: '/dashboard/analytics' },
+      'tr',
+    );
+    expect(tr).toContain('>Raporlar<');
+    expect(tr).toContain('>Özet<');
+    expect(tr).toContain('>Kullanım ve maliyet<');
+  });
+
+  it('nested style: Reports is a link under Home that shows its reports while one is in view', () => {
+    const closed = sidebar({ services: owner, menuStyle: 'tree', reportsItems: reportItems, pathname: '/dashboard/agents' });
+    expect(tag(closed, 'sidebar-reports')).toMatch(/^<a\b[^>]*href="\/dashboard\/analytics"/);
+    expect(closed).not.toContain('data-testid="sidebar-subitem-report-');
+    const open = sidebar({
+      services: owner,
+      menuStyle: 'tree',
+      reportsItems: reportItems,
+      reportsActive: true,
+      pathname: '/dashboard/analytics/agents',
+    });
+    expect(tag(open, 'sidebar-subitem-report-agents')).toContain('aria-current="page"');
+    expect(tag(open, 'sidebar-reports')).toContain('aria-current="true"');
+  });
+
+  it('the icon strip: Home, Reports, then every service with a line between categories', () => {
+    media.narrow = true;
+    try {
+      const html = sidebar({ services: owner, reportsItems: reportItems, pathname: '/dashboard/overview' });
+      expect(html).toContain('data-collapsed="true"');
+      expect(html).toContain('data-testid="sidebar-reports"');
+      for (const service of sidebarServices(owner)) {
+        expect(html).toContain(`data-testid="sidebar-service-${service.id}"`);
+      }
+      expect(html.match(/data-testid="sidebar-service-/g)).toHaveLength(sidebarServices(owner).length);
+      const member = memberServices(['agents', 'prompts', 'rag']);
+      const few = sidebar({ services: member, pathname: '/dashboard/overview' });
+      expect(few.match(/data-testid="sidebar-service-/g)).toHaveLength(3);
+      expect(few).not.toContain('data-testid="sidebar-reports"');
+    } finally {
+      media.narrow = false;
+    }
+  });
+
+  it('the shell asks for the reports only with the single menu, and passes them to both menus', () => {
+    const layout = readFileSync(join(process.cwd(), 'src/components/layout/DashboardLayout.tsx'), 'utf8');
+    expect(layout).toContain('const reportsItems = useReportsNav(SIDEBAR_NAV);');
+    expect(layout).toContain('const reportsActive = isReportsPath(pathname);');
+    expect(layout.match(/reportsItems=\{reportsItems\}/g) ?? []).toHaveLength(2);
   });
 });

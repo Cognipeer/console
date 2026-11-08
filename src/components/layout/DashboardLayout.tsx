@@ -19,7 +19,8 @@ import ServiceSubNav, {
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
 import Sidebar from './launcher/Sidebar';
-import { SIDEBAR_NAV, isFlatSidebar } from './launcher/sidebarNav';
+import { SIDEBAR_NAV } from './launcher/sidebarNav';
+import { isReportsPath, useReportsNav } from './launcher/reportsNav';
 import sidebarClasses from './launcher/Sidebar.module.css';
 import { useEffectivePermissions } from './useEffectivePermissions';
 import { LauncherProvider } from './launcher/LauncherContext';
@@ -309,6 +310,10 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const hasSubnav = Boolean(
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
   );
+  // The reports the person may read, for the single left menu's Reports row (none in community or without the license).
+  const reportsItems = useReportsNav(SIDEBAR_NAV);
+  const reportsActive = isReportsPath(pathname);
+
   // Any service's pages, filtered the same way: the single left menu's step-by-step style opens a service not in view.
   const sidebarPagesFor = useCallback(
     (service: DashboardServiceDefinition) =>
@@ -450,8 +455,8 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               onNavigate={handleNavigate}
               onMobileNavClick={() => setMobileNavOpen(true)}
               settingsHref={settingsHref}
-              // With few services the menu is one plain list and the launcher is left out.
-              hideLauncher={SIDEBAR_NAV && isFlatSidebar(allowedServices)}
+              // With the single left menu the top bar is slim: no launcher, theme and portals in the account menu.
+              variant={SIDEBAR_NAV ? 'slim' : 'full'}
             />
 
             {SIDEBAR_NAV ? (
@@ -463,8 +468,8 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                 pagesFor={sidebarPagesFor}
                 settingsHref={settingsHref}
                 settingsActive={isSettingsActive}
-                pinnedIds={pinned}
-                onTogglePin={togglePin}
+                reportsItems={reportsItems}
+                reportsActive={reportsActive}
                 onHelpClick={openServiceDocs}
                 pathname={pathname}
               />
@@ -546,8 +551,8 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                     pagesFor={sidebarPagesFor}
                     settingsHref={settingsHref}
                     settingsActive={isSettingsActive}
-                    pinnedIds={pinned}
-                    onTogglePin={togglePin}
+                    reportsItems={reportsItems}
+                    reportsActive={reportsActive}
                     onHelpClick={openServiceDocs}
                     pathname={pathname}
                   />

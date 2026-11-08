@@ -1,21 +1,23 @@
 'use client';
 
 /**
- * The single left menu (see sidebarNav.ts): Home, the pinned services, the services the person can open under their
- * categories, Settings, help and a toggle to an icon-only strip. Someone with few services gets one plain list instead
- * of categories.
+ * The single left menu (see sidebarNav.ts): Home, Reports, the services the person can open under their categories,
+ * Settings, help and a toggle to an icon-only strip. Someone with few services gets one plain list instead of
+ * categories. Nothing is pinned: every service has its one row, and search (⌘K) and Home's recently opened services
+ * are the shortcuts.
  *
  * Its style is SIDEBAR_STYLE:
  * - `drill` (the menu): one level at a time. The first lists the services; one with several pages opens a level of its
- *   own (its pages, a way back and its pin) and one with a single page is a plain link. The menu opens at the level of
- *   the page in view, and the first level names that page next to its service.
+ *   own (its pages and a way back) and one with a single page is a plain link. Reports and Settings are levels too. The
+ *   menu opens at the level of the page in view, and the first level names that page next to its service.
  * - `tree` (kept): each category folds; the service in view opens its pages in place, Settings its grouped pages while
  *   one of them is in view. The page under the service's own name (Agents › Agents) is not repeated there: the
  *   service's row is that page.
  *
  * What it lists is decided by the shell, the same way as the rail and the sub-nav it replaces: `services` holds only
  * what the person may open (role, the engine's levels for the active project, tenant-admin pages, deployment), and
- * `activeItems` / `settingsItems` / `pagesFor` are the sub-nav entries already filtered for them.
+ * `activeItems` / `settingsItems` / `pagesFor` are the sub-nav entries already filtered for them. `reportsItems` are the
+ * reports the reports API lets them read (none in community or without the license).
  *
  * A phone has no side column: the top bar's drawer shows this same menu (`variant="drawer"`), always labelled, without
  * the collapse toggle, and closing when a link in it is followed (`onNavigate`).
@@ -29,13 +31,12 @@ import { useMediaQuery } from '@mantine/hooks';
 import {
   IconArrowLeft,
   IconBook,
+  IconChartBar,
   IconChevronDown,
   IconChevronRight,
   IconLayoutDashboard,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
-  IconPin,
-  IconPinFilled,
   IconSettings,
   type Icon,
 } from '@tabler/icons-react';
@@ -48,6 +49,7 @@ import {
 import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
 import type { SubNavItem } from './ServiceSubNav';
 import {
+  REPORTS_HREF,
   SIDEBAR_NARROW_QUERY,
   SIDEBAR_STYLE,
   isFlatSidebar,
@@ -61,9 +63,10 @@ const COLLAPSED_KEY = 'cgn:sidebar:collapsed';
 const CLOSED_GROUPS_KEY = 'cgn:sidebar:closed-groups';
 const HOME_HREF = '/dashboard/overview';
 
-/** The levels of the step-by-step style: the first one, Settings, or a service's id. */
+/** The levels of the step-by-step style: the first one, Settings, Reports, or a service's id. */
 const ROOT_LEVEL = '';
 const SETTINGS_LEVEL = '@settings';
+const REPORTS_LEVEL = '@reports';
 
 function readStored<T>(key: string, fallback: T): T {
   try {
@@ -162,8 +165,13 @@ export interface SidebarProps {
   settingsItems: SubNavItem[];
   settingsHref: string;
   settingsActive: boolean;
-  pinnedIds: ReadonlySet<string>;
-  onTogglePin: (id: string) => void;
+  /**
+   * The reports the person may read: the summary first, then each report under its group's heading. Empty or missing
+   * (community, no license, nothing they may read): no Reports row. With several, Reports is a level of its own.
+   */
+  reportsItems?: SubNavItem[];
+  /** A Reports page is in view. */
+  reportsActive?: boolean;
   /** Opens the docs panel on the page of the service in view. */
   onHelpClick: () => void;
   pathname: string;
@@ -183,8 +191,8 @@ export default function Sidebar({
   settingsItems,
   settingsHref,
   settingsActive,
-  pinnedIds,
-  onTogglePin,
+  reportsItems,
+  reportsActive = false,
   onHelpClick,
   pathname,
   variant = 'side',
@@ -212,7 +220,7 @@ export default function Sidebar({
   const flat = isFlatSidebar(services);
   const listed = useMemo(() => sidebarServices(services), [services]);
   const groups = useMemo(() => sidebarGroups(services), [services]);
-  const pinned = useMemo(() => listed.filter((service) => pinnedIds.has(service.id)), [listed, pinnedIds]);
+  const reports = reportsItems ?? [];
   const homeActive = pathname === '/dashboard' || pathname.startsWith(HOME_HREF);
   const showSettings = settingsItems.length > 0;
   const servicePages = (service: DashboardServiceDefinition) =>
@@ -224,9 +232,11 @@ export default function Sidebar({
   const levelInView =
     settingsActive && settingsItems.length > 1
       ? SETTINGS_LEVEL
-      : activeService && (activeItems?.length ?? 0) > 1
-        ? activeService.id
-        : ROOT_LEVEL;
+      : reportsActive && reports.length > 1
+        ? REPORTS_LEVEL
+        : activeService && (activeItems?.length ?? 0) > 1
+          ? activeService.id
+          : ROOT_LEVEL;
   const viewKey = `${style}|${levelInView}|${pathname}`;
   const [level, setLevel] = useState(levelInView);
   const [levelMotion, setLevelMotion] = useState<'in' | 'back' | null>(null);
@@ -242,10 +252,10 @@ export default function Sidebar({
   const cameFrom = useRef<{ focus: string; scrollTop: number } | null>(null);
 
   // The page in view stays in sight in a long menu (a Settings page sits below every category): the last marked
-  // entry is the deepest one, the page under its service. Checked again when the rows above it settle — the pinned
-  // list arrives after the first render (it is read from the browser) and the services once the engine has answered.
+  // entry is the deepest one, the page under its service. Checked again when the rows above it settle — the reports
+  // arrive after the first render (from the reports API) and the services once the engine has answered.
   const scrollRef = useRef<HTMLDivElement>(null);
-  const hasPinned = pinned.length > 0;
+  const reportsCount = reports.length;
   const listedCount = listed.length;
   useEffect(() => {
     const container = scrollRef.current;
@@ -258,7 +268,7 @@ export default function Sidebar({
     if (rect.top < box.top || rect.bottom > box.bottom) {
       container.scrollTop += rect.top - box.top - box.height / 3;
     }
-  }, [pathname, collapsed, settingsActive, hasPinned, listedCount, drill]);
+  }, [pathname, collapsed, settingsActive, reportsCount, listedCount, drill]);
 
   useEffect(() => {
     const move = levelMove.current;
@@ -276,7 +286,7 @@ export default function Sidebar({
     setLevel(next);
   };
   const closeLevel = () => {
-    const service = level === SETTINGS_LEVEL ? 'settings' : `service-${level}`;
+    const service = level === SETTINGS_LEVEL ? 'settings' : level === REPORTS_LEVEL ? 'reports' : `service-${level}`;
     levelMove.current = cameFrom.current ?? { focus: `row-${service}`, scrollTop: 0 };
     cameFrom.current = null;
     setLevelMotion('back');
@@ -326,12 +336,8 @@ export default function Sidebar({
       );
     const activePages = pagesUnder(activeItems);
     const shownSettings = settingsActive ? pagesUnder(settingsItems) : [];
-    // The pinned services, and the one in view when it is not pinned; everything when the list is short.
-    const strip = flat
-      ? listed
-      : activeService && !pinnedIds.has(activeService.id) && listed.some((s) => s.id === activeService.id)
-        ? [...pinned, activeService]
-        : pinned;
+    // Every service the first level lists, with a line between categories (one run when the list is short).
+    const stripGroups = flat ? [{ category: 'all', services: listed }] : groups;
 
     return (
       <nav
@@ -342,17 +348,24 @@ export default function Sidebar({
       >
         <div className={classes.scroll} ref={scrollRef}>
           {iconLink(HOME_HREF, IconLayoutDashboard, tNav('sidebarHome'), homeActive ? 'page' : null, 'sidebar-home')}
-          <div className={classes.iconDivider} />
-          {strip.map((service) => {
-            const active = activeService?.id === service.id;
-            const mark = active ? (activePages.some(itemActive) ? 'ancestor' : 'page') : null;
-            return (
-              <Fragment key={service.id}>
-                {iconLink(service.href, service.icon, tNav(service.navLabelKey), mark, `sidebar-service-${service.id}`)}
-                {active ? pageIcons(activePages) : null}
-              </Fragment>
-            );
-          })}
+          {reports.length > 0
+            ? iconLink(REPORTS_HREF, IconChartBar, tNav('sidebarReports'), reportsActive ? 'page' : null, 'sidebar-reports')
+            : null}
+          {stripGroups.map((group) => (
+            <Fragment key={group.category}>
+              <div className={classes.iconDivider} />
+              {group.services.map((service) => {
+                const active = activeService?.id === service.id;
+                const mark = active ? (activePages.some(itemActive) ? 'ancestor' : 'page') : null;
+                return (
+                  <Fragment key={service.id}>
+                    {iconLink(service.href, service.icon, tNav(service.navLabelKey), mark, `sidebar-service-${service.id}`)}
+                    {active ? pageIcons(activePages) : null}
+                  </Fragment>
+                );
+              })}
+            </Fragment>
+          ))}
           <div className={classes.spacer} />
           {showSettings ? (
             <>
@@ -456,58 +469,52 @@ export default function Sidebar({
       </div>
     ) : null;
 
-  const pinButton = (service: DashboardServiceDefinition, label: string, className: string, testId?: string) => {
-    const isPinned = pinnedIds.has(service.id);
-    return (
-      <button
-        type="button"
-        className={`${className} ${isPinned ? classes.pinned : ''}`}
-        aria-label={tNav(isPinned ? 'sidebarUnpin' : 'sidebarPin', { service: label })}
-        aria-pressed={isPinned}
-        onClick={() => onTogglePin(service.id)}
-        data-testid={testId}
-      >
-        {isPinned ? <IconPinFilled size={12} /> : <IconPin size={12} />}
-      </button>
-    );
-  };
-
   /** A service's own link; in the tree style the service in view opens its pages under it. */
-  const serviceRow = (
-    service: DashboardServiceDefinition,
-    opts: { pinnable: boolean; opensPages: boolean; testScope: 'service' | 'pinned' },
-  ) => {
+  const serviceRow = (service: DashboardServiceDefinition, opts: { opensPages: boolean }) => {
     const ServiceIcon = service.icon;
     const label = tNav(service.navLabelKey);
     const active = activeService?.id === service.id;
-    const isPinned = pinnedIds.has(service.id);
     const shown = opts.opensPages && active ? pagesUnder(activeItems) : [];
-    // The pinned shortcut is only named: the service's own row (under its category) is the one marked.
-    const mark = !active ? null : opts.testScope === 'pinned' && !flat ? 'ancestor' : shown.some(itemActive) ? 'ancestor' : 'page';
+    const mark = !active ? null : shown.some(itemActive) ? 'ancestor' : 'page';
     return (
-      <Fragment key={`${opts.testScope}-${service.id}`}>
+      <Fragment key={`service-${service.id}`}>
         <div className={classes.row}>
           <Link
             href={service.href}
             className={`${classes.item} ${markClass(mark)}`}
             aria-current={mark === 'page' ? 'page' : mark ? 'true' : undefined}
             data-pending={pendingFor(service.href, active)}
-            data-testid={`sidebar-${opts.testScope}-${service.id}`}
+            data-testid={`sidebar-service-${service.id}`}
             onNavigate={onNavigate}
             {...getIntentProps(service.href)}
           >
             <ServiceIcon size={16} stroke={1.7} />
             <span className={classes.label}>{label}</span>
           </Link>
-          {opts.pinnable
-            ? // Shown all the time in the pinned list (to unpin); elsewhere on hover, filled when pinned.
-              pinButton(service, label, `${classes.pin} ${isPinned && opts.testScope === 'pinned' ? classes.pinStay : ''}`)
-            : null}
         </div>
         {pages(shown, label)}
       </Fragment>
     );
   };
+
+  // Reports: the summary and the reports under their groups (a level of its own step by step, pages in place nested).
+  const reportsShown = reportsActive ? reports : [];
+  const reportsLink = (
+    <div className={classes.row}>
+      <Link
+        href={REPORTS_HREF}
+        className={`${classes.item} ${markClass(reportsActive ? (reportsShown.some(itemActive) ? 'ancestor' : 'page') : null)}`}
+        aria-current={reportsActive ? 'true' : undefined}
+        data-pending={pendingFor(REPORTS_HREF, reportsActive)}
+        data-testid="sidebar-reports"
+        onNavigate={onNavigate}
+        {...getIntentProps(REPORTS_HREF)}
+      >
+        <IconChartBar size={16} stroke={1.7} />
+        <span className={classes.label}>{tNav('sidebarReports')}</span>
+      </Link>
+    </div>
+  );
 
   const settingsShown = settingsActive ? pagesUnder(settingsItems) : [];
   const settingsLink = (
@@ -532,25 +539,20 @@ export default function Sidebar({
   const tree = () => (
     <>
       {homeRow}
+      {reports.length > 0 ? (
+        <>
+          {reportsLink}
+          {pages(reportsShown, tNav('sidebarReports'))}
+        </>
+      ) : null}
 
       {flat ? (
         <div className={classes.section}>
-          {listed.map((service) => serviceRow(service, { pinnable: false, opensPages: true, testScope: 'service' }))}
+          {listed.map((service) => serviceRow(service, { opensPages: true }))}
         </div>
       ) : (
         <>
-          {pinned.length > 0 ? (
-            <div className={classes.section} data-testid="sidebar-pinned">
-              <div className={classes.sectionHeading}>
-                <span>{tNav('sidebarPinned')}</span>
-              </div>
-              {pinned.map((service) => serviceRow(service, { pinnable: true, opensPages: false, testScope: 'pinned' }))}
-            </div>
-          ) : null}
           <div className={classes.section}>
-            <div className={classes.sectionHeading}>
-              <span>{tNav('sidebarAllServices')}</span>
-            </div>
             {groups.map((group) => {
               const open = !closedGroups.has(group.category);
               const listId = `sidebar-group-list-${group.category}`;
@@ -570,7 +572,7 @@ export default function Sidebar({
                   </button>
                   {open ? (
                     <div id={listId}>
-                      {group.services.map((service) => serviceRow(service, { pinnable: true, opensPages: true, testScope: 'service' }))}
+                      {group.services.map((service) => serviceRow(service, { opensPages: true }))}
                     </div>
                   ) : null}
                 </div>
@@ -628,47 +630,51 @@ export default function Sidebar({
     );
   };
 
-  const drillServiceRow = (service: DashboardServiceDefinition, testScope: 'service' | 'pinned') => {
+  const drillServiceRow = (service: DashboardServiceDefinition) => {
     const items = servicePages(service);
     // One page: the service's own link.
-    if (!items || items.length <= 1) return serviceRow(service, { pinnable: false, opensPages: false, testScope });
+    if (!items || items.length <= 1) return serviceRow(service, { opensPages: false });
     const active = activeService?.id === service.id;
     return levelRow({
-      rowKey: `row-${testScope}-${service.id}`,
+      rowKey: `row-service-${service.id}`,
       level: service.id,
       icon: service.icon,
       label: tNav(service.navLabelKey),
       items,
       active,
-      mark: !active ? null : testScope === 'pinned' && !flat ? 'ancestor' : 'page',
-      testId: `sidebar-${testScope}-${service.id}`,
+      mark: active ? 'page' : null,
+      testId: `sidebar-service-${service.id}`,
     });
   };
 
   const firstLevel = () => (
     <>
       {homeRow}
+      {reports.length > 1
+        ? levelRow({
+            rowKey: 'row-reports',
+            level: REPORTS_LEVEL,
+            icon: IconChartBar,
+            label: tNav('sidebarReports'),
+            items: reports,
+            active: reportsActive,
+            mark: reportsActive ? 'page' : null,
+            testId: 'sidebar-reports',
+          })
+        : reports.length === 1
+          ? reportsLink
+          : null}
       {flat ? (
-        <div className={classes.section}>{listed.map((service) => drillServiceRow(service, 'service'))}</div>
+        <div className={classes.section}>{listed.map((service) => drillServiceRow(service))}</div>
       ) : (
-        <>
-          {pinned.length > 0 ? (
-            <div className={classes.section} data-testid="sidebar-pinned">
-              <div className={classes.sectionHeading}>
-                <span>{tNav('sidebarPinned')}</span>
-              </div>
-              {pinned.map((service) => drillServiceRow(service, 'pinned'))}
+        groups.map((group) => (
+          <div key={group.category} className={classes.section} data-testid={`sidebar-category-${group.category}`}>
+            <div className={classes.sectionHeading}>
+              <span>{group.label}</span>
             </div>
-          ) : null}
-          {groups.map((group) => (
-            <div key={group.category} className={classes.section} data-testid={`sidebar-category-${group.category}`}>
-              <div className={classes.sectionHeading}>
-                <span>{group.label}</span>
-              </div>
-              {group.services.map((service) => drillServiceRow(service, 'service'))}
-            </div>
-          ))}
-        </>
+            {group.services.map((service) => drillServiceRow(service))}
+          </div>
+        ))
       )}
 
       <div className={classes.spacer} />
@@ -693,8 +699,8 @@ export default function Sidebar({
     </>
   );
 
-  /** A level of its own: the way back under the owner's name, its pin, and its pages with their group headings. */
-  const ownLevel = (owner: { label: string; service?: DashboardServiceDefinition }, items: SubNavItem[]) => (
+  /** A level of its own: the way back under the owner's name, and its pages with their group headings. */
+  const ownLevel = (ownerLabel: string, items: SubNavItem[]) => (
     <>
       <div className={classes.levelHeader}>
         <button
@@ -706,35 +712,47 @@ export default function Sidebar({
           data-focus-key="back"
         >
           <IconArrowLeft size={16} stroke={1.8} />
-          <span className={classes.levelTitle}>{owner.label}</span>
+          <span className={classes.levelTitle}>{ownerLabel}</span>
           <span className={classes.srOnly}>{tNav('sidebarBack')}</span>
         </button>
-        {owner.service && !flat ? pinButton(owner.service, owner.label, classes.levelPin, 'sidebar-level-pin') : null}
       </div>
-      <div className={classes.levelPages} role="group" aria-label={owner.label}>
-        {items.map((item) => pageLink(item, { level: true, ownerLabel: owner.label }))}
+      <div className={classes.levelPages} role="group" aria-label={ownerLabel}>
+        {items.map((item) => pageLink(item, { level: true, ownerLabel }))}
       </div>
     </>
   );
 
   const stepByStep = () => {
-    const levelService = level && level !== SETTINGS_LEVEL ? listed.find((service) => service.id === level) : undefined;
-    const levelItems = level === SETTINGS_LEVEL ? settingsItems : levelService ? servicePages(levelService) : undefined;
+    const special = level === SETTINGS_LEVEL || level === REPORTS_LEVEL;
+    const levelService = level && !special ? listed.find((service) => service.id === level) : undefined;
+    const levelItems =
+      level === SETTINGS_LEVEL
+        ? settingsItems
+        : level === REPORTS_LEVEL
+          ? reports
+          : levelService
+            ? servicePages(levelService)
+            : undefined;
     // A level that has nothing to show any more (the service left the list) falls back to the first one.
     const shownLevel = levelItems && levelItems.length > 1 ? level : ROOT_LEVEL;
+    const ownerLabel =
+      shownLevel === SETTINGS_LEVEL
+        ? tNav('settings')
+        : shownLevel === REPORTS_LEVEL
+          ? tNav('sidebarReports')
+          : levelService
+            ? tNav(levelService.navLabelKey)
+            : '';
+    const testLevel =
+      shownLevel === SETTINGS_LEVEL ? 'settings' : shownLevel === REPORTS_LEVEL ? 'reports' : shownLevel || 'root';
     return (
       <div
         key={`level-${shownLevel || 'root'}`}
         className={classes.level}
         data-motion={levelMotion ?? undefined}
-        data-testid={`sidebar-level-${shownLevel === SETTINGS_LEVEL ? 'settings' : shownLevel || 'root'}`}
+        data-testid={`sidebar-level-${testLevel}`}
       >
-        {shownLevel === ROOT_LEVEL || !levelItems
-          ? firstLevel()
-          : ownLevel(
-              levelService ? { label: tNav(levelService.navLabelKey), service: levelService } : { label: tNav('settings') },
-              levelItems,
-            )}
+        {shownLevel === ROOT_LEVEL || !levelItems ? firstLevel() : ownLevel(ownerLabel, levelItems)}
       </div>
     );
   };

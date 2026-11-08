@@ -791,16 +791,23 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 ### One left menu
 
 - The icon rail and the second column with the pages of the service in view are one labelled menu that goes step by
-  step. Its first level lists Home, the pinned services and every service the person can open under Build, Data and
-  Operate (a category with nothing to open is left out). A service with several pages opens a level of its own: a way
-  back under the service's name, its pin, and its pages, filtered as before (Webhooks only with access to Webhooks); the
-  page under the service's own name is "All {service}" there (All Agents, not Agents › Agents). A service with one page
-  is a plain link, and Settings is a level of its own with its pages by group.
+  step. Its first level lists Home, Reports and every service the person can open under Build, Data and Operate (a
+  category with nothing to open is left out). Nothing is pinned: every service has its one place. A service with
+  several pages opens a level of its own: a way back under the service's name and its pages, filtered as before
+  (Webhooks only with access to Webhooks); the page under the service's own name is "All {service}" there (All Agents,
+  not Agents › Agents). A service with one page is a plain link, and Settings is a level of its own with its pages by
+  group.
+- Reports (enterprise) opens a level with the summary and every report the person may read, under Usage & cost,
+  Quality & reliability, Safety & compliance and Infrastructure. With a single report it is a plain link; without the
+  reports license, or with nothing to read, there is no Reports row.
 - The menu opens at the level of the page in view, and the first level names that page next to its service
-  ("Agents  Tools ›"). One row is marked as the page in view; a pinned shortcut to its service is only named.
-- With seven services or fewer the first level is one plain list, without categories, pins or the Services launcher.
-- "Collapse menu" turns it into an icon strip that still shows the pages of the service in view; the browser
-  remembers it.
+  ("Agents  Tools ›"). One row is marked as the page in view.
+- With seven services or fewer the first level is one plain list, without categories.
+- "Collapse menu" turns it into an icon strip (Home, Reports, then every service) that still shows the pages of the
+  service in view; the browser remembers it.
+- The top bar is the logo, the project, a wide search and the account menu. The Services launcher, the portals, theme
+  and docs buttons are gone: the services are in the left menu, the theme and the person's portals in the account menu,
+  the docs under Help at the bottom of the left menu.
 - On a phone the menu button opens this same menu in a drawer, in place of the old one with Browse all services,
   Pinned and Recent, with rows sized for a finger. Following a link closes it; moving between levels does not. A
   tapped row does not stay highlighted (there is no hover on a touch screen).

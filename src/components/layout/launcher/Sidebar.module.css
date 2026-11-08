@@ -135,8 +135,8 @@
   font-weight: 500;
 }
 
-/* The service (or Settings) the page in view is under while that page is marked below it, and a pinned shortcut to
-   the service in view: named in the accent colour, not filled, so one row is marked as the page. */
+/* The service (Settings, Reports) the page in view is under while that page is marked below it: named in the accent
+   colour, not filled, so one row is marked as the page. */
 .itemAncestor {
   color: var(--ds-accent);
   font-weight: 500;
@@ -166,40 +166,6 @@
   background: var(--ds-surface-2);
   color: var(--ds-text-muted);
   font-weight: 500;
-}
-
-/* The pin shows on hover or keyboard focus; in the pinned list it stays shown. */
-.pin {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ds-text-faint);
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity var(--ds-m-fast),
-    background-color var(--ds-m-fast);
-}
-
-.pin:focus-visible,
-.pinStay {
-  opacity: 1;
-}
-
-.pinned {
-  color: var(--ds-accent);
-}
-
-.row:has(> .pin):focus-within .item {
-  padding-right: 32px;
 }
 
 /* ── Categories ───────────────────────────────────────────────── */
@@ -352,27 +318,6 @@
   white-space: nowrap;
 }
 
-.levelPin {
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ds-text-faint);
-  cursor: pointer;
-  transition:
-    background-color var(--ds-m-fast),
-    color var(--ds-m-fast);
-}
-
-/* After .levelPin: a pinned service's pin keeps the accent colour here too. */
-.levelPin.pinned {
-  color: var(--ds-accent);
-}
-
 .levelPages {
   display: flex;
   flex-direction: column;
@@ -484,11 +429,6 @@
   font-size: 15px;
 }
 
-.drawer .levelPin {
-  width: 40px;
-  height: 40px;
-}
-
 /* Above the phone's home indicator. */
 .drawer .footer {
   padding: 8px 10px max(8px, env(safe-area-inset-bottom));
@@ -502,19 +442,6 @@
     color: var(--ds-text);
   }
 
-  .row:hover .pin {
-    opacity: 1;
-  }
-
-  .pin:hover {
-    background: var(--ds-surface-1);
-    color: var(--ds-text);
-  }
-
-  .row:has(> .pin):hover .item {
-    padding-right: 32px;
-  }
-
   .groupHeader:hover {
     background: var(--ds-surface-2);
     color: var(--ds-text-muted);
@@ -525,8 +452,7 @@
     color: var(--ds-text);
   }
 
-  .backBtn:hover,
-  .levelPin:hover {
+  .backBtn:hover {
     background: var(--ds-surface-2);
     color: var(--ds-text);
   }
@@ -534,20 +460,6 @@
   .iconBtn:hover {
     background: var(--ds-surface-2);
     color: var(--ds-text);
-  }
-}
-
-/* A touch screen has no hover: the pin stays shown with room to tap it (unseen, it could be tapped by accident). */
-@media (hover: none) {
-  .pin {
-    opacity: 1;
-    width: 32px;
-    height: 32px;
-    right: 2px;
-  }
-
-  .row:has(> .pin) .item {
-    padding-right: 38px;
   }
 }
 
