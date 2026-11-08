@@ -1206,6 +1206,7 @@ export const tr: typeof en = {
       iam: 'Yetki Motoru',
       webhooks: 'Webhook’lar',
       flows: 'Akışlar',
+      reports: 'Raporlar',
     },
     action: {
       group: {
@@ -1234,6 +1235,10 @@ export const tr: typeof en = {
         session_view_others: 'Başkalarının başlattığı {type} oturumlarını görüntüle',
         conversations_view: '{type} konuşmalarını görüntüle',
         session_manage_others: 'Başkalarının başlattığı {type} oturumlarında işlem yap',
+        view: 'Görüntüle: {type}',
+        export: 'CSV olarak indir: {type}',
+        view_all_projects: 'Tüm projelerde görüntüle: {type}',
+        view_people: '{type} içinde kişi ve API token kırılımlarını görüntüle',
       },
     },
     managed: {
@@ -1901,6 +1906,10 @@ export const tr: typeof en = {
       approve: 'Araç çağrılarını onayla',
       session_view_others: 'Başkalarının oturumlarını görüntüle',
       session_manage_others: 'Başkalarının oturumlarında işlem yap',
+      view: 'Görüntüle',
+      export: 'CSV indir',
+      view_all_projects: 'Tüm projelerde görüntüle',
+      view_people: 'Kişileri ve API token\'larını görüntüle',
     },
     actionGroups: {
       read: 'Tüm okuma işlemleri',
@@ -1930,6 +1939,12 @@ export const tr: typeof en = {
       resourceSearchPlaceholder: 'Ad, anahtar veya ID ile ara',
       resourceIdPlaceholder: 'Kaynak ID',
       resourceManualHint: 'Kaynak kayıt defterine göz atamıyorsunuz, bu yüzden kaynak ID\'sini girin.',
+      reportGroups: {
+        usage: 'Kullanım ve maliyet',
+        quality: 'Kalite ve güvenilirlik',
+        safety: 'Güvenlik ve uyum',
+        infrastructure: 'Altyapı',
+      },
     },
     policies: {
       title: 'Erişim politikaları',
@@ -5790,6 +5805,8 @@ export const tr: typeof en = {
       'prompt-optimizer': 'Prompt optimizasyonları',
       'portal': 'Portallar',
       'channel-deployment': 'Kanal dağıtımları',
+      'report': 'Raporlar',
+      'report-group': 'Rapor grupları',
     },
   },
   iamLimits: {

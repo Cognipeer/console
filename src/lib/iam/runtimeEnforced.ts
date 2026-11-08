@@ -13,7 +13,10 @@
  *  - answering an approval, and looking at / acting on a session somebody else
  *    started, by the agent routes of the dashboard and the API - community code,
  *    always there; their `portal` channel (approvals) is the portal runtime's and
- *    follows the portal rule.
+ *    follows the portal rule;
+ *  - seeing a report, downloading it, seeing it across all projects and seeing its
+ *    breakdowns that name people, by the reports API - an enterprise feature: asked
+ *    only where the overlay registered the report catalog (@/enterprise/iam-reports).
  *
  * Where a channel does not exist, a rule about the action in it would look like
  * protection and be none, so the policy compiler and the raw-Cedar check keep
@@ -25,13 +28,15 @@
 
 import { hasIamMessagingResolver } from '@/enterprise/iam-messaging';
 import { hasIamPortalResolver } from '@/enterprise/iam-portal';
-import { RUNTIME_ENFORCED_ACTIONS } from './actions';
+import { hasIamReportCatalog } from '@/enterprise/iam-reports';
+import { RUNTIME_ENFORCED_ACTIONS, isReportResourceAction } from './actions';
 import type { IamChannel } from './context';
 
 /** The channels `actionId` is decided in by a runtime of this build (empty: none). */
 export function enforcedChannelsOf(actionId: string): IamChannel[] {
   const channels = RUNTIME_ENFORCED_ACTIONS[actionId];
   if (!channels) return [];
+  if (isReportResourceAction(actionId) && !hasIamReportCatalog()) return [];
   const present: Partial<Record<IamChannel, boolean>> = { portal: hasIamPortalResolver(), messaging: hasIamMessagingResolver() };
   // A channel without an entry here (dashboard, api) is always there.
   return channels.filter((channel) => present[channel] ?? true);

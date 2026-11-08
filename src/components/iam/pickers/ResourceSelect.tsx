@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Group, Loader, Select, Text, TextInput } from '@mantine/core';
 import { useTranslations } from '@/lib/i18n';
 import type { ResourceOption } from '../api';
@@ -17,6 +17,11 @@ interface ResourceSelectProps {
   onChange: (next: ResourceRef | null) => void;
   disabled?: boolean;
   error?: ReactNode;
+  /**
+   * The choices, when the type is not in the registry (a report or a report group: code, not inventory). Filtered
+   * here; the registry is not searched.
+   */
+  options?: ResourceOption[] | null;
 }
 
 /**
@@ -33,9 +38,22 @@ export default function ResourceSelect({
   onChange,
   disabled,
   error,
+  options,
 }: ResourceSelectProps) {
   const t = useTranslations('iamCenter');
-  const { search, setSearch, items, loading, error: searchError, unavailable } = useResourceSearch(type);
+  const fixed = options ?? null;
+  const remote = useResourceSearch(fixed ? null : type);
+  const [localSearch, setLocalSearch] = useState('');
+  const search = fixed ? localSearch : remote.search;
+  const setSearch = fixed ? setLocalSearch : remote.setSearch;
+  const items = useMemo(() => {
+    if (!fixed) return remote.items;
+    const q = localSearch.trim().toLowerCase();
+    return q ? fixed.filter((o) => o.name.toLowerCase().includes(q) || o.id.toLowerCase().includes(q)) : fixed;
+  }, [fixed, remote.items, localSearch]);
+  const loading = fixed ? false : remote.loading;
+  const searchError = fixed ? null : remote.error;
+  const unavailable = fixed ? false : remote.unavailable;
   const byId = useRef(new Map<string, ResourceOption>());
   for (const item of items) byId.current.set(item.id, item);
 

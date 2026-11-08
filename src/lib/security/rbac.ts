@@ -56,7 +56,8 @@ export type PermissionService =
   | 'resources'
   | 'iam'
   | 'webhooks'
-  | 'flows';
+  | 'flows'
+  | 'reports';
 
 /**
  * Tenant-wide roles.
@@ -136,6 +137,11 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'websearch', label: 'Web Search', description: 'Web search providers (Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo) and search APIs.', category: 'data' },
   { id: 'ocr', label: 'OCR Jobs', description: 'Batch OCR + extraction jobs over files and images.', category: 'data' },
   { id: 'alerts', label: 'Alerts & Incidents', description: 'Alert rules, history and incidents.', category: 'operate' },
+  // Reports (enterprise): the summary and the reports over the usage, cost, quality and safety data of the services.
+  // Members read them by default, and each report also needs read on the service its data comes from. The views across
+  // all projects and the breakdowns that name people or API tokens are Admin actions (report.view_all_projects,
+  // report.view_people), so only owners and administrators have them until a policy grants them.
+  { id: 'reports', label: 'Reports', description: 'Usage, cost, quality and safety reports over the data of the services a person can read.', category: 'operate', defaultMemberLevel: 'read' },
   { id: 'cost', label: 'Cost Management', description: 'Spend attribution across models and agents, and reference pricing for observed (non-hub) models.', category: 'operate' },
   { id: 'automations', label: 'Automations', description: 'Operational schedulers, maintenance jobs and runtime controls.', category: 'admin', adminService: true },
   { id: 'projects', label: 'Projects', description: 'Project contexts and project-scoped access.', category: 'admin' },
@@ -320,6 +326,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // which `enforceSessionRbac` treats as "not a gated surface".
   { prefix: '/api/skills', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
+  // Reports (enterprise): the service gate; which report a person sees, exports, sees across all projects
+  // or with its people breakdowns is decided per report (`report.*` on `Report::"<key>"`) in the handler.
+  { prefix: '/api/reports', service: 'reports' },
   // NOTE (entity health): '/api/entity-health' is deliberately NOT mapped. The scoreboard covers
   // agents, models, knowledge bases, MCP servers and tools, so the plugin declares its read routes
   // `authz.authenticated()` and authorizes each entity type against its own service in the handler

@@ -99,7 +99,26 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
   { type: 'rag-module', verb: 'query', level: 'write' },
   { type: 'model', verb: 'infer', level: 'write' },
   { type: 'portal', verb: 'use', level: 'read' },
+  // A report (enterprise, lib/iam/reportEntities.ts) is a resource of the `reports` service. Seeing it and downloading
+  // its CSV are Read; seeing it across all projects and the breakdowns that name people or API tokens are Admin, so only
+  // the holders of `reports` Admin (owners and administrators) have them until a policy grants them.
+  { type: 'report', verb: 'view', level: 'read' },
+  { type: 'report', verb: 'export', level: 'read' },
+  { type: 'report', verb: 'view_all_projects', level: 'admin' },
+  { type: 'report', verb: 'view_people', level: 'admin' },
 ];
+
+/** The actions the reports API asks about one report (enterprise; lib/iam/reportEntities.ts). */
+export const REPORT_RESOURCE_ACTIONS: readonly string[] = Object.freeze([
+  'report.view',
+  'report.export',
+  'report.view_all_projects',
+  'report.view_people',
+]);
+
+export function isReportResourceAction(id: string): boolean {
+  return REPORT_RESOURCE_ACTIONS.includes(id);
+}
 
 /**
  * Resource actions that something other than the HTTP gates decides, and the
@@ -129,6 +148,12 @@ export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChann
   // Where an agent keeps its session files is a Files decision about THAT bucket (agents routes ask it).
   'file-bucket.get': ['dashboard', 'api'],
   'file-bucket.update': ['dashboard', 'api'],
+  // The reports API asks these about each report (enterprise: only where the overlay registered the report catalog,
+  // runtimeEnforced.ts).
+  'report.view': ['dashboard', 'api'],
+  'report.export': ['dashboard', 'api'],
+  'report.view_all_projects': ['dashboard', 'api'],
+  'report.view_people': ['dashboard', 'api'],
 });
 
 /** The Document Store bucket actions the agents routes ask about: choosing (listing) a bucket, and naming it in an agent's settings. */
@@ -166,7 +191,17 @@ export const EXTRA_RESOURCE_TYPES: ReadonlyArray<CatalogResourceType> = [
   // A deployment of an agent on a Slack / Teams connection: carries its own access list (messagingEntities.ts).
   { type: 'channel-deployment', service: 'channels' },
   { type: 'agent', service: 'agents' },
+  // A report is code, not an inventory entry: it is never in the registry. Its group (`report-group`) is only a parent a
+  // policy can name, so a rule about a whole group covers its reports, today's and later ones (schema.ts).
+  { type: 'report', service: 'reports' },
+  { type: 'report-group', service: 'reports' },
 ];
+
+/**
+ * Types that have only their own verbs (RESOURCE_EXTRA_VERBS), no get / list / create / update / delete: nobody creates
+ * or edits a report, and a report group is never asked about by itself.
+ */
+export const VERB_ONLY_RESOURCE_TYPES: ReadonlySet<string> = new Set(['report', 'report-group']);
 
 // ── naming ───────────────────────────────────────────────────────────────
 
@@ -274,6 +309,7 @@ export function buildActionCatalog(resourceTypes: ReadonlyArray<CatalogResourceT
 
   const types = withExtraResourceTypes(resourceTypes);
   for (const { type, service } of types) {
+    if (VERB_ONLY_RESOURCE_TYPES.has(type)) continue;
     const entityType = resourceEntityTypeName(type);
     for (const { verb, level } of RESOURCE_CRUD_VERBS) {
       catalog.push({

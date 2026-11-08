@@ -1293,6 +1293,7 @@ export const en = {
       iam: 'Authorization Engine',
       webhooks: 'Webhooks',
       flows: 'Flows',
+      reports: 'Reports',
     },
     action: {
       group: {
@@ -1321,6 +1322,10 @@ export const en = {
         session_view_others: 'View sessions of a {type} that others started',
         conversations_view: 'View the conversations of a {type}',
         session_manage_others: 'Act on sessions of a {type} that others started',
+        view: 'View a {type}',
+        export: 'Download a {type} as CSV',
+        view_all_projects: 'View a {type} across all projects',
+        view_people: 'View the breakdowns of a {type} that name people and API tokens',
       },
     },
     managed: {
@@ -2611,6 +2616,10 @@ export const en = {
       approve: 'Approve tool calls',
       session_view_others: 'View others\' sessions',
       session_manage_others: 'Act on others\' sessions',
+      view: 'View',
+      export: 'Download CSV',
+      view_all_projects: 'View across all projects',
+      view_people: 'View people and API tokens',
     },
     actionGroups: {
       read: 'All read actions',
@@ -2640,6 +2649,12 @@ export const en = {
       resourceSearchPlaceholder: 'Search by name, key or ID',
       resourceIdPlaceholder: 'Resource ID',
       resourceManualHint: 'You cannot browse the resource registry, so enter the resource ID.',
+      reportGroups: {
+        usage: 'Usage & cost',
+        quality: 'Quality & reliability',
+        safety: 'Safety & compliance',
+        infrastructure: 'Infrastructure',
+      },
     },
     policies: {
       title: 'Access policies',
@@ -7507,6 +7522,8 @@ export const en = {
       'prompt-optimizer': 'Prompt optimizations',
       'portal': 'Portals',
       'channel-deployment': 'Channel deployments',
+      'report': 'Reports',
+      'report-group': 'Report groups',
     },
   },
   iamLimits: {

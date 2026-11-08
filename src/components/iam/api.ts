@@ -109,12 +109,20 @@ export interface CatalogResourceType {
   labelKey: string;
 }
 
+/** A report (enterprise): reports are code, not registry entries, so the pickers offer them from the catalog. */
+export interface CatalogReport {
+  key: string;
+  title: string;
+  group: string | null;
+}
+
 export interface IamCatalog {
   services: CatalogService[];
   actions: CatalogAction[];
   resourceTypes: CatalogResourceType[];
   contextAttrs: string[];
   channels: IamChannel[];
+  reports: CatalogReport[];
 }
 
 // ── policies ─────────────────────────────────────────────────────────────
@@ -707,12 +715,17 @@ export function normalizeCatalog(raw: unknown): IamCatalog {
   const channels = asArray(o.channels)
     .map(toChannel)
     .filter((x): x is IamChannel => x !== null);
+  const reports = asArray(o.reports).map((x): CatalogReport => {
+    const r = asRecord(x);
+    return { key: str(r.key), title: str(r.title), group: optStr(r.group) ?? null };
+  });
   return {
     services: services.filter((s) => s.id),
     actions: actions.filter((a) => a.id),
     resourceTypes: resourceTypes.filter((t) => t.type),
     contextAttrs: strings(o.contextAttrs),
     channels: channels.length ? channels : [...IAM_CHANNELS],
+    reports: reports.filter((r) => r.key),
   };
 }
 

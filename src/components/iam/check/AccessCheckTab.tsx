@@ -46,6 +46,7 @@ import {
 import { iamHref, parseCheckParams, policyHref } from '../links';
 import ActionSelect from '../pickers/ActionSelect';
 import PrincipalSelect from '../pickers/PrincipalSelect';
+import { useReportOptions } from '../pickers/reportOptions';
 import ResourceSelect from '../pickers/ResourceSelect';
 import { useProjects } from '../pickers/lookups';
 import { formatDateTime } from '../timeFormat';
@@ -131,6 +132,7 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
 
   const issues = useMemo(() => validateForm(form), [form]);
   const selectedAction = form.action && index ? index.actionById.get(form.action) : undefined;
+  const reportOptions = useReportOptions(catalog, selectedAction?.resourceType ?? null);
   const has = (issue: CheckIssue) => showErrors && issues.includes(issue);
 
   const projectName = useCallback(
@@ -532,6 +534,7 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
                         value={form.resource}
                         onChange={(resource) => patch({ resource })}
                         error={has('resource') ? t('check.requireResource') : undefined}
+                        options={reportOptions}
                       />
                     )}
                     {/* Only where portals exist (the catalog says the action is checked there), or when the portal channel was chosen by hand. */}

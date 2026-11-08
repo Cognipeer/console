@@ -89,8 +89,8 @@ export function auditLevelOf(action: string): 'read' | 'write' {
   return verb === 'create' || verb === 'update' || verb === 'delete' ? 'write' : 'read';
 }
 
-/** The services whose resources the agents routes ask about besides their own (a bucket is the Document Store's). */
-const SERVICE_OF_TYPE: Readonly<Record<string, string>> = { 'file-bucket': 'files' };
+/** The services of the resources asked about outside the agents routes' own (a bucket is the Document Store's, a report the Reports'). */
+const SERVICE_OF_TYPE: Readonly<Record<string, string>> = { 'file-bucket': 'files', report: 'reports' };
 
 /**
  * The service a refusal is filed under: the portals' for anything the portal runtime asked, the channels' for the

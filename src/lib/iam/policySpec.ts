@@ -41,6 +41,8 @@ import { askedGateActions } from './gateActions';
 import { getIamSchema } from './schemaState';
 import { validateCustomPolicyText } from './policyText';
 import { enforcedChannelsOf, isRuntimeEnforced } from './runtimeEnforced';
+import { REPORT_GROUP_RESOURCE_TYPE, REPORT_RESOURCE_TYPE } from './reportEntities';
+import { findIamReport, isIamReportGroup, listIamReports } from '@/enterprise/iam-reports';
 
 // ── types ────────────────────────────────────────────────────────────────
 
@@ -497,14 +499,23 @@ export async function verifySpecReferences(spec: PolicySpec, tenant: SpecTenant)
     });
   }
 
-  if (resources.length > 0) {
+  // Reports and their groups are code, not registry entries: they exist when this build has them (@/enterprise/iam-reports).
+  const isReportRef = (ref: PolicySpecResourceRef) => ref.type === REPORT_RESOURCE_TYPE || ref.type === REPORT_GROUP_RESOURCE_TYPE;
+  for (const ref of resources.filter(isReportRef)) {
+    const exists = ref.type === REPORT_RESOURCE_TYPE
+      ? findIamReport(ref.id) !== null
+      : isIamReportGroup(ref.id) && listIamReports().some((r) => r.group === ref.id);
+    if (!exists) issues.push({ message: `The ${ref.type} "${ref.id}" does not exist in this workspace`, field: 'resources.resources' });
+  }
+  const registryRefs = resources.filter((ref) => !isReportRef(ref));
+  if (registryRefs.length > 0) {
     // Loaded on demand: the registry pulls in every resource provider.
     const { getResource } = await import('@/lib/resources/service');
-    const found = await mapLimited(resources, async (ref) => {
+    const found = await mapLimited(registryRefs, async (ref) => {
       const detail = await getResource({ tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, type: ref.type, id: ref.id });
       return !!detail;
     });
-    resources.forEach((ref, i) => {
+    registryRefs.forEach((ref, i) => {
       if (!found[i]) issues.push({ message: `The ${ref.type} "${ref.id}" does not exist in this workspace`, field: 'resources.resources' });
     });
   }
@@ -684,7 +695,9 @@ function runtimeReaches(id: string, channel: IamChannel, sel: PolicySpecResource
   const service = def?.service ?? 'agents';
   const type = def?.resourceType ?? 'agent';
   return !!sel.services?.includes(service) || !!sel.projects?.length
-    || refs.some((r) => r.type === type || (channel === 'portal' && r.type === 'portal') || (channel === 'messaging' && r.type === 'channel-deployment'));
+    || refs.some((r) => r.type === type || (channel === 'portal' && r.type === 'portal') || (channel === 'messaging' && r.type === 'channel-deployment')
+      // A report group reaches its reports (they are `in` it).
+      || (type === REPORT_RESOURCE_TYPE && r.type === REPORT_GROUP_RESOURCE_TYPE));
 }
 
 export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatalogView()): GateReach {
