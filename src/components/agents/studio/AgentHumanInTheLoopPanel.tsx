@@ -181,9 +181,9 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                 {rows.length === 0 ? (
                                     <Text size="xs" c="dimmed" fs="italic">{t('toolsEmpty')}</Text>
                                 ) : (
-                                    // Columns take what their content needs (a two-choice control, a button; the badge's column is set, as a
-                                    // badge shrinks to an ellipsis) and the tool name wraps. Below the minimum width the table scrolls inside
-                                    // the section instead of running out of it.
+                                    // Columns take what their content needs (a button) and the tool name wraps. Two columns are set: the
+                                    // badge's, as a badge shrinks to an ellipsis, and the approval's, which keeps the Ask / Never ask control
+                                    // whole. Below the minimum width the table scrolls inside the section instead of running out of it.
                                     <Table.ScrollContainer minWidth={600} type="native">
                                         <Table verticalSpacing={6} withTableBorder>
                                             <Table.Thead>
@@ -191,7 +191,7 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                                     <Table.Th>{t('toolColumn')}</Table.Th>
                                                     <Table.Th>{t('sourceColumn')}</Table.Th>
                                                     <Table.Th w={110}>{t('kindColumn')}</Table.Th>
-                                                    <Table.Th style={{ whiteSpace: 'nowrap' }}>{t('policyColumn')}</Table.Th>
+                                                    <Table.Th w={300}>{t('policyColumn')}</Table.Th>
                                                     <Table.Th style={{ whiteSpace: 'nowrap' }}>{t('exceptionsColumn')}</Table.Th>
                                                 </Table.Tr>
                                             </Table.Thead>
