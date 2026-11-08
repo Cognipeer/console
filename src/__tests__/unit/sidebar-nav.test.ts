@@ -20,6 +20,13 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: () => undefined, prefetch: () => undefined, replace: () => undefined }),
 }));
 
+// The window width the menu sees (useMediaQuery); everything else of @mantine/hooks stays real.
+const media = vi.hoisted(() => ({ narrow: false }));
+vi.mock('@mantine/hooks', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@mantine/hooks')>()),
+  useMediaQuery: () => media.narrow,
+}));
+
 vi.mock('@/components/common/navigation/useNavigationFeedback', () => ({
   useNavigationFeedback: () => ({ push: () => undefined }),
   usePendingNavigationKey: () => null,
@@ -156,6 +163,18 @@ describe('the menu', () => {
     expect(html).not.toContain(`data-testid="sidebar-subitem-${SUBNAV_CONFIG.files[0].id}"`);
   });
 
+  it('starts as icons on a narrow window or a tablet, labelled on a wide one', () => {
+    const wide = sidebar({ services: owner });
+    expect(wide).toContain('data-testid="sidebar-nav"');
+    expect(wide).not.toContain('data-collapsed="true"');
+    media.narrow = true;
+    try {
+      expect(sidebar({ services: owner })).toContain('data-collapsed="true"');
+    } finally {
+      media.narrow = false;
+    }
+  });
+
   it('speaks the viewer’s language', () => {
     const html = sidebar({ services: owner }, 'tr');
     expect(html).toContain('Ana sayfa');
@@ -168,6 +187,13 @@ describe('the switch and the old menu', () => {
   const layout = readFileSync(join(process.cwd(), 'src/components/layout/DashboardLayout.tsx'), 'utf8');
   const topbar = readFileSync(join(process.cwd(), 'src/components/layout/launcher/TopbarV2.tsx'), 'utf8');
   const model = readFileSync(join(process.cwd(), 'src/components/layout/launcher/sidebarNav.ts'), 'utf8');
+
+  it('a narrow window opens the menu for the visit only; the stored choice is the wide screen’s', () => {
+    const source = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.tsx'), 'utf8');
+    expect(model).toContain("export const SIDEBAR_NARROW_QUERY = '(max-width: 62em)';");
+    expect(source).toContain('const collapsed = narrow ? !narrowOpen : storedCollapsed;');
+    expect(source).toMatch(/if \(narrow\) \{\s*setNarrowOpen\(\(open\) => !open\);\s*return;\s*\}/);
+  });
 
   it('one constant picks the menu; the rail and the sub-nav are still there behind it', () => {
     expect(model).toContain('export const SIDEBAR_NAV = true;');

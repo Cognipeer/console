@@ -797,6 +797,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - With seven services or fewer the menu is one plain list, without categories, pins or the Services launcher.
 - "Collapse menu" turns it into an icon strip that still shows the pages of the service in view. The folded categories
   and the icon strip are remembered in the browser. Phones keep the menu drawer.
+- On a narrow window or a tablet (992px and below) the menu starts as the icon strip, whatever was chosen on a wide
+  screen, so the page keeps its width; opening it there lasts for the visit.
 - Service names, addresses and the ⌘K search are unchanged. `SIDEBAR_NAV` in `sidebarNav.ts` switches back to the
   rail and the sub-nav, which are kept.
 

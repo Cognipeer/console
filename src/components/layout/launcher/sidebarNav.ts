@@ -22,6 +22,13 @@ export const SIDEBAR_NAV = true;
  */
 export const SIDEBAR_FLAT_MAX = 7;
 
+/**
+ * A window this narrow (a tablet, a small laptop window) gets the icon-only menu by default: the labelled one takes
+ * 248px and left the page about 550px at 820px. Phones (48em and below) have no side menu at all, only the top bar's
+ * drawer.
+ */
+export const SIDEBAR_NARROW_QUERY = '(max-width: 62em)';
+
 /** Category order in the menu: what is built, what it uses, how it runs. Any other category follows. */
 const SIDEBAR_CATEGORY_ORDER: readonly DashboardServiceCategory[] = [
   'build',

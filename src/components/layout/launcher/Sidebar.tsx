@@ -15,6 +15,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Tooltip } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
 import {
   IconBook,
   IconChevronDown,
@@ -35,7 +36,7 @@ import {
 } from '@/components/common/navigation/useNavigationFeedback';
 import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
 import type { SubNavItem } from './ServiceSubNav';
-import { isFlatSidebar, sidebarGroups, sidebarServices } from './sidebarNav';
+import { SIDEBAR_NARROW_QUERY, isFlatSidebar, sidebarGroups, sidebarServices } from './sidebarNav';
 import classes from './Sidebar.module.css';
 
 const COLLAPSED_KEY = 'cgn:sidebar:collapsed';
@@ -59,14 +60,21 @@ function writeStored(key: string, value: unknown) {
   }
 }
 
-/** Icon-only or labelled, and which categories are folded: this browser's choice, read after the first render. */
+/**
+ * Icon-only or labelled, and which categories are folded: this browser's choice, read after the first render.
+ * A narrow window or a tablet (SIDEBAR_NARROW_QUERY) starts with the icons whatever was chosen on a wide screen,
+ * since the labelled menu left the page about 550px there; opening it lasts for the visit and is not stored.
+ */
 function useSidebarPrefs(activeCategory: string | undefined) {
   const [loaded, setLoaded] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [storedCollapsed, setStoredCollapsed] = useState(false);
+  const narrow = useMediaQuery(SIDEBAR_NARROW_QUERY) ?? false;
+  const [narrowOpen, setNarrowOpen] = useState(false);
   const [closedGroups, setClosedGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const collapsed = narrow ? !narrowOpen : storedCollapsed;
 
   useEffect(() => {
-    setCollapsed(readStored<boolean>(COLLAPSED_KEY, false) === true);
+    setStoredCollapsed(readStored<boolean>(COLLAPSED_KEY, false) === true);
     const stored = readStored<unknown>(CLOSED_GROUPS_KEY, []);
     setClosedGroups(new Set(Array.isArray(stored) ? stored.filter((v): v is string => typeof v === 'string') : []));
     setLoaded(true);
@@ -85,11 +93,15 @@ function useSidebarPrefs(activeCategory: string | undefined) {
   }, [loaded, activeCategory]);
 
   const toggleCollapsed = useCallback(() => {
-    setCollapsed((previous) => {
+    if (narrow) {
+      setNarrowOpen((open) => !open);
+      return;
+    }
+    setStoredCollapsed((previous) => {
       writeStored(COLLAPSED_KEY, !previous);
       return !previous;
     });
-  }, []);
+  }, [narrow]);
 
   const toggleGroup = useCallback((category: string) => {
     setClosedGroups((previous) => {
