@@ -43,6 +43,12 @@ vi.mock('@/lib/services/projects/projectService', () => ({
 }));
 vi.mock('@/lib/email/mailer', () => ({ sendEmail: vi.fn().mockResolvedValue(true) }));
 vi.mock('@/lib/limits/tenantLimits', () => ({ resolveTenantPlan: async () => h.plan }));
+// A hosted deployment with plan limits on; each test sets the tenant's own mode through setPlan.
+vi.mock('@/lib/limits/mode', () => ({
+  deploymentPlanLimitsMode: () => 'on',
+  planLimitsActive: () => true,
+  effectivePlanLimitsMode: () => h.plan.mode,
+}));
 vi.mock('@/lib/limits/events', () => ({
   outcomeEventFor: (d: unknown) => h.events.push(d),
   recordLimitEvent: vi.fn(),

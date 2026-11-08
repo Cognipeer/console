@@ -58,7 +58,7 @@ function UsageCenter() {
   // Members and other non-admin roles: say who can see usage instead of a load error with a retry that cannot work.
   if (forbidden) {
     return (
-      <Alert color="gray" icon={<IconLock size={16} />} title={t('noAccessTitle')}>
+      <Alert color="blue" variant="light" icon={<IconLock size={16} />} title={t('noAccessTitle')}>
         {t('noAccessDescription')}
       </Alert>
     );
