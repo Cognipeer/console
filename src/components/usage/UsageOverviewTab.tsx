@@ -12,9 +12,16 @@ type Translate = (key: string, values?: Record<string, string | number>) => stri
 const MAIN_CAPACITY: CapacityDimension[] = ['apiRpm', 'agent', 'flow', 'job', 'browser'];
 const EXTRA_CAPACITY: CapacityDimension[] = ['realtime', 'sandbox'];
 
-function valueText(t: Translate, locale: string, used: number, limit: number | undefined, format = formatNumber): string {
+function valueText(
+  t: Translate,
+  locale: string,
+  used: number,
+  limit: number | undefined,
+  format = formatNumber,
+  usedKey: 'usedOnly' | 'usedThisMonth' = 'usedOnly',
+): string {
   const usedText = format(used, locale);
-  if (limit === undefined) return `${t('usedOnly', { used: usedText })} · ${t('noLimit')}`;
+  if (limit === undefined) return `${t(usedKey, { used: usedText })} · ${t('noLimit')}`;
   return t('of', { used: usedText, limit: format(limit, locale) });
 }
 
@@ -137,7 +144,7 @@ export default function UsageOverviewTab({
             <UsageBar
               key={row.dimension}
               label={t(`rows.${row.dimension}`)}
-              valueText={valueText(t, locale, row.used, row.limit)}
+              valueText={valueText(t, locale, row.used, row.limit, formatNumber, 'usedThisMonth')}
               used={row.used}
               limit={row.limit}
             />

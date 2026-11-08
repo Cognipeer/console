@@ -15,6 +15,8 @@ export const usageTr: typeof usageEn = {
   },
   loadError: 'Kullanım bilgisi yüklenemedi.',
   retry: 'Yeniden deneyin',
+  noAccessTitle: 'Kullanım bilgisini sahipler ve yöneticiler görür',
+  noAccessDescription: 'Plan ve kullanım bilgisi için bu çalışma alanının bir sahibine veya yöneticisine başvurun.',
   shadowNotice: 'Limitler ölçülüyor ancak henüz uygulanmıyor. Hiçbir istek reddedilmez; limit olayları, uygulansaydı neyin reddedileceğini gösterir.',
   scopeCluster: 'Tüm küme genelinde sayılır.',
   scopePod: 'Yalnızca bu sunucuda sayılır; bu nedenle sunucular arasında değerler farklı olabilir.',
@@ -23,6 +25,7 @@ export const usageTr: typeof usageEn = {
   noLimit: 'Limit yok',
   of: '{used} / {limit}',
   usedOnly: '{used} kullanımda',
+  usedThisMonth: 'bu ay {used}',
   peak: '24 sa zirve {value}',
   plan: {
     title: 'Plan',

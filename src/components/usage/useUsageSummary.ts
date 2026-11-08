@@ -1,25 +1,28 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { apiRequest } from '@/lib/api/client';
+import { ApiError, apiRequest } from '@/lib/api/client';
 import type { UsageSummary } from '@/lib/limits/usageSummary';
 
 export interface UsageSummaryState {
   summary: UsageSummary | null;
   loading: boolean;
   error: boolean;
+  /** The caller may not see usage (403). Polling stops; retrying will not help. */
+  forbidden: boolean;
   refetch: () => Promise<void>;
 }
 
 /**
  * Loads `/api/usage/summary` and refetches it every `intervalMs` while the tab
  * is visible (a hidden tab stops polling and refreshes once when it comes back).
- * `enabled = false` does nothing at all.
+ * `enabled = false` does nothing at all. A 403 stops polling for good.
  */
 export function useUsageSummary(intervalMs: number, enabled = true): UsageSummaryState {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState(false);
+  const [forbidden, setForbidden] = useState(false);
   const alive = useRef(true);
 
   const refetch = useCallback(async () => {
@@ -28,8 +31,10 @@ export function useUsageSummary(intervalMs: number, enabled = true): UsageSummar
       if (!alive.current) return;
       setSummary(data);
       setError(false);
-    } catch {
-      if (alive.current) setError(true);
+    } catch (err) {
+      if (!alive.current) return;
+      if (err instanceof ApiError && err.status === 403) setForbidden(true);
+      setError(true);
     } finally {
       if (alive.current) setLoading(false);
     }
@@ -37,7 +42,7 @@ export function useUsageSummary(intervalMs: number, enabled = true): UsageSummar
 
   useEffect(() => {
     alive.current = true;
-    if (!enabled) return () => { alive.current = false; };
+    if (!enabled || forbidden) return () => { alive.current = false; };
     void refetch();
     const visible = () => typeof document === 'undefined' || document.visibilityState === 'visible';
     const timer = setInterval(() => {
@@ -52,7 +57,7 @@ export function useUsageSummary(intervalMs: number, enabled = true): UsageSummar
       clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [enabled, intervalMs, refetch]);
+  }, [enabled, forbidden, intervalMs, refetch]);
 
-  return { summary, loading, error, refetch };
+  return { summary, loading, error, forbidden, refetch };
 }

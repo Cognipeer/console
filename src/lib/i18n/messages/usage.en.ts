@@ -14,6 +14,8 @@ export const usageEn = {
   },
   loadError: 'Usage could not be loaded.',
   retry: 'Try again',
+  noAccessTitle: 'Usage is visible to owners and admins',
+  noAccessDescription: 'Ask an owner or admin of this workspace for the plan and usage numbers.',
   shadowNotice: 'Limits are measured but not enforced yet. Nothing is refused; limit events show what would have been.',
   scopeCluster: 'Counted across the whole cluster.',
   scopePod: 'Counted on this server only, so the numbers can differ between servers.',
@@ -22,6 +24,7 @@ export const usageEn = {
   noLimit: 'No limit',
   of: '{used} of {limit}',
   usedOnly: '{used} in use',
+  usedThisMonth: '{used} this month',
   peak: '24 h peak {value}',
   plan: {
     title: 'Plan',

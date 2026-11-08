@@ -3,7 +3,7 @@
 import { Suspense, useCallback, type ReactNode } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Alert, Button, Group, Loader, Tabs } from '@mantine/core';
-import { IconCoins, IconHistory, IconLayoutDashboard } from '@tabler/icons-react';
+import { IconCoins, IconHistory, IconLayoutDashboard, IconLock } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import UsageCreditsTab from '@/components/usage/UsageCreditsTab';
 import UsageEventsTab from '@/components/usage/UsageEventsTab';
@@ -23,7 +23,7 @@ function UsageCenter() {
   const t = useTranslations('usage');
   const searchParams = useSearchParams()!;
   const requested = parseUsageTab(searchParams.get('tab'));
-  const { summary, loading, error, refetch } = useUsageSummary(POLL_MS);
+  const { summary, loading, error, forbidden, refetch } = useUsageSummary(POLL_MS);
 
   const hasCredits = summary?.credits != null;
   // A link to a tab that is not there lands on the overview.
@@ -54,6 +54,15 @@ function UsageCenter() {
     }
     return loading ? spinner : null;
   };
+
+  // Members and other non-admin roles: say who can see usage instead of a load error with a retry that cannot work.
+  if (forbidden) {
+    return (
+      <Alert color="gray" icon={<IconLock size={16} />} title={t('noAccessTitle')}>
+        {t('noAccessDescription')}
+      </Alert>
+    );
+  }
 
   return (
     <Tabs value={active} onChange={select} keepMounted={false}>
