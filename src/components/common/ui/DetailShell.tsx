@@ -81,7 +81,9 @@ export default function DetailShell({
           )}
         </Tooltip>
         {icon ? <div className="detail-icon">{icon}</div> : null}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        {/* At least 220px for the title: when the actions don't fit beside that, they move to the next line (a
+            phone) instead of squeezing the title to nothing and running past the right edge. */}
+        <div style={{ flex: '1 1 220px', minWidth: 0 }}>
           <div className="detail-title-row">
             {/* A plain-text title gets the page heading the composed titles bring themselves. */}
             {typeof title === 'string' || typeof title === 'number' ? (
@@ -95,7 +97,7 @@ export default function DetailShell({
           {meta ? <div className="detail-meta-row">{meta}</div> : null}
         </div>
         {actions ? (
-          <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>
+          <div className="ds-row ds-gap-sm" style={{ flexShrink: 0, maxWidth: '100%' }}>
             {actions}
           </div>
         ) : null}

@@ -197,9 +197,40 @@
   min-width: 0;
 }
 
-@media (min-width: 64em) {
+/* The name and plan beside the avatar only where the bar has room for them (below this the avatar alone; the
+   menu shows the account). */
+@media (min-width: 75em) {
   .accountInfo {
     display: flex;
+  }
+}
+
+/* A narrow window or a tablet: search and the services launcher keep only their icons, so every control of the bar
+   stays on screen (the theme, docs and account buttons ran past the right edge from about 1060px down). Phones
+   have their own bar (below). */
+@media (max-width: 68em) {
+  .searchBox {
+    flex: 0 0 36px;
+    width: 36px;
+    min-width: 0;
+    padding: 0;
+    margin: 0 0 0 auto;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .searchPlaceholder,
+  .searchBox .kbd {
+    display: none;
+  }
+
+  .svcTrigger {
+    padding: 0 10px;
+    gap: 6px;
+  }
+
+  .svcTrigger > .dotGridSm + span {
+    display: none;
   }
 }
 

@@ -852,7 +852,9 @@ export default function ModelDetailPage() {
       )}
       {/* Header */}
       <header className="ds-page-header" style={{ alignItems: 'center' }}>
-        <div className="ds-row ds-gap-md" style={{ flex: 1, minWidth: 0 }}>
+        {/* No inline flex here: the header's own rule gives the title block a 320px basis, so on a phone the actions
+            drop below it instead of squeezing the badges into a one-word column. */}
+        <div className="ds-row ds-gap-md" style={{ minWidth: 0 }}>
           <div
             style={{
               width: 52,
@@ -889,7 +891,8 @@ export default function ModelDetailPage() {
             >
               <h1
                 className="ds-h2 ds-mono"
-                style={{ margin: 0, whiteSpace: 'nowrap' }}
+                style={{ margin: 0, whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                title={model.name}
               >
                 {model.name}
               </h1>
@@ -932,7 +935,11 @@ export default function ModelDetailPage() {
                 {providerLabel}
               </span>
               <span className="ds-faint">·</span>
-              <span className="ds-mono" style={{ whiteSpace: 'nowrap' }}>
+              <span
+                className="ds-mono"
+                style={{ whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                title={model.modelId}
+              >
                 {model.modelId}
               </span>
               {model.updatedAt ? (
@@ -946,7 +953,7 @@ export default function ModelDetailPage() {
             </div>
           </div>
         </div>
-        <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>
+        <div className="ds-row ds-gap-sm" style={{ flexShrink: 0, maxWidth: '100%' }}>
           <Tooltip label="Pin to favorites" withArrow>
             <ActionIcon variant="subtle" color="gray" radius="md" size="lg">
               <IconPinned size={15} stroke={1.7} />

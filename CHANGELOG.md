@@ -764,6 +764,28 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   per-tool approvals table no longer runs out of its section — its columns take what they need, tool names wrap
   between words, and on a narrow screen the table scrolls inside the section.
 
+### Narrow windows, tablets and phones
+
+- The top bar keeps every control on screen. From about 1090px down, search and the services launcher show only their
+  icons, and the name and plan beside the avatar show from 1200px. At about 820px the theme, docs and account buttons
+  used to be past the right edge, so the account menu could not be opened.
+- A page header's buttons and filters wrap at the header's width instead of running past the edge.
+- Overview: Health and Active incidents (and Recent sessions and Resources) stack on a narrow screen instead of
+  squeezing side by side, and the four numbers stay on one row on a tablet and make two rows of two on a phone.
+- On a phone, stat cards sit two to a row. Table columns keep a readable width and the table scrolls sideways in its
+  frame, instead of every column squeezing until text broke a letter a line. A name beside its badges wraps inside its
+  column instead of running under the next one.
+- Full-screen forms on a phone: the header grows with its subtitle (the title was pushed off the top), the Escape hint
+  is left out, and the footer's buttons wrap to a second row (Cancel was out of sight).
+- Detail pages (a portal, a provider, a connector, an incident and the others with a back button): when the buttons
+  beside the title don't fit, they move under it. On a phone the title had been squeezed to nothing and the buttons
+  ran past the edge.
+- A model's page on a phone: its columns stack at the width of the screen (a long curl example had pushed every card
+  past the right edge), and the buttons go under the name instead of squeezing the badges into a narrow column.
+- Sandbox overview: By state and Recent sandboxes stack on a narrow screen and the list scrolls in its card.
+  Telephony: the test call's fields stack on a phone, and the public URL ends in an ellipsis (copy button beside it)
+  instead of being cut off.
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept
