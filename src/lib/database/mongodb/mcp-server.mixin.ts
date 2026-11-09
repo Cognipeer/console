@@ -150,13 +150,6 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       return docs as unknown as IMcpServer[];
     }
 
-    async countMcpServers(projectId?: string): Promise<number> {
-      const db = this.getTenantDb();
-      const filter: Record<string, unknown> = {};
-      if (projectId !== undefined) filter.projectId = projectId;
-      return db.collection(COLLECTIONS.mcpServers).countDocuments(filter);
-    }
-
     // ── MCP Request Logs ─────────────────────────────────────────────
 
     async createMcpRequestLog(
