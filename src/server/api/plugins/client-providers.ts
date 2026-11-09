@@ -21,6 +21,7 @@ import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
+import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
 import type {
   CreateProviderConfigInput,
@@ -34,6 +35,7 @@ import {
   listProviderConfigs,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
+import { canUseTenantProviderScope } from '../clientGrantPolicy';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 
@@ -86,6 +88,11 @@ function isAssignedToProject(provider: { projectId?: unknown; projectIds?: unkno
   );
 }
 
+/** Tenant-wide scope is for owner/admin callers; everyone else stays inside the token's project. */
+function tenantScopeRefused(query: { scope?: string }, auth: ApiTokenContext): boolean {
+  return query.scope === 'tenant' && !canUseTenantProviderScope(auth);
+}
+
 export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/providers/drivers', withClientApiRequestContext(async (request, reply) => {
     const query = (request.query ?? {}) as { domain?: ProviderDomain };
@@ -106,6 +113,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/providers', withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const query = (request.query ?? {}) as { driver?: string; scope?: string; status?: string; type?: ProviderDomain };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const filters = {
         driver: query.driver || undefined,
         status: parseStatus(query.status),
@@ -124,6 +132,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/providers', withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const body = readJsonBody<Record<string, unknown>>(request);
       body.createdBy = auth.tokenRecord.userId;
       validateCreatePayload(body);
@@ -164,6 +173,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const provider = await getProviderConfigById(auth.tenantDbName, id);
       const ok = provider
         && provider.tenantId === auth.tenantId
@@ -180,7 +190,10 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const payload = sanitizeUpdatePayload(readJsonBody<Record<string, unknown>>(request));
+      // Re-assigning a provider to other projects is for owner/admin callers.
+      if (!canUseTenantProviderScope(auth)) delete payload.projectIds;
       payload.updatedBy = String(auth.tokenRecord.userId);
       payload.allowHostPaths = isOwnerOrAdmin(auth.user?.role);
       const existing = await getProviderConfigById(auth.tenantDbName, id);
@@ -210,6 +223,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const existing = await getProviderConfigById(auth.tenantDbName, id);
       const ok = existing
         && existing.tenantId === auth.tenantId

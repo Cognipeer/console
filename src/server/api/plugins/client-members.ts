@@ -28,8 +28,13 @@ import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { invalidateUserAuthState } from '@/lib/services/users/userAuthState';
+import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
+import { checkPermissionsEdit, targetOf } from '@/lib/services/users/peoplePolicy';
+import { loadTenantProjects } from '@/lib/services/users/projectGrants';
 import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
 import { isDirectoryManaged, isGroupDirectoryManaged } from '@/lib/iam/identity';
+import { canGrantAdminRole, clampRequestedPermissions, isUnscopedToken } from '../clientGrantPolicy';
 import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-members');
@@ -110,15 +115,44 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
       const body = readJsonBody<{ servicePermissions?: unknown }>(request);
-      const servicePermissions = normalizeServicePermissions(body.servicePermissions);
       const db = await getDatabase();
       const target = await db.findUserById(id);
       if (!target || String(target.tenantId) !== String(auth.tenantId)) {
         return reply.code(404).send({ error: 'User not found' });
       }
       if (target.role === 'owner') return reply.code(403).send({ error: 'Owner permissions cannot be changed' });
+      const actorId = String(auth.user?._id ?? auth.tokenRecord.userId);
+      if (String(target._id) === actorId) {
+        return reply.code(403).send({ error: 'Own permissions cannot be changed here' });
+      }
+      const verdict = checkPermissionsEdit({ id: actorId, role: String(auth.user?.role ?? '') }, targetOf(target));
+      if (!verdict.ok) return reply.code(verdict.status).send({ error: verdict.message, code: verdict.code });
+      // Peers at admin level are changed by the owner only.
+      if (target.role === 'admin' && auth.user?.role !== 'owner') {
+        return reply.code(403).send({ error: 'Only the owner can change the permissions of an admin' });
+      }
+      // Capped at what the calling credential itself holds.
+      const servicePermissions = clampRequestedPermissions(auth, body.servicePermissions);
       const updated = await db.updateUser(id, { servicePermissions });
       if (!updated) return reply.code(500).send({ error: 'Failed to update permissions' });
+      await invalidateUserAuthState(auth.tenantDbName, id);
+      recordPeopleAudit(
+        { tenantDbName: auth.tenantDbName, tenantId: auth.tenantId },
+        {
+          type: 'api_token',
+          userId: actorId,
+          role: auth.user?.role,
+          apiTokenId: String(auth.tokenRecord._id),
+          method: request.method.toUpperCase(),
+          path: (request.raw.url ?? '').split('?')[0],
+        },
+        {
+          event: 'user.permissions.update',
+          resourceType: 'user',
+          resourceId: id,
+          metadata: { services: Object.keys(servicePermissions).sort() },
+        },
+      );
       return reply.code(200).send({ user: serializeUser(updated) });
     } catch (error) {
       logger.error('Client update member permissions error', { error });
@@ -219,9 +253,19 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!['user', 'admin', 'project_admin'].includes(body.role)) {
         return reply.code(400).send({ error: 'Invalid role. Must be user, project_admin, or admin' });
       }
+      if (body.role === 'admin' && !canGrantAdminRole(auth)) {
+        return reply.code(403).send({
+          error: 'A scoped API token cannot create an admin user; use an unscoped owner/admin token',
+        });
+      }
       const db = await getDatabase();
       const tenant = await db.findTenantById(auth.tenantId);
       if (!tenant) return reply.code(404).send({ error: 'Tenant not found' });
+      if (body.projectId !== undefined) {
+        if (typeof body.projectId !== 'string' || !(await loadTenantProjects(db, auth.tenantId)).has(body.projectId)) {
+          return reply.code(400).send({ error: `Unknown project: ${String(body.projectId)}` });
+        }
+      }
       const existing = await db.findUserByEmail(body.email);
       if (existing) return reply.code(409).send({ error: 'User with this email already exists in your organization' });
 
@@ -260,7 +304,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         password: hashedPassword,
         projectIds: initialProjectIds,
         role: body.role as 'user' | 'admin' | 'project_admin',
-        servicePermissions: normalizeServicePermissions(body.servicePermissions),
+        servicePermissions: clampRequestedPermissions(auth, body.servicePermissions),
         tenantId: auth.tenantId,
       });
 
@@ -294,9 +338,10 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         logger.warn('Invitation email was not delivered', { userId: String(user._id) });
       }
 
+      // The sign-in link goes to the invited person; only an unscoped credential also receives it.
       return reply.code(201).send({
         invitationEmailSent,
-        invitationUrl,
+        ...(isUnscopedToken(auth) ? { invitationUrl } : {}),
         user: serializeUser(user),
       });
     } catch (error) {
@@ -334,12 +379,15 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const roleParsed = parseTenantRole(body.tenantRole);
       if (!roleParsed.ok) return reply.code(400).send({ error: 'Invalid tenantRole' });
+      if (roleParsed.role === 'admin' && !canGrantAdminRole(auth)) {
+        return reply.code(403).send({ error: 'A scoped API token cannot grant the admin role' });
+      }
       const db = await getDatabase();
       const group = await db.createGroup({
         createdBy: String(auth.tokenRecord.userId),
         description: typeof body.description === 'string' ? body.description : undefined,
         name: body.name.trim(),
-        servicePermissions: normalizeServicePermissions(body.servicePermissions),
+        servicePermissions: clampRequestedPermissions(auth, body.servicePermissions),
         tenantId: auth.tenantId,
         tenantRole: roleParsed.role,
       });
@@ -387,9 +435,12 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.tenantRole !== undefined) {
         const roleParsed = parseTenantRole(body.tenantRole);
         if (!roleParsed.ok) return reply.code(400).send({ error: 'Invalid tenantRole' });
+        if (roleParsed.role === 'admin' && !canGrantAdminRole(auth)) {
+          return reply.code(403).send({ error: 'A scoped API token cannot grant the admin role' });
+        }
         patch.tenantRole = roleParsed.role;
       }
-      if (body.servicePermissions !== undefined) patch.servicePermissions = normalizeServicePermissions(body.servicePermissions);
+      if (body.servicePermissions !== undefined) patch.servicePermissions = clampRequestedPermissions(auth, body.servicePermissions);
       const updated = await db.updateGroup(id, patch);
       if (!updated) return reply.code(500).send({ error: 'Failed to update group' });
       return reply.code(200).send({ group: serializeGroup(updated) });
@@ -423,6 +474,9 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const { db, group } = await loadGroup(auth, id);
       if (!group) return reply.code(404).send({ error: 'Group not found' });
       if (isGroupDirectoryManaged(group)) return reply.code(409).send({ error: 'Directory group membership is managed by sync' });
+      if (group.tenantRole === 'admin' && !canGrantAdminRole(auth)) {
+        return reply.code(403).send({ error: 'A scoped API token cannot add people to an admin group' });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
       if (typeof body.userId !== 'string') return reply.code(400).send({ error: 'userId is required' });
       const role: 'admin' | 'member' = body.role === 'admin' ? 'admin' : 'member';
@@ -466,7 +520,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         groupId: id,
         projectId: body.projectId,
         role: body.role === 'project_admin' ? 'project_admin' : 'member',
-        servicePermissions: normalizeServicePermissions(body.servicePermissions),
+        servicePermissions: clampRequestedPermissions(auth, body.servicePermissions),
         tenantId: auth.tenantId,
       });
       void roleParsed;
