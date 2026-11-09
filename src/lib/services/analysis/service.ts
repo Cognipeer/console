@@ -19,6 +19,7 @@
  * testable without live model calls.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
@@ -63,7 +64,7 @@ const MAX_KEY_ATTEMPTS = 50;
  * via ANALYSIS_MAX_RUN_CONVERSATIONS (default 5000) — a high-but-bounded cap so
  * one run can't accidentally fan out an unbounded number of model calls.
  */
-const MAX_RUN_CONVERSATIONS = Math.max(1, Number(process.env.ANALYSIS_MAX_RUN_CONVERSATIONS ?? 5000) || 5000);
+const MAX_RUN_CONVERSATIONS = getConfig().queues.analysisMaxRunConversations;
 /** Parallel write-back updates. Bounded so a 5k-item run can't storm the DB. */
 const WRITE_BACK_CONCURRENCY = 20;
 

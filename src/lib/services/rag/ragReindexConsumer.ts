@@ -7,6 +7,7 @@
  * the runs routed to this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import {
@@ -24,7 +25,7 @@ let started = false;
  * one: a single run already streams the whole corpus through the embedding
  * provider, so parallel runs mostly buy rate-limit errors.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.RAG_REINDEX_CONCURRENCY ?? 1) || 1);
+const CONCURRENCY = getConfig().queues.ragReindexConcurrency;
 
 export async function startRagReindexQueueConsumer(): Promise<void> {
   if (started) return;

@@ -13,6 +13,7 @@
  * directly, so this consumer isn't involved.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -34,7 +35,7 @@ interface RunPayload {
  * to as many as 16 concurrent fetches and may drive a Chromium instance, so the
  * real footprint is this number multiplied by that fan-out.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.CRAWLER_RUN_CONCURRENCY ?? 2) || 2);
+const CONCURRENCY = getConfig().queues.crawlerRunConcurrency;
 
 export async function startCrawlerQueueConsumer(): Promise<void> {
   if (started) return;

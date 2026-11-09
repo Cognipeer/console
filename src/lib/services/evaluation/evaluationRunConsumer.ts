@@ -7,6 +7,7 @@
  * this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { EVALUATION_RUN_JOB, EVALUATION_RUN_QUEUE, runSuiteJob, type EvaluationRunJobPayload } from './evaluationRunJob';
@@ -15,7 +16,7 @@ const log = createLogger('evaluation:consumer');
 let started = false;
 
 /** How many evaluation runs may execute concurrently on this node. */
-const CONCURRENCY = Math.max(1, Number(process.env.EVALUATION_RUN_CONCURRENCY ?? 2) || 2);
+const CONCURRENCY = getConfig().queues.evaluationRunConcurrency;
 
 export async function startEvaluationRunQueueConsumer(): Promise<void> {
   if (started) return;

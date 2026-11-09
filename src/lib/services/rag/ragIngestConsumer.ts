@@ -7,6 +7,7 @@
  * routed to this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import {
@@ -26,7 +27,7 @@ let started = false;
  * rather than whole corpora, but still modest: each one streams its chunks
  * through the embedding provider, and going wide mostly buys rate-limit errors.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.RAG_INGEST_CONCURRENCY ?? 2) || 2);
+const CONCURRENCY = getConfig().queues.ragIngestConcurrency;
 
 export async function startRagIngestQueueConsumer(): Promise<void> {
   if (started) return;

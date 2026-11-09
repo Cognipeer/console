@@ -3,6 +3,7 @@
  * the assignment.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -30,7 +31,7 @@ type InvokePayload = McpInvokeJob | LegacyInvokeJob;
  * Concurrent MCP tool invocations per node. Stdio servers stay bounded by
  * MCP_STDIO_MAX_CONCURRENT underneath this.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.MCP_INVOKE_CONCURRENCY ?? 4) || 4);
+const CONCURRENCY = getConfig().queues.mcpInvokeConcurrency;
 
 function resolveJobTarget(payload: InvokePayload): { tenantId: string; serverId: string } {
   const legacy = (payload as Partial<LegacyInvokeJob>).server;

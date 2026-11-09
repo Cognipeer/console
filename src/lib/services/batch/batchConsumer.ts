@@ -6,6 +6,7 @@
  * this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -21,7 +22,7 @@ interface ItemPayload {
 }
 
 /** Per-item processing concurrency (BullMQ worker / memory drain). */
-const CONCURRENCY = Math.max(1, Number(process.env.BATCH_ITEM_CONCURRENCY ?? 4) || 4);
+const CONCURRENCY = getConfig().queues.batchItemConcurrency;
 
 export async function startBatchQueueConsumer(): Promise<void> {
   if (started) return;

@@ -7,6 +7,7 @@
  * affect future sessions only.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -32,7 +33,7 @@ interface RunActionPayload {
  * Concurrent browser actions per node. Individual actions are short (bounded by
  * BROWSER_DEFAULT_ACTION_TIMEOUT_MS); the per-tenant session cap still applies.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.BROWSER_ACTION_CONCURRENCY ?? 4) || 4);
+const CONCURRENCY = getConfig().queues.browserActionConcurrency;
 
 export async function startBrowserQueueConsumer(): Promise<void> {
   if (started) return;

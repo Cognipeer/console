@@ -7,6 +7,7 @@
  * routed to this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { ANALYSIS_RUN_JOB, ANALYSIS_RUN_QUEUE, runDefinitionJob, type AnalysisRunJobPayload } from './analysisRunJob';
@@ -15,7 +16,7 @@ const log = createLogger('analysis:consumer');
 let started = false;
 
 /** How many analysis runs may execute concurrently on this node. */
-const CONCURRENCY = Math.max(1, Number(process.env.ANALYSIS_RUN_CONCURRENCY ?? 2) || 2);
+const CONCURRENCY = getConfig().queues.analysisRunConcurrency;
 
 export async function startAnalysisRunQueueConsumer(): Promise<void> {
   if (started) return;
