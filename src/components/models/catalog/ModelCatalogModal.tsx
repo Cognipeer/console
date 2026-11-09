@@ -32,6 +32,7 @@ import { SkeletonRegion, SkeletonText } from '@/components/common/ui/Skeletons';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useConfirm } from '@/components/common/confirm/ConfirmProvider';
 import { formatRelative } from '@/components/iam/timeFormat';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { IModel, ModelCategory } from '@/lib/database';
 import type { ModelProviderView } from '@/lib/services/models/types';
@@ -46,6 +47,12 @@ import {
   type CreateModelPrefill,
 } from './catalogPrefill';
 import { noteCatalogModelsCreated, useProviderModelCatalog } from './useProviderModelCatalog';
+import {
+  isPlatformCatalog,
+  mergeProjectIds,
+  type PlatformCatalogData,
+  type PlatformProviderView,
+} from './platformProviders';
 
 /** Rows drawn at once. A provider can list a couple of thousand models; the search narrows them. */
 const MAX_ROWS = 300;
@@ -69,6 +76,13 @@ export interface ModelCatalogModalProps {
   opened: boolean;
   onClose: () => void;
   providers: ModelProviderView[];
+  /**
+   * Every platform provider of the workspace, with whether it is assigned to this project. The ones that are not
+   * assigned are listed apart ("Not in this project"); their models can be seen, not added.
+   */
+  platformProviders?: PlatformProviderView[];
+  /** A platform provider was made available in this project: the page reloads its models and providers. */
+  onProviderAssigned?: () => void;
   /** Preselects this provider when the project can use it; otherwise the first active one is shown. */
   defaultProviderKey?: string;
   /** Opens on this category when the provider lists models of it; otherwise on "All". */
@@ -118,6 +132,8 @@ export default function ModelCatalogModal({
   opened,
   onClose,
   providers,
+  platformProviders,
+  onProviderAssigned,
   defaultProviderKey,
   defaultCategory,
   onSelectModel,
@@ -128,6 +144,9 @@ export default function ModelCatalogModal({
   const t = useTranslations('modelCatalog');
   const locale = useLocale();
   const { confirm } = useConfirm();
+  const role = useDashboardUser()?.role;
+  const canManage = role === 'owner' || role === 'admin';
+  const [assigning, setAssigning] = useState(false);
   const [providerKey, setProviderKey] = useState<string | undefined>(undefined);
   const [query, setQuery] = useState('');
   // null = not picked by hand: the default category applies while the provider lists models of it.
@@ -138,6 +157,15 @@ export default function ModelCatalogModal({
   const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null);
   const cancelBulkRef = useRef(false);
   const wasOpenedRef = useRef(false);
+
+  // Platform providers the project cannot use yet: offered apart, read-only.
+  const notAssignedPlatform = useMemo(
+    () =>
+      (platformProviders ?? []).filter(
+        (candidate) => !candidate.assigned && !providers.some((assigned) => assigned.key === candidate.key),
+      ),
+    [platformProviders, providers],
+  );
 
   // Every opening starts on the preselected provider with nothing filtered or picked. The provider is unset while
   // closed, so the opening render does not list a provider that is about to be replaced.
@@ -158,15 +186,21 @@ export default function ModelCatalogModal({
     }
     // The provider list changed while open (it loaded late, or a provider was added): keep the pick while usable.
     setProviderKey((current) =>
-      current && providers.some((provider) => provider.key === current && provider.status !== 'disabled')
+      current
+        && (providers.some((provider) => provider.key === current && provider.status !== 'disabled')
+          || notAssignedPlatform.some((provider) => provider.key === current))
         ? current
         : pickProvider(providers, defaultProviderKey),
     );
-  }, [opened, providers, defaultProviderKey]);
+  }, [opened, providers, notAssignedPlatform, defaultProviderKey]);
 
-  const provider = providers.find((candidate) => candidate.key === providerKey);
+  const provider = providers.find((candidate) => candidate.key === providerKey)
+    ?? notAssignedPlatform.find((candidate) => candidate.key === providerKey);
+  const isPlatform = provider?.platform === true;
   const catalog = useProviderModelCatalog(providerKey, { enabled: opened });
-  const data = catalog.data;
+  // A platform provider answers its own shape (no discovery): kept apart so the listing code below never sees it.
+  const platformData: PlatformCatalogData | undefined = isPlatformCatalog(catalog.data) ? catalog.data : undefined;
+  const data = platformData ? undefined : (catalog.data as ProviderModelCatalog | undefined);
   const models = useMemo(() => data?.models ?? [], [data]);
 
   const searchMatches = useMemo(
@@ -301,8 +335,65 @@ export default function ModelCatalogModal({
     }
   };
 
+  /** "Use in this project": adds the active project to the provider's projects, then lists and reloads. */
+  const assignToProject = async () => {
+    if (!provider || assigning) return;
+    const target = provider;
+    setAssigning(true);
+    try {
+      const projectsResponse = await fetch('/api/projects', { cache: 'no-store' });
+      const projectsBody = projectsResponse.ok
+        ? await projectsResponse.json().catch(() => null) as { activeProjectId?: string } | null
+        : null;
+      const activeProjectId = projectsBody?.activeProjectId;
+      if (!activeProjectId) throw new Error(t('platform.assignFailed'));
+
+      // The provider's projects are read again so a change made meanwhile is not overwritten; the list the page
+      // holds is the fallback when that read fails.
+      let current: { projectId?: unknown; projectIds?: unknown } = target;
+      try {
+        const listResponse = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
+        if (listResponse.ok) {
+          const listBody = await listResponse.json().catch(() => null) as
+            { providers?: Array<{ _id?: unknown; key?: string; projectId?: unknown; projectIds?: unknown }> } | null;
+          const fresh = listBody?.providers?.find((entry) => String(entry._id) === String(target._id));
+          if (fresh) current = fresh;
+        }
+      } catch {
+        // keep the list at hand
+      }
+
+      const response = await fetch(`/api/providers/${encodeURIComponent(String(target._id))}?scope=tenant`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectIds: mergeProjectIds(current, activeProjectId) }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: unknown } | null;
+        throw new Error(typeof body?.error === 'string' && body.error ? body.error : t('platform.assignFailed'));
+      }
+      notifications.show({
+        color: 'green',
+        title: t('platform.assignedTitle'),
+        message: t('platform.assignedMessage', { provider: target.label || target.key }),
+      });
+      catalog.refresh();
+      onProviderAssigned?.();
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: t('platform.assignFailed'),
+        message: error instanceof Error ? error.message : t('platform.assignFailed'),
+      });
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   const count = selectedModels.length;
-  const primaryAction: FormShellAction = bulk
+  const primaryAction: FormShellAction = isPlatform
+    ? { label: t('platform.done'), onClick: close }
+    : bulk
     ? {
         label: t('actions.adding', { done: bulk.done, total: bulk.total }),
         icon: <Loader size={12} color="gray" />,
@@ -328,7 +419,9 @@ export default function ModelCatalogModal({
             onClick: () => void addSelected(),
           };
 
-  const sourceLabel = data
+  const sourceLabel = platformData
+    ? '—'
+    : data
     ? t(data.error && data.models.length === 0 ? 'summary.sourceFailed' : `summary.${sourceSummaryKey(data.source)}`)
     : '—';
 
@@ -348,7 +441,11 @@ export default function ModelCatalogModal({
       <SummaryGroup title={t('summary.listing')}>
         <SummaryKV label={t('summary.source')} value={sourceLabel} />
         <SummaryKV label={t('summary.listed')} value={data ? formatRelative(data.fetchedAt, locale) : '—'} />
-        <SummaryKV label={t('summary.models')} value={data ? models.length.toLocaleString(locale) : '—'} mono />
+        <SummaryKV
+          label={t('summary.models')}
+          value={platformData ? platformData.models.length.toLocaleString(locale) : data ? models.length.toLocaleString(locale) : '—'}
+          mono
+        />
         <SummaryKV label={t('summary.added')} value={data ? registeredCount.toLocaleString(locale) : '—'} mono />
         <SummaryKV
           label={t('summary.took')}
@@ -388,15 +485,109 @@ export default function ModelCatalogModal({
     </>
   );
 
+  const providerOptions = useMemo(() => {
+    const assignedOptions = providers.map((candidate) => ({
+      value: candidate.key,
+      label: candidate.label || candidate.key,
+      disabled: candidate.status === 'disabled',
+    }));
+    if (notAssignedPlatform.length === 0) return assignedOptions;
+    const apart = notAssignedPlatform.map((candidate) => ({
+      value: candidate.key,
+      label: candidate.label || candidate.key,
+      disabled: candidate.status === 'disabled',
+    }));
+    return [
+      ...(assignedOptions.length ? [{ group: t('platform.groupAssigned'), items: assignedOptions }] : []),
+      { group: t('platform.group'), items: apart },
+    ];
+  }, [providers, notAssignedPlatform, t]);
+
   const enterManually = (
     <Button size="sm" color="teal" leftSection={<IconPencil size={14} />} onClick={() => onCustom(providerKey)}>
       {t('states.enterManually')}
     </Button>
   );
 
+  // A platform provider's models: read-only (the records exist already; tenants never create them), with the way to
+  // make the provider available in this project.
+  function renderPlatformBody(): ReactNode {
+    if (catalog.loading) return <RowsSkeleton label={t('models.loading')} />;
+    if (!platformData) {
+      return (
+        <CatalogState
+          tone="error"
+          icon={<IconAlertCircle size={24} />}
+          title={t('states.requestFailedTitle')}
+          text={catalog.error}
+        >
+          <Button size="sm" variant="default" leftSection={<IconRefresh size={14} />} onClick={catalog.refresh}>
+            {t('states.retry')}
+          </Button>
+        </CatalogState>
+      );
+    }
+    return (
+      <>
+        {platformData.assigned ? (
+          <Alert color="teal" variant="light" icon={<IconInfoCircle size={16} />}>
+            {t('platform.assignedInfo')}
+          </Alert>
+        ) : canManage ? (
+          <Alert color="blue" variant="light" icon={<IconInfoCircle size={16} />}>
+            <div className="ds-col" style={{ gap: 10, alignItems: 'flex-start' }}>
+              <span>{t('platform.notAssignedAdmin')}</span>
+              <Button size="sm" color="teal" loading={assigning} disabled={assigning} onClick={() => void assignToProject()}>
+                {t('platform.useInProject')}
+              </Button>
+            </div>
+          </Alert>
+        ) : (
+          <Alert color="gray" variant="light" icon={<IconInfoCircle size={16} />}>
+            {t('platform.askAdmin')}
+          </Alert>
+        )}
+        {platformData.models.length === 0 ? (
+          <span className="ds-muted" style={{ fontSize: 13 }}>{t('platform.noModels')}</span>
+        ) : (
+          <div className="ds-card" style={{ overflow: 'hidden' }}>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {platformData.models.map((model, index) => (
+                <li
+                  key={model.key}
+                  data-platform-model={model.key}
+                  style={{ padding: '9px 14px', borderTop: index === 0 ? undefined : '1px solid var(--ds-border-soft)' }}
+                >
+                  <div className="ds-row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 500, overflowWrap: 'anywhere' }}>{model.name}</span>
+                    <Badge size="sm" variant="light" color={CATEGORY_COLORS[model.category] ?? 'gray'}>
+                      {t(`categories.${model.category}`)}
+                    </Badge>
+                    {model.unavailable ? (
+                      <span className="ds-badge ds-badge-warn" title={t('platform.unavailableHint')}>
+                        {t('platform.unavailable')}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="ds-faint ds-mono" style={{ fontSize: 11.5, overflowWrap: 'anywhere' }}>{model.key}</div>
+                  {model.description ? (
+                    <Text size="xs" c="dimmed" lineClamp={1} title={model.description}>
+                      {model.description}
+                    </Text>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </>
+    );
+  }
+
   // The models section's content for the listing's state. A plain function called during render (not a component
   // declared here, which would be a new type on every render and remount the search box on each keystroke).
   function renderModelsBody(): ReactNode {
+    if (isPlatform) return renderPlatformBody();
     if (catalog.loading) return <RowsSkeleton label={t('models.loading')} />;
     if (catalog.error && !data) {
       return (
@@ -570,12 +761,16 @@ export default function ModelCatalogModal({
       subtitle={t('subtitle')}
       summary={summary}
       footerStatus={count > 0 ? t('actions.selectedStatus', { count }) : undefined}
-      secondaryAction={{
-        label: t('actions.custom'),
-        icon: <IconPencil size={13} />,
-        disabled: Boolean(bulk),
-        onClick: () => onCustom(providerKey),
-      }}
+      secondaryAction={
+        isPlatform
+          ? undefined
+          : {
+              label: t('actions.custom'),
+              icon: <IconPencil size={13} />,
+              disabled: Boolean(bulk),
+              onClick: () => onCustom(providerKey),
+            }
+      }
       primaryAction={primaryAction}
     >
       <FormSection
@@ -584,7 +779,7 @@ export default function ModelCatalogModal({
         title={t('provider.sectionTitle')}
         description={t('provider.sectionDescription')}
       >
-        {providers.length === 0 ? (
+        {providers.length === 0 && notAssignedPlatform.length === 0 ? (
           <CatalogState icon={<IconPlug size={24} />} title={t('provider.empty.title')} text={t('provider.empty.description')}>
             {onAddProvider ? (
               <Button size="sm" color="teal" leftSection={<IconPlus size={14} />} onClick={onAddProvider}>
@@ -599,11 +794,7 @@ export default function ModelCatalogModal({
                 <Select
                   aria-label={t('provider.label')}
                   placeholder={t('provider.placeholder')}
-                  data={providers.map((candidate) => ({
-                    value: candidate.key,
-                    label: candidate.label || candidate.key,
-                    disabled: candidate.status === 'disabled',
-                  }))}
+                  data={providerOptions}
                   value={providerKey ?? null}
                   onChange={(value) => {
                     if (value) changeProvider(value);
@@ -612,7 +803,8 @@ export default function ModelCatalogModal({
                   searchable
                   disabled={Boolean(bulk)}
                   renderOption={({ option }) => {
-                    const candidate = providers.find((entry) => entry.key === option.value);
+                    const candidate = providers.find((entry) => entry.key === option.value)
+                      ?? notAssignedPlatform.find((entry) => entry.key === option.value);
                     return (
                       <div className="ds-row-between" style={{ width: '100%', flexWrap: 'nowrap' }}>
                         <span>{option.label}</span>
@@ -626,7 +818,9 @@ export default function ModelCatalogModal({
                 />
               </FormField>
             </FormRow>
-            {provider ? (
+            {provider && isPlatform ? (
+              <span className="ds-muted" style={{ fontSize: 12.5 }}>{t('platform.readOnlyNote')}</span>
+            ) : provider ? (
               <SourceLine
                 data={data}
                 loading={catalog.loading}

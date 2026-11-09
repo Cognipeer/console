@@ -52,6 +52,7 @@ import { useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelCatalogModal from '@/components/models/catalog/ModelCatalogModal';
+import type { PlatformProviderView } from '@/components/models/catalog/platformProviders';
 import type { CreateModelPrefill } from '@/components/models/catalog/catalogPrefill';
 import { invalidateProviderModelCatalog, noteCatalogModelsCreated } from '@/components/models/catalog/useProviderModelCatalog';
 import EditModelModal from '@/components/models/EditModelModal';
@@ -166,6 +167,8 @@ interface ModelDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** Set on a platform model an operator switched off: listed, but it cannot be called. */
+  unavailable?: boolean;
   /** What the model resolves to (an explicit choice, else detected from its id). */
   capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
@@ -199,6 +202,7 @@ export default function ModelsPage() {
   const [models, setModels] = useState<ModelDto[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [providers, setProviders] = useState<ModelProviderView[]>([]);
+  const [platformProviders, setPlatformProviders] = useState<PlatformProviderView[]>([]);
   const [loading, setLoading] = useState(true);
   const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
@@ -223,6 +227,7 @@ export default function ModelsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const t = useTranslations('models');
+  const tCatalog = useTranslations('modelCatalog');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
   const tNav = useTranslations('navigation');
@@ -260,7 +265,7 @@ export default function ModelsPage() {
     const requestId = ++modelsRequestRef.current;
     setLoading(true);
     try {
-      const response = await fetch('/api/models?includeProviders=true', {
+      const response = await fetch('/api/models?includeProviders=true&includePlatform=true&includeUnavailable=true', {
         cache: 'no-store',
       });
       if (!response.ok) throw new Error('Failed to load models');
@@ -268,6 +273,7 @@ export default function ModelsPage() {
       if (requestId !== modelsRequestRef.current) return;
       setModels((data.models ?? []) as ModelDto[]);
       setProviders((data.providers ?? []) as ModelProviderView[]);
+      setPlatformProviders((data.platformProviders ?? []) as PlatformProviderView[]);
     } catch (error) {
       if (requestId !== modelsRequestRef.current) return;
       console.error('Failed to load models', error);
@@ -690,7 +696,10 @@ export default function ModelsPage() {
             },
           }}
           footerLeft={`Showing ${modelsCtl.records.length} of ${filtered.length} models`}
-          columns={modelColumns(t, providerLookup, usageByKey, dashboardData)}
+          columns={modelColumns(t, providerLookup, usageByKey, dashboardData, {
+            unavailable: tCatalog('platform.unavailable'),
+            unavailableHint: tCatalog('platform.unavailableHint'),
+          })}
           rowActions={(m) => [
             {
               id: 'view',
@@ -986,6 +995,10 @@ export default function ModelsPage() {
         opened={catalogOpen}
         onClose={() => setCatalogOpen(false)}
         providers={providers}
+        platformProviders={platformProviders}
+        onProviderAssigned={() => {
+          void loadModels();
+        }}
         defaultProviderKey={catalogProviderKey}
         defaultCategory={activeType === 'all' ? undefined : activeType}
         onSelectModel={(prefill) => {
@@ -1116,6 +1129,7 @@ function modelColumns(
   providerLookup: Map<string, ModelProviderView>,
   usageByKey: Map<string, ModelTopEntry>,
   dashboardData: ModelsDashboardData | null,
+  labels: { unavailable: string; unavailableHint: string },
 ): DataGridColumn<ModelDto>[] {
   return [
     {
@@ -1137,6 +1151,11 @@ function modelColumns(
           <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
             {m.key}
           </span>
+          {m.unavailable ? (
+            <span className="ds-badge ds-badge-warn" title={labels.unavailableHint} style={{ alignSelf: 'flex-start' }}>
+              {labels.unavailable}
+            </span>
+          ) : null}
         </div>
       ),
     },

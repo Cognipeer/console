@@ -59,6 +59,7 @@ import ImagePlayground from '@/components/playground/ImagePlayground';
 import EmbeddingPlayground from '@/components/playground/EmbeddingPlayground';
 import DecisionPlayground from '@/components/playground/DecisionPlayground';
 import ReplicaPoolPanel from '@/components/models/ReplicaPoolPanel';
+import { withoutPlatformProviders } from '@/components/models/catalog/platformProviders';
 import RoutingAnalyticsPanel from '@/components/models/RoutingAnalyticsPanel';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
@@ -260,6 +261,7 @@ interface ModelProviderDto {
   key: string;
   label: string;
   driver: string;
+  platform?: boolean;
 }
 
 interface UsageBreakdownEntryDto {
@@ -1110,7 +1112,7 @@ export default function ModelDetailPage() {
           modelKey={model.key}
           ownProviderKey={model.providerKey ?? ''}
           ownModelId={model.modelId}
-          providers={providers.map((provider) => ({ key: provider.key, label: provider.label }))}
+          providers={withoutPlatformProviders(providers).map((provider) => ({ key: provider.key, label: provider.label }))}
           initialReplicas={model.replicas}
         />
       ) : null}
