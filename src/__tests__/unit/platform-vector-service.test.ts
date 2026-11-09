@@ -58,7 +58,7 @@ vi.mock('@/lib/services/providers/providerService', async (importOriginal) => {
 import { registerManagedCreditsHost, resetManagedCreditsHostForTests } from '@/enterprise/managed-credits';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { providerRegistry } from '@/lib/providers';
-import { tenantStorageToken } from '@/lib/services/storage/managedStorage';
+import { getManagedStorageRuntime, loadStorageProvider, tenantStorageToken } from '@/lib/services/storage/managedStorage';
 import {
   VectorAttachNotAvailableError,
   createVectorIndex,
@@ -364,6 +364,120 @@ describe('metering what a platform provider stores', () => {
     await deleteVectorIndex(a.dbName, a.id, PROJECT, OWN_KEY, 'unmetered');
     expect(h.storage.assertStorageStock).not.toHaveBeenCalled();
     expect(h.storage.noteStoredBytes).not.toHaveBeenCalled();
+  });
+});
+
+/** The pooled runtime the service uses for the tenant (the same object: the pool keys on tenant, provider and route). */
+async function pooledRuntime(t: TestTenant): Promise<any> {
+  const loaded = await loadStorageProvider('vector', { tenantDbName: t.dbName, tenantId: t.id, providerKey: PLATFORM_KEY, projectId: PROJECT });
+  return getManagedStorageRuntime<any>('vector', loaded as any, { tenantId: t.id, projectId: PROJECT });
+}
+
+describe('metering deletes and re-upserts against what exists', () => {
+  const pad = { pad: 'aaaa' };
+
+  it('does not take anything off for made-up ids, nor for a repeated id more than once', async () => {
+    await create(a, 'del-exist');
+    const items = [vec('d1', [1, 0, 0], pad), vec('d2', [0, 1, 0], pad), vec('d3', [0, 0, 1], pad), vec('d4', [1, 1, 0], pad)];
+    const estimate = estimateUpsertBytes(3, items);
+    await upsert(a, 'del-exist', items);
+    h.storage.noteStoredBytes.mockClear();
+
+    const del = (ids: string[]) => deleteVectors(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'del-exist', ids });
+    await del(['ghost-1', 'ghost-2', 'ghost-3', 'ghost-4']);
+    expect(await stored(a, 'del-exist')).toMatchObject({ storedVectors: 4, storedBytes: estimate });
+    expect(h.storage.noteStoredBytes).not.toHaveBeenCalled();
+
+    await del(['d1', 'd1', 'd1', 'ghost-1']);
+    const average = Math.round(estimate / 4);
+    expect(await stored(a, 'del-exist')).toMatchObject({ storedVectors: 3, storedBytes: estimate - average });
+    expect(h.storage.noteStoredBytes).toHaveBeenCalledWith(a.id, -average);
+    // The vector is gone from the store, the rest is still there.
+    const left = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'del-exist', query: { vector: [1, 0, 0], topK: 10 } });
+    expect(left.matches.map((match) => match.id).sort()).toEqual(['d2', 'd3', 'd4']);
+  });
+
+  it('does not take anything off when the provider cannot say which ids exist, but still deletes', async () => {
+    await create(a, 'del-blind');
+    const items = [vec('b1'), vec('b2', [0, 1, 0])];
+    const estimate = estimateUpsertBytes(3, items);
+    await upsert(a, 'del-blind', items);
+    const runtime = await pooledRuntime(a);
+    const lookup = runtime.existingVectorIds;
+    runtime.existingVectorIds = undefined;
+    try {
+      await deleteVectors(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'del-blind', ids: ['b1'] });
+    } finally {
+      runtime.existingVectorIds = lookup;
+    }
+    expect(await stored(a, 'del-blind')).toMatchObject({ storedVectors: 2, storedBytes: estimate });
+    const left = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'del-blind', query: { vector: [1, 0, 0], topK: 10 } });
+    expect(left.matches.map((match) => match.id)).toEqual(['b2']);
+  });
+
+  it('counts a re-upserted id by the size difference only and adds no vector', async () => {
+    await create(a, 're-up');
+    const first = [vec('u1', [1, 0, 0], pad), vec('u2', [0, 1, 0], pad)];
+    const estimate = estimateUpsertBytes(3, first);
+    await upsert(a, 're-up', first);
+    const average = Math.round(estimate / 2);
+    h.storage.noteStoredBytes.mockClear();
+
+    const bigger = vec('u1', [1, 0, 0], { pad: 'a'.repeat(100) });
+    await upsert(a, 're-up', [bigger]);
+    const grown = estimateUpsertBytes(3, [bigger]) - average;
+    expect(await stored(a, 're-up')).toMatchObject({ storedVectors: 2, storedBytes: estimate + grown });
+    expect(h.storage.noteStoredBytes).toHaveBeenCalledWith(a.id, grown);
+    // The plan is asked for the full estimate, as for a new id.
+    expect(h.storage.assertStorageStock).toHaveBeenLastCalledWith(expect.objectContaining({ incomingBytes: estimateUpsertBytes(3, [bigger]) }));
+
+    // A smaller replacement shrinks the meter, which never goes below 0.
+    for (let i = 0; i < 4; i += 1) await upsert(a, 're-up', [vec('u2', [0, 1, 0])]);
+    const record = await stored(a, 're-up');
+    expect(record?.storedVectors).toBe(2);
+    expect(record?.storedBytes ?? -1).toBeGreaterThanOrEqual(0);
+  });
+
+  it('mixes new and replaced ids, and takes the last item of an id repeated in one request', async () => {
+    await create(a, 're-mix');
+    await upsert(a, 're-mix', [vec('x1', [1, 0, 0], pad)]);
+    const before = await stored(a, 're-mix');
+    const average = before!.storedBytes!;
+
+    const items = [vec('x1', [1, 0, 0], pad), vec('x2', [0, 1, 0], pad), vec('x2', [0, 0, 1], { pad: 'bbbbbbbb' })];
+    await upsert(a, 're-mix', items);
+    const kept = [vec('x1', [1, 0, 0], pad), vec('x2', [0, 0, 1], { pad: 'bbbbbbbb' })];
+    const expected = average + (estimateUpsertBytes(3, [kept[0]]) - average) + estimateUpsertBytes(3, [kept[1]]);
+    expect(await stored(a, 're-mix')).toMatchObject({ storedVectors: 2, storedBytes: expected });
+    const result = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 're-mix', query: { vector: [0, 0, 1], topK: 5 } });
+    expect(result.matches[0].id).toBe('x2');
+    expect(result.matches).toHaveLength(2);
+  });
+});
+
+describe('what a query on a platform provider returns besides matches', () => {
+  it('keeps only the allowlisted notes of usage, and leaves the tenant\'s own provider as it is', async () => {
+    await create(a, 'usage');
+    await create(a, 'usage-own', OWN_KEY);
+    const leaky = {
+      matches: [],
+      usage: {
+        hybrid: false, hybridMode: 'dense', hybridUnavailable: 'driver', resultCount: 0,
+        index: 'arn:aws:s3vectors:eu-central-1:123456789012:bucket/ops/index/x', provider: 'aws-s3-vectors', providerKey: 'conn-1',
+      },
+    };
+    const runtime = await pooledRuntime(a);
+    const original = runtime.queryVectors;
+    runtime.queryVectors = async () => leaky;
+    try {
+      const result = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'usage', query: { vector: [1, 0, 0], topK: 1 } });
+      expect(result.usage).toEqual({ hybrid: false, hybridMode: 'dense', hybridUnavailable: 'driver', resultCount: 0 });
+      expect(JSON.stringify(result)).not.toMatch(/arn:aws|providerKey|aws-s3-vectors/);
+    } finally {
+      runtime.queryVectors = original;
+    }
+    const own = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: OWN_KEY, indexKey: 'usage-own', query: { vector: [1, 0, 0], topK: 1 } });
+    expect(own.matches).toEqual([]);
   });
 });
 

@@ -240,6 +240,7 @@ describe('createVectorIndex', () => {
     expect(loadProviderRuntimeData).toHaveBeenCalledWith(
       TENANT_DB,
       expect.objectContaining({ key: PROVIDER_KEY }),
+      expect.objectContaining({ allowManaged: true }),
     );
     expect(MOCK_RUNTIME.createIndex).toHaveBeenCalledTimes(1);
     expect(db.createVectorIndex).toHaveBeenCalledTimes(1);

@@ -51,6 +51,7 @@ import {
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import { kbIndexRefusal } from '../ragOwnedResources';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:vector');
@@ -721,6 +722,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       await db.incrementProjectVectorCountApprox(projectId, vectorCount);
       return reply.code(200).send({ success: true });
     } catch (error) {
+      // A storage limit refusal (a platform provider's upsert) answers with its own status and envelope.
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });
       }

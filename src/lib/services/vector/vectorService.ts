@@ -767,22 +767,42 @@ export async function upsertVectors(
     projectId,
   );
 
-  validateVectors(index, request.vectors);
+  // One request names an id once: the last item for it wins.
+  const items = platform ? dedupeUpsertItems(request.vectors) : request.vectors;
+  validateVectors(index, items);
 
   // What a platform provider stores counts against the plan storage: checked before the write, counted after it.
-  const estimate = platform ? estimateUpsertBytes(index.dimension, request.vectors) : 0;
+  // The check uses the full estimate (a replaced id is counted as new there: erring high is fine).
+  const estimate = platform ? estimateUpsertBytes(index.dimension, items) : 0;
+  let replaced = new Set<string>();
   if (platform) {
     const source: PlanLimitSource = request.updatedBy ? { type: 'user', id: request.updatedBy } : { type: 'system' };
     await assertStorageStock({ tenantId, incomingBytes: estimate, source });
+    // Which ids the write replaces is asked before it. Unknown: every id counts as new (the high side).
+    replaced = new Set(await findExistingIds(runtime, index, items.map((item) => String(item.id))) ?? []);
   }
 
   await withResilience(
-    () => runtime.upsertVectors(toRuntimeHandle(index), request.vectors),
+    () => runtime.upsertVectors(toRuntimeHandle(index), items),
     { key: `vector-upsert:${request.providerKey}` },
   );
 
   if (platform) {
-    await adjustStoredSize(db, tenantId, index, estimate, request.vectors.length);
+    // A new id adds its estimate and one vector. A replaced id changes the size by the difference to the average
+    // (it may shrink the index) and adds no vector.
+    const average = index.storedVectors ? (index.storedBytes ?? 0) / index.storedVectors : 0;
+    let bytes = 0;
+    let vectors = 0;
+    for (const item of items) {
+      const itemBytes = estimateUpsertBytes(index.dimension, [item]);
+      if (replaced.has(String(item.id))) {
+        bytes += itemBytes - Math.round(average);
+      } else {
+        bytes += itemBytes;
+        vectors += 1;
+      }
+    }
+    await adjustStoredSize(db, tenantId, index, bytes, vectors);
   }
 }
 
@@ -812,22 +832,70 @@ export async function deleteVectors(
     projectId,
   );
 
+  const ids = platform ? [...new Set(request.ids.map(String))] : request.ids;
+  // Only vectors that exist are metered out: made-up or repeated ids must not shrink the meter. Asked before the delete.
+  const existing = platform ? await findExistingIds(runtime, index, ids) : null;
+
   await withResilience(
-    () => runtime.deleteVectors(toRuntimeHandle(index), request.ids),
+    () => runtime.deleteVectors(toRuntimeHandle(index), ids),
     { key: `vector-delete-vectors:${request.providerKey}` },
   );
 
   if (platform) {
+    if (!existing) {
+      logger.debug('Vector delete not metered: the provider cannot confirm which ids exist', { indexKey: index.key });
+      return;
+    }
     // The size of a deleted vector is not known: the index's average stands in for it.
-    const vectors = Math.min(request.ids.length, index.storedVectors ?? 0);
+    const vectors = Math.min(existing.length, index.storedVectors ?? 0);
     const average = index.storedVectors ? (index.storedBytes ?? 0) / index.storedVectors : 0;
     await adjustStoredSize(db, tenantId, index, -Math.round(average * vectors), -vectors);
   }
 }
 
+/** The items of one upsert with one entry per id (the last one wins), in order of first appearance. */
+function dedupeUpsertItems(items: VectorUpsertItem[]): VectorUpsertItem[] {
+  const byId = new Map<string, VectorUpsertItem>();
+  for (const item of items) byId.set(String(item.id), item);
+  return [...byId.values()];
+}
+
+/**
+ * The ids (of `ids`) the provider holds right now, or null when it cannot say (no such runtime method, or the lookup
+ * failed): the caller then stays on the safe side of its metering.
+ */
+async function findExistingIds(
+  runtime: VectorProviderRuntime,
+  index: VectorIndexRecord,
+  ids: string[],
+): Promise<string[] | null> {
+  if (!runtime.existingVectorIds) return null;
+  try {
+    return await runtime.existingVectorIds(toRuntimeHandle(index), ids);
+  } catch (error) {
+    logger.warn('Could not look up which vector ids exist', {
+      indexKey: index.key,
+      error: error instanceof Error ? error.message : error,
+    });
+    return null;
+  }
+}
+
+/** Per-query notes of a platform provider a caller may see: nothing that names the backend. */
+const PLATFORM_QUERY_USAGE_KEYS = ['hybrid', 'hybridMode', 'hybridUnavailable', 'resultCount'] as const;
+
+function publicQueryUsage(usage: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!usage) return usage;
+  const kept: Record<string, unknown> = {};
+  for (const key of PLATFORM_QUERY_USAGE_KEYS) {
+    if (key in usage) kept[key] = usage[key];
+  }
+  return kept;
+}
+
 /**
  * The bytes an upsert is expected to add on a platform provider: per vector its values (4 bytes each), its id and
- * its metadata as JSON. An estimate: a re-upserted id is counted again until the live count reconciles it.
+ * its metadata as JSON. An estimate.
  */
 export function estimateUpsertBytes(dimension: number, items: VectorUpsertItem[]): number {
   let total = 0;
@@ -1127,7 +1195,7 @@ export async function queryVectorIndex(
   request: VectorQueryRequest,
   options?: { signal?: AbortSignal },
 ): Promise<VectorQueryResponse> {
-  const { runtime, driver } = await buildRuntimeContext(
+  const { runtime, driver, platform } = await buildRuntimeContext(
     tenantDbName,
     tenantId,
     request.providerKey,
@@ -1225,5 +1293,11 @@ export async function queryVectorIndex(
     status: 'success',
   }));
 
+  // On a platform provider the driver's notes can carry the backend's identifiers (index ARN, bucket): only an
+  // allowlist leaves.
+  if (platform) {
+    const usage = publicQueryUsage(result.usage);
+    return { ...result, ...(usage ? { usage } : {}) };
+  }
   return result;
 }

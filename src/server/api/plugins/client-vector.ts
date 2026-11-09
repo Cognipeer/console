@@ -33,6 +33,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import { kbIndexRefusal } from '../ragOwnedResources';
 import { VectorFilterError } from '@/lib/providers';
 
@@ -460,6 +461,9 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Upsert client vector entries error', { error });
+      // A storage limit refusal (a platform provider's upsert) answers with its own status and envelope.
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });
       }
