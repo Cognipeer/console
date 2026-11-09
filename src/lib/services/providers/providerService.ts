@@ -243,13 +243,15 @@ function assertDriverIsCreatable(driver: string): void {
 }
 
 /** Refuses a change to a managed record. Without a registered host nothing is managed and nothing is read. */
+/** Refuses a change to a platform or managed record; returns the record it read (null when there is none). */
 async function assertNotManagedById(
   db: Awaited<ReturnType<typeof withTenantDb>>,
   providerId: string,
-): Promise<void> {
+): Promise<IProviderRecord | null> {
   const record = await db.findProviderById(providerId);
   assertNotPlatformRecord(record);
   if (record && getManagedCreditsHost() && isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
+  return record;
 }
 
 /** Refuses a change to a platform-provided record. */
@@ -701,8 +703,8 @@ export async function deleteProviderConfig(
   providerId: string,
 ): Promise<boolean> {
   const db = await withTenantDb(tenantDbName);
-  await assertNotManagedById(db, providerId);
-  const record = await db.findProviderById(providerId);
+  // One read serves the platform check and the in-use check.
+  const record = await assertNotManagedById(db, providerId);
   if (record?.type === 'websearch') {
     // Instances keep their behavior on top of this connection: they must not be left pointing at nothing.
     const instances = await db.listWebSearchInstances(record.tenantId, { providerKey: record.key });
