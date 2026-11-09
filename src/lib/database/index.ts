@@ -99,6 +99,12 @@ export async function getDatabase(): Promise<DatabaseProvider> {
     });
   }
 
+  if (cfg.database.tenantScopeMismatch === 'warn') {
+    log.warn(
+      'DB_TENANT_SCOPE_MISMATCH=warn: switchToTenant to another tenant inside a runWithTenant scope is allowed and only logged; the scope tenant keeps serving that caller\'s queries. Unset it to refuse such switches.',
+    );
+  }
+
   // Register shutdown handler
   registerShutdownHandler('database', async () => {
     await disconnectDatabase();
@@ -116,6 +122,10 @@ export async function getDatabase(): Promise<DatabaseProvider> {
  * tasks): `switchToTenant` alone does not survive the caller's continuation
  * after an `await`, so subsequent queries fall back to the process-global
  * tenant handle, which a concurrent request for another tenant can overwrite.
+ *
+ * Inside a `runWithTenant` scope for another tenant the switch cannot take
+ * effect (the scope keeps serving that caller), so it is refused unless
+ * `DB_TENANT_SCOPE_MISMATCH=warn`; use `runWithTenantScope` for that tenant.
  */
 export async function getTenantDatabase(
   tenantDbName: string,

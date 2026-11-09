@@ -122,6 +122,14 @@ export interface AppConfig {
      * with MONGODB_SINGLE_DATABASE for edge cases.
      */
     singleDatabase: boolean;
+    /**
+     * What `switchToTenant(B)` does when the caller already runs inside a
+     * `runWithTenant` scope for tenant A (the scope keeps serving A's queries).
+     * `error` (default) refuses the switch; `warn` keeps the earlier behavior
+     * (only the process-global handle moves) and logs a warning.
+     * Env: DB_TENANT_SCOPE_MISMATCH.
+     */
+    tenantScopeMismatch: 'error' | 'warn';
   };
 
   auth: {
@@ -978,6 +986,7 @@ function buildConfig(source: ConfigSource): AppConfig {
         'MONGODB_SINGLE_DATABASE',
         deploymentMode === 'onprem' && databaseProvider === 'mongodb',
       ),
+      tenantScopeMismatch: oneOf(source, 'DB_TENANT_SCOPE_MISMATCH', ['error', 'warn'], 'error'),
     },
 
     auth: {
