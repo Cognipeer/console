@@ -175,7 +175,7 @@ describe.runIf(MONGO_AVAILABLE)('the GridFS driver', () => {
 
   beforeAll(async () => {
     const { MongoMemoryServer } = await import('mongodb-memory-server');
-    server = await MongoMemoryServer.create();
+    server = await MongoMemoryServer.create({ instance: { launchTimeout: 60_000 } });
     // The test server is on loopback: a self-hosted install, where an in-network database is what this driver is for.
     setConfigSource({ get: (k: string) => ({ DEPLOYMENT_MODE: 'onprem' } as Record<string, string>)[k] ?? process.env[k] } as ConfigSource);
     runtime = await MongoGridFsFileProviderContract.createRuntime({

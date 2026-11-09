@@ -88,15 +88,23 @@ type MongoMemoryServerLike = {
   stop(): Promise<void>;
 };
 
+type MongoMemoryServerCreateOpts = { instance?: { launchTimeout?: number } };
+
+/**
+ * mongod is given a minute to come up. The library default is 10 seconds, which a busy CI runner (several test
+ * jobs sharing one machine) exceeds often enough to fail an otherwise green suite.
+ */
+export const MONGO_MEMORY_SERVER_OPTS: MongoMemoryServerCreateOpts = { instance: { launchTimeout: 60_000 } };
+
 async function makeMongoHandle(): Promise<ProviderHandle | null> {
   // Lazy-import via dynamic string so projects without mongodb-memory-server
   // installed do not need its types either (it's a peer/optional dep).
-  let MongoMemoryServerCtor: { create(): Promise<MongoMemoryServerLike> };
+  let MongoMemoryServerCtor: { create(opts?: MongoMemoryServerCreateOpts): Promise<MongoMemoryServerLike> };
   try {
     const moduleName = 'mongodb-memory-server';
     // The string indirection prevents TS from trying to resolve the type.
     const mod = (await import(/* @vite-ignore */ moduleName)) as {
-      MongoMemoryServer: { create(): Promise<MongoMemoryServerLike> };
+      MongoMemoryServer: { create(opts?: MongoMemoryServerCreateOpts): Promise<MongoMemoryServerLike> };
     };
     MongoMemoryServerCtor = mod.MongoMemoryServer;
   } catch {
@@ -117,7 +125,7 @@ async function makeMongoHandle(): Promise<ProviderHandle | null> {
       return db;
     },
     setup: async () => {
-      server = await MongoMemoryServerCtor.create();
+      server = await MongoMemoryServerCtor.create(MONGO_MEMORY_SERVER_OPTS);
       db = new MongoDBProvider(server.getUri(), 'parity_main', {
         minPoolSize: 1,
         maxPoolSize: 5,
