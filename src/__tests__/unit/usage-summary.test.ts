@@ -8,6 +8,8 @@ const cacheState = vi.hoisted(() => ({ name: 'memory' }));
 vi.mock('@/lib/core/cache', () => ({
   getCache: vi.fn(async () => ({ name: cacheState.name, get: vi.fn(async () => undefined) })),
 }));
+// The real meters module is used (monthlyLimitFor): keep it off the database layer.
+vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/limits/tenantLimits', () => ({ resolveTenantPlan: vi.fn() }));
 vi.mock('@/lib/limits/events', () => ({ listLimitEvents: vi.fn(async () => []) }));
 vi.mock('@/lib/limits/leases', () => ({ countPlanLeases: vi.fn(async () => 0) }));

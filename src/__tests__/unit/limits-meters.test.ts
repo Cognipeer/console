@@ -36,7 +36,7 @@ beforeEach(() => {
   h.db.incrementPlanUsageMonthly.mockClear();
   h.db.getPlanUsageMonthly.mockReset();
   h.db.getPlanUsageMonthly.mockResolvedValue({});
-  setPlan('on', { searches: 10, sandboxHours: 1 });
+  setPlan('on', { crawlerPages: 10, sandboxHours: 1 });
 });
 afterEach(() => vi.useRealTimers());
 
@@ -91,22 +91,30 @@ describe('getMonthlyUsage', () => {
 
 describe('checkMonthlyAllowance', () => {
   it('allows below the limit and refuses past it in on mode with reset info', async () => {
-    h.db.getPlanUsageMonthly.mockResolvedValue({ searches: 9 });
-    expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'searches' })).allowed).toBe(true);
+    h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 9 });
+    expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' })).allowed).toBe(true);
     clearMeterCacheForTests();
-    h.db.getPlanUsageMonthly.mockResolvedValue({ searches: 10 });
-    const d = await checkMonthlyAllowance({ tenantId: 't1', meter: 'searches' });
-    expect(d).toMatchObject({ allowed: false, outcome: 'refused', kind: 'monthly', dimension: 'searches', limit: 10, used: 10 });
+    h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 10 });
+    const d = await checkMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' });
+    expect(d).toMatchObject({ allowed: false, outcome: 'refused', kind: 'monthly', dimension: 'crawlerPages', limit: 10, used: 10 });
     expect(d.resetAt).toEqual(periodEnd(currentPeriod()));
     expect(d.retryAfterMs).toBeGreaterThan(0);
     expect(h.events).toHaveLength(1);
   });
 
   it('shadow mode reports would_refuse and allows', async () => {
-    setPlan('shadow', { searches: 1 });
-    h.db.getPlanUsageMonthly.mockResolvedValue({ searches: 1 });
-    const d = await checkMonthlyAllowance({ tenantId: 't1', meter: 'searches' });
+    setPlan('shadow', { crawlerPages: 1 });
+    h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 1 });
+    const d = await checkMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' });
     expect(d).toMatchObject({ allowed: true, outcome: 'would_refuse' });
+  });
+
+  it('never limits searches: they are paid with credits and only counted', async () => {
+    setPlan('on', { searches: 0 } as Record<string, number>);
+    h.db.getPlanUsageMonthly.mockResolvedValue({ searches: 5_000 });
+    const d = await checkMonthlyAllowance({ tenantId: 't1', meter: 'searches' });
+    expect(d).toMatchObject({ allowed: true, outcome: 'allowed', limit: undefined });
+    expect(h.events).toHaveLength(0);
   });
 
   it('compares sandbox seconds against hours', async () => {
@@ -120,18 +128,18 @@ describe('checkMonthlyAllowance', () => {
 
   it('allows when the meter has no limit, when off, or when the counter cannot be read', async () => {
     expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'flowRuns' })).allowed).toBe(true);
-    setPlan('off', { searches: 0 });
-    expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'searches' })).allowed).toBe(true);
-    setPlan('on', { searches: 0 });
+    setPlan('off', { crawlerPages: 0 });
+    expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' })).allowed).toBe(true);
+    setPlan('on', { crawlerPages: 0 });
     h.db.getPlanUsageMonthly.mockRejectedValue(new Error('db'));
-    expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'searches' })).allowed).toBe(true);
+    expect((await checkMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' })).allowed).toBe(true);
   });
 
   it('assertMonthlyAllowance throws monthly_allowance_exhausted', async () => {
-    h.db.getPlanUsageMonthly.mockResolvedValue({ searches: 10 });
-    const err = await assertMonthlyAllowance({ tenantId: 't1', meter: 'searches' }).catch((e) => e);
+    h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 10 });
+    const err = await assertMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' }).catch((e) => e);
     expect(err.code).toBe('monthly_allowance_exhausted');
-    expect(err.dimension).toBe('searches');
+    expect(err.dimension).toBe('crawlerPages');
     expect(err.status).toBe(429);
   });
 });
