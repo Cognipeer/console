@@ -9,6 +9,7 @@ import {
   getUsageAggregate,
   listModelProviders,
   listModels,
+  listPlatformModelProviders,
   listUsageLogs,
   updateModel,
 } from '@/lib/services/models/modelService';
@@ -31,7 +32,7 @@ import {
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota, type QuotaContext } from '@/lib/quota';
 import { providerRegistry } from '@/lib/providers';
-import { redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
+import { ManagedProviderError, redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
@@ -42,7 +43,7 @@ import {
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
 import {
-  getProviderModelCatalog,
+  getProviderCatalog,
   ProviderCatalogDisabledError,
   ProviderCatalogNotFoundError,
 } from '@/lib/services/models/catalog';
@@ -76,6 +77,8 @@ const SENSITIVE_FIELDS = new Set([
 type ModelQuery = {
   category?: ModelCategory;
   includeProviders?: string;
+  includePlatform?: string;
+  includeUnavailable?: string;
   providerDriver?: string;
   providerKey?: string;
 };
@@ -126,7 +129,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 function sanitizeModel(model: IModel) {
   return {
     ...model,
-    allProjects: Boolean(model.allProjects),
+    platform: Boolean(model.platform),
     capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
   };
@@ -350,7 +353,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const catalog = await getProviderModelCatalog({
+      const catalog = await getProviderCatalog({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         projectId,
@@ -364,6 +367,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (error instanceof ProviderCatalogDisabledError) {
         return reply.code(409).send({ error: error.message, code: error.code });
+      }
+      if (error instanceof ManagedProviderError) {
+        return reply.code(400).send({ error: error.message, code: error.code });
       }
       const projectReply = sendProjectError(reply, error);
       if (projectReply) return projectReply;
@@ -545,17 +551,36 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         providerKey: query.providerKey,
       });
 
+      // A platform model its operator switched off is left out unless the caller asks for it; then it is marked.
+      const includeUnavailable = query.includeUnavailable === 'true';
+      const visible = models.filter(
+        (model) => includeUnavailable || !(model.platform && model.metadata?.inactive === true),
+      );
       const payload: Record<string, unknown> = {
-        models: models.map(sanitizeModel),
+        models: visible.map((model) => ({
+          ...sanitizeModel(model),
+          ...(model.platform && model.metadata?.inactive === true ? { unavailable: true } : {}),
+        })),
       };
 
       if (query.includeProviders === 'true') {
-        payload.providers = (await listModelProviders(
+        const providers = await listModelProviders(
           session.tenantDbName,
           session.tenantId,
           projectId,
           {},
-        )).map(redactPlatformProvider);
+        );
+        payload.providers = providers.map(redactPlatformProvider);
+
+        if (query.includePlatform === 'true') {
+          // Every platform provider of the tenant that can back a model, for the one that is not assigned here too.
+          const assignedKeys = new Set(providers.map((provider) => provider.key));
+          const all = await listPlatformModelProviders(session.tenantDbName, session.tenantId);
+          payload.platformProviders = all.map((provider) => ({
+            ...redactPlatformProvider(provider),
+            assigned: assignedKeys.has(provider.key),
+          }));
+        }
       }
 
       return reply.code(200).send(payload);

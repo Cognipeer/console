@@ -840,10 +840,10 @@ export interface IProviderRecord
   projectId?: string;
   projectIds?: string[];
   /**
-   * Platform-provided record: visible in every project of the tenant, written
-   * only by the deployment (never by tenant APIs) and read-only through tenant APIs.
+   * Platform-provided record: written only by the hosting layer (never by tenant
+   * APIs) and read-only through tenant APIs, except for its project assignment.
    */
-  allProjects?: boolean;
+  platform?: boolean;
   key: string;
   type: ProviderDomain;
   driver: string;
@@ -1112,10 +1112,11 @@ export interface IModel {
   tenantId: string;
   projectId?: string;
   /**
-   * Platform-provided record: visible in every project of the tenant, written
-   * only by the deployment (never by tenant APIs) and read-only through tenant APIs.
+   * Platform-provided record: written only by the hosting layer (never by tenant
+   * APIs) and read-only through tenant APIs. It has no project of its own; it is
+   * visible in the projects its platform provider is assigned to.
    */
-  allProjects?: boolean;
+  platform?: boolean;
   name: string;
   description?: string;
   key: string;

@@ -111,6 +111,8 @@ export interface ProjectExtrasInput {
   members: Array<{ id: string; role: ProjectRole }>;
   groups: Array<{ id: string; role: ProjectRole }>;
   providerIds: string[];
+  /** When given, the model caches of a platform provider whose assignment changes are dropped. */
+  tenantDbName?: string;
 }
 
 /** Applies the people / groups / providers chosen on the create screen. Returns the warnings. */
@@ -176,10 +178,6 @@ export async function applyProjectExtras(
         warnings.push(`Provider "${providerId}" was skipped: provider not found.`);
         continue;
       }
-      if (provider.allProjects) {
-        warnings.push(`Provider "${provider.label}" was skipped: it is provided by the platform.`);
-        continue;
-      }
       // A provider created for one specific project (legacy single `projectId`) is not shareable.
       if (provider.projectId) {
         warnings.push(`Provider "${provider.label}" was skipped: it belongs to another project.`);
@@ -194,6 +192,11 @@ export async function applyProjectExtras(
         });
       } catch {
         warnings.push(`Provider "${provider.label}" could not be assigned.`);
+        continue;
+      }
+      if (provider.platform && input.tenantDbName) {
+        const { invalidatePlatformProviderModelCaches } = await import('@/lib/services/models/modelService');
+        await invalidatePlatformProviderModelCaches(input.tenantDbName, provider.key, [...assigned, projectId]);
       }
     }
   }

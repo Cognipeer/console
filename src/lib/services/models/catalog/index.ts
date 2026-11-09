@@ -119,8 +119,66 @@ async function registeredKeysByModelId(
   return byModelId;
 }
 
+/** What a platform provider offers: the platform models the hosting layer registered for it. No discovery is run. */
+export interface PlatformProviderModelCatalog {
+  platform: true;
+  /** Whether the provider is assigned to the active project (its models are callable here only then). */
+  assigned: boolean;
+  models: Array<{
+    key: string;
+    name: string;
+    category: ModelCategory;
+    description?: string;
+    unavailable: boolean;
+  }>;
+}
+
 /**
- * The model catalog of a provider of the project. Throws `ProviderCatalogNotFoundError` (404) and
+ * The catalog of a platform provider, looked up tenant-wide. It never opens credentials or asks the upstream: the
+ * models are the platform model rows of the provider.
+ */
+async function getPlatformProviderCatalog(
+  tenantDbName: string,
+  projectId: string,
+  config: { key: string; projectId?: unknown; projectIds?: unknown },
+): Promise<PlatformProviderModelCatalog> {
+  const rows = await listModels(tenantDbName, '', { providerKey: config.key });
+  const assigned = String(config.projectId) === String(projectId)
+    || (Array.isArray(config.projectIds) && config.projectIds.map(String).includes(String(projectId)));
+  return {
+    platform: true,
+    assigned,
+    models: rows
+      .filter((model) => model.platform && model.providerKey === config.key)
+      .map((model) => ({
+        key: model.key,
+        name: model.name,
+        category: model.category,
+        description: model.description,
+        unavailable: model.metadata?.inactive === true,
+      })),
+  };
+}
+
+/**
+ * The catalog the route answers: a platform provider is answered from its platform model rows (see
+ * `PlatformProviderModelCatalog`), whether or not it is assigned to the project, with no discovery and no credentials
+ * opened; any other provider through `getProviderModelCatalog`.
+ */
+export async function getProviderCatalog(
+  params: { tenantDbName: string; tenantId: string; projectId: string; providerKey: string },
+  deps?: DiscoveryDeps,
+): Promise<ProviderModelCatalog | PlatformProviderModelCatalog> {
+  const { tenantDbName, tenantId, projectId, providerKey } = params;
+  const tenantWide = await getProviderConfigByKey(tenantDbName, tenantId, providerKey);
+  if (tenantWide?.platform && tenantWide.tenantId === tenantId && MODEL_PROVIDER_TYPES.has(tenantWide.type)) {
+    return getPlatformProviderCatalog(tenantDbName, projectId, tenantWide);
+  }
+  return getProviderModelCatalog(params, deps);
+}
+
+/**
+ * The model catalog of a (non-platform) provider of the project. Throws `ProviderCatalogNotFoundError` (404) and
  * `ProviderCatalogDisabledError` (409); everything about the listing itself, including credentials that cannot be
  * opened, is answered in the catalog's `error`.
  */
@@ -131,7 +189,8 @@ export async function getProviderModelCatalog(
   const { tenantDbName, tenantId, projectId, providerKey } = params;
 
   const config = await getProviderConfigByKey(tenantDbName, tenantId, providerKey, projectId);
-  if (!config || config.tenantId !== tenantId || !MODEL_PROVIDER_TYPES.has(config.type)) {
+  // A platform provider never reaches discovery (it would open operator credentials): `getProviderCatalog` answers it.
+  if (!config || config.platform || config.tenantId !== tenantId || !MODEL_PROVIDER_TYPES.has(config.type)) {
     throw new ProviderCatalogNotFoundError(providerKey);
   }
   if (config.status === 'disabled') throw new ProviderCatalogDisabledError(providerKey);

@@ -1,5 +1,5 @@
 /**
- * Platform-provided records (`allProjects`) through the tenant-facing services: read-only everywhere a tenant could
+ * Platform-provided records (`platform`) through the tenant-facing services: read-only everywhere a tenant could
  * change them, never set from a payload, operator credentials for managed records, key uniqueness, route mapping.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ const hoisted = vi.hoisted(() => ({
     switchToTenant: vi.fn(),
     findProviderById: vi.fn(),
     findProviderByKey: vi.fn(),
+    listModels: vi.fn(),
     listProviders: vi.fn(),
     updateProvider: vi.fn(),
     deleteProvider: vi.fn(),
@@ -26,7 +27,8 @@ vi.mock('@/lib/utils/crypto', () => ({
   encryptObject: vi.fn((value: unknown) => `enc:${JSON.stringify(value)}`),
   decryptObject: vi.fn((blob: string) => JSON.parse(blob.slice(4))),
 }));
-vi.mock('@/lib/core/cache', () => ({ getCache: async () => ({ del: vi.fn(), get: vi.fn(), set: vi.fn() }) }));
+const cacheDel = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/core/cache', () => ({ getCache: async () => ({ del: cacheDel, get: vi.fn(), set: vi.fn() }) }));
 vi.mock('@/lib/services/providers/providerEndpointGuard', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   assertProviderEndpointsAllowed: vi.fn(),
@@ -68,7 +70,7 @@ const provider = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 const wideProvider = (overrides: Record<string, unknown> = {}) =>
-  provider({ _id: 'prov-wide', key: 'platform', label: 'Platform', allProjects: true, settings: { managed: true }, ...overrides });
+  provider({ _id: 'prov-wide', key: 'platform', label: 'Platform', platform: true, settings: { managed: true }, ...overrides });
 const model = (overrides: Record<string, unknown> = {}) => ({
   _id: 'model-1', tenantId: 'tenant-1', projectId: 'p1', name: 'M', key: 'm', providerKey: 'own',
   providerDriver: 'openai', category: 'llm', modelId: 'x', pricing: {}, settings: {}, ...overrides,
@@ -96,7 +98,7 @@ beforeEach(() => {
 });
 afterEach(() => resetManagedCreditsHostForTests());
 
-describe('provider mutations on a tenant-wide record', () => {
+describe('provider mutations on a platform record', () => {
   beforeEach(() => hoisted.db.findProviderById.mockResolvedValue(wideProvider({ settings: {} })));
 
   it('refuses update, delete and test writes, with no host registered', async () => {
@@ -122,7 +124,7 @@ describe('provider mutations on a tenant-wide record', () => {
     hoisted.db.findProviderById.mockResolvedValue(provider());
     hoisted.db.updateProvider.mockResolvedValue(provider({ label: 'y' }));
     hoisted.db.deleteProvider.mockResolvedValue(true);
-    await expect(updateProviderConfig('db', 'prov-1', { label: 'y' })).resolves.toMatchObject({ label: 'y', allProjects: false });
+    await expect(updateProviderConfig('db', 'prov-1', { label: 'y' })).resolves.toMatchObject({ label: 'y', platform: false });
     await expect(deleteProviderConfig('db', 'prov-1')).resolves.toBe(true);
   });
 
@@ -138,34 +140,108 @@ describe('provider mutations on a tenant-wide record', () => {
   });
 });
 
-describe('allProjects is never taken from a tenant payload', () => {
+describe('assignment of a platform provider', () => {
+  const platformProvider = (projectIds: string[]) => wideProvider({ settings: {}, projectIds });
+
+  beforeEach(() => {
+    hoisted.db.findProviderById.mockResolvedValue(platformProvider(['p1']));
+    hoisted.db.updateProvider.mockImplementation(async (_id: string, d: object) => ({ ...platformProvider(['p1']), ...d }));
+    hoisted.db.listModels.mockResolvedValue([
+      { key: 'pm-1', platform: true }, { key: 'pm-2', platform: true }, { key: 'own-model' },
+    ]);
+  });
+
+  it('tenant scope: an assignment-only change is allowed (updatedBy and allowHostPaths aside)', async () => {
+    const view = await updateProviderConfig(
+      'db', 'prov-wide',
+      { projectIds: ['p1', 'p2'], updatedBy: 'u1', allowHostPaths: true },
+      { allowPlatformAssignment: true },
+    );
+    expect(hoisted.db.updateProvider).toHaveBeenCalledWith('prov-wide', { projectIds: ['p1', 'p2'], updatedBy: 'u1' });
+    expect(view).toMatchObject({ platform: true, projectIds: ['p1', 'p2'] });
+  });
+
+  it('project scope (no allowance) is refused', async () => {
+    await expect(updateProviderConfig('db', 'prov-wide', { projectIds: ['p2'] }, { projectId: 'p1' }))
+      .rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    expect(hoisted.db.updateProvider).not.toHaveBeenCalled();
+  });
+
+  it('refuses the assignment when the payload carries any other field, or no assignment', async () => {
+    for (const payload of [
+      { projectIds: ['p2'], label: 'x' }, { projectIds: ['p2'], status: 'disabled' as const },
+      { projectIds: ['p2'], settings: {} }, { projectIds: ['p2'], credentials: { apiKey: 'k' } },
+      { projectIds: ['p2'], metadata: {} }, { projectIds: ['p2'], description: 'd' },
+      { projectIds: ['p2'], capabilitiesOverride: [] }, { label: 'x' }, {},
+    ]) {
+      await expect(updateProviderConfig('db', 'prov-wide', payload, { allowPlatformAssignment: true }))
+        .rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
+    }
+    expect(hoisted.db.updateProvider).not.toHaveBeenCalled();
+  });
+
+  it('skips the managed check for the allowed case only', async () => {
+    registerManagedCreditsHost(host());
+    hoisted.db.findProviderById.mockResolvedValue(wideProvider({ projectIds: ['p1'] }));
+    await expect(updateProviderConfig('db', 'prov-wide', { projectIds: ['p2'] }, { allowPlatformAssignment: true }))
+      .resolves.toBeTruthy();
+    // An ordinary managed record is still refused.
+    hoisted.db.findProviderById.mockResolvedValue(provider({ settings: { managed: true } }));
+    await expect(updateProviderConfig('db', 'prov-1', { projectIds: ['p2'] }, { allowPlatformAssignment: true }))
+      .rejects.toThrow();
+  });
+
+  it('invalidates the model caches of its platform models for old and new projects and the tenant-wide entry', async () => {
+    cacheDel.mockClear();
+    await updateProviderConfig('db', 'prov-wide', { projectIds: ['p2'] }, { allowPlatformAssignment: true });
+    const deleted = cacheDel.mock.calls.map((c) => c[0] as string);
+    expect(hoisted.db.listModels).toHaveBeenCalledWith({ providerKey: 'platform' });
+    for (const project of ['p1', 'p2', '']) {
+      for (const key of ['pm-1', 'pm-2']) {
+        expect(deleted).toContain(`model-meta:db:${project}:${key}`);
+      }
+    }
+    expect(deleted.some((k) => k.endsWith(':own-model'))).toBe(false);
+    expect(deleted.some((k) => k.includes(':p3:'))).toBe(false);
+  });
+
+  it('does not touch the caches when an ordinary provider is updated', async () => {
+    cacheDel.mockClear();
+    hoisted.db.findProviderById.mockResolvedValue(provider());
+    hoisted.db.updateProvider.mockResolvedValue(provider({ projectIds: ['p2'] }));
+    await updateProviderConfig('db', 'prov-1', { projectIds: ['p2'] });
+    expect(cacheDel).not.toHaveBeenCalled();
+  });
+});
+
+describe('platform is never taken from a tenant payload', () => {
   it('createProviderConfig ignores it', async () => {
     hoisted.db.findProviderByKey.mockResolvedValue(null);
     const view = await createProviderConfig('db', 'tenant-1', {
       key: 'mine', type: 'model', driver: 'openai', label: 'x', credentials: { apiKey: 'k' }, createdBy: 'u',
-      allProjects: true,
+      platform: true,
     } as never);
-    expect(hoisted.db.createProvider.mock.calls[0][0]).not.toHaveProperty('allProjects');
-    expect(view.allProjects).toBe(false);
+    expect(hoisted.db.createProvider.mock.calls[0][0]).not.toHaveProperty('platform');
+    expect(view.platform).toBe(false);
   });
 
   it('updateProviderConfig ignores it', async () => {
     hoisted.db.updateProvider.mockResolvedValue(provider());
-    await updateProviderConfig('db', 'prov-1', { label: 'x', allProjects: true } as never);
-    expect(hoisted.db.updateProvider.mock.calls[0][1]).not.toHaveProperty('allProjects');
+    await updateProviderConfig('db', 'prov-1', { label: 'x', platform: true } as never);
+    expect(hoisted.db.updateProvider.mock.calls[0][1]).not.toHaveProperty('platform');
   });
 
   it('createModel and updateModel ignore it', async () => {
     hoisted.db.findProviderByKey.mockResolvedValue(provider());
-    await createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, allProjects: true } as never);
-    expect(hoisted.db.createModel.mock.calls[0][0]).not.toHaveProperty('allProjects');
-    await updateModel('db', 'p1', 'model-1', { name: 'n', allProjects: true } as never);
-    expect(hoisted.db.updateModel.mock.calls[0][1]).not.toHaveProperty('allProjects');
+    await createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, platform: true } as never);
+    expect(hoisted.db.createModel.mock.calls[0][0]).not.toHaveProperty('platform');
+    await updateModel('db', 'p1', 'model-1', { name: 'n', platform: true } as never);
+    expect(hoisted.db.updateModel.mock.calls[0][1]).not.toHaveProperty('platform');
   });
 });
 
-describe('model mutations on a tenant-wide model', () => {
-  beforeEach(() => hoisted.db.findModelById.mockResolvedValue(model({ allProjects: true, projectId: 'other' })));
+describe('model mutations on a platform model', () => {
+  beforeEach(() => hoisted.db.findModelById.mockResolvedValue(model({ platform: true, projectId: 'other' })));
 
   it('refuses update (including replicas and settings) and delete', async () => {
     await expect(updateModel('db', 'p1', 'model-1', { name: 'x' })).rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
@@ -190,23 +266,23 @@ describe('model mutations on a tenant-wide model', () => {
 });
 
 describe('createModel on a platform provider', () => {
-  it('refuses a tenant-wide provider', async () => {
+  it('refuses a platform provider', async () => {
     hoisted.db.findProviderByKey.mockResolvedValue(wideProvider({ settings: {} }));
     await expect(createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, providerKey: 'platform' } as never))
       .rejects.toThrow('Models cannot be added to a platform provider.');
     expect(hoisted.db.createModel).not.toHaveBeenCalled();
   });
 
-  it('refuses a provider the managed host recognises, even when not tenant-wide', async () => {
+  it('refuses a provider the managed host recognises, even when not platform', async () => {
     registerManagedCreditsHost(host());
     hoisted.db.findProviderByKey.mockResolvedValue(provider({ key: 'platform', settings: { managed: true } }));
     await expect(createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, providerKey: 'platform' } as never))
       .rejects.toBeInstanceOf(PlatformRecordReadOnlyError);
   });
 
-  it('suffixes the key of a tenant-wide model instead of a duplicate-key error', async () => {
+  it('suffixes the key of a platform model instead of a duplicate-key error', async () => {
     hoisted.db.findProviderByKey.mockResolvedValue(provider());
-    hoisted.db.findModelByKey.mockImplementation(async (key: string) => (key === 'shared' ? model({ key: 'shared', allProjects: true }) : null));
+    hoisted.db.findModelByKey.mockImplementation(async (key: string) => (key === 'shared' ? model({ key: 'shared', platform: true }) : null));
     const created = await createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, name: 'Shared' } as never);
     expect(created.key).toBe('shared-2');
     expect(hoisted.db.findModelByKey).toHaveBeenCalledWith('shared', 'p1');
@@ -275,15 +351,15 @@ describe('operator connections for managed records', () => {
 });
 
 describe('listProviderConfigs view', () => {
-  it('carries allProjects with a default of false', async () => {
+  it('carries platform with a default of false', async () => {
     hoisted.db.listProviders.mockResolvedValue([provider(), wideProvider()]);
     const views = await listProviderConfigs('db', 'tenant-1', { projectId: 'p1' });
-    expect(views.map((v) => v.allProjects)).toEqual([false, true]);
+    expect(views.map((v) => v.platform)).toEqual([false, true]);
   });
 });
 
 describe('replicas cannot route a tenant model onto a platform provider', () => {
-  it('refuses a replica naming a tenant-wide provider, accepts an ordinary one', async () => {
+  it('refuses a replica naming a platform provider, accepts an ordinary one', async () => {
     hoisted.db.findProviderByKey.mockImplementation(async (_t: string, key: string) =>
       key === 'platform' ? wideProvider({ settings: {} }) : provider({ key }));
     await expect(
@@ -295,7 +371,7 @@ describe('replicas cannot route a tenant model onto a platform provider', () => 
     ).resolves.toBeTruthy();
   });
 
-  it('refuses a replica naming a managed provider with no allProjects flag', async () => {
+  it('refuses a replica naming a managed provider with no platform flag', async () => {
     registerManagedCreditsHost(host());
     hoisted.db.findProviderByKey.mockResolvedValue(provider({ key: 'm', settings: { managed: true } }));
     await expect(
@@ -305,13 +381,13 @@ describe('replicas cannot route a tenant model onto a platform provider', () => 
 });
 
 describe('redactPlatformProvider', () => {
-  it('keeps identity fields of a tenant-wide view and passes an ordinary view through', () => {
-    const wide = { ...wideProvider(), hasCredentials: true, description: 'd', metadata: { a: 1 } } as never;
+  it('keeps identity fields of a platform view and passes an ordinary view through', () => {
+    const wide = { ...wideProvider({ projectIds: ['p1'] }), hasCredentials: true, description: 'd', metadata: { a: 1 } } as never;
     const out = redactPlatformProvider(wide) as unknown as Record<string, unknown>;
-    expect(out).toMatchObject({ key: 'platform', allProjects: true, settings: {} });
+    expect(out).toMatchObject({ key: 'platform', platform: true, projectIds: ['p1'], settings: {} });
     expect(out).not.toHaveProperty('metadata');
     expect(out).not.toHaveProperty('description');
-    const plain = { ...provider(), allProjects: false, hasCredentials: true } as never;
+    const plain = { ...provider(), platform: false, hasCredentials: true } as never;
     expect(redactPlatformProvider(plain)).toBe(plain);
   });
 });

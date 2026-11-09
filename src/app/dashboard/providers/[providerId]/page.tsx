@@ -238,8 +238,9 @@ export default function ProviderDetailPage() {
     label: provider.label,
   });
 
-  // Platform record: supplied by the deployment, read-only for the tenant (the API redacts its metadata, so allProjects is the signal).
-  const isPlatform = provider.allProjects === true;
+  // Platform record: supplied by the deployment, read-only for the tenant (the API redacts its metadata, so `platform` is the signal).
+  // Only its project assignment is the tenant's to change.
+  const isPlatform = provider.platform === true;
   const canEditProvider = canManage && !isPlatform;
   const assignedIds = effectiveProjectIds(provider);
   const summary = usage.entries.length > 0
@@ -358,7 +359,7 @@ export default function ProviderDetailPage() {
     >
       {isPlatform ? (
         <Alert variant="light" color="blue" title="Platform-managed provider" mb="md">
-          This provider is supplied by the platform and billed with credits. It cannot be edited, tested, assigned or deleted here.
+          This provider is supplied by the platform. It cannot be edited, tested or deleted here; you can choose which projects use it.
         </Alert>
       ) : null}
       {activeTab === 'projects' ? (
@@ -368,7 +369,7 @@ export default function ProviderDetailPage() {
           entries={usage.entries}
           loading={usage.loading}
           error={usage.error}
-          canEdit={canEditProvider}
+          canEdit={canManage}
           onChanged={reloadAll}
         />
       ) : (

@@ -115,7 +115,7 @@ const platformRecord = (type: 'model' | 'websearch') => ({
   label: 'Managed',
   description: 'operator note',
   status: 'active',
-  allProjects: true,
+  platform: true,
   hasCredentials: true,
   credentialFields: ['apiKey'],
   settings: { baseUrl: 'https://upstream.invalid', route: 'route-a' },

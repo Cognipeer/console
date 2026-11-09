@@ -149,7 +149,7 @@ function sanitize(record: IProviderRecord, options?: ProviderViewOptions): Provi
   const { credentialsEnc, ...rest } = record;
   return {
     ...rest,
-    allProjects: Boolean(rest.allProjects),
+    platform: Boolean(rest.platform),
     hasCredentials: Boolean(credentialsEnc),
     ...(options?.credentialFields ? { credentialFields: storedCredentialNames(record) } : {}),
   };
@@ -159,15 +159,16 @@ function sanitize(record: IProviderRecord, options?: ProviderViewOptions): Provi
  * What a tenant user may see of a platform-provided record: identity and capability fields only. Settings, metadata,
  * description and credential field names belong to the deployment. Applied to API replies; server-side readers keep
  * the full view because they need `settings` to route and meter the record.
+ * The tenant's own assignment (`projectId`, `projectIds`) stays: it is the tenant's to manage.
  */
 export function redactPlatformProvider<T extends ProviderConfigView>(view: T): T {
-  if (!view.allProjects) return view;
+  if (!view.platform) return view;
   const {
-    _id, tenantId, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
+    _id, tenantId, projectId, projectIds, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
   } = view;
   return {
-    _id, tenantId, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
-    allProjects: true,
+    _id, tenantId, projectId, projectIds, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
+    platform: true,
     hasCredentials: true,
     settings: {},
     createdBy: '',
@@ -251,9 +252,22 @@ async function assertNotManagedById(
   if (record && getManagedCreditsHost() && isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
 }
 
-/** Refuses a change to a platform-provided (tenant-wide) record. */
-function assertNotPlatformRecord(record: Pick<IProviderRecord, 'allProjects'> | null | undefined): void {
-  if (record?.allProjects) throw new PlatformRecordReadOnlyError();
+/** Refuses a change to a platform-provided record. */
+function assertNotPlatformRecord(record: Pick<IProviderRecord, 'platform'> | null | undefined): void {
+  if (record?.platform) throw new PlatformRecordReadOnlyError();
+}
+
+/** True when the payload changes the project assignment and nothing else (`updatedBy` / `allowHostPaths` aside). */
+function isAssignmentOnlyPayload(payload: UpdateProviderConfigInput): boolean {
+  if (payload.projectIds === undefined) return false;
+  return Object.entries(payload).every(
+    ([field, value]) => value === undefined || field === 'projectIds' || field === 'updatedBy' || field === 'allowHostPaths',
+  );
+}
+
+/** The projects a record is assigned to: `projectIds` plus a legacy single `projectId`. */
+function assignedProjectIds(record: Pick<IProviderRecord, 'projectId' | 'projectIds'> | null | undefined): string[] {
+  return [...new Set([...(record?.projectId ? [record.projectId] : []), ...(record?.projectIds ?? [])].map(String))];
 }
 
 export async function createProviderConfig(
@@ -443,10 +457,21 @@ export async function updateProviderConfig(
   tenantDbName: string,
   providerId: string,
   payload: UpdateProviderConfigInput,
-  options?: { projectId?: string },
+  options?: {
+    projectId?: string;
+    /** Tenant admins only: a platform record may then change its project assignment (and nothing else). */
+    allowPlatformAssignment?: boolean;
+  },
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
-  await assertNotManagedById(db, providerId);
+  const before = await db.findProviderById(providerId);
+  if (before?.platform) {
+    if (!(options?.allowPlatformAssignment === true && isAssignmentOnlyPayload(payload))) {
+      throw new PlatformRecordReadOnlyError();
+    }
+  } else if (before && getManagedCreditsHost() && isManagedProviderRecord(before)) {
+    throw new ManagedProviderReadOnlyError();
+  }
   const updates: Partial<IProviderRecord> = {};
 
   // The stored "last test" describes the connection as it was tested: once the connection settings or
@@ -530,6 +555,15 @@ export async function updateProviderConfig(
   }
 
   const updated = await db.updateProvider(providerId, updates);
+  if (updated && before?.platform) {
+    // The models of a platform provider follow its assignment: drop their cached lookups for every project that
+    // gained or lost them.
+    const { invalidatePlatformProviderModelCaches } = await import('@/lib/services/models/modelService');
+    await invalidatePlatformProviderModelCaches(tenantDbName, before.key, [
+      ...assignedProjectIds(before),
+      ...assignedProjectIds(updated),
+    ]);
+  }
   return updated ? sanitize(updated) : null;
 }
 

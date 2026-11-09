@@ -30,7 +30,7 @@ export interface ManagedProviderRef {
   driver?: string;
   type?: string;
   settings?: Record<string, unknown>;
-  allProjects?: boolean;
+  platform?: boolean;
   metadata?: Record<string, unknown> | null;
 }
 

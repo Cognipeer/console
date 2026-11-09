@@ -1,6 +1,7 @@
 /**
- * Platform-provided records (`allProjects`): visible in every project of the tenant through the project-filtered
- * lookups of the SQLite provider (real database) and the MongoDB provider (the filter each method builds).
+ * Platform-provided records (`platform`): a platform provider is assigned to projects like any provider; a platform
+ * model (no project of its own) is visible in the projects its provider is assigned to. Covered through the
+ * project-filtered lookups of the SQLite provider (real database) and the MongoDB provider (the filters each method builds).
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,125 +38,142 @@ const modelBase = {
 };
 
 describe('sqlite providers', () => {
-  it('shows a tenant-wide provider in every project, and only that one', async () => {
-    await db.createProvider({ ...providerBase, key: 'wide', allProjects: true });
+  it('shows a platform provider only in the projects it is assigned to', async () => {
+    await db.createProvider({ ...providerBase, key: 'plat', platform: true, projectIds: ['p1', 'p3'] });
+    await db.createProvider({ ...providerBase, key: 'plat-legacy', platform: true, projectId: 'p2' });
+    await db.createProvider({ ...providerBase, key: 'plat-none', platform: true });
     await db.createProvider({ ...providerBase, key: 'p1-only', projectIds: ['p1'] });
-    await db.createProvider({ ...providerBase, key: 'legacy', projectId: 'p1' });
-    await db.createProvider({ ...providerBase, key: 'p2-only', projectIds: ['p2'] });
 
     const keys = async (projectId?: string, extra: Record<string, unknown> = {}) =>
       (await db.listProviders('t1', { projectId, ...extra })).map((p) => p.key).sort();
-    expect(await keys('p1')).toEqual(['legacy', 'p1-only', 'wide']);
-    expect(await keys('p2')).toEqual(['p2-only', 'wide']);
-    expect(await keys('p3')).toEqual(['wide']);
-    expect(await keys(undefined)).toEqual(['legacy', 'p1-only', 'p2-only', 'wide']);
+    expect(await keys('p1')).toEqual(['p1-only', 'plat']);
+    expect(await keys('p2')).toEqual(['plat-legacy']);
+    expect(await keys('p3')).toEqual(['plat']);
+    expect(await keys('p9')).toEqual([]);
+    expect(await keys(undefined)).toEqual(['p1-only', 'plat', 'plat-legacy', 'plat-none']);
 
-    expect((await db.findProviderByKey('t1', 'wide', 'p9'))?.allProjects).toBe(true);
-    expect(await db.findProviderByKey('t1', 'p2-only', 'p9')).toBeNull();
-    expect((await db.findProviderByKey('t1', 'p1-only', 'p1'))?.allProjects).toBeUndefined();
+    expect((await db.findProviderByKey('t1', 'plat', 'p1'))?.platform).toBe(true);
+    expect(await db.findProviderByKey('t1', 'plat', 'p9')).toBeNull();
+    expect(await db.findProviderByKey('t1', 'plat-none', 'p1')).toBeNull();
+    expect((await db.findProviderByKey('t1', 'p1-only', 'p1'))?.platform).toBeUndefined();
   });
 
-  it('does not widen the other filters', async () => {
-    await db.createProvider({ ...providerBase, key: 'wide-search', type: 'websearch', driver: 'tavily', allProjects: true });
-    await db.createProvider({ ...providerBase, key: 'off', status: 'disabled', projectIds: ['p1'] });
-    const keys = async (filters: Record<string, unknown>) =>
-      (await db.listProviders('t1', filters as never)).map((p) => p.key).sort();
-    expect(await keys({ projectId: 'p5', type: 'websearch' })).toEqual(['wide-search']);
-    expect(await keys({ projectId: 'p5', type: 'model' })).toEqual(['wide']);
-    expect(await keys({ projectId: 'p1', status: 'disabled' })).toEqual(['off']);
-    expect(await keys({ projectId: 'p5', status: 'disabled' })).toEqual([]);
-    expect(await keys({ projectId: 'p5', driver: 'tavily' })).toEqual(['wide-search']);
-  });
-
-  it('persists allProjects on update when an internal caller passes it', async () => {
+  it('persists platform on update when an internal caller passes it', async () => {
     const created = await db.createProvider({ ...providerBase, key: 'later', projectIds: ['p1'] });
-    expect((await db.findProviderById(String(created._id)))?.allProjects).toBeUndefined();
-    await db.updateProvider(String(created._id), { allProjects: true });
-    expect((await db.findProviderById(String(created._id)))?.allProjects).toBe(true);
-    await db.updateProvider(String(created._id), { allProjects: false });
-    expect((await db.findProviderById(String(created._id)))?.allProjects).toBeUndefined();
+    expect((await db.findProviderById(String(created._id)))?.platform).toBeUndefined();
+    await db.updateProvider(String(created._id), { platform: true });
+    expect((await db.findProviderById(String(created._id)))?.platform).toBe(true);
+    await db.updateProvider(String(created._id), { platform: false });
+    expect((await db.findProviderById(String(created._id)))?.platform).toBeUndefined();
   });
 });
 
 describe('sqlite models', () => {
-  it('shows a tenant-wide model in every project, by key and by id', async () => {
-    const wide = await db.createModel({ ...modelBase, key: 'wide-m', allProjects: true });
-    await db.createModel({ ...modelBase, key: 'm-p1', projectId: 'p1' });
-    await db.createModel({ ...modelBase, key: 'm-p2', projectId: 'p2', category: 'embedding' });
+  it('shows a platform model where its provider is assigned, by list, key and id', async () => {
+    // Providers of this block: 'pm-prov' is platform and assigned to p1 and p3, 'pm-other' is a platform provider
+    // assigned to nobody, 'pm-plain' is an ordinary provider assigned to p1.
+    await db.createProvider({ ...providerBase, key: 'pm-prov', platform: true, projectIds: ['p1', 'p3'] });
+    await db.createProvider({ ...providerBase, key: 'pm-other', platform: true });
+    await db.createProvider({ ...providerBase, key: 'pm-plain', projectIds: ['p1'] });
+    const wide = await db.createModel({ ...modelBase, key: 'wide-m', providerKey: 'pm-prov', platform: true });
+    await db.createModel({ ...modelBase, key: 'hidden-m', providerKey: 'pm-other', platform: true });
+    // A non-platform model on an assigned platform-looking provider key is not widened.
+    await db.createModel({ ...modelBase, key: 'plain-m', providerKey: 'pm-plain' });
+    await db.createModel({ ...modelBase, key: 'm-p1', providerKey: 'x', projectId: 'p1' });
+    await db.createModel({ ...modelBase, key: 'm-p2', providerKey: 'x', projectId: 'p2', category: 'embedding' });
 
     const keys = async (filters: Record<string, unknown>) =>
       (await db.listModels(filters as never)).map((m) => m.key).sort();
     expect(await keys({ projectId: 'p1' })).toEqual(['m-p1', 'wide-m']);
     expect(await keys({ projectId: 'p3' })).toEqual(['wide-m']);
-    expect(await keys({})).toEqual(['m-p1', 'm-p2', 'wide-m']);
+    expect(await keys({ projectId: 'p2' })).toEqual(['m-p2']);
+    expect(await keys({})).toEqual(['hidden-m', 'm-p1', 'm-p2', 'plain-m', 'wide-m']);
     // other filters do not widen
     expect(await keys({ projectId: 'p1', category: 'embedding' })).toEqual([]);
-    expect(await keys({ projectId: 'p2', category: 'embedding' })).toEqual(['m-p2']);
     expect(await keys({ projectId: 'p3', providerKey: 'other' })).toEqual([]);
 
-    expect((await db.findModelByKey('wide-m', 'p7'))?.allProjects).toBe(true);
-    expect((await db.findModelById(String(wide._id), 'p7'))?.key).toBe('wide-m');
+    expect((await db.findModelByKey('wide-m', 'p3'))?.platform).toBe(true);
+    expect(await db.findModelByKey('wide-m', 'p7')).toBeNull();
+    expect(await db.findModelByKey('hidden-m', 'p1')).toBeNull();
+    expect((await db.findModelById(String(wide._id), 'p1'))?.key).toBe('wide-m');
+    expect(await db.findModelById(String(wide._id), 'p7')).toBeNull();
     expect(await db.findModelByKey('m-p2', 'p1')).toBeNull();
     expect(await db.findModelById(String(wide._id))).not.toBeNull();
   });
 
-  it('persists allProjects through update', async () => {
+  it('follows a change of the provider assignment', async () => {
+    const provider = await db.createProvider({ ...providerBase, key: 'pm-move', platform: true, projectIds: ['q1'] });
+    await db.createModel({ ...modelBase, key: 'move-m', providerKey: 'pm-move', platform: true });
+    expect((await db.findModelByKey('move-m', 'q1'))?.key).toBe('move-m');
+    expect(await db.findModelByKey('move-m', 'q2')).toBeNull();
+    await db.updateProvider(String(provider._id), { projectIds: ['q2'] });
+    expect(await db.findModelByKey('move-m', 'q1')).toBeNull();
+    expect((await db.findModelByKey('move-m', 'q2'))?.key).toBe('move-m');
+  });
+
+  it('persists platform through update', async () => {
     const created = await db.createModel({ ...modelBase, key: 'flip', projectId: 'p1' });
-    await db.updateModel(String(created._id), { allProjects: true });
-    expect((await db.findModelByKey('flip', 'p9'))?.allProjects).toBe(true);
+    await db.updateModel(String(created._id), { platform: true });
+    expect((await db.findModelByKey('flip'))?.platform).toBe(true);
   });
 });
 
 describe('mongodb filters', () => {
-  type Captured = { filter?: Record<string, unknown> };
-  const mongoModels = () => {
+  type Captured = { filter?: Record<string, unknown>; providerFilter?: Record<string, unknown> };
+  const mongoModels = (platformProviderKeys: string[] = ['plat']) => {
     const captured: Captured = {};
-    const collection = {
+    const collection = (name: string) => ({
       findOne: vi.fn(async (filter: Record<string, unknown>) => { captured.filter = filter; return null; }),
       find: vi.fn((filter: Record<string, unknown>) => {
-        captured.filter = filter;
-        return { sort: () => ({ toArray: async () => [] }) };
+        const isProviders = name === 'providers';
+        if (isProviders) captured.providerFilter = filter; else captured.filter = filter;
+        const list = isProviders ? platformProviderKeys.map((key) => ({ key })) : [];
+        return { sort: () => ({ toArray: async () => list }), project: () => ({ toArray: async () => list }) };
       }),
-    };
+    });
     class Base {
-      getTenantDb() { return { collection: () => collection, databaseName: 'x' }; }
+      getTenantDb() { return { collection, databaseName: 'x' }; }
     }
     const Models = MongoModelMixin(Base as never) as unknown as new () => Record<string, (...a: unknown[]) => Promise<unknown>>;
     const Providers = MongoProviderMixin(Base as never) as unknown as new () => Record<string, (...a: unknown[]) => Promise<unknown>>;
     return { captured, models: new Models(), providers: new Providers() };
   };
 
-  it('models: project OR allProjects, combined (AND) with the other filters', async () => {
-    const { captured, models } = mongoModels();
+  it('models: own project OR platform models of an assigned platform provider, combined (AND) with the other filters', async () => {
+    const { captured, models } = mongoModels(['plat']);
+    const visible = [{ projectId: 'p1' }, { platform: true, providerKey: { $in: ['plat'] } }];
     await models.listModels({ projectId: 'p1', category: 'llm', providerKey: 'k' });
-    expect(captured.filter).toEqual({
-      $or: [{ projectId: 'p1' }, { allProjects: true }],
-      category: 'llm',
-      providerKey: 'k',
-    });
+    expect(captured.providerFilter).toEqual({ platform: true, $or: [{ projectId: 'p1' }, { projectIds: 'p1' }] });
+    expect(captured.filter).toEqual({ $or: visible, category: 'llm', providerKey: 'k' });
     await models.listModels({ category: 'llm' });
     expect(captured.filter).toEqual({ category: 'llm' });
     await models.findModelByKey('k', 'p1');
-    expect(captured.filter).toEqual({ key: 'k', $or: [{ projectId: 'p1' }, { allProjects: true }] });
+    expect(captured.filter).toEqual({ key: 'k', $or: visible });
     await models.findModelByKey('k');
     expect(captured.filter).toEqual({ key: 'k' });
     await models.findModelById('not-an-object-id', 'p1');
-    expect(captured.filter).toEqual({ _id: 'not-an-object-id', $or: [{ projectId: 'p1' }, { allProjects: true }] });
+    expect(captured.filter).toEqual({ _id: 'not-an-object-id', $or: visible });
   });
 
-  it('providers: project OR projectIds OR allProjects, combined with type/driver/status', async () => {
+  it('models: no platform provider assigned leaves only the project own models', async () => {
+    const { captured, models } = mongoModels([]);
+    await models.listModels({ projectId: 'p1' });
+    expect(captured.filter).toEqual({ $or: [{ projectId: 'p1' }, { platform: true, providerKey: { $in: [] } }] });
+  });
+
+  it('providers: project OR projectIds, combined with type/driver/status (platform providers are ordinary)', async () => {
     const { captured, providers } = mongoModels();
     await providers.listProviders('t1', { projectId: 'p1', type: 'websearch', status: 'active' });
-    expect(captured.filter).toEqual({
+    expect(captured.providerFilter).toEqual({
       tenantId: 't1',
-      $or: [{ projectId: 'p1' }, { projectIds: 'p1' }, { allProjects: true }],
+      $or: [{ projectId: 'p1' }, { projectIds: 'p1' }],
       type: 'websearch',
       status: 'active',
     });
     await providers.findProviderByKey('t1', 'k', 'p1');
     expect(captured.filter).toEqual({
       tenantId: 't1', key: 'k',
-      $or: [{ projectId: 'p1' }, { projectIds: 'p1' }, { allProjects: true }],
+      $or: [{ projectId: 'p1' }, { projectIds: 'p1' }],
     });
     await providers.findProviderByKey('t1', 'k');
     expect(captured.filter).toEqual({ tenantId: 't1', key: 'k' });

@@ -7961,6 +7961,7 @@ export const en = {
     list: {
       unassigned: 'Unassigned',
       unassignedTip: 'Not usable until it is assigned to a project',
+      platform: 'Platform',
       assign: 'Assign',
     },
     detail: {

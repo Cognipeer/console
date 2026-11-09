@@ -1,5 +1,5 @@
 /**
- * Web search with a platform-provided (tenant-wide) instance: it is listed and run from a project it was never
+ * Web search with a platform-provided instance: it is listed and run from a project it is
  * assigned to, and its connection comes from the operator (route + resolveConnection), never the stored blob.
  * Real SQLite database and real provider service; only the outbound call is mocked.
  */
@@ -35,7 +35,7 @@ beforeAll(async () => {
   hoisted.db = db;
   await db.createProvider({
     tenantId: 't1', type: 'websearch', driver: 'tavily', label: 'Platform search', key: 'platform-search',
-    status: 'active', credentialsEnc: 'not-decryptable', settings: { managed: true }, allProjects: true, createdBy: 'system',
+    status: 'active', credentialsEnc: 'not-decryptable', settings: { managed: true }, platform: true, projectIds: ['project-assigned'], createdBy: 'system',
   });
 });
 
@@ -45,13 +45,14 @@ afterAll(async () => {
   if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('web search over a tenant-wide record', () => {
-  it('lists it for any project', async () => {
-    const views = await listWebSearchProviders('platform_websearch_tenant', 't1', 'project-never-assigned');
-    expect(views.map((v) => [v.key, v.allProjects])).toEqual([['platform-search', true]]);
+describe('web search over a platform record', () => {
+  it('lists it for a project it is assigned to, and for no other', async () => {
+    const views = await listWebSearchProviders('platform_websearch_tenant', 't1', 'project-assigned');
+    expect(views.map((v) => [v.key, v.platform])).toEqual([['platform-search', true]]);
+    expect(await listWebSearchProviders('platform_websearch_tenant', 't1', 'project-other')).toEqual([]);
   });
 
-  it('runs it from any project with the operator key, never the stored blob', async () => {
+  it('runs it from an assigned project with the operator key, never the stored blob', async () => {
     const lease = { id: 'l1', settle: vi.fn(async () => undefined), release: vi.fn(async () => undefined) };
     registerManagedCreditsHost({
       isManagedProvider: (ref) => ref.settings?.managed === true,
@@ -62,7 +63,7 @@ describe('web search over a tenant-wide record', () => {
       ),
     });
     hoisted.call.mockResolvedValue({ results: [], provider: 'tavily' });
-    const result = await runWebSearch('platform_websearch_tenant', 't1', 'project-never-assigned', { query: 'hello' });
+    const result = await runWebSearch('platform_websearch_tenant', 't1', 'project-assigned', { query: 'hello' });
     expect(hoisted.call).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(hoisted.call.mock.calls[0])).toContain('operator-key');
     expect(hoisted.call.mock.calls[0][0].driver).toBe('search-up');
@@ -79,7 +80,7 @@ describe('web search over a tenant-wide record', () => {
       resolveConnection: () => null,
     });
     hoisted.call.mockClear();
-    await expect(runWebSearch('platform_websearch_tenant', 't1', 'project-never-assigned', { query: 'hello' }))
+    await expect(runWebSearch('platform_websearch_tenant', 't1', 'project-assigned', { query: 'hello' }))
       .rejects.toThrow('This provider is not available right now.');
     expect(hoisted.call).not.toHaveBeenCalled();
   });

@@ -81,12 +81,11 @@ function sanitizeUpdatePayload(body: unknown): UpdateProviderConfigInput {
 
 /** True when the provider row belongs to this project (direct or via projectIds). */
 function isAssignedToProject(
-  provider: { allProjects?: boolean; projectId?: unknown; projectIds?: unknown },
+  provider: { projectId?: unknown; projectIds?: unknown },
   projectId: string,
 ): boolean {
   return (
-    provider.allProjects === true
-    || String(provider.projectId) === String(projectId)
+    String(provider.projectId) === String(projectId)
     || (Array.isArray(provider.projectIds) && provider.projectIds.map(String).includes(String(projectId)))
   );
 }

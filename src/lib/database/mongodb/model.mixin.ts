@@ -151,6 +151,21 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       return result.deletedCount === 1;
     }
 
+    /**
+     * Models visible in a project: its own, plus platform models whose provider is a platform provider assigned to it
+     * (legacy `projectId` or `projectIds`).
+     */
+    protected async projectModelVisibility(projectId: string): Promise<Array<Record<string, unknown>>> {
+      const db = this.getTenantDb();
+      const providers = await db
+        .collection(COLLECTIONS.providers)
+        .find({ platform: true, $or: [{ projectId }, { projectIds: projectId }] })
+        .project({ key: 1 })
+        .toArray();
+      const keys = providers.map((p) => (p as { key?: string }).key).filter((k): k is string => typeof k === 'string');
+      return [{ projectId }, { platform: true, providerKey: { $in: keys } }];
+    }
+
     async listModels(filters?: {
       projectId?: string;
       category?: ModelCategory;
@@ -162,8 +177,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       const query: Record<string, unknown> = {};
 
       if (filters?.projectId) {
-        // Platform-provided records are visible in every project.
-        query.$or = [{ projectId: filters.projectId }, { allProjects: true }];
+        query.$or = await this.projectModelVisibility(filters.projectId);
       }
 
       if (filters?.category) {
@@ -200,7 +214,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         _id: ObjectId.isValid(id) ? new ObjectId(id) : id,
       };
       if (projectId) {
-        query.$or = [{ projectId }, { allProjects: true }];
+        query.$or = await this.projectModelVisibility(projectId);
       }
       const model = await db
         .collection<IModel>(COLLECTIONS.models)
@@ -219,7 +233,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       const db = this.getTenantDb();
       const query: Record<string, unknown> = { key };
       if (projectId) {
-        query.$or = [{ projectId }, { allProjects: true }];
+        query.$or = await this.projectModelVisibility(projectId);
       }
       const model = await db.collection<IModel>(COLLECTIONS.models).findOne(query);
       if (!model) {

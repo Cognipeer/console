@@ -296,6 +296,7 @@ describe('PATCH /api/providers/:id?scope=tenant - projectIds', () => {
       'tenant_acme',
       'prov-1',
       expect.objectContaining({ projectIds: ['p1', 'p2'] }),
+      { allowPlatformAssignment: true },
     );
   });
 

@@ -113,7 +113,7 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 function sanitizeModel(model: IModel) {
   return {
     ...model,
-    allProjects: Boolean(model.allProjects),
+    platform: Boolean(model.platform),
     capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
   };

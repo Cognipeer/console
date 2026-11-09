@@ -6238,6 +6238,7 @@ export const tr: typeof en = {
     list: {
       unassigned: 'Atanmamış',
       unassignedTip: 'Bir projeye atanana kadar kullanılamaz',
+      platform: 'Platform',
       assign: 'Ata',
     },
     detail: {

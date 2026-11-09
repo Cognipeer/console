@@ -466,8 +466,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = await requireProjectContextForRequest(request);
       const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
       const assigned = provider && (
-        provider.allProjects === true
-        || String(provider.projectId) === String(projectId)
+        String(provider.projectId) === String(projectId)
         || (
           Array.isArray(provider.projectIds)
           && provider.projectIds.map(String).includes(String(projectId))
@@ -519,7 +518,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Not found' });
         }
 
-        const updated = await updateProviderConfig(session.tenantDbName, id, payload);
+        const updated = await updateProviderConfig(session.tenantDbName, id, payload, { allowPlatformAssignment: true });
         if (!updated) {
           return reply.code(404).send({ error: 'Not found' });
         }
@@ -530,8 +529,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = await requireProjectContextForRequest(request);
       const existing = await getProviderConfigById(session.tenantDbName, id);
       const assigned = existing && (
-        existing.allProjects === true
-        || String(existing.projectId) === String(projectId)
+        String(existing.projectId) === String(projectId)
         || (
           Array.isArray(existing.projectIds)
           && existing.projectIds.map(String).includes(String(projectId))
@@ -581,8 +579,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = await requireProjectContextForRequest(request);
       const existing = await getProviderConfigById(session.tenantDbName, id);
       const assigned = existing && (
-        existing.allProjects === true
-        || String(existing.projectId) === String(projectId)
+        String(existing.projectId) === String(projectId)
         || (
           Array.isArray(existing.projectIds)
           && existing.projectIds.map(String).includes(String(projectId))

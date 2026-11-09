@@ -1,6 +1,7 @@
 /**
  * A platform-provided record refused by the model service answers 403 with code platform_record_read_only on the
- * dashboard routes (create, delete) of /api/models; the model view carries allProjects.
+ * dashboard routes (create, delete) of /api/models; the model view carries platform. Inactive platform
+ * models are left out unless asked for (then marked unavailable); platform providers are listed on request.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +17,7 @@ vi.mock('@/lib/services/models/modelService', () => ({
   createModel: vi.fn(),
   deleteModel: vi.fn(),
   listModelProviders: vi.fn(),
+  listPlatformModelProviders: vi.fn(),
 }));
 vi.mock('@/lib/quota', () => ({ checkResourceQuota: vi.fn() }));
 vi.mock('@/lib/services/projects/projectContext', () => {
@@ -29,7 +31,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { resolveProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { createModel, deleteModel, listModels, listModelProviders } from '@/lib/services/models/modelService';
+import { createModel, deleteModel, listModels, listModelProviders, listPlatformModelProviders } from '@/lib/services/models/modelService';
 import { PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
 import { checkResourceQuota } from '@/lib/quota';
 import { resolveProjectContext } from '@/lib/services/projects/projectContext';
@@ -92,13 +94,47 @@ describe('/api/models and platform records', () => {
     expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Models cannot be added to a platform provider.');
   });
 
-  it('lists a model with allProjects as a boolean, false by default', async () => {
+  it('lists a model with platform as a boolean, false by default', async () => {
     (listModels as ReturnType<typeof vi.fn>).mockResolvedValue([
       { _id: 'a', name: 'A', key: 'a', category: 'llm', settings: {} },
-      { _id: 'b', name: 'B', key: 'b', category: 'llm', settings: {}, allProjects: true },
+      { _id: 'b', name: 'B', key: 'b', category: 'llm', settings: {}, platform: true },
     ]);
     const res = await app.inject({ method: 'GET', url: '/api/models', headers: HEADERS });
-    const body = parseJsonBody<{ models: Array<{ allProjects: boolean }> }>(res.body);
-    expect(body.models.map((m) => m.allProjects)).toEqual([false, true]);
+    const body = parseJsonBody<{ models: Array<{ platform: boolean }> }>(res.body);
+    expect(body.models.map((m) => m.platform)).toEqual([false, true]);
+  });
+
+  it('leaves out inactive platform models unless includeUnavailable, then marks them unavailable', async () => {
+    (listModels as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { _id: 'a', name: 'A', key: 'a', category: 'llm', settings: {}, platform: true },
+      { _id: 'b', name: 'B', key: 'b', category: 'llm', settings: {}, platform: true, metadata: { inactive: true } },
+      { _id: 'c', name: 'C', key: 'c', category: 'llm', settings: {}, metadata: { inactive: true } },
+    ]);
+    const plain = await app.inject({ method: 'GET', url: '/api/models', headers: HEADERS });
+    expect(parseJsonBody<{ models: Array<{ key: string }> }>(plain.body).models.map((m) => m.key)).toEqual(['a', 'c']);
+    const all = await app.inject({ method: 'GET', url: '/api/models?includeUnavailable=true', headers: HEADERS });
+    const models = parseJsonBody<{ models: Array<{ key: string; unavailable?: boolean }> }>(all.body).models;
+    expect(models.map((m) => [m.key, m.unavailable])).toEqual([['a', undefined], ['b', true], ['c', undefined]]);
+  });
+
+  it('returns platformProviders with the assigned flag on includeProviders + includePlatform only', async () => {
+    const assigned = { _id: 'pp1', tenantId: 'tenant-1', key: 'plat-a', type: 'model', driver: 'openai', label: 'A', status: 'active', platform: true, projectIds: ['proj-1'], settings: { secret: 1 }, description: 'internal' };
+    const other = { ...assigned, _id: 'pp2', key: 'plat-b', label: 'B', projectIds: [] };
+    (listModelProviders as ReturnType<typeof vi.fn>).mockResolvedValue([assigned]);
+    (listPlatformModelProviders as ReturnType<typeof vi.fn>).mockResolvedValue([assigned, other]);
+
+    const withPlatform = await app.inject({ method: 'GET', url: '/api/models?includeProviders=true&includePlatform=true', headers: HEADERS });
+    const body = parseJsonBody<{ providers: Array<{ key: string }>; platformProviders: Array<Record<string, unknown>> }>(withPlatform.body);
+    expect(body.providers.map((p) => p.key)).toEqual(['plat-a']);
+    expect(body.platformProviders.map((p) => [p.key, p.assigned])).toEqual([['plat-a', true], ['plat-b', false]]);
+    for (const p of body.platformProviders) {
+      expect(p).toMatchObject({ platform: true, settings: {} });
+      expect(p).not.toHaveProperty('description');
+    }
+
+    const without = await app.inject({ method: 'GET', url: '/api/models?includeProviders=true', headers: HEADERS });
+    expect(parseJsonBody<Record<string, unknown>>(without.body)).not.toHaveProperty('platformProviders');
+    const noProviders = await app.inject({ method: 'GET', url: '/api/models?includePlatform=true', headers: HEADERS });
+    expect(parseJsonBody<Record<string, unknown>>(noProviders.body)).not.toHaveProperty('platformProviders');
   });
 });

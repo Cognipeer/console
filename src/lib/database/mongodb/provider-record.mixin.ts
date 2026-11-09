@@ -140,7 +140,7 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
       if (projectId) {
         // Treat projectId as an assignment filter.
         // Supports legacy single-project providers (projectId) and multi-assigned providers (projectIds).
-        query.$or = [{ projectId }, { projectIds: projectId }, { allProjects: true }];
+        query.$or = [{ projectId }, { projectIds: projectId }];
       }
       const provider = await db
         .collection<IProviderRecord>(COLLECTIONS.providers)
@@ -172,7 +172,6 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
         query.$or = [
           { projectId: filters.projectId },
           { projectIds: filters.projectId },
-          { allProjects: true },
         ];
       }
 

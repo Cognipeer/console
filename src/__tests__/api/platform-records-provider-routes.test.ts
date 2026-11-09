@@ -1,6 +1,7 @@
 /**
- * Platform-provided provider records through /api/providers: a project-scope read opens a tenant-wide record,
- * a write answers 403 (not 404), and replies carry identity fields only.
+ * Platform-provided provider records through /api/providers: a project-scope read opens a platform record assigned
+ * to the project (and 404s one that is not), a write answers 403 (not 404), only the tenant-scope PATCH may change
+ * the assignment, and replies carry identity fields and the assignment only.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -40,7 +41,7 @@ import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const wide = {
   _id: 'prov-wide', tenantId: 'tenant-1', key: 'platform', type: 'model', driver: 'openai', label: 'Platform',
-  status: 'active', allProjects: true, hasCredentials: true, createdBy: 'op',
+  status: 'active', platform: true, projectIds: ['proj-ctx'], hasCredentials: true, createdBy: 'op',
   description: 'internal note', settings: { endpoint: 'https://internal.example', managed: true },
   metadata: { region: 'internal' }, credentialFields: ['apiKey'],
 };
@@ -60,12 +61,12 @@ afterEach(async () => {
 });
 
 const expectRedacted = (provider: Record<string, unknown>) => {
-  expect(provider).toMatchObject({ key: 'platform', driver: 'openai', label: 'Platform', allProjects: true });
+  expect(provider).toMatchObject({ key: 'platform', driver: 'openai', label: 'Platform', platform: true });
   expect(provider.settings).toEqual({});
   for (const hidden of ['description', 'metadata', 'credentialFields']) expect(provider).not.toHaveProperty(hidden);
 };
 
-describe('tenant-wide provider record over the dashboard routes', () => {
+describe('platform provider record over the dashboard routes', () => {
   it('opens in project scope and lists, both with identity fields only', async () => {
     const detail = await app.inject({ method: 'GET', url: '/api/providers/prov-wide' });
     expect(detail.statusCode).toBe(200);
@@ -88,8 +89,39 @@ describe('tenant-wide provider record over the dashboard routes', () => {
     expect(del.statusCode).toBe(403);
   });
 
+  it('keeps the tenant assignment in the redacted view', async () => {
+    const detail = await app.inject({ method: 'GET', url: '/api/providers/prov-wide' });
+    expect(parseJsonBody<{ provider: Record<string, unknown> }>(detail.body).provider.projectIds).toEqual(['proj-ctx']);
+  });
+
+  it('hides a platform record that is not assigned to the project (and opens it tenant-wide)', async () => {
+    hoisted.getProviderConfigById.mockResolvedValue({ ...wide, projectIds: ['other'] });
+    expect((await app.inject({ method: 'GET', url: '/api/providers/prov-wide' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/api/providers/prov-wide?scope=tenant' })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'PATCH', url: '/api/providers/prov-wide', payload: { projectIds: [] } })).statusCode).toBe(404);
+  });
+
+  it('lets only the tenant-scope PATCH change the assignment of a platform provider', async () => {
+    hoisted.updateProviderConfig.mockResolvedValue({ ...wide });
+    const tenant = await app.inject({ method: 'PATCH', url: '/api/providers/prov-wide?scope=tenant', payload: { projectIds: [] } });
+    expect(tenant.statusCode).toBe(200);
+    expect(hoisted.updateProviderConfig).toHaveBeenLastCalledWith(
+      'tenant_acme', 'prov-wide', expect.objectContaining({ projectIds: [] }), { allowPlatformAssignment: true },
+    );
+    await app.inject({ method: 'PATCH', url: '/api/providers/prov-wide', payload: { projectIds: [] } });
+    expect(hoisted.updateProviderConfig).toHaveBeenLastCalledWith(
+      'tenant_acme', 'prov-wide', expect.anything(), { projectId: 'proj-ctx' },
+    );
+  });
+
+  it('never takes platform from a tenant payload', async () => {
+    hoisted.updateProviderConfig.mockResolvedValue({ ...wide });
+    await app.inject({ method: 'PATCH', url: '/api/providers/prov-wide?scope=tenant', payload: { projectIds: [], platform: true, label: 'x' } });
+    expect(hoisted.updateProviderConfig.mock.calls[0][2]).not.toHaveProperty('platform');
+  });
+
   it('still hides an ordinary record of another project', async () => {
-    hoisted.getProviderConfigById.mockResolvedValue({ ...wide, allProjects: false, projectIds: ['other'] });
+    hoisted.getProviderConfigById.mockResolvedValue({ ...wide, platform: false, projectIds: ['other'] });
     expect((await app.inject({ method: 'GET', url: '/api/providers/prov-wide' })).statusCode).toBe(404);
   });
 });
