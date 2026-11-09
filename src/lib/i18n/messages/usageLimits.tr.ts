@@ -53,6 +53,7 @@ export const usageLimitsTr: typeof usageLimitsEn = {
     agent: 'ajan oturumu',
     flow: 'akış',
     job: 'iş',
+    crawler: 'crawler işi',
     browser: 'tarayıcı oturumu',
     realtime: 'gerçek zamanlı oturum',
     sandbox: 'sandbox',

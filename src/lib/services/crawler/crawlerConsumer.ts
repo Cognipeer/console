@@ -43,12 +43,13 @@ export async function startCrawlerQueueConsumer(): Promise<void> {
   queue.consume(queueNameFor('crawler'), async (ctx: JobContext<QueuePayload>) => {
     if (ctx.name === 'crawler.run') {
       const payload = ctx.data as unknown as RunPayload;
-      // Plan limit (background jobs): one 'job' lease per crawl job; a full pool requeues it with a delay.
+      // Plan limit (crawler jobs): one 'crawler' lease per crawl job; a full pool requeues it with a delay.
       const leased = await runJobUnderLease({
         tenantId: payload.ctx.tenantId,
         holderId: payload.jobId,
         queueName: queueNameFor('crawler'),
         jobName: 'crawler.run',
+        pool: 'crawler',
         payload: payload as unknown as QueuePayload,
         run: () => runCrawlJobLocal(payload.ctx, payload.jobId),
       });

@@ -81,9 +81,11 @@ export async function getMonthlyUsage(tenantId: string, period: string = current
 
 /** The limit in the meter's own unit (sandbox hours are limited in hours, stored in seconds). */
 export function monthlyLimitFor(
-  monthly: { searches?: number; flowRuns?: number; crawlerPages?: number; sandboxHours?: number },
+  monthly: { flowRuns?: number; crawlerPages?: number; sandboxHours?: number },
   meter: MonthlyMeter,
 ): number | undefined {
+  // Web searches are counted for the usage page but paid with credits: never a monthly limit.
+  if (meter === 'searches') return undefined;
   if (meter === 'sandboxSeconds') {
     return monthly.sandboxHours === undefined ? undefined : monthly.sandboxHours * 3600;
   }

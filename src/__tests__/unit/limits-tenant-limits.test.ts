@@ -43,7 +43,7 @@ const claim = {
   seats: { console: 5, portal: 20 },
   limits: {
     apiRequestsPerMinute: 120,
-    concurrent: { agentSessions: 3, flows: 4, jobs: 2, browserSessions: 1, realtimeSessions: 6, sandboxes: 0 },
+    concurrent: { agentSessions: 3, flows: 4, jobs: 2, crawlers: 3, browserSessions: 1, realtimeSessions: 6, sandboxes: 0 },
     monthly: { searches: 100, flowRuns: 50, crawlerPages: 500, sandboxHours: 2 },
     storageGb: 1.5,
     realtimeMaxSessionMinutes: 30,
@@ -71,8 +71,8 @@ describe('limitsFromPlanClaim', () => {
       planName: 'Test',
       capacityPacks: 2,
       apiRpm: 120,
-      concurrency: { agent: 3, flow: 4, job: 2, browser: 1, realtime: 6, sandbox: 0 },
-      monthly: { searches: 100, flowRuns: 50, crawlerPages: 500, sandboxHours: 2 },
+      concurrency: { agent: 3, flow: 4, job: 2, crawler: 3, browser: 1, realtime: 6, sandbox: 0 },
+      monthly: { flowRuns: 50, crawlerPages: 500, sandboxHours: 2 },
       storageBytes: 1_500_000_000,
       seats: { console: 5, portal: 20 },
       sandboxMaxSize: { cpu: 2, memoryMb: 1024 },
@@ -82,10 +82,17 @@ describe('limitsFromPlanClaim', () => {
     });
   });
 
+  it('ignores an older claim\'s monthly searches: web search is paid with credits', () => {
+    const l = limitsFromPlanClaim(claim, 'license');
+    expect(l.monthly).toEqual({ flowRuns: 50, crawlerPages: 500, sandboxHours: 2 });
+    expect('searches' in l.monthly).toBe(false);
+  });
+
   it('leaves absent limits undefined', () => {
     const l = limitsFromPlanClaim({ id: 'x' }, 'default');
     expect(l.apiRpm).toBeUndefined();
     expect(l.concurrency).toEqual({});
+    expect(l.concurrency.crawler).toBeUndefined();
     expect(l.storageBytes).toBeUndefined();
     expect(l.source).toBe('default');
   });

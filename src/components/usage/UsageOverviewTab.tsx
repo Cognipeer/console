@@ -9,7 +9,7 @@ import { formatBytes, formatDate, formatNumber, formatPeriod, runwayText } from 
 
 type Translate = (key: string, values?: Record<string, string | number>) => string;
 
-const MAIN_CAPACITY: CapacityDimension[] = ['apiRpm', 'agent', 'flow', 'job', 'browser'];
+const MAIN_CAPACITY: CapacityDimension[] = ['apiRpm', 'agent', 'flow', 'job', 'crawler', 'browser'];
 const EXTRA_CAPACITY: CapacityDimension[] = ['realtime', 'sandbox'];
 
 function valueText(
@@ -142,7 +142,11 @@ export default function UsageOverviewTab({
             <UsageBar
               key={row.dimension}
               label={t(`rows.${row.dimension}`)}
-              valueText={valueText(t, locale, row.used, row.limit, formatNumber, 'usedThisMonth')}
+              valueText={
+                row.dimension === 'searches'
+                  ? `${t('usedThisMonth', { used: formatNumber(row.used, locale) })} · ${t('paidWithCredits')}`
+                  : valueText(t, locale, row.used, row.limit, formatNumber, 'usedThisMonth')
+              }
               used={row.used}
               limit={row.limit}
             />

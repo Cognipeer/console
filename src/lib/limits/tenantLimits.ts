@@ -7,7 +7,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { getDefaultPlanClaim } from '@/enterprise/plan-limits';
 import { LicenseManager } from '@/lib/license/license-manager';
-import type { LicensePlanClaim } from '@/lib/license/planClaim';
+import type { LicensePlanClaim, LicensePlanMonthlyLimits } from '@/lib/license/planClaim';
 import { effectivePlanLimitsMode, planLimitsActive } from './mode';
 import type { PlanLimitsMode, ResolvedTenantPlan, TenantLimits } from './types';
 
@@ -20,6 +20,19 @@ const LOG_EVERY_MS = 60_000;
 const cache = new Map<string, { at: number; value: ResolvedTenantPlan }>();
 let lastLoadFailureLogAt = 0;
 
+/**
+ * The monthly limits of a claim. An older claim may still carry `searches`; it is ignored, because
+ * hosted web search is paid per search with credits and has no monthly allowance.
+ */
+function monthlyLimits(monthly: LicensePlanMonthlyLimits | undefined): TenantLimits['monthly'] {
+  const { flowRuns, crawlerPages, sandboxHours } = monthly ?? {};
+  return {
+    ...(flowRuns !== undefined ? { flowRuns } : {}),
+    ...(crawlerPages !== undefined ? { crawlerPages } : {}),
+    ...(sandboxHours !== undefined ? { sandboxHours } : {}),
+  };
+}
+
 export function limitsFromPlanClaim(
   claim: LicensePlanClaim,
   source: 'license' | 'default',
@@ -31,6 +44,7 @@ export function limitsFromPlanClaim(
   if (concurrent.agentSessions !== undefined) concurrency.agent = concurrent.agentSessions;
   if (concurrent.flows !== undefined) concurrency.flow = concurrent.flows;
   if (concurrent.jobs !== undefined) concurrency.job = concurrent.jobs;
+  if (concurrent.crawlers !== undefined) concurrency.crawler = concurrent.crawlers;
   if (concurrent.browserSessions !== undefined) concurrency.browser = concurrent.browserSessions;
   if (concurrent.realtimeSessions !== undefined) concurrency.realtime = concurrent.realtimeSessions;
   if (concurrent.sandboxes !== undefined) concurrency.sandbox = concurrent.sandboxes;
@@ -42,7 +56,7 @@ export function limitsFromPlanClaim(
     capacityPacks: claim.capacityPacks,
     apiRpm: limits.apiRequestsPerMinute,
     concurrency,
-    monthly: { ...(limits.monthly ?? {}) },
+    monthly: monthlyLimits(limits.monthly),
     storageBytes: limits.storageGb !== undefined ? Math.round(limits.storageGb * 1e9) : undefined,
     seats: { ...(claim.seats ?? {}) },
     sandboxMaxSize: limits.sandboxMaxSize ? { ...limits.sandboxMaxSize } : undefined,

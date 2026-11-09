@@ -63,6 +63,7 @@ export const CAPACITY_DIMENSIONS: readonly CapacityDimension[] = [
   'agent',
   'flow',
   'job',
+  'crawler',
   'browser',
   'realtime',
   'sandbox',
@@ -207,7 +208,8 @@ export async function buildUsageSummary(tenantId: string): Promise<UsageSummary 
   const withLimit = <D extends MonthlyDimension>(dimension: D, used: number, limit: number | undefined): UsageRow<D> =>
     limit === undefined ? { dimension, used } : { dimension, used, limit };
   const monthly: Array<UsageRow<MonthlyDimension>> = [
-    withLimit('searches', monthlyUsage.searches, monthlyLimitFor(monthlyLimits, 'searches')),
+    // Counted only: hosted web search is paid per search with credits.
+    { dimension: 'searches', used: monthlyUsage.searches },
     withLimit('flowRuns', monthlyUsage.flowRuns, monthlyLimitFor(monthlyLimits, 'flowRuns')),
     withLimit('crawlerPages', monthlyUsage.crawlerPages, monthlyLimitFor(monthlyLimits, 'crawlerPages')),
     withLimit('sandboxHours', Math.round((monthlyUsage.sandboxSeconds / 3600) * 100) / 100, monthlyLimits.sandboxHours),

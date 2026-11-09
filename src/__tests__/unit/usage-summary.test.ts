@@ -41,7 +41,7 @@ function limits(overrides: Partial<TenantLimits> = {}): TenantLimits {
     capacityPacks: 2,
     apiRpm: 120,
     concurrency: { agent: 10, flow: 5, job: 2, browser: 3 },
-    monthly: { searches: 1000, flowRuns: 500, crawlerPages: 2000, sandboxHours: 10 },
+    monthly: { flowRuns: 500, crawlerPages: 2000, sandboxHours: 10 },
     storageBytes: 5_000_000_000,
     seats: { console: 5, portal: 20 },
     credits: {},
@@ -78,7 +78,7 @@ describe('computeBanners', () => {
       computeBanners(
         emptyInput({
           monthly: [
-            { dimension: 'searches', used: 799, limit: 1000 },
+            { dimension: 'crawlerPages', used: 799, limit: 1000 },
             { dimension: 'flowRuns', used: 999_999 },
           ],
           storage: { usedBytes: 79, limitBytes: 100 },
@@ -91,14 +91,14 @@ describe('computeBanners', () => {
     const banners = computeBanners(
       emptyInput({
         monthly: [
-          { dimension: 'searches', used: 800, limit: 1000 },
+          { dimension: 'crawlerPages', used: 800, limit: 1000 },
           { dimension: 'flowRuns', used: 500, limit: 500 },
         ],
         storage: { usedBytes: 99, limitBytes: 100 },
       }),
     );
     const byId = Object.fromEntries(banners.map((banner) => [banner.id, banner.severity]));
-    expect(byId).toEqual({ 'monthly:searches': 'warning', 'monthly:flowRuns': 'critical', storage: 'warning' });
+    expect(byId).toEqual({ 'monthly:crawlerPages': 'warning', 'monthly:flowRuns': 'critical', storage: 'warning' });
     // most severe first
     expect(banners[0]!.severity).toBe('critical');
 
@@ -172,12 +172,13 @@ describe('buildUsageSummary', () => {
       expiresAt: '2027-01-31T00:00:00.000Z',
       seats: { console: { used: 3, limit: 5 }, portal: { used: 7, limit: 20 } },
     });
-    expect(summary.capacity.map((row) => row.dimension)).toEqual(['apiRpm', 'agent', 'flow', 'job', 'browser', 'realtime', 'sandbox']);
+    expect(summary.capacity.map((row) => row.dimension)).toEqual(['apiRpm', 'agent', 'flow', 'job', 'crawler', 'browser', 'realtime', 'sandbox']);
     expect(summary.capacity.find((row) => row.dimension === 'agent')).toEqual({ dimension: 'agent', used: 4, limit: 10, peak24h: 9 });
     // no limit for realtime: the row carries no limit key
     expect(summary.capacity.find((row) => row.dimension === 'realtime')).toEqual({ dimension: 'realtime', used: 0 });
+    // Web searches are counted but never limited: they are paid with credits.
     expect(summary.monthly).toEqual([
-      { dimension: 'searches', used: 10, limit: 1000 },
+      { dimension: 'searches', used: 10 },
       { dimension: 'flowRuns', used: 20, limit: 500 },
       { dimension: 'crawlerPages', used: 30, limit: 2000 },
       { dimension: 'sandboxHours', used: 1.5, limit: 10 },

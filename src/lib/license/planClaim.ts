@@ -17,8 +17,10 @@ export interface LicensePlanConcurrentLimits {
   agentSessions?: number;
   /** Flow runs in progress. */
   flows?: number;
-  /** Background jobs in progress (evaluations, red-team, analysis, crawler, OCR, batch). */
+  /** Background jobs in progress (evaluations, red-team, analysis, OCR, batch). */
   jobs?: number;
+  /** Crawler jobs in progress. */
+  crawlers?: number;
   /** Open browser sessions. */
   browserSessions?: number;
   /** Open realtime sessions. */
@@ -28,7 +30,10 @@ export interface LicensePlanConcurrentLimits {
 }
 
 export interface LicensePlanMonthlyLimits {
-  /** Managed web searches per calendar month (UTC). */
+  /**
+   * Accepted so older licenses still activate; not enforced. Hosted web search is paid per search
+   * with credits and has no monthly allowance.
+   */
   searches?: number;
   /** Flow runs per calendar month (UTC). */
   flowRuns?: number;
@@ -160,6 +165,7 @@ export function normalizePlanClaim(value: unknown): LicensePlanClaim | undefined
         agentSessions: limitValue(concurrent.agentSessions, 'limits.concurrent.agentSessions'),
         flows: limitValue(concurrent.flows, 'limits.concurrent.flows'),
         jobs: limitValue(concurrent.jobs, 'limits.concurrent.jobs'),
+        crawlers: limitValue(concurrent.crawlers, 'limits.concurrent.crawlers'),
         browserSessions: limitValue(concurrent.browserSessions, 'limits.concurrent.browserSessions'),
         realtimeSessions: limitValue(concurrent.realtimeSessions, 'limits.concurrent.realtimeSessions'),
         sandboxes: limitValue(concurrent.sandboxes, 'limits.concurrent.sandboxes'),

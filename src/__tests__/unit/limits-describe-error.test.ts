@@ -142,7 +142,7 @@ describe('message mapping', () => {
     expect(limitDimensionKey('agent')).toBe('dimensions.agent');
     expect(limitDimensionKey('whatever')).toBe('dimensions.unknown');
     expect(limitDimensionKey(undefined)).toBe('dimensions.unknown');
-    for (const key of ['apiRpm', 'agent', 'flow', 'job', 'browser', 'realtime', 'sandbox', 'searches', 'flowRuns', 'crawlerPages', 'sandboxHours', 'sandboxSeconds']) {
+    for (const key of ['apiRpm', 'agent', 'flow', 'job', 'crawler', 'browser', 'realtime', 'sandbox', 'searches', 'flowRuns', 'crawlerPages', 'sandboxHours', 'sandboxSeconds']) {
       expect(en.has(limitDimensionKey(key)), key).toBe(true);
     }
   });

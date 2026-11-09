@@ -67,7 +67,8 @@ export async function releaseQuietly(lease: PlanLease | null | undefined): Promi
 }
 
 /**
- * Runs a background job under one 'job' lease (holder = the job id, never an
+ * Runs a background job under one lease (pool 'job' unless `pool` says
+ * otherwise, e.g. 'crawler'; holder = the job id, never an
  * item). When the pool is full the job is published again with a delay and its
  * own status is left untouched (still queued); `run` is not called. The lease
  * is released in `finally`, whatever way `run` ends.
@@ -78,11 +79,12 @@ export async function runJobUnderLease<T>(input: {
   queueName: string;
   jobName: string;
   payload: QueuePayload;
+  pool?: 'job' | 'crawler';
   run: () => Promise<T>;
 }): Promise<{ deferred: false; value: T } | { deferred: true }> {
   const attempt = await tryPoolLease({
     tenantId: input.tenantId,
-    pool: 'job',
+    pool: input.pool ?? 'job',
     holderId: input.holderId,
     source: { type: 'job', id: input.holderId },
   });

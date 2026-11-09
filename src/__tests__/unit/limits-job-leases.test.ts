@@ -35,6 +35,13 @@ describe('runJobUnderLease', () => {
     expect(h.publish).not.toHaveBeenCalled();
   });
 
+  it('takes the lease from the pool the caller names', async () => {
+    h.acquire.mockResolvedValue({ decision: allowed, lease: lease() });
+    const run = vi.fn(async () => 'done');
+    await runJobUnderLease({ tenantId: 't1', holderId: 'j1', queueName: 'q', jobName: 'n', payload, pool: 'crawler', run });
+    expect(h.acquire).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 't1', pool: 'crawler', holderId: 'j1' }));
+  });
+
   it('releases the lease when the job throws', async () => {
     h.acquire.mockResolvedValue({ decision: allowed, lease: lease() });
     await expect(

@@ -52,6 +52,7 @@ export const usageLimitsEn = {
     agent: 'agent sessions',
     flow: 'flows',
     job: 'jobs',
+    crawler: 'crawler jobs',
     browser: 'browser sessions',
     realtime: 'realtime sessions',
     sandbox: 'sandboxes',

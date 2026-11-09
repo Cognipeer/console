@@ -8,7 +8,7 @@
 export type PlanLimitsMode = 'off' | 'shadow' | 'on';
 
 /** Things counted while they are in progress (a lease is held for each). */
-export type ConcurrencyPool = 'agent' | 'flow' | 'job' | 'browser' | 'realtime' | 'sandbox';
+export type ConcurrencyPool = 'agent' | 'flow' | 'job' | 'crawler' | 'browser' | 'realtime' | 'sandbox';
 
 /** Things counted per calendar month (UTC). Sandbox time is stored in seconds and limited in hours. */
 export type MonthlyMeter = 'searches' | 'flowRuns' | 'crawlerPages' | 'sandboxSeconds';
@@ -35,8 +35,11 @@ export interface TenantLimits {
   apiRpm?: number;
   /** In-progress limits per pool; a missing pool has no limit, 0 = none allowed. */
   concurrency: Partial<Record<ConcurrencyPool, number>>;
-  /** Per calendar month (UTC); a missing entry has no limit, 0 = none allowed. */
-  monthly: { searches?: number; flowRuns?: number; crawlerPages?: number; sandboxHours?: number };
+  /**
+   * Per calendar month (UTC); a missing entry has no limit, 0 = none allowed. Web searches are counted
+   * but never limited here: hosted search is paid per search with credits.
+   */
+  monthly: { flowRuns?: number; crawlerPages?: number; sandboxHours?: number };
   /** Stored bytes the tenant may hold; undefined = no limit. */
   storageBytes?: number;
   seats: { console?: number; portal?: number };

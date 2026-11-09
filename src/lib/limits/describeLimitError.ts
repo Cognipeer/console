@@ -97,7 +97,7 @@ export function limitTitleKey(info: LimitErrorInfo): string {
 /** Key of a dimension label inside the `usageLimits` namespace. */
 export function limitDimensionKey(dimension: string | undefined): string {
   switch (dimension) {
-    case 'apiRpm': case 'agent': case 'flow': case 'job': case 'browser': case 'realtime': case 'sandbox':
+    case 'apiRpm': case 'agent': case 'flow': case 'job': case 'crawler': case 'browser': case 'realtime': case 'sandbox':
     case 'searches': case 'flowRuns': case 'crawlerPages': case 'sandboxHours': case 'sandboxSeconds':
       return `dimensions.${dimension}`;
     default:
