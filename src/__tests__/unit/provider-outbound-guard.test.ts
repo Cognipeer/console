@@ -72,31 +72,40 @@ describe('guarded provider fetch', () => {
 });
 
 describe('guarded provider fetch in warn mode (default)', () => {
+  const fetchMock = vi.fn();
   beforeEach(() => {
     delete process.env.PROVIDER_RUNTIME_GUARD;
     reloadConfig();
+    fetchMock.mockReset().mockResolvedValue(new Response('{}'));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it('attempts a target the guard would refuse and logs a warning once per host', async () => {
+  it('sends the call down the plain fetch path and logs a target the guard would refuse, once per host', async () => {
     const { OutboundPrivateTargetError } = await vi.importActual<typeof import('@/lib/security/outboundFetch')>('@/lib/security/outboundFetch');
     assertPublicUrlMock.mockRejectedValue(new OutboundPrivateTargetError('warn-host.internal.test'));
-    safeFetchMock.mockResolvedValue(new Response('{}'));
     const guarded = createGuardedFetch();
-    await runWithRequestContext({ requestId: 'r1', tenantId: 'tenant-a' }, () => guarded('http://warn-host.internal.test/v1'));
+    const init = { method: 'POST', body: '{}' };
+    await runWithRequestContext({ requestId: 'r1', tenantId: 'tenant-a' }, () => guarded('http://warn-host.internal.test/v1', init));
     await guarded('http://warn-host.internal.test/v2');
-    expect(safeFetchMock).toHaveBeenCalledTimes(2);
-    expect(safeFetchMock.mock.calls[0][2]).toMatchObject({ allowPrivate: true, keepAbortLinked: true, timeoutMs: 600_000 });
-    expect(safeFetchMock.mock.calls[0][2].followRedirects).toBeUndefined();
-    expect(warnMock).toHaveBeenCalledTimes(1);
+    expect(safeFetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]).toEqual(['http://warn-host.internal.test/v1', init]);
+    await vi.waitFor(() => expect(warnMock).toHaveBeenCalledTimes(1));
     expect(warnMock.mock.calls[0][1]).toMatchObject({ tenantId: 'tenant-a', host: 'warn-host.internal.test' });
   });
 
-  it('keeps the guard options for a target the guard accepts', async () => {
-    assertPublicUrlMock.mockResolvedValue(new URL('https://api.example.com/'));
-    safeFetchMock.mockResolvedValue(new Response('{}'));
-    await createGuardedFetch()('https://api.example.com/v1');
-    expect(safeFetchMock.mock.calls[0][2]).toMatchObject({ forceBlock: true });
-    expect(safeFetchMock.mock.calls[0][2].allowPrivate).toBeUndefined();
+  it('does not wait for the policy check and stays quiet for a target the guard accepts', async () => {
+    let resolveCheck: (url: URL) => void = () => undefined;
+    assertPublicUrlMock.mockReturnValue(new Promise<URL>((resolve) => { resolveCheck = resolve; }));
+    const response = await createGuardedFetch()('https://api.example.com/v1');
+    expect(response).toBeInstanceOf(Response);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    resolveCheck(new URL('https://api.example.com/'));
+    await Promise.resolve();
+    expect(safeFetchMock).not.toHaveBeenCalled();
     expect(warnMock).not.toHaveBeenCalled();
   });
 });

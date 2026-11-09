@@ -401,8 +401,9 @@ export interface AppConfig {
     defaultTimeoutMs: number;
     /**
      * What happens to a provider runtime call (model, embedding, image, speech, moderation, OCR and web search
-     * requests) whose target the outbound guard refuses. `enforce` refuses it. `warn` logs a rate-limited warning
-     * and lets the call through. The endpoint checks made when a provider is saved are the same in both modes.
+     * requests) whose target the outbound guard refuses. `enforce` refuses it. `warn` keeps the plain `fetch` path the
+     * call took before this setting existed and logs a rate-limited warning beside it. The endpoint checks made when a
+     * provider is saved are the same in both modes.
      */
     providerRuntimeGuard: 'enforce' | 'warn';
   };

@@ -3,9 +3,9 @@
  * web search runtimes), chosen by `PROVIDER_RUNTIME_GUARD`.
  *
  * `enforce`: the deployment's guard options apply and a redirect is handed back instead of followed.
- * `warn`: the same policy is evaluated first; a target it would refuse is logged (once per host every ten minutes)
- * and the call goes ahead, with redirects followed as `safeFetch` does by default. A target the policy accepts is
- * still address-pinned. Evaluating the policy never fails the call in this mode.
+ * `warn`: the request takes the same path it took before this setting existed (plain `fetch`), and the policy is
+ * evaluated beside it: a target it would refuse is logged (once per host every ten minutes). Evaluating the policy
+ * never fails or delays the call in this mode.
  *
  * The organization is read from the request context by the callers; a call without one (a background job) is judged
  * with no private networks opened.
@@ -62,4 +62,17 @@ export async function providerRuntimeGuardOptions(
     }
     return { allowPrivate: true };
   }
+}
+
+/** True while `PROVIDER_RUNTIME_GUARD=warn`: the policy is observed and logged, the request is not held to it. */
+export function providerRuntimeGuardObserves(): boolean {
+  return getConfig().outboundHttp.providerRuntimeGuard === 'warn';
+}
+
+/**
+ * Evaluates the policy for a request that has already gone ahead and logs a refusal (see
+ * `providerRuntimeGuardOptions`). Never throws and is not awaited by the caller.
+ */
+export function observeProviderTarget(url: string, tenantId: string | undefined): void {
+  void providerRuntimeGuardOptions(url, tenantId).catch(() => undefined);
 }

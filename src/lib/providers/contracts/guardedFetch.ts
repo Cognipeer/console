@@ -1,7 +1,8 @@
 /**
  * `fetch` for provider runtimes: every call is checked against the outbound guard of the deployment at call time
  * (the target addresses are validated and pinned for the connection, redirects are handed back instead of followed;
- * with `PROVIDER_RUNTIME_GUARD=warn` a refused target is logged and the call goes ahead, see `runtimeGuard`),
+ * with `PROVIDER_RUNTIME_GUARD=warn` the call takes the plain `fetch` path and a refused target is only logged, see
+ * `runtimeGuard`),
  * so a stored endpoint is vetted on each request and not only when the provider is saved.
  *
  * The organization is read from the request context when the call is made: it decides which private networks the
@@ -9,7 +10,11 @@
  */
 import { getRequestContext } from '@/lib/core/requestContext';
 import { safeFetch } from '@/lib/security/outboundFetch';
-import { providerRuntimeGuardOptions } from '@/lib/services/providers/runtimeGuard';
+import {
+  observeProviderTarget,
+  providerRuntimeGuardObserves,
+  providerRuntimeGuardOptions,
+} from '@/lib/services/providers/runtimeGuard';
 
 /** Upper bound on the wait for response headers; the provider SDKs and runtimes apply their own, shorter, budgets. */
 const PROVIDER_HEADERS_TIMEOUT_MS = 600_000;
@@ -34,8 +39,13 @@ export function createGuardedFetch(): GuardedFetch {
         ...init,
       } as RequestInit;
     }
+    const tenantId = getRequestContext()?.tenantId;
+    if (providerRuntimeGuardObserves()) {
+      observeProviderTarget(url, tenantId);
+      return fetch(input, init);
+    }
     return safeFetch(url, requestInit, {
-      ...(await providerRuntimeGuardOptions(url, getRequestContext()?.tenantId)),
+      ...(await providerRuntimeGuardOptions(url, tenantId)),
       timeoutMs: PROVIDER_HEADERS_TIMEOUT_MS,
       keepAbortLinked: true,
       sensitiveHeaders: ['x-api-key', 'api-key', 'openai-organization'],
