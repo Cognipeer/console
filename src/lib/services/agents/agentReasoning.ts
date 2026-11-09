@@ -21,7 +21,7 @@ import type { IAgentConfig, IAgentRuntimeConfig } from '@/lib/database/provider/
 import { effortsOfRule, resolveRuleForDriver } from '@/lib/services/models/modelRules';
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { isManagedModel } from '@/enterprise/managed-credits';
-import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
+import { primaryReplicaModel } from '@/lib/services/models/replicaList';
 import {
   normalizeReasoning,
   readModelReasoning,
