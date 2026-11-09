@@ -256,9 +256,9 @@ describe('ModelCatalogModal with platform providers', () => {
     await render(modal({ providers: [hostedAssigned as unknown as ModelProviderView], platformProviders: [hostedAssigned], onProviderAssigned }, 'admin'));
     await pickProvider('Hosted models');
     await click(document.body.querySelector('li input.ds-checkbox'));
-    expect(buttonByText('Add 1 models')).toBeDefined();
+    expect(buttonByText('Add 1 model')).toBeDefined();
     fetchMock.mockImplementationOnce(async () => reply(200, {}));
-    await click(buttonByText('Add 1 models'));
+    await click(buttonByText('Add 1 model'));
     await wait(0);
     await wait(0);
     const adds = fetchMock.mock.calls.filter(([url]) => String(url) === '/api/models/platform/add') as Array<[string, RequestInit]>;

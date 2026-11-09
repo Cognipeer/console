@@ -193,6 +193,20 @@ describe('the Web Search list', () => {
     expect(buttonByText('Create instance')).toBeUndefined();
     expect(await menuOf('Docs search')).toEqual(['Open']);
   });
+
+  it('tells a role without web search access so, instead of an empty list that offers to create', async () => {
+    api = installApiMock([
+      ['GET', '/api/websearch/providers', () => new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      })],
+    ]);
+    await render(WebSearchListPage, MEMBER);
+
+    expect(text()).toContain('Web search is not open to your role');
+    expect(text()).not.toContain('No web search instances yet');
+    expect(buttonByText('Create instance')).toBeUndefined();
+  });
 });
 
 describe('creating an instance', () => {

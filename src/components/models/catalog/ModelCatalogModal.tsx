@@ -276,7 +276,7 @@ export default function ModelCatalogModal({
     const payloads = selectedModels.map((model) => ({ model, ...catalogModelToCreatePayload(model, target) }));
     const unpriced = payloads.filter((payload) => !payload.priced).length;
     const ok = await confirm({
-      title: t('bulk.confirmTitle', { count: payloads.length }),
+      title: t(countKey('bulk.confirmTitle', payloads.length), { count: payloads.length }),
       message: (
         <span className="ds-col" style={{ gap: 8 }}>
           <span>{t('bulk.confirmMessage', { provider: target.label || target.key })}</span>
@@ -461,7 +461,7 @@ export default function ModelCatalogModal({
               onClick: () => undefined,
             }
           : {
-              label: t('actions.addMany', { count }),
+              label: t(countKey('actions.addMany', count), { count }),
               icon: <IconPlus size={13} />,
               onClick: () => void addPlatformSelected(),
             }
@@ -486,7 +486,7 @@ export default function ModelCatalogModal({
             onClick: () => configure(selectedModels[0]),
           }
         : {
-            label: t('actions.addMany', { count }),
+            label: t(countKey('actions.addMany', count), { count }),
             icon: <IconPlus size={13} />,
             onClick: () => void addSelected(),
           };

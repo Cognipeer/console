@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button } from '@mantine/core';
+import { Alert, Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconEdit,
   IconEye,
+  IconLock,
   IconPlus,
   IconSparkles,
   IconTrash,
@@ -48,6 +49,8 @@ export default function WebSearchListPage() {
   const [rows, setRows] = useState<WebSearchListRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // A role without web search access: say so instead of a load error and an empty list that offers to create.
+  const [forbidden, setForbidden] = useState(false);
   const [query, setQuery] = useState('');
   // Creating: open, and the provider picked to start with (a row that has no instance yet).
   const [creating, setCreating] = useState<{ providerKey: string | null } | null>(null);
@@ -58,6 +61,10 @@ export default function WebSearchListPage() {
     try {
       // The compatible list: the instances, then the providers whose key no instance has.
       const res = await fetch('/api/websearch/providers', { cache: 'no-store' });
+      if (res.status === 403) {
+        setForbidden(true);
+        return;
+      }
       if (!res.ok) throw new Error(t('loadFailed'));
       const data = (await res.json()) as { providers?: WebSearchListRow[] };
       setRows(listRows(data.providers ?? []));
@@ -203,6 +210,17 @@ export default function WebSearchListPage() {
       ),
     },
   ];
+
+  if (forbidden) {
+    return (
+      <PageContainer>
+        <PageHeader eyebrow={t('eyebrow')} title={t('title')} subtitle={t('subtitle')} />
+        <Alert color="blue" variant="light" icon={<IconLock size={16} />} title={t('noAccessTitle')}>
+          {t('noAccessDescription')}
+        </Alert>
+      </PageContainer>
+    );
+  }
 
   return (
     <PageContainer>

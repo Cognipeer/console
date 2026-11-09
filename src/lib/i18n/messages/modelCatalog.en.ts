@@ -196,11 +196,13 @@ export const modelCatalogEn = {
     selectModelHint: 'Pick a model from the list, or enter a custom one.',
     continue: 'Continue',
     addMany: 'Add {count} models',
+    addManyOne: 'Add 1 model',
     adding: 'Adding {done} of {total}…',
     selectedStatus: '{count} selected',
   },
   bulk: {
     confirmTitle: 'Add {count} models?',
+    confirmTitleOne: 'Add 1 model?',
     confirmMessage: 'They are created on {provider} with the default settings, each with a key generated from its name. You can edit every model afterwards.',
     unpriced: '{count} of them have no known price and are created with 0 prices: their usage is recorded at no cost until you set one.',
     unpricedOne: '1 of them has no known price and is created with 0 prices: its usage is recorded at no cost until you set one.',

@@ -194,11 +194,13 @@ export const modelCatalogTr: typeof modelCatalogEn = {
     selectModelHint: 'Listeden bir model seçin ya da özel bir model girin.',
     continue: 'Devam',
     addMany: '{count} model ekle',
+    addManyOne: '1 model ekle',
     adding: '{total} modelden {done} tanesi ekleniyor…',
     selectedStatus: '{count} seçili',
   },
   bulk: {
     confirmTitle: '{count} model eklensin mi?',
+    confirmTitleOne: '1 model eklensin mi?',
     confirmMessage: 'Modeller {provider} üzerinde varsayılan ayarlarla ve her birinin anahtarı adından üretilerek oluşturulur. Her modeli sonradan düzenleyebilirsiniz.',
     unpriced: 'Bunlardan {count} tanesinin bilinen bir fiyatı yok ve 0 fiyatla oluşturulur: siz fiyat girene kadar kullanımları ücretsiz olarak kaydedilir.',
     unpricedOne: 'Bunlardan 1 tanesinin bilinen bir fiyatı yok ve 0 fiyatla oluşturulur: siz fiyat girene kadar kullanımı ücretsiz olarak kaydedilir.',

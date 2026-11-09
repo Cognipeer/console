@@ -31,6 +31,8 @@ export const webSearchEn = {
     edit: 'Edit',
     delete: 'Delete',
     loadFailed: 'Could not load the web search instances.',
+    noAccessTitle: 'Web search is not open to your role',
+    noAccessDescription: 'Ask an owner or admin of this workspace for access to web search.',
     deleted: 'Instance deleted',
     deleteFailed: 'Could not delete the instance',
   },

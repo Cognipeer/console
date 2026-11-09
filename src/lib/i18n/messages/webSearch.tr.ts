@@ -28,6 +28,8 @@ export const webSearchTr: typeof webSearchEn = {
     edit: 'Düzenle',
     delete: 'Sil',
     loadFailed: 'Web arama örnekleri yüklenemedi.',
+    noAccessTitle: 'Web arama rolünüze açık değil',
+    noAccessDescription: 'Web aramaya erişim için bu çalışma alanının bir sahibine veya yöneticisine başvurun.',
     deleted: 'Örnek silindi',
     deleteFailed: 'Örnek silinemedi',
   },
