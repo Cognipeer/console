@@ -10,7 +10,12 @@ import iconv from 'iconv-lite';
 import mime from 'mime-types';
 import { parseContentTypeBase } from './normalize';
 import { createGuardedLookup, privateNetworkBlockApplies } from '@/lib/security/outboundFetch';
-import { assertResolvedUrl, crawlerGuardOptions } from './ssrf';
+import {
+  assertResolvedUrl,
+  crawlerGuardOptions,
+  crawlerResolvedPrivateAllowance,
+  isProxiedByEgress,
+} from './ssrf';
 import type { CrawlHttpConfig, CrawlerEngineMode } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
 
@@ -20,11 +25,25 @@ const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 // Agents whose socket lookup applies the outbound network policy to the
 // address actually dialled (so a name that resolves differently at connect
-// time is still checked). Shared across requests to keep keep-alive.
-const guardedLookup = createGuardedLookup();
-const guardedHttpAgent = new http1.Agent({ lookup: guardedLookup });
-const guardedHttpsAgent = new https.Agent({ lookup: guardedLookup });
-const guardedInsecureHttpsAgent = new https.Agent({ rejectUnauthorized: false, lookup: guardedLookup });
+// time is still checked). Built on first use and shared across requests to
+// keep keep-alive.
+interface GuardedAgents {
+  http: http1.Agent;
+  https: https.Agent;
+  insecureHttps: https.Agent;
+}
+let guardedAgents: GuardedAgents | undefined;
+function getGuardedAgents(): GuardedAgents {
+  if (!guardedAgents) {
+    const lookup = createGuardedLookup({ privateNetworks: crawlerResolvedPrivateAllowance });
+    guardedAgents = {
+      http: new http1.Agent({ lookup }),
+      https: new https.Agent({ lookup }),
+      insecureHttps: new https.Agent({ rejectUnauthorized: false, lookup }),
+    };
+  }
+  return guardedAgents;
+}
 
 // The initial frontier URL is checked by the caller (engine/index.ts).
 // Redirects are followed manually so every hop is checked against the
@@ -90,7 +109,12 @@ export async function fetchWithAxios(
       // Resolve and validate every hop (seed and redirects) before requesting it.
       await assertResolvedUrl(currentUrl, http.allowPrivateNetwork);
       const guardOptions = crawlerGuardOptions(http.allowPrivateNetwork);
-      const guarded = privateNetworkBlockApplies(new URL(currentUrl).hostname, guardOptions);
+      // A request carried by the egress proxy (HTTP(S)_PROXY, which axios
+      // honours) is resolved and policed by that proxy; the in-process
+      // guarded lookup only applies to direct connections.
+      const guarded =
+        privateNetworkBlockApplies(new URL(currentUrl).hostname, guardOptions) &&
+        !isProxiedByEgress(currentUrl);
       const response = await axios.get(currentUrl, {
         responseType: 'arraybuffer',
         headers,
@@ -102,9 +126,9 @@ export async function fetchWithAxios(
         signal: controller.signal,
         auth: http.basicAuth,
         validateStatus: (status) => status < 400,
-        httpAgent: guarded ? guardedHttpAgent : undefined,
+        httpAgent: guarded ? getGuardedAgents().http : undefined,
         httpsAgent: guarded
-          ? http.allowInsecureTls ? guardedInsecureHttpsAgent : guardedHttpsAgent
+          ? http.allowInsecureTls ? getGuardedAgents().insecureHttps : getGuardedAgents().https
           : http.allowInsecureTls ? insecureAgent : undefined,
       });
       clearTimeout(tid);

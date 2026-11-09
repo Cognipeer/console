@@ -240,10 +240,13 @@ export class PlaywrightSession {
       await this.context.route('**/*', async (route) => {
         const request = route.request();
         // Every http(s) request (navigations, redirects and sub-resources) is
-        // resolved and checked against the outbound network policy.
+        // checked against the outbound network policy. Requests the session's
+        // egress proxy carries are resolved by that proxy, which enforces
+        // egress policy for them, so only the literal pre-check runs here;
+        // direct requests are resolved and checked in-process.
         if (/^https?:/i.test(request.url())) {
           try {
-            await assertResolvedUrl(request.url(), this.http.allowPrivateNetwork);
+            await assertResolvedUrl(request.url(), this.http.allowPrivateNetwork, this.proxyRouting ?? null);
           } catch {
             return route.abort('blockedbyclient').catch(() => undefined);
           }

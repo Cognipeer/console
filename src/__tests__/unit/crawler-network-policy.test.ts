@@ -6,18 +6,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const cfg = vi.hoisted(() => ({
-  outboundHttp: { blockPrivateNetwork: true, allowedHosts: [] as string[], crawlerAllowPrivateOptIn: false },
+  outboundHttp: { blockPrivateNetwork: true, allowedHosts: [] as string[], crawlerAllowPrivateOptIn: false,
+    crawlerResolvedPrivatePolicy: 'refuse' as 'refuse' | 'warn',
+  },
   deployment: { isOnPrem: false },
 }));
 
 vi.mock('@/lib/core/config', () => ({ getConfig: () => cfg }));
 
-import { assertSafeUrl, isPrivateHost, resolveAllowPrivate } from '@/lib/services/crawler/engine/ssrf';
+import {
+  assertResolvedUrl,
+  assertSafeUrl,
+  crawlerResolvedPrivateAllowance,
+  isPrivateHost,
+  resolveAllowPrivate,
+} from '@/lib/services/crawler/engine/ssrf';
 
 beforeEach(() => {
   cfg.outboundHttp.blockPrivateNetwork = true;
   cfg.outboundHttp.allowedHosts = [];
   cfg.outboundHttp.crawlerAllowPrivateOptIn = false;
+  cfg.outboundHttp.crawlerResolvedPrivatePolicy = 'refuse';
   cfg.deployment.isOnPrem = false;
 });
 
@@ -84,5 +93,46 @@ describe('resolveAllowPrivate', () => {
     expect(resolveAllowPrivate(true)).toBe(false);
     cfg.outboundHttp.crawlerAllowPrivateOptIn = true;
     expect(resolveAllowPrivate(true)).toBe(true);
+  });
+});
+
+describe('resolved-private policy', () => {
+  it('refuses internal-only names under refuse', () => {
+    expect(() => assertSafeUrl('http://kubernetes.default.svc/')).toThrow(/Refusing/);
+    expect(() => assertSafeUrl('http://intranet/')).toThrow(/Refusing/);
+    expect(crawlerResolvedPrivateAllowance.hasRanges).toBe(false);
+    expect(crawlerResolvedPrivateAllowance.permits('10.0.0.5', 'docs.corp.example')).toBe(false);
+  });
+
+  it('allows internal-only names and names resolving to private addresses under warn', () => {
+    cfg.outboundHttp.crawlerResolvedPrivatePolicy = 'warn';
+    expect(() => assertSafeUrl('http://kubernetes.default.svc/')).not.toThrow();
+    expect(() => assertSafeUrl('http://intranet/')).not.toThrow();
+    expect(crawlerResolvedPrivateAllowance.hasRanges).toBe(true);
+    expect(crawlerResolvedPrivateAllowance.permits('10.0.0.5', 'docs.corp.example')).toBe(true);
+  });
+
+  it('keeps literal addresses and localhost refused under warn', () => {
+    cfg.outboundHttp.crawlerResolvedPrivatePolicy = 'warn';
+    expect(() => assertSafeUrl('http://10.0.0.5/')).toThrow(/Refusing/);
+    expect(() => assertSafeUrl('http://[::1]/')).toThrow(/Refusing/);
+    expect(() => assertSafeUrl('http://localhost/')).toThrow(/Refusing/);
+    expect(() => assertSafeUrl('http://app.localhost/')).toThrow(/Refusing/);
+    expect(crawlerResolvedPrivateAllowance.permits('10.0.0.5', '10.0.0.5')).toBe(false);
+    expect(crawlerResolvedPrivateAllowance.permits('127.0.0.1', 'localhost')).toBe(false);
+  });
+});
+
+describe('assertResolvedUrl through an egress proxy', () => {
+  const routing = { server: 'http://proxy.corp.example:3128' };
+
+  it('skips in-process resolution but keeps the literal pre-check', async () => {
+    await expect(assertResolvedUrl('http://www.corp-e2e.test/', false, routing)).resolves.toBeUndefined();
+    await expect(assertResolvedUrl('http://10.0.0.5/', false, routing)).rejects.toThrow(/Refusing/);
+  });
+
+  it('is not used for hosts the proxy is bypassed for (checked in-process)', async () => {
+    const bypassed = { ...routing, bypass: '10.0.0.5' };
+    await expect(assertResolvedUrl('http://10.0.0.5/', false, bypassed)).rejects.toThrow();
   });
 });
