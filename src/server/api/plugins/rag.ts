@@ -49,6 +49,7 @@ import {
 } from '../fastify-utils';
 import { canAdministerRagAccess, ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAccessRequest';
 import { kbIndexShareRefusal } from '../ragOwnedResources';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import type { RagDocumentPlacementInput } from '@/lib/services/rag/ragAccessService';
 import type { RagAccessScope } from '@/lib/services/rag/access';
 import { VectorFilterError } from '@/lib/providers';
@@ -797,6 +798,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ document: withoutSourceText(document) });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
       if (error instanceof RagModuleInactiveError) {
@@ -1101,6 +1105,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
       if (
