@@ -176,6 +176,15 @@ export interface AppConfig {
     circuitBreakerResetMs: number;
   };
 
+  guardrail: {
+    /**
+     * Fail mode a new guardrail gets when the request names none. `auto`
+     * (default): `closed` for presets that run PII or prompt-shield checks,
+     * `open` otherwise. `open`: the previous behavior for every guardrail.
+     */
+    defaultFailMode: 'auto' | 'open';
+  };
+
   cache: {
     provider: 'none' | 'memory' | 'redis';
     ttlSeconds: number;
@@ -623,6 +632,13 @@ export interface AppConfig {
 
     /** Stdio (npx/uvx) servers run as subprocesses of this process, from one pool shared by all tenants. */
     stdio: {
+      /**
+       * Whether stdio servers may run as subprocesses of this process. Default:
+       * on for every deployment mode (a `saas` deployment logs a one-time notice
+       * that the default becomes off in a later release); `MCP_STDIO_ENABLED`
+       * set to `false`, `0`, `no` or `off` (any case) turns it off.
+       */
+      enabled: boolean;
       /** Subprocesses running at once, all tenants together. */
       maxConcurrent: number;
       /** Subprocesses one tenant may run at once; 0 = only `maxConcurrent` limits. Default: half the pool, at least 1. */
@@ -700,6 +716,13 @@ function boundedAgentRunConfig(source: ConfigSource) {
   };
 }
 
+/** On unless `MCP_STDIO_ENABLED` is explicitly `false`, `0`, `no` or `off` (any case). */
+function stdioEnabled(source: ConfigSource): boolean {
+  const raw = source.get('MCP_STDIO_ENABLED');
+  if (raw === undefined) return true;
+  return !['false', '0', 'no', 'off'].includes(raw.trim().toLowerCase());
+}
+
 /**
  * The stdio subprocess pool and one tenant's share of it. The share defaults to
  * half the pool (at least 1) so that one tenant cannot hold every slot; an unset,
@@ -710,6 +733,7 @@ function stdioPoolConfig(source: ConfigSource) {
   const maxConcurrent = Math.max(int(source, 'MCP_STDIO_MAX_CONCURRENT', 8), 0);
   const share = int(source, 'MCP_STDIO_MAX_CONCURRENT_PER_TENANT', -1);
   return {
+    enabled: stdioEnabled(source),
     maxConcurrent,
     maxConcurrentPerTenant: share >= 0 ? share : Math.max(Math.floor(maxConcurrent / 2), 1),
   };
@@ -1018,6 +1042,10 @@ function buildConfig(source: ConfigSource): AppConfig {
       circuitBreakerEnabled: bool(source, 'GATEWAY_CIRCUIT_BREAKER_ENABLED', true),
       circuitBreakerThreshold: int(source, 'GATEWAY_CIRCUIT_BREAKER_THRESHOLD', 5),
       circuitBreakerResetMs: int(source, 'GATEWAY_CIRCUIT_BREAKER_RESET_MS', 30000),
+    },
+
+    guardrail: {
+      defaultFailMode: oneOf(source, 'GUARDRAIL_DEFAULT_FAIL_MODE', ['auto', 'open'], 'auto'),
     },
 
     cache: {

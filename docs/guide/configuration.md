@@ -110,7 +110,8 @@ owned by the given user on first boot and public signup stays off.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis` | `memory` |
+| `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis`. With `none`, values are not cached; counters and locks stay process-local. | `memory` |
+| `GUARDRAIL_DEFAULT_FAIL_MODE` | Fail mode for new guardrails created without one: `auto` (`closed` for presets running PII or prompt-shield checks, `open` otherwise) or `open` (every new guardrail). | `auto` |
 | `CACHE_TTL_SECONDS` | Default cache TTL | `300` |
 | `REDIS_URL` | Redis connection URL (required when provider=redis) | — |
 | `REDIS_KEY_PREFIX` | Key prefix for Redis cache | `console:` |
@@ -289,6 +290,7 @@ credential, stdio environment values, runtime headers) are masked as
 | `MCP_UPSTREAM_MAX_RESPONSE_BYTES` | Largest response body read from the upstream of an OpenAPI or remote MCP server; a bigger one fails the call (minimum `65536`). | `8388608` |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Longest a call to that upstream may take, headers and body together (minimum `1000`). | `90000` |
 | `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
+| `MCP_STDIO_ENABLED` | Allow stdio (npx/uvx) MCP servers to run as subprocesses of the gateway. Sandbox execution is unaffected. Set `false`, `0`, `no` or `off` to disable. A `saas` deployment logs a one-time notice that this default becomes `false` in a later release. | `true` |
 | `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
 | `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |
 
