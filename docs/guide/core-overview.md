@@ -15,7 +15,7 @@ The core infrastructure layer (`src/lib/core/`) provides production-ready cross-
 | Async Tasks | `@/lib/core/asyncTask` | Fire-and-forget background operations |
 | Health | `@/lib/core/health` | Health check registry |
 | Lifecycle | `@/lib/core/lifecycle` | Graceful shutdown management |
-| CORS | `@/lib/core/cors` | CORS handling for client APIs |
+| CORS | `src/server/api/cors.ts` | CORS handling for client APIs |
 
 ## Design Principles
 

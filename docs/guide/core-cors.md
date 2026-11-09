@@ -1,6 +1,6 @@
 # CORS Module
 
-The CORS module (`src/lib/core/cors.ts`) provides configurable Cross-Origin Resource Sharing for the client API surface (`/api/client/*`). It handles both preflight (OPTIONS) and normal requests.
+CORS for the client API surface (`/api/client/*`) lives in `src/server/api/cors.ts` and is applied by the Fastify API plugin (`src/server/api/plugin.ts`). It handles both preflight (OPTIONS) and normal requests.
 
 ## Why
 
@@ -9,27 +9,11 @@ The CORS module (`src/lib/core/cors.ts`) provides configurable Cross-Origin Reso
 - **Wildcard subdomains** — Supports patterns like `*.example.com` to allow all subdomains.
 - **Configurable** — Enabled/disabled via environment variables with no code changes.
 
-## Usage
-
-CORS is applied for the client API surface by the Fastify API plugin (`src/server/api/plugin.ts`, via `src/server/api/cors.ts`):
-
-```typescript
-import { applyCors, handleCorsPreflightIfNeeded } from '@/lib/core/cors';
-
-// Handle OPTIONS preflight
-const preflightResponse = handleCorsPreflightIfNeeded(request);
-if (preflightResponse) return preflightResponse;
-
-// For normal responses:
-const response = NextResponse.next();
-applyCors(request, response);
-```
-
 ## API Reference
 
-### `applyCors(request, response): void`
+### `applyCorsHeaders(request, reply): boolean`
 
-Apply CORS headers to a response. Call this for non-preflight responses.
+Sets CORS headers on a Fastify reply when CORS is enabled and the request origin is allowed. Returns `true` if headers were set.
 
 Headers set:
 - `Access-Control-Allow-Origin` — The request origin (if allowed)
@@ -37,10 +21,11 @@ Headers set:
 - `Access-Control-Allow-Headers` — `Authorization, Content-Type, X-Request-Id, X-Api-Key`
 - `Access-Control-Max-Age` — Configurable (default: 86400 seconds)
 - `Access-Control-Allow-Credentials` — `true`
+- `Access-Control-Expose-Headers` — `X-Decision-Id`
 
-### `handleCorsPreflightIfNeeded(request): NextResponse | null`
+### `matchesAllowedOrigin(origin, allowedOrigins): boolean`
 
-Handle CORS preflight (OPTIONS) requests. Returns a `204 No Content` response with CORS headers if applicable, or `null` if the request is not a preflight.
+Whether an origin is in the allowlist: an exact origin or a `*.example.com` wildcard.
 
 ## Configuration
 
