@@ -235,10 +235,8 @@ export class PlaywrightSession {
       }
       // Block heavy resources to speed crawls up, and re-validate every
       // request (navigations, redirects and sub-resources) against the
-      // outbound network policy: Chromium follows redirect chains
-      // itself, so the original URL passing `assertSafeUrl()` in the caller
-      // is not enough — a public seed can 3xx straight to a private/
-      // metadata host and the browser would navigate there transparently.
+      // outbound network policy. Chromium follows redirect chains itself,
+      // so every request, including redirect hops, is checked here.
       await this.context.route('**/*', async (route) => {
         const request = route.request();
         // Every http(s) request (navigations, redirects and sub-resources) is

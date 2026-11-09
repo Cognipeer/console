@@ -26,12 +26,9 @@ const guardedHttpAgent = new http1.Agent({ lookup: guardedLookup });
 const guardedHttpsAgent = new https.Agent({ lookup: guardedLookup });
 const guardedInsecureHttpsAgent = new https.Agent({ rejectUnauthorized: false, lookup: guardedLookup });
 
-// The initial frontier URL is SSRF-checked by the caller (engine/index.ts),
-// but axios happily follows a 3xx `Location` chain on its own — a public
-// seed can redirect straight to `http://169.254.169.254/` (or any other
-// private target) and axios would fetch it transparently, bypassing the
-// guard entirely. To prevent that, redirects are followed manually here:
-// each hop is re-validated with `assertResolvedUrl()` before being requested.
+// The initial frontier URL is checked by the caller (engine/index.ts).
+// Redirects are followed manually so every hop is checked against the
+// outbound network policy with `assertResolvedUrl()` before being requested.
 const MAX_MANUAL_REDIRECTS = 5;
 
 export interface FetchResult {

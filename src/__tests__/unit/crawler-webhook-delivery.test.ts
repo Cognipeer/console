@@ -8,7 +8,9 @@ const { safeFetch } = vi.hoisted(() => ({ safeFetch: vi.fn() }));
 
 vi.mock('@/lib/security/outboundFetch', () => ({
   safeFetch,
-  OutboundNetworkError: class OutboundNetworkError extends Error {},
+  OutboundNetworkError: class OutboundNetworkError extends Error {
+    retryable = false;
+  },
 }));
 vi.mock('@/lib/services/crawler/engine/ssrf', () => ({
   crawlerGuardOptions: (flag?: boolean) => ({ allowPrivate: Boolean(flag) && false }),
@@ -47,6 +49,24 @@ describe('sendCrawlerWebhook', () => {
       payload,
     });
     expect(safeFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries when the network error is marked retryable', async () => {
+    vi.useFakeTimers();
+    try {
+      const err = Object.assign(new OutboundNetworkError('resolver error'), { retryable: true });
+      safeFetch.mockRejectedValue(err);
+      const done = sendCrawlerWebhook({
+        webhook: { url: 'https://hook.example.com/x', events: ['completed'] },
+        event: 'completed',
+        payload,
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await done;
+      expect(safeFetch).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('skips events the webhook is not subscribed to', async () => {

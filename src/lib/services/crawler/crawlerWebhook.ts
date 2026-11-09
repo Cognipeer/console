@@ -92,8 +92,9 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
       lastErr = new Error(`Webhook responded with status ${response.status}`);
     } catch (err) {
       lastErr = err;
-      // A refused target will not change between attempts.
-      if (err instanceof OutboundNetworkError) break;
+      // A refused target will not change between attempts; transient
+      // failures (for example a resolver error) are retried.
+      if (err instanceof OutboundNetworkError && !err.retryable) break;
     }
     if (attempt < DEFAULT_ATTEMPTS - 1) {
       await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
