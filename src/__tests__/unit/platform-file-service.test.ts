@@ -75,23 +75,30 @@ let sqlite: SQLiteProvider;
 let a: TestTenant;
 let b: TestTenant;
 
+/**
+ * Runs a call the way a request of the tenant runs: bound to the tenant's database for the whole call. Both tenants
+ * share one provider, and without the binding a query after an await uses whichever tenant was switched to last.
+ */
+const inTenant = <T>(t: TestTenant, call: () => Promise<T>): Promise<T> => sqlite.runWithTenant(t.dbName, call);
+
 async function newTenant(name: string): Promise<TestTenant> {
   const slug = `${name}-${Math.random().toString(36).slice(2, 8)}`;
   const dbName = `tenant_${slug}`;
   const tenant = await sqlite.createTenant({ companyName: name, slug, dbName, licenseType: 'FREE', ownerId: 'pending' });
-  await sqlite.switchToTenant(dbName);
   const base = { tenantId: String(tenant._id), projectIds: [PROJECT], type: 'file' as const, status: 'active' as const, credentialsEnc: '', createdBy: 'system' };
-  await sqlite.createProvider({ ...base, key: PLATFORM_KEY, driver: 'platform-virtual', label: 'Platform Files', platform: true, settings: {} });
-  await sqlite.createProvider({ ...base, key: S3_KEY, driver: 'aws-s3-files', label: 'Own S3', settings: { bucket: 'tenant-bucket', region: 'eu-west-1' } });
+  await sqlite.runWithTenant(dbName, async () => {
+    await sqlite.createProvider({ ...base, key: PLATFORM_KEY, driver: 'platform-virtual', label: 'Platform Files', platform: true, settings: {} });
+    await sqlite.createProvider({ ...base, key: S3_KEY, driver: 'aws-s3-files', label: 'Own S3', settings: { bucket: 'tenant-bucket', region: 'eu-west-1' } });
+  });
   return { id: String(tenant._id), dbName };
 }
 
 const bucket = (t: TestTenant, key = 'docs', extra: Record<string, unknown> = {}) =>
-  createFileBucket(t.dbName, t.id, PROJECT, { providerKey: PLATFORM_KEY, key, name: key, createdBy: 'u1', ...extra } as never);
+  inTenant(t, () => createFileBucket(t.dbName, t.id, PROJECT, { providerKey: PLATFORM_KEY, key, name: key, createdBy: 'u1', ...extra } as never));
 const upload = (t: TestTenant, fileName = 'a.txt', text = 'hello', extra: Record<string, unknown> = {}) =>
-  uploadFile(t.dbName, t.id, PROJECT, {
+  inTenant(t, () => uploadFile(t.dbName, t.id, PROJECT, {
     bucketKey: 'docs', fileName, contentType: 'text/plain', data: Buffer.from(text), createdBy: 'u1', convertToMarkdown: false, ...extra,
-  });
+  }));
 
 async function filesBelow(dir: string): Promise<string[]> {
   const found: string[] = [];
@@ -140,10 +147,10 @@ describe('a platform file provider: buckets, uploads, lists, downloads and delet
     const uploaded = await upload(a, 'a.txt', 'hello');
     expect(uploaded.record.size).toBe(5);
 
-    const listed = await listFiles(a.dbName, a.id, PROJECT, { bucketKey: 'docs' });
+    const listed = await inTenant(a, () => listFiles(a.dbName, a.id, PROJECT, { bucketKey: 'docs' }));
     expect(listed.items.map((item) => item.name)).toEqual(['a.txt']);
 
-    const downloaded = await downloadFile(a.dbName, a.id, PROJECT, 'docs', uploaded.record.key);
+    const downloaded = await inTenant(a, () => downloadFile(a.dbName, a.id, PROJECT, 'docs', uploaded.record.key));
     expect(Buffer.from(downloaded.data).toString()).toBe('hello');
 
     // Physically: <backend>/<tenant token>/<tenant id>/<provider key>/<bucket prefix>/<file>
@@ -155,20 +162,20 @@ describe('a platform file provider: buckets, uploads, lists, downloads and delet
     // Nothing outside the tenant's token folder.
     expect(await readdir(backendDir)).toEqual([token]);
 
-    expect(await deleteFile(a.dbName, a.id, PROJECT, 'docs', uploaded.record.key, 'u1')).toBe(true);
-    expect((await listFiles(a.dbName, a.id, PROJECT, { bucketKey: 'docs' })).items).toEqual([]);
+    expect(await inTenant(a, () => deleteFile(a.dbName, a.id, PROJECT, 'docs', uploaded.record.key, 'u1'))).toBe(true);
+    expect((await inTenant(a, () => listFiles(a.dbName, a.id, PROJECT, { bucketKey: 'docs' }))).items).toEqual([]);
     expect(await filesBelow(rootDir)).toEqual([]);
   });
 
   it('keeps another tenant out: its bucket sees none of the files and its objects are separate', async () => {
     await upload(a, 'private.txt', 'secret');
     await bucket(b);
-    expect((await listFiles(b.dbName, b.id, PROJECT, { bucketKey: 'docs' })).items).toEqual([]);
-    await expect(downloadFile(b.dbName, b.id, PROJECT, 'docs', 'private.txt')).rejects.toBeTruthy();
+    expect((await inTenant(b, () => listFiles(b.dbName, b.id, PROJECT, { bucketKey: 'docs' }))).items).toEqual([]);
+    await expect(inTenant(b, () => downloadFile(b.dbName, b.id, PROJECT, 'docs', 'private.txt'))).rejects.toBeTruthy();
 
     // The provider listing of the other tenant's runtime holds nothing of the first tenant's.
-    const ctxA = await requireBucketContext(a.dbName, a.id, PROJECT, 'docs', 'read');
-    const ctxB = await requireBucketContext(b.dbName, b.id, PROJECT, 'docs', 'read');
+    const ctxA = await inTenant(a, () => requireBucketContext(a.dbName, a.id, PROJECT, 'docs', 'read'));
+    const ctxB = await inTenant(b, () => requireBucketContext(b.dbName, b.id, PROJECT, 'docs', 'read'));
     expect((await ctxA.runtime.listFiles({})).items.length).toBeGreaterThan(0);
     expect((await ctxB.runtime.listFiles({})).items).toEqual([]);
 
@@ -209,7 +216,7 @@ describe('a platform file provider: buckets, uploads, lists, downloads and delet
 
 describe('where files live', () => {
   it('is not shown for a platform provider, and still is for the tenant\'s own', async () => {
-    const providers = await listFileProviderItems(a.dbName, a.id, PROJECT);
+    const providers = await inTenant(a, () => listFileProviderItems(a.dbName, a.id, PROJECT));
     const platform = providers.find((provider) => provider.key === PLATFORM_KEY)!;
     const own = providers.find((provider) => provider.key === S3_KEY)!;
     expect(platform.platform).toBe(true);
@@ -224,7 +231,7 @@ describe('where files live', () => {
     expect(platform.providerHealth).toEqual({ state: 'builtin' });
 
     await bucket(a, 'where');
-    const detail = await getFileBucketDetail(a.dbName, a.id, PROJECT, 'where');
+    const detail = await inTenant(a, () => getFileBucketDetail(a.dbName, a.id, PROJECT, 'where'));
     expect(detail.storageLocation).toBeNull();
     expect(detail.provider?.platform).toBe(true);
   });

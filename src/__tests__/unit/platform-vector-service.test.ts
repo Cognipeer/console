@@ -59,21 +59,8 @@ import { registerManagedCreditsHost, resetManagedCreditsHostForTests } from '@/e
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { providerRegistry } from '@/lib/providers';
 import { getManagedStorageRuntime, loadStorageProvider, tenantStorageToken } from '@/lib/services/storage/managedStorage';
-import {
-  VectorAttachNotAvailableError,
-  createVectorIndex,
-  deleteVectorIndex,
-  deleteVectors,
-  estimateUpsertBytes,
-  getVectorIndex,
-  getVectorIndexCount,
-  listProjectVectorIndexes,
-  listVectorIndexes,
-  listVectorProviders,
-  queryVectorIndex,
-  updateVectorIndex,
-  upsertVectors,
-} from '@/lib/services/vector/vectorService';
+import * as vectorService from '@/lib/services/vector/vectorService';
+import { VectorAttachNotAvailableError, estimateUpsertBytes } from '@/lib/services/vector/vectorService';
 
 const PLATFORM_KEY = 'platform-vector';
 const OWN_KEY = 'own-vector';
@@ -91,14 +78,34 @@ let sqlite: SQLiteProvider;
 let a: TestTenant;
 let b: TestTenant;
 
+/**
+ * Runs a service call the way a request of the tenant runs: bound to the tenant's database for the whole call. Both
+ * tenants share one provider, and without the binding a query after an await uses whichever tenant was switched to last.
+ */
+const inTenantDb = <A extends unknown[], R>(call: (tenantDbName: string, ...rest: A) => Promise<R>) =>
+  (tenantDbName: string, ...rest: A): Promise<R> => sqlite.runWithTenant(tenantDbName, () => call(tenantDbName, ...rest));
+
+const createVectorIndex = inTenantDb(vectorService.createVectorIndex);
+const deleteVectorIndex = inTenantDb(vectorService.deleteVectorIndex);
+const deleteVectors = inTenantDb(vectorService.deleteVectors);
+const getVectorIndex = inTenantDb(vectorService.getVectorIndex);
+const getVectorIndexCount = inTenantDb(vectorService.getVectorIndexCount);
+const listProjectVectorIndexes = inTenantDb(vectorService.listProjectVectorIndexes);
+const listVectorIndexes = inTenantDb(vectorService.listVectorIndexes);
+const listVectorProviders = inTenantDb(vectorService.listVectorProviders);
+const queryVectorIndex = inTenantDb(vectorService.queryVectorIndex);
+const updateVectorIndex = inTenantDb(vectorService.updateVectorIndex);
+const upsertVectors = inTenantDb(vectorService.upsertVectors);
+
 async function newTenant(name: string): Promise<TestTenant> {
   const slug = `${name}-${Math.random().toString(36).slice(2, 8)}`;
   const dbName = `tenant_${slug}`;
   const tenant = await sqlite.createTenant({ companyName: name, slug, dbName, licenseType: 'FREE', ownerId: 'pending' });
-  await sqlite.switchToTenant(dbName);
   const base = { tenantId: String(tenant._id), projectIds: [PROJECT], type: 'vector' as const, status: 'active' as const, credentialsEnc: '', createdBy: 'system' };
-  await sqlite.createProvider({ ...base, key: PLATFORM_KEY, driver: 'platform-virtual', label: 'Platform Vector', platform: true, settings: {} });
-  await sqlite.createProvider({ ...base, key: OWN_KEY, driver: 'sqlite-vector', label: 'Own Vector', settings: { basePath: ownDir } });
+  await sqlite.runWithTenant(dbName, async () => {
+    await sqlite.createProvider({ ...base, key: PLATFORM_KEY, driver: 'platform-virtual', label: 'Platform Vector', platform: true, settings: {} });
+    await sqlite.createProvider({ ...base, key: OWN_KEY, driver: 'sqlite-vector', label: 'Own Vector', settings: { basePath: ownDir } });
+  });
   return { id: String(tenant._id), dbName };
 }
 
@@ -107,10 +114,8 @@ const create = (t: TestTenant, name = 'docs', providerKey = PLATFORM_KEY, extra:
 const vec = (id: string, values = [1, 0, 0], metadata?: Record<string, unknown>) => ({ id, values, metadata });
 const upsert = (t: TestTenant, indexKey: string, vectors: ReturnType<typeof vec>[], providerKey = PLATFORM_KEY) =>
   upsertVectors(t.dbName, t.id, PROJECT, { providerKey, indexKey, vectors, updatedBy: 'u1' });
-const stored = async (t: TestTenant, indexKey: string, providerKey = PLATFORM_KEY) => {
-  await sqlite.switchToTenant(t.dbName);
-  return sqlite.findVectorIndexByKey(providerKey, indexKey, PROJECT);
-};
+const stored = (t: TestTenant, indexKey: string, providerKey = PLATFORM_KEY) =>
+  sqlite.runWithTenant(t.dbName, () => sqlite.findVectorIndexByKey(providerKey, indexKey, PROJECT));
 
 beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'platform-vector-'));
@@ -369,8 +374,10 @@ describe('metering what a platform provider stores', () => {
 
 /** The pooled runtime the service uses for the tenant (the same object: the pool keys on tenant, provider and route). */
 async function pooledRuntime(t: TestTenant): Promise<any> {
-  const loaded = await loadStorageProvider('vector', { tenantDbName: t.dbName, tenantId: t.id, providerKey: PLATFORM_KEY, projectId: PROJECT });
-  return getManagedStorageRuntime<any>('vector', loaded as any, { tenantId: t.id, projectId: PROJECT });
+  return sqlite.runWithTenant(t.dbName, async () => {
+    const loaded = await loadStorageProvider('vector', { tenantDbName: t.dbName, tenantId: t.id, providerKey: PLATFORM_KEY, projectId: PROJECT });
+    return getManagedStorageRuntime<any>('vector', loaded as any, { tenantId: t.id, projectId: PROJECT });
+  });
 }
 
 describe('metering deletes and re-upserts against what exists', () => {
