@@ -20,6 +20,22 @@ The gateway supports two authentication mechanisms: JWT-based session auth for t
 5. Sets HTTP-only cookie (`token`)
 6. Returns user profile
 
+Without a slug the account is found through the cross-tenant user directory
+(every account write keeps it current). `AUTH_LOGIN_TENANT_SCAN=true` restores the
+legacy lookup in every tenant database for an address the directory does not know.
+
+The body fields (`email`, `password`, `slug`, `workspace`) must be strings of a
+bounded length; anything else is answered with `400` (`invalid_body`). Sign-in
+attempts are limited per client address and, in addition, per account
+(`AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS`, 20 in 15 minutes by default, counted across
+replicas when `RATE_LIMIT_PROVIDER=redis`).
+
+Changing or resetting a password ends every session issued before the change:
+the next request of such a session is answered with `401` (`session_expired`) and
+its cookies are cleared. The session that changed the password receives a new
+cookie and carries on. `AUTH_PASSWORD_CHANGE_ENDS_SESSIONS=false` keeps earlier
+sessions valid until they expire (a startup warning is logged).
+
 ### Registration Flow
 
 1. User submits company name, slug, name, email, password to `POST /api/auth/register`
@@ -377,4 +393,7 @@ is in [Authorization](/guide/authorization#the-settings-you-maintain).
 | `JWT_SECRET` | — | **Required**. Secret for JWT signing |
 | `JWT_EXPIRES_IN` | `7d` | JWT expiration duration |
 | `PROVIDER_ENCRYPTION_SECRET` | — | **Required**. Key that encrypts stored provider credentials at rest. Min 32 chars, must differ from `JWT_SECRET` |
-| `TRUSTED_PROXIES` | — (unset: forwarded headers are not used for authorization) | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Set it whenever the console runs behind one: the client address that token IP allowlists, the IP condition of policies, rate limits and audit logs use depends on it. See [Authorization](/guide/authorization#client-address-and-trusted-proxies). |
+| `AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS` | `20` | Sign-in attempts one account may make in 15 minutes, from any address. `0` turns the per-account limit off |
+| `AUTH_PASSWORD_CHANGE_ENDS_SESSIONS` | `true` | Changing or resetting a password ends the sessions issued before it. `false` keeps them valid until they expire and logs a startup warning |
+| `AUTH_LOGIN_TENANT_SCAN` | `false` | Legacy: a sign-in without a workspace for an address the user directory does not know also searches every tenant database. A startup warning is logged while it is on |
+| `TRUSTED_PROXIES` | — (unset: forwarded headers are not used for authorization) | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Set it whenever the console runs behind one: the client address that token IP allowlists, the IP condition of policies, rate limits and audit logs use depends on it. In production a startup warning is logged while it is unset. See [Authorization](/guide/authorization#client-address-and-trusted-proxies). |

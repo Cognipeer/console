@@ -10,11 +10,13 @@ vi.mock('bcryptjs', () => ({
 
 import bcrypt from 'bcryptjs';
 import { getDatabase } from '@/lib/database';
+import { TokenManager } from '@/lib/license/token-manager';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 import { authApiPlugin } from '@/server/api/plugins/auth';
 import {
   createFastifyApiTestApp,
+  getSetCookieHeaders,
   parseJsonBody,
 } from '../helpers/fastify-api';
 
@@ -137,6 +139,45 @@ describe('POST /api/auth/change-password', () => {
         mustChangePassword: false,
       }),
     );
+  });
+
+  it('records when the password changed and hands the session a cookie issued now', async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const current = await TokenManager.generateToken({
+      userId: 'user-1',
+      email: 'user@acme.com',
+      tenantId: 'tenant-1',
+      tenantSlug: 'acme',
+      tenantDbName: 'tenant_acme',
+      role: 'owner',
+      licenseId: 'FREE',
+      licenseType: 'FREE' as never,
+      features: [],
+    });
+    const res = await changePassword(
+      { currentPassword: 'oldpass', newPassword: 'Newpassword123!' },
+      { cookie: `token=${current}; active_project_id=proj-7` },
+    );
+    expect(res.statusCode).toBe(200);
+
+    const update = db.updateUser.mock.calls[0]?.[1] as { passwordChangedAt?: Date };
+    expect(update.passwordChangedAt).toBeInstanceOf(Date);
+    const changedAtSeconds = Math.floor(update.passwordChangedAt!.getTime() / 1000);
+    expect(changedAtSeconds).toBeGreaterThanOrEqual(before);
+
+    const cookies = getSetCookieHeaders(res.headers['set-cookie']);
+    const tokenCookie = cookies.find((c) => c.startsWith('token='));
+    expect(tokenCookie).toBeDefined();
+    const reissued = await TokenManager.verifyToken(tokenCookie!.slice('token='.length).split(';')[0]);
+    expect(reissued?.userId).toBe('user-1');
+    expect(reissued?.iat).toBeGreaterThanOrEqual(changedAtSeconds);
+    expect(cookies.some((c) => c.startsWith('active_project_id=proj-7'))).toBe(true);
+  });
+
+  it('changes the password without a session cookie to replace', async () => {
+    const res = await changePassword({ currentPassword: 'oldpass', newPassword: 'Newpassword123!' });
+    expect(res.statusCode).toBe(200);
+    expect(getSetCookieHeaders(res.headers['set-cookie']).some((c) => c.startsWith('token='))).toBe(false);
   });
 
   it('returns 500 when updateUser fails', async () => {

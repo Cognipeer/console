@@ -29,7 +29,7 @@ vi.mock('@/lib/services/auth/rateLimiter', async (importOriginal) => {
 });
 
 import bcrypt from 'bcryptjs';
-import { getConfig } from '@/lib/core/config';
+import { getConfig, reloadConfig } from '@/lib/core/config';
 import { getDatabase, type ITenant, type IUser } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
 import { registerExternalAuthenticator } from '@/enterprise/external-auth';
@@ -124,14 +124,21 @@ describe('disabled users and the auth routes', () => {
       expect(bcrypt.compare).not.toHaveBeenCalled();
     });
 
-    it('all-tenants fallback lookup: generic 401, password never checked, directory not populated', async () => {
-      db.listTenantsForUser.mockResolvedValue([]);
-      db.listTenants.mockResolvedValue([tenant as never]);
-      db.findUserByEmail.mockResolvedValue(disabledUser as never);
-      const res = await login({ email: activeUser.email, password: 'pw-123456' });
-      expectGenericFailure(res);
-      expect(bcrypt.compare).not.toHaveBeenCalled();
-      expect(db.registerUserInDirectory).not.toHaveBeenCalled();
+    it('all-tenants fallback lookup (AUTH_LOGIN_TENANT_SCAN): generic 401, password never checked, directory not populated', async () => {
+      process.env.AUTH_LOGIN_TENANT_SCAN = 'true';
+      reloadConfig();
+      try {
+        db.listTenantsForUser.mockResolvedValue([]);
+        db.listTenants.mockResolvedValue([tenant as never]);
+        db.findUserByEmail.mockResolvedValue(disabledUser as never);
+        const res = await login({ email: activeUser.email, password: 'pw-123456' });
+        expectGenericFailure(res);
+        expect(bcrypt.compare).not.toHaveBeenCalled();
+        expect(db.registerUserInDirectory).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.AUTH_LOGIN_TENANT_SCAN;
+        reloadConfig();
+      }
     });
 
     it('an external account never signs in, even if a lookup returned it and its flags said it could', async () => {

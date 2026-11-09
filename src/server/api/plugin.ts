@@ -500,6 +500,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
       tenantDbName: sessionHeaders['x-tenant-db-name'],
       tenantId: payload.tenantId,
       userId: payload.userId,
+      issuedAt: payload.iat,
     })) {
       return reply;
     }

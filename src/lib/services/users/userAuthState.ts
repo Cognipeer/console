@@ -108,23 +108,60 @@ export interface UserIdentity {
   state: UserAuthState;
   /** The role the account has now; null when the account is missing or its role is not a known one. */
   role: TenantRole | null;
+  /**
+   * When the password of the account was last set, in whole seconds since the epoch. A session issued
+   * before it no longer counts (see `isSessionIssuedBeforeCredentialChange`). Absent when not recorded.
+   */
+  sessionsValidFrom?: number;
+}
+
+/**
+ * True when a session issued at `issuedAt` (the JWT `iat`, seconds) predates the last password change of
+ * its account. Compared in whole seconds, so the session issued together with the change stays valid.
+ * A session without an issue time counts as older than any recorded change.
+ */
+export function isSessionIssuedBeforeCredentialChange(
+  issuedAt: number | undefined,
+  sessionsValidFrom: number | undefined,
+): boolean {
+  if (typeof sessionsValidFrom !== 'number') return false;
+  if (typeof issuedAt !== 'number' || !Number.isFinite(issuedAt)) return true;
+  return Math.floor(issuedAt) < sessionsValidFrom;
 }
 
 export function userIdentityCacheKey(tenantDbName: string, userId: string): string {
   return `user-identity:${tenantDbName}:${userId}`;
 }
 
-/** `active:admin`, `disabled:user`, `missing:` - the cached form of an identity. */
+/**
+ * `active:admin`, `disabled:user`, `missing:` - the cached form of an identity, followed by
+ * `:<seconds>` when the last password change is known (`active:admin:1767225600`).
+ */
 function serializeIdentity(identity: UserIdentity): string {
-  return `${identity.state}:${identity.role ?? ''}`;
+  const base = `${identity.state}:${identity.role ?? ''}`;
+  return typeof identity.sessionsValidFrom === 'number' ? `${base}:${identity.sessionsValidFrom}` : base;
 }
 
 function parseIdentity(value: unknown): UserIdentity | null {
   if (typeof value !== 'string') return null;
-  const [state, role = ''] = value.split(':');
+  const parts = value.split(':');
+  if (parts.length > 3) return null;
+  const [state, role = '', validFrom] = parts;
   if (!isUserAuthState(state)) return null;
   if (role !== '' && !isTenantRole(role)) return null;
-  return { state, role: role === '' ? null : (role as TenantRole) };
+  if (validFrom !== undefined && !/^\d{1,15}$/.test(validFrom)) return null;
+  return {
+    state,
+    role: role === '' ? null : (role as TenantRole),
+    ...(validFrom !== undefined ? { sessionsValidFrom: Number(validFrom) } : {}),
+  };
+}
+
+/** The last password change of a row in whole seconds, or undefined when it is not recorded. */
+function passwordChangedAtSeconds(user: IUser): number | undefined {
+  if (!user.passwordChangedAt) return undefined;
+  const ms = new Date(user.passwordChangedAt).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
 }
 
 function identityOf(user: IUser | null, tenantId: string): UserIdentity {
@@ -132,9 +169,11 @@ function identityOf(user: IUser | null, tenantId: string): UserIdentity {
   if (!user || (user.tenantId && String(user.tenantId) !== String(tenantId))) {
     return { state: 'missing', role: null };
   }
+  const sessionsValidFrom = passwordChangedAtSeconds(user);
   return {
     state: isUserDisabled(user) ? 'disabled' : 'active',
     role: isTenantRole(user.role) ? user.role : null,
+    ...(sessionsValidFrom !== undefined ? { sessionsValidFrom } : {}),
   };
 }
 
