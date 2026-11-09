@@ -571,8 +571,15 @@ function managedSafeError(state: CallState, error: unknown): unknown {
     || error instanceof GuardrailBlockError
     || state.context.signal?.aborted
   ) return error;
-  const status = normalizeInferenceError(error).status;
-  return new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
+  const normalized = normalizeInferenceError(error);
+  const status = normalized.status;
+  const sanitized = new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
+  // The one thing kept besides the status: a safety-filter refusal is a verdict on the content, not an outage,
+  // and a caller (the guardrail judge) must be able to tell the two apart. A bare code, nothing of the upstream's text.
+  if (status === 400 && (normalized.error.code === 'content_filter' || normalized.error.code === 'content_policy_violation')) {
+    (sanitized as UpstreamRequestError & { code?: string }).code = 'content_filter';
+  }
+  return sanitized;
 }
 
 /** Why an attempt ended without usage: the caller walked away, or it failed. */
