@@ -604,8 +604,9 @@ export async function applyAgentDocumentImport(
             ...(plan.systemPrompt ? { systemPrompt: plan.systemPrompt } : {}),
             ...(toolBindings.length > 0 ? { toolBindings } : {}),
             ...(skillKeys.length > 0 ? { skills: [...new Set(skillKeys)] } : {}),
+            // A new agent's sandbox starts without network access; the user turns it on under Sandbox.
             ...(sandboxAvailability?.available
-                ? { sandbox: { enabled: true, mode: 'ephemeral' as const } }
+                ? { sandbox: { enabled: true, mode: 'ephemeral' as const, blockNetwork: true } }
                 : {}),
         };
         if (plan.builtins.sandbox.length > 0 && !sandboxAvailability?.available) {
