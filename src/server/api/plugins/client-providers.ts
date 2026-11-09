@@ -191,6 +191,8 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
       if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
+      // Provider updates are for owner/admin callers, as on the dashboard.
+      if (!canUseTenantProviderScope(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const payload = sanitizeUpdatePayload(readJsonBody<Record<string, unknown>>(request));
       // Re-assigning a provider to other projects is for owner/admin callers.
       if (!canUseTenantProviderScope(auth)) delete payload.projectIds;
@@ -224,6 +226,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
       if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
+      if (!canUseTenantProviderScope(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const existing = await getProviderConfigById(auth.tenantDbName, id);
       const ok = existing
         && existing.tenantId === auth.tenantId

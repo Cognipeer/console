@@ -34,7 +34,7 @@ import { checkPermissionsEdit, targetOf } from '@/lib/services/users/peoplePolic
 import { loadTenantProjects } from '@/lib/services/users/projectGrants';
 import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
 import { isDirectoryManaged, isGroupDirectoryManaged } from '@/lib/iam/identity';
-import { canGrantAdminRole, clampRequestedPermissions, isUnscopedToken } from '../clientGrantPolicy';
+import { canGrantAdminRole, clampRequestedPermissions, exceedsCallerPermissions, isUnscopedToken } from '../clientGrantPolicy';
 import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-members');
@@ -476,6 +476,14 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       if (isGroupDirectoryManaged(group)) return reply.code(409).send({ error: 'Directory group membership is managed by sync' });
       if (group.tenantRole === 'admin' && !canGrantAdminRole(auth)) {
         return reply.code(403).send({ error: 'A scoped API token cannot add people to an admin group' });
+      }
+      if (!canGrantAdminRole(auth)) {
+        const grants = await db.listGroupProjectsByGroup(id);
+        const exceeds = exceedsCallerPermissions(auth, group.servicePermissions)
+          || grants.some((grant) => exceedsCallerPermissions(auth, grant.servicePermissions) || grant.role === 'project_admin');
+        if (exceeds) {
+          return reply.code(403).send({ error: 'The group holds permissions above this credential' });
+        }
       }
       const body = readJsonBody<Record<string, unknown>>(request);
       if (typeof body.userId !== 'string') return reply.code(400).send({ error: 'userId is required' });

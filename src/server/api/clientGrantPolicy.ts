@@ -44,3 +44,10 @@ export function clampRequestedPermissions(auth: ApiTokenContext, raw: unknown): 
   }
   return clamped;
 }
+
+/** True when any requested level is higher than the caller's own effective level. */
+export function exceedsCallerPermissions(auth: ApiTokenContext, raw: unknown): boolean {
+  const requested = normalizeServicePermissions(raw);
+  const clamped = clampRequestedPermissions(auth, requested);
+  return (Object.keys(requested) as PermissionService[]).some((service) => clamped[service] !== requested[service]);
+}

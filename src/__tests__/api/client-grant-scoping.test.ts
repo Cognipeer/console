@@ -110,15 +110,27 @@ describe('client admin surface grant scoping', () => {
       expect(list.statusCode).toBe(200);
     });
 
-    it('does not let a non-admin caller reassign projects', async () => {
+    it('refuses provider updates and deletes for a non-admin caller', async () => {
       await boot(clientProvidersApiPlugin, authFor(MEMBER));
       (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({ _id: 'prov-1', tenantId: 'tenant-1', projectId: 'p1' });
-      await app.inject({
+      const patch = await app.inject({
         method: 'PATCH', url: '/api/client/v1/providers/prov-1', headers,
-        payload: JSON.stringify({ label: 'x', projectIds: ['p2'] }),
+        payload: JSON.stringify({ settings: { baseUrl: 'https://example.org' } }),
       });
-      const payload = (updateProviderConfig as ReturnType<typeof vi.fn>).mock.calls[0][2] as Record<string, unknown>;
-      expect(payload.projectIds).toBeUndefined();
+      expect(patch.statusCode).toBe(403);
+      const del = await app.inject({ method: 'DELETE', url: '/api/client/v1/providers/prov-1', headers: { authorization: headers.authorization } });
+      expect(del.statusCode).toBe(403);
+      expect(updateProviderConfig).not.toHaveBeenCalled();
+    });
+
+    it('does not let a scoped admin-role caller reassign projects', async () => {
+      await boot(clientProvidersApiPlugin, authFor(ADMIN));
+      (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({ _id: 'prov-1', tenantId: 'tenant-1', projectId: 'p1' });
+      const res = await app.inject({
+        method: 'PATCH', url: '/api/client/v1/providers/prov-1', headers,
+        payload: JSON.stringify({ label: 'x' }),
+      });
+      expect(res.statusCode).toBe(200);
     });
 
     it('allows tenant-wide scope for an admin caller', async () => {
@@ -194,6 +206,32 @@ describe('client admin surface grant scoping', () => {
       });
       expect(ok.statusCode).toBe(201);
       expect((db.createGroup.mock.calls[0][0] as { servicePermissions: Record<string, string> }).servicePermissions.iam).toBe('none');
+    });
+
+    it('refuses adding a person to a group that holds more than the credential', async () => {
+      await boot(clientMembersApiPlugin, authFor(ADMIN, { members: 'admin', models: 'read' }));
+      db.findGroupById.mockResolvedValue({ _id: 'g1', tenantId: 'tenant-1', tenantRole: 'member', servicePermissions: { models: 'admin' } } as never);
+      (db as unknown as Record<string, ReturnType<typeof vi.fn>>).listGroupProjectsByGroup = vi.fn().mockResolvedValue([]);
+      db.findUserById.mockResolvedValue({ _id: 'u2', tenantId: 'tenant-1' } as never);
+      const res = await app.inject({
+        method: 'POST', url: '/api/client/v1/members/groups/g1/members', headers,
+        payload: JSON.stringify({ userId: 'u2' }),
+      });
+      expect(res.statusCode).toBe(403);
+      expect(db.addGroupMember).not.toHaveBeenCalled();
+    });
+
+    it('allows adding a person to a group within the credential', async () => {
+      await boot(clientMembersApiPlugin, authFor(ADMIN, { members: 'admin', models: 'write' }));
+      db.findGroupById.mockResolvedValue({ _id: 'g1', tenantId: 'tenant-1', tenantRole: 'member', servicePermissions: { models: 'read' } } as never);
+      (db as unknown as Record<string, ReturnType<typeof vi.fn>>).listGroupProjectsByGroup = vi.fn().mockResolvedValue([]);
+      db.findUserById.mockResolvedValue({ _id: 'u2', tenantId: 'tenant-1' } as never);
+      const res = await app.inject({
+        method: 'POST', url: '/api/client/v1/members/groups/g1/members', headers,
+        payload: JSON.stringify({ userId: 'u2' }),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(db.addGroupMember).toHaveBeenCalled();
     });
   });
 
