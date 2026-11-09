@@ -55,12 +55,12 @@ let suppressedMismatchesSinceLastWarn = 0;
  * query of that caller, so the switch cannot take effect: the caller has to
  * open its own scope with `runWithTenantScope(requested, ...)`.
  *
- * `DB_TENANT_SCOPE_MISMATCH=error` (default) refuses the switch;
- * `DB_TENANT_SCOPE_MISMATCH=warn` keeps the earlier behavior (the switch only
- * moves the process-global handle) and logs a rate-limited warning.
+ * `DB_TENANT_SCOPE_MISMATCH=warn` (default) keeps the earlier behavior (the
+ * switch only moves the process-global handle) and logs a rate-limited warning;
+ * `DB_TENANT_SCOPE_MISMATCH=error` refuses the switch.
  */
 export function handleTenantScopeMismatch(active: string, requested: string): void {
-  if (getConfig().database?.tenantScopeMismatch !== 'warn') {
+  if (getConfig().database?.tenantScopeMismatch === 'error') {
     throw new Error(
       `switchToTenant("${requested}") inside an active tenant scope for "${active}". `
       + `Use runWithTenantScope("${requested}", ...) to work on another tenant.`,

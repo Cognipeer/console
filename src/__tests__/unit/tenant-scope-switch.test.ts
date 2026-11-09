@@ -1,9 +1,9 @@
 /**
  * switchToTenant inside a runWithTenant scope: the scope's handle serves every
- * query of that caller, so a switch to another tenant is refused (default) or,
- * with DB_TENANT_SCOPE_MISMATCH=warn, allowed and logged. Switching to the
- * scope's own tenant, nested runWithTenant scopes, and switches outside any
- * scope keep working.
+ * query of that caller. By default (DB_TENANT_SCOPE_MISMATCH=warn) a switch to
+ * another tenant is allowed and logged; with DB_TENANT_SCOPE_MISMATCH=error it
+ * is refused. Switching to the scope's own tenant, nested runWithTenant scopes,
+ * and switches outside any scope keep working.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,8 +64,8 @@ const providers: Array<[string, () => Provider]> = [
 ];
 
 describe.each(providers)('tenant scope (%s)', (_label, make) => {
-  it('refuses a switch to another tenant inside a scope by default', async () => {
-    use();
+  it('with DB_TENANT_SCOPE_MISMATCH=error refuses a switch to another tenant inside a scope', async () => {
+    use({ DB_TENANT_SCOPE_MISMATCH: 'error' });
     const db = make();
     await expect(
       db.runWithTenant('tenant_scope_a', () => switchViaHelper(db, 'tenant_scope_b')),
@@ -99,8 +99,8 @@ describe.each(providers)('tenant scope (%s)', (_label, make) => {
     await expect(db.switchToTenant('tenant_scope_b')).resolves.toBeUndefined();
   });
 
-  it('with DB_TENANT_SCOPE_MISMATCH=warn the switch is allowed and the scope tenant keeps serving', async () => {
-    use({ DB_TENANT_SCOPE_MISMATCH: 'warn' });
+  it('by default the switch is allowed (warn) and the scope tenant keeps serving', async () => {
+    use();
     const db = make();
     const bound = await db.runWithTenant('tenant_scope_a', async () => {
       await switchViaHelper(db, 'tenant_scope_b');
@@ -111,12 +111,12 @@ describe.each(providers)('tenant scope (%s)', (_label, make) => {
 });
 
 describe('DB_TENANT_SCOPE_MISMATCH config', () => {
-  it('defaults to error and accepts warn', () => {
+  it('defaults to warn and accepts error', () => {
     use();
-    expect(getConfig().database.tenantScopeMismatch).toBe('error');
-    use({ DB_TENANT_SCOPE_MISMATCH: 'warn' });
     expect(getConfig().database.tenantScopeMismatch).toBe('warn');
-    use({ DB_TENANT_SCOPE_MISMATCH: 'something-else' });
+    use({ DB_TENANT_SCOPE_MISMATCH: 'error' });
     expect(getConfig().database.tenantScopeMismatch).toBe('error');
+    use({ DB_TENANT_SCOPE_MISMATCH: 'something-else' });
+    expect(getConfig().database.tenantScopeMismatch).toBe('warn');
   });
 });
