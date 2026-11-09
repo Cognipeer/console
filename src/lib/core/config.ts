@@ -176,6 +176,15 @@ export interface AppConfig {
     circuitBreakerResetMs: number;
   };
 
+  guardrail: {
+    /**
+     * Fail mode a new guardrail gets when the request names none. `auto`
+     * (default): `closed` for presets that run PII or prompt-shield checks,
+     * `open` otherwise. `open`: the previous behavior for every guardrail.
+     */
+    defaultFailMode: 'auto' | 'open';
+  };
+
   cache: {
     provider: 'none' | 'memory' | 'redis';
     ttlSeconds: number;
@@ -623,6 +632,12 @@ export interface AppConfig {
 
     /** Stdio (npx/uvx) servers run as subprocesses of this process, from one pool shared by all tenants. */
     stdio: {
+      /**
+       * Whether stdio servers may run as subprocesses of this process. Default:
+       * on for `onprem` deployments, off for `saas`; `MCP_STDIO_ENABLED` sets it
+       * explicitly either way.
+       */
+      enabled: boolean;
       /** Subprocesses running at once, all tenants together. */
       maxConcurrent: number;
       /** Subprocesses one tenant may run at once; 0 = only `maxConcurrent` limits. Default: half the pool, at least 1. */
@@ -706,10 +721,11 @@ function boundedAgentRunConfig(source: ConfigSource) {
  * negative or unreadable value takes the default, and 0 leaves the pool as the
  * only limit.
  */
-function stdioPoolConfig(source: ConfigSource) {
+function stdioPoolConfig(source: ConfigSource, deploymentMode: 'saas' | 'onprem') {
   const maxConcurrent = Math.max(int(source, 'MCP_STDIO_MAX_CONCURRENT', 8), 0);
   const share = int(source, 'MCP_STDIO_MAX_CONCURRENT_PER_TENANT', -1);
   return {
+    enabled: bool(source, 'MCP_STDIO_ENABLED', deploymentMode === 'onprem'),
     maxConcurrent,
     maxConcurrentPerTenant: share >= 0 ? share : Math.max(Math.floor(maxConcurrent / 2), 1),
   };
@@ -1020,6 +1036,10 @@ function buildConfig(source: ConfigSource): AppConfig {
       circuitBreakerResetMs: int(source, 'GATEWAY_CIRCUIT_BREAKER_RESET_MS', 30000),
     },
 
+    guardrail: {
+      defaultFailMode: oneOf(source, 'GUARDRAIL_DEFAULT_FAIL_MODE', ['auto', 'open'], 'auto'),
+    },
+
     cache: {
       provider: oneOf(source, 'CACHE_PROVIDER', ['none', 'memory', 'redis'], 'memory'),
       ttlSeconds: int(source, 'CACHE_TTL_SECONDS', 300),
@@ -1212,7 +1232,7 @@ function buildConfig(source: ConfigSource): AppConfig {
         maxBufferedBytes: Math.max(int(source, 'MCP_SSE_MAX_BUFFERED_BYTES', 8 * 1024 * 1024), 0),
         keepaliveMs: Math.max(int(source, 'MCP_SSE_KEEPALIVE_MS', 25_000), 0),
       },
-      stdio: stdioPoolConfig(source),
+      stdio: stdioPoolConfig(source, deploymentMode),
       public: {
         ...publicRateConfig(source),
         bodyLimitBytes: Math.max(int(source, 'MCP_PUBLIC_BODY_LIMIT_BYTES', 1024 * 1024), 1024),

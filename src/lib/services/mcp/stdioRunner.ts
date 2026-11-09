@@ -172,8 +172,19 @@ function buildChildEnv(tenantEnv: Record<string, string>): NodeJS.ProcessEnv {
   };
 }
 
+let warnedStdioEnabledOnSaas = false;
+
 export function isStdioRunnerEnabled(): boolean {
-  return (process.env.MCP_STDIO_ENABLED ?? 'true').toLowerCase() !== 'false';
+  const cfg = getConfig();
+  const enabled = cfg.mcp.stdio.enabled;
+  if (enabled && !cfg.deployment.isOnPrem && !warnedStdioEnabledOnSaas) {
+    warnedStdioEnabledOnSaas = true;
+    logger.warn(
+      'MCP_STDIO_ENABLED is on for a saas deployment: stdio MCP servers run as subprocesses of this process. '
+      + 'Leave it unset to use sandbox execution only.',
+    );
+  }
+  return enabled;
 }
 
 interface JsonRpcResponse {
