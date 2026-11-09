@@ -34,6 +34,7 @@ import {
   type OcrJobItemInput,
   type UpdateOcrJobInput,
 } from '@/lib/services/ocrJobs';
+import { parseOcrJobItems } from '@/lib/services/ocrJobs/itemInput';
 import type {
   IOcrJob,
   IOcrJobItem,
@@ -109,39 +110,6 @@ function normalizeEvents(raw: unknown): OcrJobWebhookEvent[] | undefined {
   return filtered.length ? filtered : undefined;
 }
 
-function itemFromJson(raw: unknown): OcrJobItemInput | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const obj = raw as Record<string, unknown>;
-  const fileName = typeof obj.fileName === 'string' ? obj.fileName : undefined;
-
-  const src = obj.source as Record<string, unknown> | undefined;
-  if (src && typeof src.kind === 'string') {
-    if (src.kind === 'inline' && typeof src.data === 'string') {
-      return { source: { kind: 'inline', data: src.data, fileName: typeof src.fileName === 'string' ? src.fileName : fileName, contentType: typeof src.contentType === 'string' ? src.contentType : undefined }, fileName };
-    }
-    if (src.kind === 'url' && typeof src.url === 'string') {
-      return { source: { kind: 'url', url: src.url, contentType: typeof src.contentType === 'string' ? src.contentType : undefined }, fileName };
-    }
-    if (src.kind === 'bucket' && typeof src.bucketKey === 'string' && typeof src.objectKey === 'string') {
-      return { source: { kind: 'bucket', bucketKey: src.bucketKey, objectKey: src.objectKey }, fileName };
-    }
-  }
-
-  const bucket = obj.bucket as Record<string, unknown> | undefined;
-  if (bucket && typeof bucket.bucketKey === 'string' && typeof bucket.objectKey === 'string') {
-    return { source: { kind: 'bucket', bucketKey: bucket.bucketKey, objectKey: bucket.objectKey }, fileName };
-  }
-  const document = (obj.document as Record<string, unknown> | undefined) ?? obj;
-  if (typeof document.url === 'string') {
-    return { source: { kind: 'url', url: document.url, contentType: typeof document.contentType === 'string' ? document.contentType : undefined }, fileName };
-  }
-  if (typeof document.data === 'string') {
-    const f = typeof document.fileName === 'string' ? document.fileName : fileName;
-    return { source: { kind: 'inline', data: document.data, fileName: f, contentType: typeof document.contentType === 'string' ? document.contentType : undefined }, fileName: f };
-  }
-  return null;
-}
-
 function buildCreateInput(body: Record<string, unknown>): CreateOcrJobInput {
   const ocrModelKey = typeof body.ocr_model === 'string' ? body.ocr_model : typeof body.model === 'string' ? body.model : '';
   if (!ocrModelKey) throw new OcrJobValidationError('`ocr_model` is required.');
@@ -183,7 +151,7 @@ async function buildFileInputs(request: FastifyRequest): Promise<{ items: OcrJob
   if (contentType.includes('application/json')) {
     const body = readJsonBody<Record<string, unknown>>(request);
     const raw = Array.isArray(body.items) ? body.items : Array.isArray(body.documents) ? body.documents : [];
-    const items = raw.map(itemFromJson).filter((v): v is OcrJobItemInput => v !== null);
+    const items = parseOcrJobItems(raw);
     return { items, mode: body.mode === 'sync' ? 'sync' : 'async' };
   }
   throw new OcrJobValidationError('Content-Type must be multipart/form-data or application/json.');

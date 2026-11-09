@@ -14,3 +14,4 @@ export {
 export { processOcrItem } from './ocrJobRunner';
 export { startOcrJobQueueConsumer } from './ocrJobConsumer';
 export { sendOcrJobWebhook } from './ocrJobWebhook';
+export { parseOcrJobItem, parseOcrJobItems } from './itemInput';

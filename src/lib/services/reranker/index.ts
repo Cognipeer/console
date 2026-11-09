@@ -9,3 +9,16 @@ export {
   listRerankerRunLogs,
   runReranker,
 } from './rerankerService';
+export {
+  ALLOWED_STRATEGIES,
+  RerankerInputError,
+  isStrategy,
+  normalizeDocuments,
+  readCreateBody as readRerankerCreateBody,
+  readPatchBody as readRerankerPatchBody,
+} from './requestParsing';
+export type {
+  RerankerCreateInput,
+  RerankerCreateParseResult,
+  RerankerPatchInput,
+} from './requestParsing';
