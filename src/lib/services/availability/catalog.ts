@@ -75,7 +75,6 @@ const MODULE_LABELS: Readonly<Record<string, string>> = {
   health: 'Entity Health',
   'mcp-hub': 'MCP Hub catalogs',
   'prompt-optimizer': 'Prompt Optimizer',
-  reports: 'Service Reports',
 };
 
 export function serviceLabel(service: string): string {

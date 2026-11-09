@@ -8,6 +8,7 @@ import type { IamCatalog } from '../api';
 import { isOfferableService } from '../catalogModel';
 import ResourceSelect from '../pickers/ResourceSelect';
 import { useProjects } from '../pickers/lookups';
+import { useReportOptions } from '../pickers/reportOptions';
 import type { IamLabels } from '../useIamLabels';
 import { resourceKey, type PolicyDraft, type ResourceRef, type WhereMode } from './specModel';
 
@@ -28,6 +29,7 @@ export default function WhereSection({ draft, patch, catalog, labels, showError 
   const t = useTranslations('iamCenter');
   const { projects, loading: projectsLoading, error: projectsError } = useProjects();
   const [pendingType, setPendingType] = useState<string | null>(null);
+  const reportOptions = useReportOptions(catalog, pendingType);
   const [pending, setPending] = useState<ResourceRef | null>(null);
 
   const modes: Array<{ value: WhereMode; label: string }> = [
@@ -148,7 +150,13 @@ export default function WhereSection({ draft, patch, catalog, labels, showError 
               maxDropdownHeight={260}
             />
             <div style={{ flex: '2 1 240px' }}>
-              <ResourceSelect type={pendingType} label={t('where.resource')} value={pending} onChange={setPending} />
+              <ResourceSelect
+                type={pendingType}
+                label={t('where.resource')}
+                value={pending}
+                onChange={setPending}
+                options={reportOptions}
+              />
             </div>
             <Button variant="default" leftSection={<IconPlus size={14} />} disabled={!pending} onClick={addPending}>
               {t('common.add')}

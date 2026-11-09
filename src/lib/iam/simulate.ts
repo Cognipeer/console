@@ -31,6 +31,8 @@
 
 import { runWithTenantScope } from '@/lib/database';
 import { resolveIamPortal, type IamPortalFacts } from '@/enterprise/iam-portal';
+import { findIamReport } from '@/enterprise/iam-reports';
+import { REPORT_RESOURCE_TYPE, reportResource } from './reportEntities';
 import { isPermissionService } from '@/lib/security/rbac';
 import { isSessionResourceAction, RUNTIME_ENFORCED_ACTIONS, type ActionDefinition } from './actions';
 import { agentSessionResource, DEFAULT_AGENT_APPROVERS, isAgentApprovers, portalAgentSessionResource, type AgentApprovers } from './agentEntities';
@@ -292,6 +294,12 @@ async function resolveResource(
       // The registry knows a portal exists; only the portal seam knows who its access list admits.
       const facts = await portalOf(tenant, input.id);
       return { resource: portalResource({ id: facts.id, key: facts.key, access: facts.access }), portal: facts };
+    }
+    if (input.type === REPORT_RESOURCE_TYPE) {
+      // A report is code, not a registry entry (@/enterprise/iam-reports): asked as seen across all projects.
+      const report = findIamReport(input.id);
+      if (!report) throw new SimulateInputError('resource_not_found', `The report "${input.id}" does not exist in this workspace`, 404);
+      return { resource: reportResource({ key: report.key, group: report.group }) };
     }
     const { getResource } = await import('@/lib/resources/service');
     const detail = await getResource({ tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, type: input.type, id: input.id });

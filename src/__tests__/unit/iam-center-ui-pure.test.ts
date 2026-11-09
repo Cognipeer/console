@@ -86,6 +86,7 @@ const catalog: IamCatalog = {
   resourceTypes: [{ type: 'agent', service: 'agents', labelKey: 'resources.types.agent' }],
   contextAttrs: ['projectId', 'channel', 'ip', 'now'],
   channels: ['dashboard', 'api', 'portal'],
+  reports: [],
 };
 
 const fullSpec: PolicySpec = {

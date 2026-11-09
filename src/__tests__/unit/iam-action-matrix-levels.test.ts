@@ -39,6 +39,7 @@ const catalog: IamCatalog = {
   resourceTypes: [],
   contextAttrs: [],
   channels: [],
+  reports: [],
 };
 const index = indexCatalog(catalog);
 const labels = {

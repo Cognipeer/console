@@ -18,6 +18,10 @@ import { IAM_CONTEXT_ATTRS } from './schema';
 import { getIamSchema } from './schemaState';
 import { listIamResourceTypes } from './resourceTypes';
 import { enforcedChannelsOf } from './runtimeEnforced';
+import { listIamReports } from '@/enterprise/iam-reports';
+import { REPORT_GROUP_RESOURCE_TYPE, REPORT_RESOURCE_TYPE } from './reportEntities';
+
+const REPORT_TYPES: ReadonlySet<string> = new Set([REPORT_RESOURCE_TYPE, REPORT_GROUP_RESOURCE_TYPE]);
 
 export interface CatalogService {
   id: string;
@@ -53,12 +57,22 @@ export interface CatalogResourceType {
   labelKey: string;
 }
 
+/** A report a policy or the Access check can name (enterprise; none in community). */
+export interface CatalogReport {
+  key: string;
+  /** English title; a UI translates it by key. */
+  title: string;
+  group: string | null;
+}
+
 export interface IamCatalog {
   services: CatalogService[];
   actions: CatalogAction[];
   resourceTypes: CatalogResourceType[];
   contextAttrs: string[];
   channels: string[];
+  /** The reports and their groups are code, not registry entries: the pickers offer them from here. */
+  reports: CatalogReport[];
 }
 
 /** The catalog's label keys are namespaced `iam.action.*`; the API serves them under `iamApi.action.*`. */
@@ -66,6 +80,9 @@ const apiLabelKey = (key: string): string => key.replace(/^iam\.action\./, 'iamA
 
 export function buildCatalog(): IamCatalog {
   const schema = getIamSchema();
+  // Without reports (community) their type and actions are left out: there is nothing to name.
+  const reports = listIamReports();
+  const offered = (type: string | undefined) => reports.length > 0 || !type || !REPORT_TYPES.has(type);
   return {
     services: RBAC_SERVICE_DEFINITIONS.map((d) => ({
       id: d.id,
@@ -75,7 +92,7 @@ export function buildCatalog(): IamCatalog {
       category: d.category,
       ...(d.deprecated ? { deprecated: true as const } : {}),
     })),
-    actions: schema.catalog.map((a) => {
+    actions: schema.catalog.filter((a) => offered(a.resourceType)).map((a) => {
       const enforcedIn: IamChannel[] = a.kind === 'service' ? ['dashboard', 'api'] : a.kind === 'resource' ? enforcedChannelsOf(a.id) : [];
       return {
         id: a.id,
@@ -89,12 +106,13 @@ export function buildCatalog(): IamCatalog {
         ...(enforcedIn.length > 0 ? { enforcedIn } : {}),
       };
     }),
-    resourceTypes: listIamResourceTypes().map((t) => ({
+    resourceTypes: listIamResourceTypes().filter((t) => offered(t.type)).map((t) => ({
       type: t.type,
       service: t.service,
       labelKey: `resources.types.${t.type}`,
     })),
     contextAttrs: [...IAM_CONTEXT_ATTRS],
     channels: [...IAM_CHANNELS],
+    reports: reports.map((r) => ({ key: r.key, title: r.title, group: r.group })),
   };
 }

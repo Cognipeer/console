@@ -10,6 +10,7 @@ import { RUNTIME_ENFORCED_ACTIONS, impliedLevelActionIds } from './actions';
 import { askedGateActions } from './gateActions';
 import { MANAGED_ANNOTATION } from './managedPolicies';
 import { isRuntimeEnforced } from './runtimeEnforced';
+import { hasIamReportCatalog } from '@/enterprise/iam-reports';
 import { getIamSchema, validateAgainstSchema } from './schemaState';
 
 export const MAX_POLICY_TEXT_BYTES = 64 * 1024;
@@ -57,6 +58,10 @@ function namedActions(action: ScopeJson | undefined): string[] {
 
 /** Entity types the runtimes ask about: the portal, the channel deployment (Slack / Teams), the agent (run through a portal, answered, or a session's), and the project the agent is in. */
 const RUNTIME_PLANE_TYPES: ReadonlySet<string> = new Set(['Portal', 'ChannelDeployment', 'Agent', 'Project', 'FileBucket']);
+/** A report and its group: asked about by the reports API, only where this build has reports (the overlay registered them). */
+const REPORT_PLANE_TYPES: ReadonlySet<string> = new Set(['Report', 'ReportGroup']);
+const isRuntimePlaneType = (entityType: string) =>
+  RUNTIME_PLANE_TYPES.has(entityType) || (REPORT_PLANE_TYPES.has(entityType) && hasIamReportCatalog());
 
 /**
  * Can a statement with this action scope match a decision of a runtime of this build
@@ -86,7 +91,8 @@ function mayReachRuntime(named: readonly string[]): boolean {
  * The exceptions are the runtimes: the portal runtime, where it exists, asks `portal.use`
  * about a Portal and `agent.invoke` / `agent.approve` about an Agent that is `in` the portal
  * and in its project; the agent routes ask `agent.approve` and the session actions about
- * the Agent of a session. A statement that can match those is not flagged.
+ * the Agent of a session; the reports API, where this build has reports, asks the `report.*`
+ * actions about a Report that is `in` its ReportGroup. A statement that can match those is not flagged.
  *
  * Only the scope is looked at (a `when` clause is arbitrary logic), so this has
  * no false positives: a statement it flags really cannot apply.
@@ -102,7 +108,7 @@ function unreachableScope(json: { action?: ScopeJson; resource?: ScopeJson }): s
     : resource?.op === 'is' ? resource.entity_type
       : undefined;
   if (entityType && entityType !== 'Service') {
-    if (RUNTIME_PLANE_TYPES.has(entityType) && mayReachRuntime(named)) return null;
+    if (isRuntimePlaneType(entityType) && mayReachRuntime(named)) return null;
     return `is limited to ${entityType} entities, but the request gates only check whole services`;
   }
   return null;

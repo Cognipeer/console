@@ -589,6 +589,15 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   sub-folder of a session that a caller may not view (`agent.session_view_others`) is left out, as its files already
   were. Folders count as entries of the page, which is filled from the following reads; the scope is decided once per
   request. The dashboard and the client Files API answer alike on SQLite and MongoDB.
+- Reports (Enterprise) have a row of their own in the permission matrix, `reports` (Read for members by default, and
+  it can be switched off by the license), and four actions the policy engine asks report by report, on
+  `Report::"<key>"` in its group (`ReportGroup::"usage"`, `"quality"`, `"safety"` or `"infrastructure"`):
+  `report.view` and `report.export` (Read), `report.view_all_projects` and `report.view_people` (Admin: owners and
+  administrators, or whom a policy grants them). A report is listed when the person may read Reports, may view the
+  report and may read the service its data comes from; the summary's figures follow the reports they open. Without
+  `report.view_people` the breakdowns, filters and table columns that name people or API tokens are left out and Users
+  & Tokens does not open; without `report.view_all_projects` a report shows the active project only. Every CSV download
+  is written to the audit log. The policy editor offers reports and report groups, and the Access check takes them.
 
 ### People and access
 

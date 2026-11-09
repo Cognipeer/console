@@ -14,6 +14,7 @@
  *   ApiToken { owner: User, scoped: Bool, capRead/capWrite/capAdmin: Set<String>, project?: Project }
  *   Service  { service, adminService }            // service-level checks (HTTP gate)
  *   <RegistryType> in [Project] { service, adminService, key?, tags? }
+ *   Report   in [Project, ReportGroup] { ... }       // a report (enterprise), under its group (reportEntities.ts)
  *   Portal   in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group>,
  *                           embedAccess?: String, networkMode?: String, net0 ... net31?: ipaddr }
  *   ChannelDeployment in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
@@ -60,6 +61,7 @@ import {
 } from './actions';
 import type { CedarSchemaJson } from './cedar';
 import { PORTAL_NETWORK_SLOTS } from './portalNetworks';
+import { REPORT_GROUP_ENTITY, REPORT_GROUP_RESOURCE_TYPE, REPORT_RESOURCE_TYPE } from './reportEntities';
 
 type TypeJson = Record<string, unknown>;
 
@@ -178,6 +180,20 @@ export interface BuiltSchema {
   resourceEntityTypes: Record<string, string>;
 }
 
+/**
+ * A report sits under its group (`ReportGroup::"usage"`), so a rule can name a whole group - the group's reports of
+ * today and of later. The group has no actions of its own (nobody is asked about a group), so it is added here, and
+ * mapped as the `report-group` type a policy may name (reportEntities.ts).
+ */
+function applyReportShape(entityTypes: Record<string, TypeJson>, resourceEntityTypes: Record<string, string>): void {
+  const reportName = resourceEntityTypes[REPORT_RESOURCE_TYPE];
+  const report = reportName ? (entityTypes[reportName] as EntityTypeJson | undefined) : undefined;
+  if (!reportName || !report) return;
+  entityTypes[REPORT_GROUP_ENTITY] = { shape: record({}) };
+  report.memberOfTypes = [...new Set([...(report.memberOfTypes ?? []), REPORT_GROUP_ENTITY])];
+  resourceEntityTypes[REPORT_GROUP_RESOURCE_TYPE] = REPORT_GROUP_ENTITY;
+}
+
 export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): BuiltSchema {
   const catalog = buildActionCatalog(resourceTypes);
   const entityTypes: Record<string, TypeJson> = {};
@@ -236,6 +252,7 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
   applyPortalShape(entityTypes, resourceEntityTypes);
   applyMessagingShape(entityTypes, resourceEntityTypes);
   applyAgentShape(entityTypes, resourceEntityTypes);
+  applyReportShape(entityTypes, resourceEntityTypes);
 
   const actions: Record<string, TypeJson> = {};
   for (const action of catalog) {
