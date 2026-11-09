@@ -22,7 +22,12 @@
  * Leaf module: no imports, so the overlay can import it at load.
  */
 
-export type ManagedCallKind = 'chat' | 'embedding' | 'search';
+/**
+ * `file` and `vector` are storage: never paid with credits (core counts what a tenant stores against its plan storage
+ * and never calls `reserve` for them), served by the FIRST live route only (stored data stays on the backend it was
+ * written to: there is no failover), and confined to the tenant by core whatever connection the host returns.
+ */
+export type ManagedCallKind = 'chat' | 'embedding' | 'search' | 'file' | 'vector';
 
 /** The parts of a provider record the host needs to decide whether it is managed (core passes the stored record). */
 export interface ManagedProviderRef {
@@ -55,7 +60,7 @@ export interface ManagedRoute {
 
 export interface ManagedRouteQuery {
   providerKey: string;
-  /** Model key (chat, embedding); undefined for search. */
+  /** Model key (chat, embedding); undefined for search and storage. */
   modelKey?: string;
   modelId?: string;
   kind: ManagedCallKind;
@@ -114,7 +119,7 @@ export interface ManagedCreditsHost {
    * credits_unavailable 503, plan_feature_unavailable 402) to refuse the call.
    */
   reserve(call: ManagedCallInfo): Promise<ManagedCreditLease>;
-  /** Routes that can serve this managed model or search now, live ones only. [] = not available right now. */
+  /** Routes that can serve this managed model, search or storage now, live ones only. [] = not available right now. */
   listRoutes?(query: ManagedRouteQuery): ManagedRoute[];
   /**
    * The connection behind a route, for a managed record. The only door to operator secrets: null refuses the call.
@@ -152,7 +157,7 @@ export function isManagedModel(model: { providerKey?: string; providerDriver?: s
   return isManagedProviderRecord({ key: model.providerKey, driver: model.providerDriver });
 }
 
-/** The host's live routes for a managed model or search. Never throws: no host, no method or a throw gives []. */
+/** The host's live routes for a managed model, search or storage. Never throws: no host, no method or a throw gives []. */
 export function listManagedRoutes(query: ManagedRouteQuery): ManagedRoute[] {
   if (!host?.listRoutes) return [];
   try {
