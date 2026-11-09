@@ -15,7 +15,7 @@ A trigger has a `type` and, except for `manual`, one settings object named after
 | `type` | Settings object | Fires | `next_fire_at` |
 | --- | --- | --- | --- |
 | `schedule` | `schedule: { cron, timezone }` | On a 5-field cron expression (minute hour day-of-month month day-of-week) evaluated in an IANA timezone (`Europe/Istanbul`; default `UTC`), so "09:00 on weekdays" stays 09:00 local across daylight-saving changes | The next slot |
-| `once` | `once: { run_at }` or, when saving, `once: { delay_seconds }` | One time: `run_at` (ISO-8601 or unix seconds) or `delay_seconds` | The set time, until it fired; none after |
+| `once` | `once: { run_at }` or, when saving, `once: { delay_seconds }` | One time: `run_at` (ISO-8601 or unix seconds, not milliseconds) or `delay_seconds`, at most 365 days ahead | The set time, until it fired; none after |
 | `manual` | none | Only by **Run now** or the API (the default for a new trigger) | none |
 | `webhook` | `webhook: { url, preset, auth, … }` | When an [incoming webhook](#webhook-triggers) delivery arrives | none |
 | `connector` | `connector: { connector_id, trigger, params, … }` | When a [connector](#connector-triggers) reports an event (the service pushes it, or the connector finds it by polling). Needs the Connectors module | none |
