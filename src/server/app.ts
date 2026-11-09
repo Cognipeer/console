@@ -50,7 +50,7 @@ export function resolveTrustProxyOption(trustedProxies: string[]): boolean | str
 }
 
 /**
- * Settings that keep a permissive behaviour for compatibility, one message each. Logged once at
+ * Settings that keep a legacy or permissive behaviour for compatibility, one message each. Logged once at
  * startup (`createServer`) so an operator sees what to set.
  */
 export function startupSettingWarnings(config: AppConfig): string[] {
@@ -70,8 +70,10 @@ export function startupSettingWarnings(config: AppConfig): string[] {
   }
   if (config.auth.loginTenantScan) {
     warnings.push(
-      'AUTH_LOGIN_TENANT_SCAN is on: a sign-in for an address the user directory does not know is looked up in '
-      + 'every tenant database. Turn it off once the user directory is complete.',
+      'Legacy sign-in lookup is on (AUTH_LOGIN_TENANT_SCAN): a sign-in for an address the user directory does '
+      + 'not know is also looked up in every tenant database, and found accounts are added to the directory. '
+      + 'It will default to off in a later release once the directory is complete; set '
+      + 'AUTH_LOGIN_TENANT_SCAN=false to turn it off now.',
     );
   }
   return warnings;

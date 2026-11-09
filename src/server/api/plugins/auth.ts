@@ -63,7 +63,7 @@ export const LOGIN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 
 /** Longest value each field of the sign-in, sign-up and password-reset bodies takes. */
 const MAX_EMAIL_LENGTH = 320;
-const MAX_PASSWORD_LENGTH = 1024;
+const MAX_PASSWORD_LENGTH = 4096;
 const MAX_SLUG_LENGTH = 128;
 const MAX_NAME_LENGTH = 200;
 const MAX_TOKEN_LENGTH = 8192;

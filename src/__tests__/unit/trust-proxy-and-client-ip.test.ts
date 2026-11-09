@@ -183,7 +183,7 @@ describe('startupSettingWarnings', () => {
   it('warns while the legacy sign-in lookup in every tenant is on', () => {
     const warnings = startupSettingWarnings(configWith('development', [], true));
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/AUTH_LOGIN_TENANT_SCAN/);
+    expect(warnings[0]).toMatch(/AUTH_LOGIN_TENANT_SCAN=false/);
   });
 
   it('warns while password changes keep earlier sessions valid', () => {

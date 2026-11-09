@@ -132,8 +132,10 @@ export interface AppConfig {
      * Sign-in without a workspace finds the account through the cross-tenant
      * user directory. When true (legacy), an address the directory does not
      * know is also looked up in every tenant, one tenant database after the
-     * other, and registered in the directory when found. Default false; a
-     * startup warning is logged when it is on (AUTH_LOGIN_TENANT_SCAN).
+     * other, and registered in the directory when found
+     * (AUTH_LOGIN_TENANT_SCAN). Default true for this release, because the
+     * directory can be incomplete for older accounts; it will default to false
+     * in a later release. A note is logged at startup while it is on.
      */
     loginTenantScan: boolean;
     /**
@@ -1005,7 +1007,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       jwtSecret: str(source, 'JWT_SECRET', 'jwt-key-change-me'),
       jwtExpiresIn: str(source, 'JWT_EXPIRES_IN', '7d'),
       providerEncryptionSecret: str(source, 'PROVIDER_ENCRYPTION_SECRET', ''),
-      loginTenantScan: bool(source, 'AUTH_LOGIN_TENANT_SCAN', false),
+      loginTenantScan: bool(source, 'AUTH_LOGIN_TENANT_SCAN', true),
       loginAccountMaxAttempts: Math.max(0, int(source, 'AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS', 20)),
       passwordChangeEndsSessions: bool(source, 'AUTH_PASSWORD_CHANGE_ENDS_SESSIONS', true),
     },

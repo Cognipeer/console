@@ -103,9 +103,9 @@ describe('POST /api/auth/login', () => {
     });
   }
 
-  /** Runs `fn` with AUTH_LOGIN_TENANT_SCAN turned on. */
-  async function withTenantScan(fn: () => Promise<void>) {
-    process.env.AUTH_LOGIN_TENANT_SCAN = 'true';
+  /** Runs `fn` with AUTH_LOGIN_TENANT_SCAN set to `value` (default 'true'), then restores the default. */
+  async function withTenantScan(fn: () => Promise<void>, value = 'true') {
+    process.env.AUTH_LOGIN_TENANT_SCAN = value;
     reloadConfig();
     try {
       await fn();
@@ -422,28 +422,36 @@ describe('POST /api/auth/login', () => {
       expect(res.statusCode).toBe(401);
     });
 
-    it('answers an address the directory does not know without reading other tenants, after one password comparison', async () => {
-      db.listTenantsForUser.mockResolvedValue([]);
-      db.listTenants.mockResolvedValue([mockTenant]);
-      const res = await login({ email: 'nobody@nowhere.com', password: 'password123' });
-      expect(res.statusCode).toBe(401);
-      expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/invalid email or password/i);
-      expect(db.listTenants).not.toHaveBeenCalled();
-      expect(db.findUserByEmail).not.toHaveBeenCalled();
-      expect(db.registerUserInDirectory).not.toHaveBeenCalled();
-      expect(bcrypt.compare).toHaveBeenCalledTimes(1);
-      expect(TokenManager.generateToken).not.toHaveBeenCalled();
+    it('defaults AUTH_LOGIN_TENANT_SCAN to on for this release', () => {
+      delete process.env.AUTH_LOGIN_TENANT_SCAN;
+      reloadConfig();
+      expect(getConfig().auth.loginTenantScan).toBe(true);
     });
 
-    it('with AUTH_LOGIN_TENANT_SCAN on, finds the account in another tenant and registers it in the directory', async () => {
+    it('with AUTH_LOGIN_TENANT_SCAN=false, answers an address the directory does not know without reading other tenants, after one password comparison', async () => {
       await withTenantScan(async () => {
         db.listTenantsForUser.mockResolvedValue([]);
         db.listTenants.mockResolvedValue([mockTenant]);
-        const res = await login({ email: 'admin@acme.com', password: 'password123' });
-        expect(res.statusCode).toBe(200);
-        expect(db.listTenants).toHaveBeenCalled();
-        expect(db.registerUserInDirectory).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-1' }));
-      });
+        const res = await login({ email: 'nobody@nowhere.com', password: 'password123' });
+        expect(res.statusCode).toBe(401);
+        expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/invalid email or password/i);
+        expect(db.listTenants).not.toHaveBeenCalled();
+        expect(db.findUserByEmail).not.toHaveBeenCalled();
+        expect(db.registerUserInDirectory).not.toHaveBeenCalled();
+        expect(bcrypt.compare).toHaveBeenCalledTimes(1);
+        expect(TokenManager.generateToken).not.toHaveBeenCalled();
+      }, 'false');
+    });
+
+    it('by default, finds the account in another tenant and registers it in the directory', async () => {
+      delete process.env.AUTH_LOGIN_TENANT_SCAN;
+      reloadConfig();
+      db.listTenantsForUser.mockResolvedValue([]);
+      db.listTenants.mockResolvedValue([mockTenant]);
+      const res = await login({ email: 'admin@acme.com', password: 'password123' });
+      expect(res.statusCode).toBe(200);
+      expect(db.listTenants).toHaveBeenCalled();
+      expect(db.registerUserInDirectory).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-1' }));
     });
 
     it('continues to next tenant when password is invalid', async () => {
