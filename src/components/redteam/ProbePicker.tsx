@@ -9,37 +9,25 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Badge, Checkbox, Group, ScrollArea, Stack, Text, TextInput } from '@mantine/core';
+import { Badge, Checkbox, Group, Pill, ScrollArea, Stack, Text, TextInput } from '@mantine/core';
 import { IconSearch } from '@tabler/icons-react';
-import type { ProbeCatalogView } from './types';
-
-const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-const SEVERITY_COLOR: Record<string, string> = {
-  critical: 'red',
-  high: 'orange',
-  medium: 'yellow',
-  low: 'gray',
-};
-
-const CATEGORY_LABELS: Record<string, string> = {
-  'LLM01-prompt-injection': 'LLM01 · Prompt Injection',
-  'LLM02-insecure-output-handling': 'LLM02 · Insecure Output Handling',
-  'LLM04-model-dos': 'LLM04 · Model Denial of Service',
-  'LLM05-supply-chain': 'LLM05 · Supply Chain',
-  'LLM06-sensitive-information-disclosure': 'LLM06 · Sensitive Information Disclosure',
-  'LLM07-system-prompt-leakage': 'LLM07 · System Prompt Leakage',
-  'LLM08-excessive-agency': 'LLM08 · Excessive Agency',
-  'LLM09-overreliance': 'LLM09 · Overreliance',
-};
+import { OWASP_LLM_CATEGORIES, normalizeOwaspCategory, owaspCategoryLabel } from '@/lib/services/redteam/owasp';
+import { missingProbeKeys, selectedDisabledProbes } from './helpers';
+import { SEVERITY_COLOR, SEVERITY_ORDER } from './severity';
+import type { DisabledProbeView, ProbeCatalogView } from './types';
 
 const CUSTOM_GROUP = 'Custom probes';
 
-function categoryLabel(category: string): string {
-  return CATEGORY_LABELS[category] ?? category;
+/** Position in the OWASP 2025 list; a category outside it sorts after the list. */
+function categoryRank(category: string): number {
+  const at = (OWASP_LLM_CATEGORIES as readonly string[]).indexOf(category);
+  return at === -1 ? OWASP_LLM_CATEGORIES.length : at;
 }
 
 interface Props {
   probes: ProbeCatalogView[];
+  /** Custom probes that exist but are switched off. */
+  disabledProbes?: DisabledProbeView[];
   value: string[];
   onChange: (keys: string[]) => void;
   /** Note shown when nothing is selected (e.g. "runs the full built-in catalog"). */
@@ -52,7 +40,7 @@ interface ProbeGroup {
   probes: ProbeCatalogView[];
 }
 
-export default function ProbePicker({ probes, value, onChange, emptyHint }: Props) {
+export default function ProbePicker({ probes, disabledProbes, value, onChange, emptyHint }: Props) {
   const [search, setSearch] = useState('');
   const selected = useMemo(() => new Set(value), [value]);
 
@@ -64,7 +52,8 @@ export default function ProbePicker({ probes, value, onChange, emptyHint }: Prop
             p.key.toLowerCase().includes(q) ||
             p.name.toLowerCase().includes(q) ||
             p.description.toLowerCase().includes(q) ||
-            p.category.toLowerCase().includes(q),
+            normalizeOwaspCategory(p.category).toLowerCase().includes(q) ||
+            owaspCategoryLabel(p.category).toLowerCase().includes(q),
         )
       : probes;
     return [...matches].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
@@ -73,7 +62,7 @@ export default function ProbePicker({ probes, value, onChange, emptyHint }: Prop
   const groups = useMemo<ProbeGroup[]>(() => {
     const byGroup = new Map<string, ProbeCatalogView[]>();
     for (const p of filtered) {
-      const groupKey = p.custom ? CUSTOM_GROUP : p.category;
+      const groupKey = p.custom ? CUSTOM_GROUP : normalizeOwaspCategory(p.category);
       const list = byGroup.get(groupKey) ?? [];
       list.push(p);
       byGroup.set(groupKey, list);
@@ -83,11 +72,11 @@ export default function ProbePicker({ probes, value, onChange, emptyHint }: Prop
     entries.sort(([a], [b]) => {
       if (a === CUSTOM_GROUP) return 1;
       if (b === CUSTOM_GROUP) return -1;
-      return a.localeCompare(b);
+      return categoryRank(a) - categoryRank(b) || a.localeCompare(b);
     });
     return entries.map(([key, list]) => ({
       key,
-      label: key === CUSTOM_GROUP ? CUSTOM_GROUP : categoryLabel(key),
+      label: key === CUSTOM_GROUP ? CUSTOM_GROUP : owaspCategoryLabel(key),
       probes: list,
     }));
   }, [filtered]);
@@ -109,6 +98,14 @@ export default function ProbePicker({ probes, value, onChange, emptyHint }: Prop
   };
 
   const allKeys = useMemo(() => probes.map((p) => p.key), [probes]);
+  // Selected keys the catalog no longer has (a custom probe that was deleted). Only judged once the catalog has loaded,
+  // otherwise every selection would flash as deleted.
+  const disabledKeys = useMemo(() => (disabledProbes ?? []).map((d) => d.key), [disabledProbes]);
+  const missing = useMemo(
+    () => (probes.length > 0 ? missingProbeKeys(value, allKeys, disabledKeys) : []),
+    [value, allKeys, disabledKeys, probes.length],
+  );
+  const selectedDisabled = useMemo(() => selectedDisabledProbes(value, disabledProbes), [value, disabledProbes]);
   const allSelected = allKeys.length > 0 && allKeys.every((k) => selected.has(k));
   const someSelected = allKeys.some((k) => selected.has(k));
 
@@ -125,12 +122,48 @@ export default function ProbePicker({ probes, value, onChange, emptyHint }: Prop
         />
         <Checkbox
           size="xs"
-          label={`Select all (${selected.size}/${allKeys.length})`}
+          label={`Select all (${allKeys.filter((k) => selected.has(k)).length}/${allKeys.length})`}
           checked={allSelected}
           indeterminate={!allSelected && someSelected}
           onChange={(e) => setMany(allKeys, e.currentTarget.checked)}
         />
       </Group>
+
+      {selectedDisabled.length > 0 ? (
+        <Group gap={6} data-testid="redteam-disabled-probes">
+          {selectedDisabled.map((d) => (
+            <Pill
+              key={d.key}
+              size="sm"
+              withRemoveButton
+              onRemove={() => onChange(value.filter((k) => k !== d.key))}
+              removeButtonProps={{ 'aria-label': `Remove disabled probe ${d.name}` }}
+            >
+              {d.name} · disabled
+            </Pill>
+          ))}
+          <Text size="xs" c="dimmed">Skipped while disabled.</Text>
+        </Group>
+      ) : null}
+
+      {missing.length > 0 ? (
+        <Group gap={6} data-testid="redteam-deleted-probes">
+          <Text size="xs" c="dimmed">No longer exist:</Text>
+          {missing.map((key) => (
+            <Pill
+              key={key}
+              size="sm"
+              withRemoveButton
+              onRemove={() => onChange(value.filter((k) => k !== key))}
+              removeButtonProps={{ 'aria-label': `Remove deleted probe ${key}` }}
+            >
+              {key} · deleted probe
+            </Pill>
+          ))}
+        </Group>
+      ) : null}
+
+      <Text size="xs" c="dimmed">OWASP Top 10 for LLM Applications (2025)</Text>
 
       <ScrollArea.Autosize mah={340} type="auto">
         <Stack gap="sm" pr="sm">
@@ -169,6 +202,7 @@ export default function ProbePicker({ probes, value, onChange, emptyHint }: Prop
                         <Checkbox
                           size="xs"
                           checked={selected.has(p.key)}
+                          aria-label={p.name}
                           onChange={() => toggle(p.key)}
                           onClick={(e) => e.stopPropagation()}
                           mt={2}

@@ -5,7 +5,7 @@
  * refusals → safe, benign answers → deferred (not false-positive).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runCalibration } from '@/lib/services/redteam/calibration/calibrationRunner';
 import { GOLDEN_SET } from '@/lib/services/redteam/calibration/goldenSet';
 
@@ -33,6 +33,58 @@ describe('runCalibration', () => {
     expect(leak?.predicted).toBe('vulnerable');
     expect(leak?.decidedBy).toMatch(/hard-proof/);
     expect(result.detectorHits.pattern).toBeGreaterThanOrEqual(2);
+  });
+
+  it('covers the accuracy cases: refusal-then-comply, Turkish and curly refusals, look-alike numbers, echoes, fenced payloads', () => {
+    const ids = GOLDEN_SET.map((c) => c.id);
+    for (const id of [
+      'sid-refuse-then-leak',
+      'pi-refusal-tr',
+      'pi-refusal-curly',
+      'pii-dates-versions',
+      'pii-echo-prompt',
+      'insecure-fenced',
+    ]) {
+      expect(ids).toContain(id);
+    }
+  });
+
+  it('a refusal that goes on to leak the secret is vulnerable, not safe', async () => {
+    const result = await runCalibration();
+    const c = result.cases.find((x) => x.id === 'sid-refuse-then-leak');
+    expect(c?.predicted).toBe('vulnerable');
+    expect(c?.decidedBy).toMatch(/hard-proof/);
+  });
+
+  it('Turkish and curly-apostrophe refusals are safe through the gate', async () => {
+    const result = await runCalibration();
+    for (const id of ['pi-refusal-tr', 'pi-refusal-curly']) {
+      const c = result.cases.find((x) => x.id === id);
+      expect(c?.predicted).toBe('safe');
+      expect(c?.decidedBy).toMatch(/safe-gate/);
+    }
+  });
+
+  it('dates, versions, echoed PII and a fenced payload never reach vulnerable', async () => {
+    const result = await runCalibration();
+    for (const id of ['pii-dates-versions', 'pii-echo-prompt', 'insecure-fenced']) {
+      const c = result.cases.find((x) => x.id === id);
+      expect(c?.predicted).not.toBe('vulnerable');
+      expect(c?.correct).toBe(true);
+    }
+    // the fenced payload is soft evidence for a human, not hard proof
+    expect(result.cases.find((x) => x.id === 'insecure-fenced')?.predicted).toBe('needs_review');
+  });
+
+  it('skips the judge for a case a hard proof settles', async () => {
+    const invokeJudge = vi.fn().mockResolvedValue('{"success_score":0.1,"complied":false}');
+    const result = await runCalibration(
+      GOLDEN_SET.filter((c) => c.id === 'sid-leak' || c.id === 'pi-benign'),
+      { invokeJudge },
+    );
+    // pi-benign has two judges, sid-leak has two but is settled by the canary
+    expect(invokeJudge).toHaveBeenCalledTimes(2);
+    expect(result.cases.find((c) => c.id === 'sid-leak')?.predicted).toBe('vulnerable');
   });
 
   it('treats refusals as safe via the refusal gate', async () => {

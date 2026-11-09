@@ -5,7 +5,7 @@
  */
 
 import type { EuRiskCategory, EuArticleRef } from '../euTaxonomy';
-import type { RedTeamSeverity } from '@/lib/database';
+import type { RedTeamInconclusiveReason, RedTeamSeverity } from '@/lib/database';
 
 /** EU AI Act risk classification recorded for the system under test. */
 export type EuRiskTier =
@@ -53,6 +53,9 @@ export interface ComplianceEvidenceSample {
   campaignKey: string;
   probeKey: string;
   attemptId: string;
+  /** `<probeKey>::<attemptId>`, the attempt's identity within its run. */
+  attemptKey?: string;
+  /** The 2025 OWASP key. */
   owaspCategory: string;
   outcome: 'safe' | 'vulnerable' | 'needs_review';
   /** The adversarial input (last user turn of the attempt). */
@@ -88,29 +91,53 @@ export interface ComplianceFinding {
   example?: ComplianceEvidenceSample;
 }
 
-/** A probe category expected but not exercised by any completed scan. */
+/** An OWASP category (of the ten in the 2025 list) that no scan of the current posture exercised. */
 export interface ComplianceCoverageGap {
   owaspCategory: string;
+  /** Display label of the category. */
+  label?: string;
   reason: string;
+}
+
+/** Older completed scans of the campaigns in the report: counts only, never posture. */
+export interface ComplianceHistory {
+  runs: number;
+  byCampaign: Array<{ campaignKey: string; runs: number; attempts: number; vulnerable: number }>;
+}
+
+/** A completed scan whose rates cannot be trusted, so it is left out of the posture. */
+export interface ComplianceInconclusiveRun {
+  runId: string;
+  campaignKey: string;
+  finishedAt?: string;
+  reasons: RedTeamInconclusiveReason[];
 }
 
 export interface EuComplianceReport {
   generatedAt: string;
+  /** `runsConsidered`: the scans the posture is read from (the latest conclusive completed scan of each campaign). */
   scope: { projectId?: string; runsConsidered: number; scanWindow?: { from?: string; to?: string } };
+  /** The category list the report is organised by. */
+  owaspReference: { name: string; version: string; label: string };
   system: CampaignComplianceMeta & { campaigns: string[]; targets: string[] };
   posture: {
     totalAttempts: number;
     completed: number;
     vulnerable: number;
     needsReview: number;
-    attackSuccessRate: number;
-    resilienceScore: number;
+    /** null when no attempt completed. */
+    attackSuccessRate: number | null;
+    resilienceScore: number | null;
     bySeverity: Record<string, number>;
   };
-  byOwaspCategory: Array<{ category: string; total: number; vulnerable: number; needsReview: number; resilience: number }>;
+  byOwaspCategory: Array<{ category: string; label?: string; total: number; vulnerable: number; needsReview: number; resilience: number }>;
   byEuCategory: ComplianceEuCategoryPosture[];
   findings: ComplianceFinding[];
   coverageGaps: ComplianceCoverageGap[];
+  /** Older completed scans of the same campaigns (counts only). */
+  history: ComplianceHistory;
+  /** Completed scans left out of the posture because their rates cannot be trusted. */
+  inconclusiveRuns: ComplianceInconclusiveRun[];
   /** Machine-readable statement of which regulatory hooks the report addresses. */
   regulatoryBasis: EuArticleRef[];
   /** Human-readable caveats the report must carry to be honest evidence. */

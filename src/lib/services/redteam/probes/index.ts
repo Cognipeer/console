@@ -45,9 +45,18 @@ export interface ProbeCatalogEntry {
   description: string;
   /** True for user-authored probes (built-ins are false / omitted). */
   custom?: boolean;
+  /**
+   * Every attempt of the probe plants a system turn (a secret or a rule to leak),
+   * so the probe cannot run against a target that keeps its own instructions, as
+   * an agent does.
+   */
+  requiresSystemPrompt: boolean;
+  /** At least one attempt is adaptive: it needs an attacker model to escalate. */
+  needsJudgeModel: boolean;
 }
 
 function catalogEntry(probe: Probe, custom = false, name?: string): ProbeCatalogEntry {
+  const attempts = probe.generate();
   return {
     key: probe.key,
     name: name ?? probe.key,
@@ -56,6 +65,8 @@ function catalogEntry(probe: Probe, custom = false, name?: string): ProbeCatalog
     severity: probe.severity,
     description: probe.description,
     custom,
+    requiresSystemPrompt: attempts.length > 0 && attempts.every((a) => Boolean(a.system)),
+    needsJudgeModel: attempts.some((a) => a.adaptive === true),
   };
 }
 
@@ -107,6 +118,47 @@ export function buildProbes(keys?: string[], customProbes: IRedTeamCustomProbe[]
   return probes;
 }
 
+/**
+ * Like `buildProbes`, for a campaign whose selection may have outlived its
+ * probes: a key that no longer resolves (a deleted custom probe, a built-in
+ * that was renamed, a custom definition that no longer validates) is returned in
+ * `missing` instead of throwing, so the scan runs what is left and the caller can
+ * say what it skipped. A custom probe that is switched off is skipped quietly,
+ * as in `buildProbes`.
+ */
+export function buildProbesLenient(
+  keys?: string[],
+  customProbes: IRedTeamCustomProbe[] = [],
+): { probes: Probe[]; missing: string[] } {
+  const selected = keys && keys.length > 0 ? keys : BUILTIN_PROBE_KEYS;
+  const customByKey = new Map(customProbes.map((def) => [def.key, def]));
+  const probes: Probe[] = [];
+  const missing: string[] = [];
+  for (const key of selected) {
+    if (isCustomProbeKey(key)) {
+      const def = customByKey.get(key);
+      if (!def) {
+        missing.push(key);
+        continue;
+      }
+      if (def.enabled === false) continue;
+      try {
+        probes.push(buildCustomProbe(def));
+      } catch {
+        missing.push(key);
+      }
+      continue;
+    }
+    const factory = PROBE_REGISTRY[key];
+    if (!factory) {
+      missing.push(key);
+      continue;
+    }
+    probes.push(factory());
+  }
+  return { probes, missing };
+}
+
 export {
   createPromptInjectionProbe,
   createJailbreakProbe,
@@ -122,6 +174,7 @@ export {
 export {
   buildCustomProbe,
   validateCustomProbe,
+  validateCustomProbeDefinition,
   validateCustomProbePatterns,
   CustomProbeError,
   CUSTOM_PROBE_PREFIX,

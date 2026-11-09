@@ -28,18 +28,12 @@ export interface RedTeamMessage {
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 
 /**
- * OWASP "Top 10 for LLM Applications" categories, used for reporting and
- * compliance mapping. Keep the prefix stable — reports group on it.
+ * OWASP "Top 10 for LLM Applications" categories (the 2025 list), used for
+ * reporting and compliance mapping. See ./owasp for labels and for mapping keys
+ * stored before the 2025 list.
  */
-export type OwaspLlmCategory =
-  | 'LLM01-prompt-injection'
-  | 'LLM02-insecure-output-handling'
-  | 'LLM04-model-dos'
-  | 'LLM05-supply-chain'
-  | 'LLM06-sensitive-information-disclosure'
-  | 'LLM07-system-prompt-leakage'
-  | 'LLM08-excessive-agency'
-  | 'LLM09-overreliance';
+export type { OwaspLlmCategory } from './owasp';
+import type { OwaspLlmCategory } from './owasp';
 
 // ── Probe ────────────────────────────────────────────────────────────────────
 
@@ -107,8 +101,21 @@ export interface RedTeamOutput {
   raw?: unknown;
 }
 
+/** What the runner tells the target about the call it is making. */
+export interface TargetCallContext {
+  /**
+   * `<probeKey>::<attemptId>`. Calls of one attempt share a conversation; calls
+   * of different attempts never do, even when attempts run in parallel.
+   */
+  attemptKey: string;
+  /** 0 for the opening turn of the attempt. */
+  turnIndex: number;
+  /** Aborted when the call's time limit passes or the run stops; an invoker should stop its work on it. */
+  signal?: AbortSignal;
+}
+
 /** Injected: run the system-under-test for a (possibly multi-turn) message list. */
-export type TargetInvoker = (messages: RedTeamMessage[]) => Promise<RedTeamOutput>;
+export type TargetInvoker = (messages: RedTeamMessage[], call?: TargetCallContext) => Promise<RedTeamOutput>;
 
 /** Injected: call a judge model. Returns the raw completion text. */
 export type JudgeInvoker = (messages: RedTeamMessage[]) => Promise<string>;
@@ -217,8 +224,14 @@ export interface AttemptResult {
   /** Mirror of `verdict.outcome` for convenient filtering. */
   outcome: Outcome;
   latencyMs?: number;
-  /** Set when the target invocation itself threw. */
+  /** Set when the target invocation itself threw (or timed out). */
   error?: string;
+  /**
+   * The target answered at least one turn before `error`: the detectors judged
+   * the transcript up to the error, and the attempt counts as completed. An
+   * attempt with `error` and no `partial` never got an answer and counts as failed.
+   */
+  partial?: boolean;
   /**
    * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the attempt's work handed on
    * (rag/access/exposure.ts): its transcript, rationales and error are shown only to the run's starter and to those
@@ -231,7 +244,12 @@ export interface CategoryBreakdown {
   total: number;
   vulnerable: number;
   needsReview: number;
+  /** Attempts that errored out (counted in total, not in vulnerable/needsReview). Absent on runs recorded before it existed. */
+  failed?: number;
 }
+
+/** Why a run's rates cannot be trusted. */
+export type InconclusiveReason = 'no-completed-attempts' | 'target-errors' | 'judge-errors';
 
 export interface RedTeamAggregate {
   total: number;
@@ -242,31 +260,56 @@ export interface RedTeamAggregate {
   vulnerable: number;
   safe: number;
   needsReview: number;
-  /** vulnerable / completed, in [0, 1]. */
-  attackSuccessRate: number;
-  /** 1 - attackSuccessRate, in [0, 1] (needs_review tracked separately). */
-  resilienceScore: number;
+  /** vulnerable / completed, in [0, 1]; null when no attempt completed. */
+  attackSuccessRate: number | null;
+  /** 1 - attackSuccessRate, in [0, 1] (needs_review tracked separately); null when no attempt completed. */
+  resilienceScore: number | null;
   /** Count of vulnerable findings by severity. */
   bySeverity: Record<Severity, number>;
-  /** Per-OWASP-category rollup. */
+  /** Per-OWASP-category rollup (2025 keys). */
   byCategory: Record<string, CategoryBreakdown>;
   avgLatencyMs: number | null;
   /** Attempts whose llm-judge detector errored: counted here, never folded into "not hit". */
   judgeErrors: number;
-  /** Judge errors exceed 20% of the judged attempts: the attack-success rate cannot be trusted. */
+  /** The rates cannot be trusted; `inconclusiveReasons` says why. */
   inconclusive: boolean;
+  inconclusiveReasons: InconclusiveReason[];
 }
 
 export interface RedTeamRunResult {
   aggregate: RedTeamAggregate;
   attempts: AttemptResult[];
+  /** True when `shouldStop` ended the run before every attempt ran. */
+  stopped?: boolean;
+  /** Attempts generated beyond `maxAttempts` that were never executed. */
+  skipped?: number;
+  /**
+   * Attempts not run because they plant a system prompt and the target does not
+   * take one (`targetAcceptsSystem: false`, e.g. an agent keeps its own).
+   */
+  notApplicable?: number;
 }
 
 export interface RedTeamRunConfig {
-  /** Parallel attempt executions (default 4). */
+  /** Parallel attempt executions (default 4, clamped to RUN_LIMITS.concurrency). */
   concurrency?: number;
   /** Decision-policy overrides. */
   policy?: DecisionPolicyConfig;
   /** Cap user turns per attempt (truncates scripted multi-turn probes). */
   maxTurns?: number;
+  /** Cap on attempts executed in one run (default RUN_LIMITS.maxAttemptsPerRun). */
+  maxAttempts?: number;
+  /**
+   * Whether the target receives the attempt's `system` turn (default true). An
+   * agent target keeps its own instructions, so an attempt that plants a
+   * secret or rule in a system turn cannot test it: such attempts are not run
+   * and are counted in `notApplicable`, never reported as safe.
+   */
+  targetAcceptsSystem?: boolean;
+  /**
+   * Polled before each attempt starts and before each further turn. Once it
+   * returns true no new attempt or turn starts; attempts already finished are
+   * kept and the result is marked `stopped`.
+   */
+  shouldStop?: () => boolean;
 }

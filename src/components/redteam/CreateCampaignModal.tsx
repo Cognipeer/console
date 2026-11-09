@@ -6,9 +6,9 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Alert, SegmentedControl, Select, Switch, TextInput, Textarea } from '@mantine/core';
+import { Alert, List, NumberInput, SegmentedControl, Select, Switch, Text, TextInput, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconLock, IconShield } from '@tabler/icons-react';
+import { IconAlertTriangle, IconLock, IconShield } from '@tabler/icons-react';
 import FormShell, {
   FormField,
   FormRow,
@@ -21,8 +21,10 @@ import { configVersionTag } from '@/components/agents/agentVersionTag';
 import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
 import { useAgentVersionOptions } from '@/components/agents/useAgentVersionOptions';
 import { storedVersionFromPicker } from '@/lib/shared/agentRevision';
+import { RUN_LIMITS } from '@/lib/services/redteam/limits';
 import ProbePicker from './ProbePicker';
-import type { ProbeCatalogView, RedTeamCampaignView, RedTeamTargetKind, SelectOption } from './types';
+import { cronError, formatFireTime, nextFireTimes } from './cronPreview';
+import type { DisabledProbeView, ProbeCatalogView, RedTeamCampaignView, RedTeamTargetKind, SelectOption } from './types';
 
 interface Props {
   opened: boolean;
@@ -31,10 +33,17 @@ interface Props {
   agents: SelectOption[];
   models: SelectOption[];
   probes: ProbeCatalogView[];
+  disabledProbes?: DisabledProbeView[];
   onSaved: (campaign?: RedTeamCampaignView) => void;
 }
 
 const DEFAULT_CRON = '0 3 * * *';
+const DEFAULT_CONCURRENCY: number = RUN_LIMITS.concurrency.default;
+
+/** A whole number inside [min, max]; anything else (empty, fractional, out of range) is not a usable value. */
+function wholeInRange(value: number | string, min: number, max: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+}
 
 /** The Version select holds 'published', 'draft' or a version number as digits. */
 function versionSelectValue(stored: RedTeamCampaignView['agentVersion']): string {
@@ -45,7 +54,7 @@ function versionLabel(value: string): string {
   return value === 'draft' ? 'draft' : value === 'published' ? 'published' : `v${value}`;
 }
 
-export default function CreateCampaignModal({ opened, editing, onClose, agents, models, probes, onSaved }: Props) {
+export default function CreateCampaignModal({ opened, editing, onClose, agents, models, probes, disabledProbes, onSaved }: Props) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [targetKind, setTargetKind] = useState<RedTeamTargetKind>('agent');
@@ -56,6 +65,8 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
   const [judgeModelKey, setJudgeModelKey] = useState<string | null>(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [cron, setCron] = useState(DEFAULT_CRON);
+  const [concurrency, setConcurrency] = useState<number | string>(DEFAULT_CONCURRENCY);
+  const [maxOutputTokens, setMaxOutputTokens] = useState<number | string>('');
   const [saving, setSaving] = useState(false);
   const { canRunAgentTests } = useAgentTestAccess();
   const agentVersions = useAgentVersionOptions(agentKey, opened && targetKind === 'agent');
@@ -72,6 +83,8 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
     setJudgeModelKey(editing?.judgeModelKey ?? null);
     setScheduleEnabled(editing?.schedule?.enabled ?? false);
     setCron(editing?.schedule?.cron ?? DEFAULT_CRON);
+    setConcurrency(editing?.runConfig?.concurrency ?? DEFAULT_CONCURRENCY);
+    setMaxOutputTokens(editing?.runConfig?.maxOutputTokens ?? '');
   }, [opened, editing]);
 
   const targetRef = targetKind === 'agent' ? agentKey : modelKey;
@@ -82,7 +95,20 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
   const draftScheduled = targetKind === 'agent' && scheduleEnabled && agentVersion === 'draft';
   // Creating or changing an agent campaign needs Write on Agents, like scanning it (the server refuses it otherwise).
   const agentBlocked = targetKind === 'agent' && !canRunAgentTests;
-  const canSubmit = validIdentity && validTarget && !draftScheduled && !agentBlocked && !saving;
+  const validConcurrency = wholeInRange(concurrency, RUN_LIMITS.concurrency.min, RUN_LIMITS.concurrency.max);
+  const validMaxTokens = maxOutputTokens === '' || wholeInRange(maxOutputTokens, 1, RUN_LIMITS.maxOutputTokens.max);
+  // An enabled schedule needs a cron the server will accept; the same check runs here so Save says so first.
+  const scheduleError = scheduleEnabled ? cronError(cron) : null;
+  const fireTimes = scheduleEnabled && !scheduleError ? nextFireTimes(cron.trim(), 3) : [];
+  const canSubmit =
+    validIdentity && validTarget && !draftScheduled && !agentBlocked && validConcurrency && validMaxTokens && !scheduleError && !saving;
+
+  // What a scan would actually run: with nothing selected it is the whole built-in catalog.
+  const effectiveProbes = probeKeys.length > 0
+    ? probes.filter((p) => probeKeys.includes(p.key))
+    : probes.filter((p) => !p.custom);
+  const needsJudge = effectiveProbes.filter((p) => p.needsJudgeModel);
+  const plantsSystemPrompt = targetKind === 'agent' ? effectiveProbes.filter((p) => p.requiresSystemPrompt) : [];
 
   const versionOptions = [
     { value: 'published', label: 'Published — follows the live version' },
@@ -97,6 +123,15 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
   if (!versionOptions.some((o) => o.value === agentVersion)) {
     versionOptions.push({ value: agentVersion, label: versionLabel(agentVersion) });
   }
+
+  const buildRunConfig = (): { concurrency: number; maxOutputTokens?: number } => ({
+    concurrency: concurrency as number,
+    ...(typeof maxOutputTokens === 'number' ? { maxOutputTokens } : {}),
+  });
+
+  const runConfigChanged = (): boolean =>
+    concurrency !== (editing?.runConfig?.concurrency ?? DEFAULT_CONCURRENCY) ||
+    (maxOutputTokens === '' ? undefined : maxOutputTokens) !== editing?.runConfig?.maxOutputTokens;
 
   const submit = async () => {
     if (!validIdentity) {
@@ -128,6 +163,9 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
         schedule: scheduleEnabled && cron.trim()
           ? { cron: cron.trim(), enabled: true }
           : { cron: editing?.schedule?.cron ?? DEFAULT_CRON, enabled: false },
+        // Sent only when the person changed a limit: it replaces the stored run settings as a whole, and an
+        // untouched form should leave them alone.
+        ...(runConfigChanged() ? { runConfig: buildRunConfig() } : {}),
       };
       const url = editing ? `/api/redteam/campaigns/${editing.id}` : '/api/redteam/campaigns';
       const res = await fetch(url, {
@@ -159,6 +197,7 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
       />
       <SummaryKV label="Probes" value={probeKeys.length === 0 ? 'all built-in' : `${probeKeys.length} selected`} />
       <SummaryKV label="Judge" value={judgeModelKey ?? 'none'} mono />
+      <SummaryKV label="Concurrency" value={validConcurrency ? String(concurrency) : '—'} mono />
       <SummaryKV label="Schedule" value={scheduleEnabled ? cron : 'manual'} mono />
     </SummaryGroup>
   );
@@ -171,7 +210,7 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
       title={editing ? 'Edit campaign' : 'New red-team campaign'}
       subtitle="Point adversarial probes at an agent or model and judge each verdict."
       summary={summary}
-      footerStatus={agentBlocked ? AGENT_TEST_ACCESS_HINT : draftScheduled ? 'a scheduled scan cannot run on the draft' : canSubmit ? 'ready' : 'fill required fields'}
+      footerStatus={agentBlocked ? AGENT_TEST_ACCESS_HINT : draftScheduled ? 'a scheduled scan cannot run on the draft' : scheduleError ? 'fix the cron expression' : !validConcurrency || !validMaxTokens ? 'fix the run limits' : canSubmit ? 'ready' : 'fill required fields'}
       primaryAction={{
         label: editing ? 'Save campaign' : 'Create campaign',
         loading: saving,
@@ -249,17 +288,68 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
         <FormField label="Probes" optional hint="Leave empty to run the entire built-in catalog. Custom probes must be selected explicitly.">
           <ProbePicker
             probes={probes}
+            disabledProbes={disabledProbes}
             value={probeKeys}
             onChange={setProbeKeys}
             emptyHint="No probes selected — the entire built-in catalog will run."
           />
         </FormField>
+        {plantsSystemPrompt.length > 0 ? (
+          <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={16} />} title="Not run against agents" data-testid="redteam-agent-skip-warning">
+            <Text size="sm" mb={4}>
+              These probes plant their own system prompt, and an agent keeps its own instructions, so their attempts are skipped:
+            </Text>
+            <List size="sm" spacing={2}>
+              {plantsSystemPrompt.map((p) => <List.Item key={p.key}>{p.name}</List.Item>)}
+            </List>
+          </Alert>
+        ) : null}
         <FormField label="Judge / attacker model" optional hint="Powers the LLM-judge detectors AND the adaptive multi-turn attacker that escalates across turns. Strongly recommended.">
           <Select searchable clearable data={models} value={judgeModelKey} onChange={setJudgeModelKey} placeholder="Select a judge model" />
         </FormField>
+        {!judgeModelKey && needsJudge.length > 0 ? (
+          <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={16} />} title="No judge model" data-testid="redteam-judge-warning">
+            {needsJudge.length === 1 ? '1 selected probe uses' : `${needsJudge.length} selected probes use`} multi-turn or adaptive
+            attacks. Without a judge / attacker model they cannot escalate, and their verdicts rest on the cheap detectors alone.
+          </Alert>
+        ) : null}
       </FormSection>
 
-      <FormSection number={4} title="Schedule" description="Run automatically on a cron schedule for unattended regression testing.">
+      <FormSection number={4} title="Run limits" description="How hard a scan pushes the target.">
+        <FormRow cols={2}>
+          <FormField label="Concurrency" hint={`Attempts run in parallel, ${RUN_LIMITS.concurrency.min} to ${RUN_LIMITS.concurrency.max}.`}>
+            <NumberInput
+              value={concurrency}
+              onChange={setConcurrency}
+              min={RUN_LIMITS.concurrency.min}
+              max={RUN_LIMITS.concurrency.max}
+              allowDecimal={false}
+              allowNegative={false}
+              error={validConcurrency ? undefined : `Enter a whole number from ${RUN_LIMITS.concurrency.min} to ${RUN_LIMITS.concurrency.max}.`}
+            />
+          </FormField>
+          <FormField
+            label="Max output tokens"
+            optional
+            hint={targetKind === 'agent'
+              ? 'Applies to model targets. An agent keeps its own output limit.'
+              : `Per reply, up to ${RUN_LIMITS.maxOutputTokens.max}. Leave empty to use the model's default.`}
+          >
+            <NumberInput
+              value={maxOutputTokens}
+              onChange={setMaxOutputTokens}
+              min={1}
+              max={RUN_LIMITS.maxOutputTokens.max}
+              allowDecimal={false}
+              allowNegative={false}
+              placeholder="Model default"
+              error={validMaxTokens ? undefined : `Enter a whole number up to ${RUN_LIMITS.maxOutputTokens.max}.`}
+            />
+          </FormField>
+        </FormRow>
+      </FormSection>
+
+      <FormSection number={5} title="Schedule" description="Run automatically on a cron schedule for unattended regression testing.">
         <Switch
           label="Scheduled scan"
           checked={scheduleEnabled}
@@ -267,8 +357,18 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
         />
         {scheduleEnabled ? (
           <FormField label="Cron expression (UTC)" hint="Default: every day at 03:00 UTC">
-            <TextInput value={cron} onChange={(e) => setCron(e.currentTarget.value)} placeholder="0 3 * * *" />
+            <TextInput
+              value={cron}
+              onChange={(e) => setCron(e.currentTarget.value)}
+              placeholder="0 3 * * *"
+              error={scheduleError ?? undefined}
+            />
           </FormField>
+        ) : null}
+        {fireTimes.length > 0 ? (
+          <Text size="xs" c="dimmed" data-testid="redteam-cron-preview">
+            Next runs: {fireTimes.map(formatFireTime).join(' · ')}
+          </Text>
         ) : null}
       </FormSection>
     </FormShell>

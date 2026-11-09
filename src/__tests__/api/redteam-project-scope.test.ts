@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getRun: vi.fn(),
   compareRuns: vi.fn(),
   reviewAttempt: vi.fn(),
+  cancelRun: vi.fn(),
   getCustomProbe: vi.fn(),
   updateCustomProbe: vi.fn(),
   deleteCustomProbe: vi.fn(),
@@ -34,13 +35,20 @@ vi.mock('@/lib/services/redteam/service', () => ({
   getCustomProbe: mocks.getCustomProbe,
   getOverview: vi.fn(),
   getRun: mocks.getRun,
-  listRuns: vi.fn(async () => []),
+  listRunsPage: vi.fn(async () => ({ runs: [], total: 0 })),
+  cancelRun: mocks.cancelRun,
   reviewAttempt: mocks.reviewAttempt,
   updateCustomProbe: mocks.updateCustomProbe,
+  validateCampaignInput: vi.fn(),
   CustomProbeError: class CustomProbeError extends Error {},
+  RedTeamConflictError: class RedTeamConflictError extends Error {},
+  RedTeamForbiddenError: class RedTeamForbiddenError extends Error {},
+  RedTeamNotFoundError: class RedTeamNotFoundError extends Error {},
+  RedTeamValidationError: class RedTeamValidationError extends Error {},
 }));
 vi.mock('@/lib/services/redteam/campaignJob', () => ({ enqueueCampaignRun: vi.fn() }));
 vi.mock('@/server/api/restrictedKnowledgeRequest', () => ({
+  restrictedKnowledgeReaderFor: vi.fn(() => ({ mayRead: async () => true })),
   withoutRestrictedAttempts: vi.fn(async (_request: unknown, _viewer: unknown, run: unknown) => run),
 }));
 vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
@@ -100,8 +108,9 @@ describe('dashboard red-team routes keep to the active project', () => {
     mocks.deleteCampaign.mockResolvedValue(true);
     mocks.compareRuns.mockResolvedValue({ regressed: [] });
     mocks.reviewAttempt.mockImplementation(async (_db, id) => run(id, 'proj-1'));
+    mocks.cancelRun.mockImplementation(async (_db, id) => run(id, 'proj-1'));
     mocks.updateCustomProbe.mockImplementation(async (_db, id, _user, data) => ({ id, ...data }));
-    mocks.deleteCustomProbe.mockResolvedValue(true);
+    mocks.deleteCustomProbe.mockResolvedValue({ deleted: true, usedBy: [] });
     app = await createFastifyApiTestApp(redTeamApiPlugin, { rawJsonBody: true });
   });
 
@@ -154,6 +163,16 @@ describe('dashboard red-team routes keep to the active project', () => {
       mocks.getRun.mockImplementation(async (_db, id: string) => run(id, 'proj-1'));
       expect((await call(app, 'GET', '/api/redteam/runs/r1/compare?baseline=base')).statusCode).toBe(200);
       expect(mocks.compareRuns).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels only a run of the active project', async () => {
+      mocks.getRun.mockResolvedValue(run('r1', 'proj-2'));
+      expect((await call(app, 'POST', '/api/redteam/runs/r1/cancel')).statusCode).toBe(404);
+      expect(mocks.cancelRun).not.toHaveBeenCalled();
+
+      mocks.getRun.mockResolvedValue(run('r1', 'proj-1'));
+      expect((await call(app, 'POST', '/api/redteam/runs/r1/cancel')).statusCode).toBe(200);
+      expect(mocks.cancelRun).toHaveBeenCalledWith('tenant_db', 'r1', 'user-1');
     });
 
     it('records a review only on a run of the active project', async () => {

@@ -2,7 +2,7 @@
  * EU AI Act / GPAI Code of Practice risk taxonomy for red-team reporting.
  *
  * The engine natively tags every probe with an OWASP "Top 10 for LLM
- * Applications" category (stable, tool-facing). Regulators, however, reason in
+ * Applications" (2025) category (stable, tool-facing). Regulators, however, reason in
  * the EU AI Act's own vocabulary: the Article 55 / GPAI Code-of-Practice
  * *systemic-risk* families (CBRN, cyber-offence, loss-of-control, harmful
  * manipulation) plus the Article 15 accuracy/robustness/cybersecurity duties for
@@ -15,6 +15,7 @@
  * carries one.
  */
 
+import { normalizeOwaspCategory } from './owasp';
 import type { OwaspLlmCategory } from './types';
 
 /**
@@ -132,27 +133,33 @@ export const EU_RISK_CATEGORIES: Record<EuRiskCategory, EuRiskCategoryMeta> = {
  * Map an OWASP LLM category to the EU risk families it evidences. A single
  * OWASP category can speak to more than one EU duty (e.g. prompt injection is
  * both a manipulation and a robustness concern), so the mapping is one-to-many.
- * Unknown / custom-only categories fall back to a robustness signal so nothing
- * silently drops out of a compliance rollup.
+ * The category is the 2025 key; a key stored before the 2025 list is mapped to
+ * its 2025 key first, so old runs fold the same way as new ones. Unknown /
+ * custom-only categories fall back to a robustness signal so nothing silently
+ * drops out of a compliance rollup.
  */
 export function mapOwaspToEu(owasp: string): EuRiskCategory[] {
-  switch (owasp as OwaspLlmCategory) {
+  switch (normalizeOwaspCategory(owasp) as OwaspLlmCategory) {
     case 'LLM01-prompt-injection':
       return ['harmful-manipulation', 'cyber-offence'];
-    case 'LLM02-insecure-output-handling':
-      return ['cyber-offence'];
-    case 'LLM04-model-dos':
-      return ['availability-robustness'];
-    case 'LLM05-supply-chain':
-      return ['cyber-offence', 'availability-robustness'];
-    case 'LLM06-sensitive-information-disclosure':
+    case 'LLM02-sensitive-information-disclosure':
       return ['sensitive-data-disclosure'];
+    case 'LLM03-supply-chain':
+      return ['cyber-offence', 'availability-robustness'];
+    case 'LLM04-data-model-poisoning':
+      return ['harmful-manipulation', 'availability-robustness'];
+    case 'LLM05-improper-output-handling':
+      return ['cyber-offence'];
+    case 'LLM06-excessive-agency':
+      return ['loss-of-control', 'cyber-offence'];
     case 'LLM07-system-prompt-leakage':
       return ['sensitive-data-disclosure'];
-    case 'LLM08-excessive-agency':
-      return ['loss-of-control', 'cyber-offence'];
-    case 'LLM09-overreliance':
+    case 'LLM08-vector-embedding-weaknesses':
+      return ['sensitive-data-disclosure', 'cyber-offence'];
+    case 'LLM09-misinformation':
       return ['misinformation'];
+    case 'LLM10-unbounded-consumption':
+      return ['availability-robustness'];
     default:
       return ['availability-robustness'];
   }

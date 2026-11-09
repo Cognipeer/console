@@ -227,6 +227,12 @@ const CORE_TARGETS: RetentionTarget[] = [
     guard: NOT_RUNNING,
   },
   {
+    id: 'redteam_run_attempts', collection: 'redteam_run_attempts', edition: 'core',
+    label: 'Red-team run attempts',
+    timeField: 'createdAt', projectField: 'projectId',
+    phases: [{ class: 'results', action: 'delete' }],
+  },
+  {
     id: 'analysis_runs', collection: 'analysis_runs', edition: 'core',
     label: 'Analysis runs and their results',
     timeField: 'createdAt', projectField: 'projectId',

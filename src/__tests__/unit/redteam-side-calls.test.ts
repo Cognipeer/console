@@ -221,3 +221,30 @@ describe('the target under test', () => {
     expect(chat).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('the target call limits', () => {
+  it('sends the configured output cap as max_tokens, clamped to the limit', async () => {
+    await buildTargetInvoker({ kind: 'model', key: 't', modelKey: 'target-model', maxOutputTokens: 512 }, ctx)(messages);
+    expect(bodyOf(0).max_tokens).toBe(512);
+
+    chat.mockClear();
+    await buildTargetInvoker({ kind: 'model', key: 't', modelKey: 'target-model', maxOutputTokens: 10_000_000 }, ctx)(messages);
+    expect(bodyOf(0).max_tokens).toBe(16384);
+  });
+
+  it('sends no cap when none is configured', async () => {
+    await buildTargetInvoker({ kind: 'model', key: 't', modelKey: 'target-model' }, ctx)(messages);
+    expect('max_tokens' in bodyOf(0)).toBe(false);
+  });
+
+  it('hands the call signal to the model call', async () => {
+    const controller = new AbortController();
+    await buildTargetInvoker({ kind: 'model', key: 't', modelKey: 'target-model' }, ctx)(messages, {
+      attemptKey: 'p::a1',
+      turnIndex: 0,
+      signal: controller.signal,
+    });
+    expect(chat.mock.calls[0][0].signal).toBe(controller.signal);
+  });
+});
+

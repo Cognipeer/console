@@ -47,6 +47,7 @@ export const COLLECTIONS = {
   evaluationRuns: 'evaluation_runs',
   redTeamCampaigns: 'redteam_campaigns',
   redTeamRuns: 'redteam_runs',
+  redTeamRunAttempts: 'redteam_run_attempts',
   redTeamCustomProbes: 'redteam_custom_probes',
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',

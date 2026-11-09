@@ -26,7 +26,7 @@ vi.mock('@/lib/database', () => ({
 }));
 
 import { updateSuite, updateTarget } from '@/lib/services/evaluation/service';
-import { updateCampaign, updateCustomProbe } from '@/lib/services/redteam/service';
+import { RedTeamValidationError, updateCampaign, updateCustomProbe, validateCampaignInput } from '@/lib/services/redteam/service';
 
 const echo = (_id: string, data: Record<string, unknown>) => ({ _id: 'rec-1', ...data });
 
@@ -88,6 +88,78 @@ describe('updateCampaign', () => {
 
     await updateCampaign('tenant', 'c1', 'ann', { name: 'Renamed' });
     expect('metadata' in h.db.updateRedTeamCampaign.mock.calls[1][1]).toBe(false);
+  });
+});
+
+describe('campaign limits on update', () => {
+  it('clamps concurrency and the output-token cap, and hands over only the keys it was given', async () => {
+    await updateCampaign('tenant', 'c1', 'ann', { runConfig: { concurrency: 99, maxOutputTokens: 10_000_000 } });
+
+    expect(h.db.updateRedTeamCampaign).toHaveBeenCalledWith('c1', {
+      runConfig: { concurrency: 16, maxOutputTokens: 16384 },
+      updatedBy: 'ann',
+    });
+  });
+
+  it('refuses a policy outside its ranges before anything is written', async () => {
+    await expect(updateCampaign('tenant', 'c1', 'ann', { policy: { deterministicConfidence: 0.2 } })).rejects.toBeInstanceOf(RedTeamValidationError);
+    expect(h.db.updateRedTeamCampaign).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates the probe selection', async () => {
+    await updateCampaign('tenant', 'c1', 'ann', { probeKeys: ['jailbreak', 'prompt-injection', 'jailbreak'] });
+
+    expect(h.db.updateRedTeamCampaign).toHaveBeenCalledWith('c1', { probeKeys: ['jailbreak', 'prompt-injection'], updatedBy: 'ann' });
+  });
+});
+
+describe('validateCampaignInput', () => {
+  it('leaves absent fields absent and passes the rest through', () => {
+    expect(validateCampaignInput({})).toEqual({});
+    expect(validateCampaignInput({ runConfig: { concurrency: 4 } })).toEqual({ runConfig: { concurrency: 4 } });
+  });
+
+  it.each([
+    [0, 1],
+    [-3, 1],
+    [2.7, 2],
+    [16, 16],
+    [17, 16],
+  ])('clamps concurrency %s to %s', (given, clamped) => {
+    expect(validateCampaignInput({ runConfig: { concurrency: given } }).runConfig?.concurrency).toBe(clamped);
+  });
+
+  it('accepts a policy inside its ranges and drops what it does not know', () => {
+    const policy = { deterministicConfidence: 0.5, reviewBand: [0.2, 0.8] as [number, number], maxJudgeVariance: 0, extra: 1 };
+    expect(validateCampaignInput({ policy: policy as never }).policy).toEqual({
+      deterministicConfidence: 0.5,
+      reviewBand: [0.2, 0.8],
+      maxJudgeVariance: 0,
+    });
+  });
+
+  it.each([
+    [{ deterministicConfidence: 0.49 }, /deterministicConfidence/],
+    [{ deterministicConfidence: 1.01 }, /deterministicConfidence/],
+    [{ deterministicConfidence: 'high' }, /deterministicConfidence/],
+    [{ reviewBand: [0.7, 0.3] }, /low <= high/],
+    [{ reviewBand: [-0.1, 0.5] }, /reviewBand/],
+    [{ reviewBand: [0.1, 1.5] }, /reviewBand/],
+    [{ reviewBand: [0.5] }, /pair/],
+    [{ maxJudgeVariance: -0.1 }, /maxJudgeVariance/],
+    [{ maxJudgeVariance: 1.1 }, /maxJudgeVariance/],
+  ])('refuses policy %j', (policy, message) => {
+    expect(() => validateCampaignInput({ policy: policy as never })).toThrow(RedTeamValidationError);
+    expect(() => validateCampaignInput({ policy: policy as never })).toThrow(message);
+  });
+
+  it('deduplicates probe keys and bounds the selection', () => {
+    expect(validateCampaignInput({ probeKeys: ['a', 'b', 'a'] }).probeKeys).toEqual(['a', 'b']);
+    const many = Array.from({ length: 101 }, (_, i) => `custom:p${i}`);
+    expect(() => validateCampaignInput({ probeKeys: many })).toThrow(/at most 100/);
+    // Repeats do not count against the bound.
+    expect(validateCampaignInput({ probeKeys: [...many.slice(0, 100), ...many.slice(0, 50)] }).probeKeys).toHaveLength(100);
+    expect(() => validateCampaignInput({ probeKeys: ['ok', ''] })).toThrow(RedTeamValidationError);
   });
 });
 

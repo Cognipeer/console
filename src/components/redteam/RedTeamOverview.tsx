@@ -12,26 +12,16 @@ import { Card, Group, Progress, Stack, Text } from '@mantine/core';
 import { IconAlertTriangle, IconShieldCheck, IconSearch, IconEye } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
+import { owaspCategoryLabel } from '@/lib/services/redteam/owasp';
+import { SEVERITY_COLOR } from './severity';
 import type { RedTeamOverviewView } from './types';
 
-const CATEGORY_LABELS: Record<string, string> = {
-  'LLM01-prompt-injection': 'LLM01 · Prompt Injection',
-  'LLM02-insecure-output-handling': 'LLM02 · Insecure Output Handling',
-  'LLM04-model-dos': 'LLM04 · Model Denial of Service',
-  'LLM05-supply-chain': 'LLM05 · Supply Chain',
-  'LLM06-sensitive-information-disclosure': 'LLM06 · Sensitive Information Disclosure',
-  'LLM07-system-prompt-leakage': 'LLM07 · System Prompt Leakage',
-  'LLM08-excessive-agency': 'LLM08 · Excessive Agency',
-  'LLM09-overreliance': 'LLM09 · Overreliance',
-};
-
-const SEVERITY_COLOR: Record<string, string> = { critical: 'red', high: 'orange', medium: 'yellow', low: 'gray' };
-
-function pct(v: number): string {
-  return `${Math.round(v * 100)}%`;
+function pct(v: number | null | undefined): string {
+  return v === null || v === undefined ? '—' : `${Math.round(v * 100)}%`;
 }
 
-function resilienceColor(r: number): string {
+function resilienceColor(r: number | null): string {
+  if (r === null) return 'gray';
   if (r >= 0.9) return 'teal';
   if (r >= 0.7) return 'yellow';
   if (r >= 0.5) return 'orange';
@@ -68,7 +58,7 @@ export default function RedTeamOverview() {
       <PageHeader
         eyebrow="Operate · Red Team"
         title="OWASP Overview"
-        subtitle="Compliance posture across all completed scans, rolled up by OWASP LLM risk category. The riskiest categories surface first."
+        subtitle="Compliance posture across the latest completed scans, rolled up by OWASP Top 10 for LLM Applications (2025) risk category. The riskiest categories surface first."
       />
 
       <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
@@ -85,12 +75,12 @@ export default function RedTeamOverview() {
       ) : (
         <Stack gap="lg">
           <Card withBorder padding="md" radius="md">
-            <Text fw={600} size="sm" mb="sm">Resilience by OWASP category</Text>
+            <Text fw={600} size="sm" mb="sm">Resilience by category · OWASP Top 10 for LLM Applications (2025)</Text>
             <Stack gap="md">
               {(overview?.byCategory ?? []).map((c) => (
                 <div key={c.category}>
                   <Group justify="space-between" mb={4}>
-                    <Text size="sm">{CATEGORY_LABELS[c.category] ?? c.category}</Text>
+                    <Text size="sm">{owaspCategoryLabel(c.category)}</Text>
                     <Group gap="md">
                       {c.vulnerable > 0 ? <Text size="xs" c="red">{c.vulnerable} vulnerable</Text> : null}
                       {c.needsReview > 0 ? <Text size="xs" c="yellow.7">{c.needsReview} review</Text> : null}
@@ -126,7 +116,7 @@ export default function RedTeamOverview() {
                 {(overview?.trend ?? []).slice().reverse().map((t) => (
                   <Group key={t.runId} justify="space-between" wrap="nowrap" gap="xs">
                     <Text size="xs" className="ds-mono" truncate style={{ maxWidth: 120 }}>{t.campaignKey}</Text>
-                    <Progress value={t.resilienceScore * 100} color={resilienceColor(t.resilienceScore)} size="sm" radius="sm" style={{ flex: 1 }} />
+                    <Progress value={(t.resilienceScore ?? 0) * 100} color={resilienceColor(t.resilienceScore)} size="sm" radius="sm" style={{ flex: 1 }} />
                     <Text size="xs" fw={600} c={`${resilienceColor(t.resilienceScore)}.7`} w={42} ta="right">{pct(t.resilienceScore)}</Text>
                     <Text size="xs" c="dimmed" w={120} ta="right" truncate>{fmtDate(t.finishedAt)}</Text>
                   </Group>

@@ -11,6 +11,8 @@ const db = vi.hoisted(() => ({
   switchToTenant: vi.fn(async () => undefined),
   listRedTeamCampaigns: vi.fn(),
   listRedTeamRuns: vi.fn(),
+  findRedTeamCustomProbeByKey: vi.fn(async () => null),
+  createRedTeamCustomProbe: vi.fn(async (probe: Record<string, unknown>) => ({ _id: 'probe-1', ...probe })),
 }));
 
 vi.mock('@/lib/database', async (importOriginal) => ({
@@ -19,7 +21,7 @@ vi.mock('@/lib/database', async (importOriginal) => ({
 }));
 
 import { runScheduledScans } from '@/lib/services/redteam/campaignJob';
-import { createCustomProbe } from '@/lib/services/redteam/service';
+import { createCustomProbe, isDuplicateKeyError, RedTeamConflictError } from '@/lib/services/redteam/service';
 import { CustomProbeError, validateCustomProbePatterns } from '@/lib/services/redteam/probes';
 import { MAX_PATTERNS_PER_ATTEMPT } from '@/lib/services/redteam/detectors/safePattern';
 import { RedTeamMixin } from '@/lib/database/mongodb/redteam.mixin';
@@ -38,7 +40,7 @@ describe('scheduled scans', () => {
     const result = await runScheduledScans('tenant_db', 'tenant-1', new Date());
 
     expect(result.fired).toEqual([]);
-    expect(db.listRedTeamRuns).toHaveBeenCalledWith({ projectId: 'proj-a', campaignKey: 'nightly', limit: 1 });
+    expect(db.listRedTeamRuns).toHaveBeenCalledWith({ projectId: 'proj-a', campaignKey: 'nightly', limit: 1, omitAttempts: true });
   });
 });
 
@@ -64,6 +66,66 @@ describe('Mongo red-team search', () => {
 
     await ops.listRedTeamCustomProbes({ search: 'x+' });
     expect((seen?.$or as Array<{ name?: { $regex: string } }>)[0].name?.$regex).toBe('x\\+');
+  });
+});
+
+describe('custom probe identity and category', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const input =(over: Record<string, unknown> = {}) => ({
+    name: 'Probe',
+    category: 'LLM01-prompt-injection',
+    severity: 'high' as const,
+    attempts: [{ id: 'a1', turns: ['hi'] }],
+    detectors: { refusal: true, pattern: false, judges: [] },
+    projectId: 'proj-a',
+    ...over,
+  });
+
+  it('stores a category given in the older numbering under its 2025 key', async () => {
+    const probe = await createCustomProbe('tenant_db', 'tenant-1', 'user-1', input({ category: 'LLM08-excessive-agency' }));
+
+    expect(probe.category).toBe('LLM06-excessive-agency');
+    expect(db.createRedTeamCustomProbe).toHaveBeenCalledWith(expect.objectContaining({ category: 'LLM06-excessive-agency' }));
+  });
+
+  it('takes a new key and tries again after a duplicate-key error, then gives up with a conflict', async () => {
+    const dup = () => Object.assign(new Error('UNIQUE constraint failed: redteam_custom_probes.key'), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
+    db.createRedTeamCustomProbe.mockRejectedValueOnce(dup());
+    const probe = await createCustomProbe('tenant_db', 'tenant-1', 'user-1', input());
+    expect(probe.key).toBeTruthy();
+    expect(db.createRedTeamCustomProbe).toHaveBeenCalledTimes(2);
+
+    vi.clearAllMocks();
+    db.createRedTeamCustomProbe.mockRejectedValue(dup());
+    await expect(createCustomProbe('tenant_db', 'tenant-1', 'user-1', input())).rejects.toBeInstanceOf(RedTeamConflictError);
+    expect(db.createRedTeamCustomProbe).toHaveBeenCalledTimes(3);
+    db.createRedTeamCustomProbe.mockImplementation(async (p: Record<string, unknown>) => ({ _id: 'probe-1', ...p }));
+  });
+
+  it('recognises duplicate-key errors of both providers', () => {
+    expect(isDuplicateKeyError(Object.assign(new Error('x'), { code: 11000 }))).toBe(true);
+    expect(isDuplicateKeyError(new Error('E11000 duplicate key error'))).toBe(true);
+    expect(isDuplicateKeyError(new Error('UNIQUE constraint failed: t.key'))).toBe(true);
+    expect(isDuplicateKeyError(new Error('disk full'))).toBe(false);
+    expect(isDuplicateKeyError(null)).toBe(false);
+  });
+
+  it('refuses a category that is not on the list', async () => {
+    await expect(createCustomProbe('tenant_db', 'tenant-1', 'user-1', input({ category: 'LLM99-made-up' })))
+      .rejects.toBeInstanceOf(CustomProbeError);
+    expect(db.createRedTeamCustomProbe).not.toHaveBeenCalled();
+  });
+
+  it('refuses attempt ids that are not plain tokens or repeat inside the probe', async () => {
+    await expect(createCustomProbe('tenant_db', 'tenant-1', 'user-1', input({ attempts: [{ id: 'has space', turns: ['hi'] }] })))
+      .rejects.toThrow(/attempt id/);
+    await expect(createCustomProbe('tenant_db', 'tenant-1', 'user-1', input({ attempts: [{ id: 'x'.repeat(65), turns: ['hi'] }] })))
+      .rejects.toThrow(/attempt id/);
+    await expect(createCustomProbe('tenant_db', 'tenant-1', 'user-1', input({
+      attempts: [{ id: 'a1', turns: ['hi'] }, { id: 'a1', turns: ['again'] }],
+    }))).rejects.toThrow(/used twice/);
+    expect(db.createRedTeamCustomProbe).not.toHaveBeenCalled();
   });
 });
 

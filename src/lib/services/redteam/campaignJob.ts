@@ -15,7 +15,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { createAsyncRun, executeRun, type RunOptions, type WithId } from './service';
-import { isDue } from './schedulePlanner';
+import { isDue, latestSlot } from './schedulePlanner';
 import { storedAgentRevision } from '@/lib/shared/agentRevision';
 import type { IRedTeamRun } from '@/lib/database';
 
@@ -68,8 +68,25 @@ export async function enqueueCampaignRun(input: EnqueueCampaignRunInput): Promis
     options: input.options,
   };
 
-  const queue = await getQueue();
-  await queue.publish(RED_TEAM_QUEUE, RED_TEAM_JOB, payload, { attempts: 2, backoffMs: 5000 });
+  try {
+    const queue = await getQueue();
+    await queue.publish(RED_TEAM_QUEUE, RED_TEAM_JOB, payload, { attempts: 2, backoffMs: 5000 });
+  } catch (error) {
+    // A run no worker will ever take is ended here, so it does not hold the campaign as busy.
+    logger.error('Red-team scan could not be queued', { runId: run.id, campaignKey: campaign.key, error });
+    try {
+      const db = await getDatabase();
+      await db.switchToTenant(input.tenantDbName);
+      await db.updateRedTeamRunIf(run.id, { status: 'pending' }, {
+        status: 'failed',
+        error: 'The scan could not be queued; try again.',
+        finishedAt: new Date(),
+      });
+    } catch (endError) {
+      logger.error('Red-team run left pending after a queue failure', { runId: run.id, error: endError });
+    }
+    throw error;
+  }
   logger.info('Red-team scan enqueued', { runId: run.id, campaignKey: campaign.key });
 
   return run;
@@ -84,11 +101,16 @@ export async function runCampaignJob(payload: RedTeamJobPayload): Promise<void> 
     const campaign = await db.findRedTeamCampaignById(payload.campaignId);
     if (!campaign) {
       logger.error('Red-team scan job: campaign gone', { campaignId: payload.campaignId, runId: payload.runId });
-      await db.updateRedTeamRun(payload.runId, { status: 'failed', error: 'campaign not found', finishedAt: new Date() });
+      // Only a run still waiting is ended here; one a worker already took is that worker's to finish.
+      await db.updateRedTeamRunIf(payload.runId, { status: 'pending' }, {
+        status: 'failed',
+        error: 'campaign not found',
+        finishedAt: new Date(),
+      });
       return;
     }
 
-    await executeRun({
+    const run = await executeRun({
       tenantDbName: payload.tenantDbName,
       tenantId: payload.tenantId,
       projectId: payload.projectId,
@@ -98,28 +120,39 @@ export async function runCampaignJob(payload: RedTeamJobPayload): Promise<void> 
       campaign,
       options: payload.options,
     });
-    logger.info('Red-team scan completed', { runId: payload.runId, campaignKey: campaign.key });
+    // A run somebody else already started (a queue retry) comes back as it is, without work done here.
+    logger.info('Red-team scan job finished', { runId: payload.runId, campaignKey: campaign.key, status: run.status });
   });
+}
+
+/** A claimed slot is remembered for a day, long past the moment every replica has seen it. */
+const SLOT_CLAIM_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The claim key of one cron slot of one campaign: whoever inserts it first fires the slot. */
+export function scheduledSlotKey(tenantDbName: string, campaignId: string, slot: Date): string {
+  return `redteam:${tenantDbName}:${campaignId}:${slot.toISOString().slice(0, 16)}`;
 }
 
 /**
  * Enqueue a scan for every campaign in a tenant whose cron schedule is due.
  * "Due" is decided against the most recent run's timestamp so each slot fires
- * at most once. Used by the background red-team scheduler. A campaign with a
- * scan already in progress is skipped (createAsyncRun throws → caught here), and
- * so is one whose default revision is the draft (a schedule guards what is
- * published).
+ * at most once on one replica; the database claim on the slot makes that hold
+ * across replicas too (the replica that loses the claim skips the slot). Used by
+ * the background red-team scheduler. A campaign with a scan already in progress
+ * is skipped (createAsyncRun throws → caught here), and so is one whose default
+ * revision is the draft (a schedule guards what is published).
  */
 export async function runScheduledScans(
   tenantDbName: string,
   tenantId: string,
   now: Date = new Date(),
-): Promise<{ fired: string[]; errors: string[] }> {
+): Promise<{ fired: string[]; errors: string[]; claimedElsewhere: string[] }> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const campaigns = await db.listRedTeamCampaigns();
   const fired: string[] = [];
   const errors: string[] = [];
+  const claimedElsewhere: string[] = [];
   for (const campaign of campaigns) {
     if (!campaign.schedule?.enabled) continue;
     // Saving refuses this combination; guard again so a campaign that got there
@@ -129,10 +162,20 @@ export async function runScheduledScans(
       continue;
     }
     // Keys are unique per project, so the last run is looked up in the campaign's own project.
-    const recent = await db.listRedTeamRuns({ projectId: campaign.projectId, campaignKey: campaign.key, limit: 1 });
+    const recent = await db.listRedTeamRuns({ projectId: campaign.projectId, campaignKey: campaign.key, limit: 1, omitAttempts: true });
     const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
     if (!isDue(campaign.schedule, last ? new Date(last) : null, now)) continue;
+    const slot = latestSlot(campaign.schedule, now);
+    if (!slot) continue;
     try {
+      const won = await db.claimSchedulerSlot(
+        scheduledSlotKey(tenantDbName, String(campaign._id), slot),
+        new Date(now.getTime() + SLOT_CLAIM_TTL_MS),
+      );
+      if (!won) {
+        claimedElsewhere.push(campaign.key);
+        continue;
+      }
       await enqueueCampaignRun({
         tenantDbName,
         tenantId,
@@ -146,5 +189,5 @@ export async function runScheduledScans(
       errors.push(`${campaign.key}: ${(err as Error).message}`);
     }
   }
-  return { fired, errors };
+  return { fired, errors, claimedElsewhere };
 }

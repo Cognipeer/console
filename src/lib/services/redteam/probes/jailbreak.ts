@@ -1,5 +1,5 @@
 /**
- * LLM01/LLM09 — Jailbreak (safety-bypass).
+ * LLM01 — Jailbreak (safety-bypass).
  *
  * Classic persona / framing attacks that try to get the model to drop its
  * safety guardrails. Includes a single-turn DAN-style attempt and a multi-turn

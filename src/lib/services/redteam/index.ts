@@ -9,9 +9,39 @@
  */
 
 export * from './types';
-export { runRedTeam } from './runner';
-export type { RunRedTeamParams } from './runner';
-export { decide, resolvePolicyConfig, variance } from './decisionPolicy';
+export { runRedTeam, JUDGE_ERROR_INCONCLUSIVE_SHARE } from './runner';
+export type { RunRedTeamParams, RunTimeouts } from './runner';
+export { decide, hasHardProof, resolvePolicyConfig, variance } from './decisionPolicy';
+export {
+  OWASP_LLM_VERSION,
+  OWASP_LLM_CATEGORIES,
+  OWASP_LLM_LABELS,
+  LEGACY_OWASP_CATEGORY_MAP,
+  isOwaspLlmCategory,
+  isKnownOwaspCategory,
+  normalizeOwaspCategory,
+  owaspCategoryLabel,
+} from './owasp';
+export { ATTEMPT_KEY_SEPARATOR, attemptKeyOf, parseAttemptKey } from './attemptKey';
+export {
+  RUN_LIMITS,
+  CUSTOM_PROBE_LIMITS,
+  ATTEMPT_ID_PATTERN,
+  RUN_LIFECYCLE,
+  INCONCLUSIVE_THRESHOLDS,
+  clampConcurrency,
+  clampMaxOutputTokens,
+  truncateText,
+} from './limits';
+export { computeAggregate, effectiveOutcome, isFailedAttempt, summarizeJudgeErrors } from './aggregate';
+export type { AggregateAttempt } from './aggregate';
+export { compareRedTeamRuns } from './compare';
+export type {
+  ComparisonStatus,
+  RedTeamComparison,
+  RedTeamComparisonAttempt,
+  RedTeamComparisonAttempts,
+} from './compare';
 export {
   createRefusalDetector,
   createPatternDetector,
@@ -20,12 +50,18 @@ export {
   createPiiDetector,
   createInsecureOutputDetector,
   createEncodingLeakDetector,
+  analyzeRefusal,
+  looksLikeRefusal,
+  findPii,
+  findPiiDetailed,
 } from './detectors';
 export type { LlmJudgeDetectorOptions } from './detectors';
 export {
   PROBE_REGISTRY,
   BUILTIN_PROBE_KEYS,
   buildProbes,
+  buildProbesLenient,
+  validateCustomProbeDefinition,
   listProbeCatalog,
   createPromptInjectionProbe,
   createJailbreakProbe,

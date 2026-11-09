@@ -349,6 +349,20 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, suiteKey: 1, createdAt: -1 }, options: { name: 'idx_project_suite_createdAt' } },
     { key: { projectId: 1, status: 1 }, options: { name: 'idx_project_status' } },
   ],
+  // Red-team: keys are unique per project; the active-run check reads project + campaign
+  // newest-first, the reaper reads by status and lease. Attempt rows are written by
+  // upsert (ensureTenantCollectionIndexes runs before the first one).
+  redteam_campaigns: [{ key: { projectId: 1, key: 1 }, options: { name: 'uniq_project_key', unique: true } }],
+  redteam_custom_probes: [{ key: { projectId: 1, key: 1 }, options: { name: 'uniq_project_key', unique: true } }],
+  redteam_runs: [
+    { key: { projectId: 1, campaignKey: 1, createdAt: -1 }, options: { name: 'idx_project_campaign_createdAt' } },
+    { key: { status: 1, leaseUntil: 1 }, options: { name: 'idx_status_lease' } },
+    { key: { status: 1, createdAt: 1 }, options: { name: 'idx_status_createdAt' } },
+  ],
+  redteam_run_attempts: [
+    { key: { runId: 1, attemptKey: 1 }, options: { name: 'uniq_run_attemptKey', unique: true } },
+    { key: { runId: 1, seq: 1 }, options: { name: 'idx_run_seq' } },
+  ],
   memory_items: [{ key: { storeKey: 1, createdAt: -1 }, options: { name: 'idx_store_createdAt' } }],
   alert_events: [
     { key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } },
@@ -433,6 +447,7 @@ export const RETENTION_AGE_INDEXES: ReadonlyArray<readonly [collection: string, 
   ['rag_reindex_runs', 'createdAt'],
   ['evaluation_runs', 'createdAt'],
   ['redteam_runs', 'createdAt'],
+  ['redteam_run_attempts', 'createdAt'],
   ['analysis_runs', 'createdAt'],
   ['prescription_reports', 'createdAt'],
   ['alert_events', 'firedAt'],

@@ -1131,6 +1131,8 @@ export type RedTeamRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 
 export type RedTeamRunMode = 'sync' | 'async';
 export type RedTeamOutcome = 'safe' | 'vulnerable' | 'needs_review';
 export type RedTeamSeverity = 'low' | 'medium' | 'high' | 'critical';
+/** Why a run's rates cannot be trusted (mirrors the engine's InconclusiveReason). */
+export type RedTeamInconclusiveReason = 'no-completed-attempts' | 'target-errors' | 'judge-errors';
 
 /** Decision-policy overrides; mirrors the engine's DecisionPolicyConfig. */
 export interface IRedTeamPolicyConfig {
@@ -1166,7 +1168,8 @@ export interface IRedTeamCampaign {
   probeKeys: string[];
   /** Model backing any llm-judge detectors (required if probes use them). */
   judgeModelKey?: string;
-  runConfig?: { concurrency?: number };
+  /** Parallel attempts (clamped to 1..16) and the target's output-token cap per turn. */
+  runConfig?: { concurrency?: number; maxOutputTokens?: number };
   policy?: IRedTeamPolicyConfig;
   /** Optional cron schedule for unattended (e.g. nightly) regression scans. */
   schedule?: { cron: string; enabled: boolean };
@@ -1205,6 +1208,8 @@ export interface IRedTeamReview {
 export interface IRedTeamAttemptResult {
   probeKey: string;
   attemptId: string;
+  /** `<probeKey>::<attemptId>`, the attempt's identity within its run (see redteam/attemptKey.ts). Set on stored rows and views. */
+  attemptKey?: string;
   family: string;
   category: string;
   severity: RedTeamSeverity;
@@ -1215,6 +1220,8 @@ export interface IRedTeamAttemptResult {
   signals: IRedTeamSignal[];
   latencyMs?: number;
   error?: string;
+  /** The target answered at least one turn before `error`; the attempt was judged on that transcript (see redteam/types.ts AttemptResult.partial). */
+  partial?: boolean;
   review?: IRedTeamReview;
   /** See AttemptResult.kbRestricted (redteam/types.ts). */
   kbRestricted?: string[];
@@ -1226,6 +1233,8 @@ export interface IRedTeamCategoryBreakdown {
   total: number;
   vulnerable: number;
   needsReview: number;
+  /** Attempts that errored out (counted in total, not in vulnerable/needsReview). Absent on runs recorded before it existed. */
+  failed?: number;
 }
 
 export interface IRedTeamAggregate {
@@ -1235,15 +1244,18 @@ export interface IRedTeamAggregate {
   vulnerable: number;
   safe: number;
   needsReview: number;
-  attackSuccessRate: number;
-  resilienceScore: number;
+  /** vulnerable / completed; null when no attempt completed (stored as 0 on runs recorded before). */
+  attackSuccessRate: number | null;
+  resilienceScore: number | null;
   bySeverity: Record<string, number>;
   byCategory: Record<string, IRedTeamCategoryBreakdown>;
   avgLatencyMs: number | null;
   /** Attempts whose llm-judge detector errored: counted apart, never folded into "not hit". Absent on runs recorded before it existed. */
   judgeErrors?: number;
-  /** Judge errors exceeded 20% of the judged attempts: the attack-success rate cannot be trusted. */
+  /** The rates cannot be trusted; `inconclusiveReasons` says why. */
   inconclusive?: boolean;
+  /** Absent on runs recorded before it existed (there `inconclusive` meant judge errors). */
+  inconclusiveReasons?: RedTeamInconclusiveReason[];
 }
 
 export interface IRedTeamRun {
@@ -1260,12 +1272,57 @@ export interface IRedTeamRun {
   mode: RedTeamRunMode;
   progress: { total: number; completed: number; failed: number };
   aggregate?: IRedTeamAggregate;
+  /**
+   * Embedded attempts. Runs recorded before `attemptStore: 'collection'` keep
+   * their attempts here; newer runs store `[]` and keep one row per attempt in
+   * redteam_run_attempts (IRedTeamRunAttempt). Views fill this from whichever
+   * store the run uses.
+   */
   attempts: IRedTeamAttemptResult[];
+  /** Where the attempts live; absent means embedded (runs recorded before the attempt rows). */
+  attemptStore?: 'embedded' | 'collection';
+  /** Attempts generated beyond the per-run cap that were never executed. */
+  skippedAttempts?: number;
+  /** Attempts not run because they plant a system prompt the target does not take (agent targets). */
+  notApplicableAttempts?: number;
+  /** Things the run skipped or worked around, shown with the run (e.g. a selected custom probe that no longer exists). */
+  warnings?: string[];
+  /** The worker that claimed the run (pending → running). */
+  workerId?: string;
+  /** The claim holds until this instant; a heartbeat renews it, the reaper fails a run past it. */
+  leaseUntil?: Date;
+  /** A user asked a running scan to stop; the worker ends it as `cancelled` with what finished. */
+  cancelRequested?: boolean;
+  cancelRequestedBy?: string;
+  cancelledAt?: Date;
   error?: string;
   startedAt?: Date;
   finishedAt?: Date;
   createdBy: string;
   createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** One attempt of a run, stored as its own row (collection/table `redteam_run_attempts`). */
+export interface IRedTeamRunAttempt extends IRedTeamAttemptResult {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  /** The run's id, as a string. */
+  runId: string;
+  /** Unique per run: `<probeKey>::<attemptId>`. */
+  attemptKey: string;
+  /** Execution order within the run, for a stable listing. */
+  seq: number;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/** Compare-and-set guard for a run update: every given field must match the stored run. */
+export interface IRedTeamRunGuard {
+  status?: RedTeamRunStatus | RedTeamRunStatus[];
+  workerId?: string;
+  /** Matches only while the run's `updatedAt` still equals this instant (optimistic concurrency). */
   updatedAt?: Date;
 }
 

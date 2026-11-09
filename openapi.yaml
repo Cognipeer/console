@@ -11259,7 +11259,7 @@ paths:
       tags:
         - Red Team
       summary: List runs
-      description: Returns run summaries (no per-attempt detail), newest first, scoped to the token's project.
+      description: Returns run summaries (no per-attempt detail), newest first, scoped to the token's project. `total` counts every run that matches the filter, so a caller can page with `limit` and `skip`.
       operationId: listRedTeamRuns
       parameters:
         - name: campaign_key
@@ -11276,6 +11276,13 @@ paths:
             type: integer
             minimum: 1
             maximum: 200
+        - name: skip
+          in: query
+          required: false
+          description: Number of runs to skip (newest first). Rejected with 400 when it is not a non-negative integer.
+          schema:
+            type: integer
+            minimum: 0
       responses:
         "200":
           description: Run summaries, newest first.
@@ -11283,6 +11290,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RedTeamRunsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "500":
@@ -11292,7 +11301,7 @@ paths:
       tags:
         - Red Team
       summary: Get run detail
-      description: Returns the run summary plus `progress`, any fatal `error`, and the per-attempt verdicts.
+      description: Returns the run summary plus `progress`, a short `error` message when the run failed, `warnings`, the counts of attempts that were skipped or not run, and the per-attempt verdicts. Attempts are identified by `attempt_key` (`<probe_key>::<attempt_id>`); an attempt id alone is unique only within its probe.
       operationId: getRedTeamRun
       parameters:
         - name: id
@@ -26075,10 +26084,12 @@ components:
           description: Attempts needing review.
         attackSuccessRate:
           type: number
-          description: "`vulnerable / completed`."
+          nullable: true
+          description: "`vulnerable / completed`. `null` when no attempt completed. Runs recorded before this was tracked report `0` there."
         resilienceScore:
           type: number
-          description: "`1 - attackSuccessRate`."
+          nullable: true
+          description: "`1 - attackSuccessRate`; `null` when no attempt completed."
         bySeverity:
           type: object
           description: Vulnerable count by severity.
@@ -26098,7 +26109,23 @@ components:
             $ref: "#/components/schemas/RedTeamCategoryBreakdown"
         avgLatencyMs:
           type: number
+          nullable: true
           description: Average target invocation latency in milliseconds.
+        judgeErrors:
+          type: integer
+          description: Attempts whose judge failed to give a usable verdict. They are counted apart and never read as "not vulnerable". Absent on runs recorded before it was tracked.
+        inconclusive:
+          type: boolean
+          description: "`true` when the rates cannot be trusted; `inconclusiveReasons` says why."
+        inconclusiveReasons:
+          type: array
+          description: Why the rates cannot be trusted. Absent on runs recorded before it was tracked; there `inconclusive` meant judge errors.
+          items:
+            type: string
+            enum:
+              - no-completed-attempts
+              - target-errors
+              - judge-errors
     RedTeamCampaign:
       type: object
       description: A named, reusable scan configuration.
@@ -26162,13 +26189,16 @@ components:
       properties:
         total:
           type: integer
-          description: Attempts in this category.
+          description: Attempts in this category, including failed ones.
         vulnerable:
           type: integer
           description: Vulnerable attempts in this category.
         needsReview:
           type: integer
           description: Attempts needing review in this category.
+        failed:
+          type: integer
+          description: Attempts in this category the target never answered. Absent on runs recorded before it was tracked.
     RedTeamProbe:
       type: object
       description: "A built-in probe: a generator for one vulnerability class."
@@ -26219,13 +26249,16 @@ components:
           description: Probe that generated the attempt.
         attempt_id:
           type: string
-          description: Attempt identifier.
+          description: Attempt identifier, unique within its probe.
+        attempt_key:
+          type: string
+          description: "The attempt's identity within the run: `<probe_key>::<attempt_id>`. Present on every attempt of a run recorded from now on, and filled in for older runs."
         family:
           type: string
           description: Probe family.
         category:
           type: string
-          description: OWASP-LLM category.
+          description: OWASP Top 10 for LLM Applications (2025) category. Runs recorded before the 2025 list may carry the earlier key for the same risk.
         severity:
           type: string
           description: Attempt severity.
@@ -26263,7 +26296,10 @@ components:
         error:
           type: string
           nullable: true
-          description: Set when the target invocation itself threw (counts toward `failed`).
+          description: Set when the target invocation failed or timed out. With `partial` it counts as judged; without it the attempt counts toward `failed`.
+        partial:
+          type: boolean
+          description: "`true` when the target answered at least one turn before the error; the verdict is on that part of the conversation."
     RedTeamRunDetail:
       description: "Full run view: summary plus progress, error, and per-attempt verdicts."
       allOf:
@@ -26278,7 +26314,18 @@ components:
             error:
               type: string
               nullable: true
-              description: Fatal run error, if any.
+              description: A short message when the run failed (no stack or provider payload).
+            warnings:
+              type: array
+              description: Things the run skipped or worked around, for example a selected custom probe that no longer exists.
+              items:
+                type: string
+            skipped_attempts:
+              type: integer
+              description: Attempts left out because the run reached its attempt limit.
+            not_applicable_attempts:
+              type: integer
+              description: Attempts not run because they plant a system prompt and the target (an agent) keeps its own instructions.
             attempts:
               type: array
               description: Per-attempt verdicts.
@@ -26326,7 +26373,7 @@ components:
           $ref: "#/components/schemas/AgentRunRevision"
         status:
           type: string
-          description: Run status.
+          description: "Run status. `cancelled` means the scan was stopped before it finished; its aggregate covers the attempts that did."
           enum:
             - pending
             - running
@@ -26335,7 +26382,7 @@ components:
             - cancelled
         aggregate:
           nullable: true
-          description: Verdict roll-up; `null` until the run completes.
+          description: Verdict roll-up; `null` until the run finishes. A run that finished with no completed attempt has `null` rates and `inconclusive` set.
           allOf:
             - $ref: "#/components/schemas/RedTeamAggregate"
           type: object
@@ -26358,6 +26405,9 @@ components:
           description: Run summaries, newest first.
           items:
             $ref: "#/components/schemas/RedTeamRunSummary"
+        total:
+          type: integer
+          description: Runs that match the filter, across all pages.
     RedTeamScanResponse:
       type: object
       properties:

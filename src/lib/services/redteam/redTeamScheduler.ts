@@ -13,6 +13,7 @@ import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { runScheduledScans } from './campaignJob';
+import { reapStaleRuns } from './service';
 
 const logger = createLogger('redteam-scheduler');
 
@@ -40,6 +41,17 @@ async function runOnce(): Promise<void> {
       // anything, so the work runs on a later tick once the service is back on.
       if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'redteam'))) continue;
       try {
+        // Runs whose worker is gone (lease expired) or that never started are ended first, so they
+        // no longer hold their campaign when the due scans below are created. A failure here must
+        // not keep the schedules from firing.
+        try {
+          const reaped = await runWithTenantScope(tenant.dbName, () => reapStaleRuns(tenant.dbName!));
+          if (reaped > 0) logger.warn(`Tenant ${tenant.slug}: ended ${reaped} stale red-team run(s)`);
+        } catch (err) {
+          logger.error(`Error reaping stale red-team runs for tenant ${tenant.slug}`, {
+            error: err instanceof Error ? err.message : err,
+          });
+        }
         // Timer context: bind the tenant for the whole per-tenant run (see
         // runWithTenantScope — switchToTenant alone races cross-tenant).
         const { fired, errors } = await runWithTenantScope(tenant.dbName, () =>

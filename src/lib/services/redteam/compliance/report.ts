@@ -15,26 +15,31 @@
 
 import { getDatabase } from '@/lib/database';
 import { restrictedKnowledgeTagsOf } from '@/lib/services/rag/access/exposure';
-import type { IRedTeamAttemptResult, IRedTeamRun, RedTeamOutcome } from '@/lib/database';
-import { BUILTIN_PROBE_KEYS, PROBE_REGISTRY } from '../probes';
+import type { IRedTeamAttemptResult, IRedTeamRun } from '@/lib/database';
 import { EU_RISK_CATEGORIES, mapOwaspToEu, type EuRiskCategory } from '../euTaxonomy';
+import { effectiveOutcome, isFailedAttempt } from '../aggregate';
+import {
+  OWASP_LLM_CATEGORIES,
+  OWASP_LLM_VERSION,
+  normalizeOwaspCategory,
+  owaspCategoryLabel,
+} from '../owasp';
+import { completedInBucket, inconclusiveReasonsOf, loadRunAttempts, normalizeRunLimit, RUN_LIST_PAGE_SIZE } from '../service';
 import type {
   CampaignComplianceMeta,
   ComplianceEvidenceSample,
   ComplianceEuCategoryPosture,
   ComplianceFinding,
+  ComplianceInconclusiveRun,
   EuComplianceReport,
 } from './types';
+
+const OWASP_LIST_NAME = 'OWASP Top 10 for LLM Applications';
 
 /** Evidence samples surfaced per EU risk family (CoP asks for ~5). */
 const SAMPLES_PER_CATEGORY = 5;
 /** Pages of `limit` runs read past draft scans at most, so a project of mostly drafts cannot turn one report into a full scan. */
 const MAX_RUN_PAGES = 10;
-
-/** Effective outcome honouring any human-in-the-loop override. */
-function effectiveOutcome(a: IRedTeamAttemptResult): RedTeamOutcome {
-  return a.review?.outcome ?? a.outcome;
-}
 
 /** Pick up to `n` items evenly spaced across a list (stable, reproducible). */
 function pickEvenly<T>(items: T[], n: number): T[] {
@@ -56,19 +61,13 @@ function toSample(run: IRedTeamRun, a: IRedTeamAttemptResult): ComplianceEvidenc
     campaignKey: run.campaignKey,
     probeKey: a.probeKey,
     attemptId: a.attemptId,
-    owaspCategory: a.category,
+    ...(a.attemptKey ? { attemptKey: a.attemptKey } : {}),
+    owaspCategory: normalizeOwaspCategory(a.category),
     outcome: effectiveOutcome(a),
     input: lastTurn?.user ?? a.transcript[0]?.user ?? '',
     output: lastTurn?.assistant ?? '',
     ...(run.agentRevision?.version !== undefined ? { agentVersion: run.agentRevision.version } : {}),
   };
-}
-
-/** All OWASP categories the built-in catalog can exercise (for gap detection). */
-function builtinCategories(): Set<string> {
-  const cats = new Set<string>();
-  for (const key of BUILTIN_PROBE_KEYS) cats.add(PROBE_REGISTRY[key]().category);
-  return cats;
 }
 
 /** Merge per-campaign compliance metadata: first defined value wins per field. */
@@ -106,22 +105,26 @@ export async function buildComplianceReport(
   // A scan of an unpublished draft shows how a candidate holds up, not how the
   // system in service does, so it is not evidence about the latter. Drafts are
   // skipped while reading, so they do not use up the report's `limit`.
-  const limit = options.limit ?? 100;
+  const limit = normalizeRunLimit(options.limit);
   const runs: IRedTeamRun[] = [];
   let draftRunsExcluded = 0;
+  let skip = 0;
   for (let page = 0; page < MAX_RUN_PAGES && runs.length < limit; page += 1) {
+    const chunk = Math.min(limit - runs.length, RUN_LIST_PAGE_SIZE);
     const batch = await db.listRedTeamRuns({
       projectId: options.projectId,
       status: 'completed',
-      limit,
-      skip: page * limit,
+      limit: chunk,
+      skip,
+      omitAttempts: true,
     });
+    skip += batch.length;
     for (const run of batch) {
       if (runs.length >= limit) break;
       if (run.agentRevision?.requested === 'draft') draftRunsExcluded += 1;
       else runs.push(run);
     }
-    if (batch.length < limit) break;
+    if (batch.length < chunk) break;
   }
 
   const disclaimers: string[] = [
@@ -136,8 +139,48 @@ export async function buildComplianceReport(
     );
   }
 
+  // ── Which scans are the posture ────────────────────────────────────
+  // Per campaign, the latest completed scan whose rates can be trusted is its current posture; older
+  // completed scans of it are history (counts only), and a scan whose rates cannot be trusted (it lost
+  // its judge, or the target kept failing) is never posture, only listed with its reasons. `runs` is
+  // newest first.
+  const posture: IRedTeamRun[] = [];
+  const history = new Map<string, { campaignKey: string; runs: number; attempts: number; vulnerable: number }>();
+  const inconclusiveRuns: ComplianceInconclusiveRun[] = [];
+  const currentOf = new Set<string>();
+  for (const run of runs) {
+    const agg = run.aggregate;
+    if (!agg) continue;
+    const reasons = inconclusiveReasonsOf(agg);
+    if (reasons.length > 0) {
+      inconclusiveRuns.push({
+        runId: runIdOf(run),
+        campaignKey: run.campaignKey,
+        ...(run.finishedAt ? { finishedAt: new Date(run.finishedAt).toISOString() } : {}),
+        reasons,
+      });
+      continue;
+    }
+    const scope = `${run.projectId ?? ''}\u0000${run.campaignKey}`;
+    if (!currentOf.has(scope)) {
+      currentOf.add(scope);
+      posture.push(run);
+      continue;
+    }
+    const entry = history.get(scope) ?? { campaignKey: run.campaignKey, runs: 0, attempts: 0, vulnerable: 0 };
+    entry.runs += 1;
+    entry.attempts += agg.total;
+    entry.vulnerable += agg.vulnerable;
+    history.set(scope, entry);
+  }
+  if (inconclusiveRuns.length > 0) {
+    disclaimers.push(
+      `${inconclusiveRuns.length} completed scan${inconclusiveRuns.length === 1 ? ' was' : 's were'} left out of the posture because ${inconclusiveRuns.length === 1 ? 'its' : 'their'} results could not be trusted (see inconclusiveRuns).`,
+    );
+  }
+
   // ── System header: gather campaign metadata + targets ──────────────
-  const campaignKeys = [...new Set(runs.map((r) => r.campaignKey))];
+  const campaignKeys = [...new Set(posture.map((r) => r.campaignKey))];
   const complianceMetas: CampaignComplianceMeta[] = [];
   const targets = new Set<string>();
   for (const key of campaignKeys) {
@@ -148,44 +191,56 @@ export async function buildComplianceReport(
     const meta = (campaign.metadata?.compliance ?? undefined) as CampaignComplianceMeta | undefined;
     if (meta) complianceMetas.push(meta);
   }
-  for (const r of runs) if (r.targetRef) targets.add(r.targetRef);
+  for (const r of posture) if (r.targetRef) targets.add(r.targetRef);
 
   // ── Posture + per-OWASP rollup from persisted aggregates ───────────
   const bySeverity: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
-  const owaspMap = new Map<string, { category: string; total: number; vulnerable: number; needsReview: number }>();
+  const owaspMap = new Map<string, { category: string; total: number; completed: number; vulnerable: number; needsReview: number }>();
   let totalAttempts = 0;
   let completed = 0;
   let vulnerable = 0;
   let needsReview = 0;
-  for (const run of runs) {
-    const agg = run.aggregate;
-    if (!agg) continue;
+  for (const run of posture) {
+    const agg = run.aggregate!;
     totalAttempts += agg.total;
     completed += agg.completed;
     vulnerable += agg.vulnerable;
     needsReview += agg.needsReview;
     for (const sev of Object.keys(bySeverity)) bySeverity[sev] += agg.bySeverity?.[sev] ?? 0;
     for (const [cat, bucket] of Object.entries(agg.byCategory ?? {})) {
-      const e = owaspMap.get(cat) ?? { category: cat, total: 0, vulnerable: 0, needsReview: 0 };
+      const key = normalizeOwaspCategory(cat);
+      const e = owaspMap.get(key) ?? { category: key, total: 0, completed: 0, vulnerable: 0, needsReview: 0 };
       e.total += bucket.total;
+      e.completed += completedInBucket(bucket);
       e.vulnerable += bucket.vulnerable;
       e.needsReview += bucket.needsReview;
-      owaspMap.set(cat, e);
+      owaspMap.set(key, e);
     }
   }
+  // A category none of whose attempts completed has no rate to show; it is a coverage gap below.
   const byOwaspCategory = [...owaspMap.values()]
-    .map((c) => ({ ...c, resilience: c.total > 0 ? (c.total - c.vulnerable) / c.total : 1 }))
+    .filter((c) => c.completed > 0)
+    .map(({ completed: done, ...c }) => ({
+      ...c,
+      label: owaspCategoryLabel(c.category),
+      resilience: (done - c.vulnerable) / done,
+    }))
     .sort((a, b) => a.resilience - b.resilience || b.vulnerable - a.vulnerable);
 
   // ── Gather candidate evidence samples grouped by EU family ─────────
   const samplesByEu = new Map<EuRiskCategory, ComplianceEvidenceSample[]>();
   const findingsMap = new Map<string, ComplianceFinding>();
-  for (const run of runs) {
-    for (const a of run.attempts) {
+  for (const run of posture) {
+    // A list read leaves embedded attempts out, so a run from before attempt rows is read whole.
+    const whole = run.attemptStore === 'collection' ? run : ((await db.findRedTeamRunById(runIdOf(run))) ?? run);
+    for (const a of await loadRunAttempts(db, whole)) {
+      // An attempt the target never answered says nothing about the system.
+      if (isFailedAttempt(a)) continue;
       // An exported document: an attempt that handed on passages of knowledge base documents not open to everyone
       // never becomes evidence text (its finding is still counted below).
       const sample = restrictedKnowledgeTagsOf(a.kbRestricted).length > 0 ? undefined : toSample(run, a);
-      const euCats = mapOwaspToEu(a.category);
+      const category = normalizeOwaspCategory(a.category);
+      const euCats = mapOwaspToEu(category);
       for (const eu of sample ? euCats : []) {
         const arr = samplesByEu.get(eu) ?? [];
         arr.push(sample!);
@@ -199,7 +254,7 @@ export async function buildComplianceReport(
           existing.example ??= sample;
         } else {
           findingsMap.set(fk, {
-            owaspCategory: a.category,
+            owaspCategory: category,
             euCategories: euCats,
             probeKey: a.probeKey,
             severity: a.severity,
@@ -212,11 +267,13 @@ export async function buildComplianceReport(
   }
 
   // ── EU-category posture (fold OWASP rollup + attach evidence) ───────
-  const euAgg = new Map<EuRiskCategory, { total: number; vulnerable: number; needsReview: number }>();
-  for (const c of byOwaspCategory) {
+  const euAgg = new Map<EuRiskCategory, { total: number; completed: number; vulnerable: number; needsReview: number }>();
+  for (const c of owaspMap.values()) {
+    if (c.completed === 0) continue;
     for (const eu of mapOwaspToEu(c.category)) {
-      const e = euAgg.get(eu) ?? { total: 0, vulnerable: 0, needsReview: 0 };
+      const e = euAgg.get(eu) ?? { total: 0, completed: 0, vulnerable: 0, needsReview: 0 };
       e.total += c.total;
+      e.completed += c.completed;
       e.vulnerable += c.vulnerable;
       e.needsReview += c.needsReview;
       euAgg.set(eu, e);
@@ -240,19 +297,24 @@ export async function buildComplianceReport(
         total: e.total,
         vulnerable: e.vulnerable,
         needsReview: e.needsReview,
-        resilience: e.total > 0 ? (e.total - e.vulnerable) / e.total : 1,
+        // Over the attempts the target answered: a category's failed attempts say nothing about the system.
+        resilience: e.completed > 0 ? (e.completed - e.vulnerable) / e.completed : 1,
         articleRefs: meta.articleRefs,
         evidence,
       };
     })
     .sort((a, b) => a.resilience - b.resilience || b.vulnerable - a.vulnerable);
 
-  // ── Coverage gaps: built-in categories never exercised ─────────────
-  const exercised = new Set(owaspMap.keys());
-  const coverageGaps = [...builtinCategories()]
+  // ── Coverage gaps: every category of the list the posture never exercised ─
+  const exercised = new Set([...owaspMap.values()].filter((c) => c.completed > 0).map((c) => c.category));
+  const coverageGaps = OWASP_LLM_CATEGORIES
     .filter((cat) => !exercised.has(cat))
-    .map((cat) => ({ owaspCategory: cat, reason: 'No completed scan exercised this category in the report window.' }));
-  if (runs.length === 0) {
+    .map((cat) => ({
+      owaspCategory: cat,
+      label: owaspCategoryLabel(cat),
+      reason: 'No scan of the current posture exercised this category.',
+    }));
+  if (posture.length === 0) {
     disclaimers.unshift('No completed red-team scans were found for this scope; this report has no evidentiary content yet.');
   }
 
@@ -261,29 +323,38 @@ export async function buildComplianceReport(
     return order[a.severity] - order[b.severity] || b.count - a.count;
   });
 
-  // Scan window from run timestamps.
-  const times = runs.map((r) => r.finishedAt).filter((d): d is Date => !!d).map((d) => new Date(d).getTime());
+  // Scan window from the posture scans' timestamps.
+  const times = posture.map((r) => r.finishedAt).filter((d): d is Date => !!d).map((d) => new Date(d).getTime());
   const scanWindow = times.length
     ? { from: new Date(Math.min(...times)).toISOString(), to: new Date(Math.max(...times)).toISOString() }
     : undefined;
 
+  const historyRows = [...history.values()];
+
   return {
     generatedAt: generatedAt.toISOString(),
-    scope: { projectId: options.projectId, runsConsidered: runs.length, scanWindow },
+    scope: { projectId: options.projectId, runsConsidered: posture.length, scanWindow },
+    owaspReference: {
+      name: OWASP_LIST_NAME,
+      version: OWASP_LLM_VERSION,
+      label: `${OWASP_LIST_NAME} (${OWASP_LLM_VERSION})`,
+    },
     system: { ...mergeCompliance(complianceMetas), campaigns: campaignKeys, targets: [...targets].filter(Boolean) },
     posture: {
       totalAttempts,
       completed,
       vulnerable,
       needsReview,
-      attackSuccessRate: completed > 0 ? vulnerable / completed : 0,
-      resilienceScore: completed > 0 ? 1 - vulnerable / completed : 1,
+      attackSuccessRate: completed > 0 ? vulnerable / completed : null,
+      resilienceScore: completed > 0 ? 1 - vulnerable / completed : null,
       bySeverity,
     },
     byOwaspCategory,
     byEuCategory,
     findings,
     coverageGaps,
+    history: { runs: historyRows.reduce((n, h) => n + h.runs, 0), byCampaign: historyRows },
+    inconclusiveRuns,
     regulatoryBasis: [
       { source: 'AI Act Art. 55', note: 'Adversarial testing / model evaluation of systemic risk (GPAI).' },
       { source: 'AI Act Art. 15', note: 'Accuracy, robustness and cybersecurity of high-risk systems.' },

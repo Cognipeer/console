@@ -8,7 +8,7 @@
  *   GET  /client/v1/redteam/campaigns               – list configured campaigns
  *   POST /client/v1/redteam/campaigns/:key/scan     – trigger a scan (async); scanning an
  *        agent campaign also needs write access to Agents (403 otherwise), whichever version is asked for
- *   GET  /client/v1/redteam/runs                    – list runs (?campaign_key,?limit)
+ *   GET  /client/v1/redteam/runs                    – list runs (?campaign_key,?limit,?skip) + `total`
  *   GET  /client/v1/redteam/runs/:id                – one run + per-attempt verdicts
  *
  * Authoring of campaigns stays on the dashboard surface (`/api/redteam/*`).
@@ -19,8 +19,19 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { listProbeCatalog } from '@/lib/services/redteam/probes';
 import { enqueueCampaignRun } from '@/lib/services/redteam/campaignJob';
-import { getRun, listCampaigns, listRuns, type WithId } from '@/lib/services/redteam/service';
-import type { IRedTeamCampaign, IRedTeamRun } from '@/lib/database';
+import {
+  getRun,
+  listCampaigns,
+  listRunsPage,
+  RedTeamConflictError,
+  RedTeamForbiddenError,
+  RedTeamNotFoundError,
+  RedTeamValidationError,
+  type WithId,
+} from '@/lib/services/redteam/service';
+import { attemptKeyOf } from '@/lib/services/redteam/attemptKey';
+import { normalizeOwaspCategory } from '@/lib/services/redteam/owasp';
+import type { IRedTeamAggregate, IRedTeamCampaign, IRedTeamRun } from '@/lib/database';
 import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
 import { agentRevisionApiView, parseAgentRunOverride, storedAgentRevision } from '@/lib/shared/agentRevision';
 import {
@@ -41,12 +52,26 @@ function clampLimit(raw: unknown): number | undefined {
   return Math.min(n, 200);
 }
 
+/** `skip` is new on this surface, so a value that is not a whole number is refused rather than ignored. */
+function readSkip(raw: unknown): { value?: number } | { error: string } {
+  if (raw === undefined || raw === '') return {};
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim()) || !Number.isSafeInteger(Number(raw.trim()))) {
+    return { error: 'skip must be a non-negative integer' };
+  }
+  return { value: Number(raw.trim()) };
+}
+
 function fail(reply: import('fastify').FastifyReply, error: unknown, scope: string) {
   if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
   // A refusal (403, or the 503 when the engine cannot decide) is answered as the gate answers it, never as a 404 or a 500.
   const refused = sendAgentTestRefusal(reply, error);
   if (refused) return refused;
   logger.error(`Client red-team ${scope} error`, { error });
+  // The service's typed errors keep their status.
+  if (error instanceof RedTeamValidationError) return reply.code(400).send({ error: error.message });
+  if (error instanceof RedTeamForbiddenError) return reply.code(403).send({ error: error.message });
+  if (error instanceof RedTeamNotFoundError) return reply.code(404).send({ error: error.message });
+  if (error instanceof RedTeamConflictError) return reply.code(409).send({ error: error.message });
   const message = error instanceof Error ? error.message : 'Internal error';
   return (
     sendApiTokenError(reply, error)
@@ -70,6 +95,33 @@ function toCampaignView(c: WithId<IRedTeamCampaign>) {
   };
 }
 
+/**
+ * The roll-up as a caller reads it. Runs recorded before the reasons existed carry `inconclusive` alone, which
+ * then meant judge errors; categories recorded under an earlier OWASP list are grouped under the 2025 key.
+ * Rates stay as stored: `null` when nothing completed.
+ */
+function toAggregateView(aggregate: IRedTeamAggregate | undefined): IRedTeamAggregate | undefined {
+  if (!aggregate) return aggregate;
+  const byCategory: IRedTeamAggregate['byCategory'] = {};
+  for (const [category, counts] of Object.entries(aggregate.byCategory ?? {})) {
+    const key = normalizeOwaspCategory(category);
+    const into = byCategory[key] ?? { total: 0, vulnerable: 0, needsReview: 0 };
+    // `failed` exists only on aggregates written since it was added; a legacy one keeps it absent.
+    const hasFailed = into.failed !== undefined || counts.failed !== undefined;
+    byCategory[key] = {
+      total: into.total + counts.total,
+      vulnerable: into.vulnerable + counts.vulnerable,
+      needsReview: into.needsReview + counts.needsReview,
+      ...(hasFailed ? { failed: (into.failed ?? 0) + (counts.failed ?? 0) } : {}),
+    };
+  }
+  return {
+    ...aggregate,
+    byCategory,
+    ...(aggregate.inconclusive && !aggregate.inconclusiveReasons ? { inconclusiveReasons: ['judge-errors' as const] } : {}),
+  };
+}
+
 function toRunSummary(r: WithId<IRedTeamRun>) {
   return {
     id: r.id,
@@ -78,7 +130,7 @@ function toRunSummary(r: WithId<IRedTeamRun>) {
     target_ref: r.targetRef,
     agent_revision: agentRevisionApiView(r.agentRevision),
     status: r.status,
-    aggregate: r.aggregate,
+    aggregate: toAggregateView(r.aggregate),
     started_at: r.startedAt,
     finished_at: r.finishedAt,
     created_at: r.createdAt,
@@ -89,12 +141,17 @@ function toRunView(r: WithId<IRedTeamRun>) {
   return {
     ...toRunSummary(r),
     progress: r.progress,
+    // A short message: the stored error carries no stack and no provider payload.
     error: r.error,
+    warnings: r.warnings ?? [],
+    skipped_attempts: r.skippedAttempts ?? 0,
+    not_applicable_attempts: r.notApplicableAttempts ?? 0,
     attempts: r.attempts.map((a) => ({
       probe_key: a.probeKey,
       attempt_id: a.attemptId,
+      attempt_key: a.attemptKey ?? attemptKeyOf(a),
       family: a.family,
-      category: a.category,
+      category: normalizeOwaspCategory(a.category),
       severity: a.severity,
       outcome: a.review?.outcome ?? a.outcome,
       machine_outcome: a.outcome,
@@ -103,6 +160,7 @@ function toRunView(r: WithId<IRedTeamRun>) {
       reviewed: Boolean(a.review),
       latency_ms: a.latencyMs,
       error: a.error,
+      ...(a.partial ? { partial: true } : {}),
       ...(a.restricted ? { restricted: true } : {}),
     })),
   };
@@ -177,13 +235,17 @@ export const clientRedTeamApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/redteam/runs', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const query = (request.query ?? {}) as { campaign_key?: string; limit?: string };
-      const runs = await listRuns(ctx.tenantDbName, {
+      const query = (request.query ?? {}) as { campaign_key?: string; limit?: string; skip?: string };
+      const skip = readSkip(query.skip);
+      if ('error' in skip) return reply.code(400).send({ error: skip.error });
+      // `runs` keeps its shape; `total` counts every run that matches, so a caller can page.
+      const { runs, total } = await listRunsPage(ctx.tenantDbName, {
         projectId: ctx.projectId,
         campaignKey: query.campaign_key,
         limit: clampLimit(query.limit),
+        ...(skip.value !== undefined ? { skip: skip.value } : {}),
       });
-      return reply.code(200).send({ runs: runs.map(toRunSummary) });
+      return reply.code(200).send({ runs: runs.map(toRunSummary), total });
     } catch (error) {
       return fail(reply, error, 'list runs');
     }

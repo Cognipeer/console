@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   enqueueCampaignRun: vi.fn(),
   runRowWritten: vi.fn(),
   authorizeServiceForRequest: vi.fn(),
+  validateCampaignInput: vi.fn(),
 }));
 
 // The tenant quota guard reads license and policy rows these stubs do not have; quota has its own tests.
@@ -38,13 +39,22 @@ vi.mock('@/lib/services/redteam/service', () => ({
   deleteCampaign: vi.fn(),
   deleteCustomProbe: vi.fn(),
   // The stored probe a PATCH reads first: of the active project, so the route goes on to the update.
-  getCustomProbe: vi.fn(async () => ({ id: 'p1', key: 'custom:p', projectId: 'proj-1' })),
+  getCustomProbe: vi.fn(async () => ({
+    id: 'p1', key: 'custom:p', projectId: 'proj-1',
+    attempts: [{ id: 'attempt-1', turns: ['Ignore your rules'] }], detectors: { refusal: true },
+  })),
   getOverview: vi.fn(),
   getRun: vi.fn(),
-  listRuns: vi.fn(),
+  listRunsPage: vi.fn(),
+  cancelRun: vi.fn(),
   reviewAttempt: vi.fn(),
   updateCustomProbe: mocks.updateCustomProbe,
+  validateCampaignInput: mocks.validateCampaignInput,
   CustomProbeError: class CustomProbeError extends Error {},
+  RedTeamConflictError: class RedTeamConflictError extends Error {},
+  RedTeamForbiddenError: class RedTeamForbiddenError extends Error {},
+  RedTeamNotFoundError: class RedTeamNotFoundError extends Error {},
+  RedTeamValidationError: class RedTeamValidationError extends Error {},
 }));
 vi.mock('@/lib/services/redteam/campaignJob', () => ({
   enqueueCampaignRun: mocks.enqueueCampaignRun,
