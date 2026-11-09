@@ -10,7 +10,7 @@ import { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadO
 export { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadOnlyError };
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
-import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
+import { ProviderInUseError, ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
 import { isSafePathSegment } from '@/lib/providers/pathSegments';
 import { providerRegistry } from '@/lib/providers/registry';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
@@ -685,6 +685,12 @@ export async function deleteProviderConfig(
 ): Promise<boolean> {
   const db = await withTenantDb(tenantDbName);
   await assertNotManagedById(db, providerId);
+  const record = await db.findProviderById(providerId);
+  if (record?.type === 'websearch') {
+    // Instances keep their behavior on top of this connection: they must not be left pointing at nothing.
+    const instances = await db.listWebSearchInstances(record.tenantId, { providerKey: record.key });
+    if (instances.length > 0) throw new ProviderInUseError(record.key, instances.map((i) => i.key).sort());
+  }
   return db.deleteProvider(providerId);
 }
 

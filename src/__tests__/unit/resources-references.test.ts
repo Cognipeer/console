@@ -65,6 +65,8 @@ describe('edge kind registry', () => {
       'guardrail.piiPolicy',
       // resolveTemplateIdByKey throws "Sandbox template not found" on the first sandbox call
       'agent.sandboxTemplate', 'mcp.sandboxTemplate',
+      // An instance searches through its provider: without it every search fails.
+      'websearchInstance.provider',
     ];
     const warnings = [
       'agent.tool', 'agent.mcp', 'agent.knowledge', 'agent.subagent', 'agent.subagentModel', 'agent.subagentKnowledge',

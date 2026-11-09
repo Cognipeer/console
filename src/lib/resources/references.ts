@@ -72,6 +72,12 @@ export interface EdgeKindDefinition {
   requiresActive?: boolean;
   /** The runtime also requires this attribute of the target to equal `value` (when the target reports it). */
   targetAttribute?: { key: string; value: string };
+  /**
+   * A value that names no row of `toType` may name a row of this type instead (a web search binding names an
+   * instance, or, legacy, a provider). Resolved by the fallback type's own rule, `fallbackScope`.
+   */
+  fallbackToType?: string;
+  fallbackScope?: EdgeScopeRule;
 }
 
 export interface KindOptions {
@@ -82,6 +88,8 @@ export interface KindOptions {
   callerScoped?: boolean;
   requiresActive?: boolean;
   targetAttribute?: { key: string; value: string };
+  fallbackToType?: string;
+  fallbackScope?: EdgeScopeRule;
 }
 
 /**
@@ -109,6 +117,8 @@ export function defineEdgeKind(
     ...(options.callerScoped ? { callerScoped: true } : {}),
     ...(options.requiresActive ? { requiresActive: true } : {}),
     ...(options.targetAttribute ? { targetAttribute: options.targetAttribute } : {}),
+    ...(options.fallbackToType ? { fallbackToType: options.fallbackToType } : {}),
+    ...(options.fallbackScope ? { fallbackScope: options.fallbackScope } : {}),
   };
 }
 
@@ -159,8 +169,15 @@ kind('agent.browser', 'agent', 'browser', 'project-then-tenant', 'warning', {
   by: 'id', alsoByKey: true, inactiveBreaks: true,
 });
 // The optional provider pin; webSearchService throws when it is not an active websearch instance.
-kind('agent.webSearchProvider', 'agent', 'provider', 'provider-assignment', 'warning', {
+// The binding names a web search instance (own project first, else tenant-wide) or, legacy, a websearch provider
+// assigned to the agent's project: the instance is looked up first.
+kind('agent.webSearchProvider', 'agent', 'websearch-instance', 'project-then-tenant', 'warning', {
   inactiveBreaks: true, requiresActive: true, targetAttribute: { key: 'type', value: 'websearch' },
+  fallbackToType: 'provider', fallbackScope: 'provider-assignment',
+});
+// An instance searches through its provider: a missing, unassigned or disabled provider fails every search.
+kind('websearchInstance.provider', 'websearch-instance', 'provider', 'provider-assignment', 'error', {
+  inactiveBreaks: true, targetAttribute: { key: 'type', value: 'websearch' },
 });
 
 // web_fetch.config.crawlerKey: fetchPageWithCrawler throws for a missing or non-active crawler.
@@ -454,30 +471,45 @@ export function resolveEdge(
   const def = getEdgeKindDefinition(edge.kind);
   if (!def) return null;
 
-  let candidates: ResourceRecord[];
-  if (edge.by === 'id') {
-    const byId = index.byTypeId.get(edge.toType)?.get(edge.target);
-    candidates = byId ? [byId] : [];
-    if (candidates.length === 0 && def.alsoByKey) {
-      candidates = index.byTypeKey.get(edge.toType)?.get(edge.target) ?? [];
+  const lookup = (toType: string): ResourceRecord[] => {
+    let found: ResourceRecord[];
+    if (edge.by === 'id') {
+      const byId = index.byTypeId.get(toType)?.get(edge.target);
+      found = byId ? [byId] : [];
+      if (found.length === 0 && def.alsoByKey) {
+        found = index.byTypeKey.get(toType)?.get(edge.target) ?? [];
+      }
+    } else {
+      found = index.byTypeKey.get(toType)?.get(edge.target) ?? [];
     }
-  } else {
-    candidates = index.byTypeKey.get(edge.toType)?.get(edge.target) ?? [];
-  }
-  if (edge.qualifier) {
-    const attr = def.qualifierAttribute ?? 'providerKey';
-    candidates = candidates.filter((c) => attributeOf(c, attr) === edge.qualifier);
-  }
-  if (def.targetAttribute) {
-    // The runtime rejects a row of the wrong kind (e.g. a non-websearch provider); an unreported attribute is not judged.
-    const { key, value } = def.targetAttribute;
-    candidates = candidates.filter((c) => {
-      const actual = attributeOf(c, key);
-      return actual === null || actual === value;
-    });
-  }
+    if (edge.qualifier) {
+      const attr = def.qualifierAttribute ?? 'providerKey';
+      found = found.filter((c) => attributeOf(c, attr) === edge.qualifier);
+    }
+    if (def.targetAttribute) {
+      // The runtime rejects a row of the wrong kind (e.g. a non-websearch provider); an unreported attribute is not judged.
+      const { key, value } = def.targetAttribute;
+      found = found.filter((c) => {
+        const actual = attributeOf(c, key);
+        return actual === null || actual === value;
+      });
+    }
+    return found;
+  };
 
-  const matches = applyScope(def, from, candidates);
+  let candidates = lookup(edge.toType);
+  let matches = applyScope(def, from, candidates);
+  if (matches.length === 0 && def.fallbackToType) {
+    // The value names no instance visible here: it may be a provider key (the legacy binding).
+    const fallbackCandidates = lookup(def.fallbackToType);
+    const fallbackMatches = applyScope({ ...def, scope: def.fallbackScope ?? def.scope }, from, fallbackCandidates);
+    if (fallbackMatches.length > 0) {
+      candidates = fallbackCandidates;
+      matches = fallbackMatches;
+    } else if (candidates.length === 0) {
+      candidates = fallbackCandidates;
+    }
+  }
   let status: ResourceEdgeStatus;
   if (matches.length === 0) {
     status = candidates.length > 0 ? 'cross-project' : 'missing';

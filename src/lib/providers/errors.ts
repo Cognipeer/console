@@ -40,3 +40,25 @@ export class ProviderKeyExistsError extends Error {
     this.name = 'ProviderKeyExistsError';
   }
 }
+
+export const PROVIDER_IN_USE = 'provider_in_use';
+
+/**
+ * Thrown when a web search provider is deleted while web search instances still search through it. Maps to HTTP 409
+ * `{ error, code, instances }` at every provider delete entry point (`sendProviderConfigError`); the instances have
+ * to be pointed elsewhere or deleted first.
+ */
+export class ProviderInUseError extends Error {
+  readonly code = PROVIDER_IN_USE;
+  readonly retryable = false;
+  readonly instanceKeys: string[];
+
+  constructor(providerKey: string, instanceKeys: string[]) {
+    super(
+      `Provider "${providerKey}" is still used by web search instance${instanceKeys.length === 1 ? '' : 's'} `
+      + `${instanceKeys.map((k) => `"${k}"`).join(', ')}. Delete them or point them at another provider first.`,
+    );
+    this.name = 'ProviderInUseError';
+    this.instanceKeys = instanceKeys;
+  }
+}

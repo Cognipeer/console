@@ -72,6 +72,21 @@ export async function listWebSearchProviders(
   }, options);
 }
 
+/**
+ * True when a search can run in the project without naming a key: an active instance is visible, or an active
+ * provider is (the legacy path, which platform and managed providers still use).
+ */
+export async function hasActiveWebSearch(
+  tenantDbName: string,
+  tenantId: string,
+  projectId?: string,
+): Promise<boolean> {
+  const instances = await listWebSearchInstances(tenantDbName, tenantId, projectId);
+  if (instances.some((i) => i.status === 'active')) return true;
+  const providers = await listWebSearchProviders(tenantDbName, tenantId, projectId);
+  return providers.some((p) => p.status === 'active');
+}
+
 async function withTenantDb(tenantDbName: string) {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
