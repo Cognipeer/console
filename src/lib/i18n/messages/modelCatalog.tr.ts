@@ -45,6 +45,9 @@ export const modelCatalogTr: typeof modelCatalogEn = {
     creditsPerCallOne: '1 kredi / çağrı',
     creditsPerMillion: '{count} kredi / 1M token',
     creditsPerMillionOne: '1 kredi / 1M token',
+    creditsSpent: '{count} kredi',
+    creditsSpentOne: '1 kredi',
+    creditsSpentTotal: 'platform modellerinde {count} kredi',
   },
   source: {
     live: '{provider} üzerinden canlı · {time} listelendi',

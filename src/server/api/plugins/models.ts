@@ -49,6 +49,7 @@ import {
   getProviderCatalog,
   ProviderCatalogDisabledError,
   ProviderCatalogNotFoundError,
+  platformModelCredits,
 } from '@/lib/services/models/catalog';
 import { calcCacheHitRate } from '@/lib/utils/tracingUtils';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
@@ -130,11 +131,14 @@ function sanitizeSettings(settings: Record<string, unknown>) {
 }
 
 function sanitizeModel(model: IModel) {
+  const credits = model.platform ? platformModelCredits(model.metadata) : undefined;
   return {
     ...model,
     platform: Boolean(model.platform),
     capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
+    // A platform model is paid with credits, not per-token prices: its credit price, for the model list.
+    ...(credits ? { credits } : {}),
   };
 }
 

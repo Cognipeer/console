@@ -174,6 +174,11 @@ function platformModelFacts(metadata: unknown): Pick<PlatformProviderModelCatalo
   };
 }
 
+/** The credit price of a platform model row (from its metadata), or undefined when it has none. */
+export function platformModelCredits(metadata: unknown): { perCall?: number; perMillionTokens?: number } | undefined {
+  return platformModelFacts(metadata).credits;
+}
+
 /**
  * The catalog of a platform provider, looked up tenant-wide. It never opens credentials or asks the upstream: the
  * models are the platform model rows of the provider.

@@ -47,6 +47,9 @@ export const modelCatalogEn = {
     creditsPerCallOne: '1 credit / call',
     creditsPerMillion: '{count} credits / 1M tokens',
     creditsPerMillionOne: '1 credit / 1M tokens',
+    creditsSpent: '{count} credits',
+    creditsSpentOne: '1 credit',
+    creditsSpentTotal: '{count} credits on platform models',
   },
   source: {
     live: 'Live from {provider} · listed {time}',
