@@ -29,6 +29,7 @@ import { buildMongoConversationSearchCondition, findConversationSearchMatch, nor
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { definedFields } from './definedFields';
+import { isDuplicateKeyError } from './errors';
 
 /** A conversation as the rest of the app sees it: without the internal turn-owner marker. */
 function withoutTurnOwner<T extends object>(conversation: T): Omit<T, 'runtimeTurnId'> {
@@ -715,7 +716,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       try {
         await collection.insertMany(docs as never[], { ordered: true });
       } catch (error) {
-        if ((error as { code?: number } | null)?.code === 11000) {
+        if (isDuplicateKeyError(error)) {
           // An ordered insert keeps the documents before the one that failed.
           // Say which, by what is actually stored (a primary-key lookup) rather
           // than by what the driver reports, which differs between backends:
