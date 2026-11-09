@@ -243,6 +243,8 @@ export interface AppConfig {
     tracingStaleSessionMinutes: number;
     /** How often the stale tracing-session finalizer runs. */
     tracingFinalizerIntervalMs: number;
+    /** Minimum gap between plan-retention sweeps triggered by tracing ingest, per tenant and project. 0 sweeps on every ingest request. */
+    tracingRetentionSweepIntervalMs: number;
     /** Per-channel timeout when delivering an alert notification. */
     alertChannelTimeoutMs: number;
     /** New projects get the default alert rules (the default set of the rule templates). */
@@ -1089,6 +1091,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       entityMetricsMaxBufferedRowsPerTenant: Math.max(int(source, 'ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT', 10_000), 100),
       tracingStaleSessionMinutes: Math.max(int(source, 'TRACING_STALE_SESSION_MINUTES', 360), 5),
       tracingFinalizerIntervalMs: Math.max(int(source, 'TRACING_FINALIZER_INTERVAL_MS', 300_000), 10_000),
+      tracingRetentionSweepIntervalMs: Math.max(int(source, 'TRACING_RETENTION_SWEEP_INTERVAL_MS', 3_600_000), 0),
       alertChannelTimeoutMs: Math.max(int(source, 'ALERT_CHANNEL_TIMEOUT_MS', 10_000), 1_000),
       defaultAlertRulesOnCreate: bool(source, 'ALERT_DEFAULT_RULES_ON_CREATE', true),
     },

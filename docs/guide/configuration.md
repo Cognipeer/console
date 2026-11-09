@@ -416,6 +416,7 @@ Health views, alert rules and reports for agents, models, knowledge bases, MCP s
 | `ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT` | Cap on distinct rollup rows one tenant may hold in the buffer (minimum `100`), so a single tenant cannot use up the share of the others; the effective cap is the lower of this and `ENTITY_METRICS_MAX_BUFFERED_ROWS`. Excess new rows are dropped and counted per tenant | `10000` |
 | `TRACING_STALE_SESSION_MINUTES` | A traced session still `in_progress` this many minutes after its last activity is marked `abandoned` (minimum `5`). An abandoned session is not an error | `360` |
 | `TRACING_FINALIZER_INTERVAL_MS` | How often stale traced sessions are swept (minimum `10000`) | `300000` |
+| `TRACING_RETENTION_SWEEP_INTERVAL_MS` | Minimum gap between plan-retention sweeps triggered by tracing ingest, per tenant and project (`0` sweeps on every request) | `3600000` |
 | `ALERT_CHANNEL_TIMEOUT_MS` | Per-channel timeout when delivering an alert notification: webhook, Slack, Teams and PagerDuty (minimum `1000`) | `10000` |
 | `ALERT_DEFAULT_RULES_ON_CREATE` | New projects and the Default Project of a new workspace get the five default [alert rules](../api/alerts.md#the-default-set) (the default set of the rule templates). `false` turns that default off; a project can still add them from **Alerts → Templates**, and a create request that sends `defaultAlertRules: true` still gets them | `true` |
 
