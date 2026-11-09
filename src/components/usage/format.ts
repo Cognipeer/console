@@ -74,3 +74,17 @@ export function bannerMessage(banner: UsageBanner, t: Translate, locale?: string
     limit: formatNumber(banner.limit, locale),
   });
 }
+
+/** Beyond this many days the runway is shown as "more than a year". */
+export const MAX_RUNWAY_DAYS = 365;
+
+/** The runway line: the day count, or the "more than a year" text above a year. */
+export function runwayText(
+  t: (key: string, values?: Record<string, string | number>) => string,
+  locale: string,
+  runwayDays: number | undefined,
+): string {
+  if (runwayDays === undefined) return t('creditCard.noRunway');
+  if (runwayDays > MAX_RUNWAY_DAYS) return t('creditCard.runwayOverYear');
+  return t('creditCard.runwayValue', { days: formatNumber(runwayDays, locale) });
+}

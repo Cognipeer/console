@@ -51,6 +51,7 @@ export const usageTr: typeof usageEn = {
     prepaidLots: '{lots} açık paket',
     runway: 'Yetecek süre',
     runwayValue: 'Son 7 günlük harcamayla {days} gün',
+    runwayOverYear: 'Son 7 günlük harcamayla bir yıldan fazla',
     noRunway: 'Son 7 günde harcama yok',
     open: 'Kredileri aç',
   },

@@ -5,7 +5,7 @@ import { IconInfoCircle } from '@tabler/icons-react';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { CapacityDimension, MonthlyDimension, UsageRow, UsageSummary } from '@/lib/limits/usageSummary';
 import UsageBar from './UsageBar';
-import { formatBytes, formatDate, formatNumber, formatPeriod } from './format';
+import { formatBytes, formatDate, formatNumber, formatPeriod, runwayText } from './format';
 
 type Translate = (key: string, values?: Record<string, string | number>) => string;
 
@@ -119,9 +119,7 @@ export default function UsageOverviewTab({
                 {credits.prepaid.lots > 0 ? ` · ${t('creditCard.prepaidLots', { lots: credits.prepaid.lots })}` : ''}
               </Text>
               <Text size="sm" c="dimmed">
-                {t('creditCard.runway')}: {credits.runwayDays !== undefined
-                  ? t('creditCard.runwayValue', { days: formatNumber(credits.runwayDays, locale) })
-                  : t('creditCard.noRunway')}
+                {t('creditCard.runway')}: {runwayText(t, locale, credits.runwayDays)}
               </Text>
             </Stack>
           </Paper>

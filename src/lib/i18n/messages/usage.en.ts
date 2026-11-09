@@ -50,6 +50,7 @@ export const usageEn = {
     prepaidLots: '{lots} open',
     runway: 'Runway',
     runwayValue: '{days} days at the last 7 days of spend',
+    runwayOverYear: 'More than a year at the last 7 days of spend',
     noRunway: 'No spend in the last 7 days',
     open: 'Open credits',
   },
