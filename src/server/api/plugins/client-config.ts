@@ -1,7 +1,8 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { ConfigValueType } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
+  ConfigServiceError,
   createConfigGroup,
   createConfigItem,
   deleteConfigGroup,
@@ -23,8 +24,13 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendRouteError } from '../routeErrors';
 
 const logger = createLogger('api:client-config');
+
+/** A request the config service refuses for the caller to correct (a key already taken, a group or item not found). */
+const sendConfigServiceError = (reply: FastifyReply) => (error: unknown) =>
+  error instanceof ConfigServiceError ? reply.code(error.status).send({ error: error.message }) : null;
 
 export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/config/groups', withClientApiRequestContext(async (request, reply) => {
@@ -38,10 +44,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ groups });
     } catch (error) {
-      logger.error('List client config groups error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'List client config groups error' });
     }
   }));
 
@@ -65,10 +68,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ group });
     } catch (error) {
-      logger.error('Create client config group error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Create client config group error' });
     }
   }));
 
@@ -96,10 +96,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ group });
     } catch (error) {
-      logger.error('Get client config group error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Get client config group error' });
     }
   }));
 
@@ -135,10 +132,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ group });
     } catch (error) {
-      logger.error('Update client config group error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Update client config group error' });
     }
   }));
 
@@ -167,10 +161,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ success: true });
     } catch (error) {
-      logger.error('Delete client config group error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Delete client config group error' });
     }
   }));
 
@@ -203,10 +194,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ items });
     } catch (error) {
-      logger.error('List client config group items error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'List client config group items error' });
     }
   }));
 
@@ -253,10 +241,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ item });
     } catch (error) {
-      logger.error('Create client config item error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Create client config item error' });
     }
   }));
 
@@ -278,10 +263,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ items });
     } catch (error) {
-      logger.error('List client config items error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'List client config items error' });
     }
   }));
 
@@ -297,10 +279,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ item });
     } catch (error) {
-      logger.error('Get client config item error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Get client config item error' });
     }
   }));
 
@@ -334,10 +313,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ item });
     } catch (error) {
-      logger.error('Update client config item error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Update client config item error' });
     }
   }));
 
@@ -361,10 +337,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ success: true });
     } catch (error) {
-      logger.error('Delete client config item error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Delete client config item error' });
     }
   }));
 
@@ -382,10 +355,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ logs });
     } catch (error) {
-      logger.error('List client config audit logs error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'List client config audit logs error' });
     }
   }));
 
@@ -412,10 +382,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ configs });
     } catch (error) {
-      logger.error('Resolve client config values error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return sendRouteError(reply, error, { logger, typed: sendConfigServiceError(reply), log: 'Resolve client config values error' });
     }
   }));
 };
