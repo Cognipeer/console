@@ -128,7 +128,8 @@ export async function runScheduledScans(
       errors.push(`${campaign.key}: scheduled scans cannot run against the draft; pick Published or a version`);
       continue;
     }
-    const recent = await db.listRedTeamRuns({ campaignKey: campaign.key, limit: 1 });
+    // Keys are unique per project, so the last run is looked up in the campaign's own project.
+    const recent = await db.listRedTeamRuns({ projectId: campaign.projectId, campaignKey: campaign.key, limit: 1 });
     const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
     if (!isDue(campaign.schedule, last ? new Date(last) : null, now)) continue;
     try {

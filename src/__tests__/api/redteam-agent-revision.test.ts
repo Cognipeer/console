@@ -37,7 +37,8 @@ vi.mock('@/lib/services/redteam/service', () => ({
   createCustomProbe: mocks.createCustomProbe,
   deleteCampaign: vi.fn(),
   deleteCustomProbe: vi.fn(),
-  getCustomProbe: vi.fn(),
+  // The stored probe a PATCH reads first: of the active project, so the route goes on to the update.
+  getCustomProbe: vi.fn(async () => ({ id: 'p1', key: 'custom:p', projectId: 'proj-1' })),
   getOverview: vi.fn(),
   getRun: vi.fn(),
   listRuns: vi.fn(),

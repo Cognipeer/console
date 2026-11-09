@@ -26,7 +26,7 @@ import type {
   RedTeamTargetKind,
 } from '@/lib/database';
 import { runRedTeam, summarizeJudgeErrors } from './runner';
-import { buildProbes, CUSTOM_PROBE_PREFIX, validateCustomProbe, CustomProbeError } from './probes';
+import { buildProbes, CUSTOM_PROBE_PREFIX, validateCustomProbe, validateCustomProbePatterns, CustomProbeError } from './probes';
 import { compareRedTeamRuns, type RedTeamComparison } from './compare';
 import { mapOwaspToEu, EU_RISK_CATEGORIES, type EuRiskCategory } from './euTaxonomy';
 import type { CampaignComplianceMeta } from './compliance/types';
@@ -751,6 +751,7 @@ export async function createCustomProbe(
 ): Promise<WithId<IRedTeamCustomProbe>> {
   // Fail loudly on an unrunnable definition before it reaches a campaign.
   validateCustomProbe({ attempts: input.attempts, detectors: input.detectors });
+  validateCustomProbePatterns(input.attempts);
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const key = await generateUniqueProbeKey(input.name, async (k) => !!(await db.findRedTeamCustomProbeByKey(k, input.projectId)));
@@ -816,6 +817,7 @@ export async function updateCustomProbe(
       attempts: data.attempts ?? existing.attempts,
       detectors: data.detectors ?? existing.detectors,
     });
+    if (data.attempts !== undefined) validateCustomProbePatterns(data.attempts, existing.attempts);
   }
   const { description, family, ...rest } = data;
   const updated = await db.updateRedTeamCustomProbe(id, {

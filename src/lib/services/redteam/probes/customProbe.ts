@@ -10,6 +10,7 @@
 
 import type { IRedTeamCustomProbe } from '@/lib/database';
 import { createLlmJudgeDetector, createPatternDetector, createRefusalDetector } from '../detectors';
+import { patternListError } from '../detectors/safePattern';
 import type { Detector, OwaspLlmCategory, Probe, ProbeAttempt, Severity } from '../types';
 
 /** Selection keys for custom probes are namespaced to avoid built-in clashes. */
@@ -36,6 +37,30 @@ export function validateCustomProbe(def: Pick<IRedTeamCustomProbe, 'attempts' | 
   const judgeCount = d.judges?.length ?? 0;
   if (!d.refusal && !d.pattern && judgeCount === 0) {
     throw new CustomProbeError('a custom probe needs at least one detector (refusal, pattern, or a judge lens)');
+  }
+}
+
+type PatternAttempt = Pick<IRedTeamCustomProbe['attempts'][number], 'id' | 'forbiddenPatterns'>;
+
+function samePatterns(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  const x = a ?? [];
+  const y = b ?? [];
+  return x.length === y.length && x.every((p, i) => p === y[i]);
+}
+
+/**
+ * Save-time limits on the forbidden patterns a user stores. Checked when a probe
+ * is created or changed, not when it runs: a stored probe that predates the
+ * limits still runs, and its patterns are bounded at match time instead. On an
+ * update, an attempt whose pattern list is unchanged from the stored one is not
+ * checked again, so such a probe can still be renamed or re-rated.
+ */
+export function validateCustomProbePatterns(attempts: PatternAttempt[], stored: PatternAttempt[] = []): void {
+  const storedById = new Map(stored.map((a) => [a.id, a.forbiddenPatterns]));
+  for (const a of attempts) {
+    if (storedById.has(a.id) && samePatterns(storedById.get(a.id), a.forbiddenPatterns)) continue;
+    const error = patternListError(a.forbiddenPatterns ?? []);
+    if (error) throw new CustomProbeError(`attempt "${a.id ?? '?'}": ${error}`);
   }
 }
 

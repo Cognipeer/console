@@ -13,7 +13,7 @@ import type {
   RedTeamRunStatus,
 } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, escapeRegex } from './base';
 import { definedFields } from './definedFields';
 
 export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
@@ -69,10 +69,12 @@ export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.targetKind !== undefined) filter.targetKind = filters.targetKind;
       if (filters?.search) {
+        // A literal substring search, like the SQLite provider's LIKE: the term is escaped before it reaches $regex.
+        const term = escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: term, $options: 'i' } },
+          { description: { $regex: term, $options: 'i' } },
+          { key: { $regex: term, $options: 'i' } },
         ];
       }
       const docs = await db.collection(COLLECTIONS.redTeamCampaigns).find(filter).sort({ createdAt: -1 }).toArray();
@@ -177,10 +179,12 @@ export function RedTeamMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       const filter: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.search) {
+        // A literal substring search, like the SQLite provider's LIKE: the term is escaped before it reaches $regex.
+        const term = escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: term, $options: 'i' } },
+          { description: { $regex: term, $options: 'i' } },
+          { key: { $regex: term, $options: 'i' } },
         ];
       }
       const docs = await db.collection(COLLECTIONS.redTeamCustomProbes).find(filter).sort({ createdAt: -1 }).toArray();
