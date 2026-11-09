@@ -290,7 +290,7 @@ credential, stdio environment values, runtime headers) are masked as
 | `MCP_UPSTREAM_MAX_RESPONSE_BYTES` | Largest response body read from the upstream of an OpenAPI or remote MCP server; a bigger one fails the call (minimum `65536`). | `8388608` |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Longest a call to that upstream may take, headers and body together (minimum `1000`). | `90000` |
 | `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
-| `MCP_STDIO_ENABLED` | Allow stdio (npx/uvx) MCP servers to run as subprocesses of the gateway. Sandbox execution is unaffected. | `true` for `DEPLOYMENT_MODE=onprem`, `false` for `saas` |
+| `MCP_STDIO_ENABLED` | Allow stdio (npx/uvx) MCP servers to run as subprocesses of the gateway. Sandbox execution is unaffected. Set `false`, `0`, `no` or `off` to disable. A `saas` deployment logs a one-time notice that this default becomes `false` in a later release. | `true` |
 | `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
 | `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |
 

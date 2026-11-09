@@ -172,16 +172,21 @@ function buildChildEnv(tenantEnv: Record<string, string>): NodeJS.ProcessEnv {
   };
 }
 
-let warnedStdioEnabledOnSaas = false;
+let warnedStdioOnSaas = false;
+
+/** Test hook: lets the once-per-process notice fire again. */
+export function __resetStdioWarningForTests(): void {
+  warnedStdioOnSaas = false;
+}
 
 export function isStdioRunnerEnabled(): boolean {
   const cfg = getConfig();
   const enabled = cfg.mcp.stdio.enabled;
-  if (enabled && !cfg.deployment.isOnPrem && !warnedStdioEnabledOnSaas) {
-    warnedStdioEnabledOnSaas = true;
+  if (enabled && !cfg.deployment.isOnPrem && !warnedStdioOnSaas) {
+    warnedStdioOnSaas = true;
     logger.warn(
-      'MCP_STDIO_ENABLED is on for a saas deployment: stdio MCP servers run as subprocesses of this process. '
-      + 'Leave it unset to use sandbox execution only.',
+      'This hosted deployment runs stdio MCP servers as subprocesses of this process. '
+      + 'The default becomes off in a later release; set MCP_STDIO_ENABLED=false to disable it now.',
     );
   }
   return enabled;

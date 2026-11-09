@@ -634,8 +634,9 @@ export interface AppConfig {
     stdio: {
       /**
        * Whether stdio servers may run as subprocesses of this process. Default:
-       * on for `onprem` deployments, off for `saas`; `MCP_STDIO_ENABLED` sets it
-       * explicitly either way.
+       * on for every deployment mode (a `saas` deployment logs a one-time notice
+       * that the default becomes off in a later release); `MCP_STDIO_ENABLED`
+       * set to `false`, `0`, `no` or `off` (any case) turns it off.
        */
       enabled: boolean;
       /** Subprocesses running at once, all tenants together. */
@@ -715,17 +716,24 @@ function boundedAgentRunConfig(source: ConfigSource) {
   };
 }
 
+/** On unless `MCP_STDIO_ENABLED` is explicitly `false`, `0`, `no` or `off` (any case). */
+function stdioEnabled(source: ConfigSource): boolean {
+  const raw = source.get('MCP_STDIO_ENABLED');
+  if (raw === undefined) return true;
+  return !['false', '0', 'no', 'off'].includes(raw.trim().toLowerCase());
+}
+
 /**
  * The stdio subprocess pool and one tenant's share of it. The share defaults to
  * half the pool (at least 1) so that one tenant cannot hold every slot; an unset,
  * negative or unreadable value takes the default, and 0 leaves the pool as the
  * only limit.
  */
-function stdioPoolConfig(source: ConfigSource, deploymentMode: 'saas' | 'onprem') {
+function stdioPoolConfig(source: ConfigSource) {
   const maxConcurrent = Math.max(int(source, 'MCP_STDIO_MAX_CONCURRENT', 8), 0);
   const share = int(source, 'MCP_STDIO_MAX_CONCURRENT_PER_TENANT', -1);
   return {
-    enabled: bool(source, 'MCP_STDIO_ENABLED', deploymentMode === 'onprem'),
+    enabled: stdioEnabled(source),
     maxConcurrent,
     maxConcurrentPerTenant: share >= 0 ? share : Math.max(Math.floor(maxConcurrent / 2), 1),
   };
@@ -1232,7 +1240,7 @@ function buildConfig(source: ConfigSource): AppConfig {
         maxBufferedBytes: Math.max(int(source, 'MCP_SSE_MAX_BUFFERED_BYTES', 8 * 1024 * 1024), 0),
         keepaliveMs: Math.max(int(source, 'MCP_SSE_KEEPALIVE_MS', 25_000), 0),
       },
-      stdio: stdioPoolConfig(source, deploymentMode),
+      stdio: stdioPoolConfig(source),
       public: {
         ...publicRateConfig(source),
         bodyLimitBytes: Math.max(int(source, 'MCP_PUBLIC_BODY_LIMIT_BYTES', 1024 * 1024), 1024),
