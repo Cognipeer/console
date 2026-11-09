@@ -110,17 +110,51 @@ describe('client admin surface grant scoping', () => {
       expect(list.statusCode).toBe(200);
     });
 
-    it('refuses provider updates and deletes for a non-admin caller', async () => {
+    it('lets a non-admin caller update a non-target field and delete on an assigned provider', async () => {
       await boot(clientProvidersApiPlugin, authFor(MEMBER));
-      (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({ _id: 'prov-1', tenantId: 'tenant-1', projectId: 'p1' });
+      (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({
+        _id: 'prov-1', tenantId: 'tenant-1', projectId: 'p1', settings: { baseUrl: 'https://api.example.com' },
+      });
+      const patch = await app.inject({
+        method: 'PATCH', url: '/api/client/v1/providers/prov-1', headers,
+        payload: JSON.stringify({ label: 'renamed', settings: { baseUrl: 'https://api.example.com', temperature: 0.2 } }),
+      });
+      expect(patch.statusCode).toBe(200);
+      const del = await app.inject({ method: 'DELETE', url: '/api/client/v1/providers/prov-1', headers: { authorization: headers.authorization } });
+      expect(del.statusCode).toBe(200);
+    });
+
+    it('refuses a non-admin update that changes the connection target', async () => {
+      await boot(clientProvidersApiPlugin, authFor(MEMBER));
+      (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({
+        _id: 'prov-1', tenantId: 'tenant-1', projectId: 'p1', settings: { baseUrl: 'https://api.example.com' },
+      });
       const patch = await app.inject({
         method: 'PATCH', url: '/api/client/v1/providers/prov-1', headers,
         payload: JSON.stringify({ settings: { baseUrl: 'https://example.org' } }),
       });
       expect(patch.statusCode).toBe(403);
-      const del = await app.inject({ method: 'DELETE', url: '/api/client/v1/providers/prov-1', headers: { authorization: headers.authorization } });
-      expect(del.statusCode).toBe(403);
+      expect(parseJsonBody<{ code: string }>(patch.body).code).toBe('provider_target_change_requires_admin');
       expect(updateProviderConfig).not.toHaveBeenCalled();
+    });
+
+    it('does not let a non-admin caller touch a provider outside its project', async () => {
+      await boot(clientProvidersApiPlugin, authFor(MEMBER));
+      (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({ _id: 'prov-2', tenantId: 'tenant-1', projectId: 'p2' });
+      const del = await app.inject({ method: 'DELETE', url: '/api/client/v1/providers/prov-2', headers: { authorization: headers.authorization } });
+      expect(del.statusCode).toBe(404);
+    });
+
+    it('allows an admin caller to change the connection target', async () => {
+      await boot(clientProvidersApiPlugin, authFor(ADMIN));
+      (getProviderConfigById as ReturnType<typeof vi.fn>).mockResolvedValue({
+        _id: 'prov-1', tenantId: 'tenant-1', projectId: 'p1', settings: { baseUrl: 'https://api.example.com' },
+      });
+      const patch = await app.inject({
+        method: 'PATCH', url: '/api/client/v1/providers/prov-1', headers,
+        payload: JSON.stringify({ settings: { baseUrl: 'https://example.org' } }),
+      });
+      expect(patch.statusCode).toBe(200);
     });
 
     it('does not let a scoped admin-role caller reassign projects', async () => {
