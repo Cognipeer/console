@@ -18,7 +18,7 @@ import { isManagedModel } from '@/enterprise/managed-credits';
 import type { GatewayChatRequest } from '@/lib/services/models/gatewayTypes';
 import type { GuardrailFinding } from './types';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
-import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { isContentFilterError } from '@/lib/services/models/contentFilter';
 import {
   MODERATION_CATEGORIES,
   PROMPT_SHIELD_ISSUES,
@@ -55,39 +55,6 @@ export class JudgeContentFilteredError extends Error {
   constructor() {
     super("The model provider's safety filter refused to evaluate this content.");
     this.name = 'JudgeContentFilteredError';
-  }
-}
-
-const CONTENT_FILTER_CODES = new Set(['content_filter', 'content_policy_violation']);
-
-function isContentFilterCode(value: unknown): boolean {
-  return typeof value === 'string' && CONTENT_FILTER_CODES.has(value.trim().toLowerCase());
-}
-
-/**
- * True when an upstream error is the provider's safety filter refusing the
- * request: HTTP 400 with a `content_filter` code. The code is read where the
- * clients keep it: `code` / `error.code` on SDK errors, the error body an
- * `UpstreamRequestError` carries (`body`), and the gateway's own normalization
- * (which also covers a managed provider's sanitized error, tagged with the code
- * by the gateway).
- */
-export function isContentFilterError(error: unknown): boolean {
-  if (error instanceof JudgeContentFilteredError) return true;
-  if (!error || typeof error !== 'object') return false;
-  const carrier = error as { status?: unknown; statusCode?: unknown; code?: unknown; error?: { code?: unknown } | null; body?: unknown };
-  const status = carrier.status ?? carrier.statusCode;
-  if (status === 400) {
-    if (isContentFilterCode(carrier.code) || isContentFilterCode(carrier.error?.code)) return true;
-    if (typeof carrier.body === 'string' && /["']code["']\s*:\s*["']content_filter["']/i.test(carrier.body)) return true;
-  }
-  // An upstream status other than 400 is an ordinary failure, whatever its code says.
-  if (typeof status === 'number' && status !== 400) return false;
-  try {
-    const normalized = normalizeInferenceError(error);
-    return normalized.status === 400 && isContentFilterCode(normalized.error.code);
-  } catch {
-    return false;
   }
 }
 
@@ -145,7 +112,7 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
           logFailures: true,
         },
       }),
-      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
+      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
       );
     } catch (error) {
       if (isContentFilterError(error)) throw new JudgeContentFilteredError();
@@ -196,7 +163,7 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
           { role: 'user', content: userPrompt },
         ],
       }),
-      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
+      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
     );
   } catch (error) {
     if (isContentFilterError(error)) throw new JudgeContentFilteredError();

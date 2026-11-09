@@ -29,6 +29,7 @@ import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning, withReasoningVisibilit
 import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
+import { isContentFilterError } from './contentFilter';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import type { IModel } from '@/lib/database';
 import { sourceForActor, type UsageAttribution } from '@/lib/services/usage/usageEvents';
@@ -251,6 +252,12 @@ function replicaTrace(
  * merged `settings` already swapped - so nothing downstream has to know a pool
  * exists.
  */
+/**
+ * A safety-filter refusal is a verdict on the content, not on the provider's health: it does not count against a
+ * replica's circuit, and the next replica would refuse the same content (one more paid call), so it is not retried elsewhere.
+ */
+const notContentFilter = (error: unknown): boolean => !isContentFilterError(error);
+
 async function runAcrossReplicas<T>(
   model: IModel,
   prefix: 'chat' | 'chat-stream',
@@ -278,7 +285,7 @@ async function runAcrossReplicas<T>(
     } catch (error) {
       lastError = error;
       const isLast = i === order.length - 1;
-      if (isLast || !shouldTryNextReplica(error)) throw error;
+      if (isLast || isContentFilterError(error) || !shouldTryNextReplica(error)) throw error;
       failed.push(replica);
       logger.warn('Replica failed, trying the next one', {
         modelKey: model.key,
@@ -1067,6 +1074,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
         (signal) => prepared.client.complete({ ...prepared.request, signal }),
         {
           key: replicaBreakerKey('chat', tenantDbName, replica),
+          countFailure: notContentFilter,
           ...(context.signal ? { signal: context.signal } : {}),
         },
       );
@@ -1345,6 +1353,7 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
         (signal) => prepared.client.complete({ ...prepared.request, signal }),
         {
           key: replicaBreakerKey('chat', state.tenantDbName, replica),
+          countFailure: notContentFilter,
           ...(context.signal ? { signal: context.signal } : {}),
         },
       );
@@ -1362,6 +1371,7 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
       },
       {
         key: replicaBreakerKey('chat-stream', state.tenantDbName, replica),
+        countFailure: notContentFilter,
         ...(context.signal ? { signal: context.signal } : {}),
       },
     );
