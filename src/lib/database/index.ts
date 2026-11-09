@@ -516,6 +516,7 @@ export type {
   AgentTriggerDeliveryOutcome,
   IAgentSkill,
   IAgentSkillPolicy,
+  IResourceAccessList,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentSandboxSeedFile,

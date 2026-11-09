@@ -26,6 +26,7 @@ import type {
   OpenApiSpec,
   OpenApiOperation,
 } from './types';
+import { readAccessList } from '@/lib/iam/accessList';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -518,6 +519,7 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
     id: typeof record._id === 'string' ? record._id : (record._id?.toString() ?? ''),
     sourceType: resolveSourceType(record),
     exposure: resolveExposure(record),
+    access: readAccessList(record.access),
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
     disabledTools: getDisabledToolNames(record),
@@ -536,6 +538,7 @@ export function serializeMcpServerFull(record: IMcpServer): McpServerView & { op
     id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
     sourceType: resolveSourceType(record),
     exposure: resolveExposure(record),
+    access: readAccessList(record.access),
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
     disabledTools: getDisabledToolNames(record),
@@ -1200,6 +1203,8 @@ export async function createMcpServer(
     // Absent bindings are OMITTED, never `undefined` (BSON null on Mongo), and
     // either column sent is projected onto the other for one release.
     ...projectMcpGuardrailBinding(input),
+    // Omitted when not given (a record without a list is open), never `undefined` (BSON null on Mongo).
+    ...(input.access ? { access: input.access } : {}),
     status: 'active',
     endpointSlug,
     totalRequests: 0,
@@ -1242,6 +1247,7 @@ export async function createMcpServer(
       name: { to: input.name.trim() },
       sourceType: { to: sourceType },
       exposure: { to: normalizeExposure(input.exposure) },
+      ...(input.access ? { access: { to: input.access } } : {}),
     },
     performedBy: audit?.performedBy ?? userId,
     ipAddress: audit?.ipAddress,
@@ -1267,6 +1273,7 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
   compare('status', before.status, after.status);
   compare('upstreamBaseUrl', before.upstreamBaseUrl, after.upstreamBaseUrl);
   compare('exposure', resolveExposure(before), after.exposure);
+  compare('access', readAccessList(before.access), after.access);
   compare('aegis', before.aegis, after.aegis);
   compare('guardrail', before.guardrail, after.guardrail);
   compare('remoteConfig', before.remoteConfig, after.remoteConfig);
@@ -1375,6 +1382,7 @@ export async function updateMcpServer(
     updateData.upstreamAuth = mergeAuthConfigUpdate(existing.upstreamAuth, input.upstreamAuth);
   }
   if (input.exposure !== undefined) updateData.exposure = normalizeExposure(input.exposure);
+  if (input.access !== undefined) updateData.access = input.access;
   if (input.endpointSlug !== undefined) {
     updateData.endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug, serverId);
   }

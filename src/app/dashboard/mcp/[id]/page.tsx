@@ -63,6 +63,8 @@ import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/comm
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
+import { AccessListPanel } from '@/components/access/AccessListPanel';
+import type { AccessListValue } from '@/components/access/AccessListFields';
 
 const AUTH_LABELS: Record<string, string> = {
   none: 'None',
@@ -273,6 +275,7 @@ export default function McpDetailPage() {
   const confirmKeyChange = useConfirmKeyChange();
   const deleteResource = useDeleteResource();
   const tNouns = useTranslations('common.confirm.nouns');
+  const tAccess = useTranslations('resourceAccess');
   const searchParams = useSearchParams()!;
   const tabParam = searchParams.get('tab');
   const initialTab = ['overview', 'usage', 'members', 'tools', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
@@ -657,6 +660,28 @@ export default function McpDetailPage() {
       });
     } finally {
       setSavingGuardrail(false);
+    }
+  };
+
+  /** Saves the whole access list; a failure is reported and rethrown, so the editor keeps the draft. */
+  const handleSaveAccess = async (next: AccessListValue) => {
+    try {
+      const res = await fetch(`/api/mcp/${params.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access: next }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || tAccess('saveFailed'));
+      setServer(data.server);
+      notifications.show({ message: tAccess('saved'), color: 'teal' });
+    } catch (err) {
+      notifications.show({
+        title: 'Error',
+        message: err instanceof Error ? err.message : tAccess('saveFailed'),
+        color: 'red',
+      });
+      throw err;
     }
   };
 
@@ -1298,6 +1323,10 @@ export default function McpDetailPage() {
               </Text>
             </Paper>
           </SimpleGrid>
+
+          <Box mb="md">
+            <AccessListPanel access={server.access} resource="mcp" onSave={handleSaveAccess} />
+          </Box>
 
           <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md" mb="md">
             <Paper withBorder p="md" radius="md">

@@ -9,6 +9,7 @@ import type {
   IMcpToolAnnotations,
   McpAuthType,
   McpSourceType,
+  IResourceAccessList,
 } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import type { IMcpCompositeMemberSummary } from './composite';
@@ -46,6 +47,8 @@ export interface McpServerView {
   /** Env values are masked in views. */
   stdioConfig?: IMcpStdioConfig;
   exposure: IMcpExposureConfig;
+  /** Who may use the server's tools in an agent run (always present: a record without a list reads as `all`). */
+  access: IResourceAccessList;
   /** @deprecated Legacy shield binding; still returned so an un-deployed UI keeps rendering. */
   aegis?: IMcpAegisConfig;
   /** Guardrail binding evaluated at `tool.pre` / `tool.post`. */
@@ -116,6 +119,8 @@ export interface CreateMcpServerInput {
   aegis?: IMcpAegisConfig;
   /** Guardrail binding for this server's tool calls (omit = unguarded). */
   guardrail?: IMcpGuardrailConfig;
+  /** Who may use the server's tools in an agent run (omit = everyone who can run the agent). */
+  access?: IResourceAccessList;
 }
 
 /** Which internal capability backs the server, and its instance + settings. */
@@ -162,6 +167,8 @@ export interface UpdateMcpServerInput {
   aegis?: IMcpAegisConfig;
   /** Guardrail binding for this server's tool calls. */
   guardrail?: IMcpGuardrailConfig;
+  /** Full replacement of who may use the server's tools in an agent run. */
+  access?: IResourceAccessList;
   status?: string;
   /** Opt-in policy for caller-supplied runtime header passthrough (null clears). */
   runtimeHeaders?: { allow?: boolean; allowedNames?: string[] } | null;

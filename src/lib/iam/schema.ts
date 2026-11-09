@@ -20,6 +20,8 @@
  *   ChannelDeployment in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
  *   Agent    in [Project, Portal, ChannelDeployment] { ..., portal?: Portal, channelDeployment?: ChannelDeployment,
  *                                                        approvers?: String, owners?: Set<User> }
+ *   McpServer, Skill in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
+ *            the access list of a shared resource (accessListCatalog.ts): who may use it in an agent run
  *
  * `owners` and `approvers` describe the SESSION an agent is asked about (agentEntities.ts): the
  * people who started it, and whose answer the agent accepts for a pending approval. The managed
@@ -61,6 +63,7 @@ import {
 } from './actions';
 import type { CedarSchemaJson } from './cedar';
 import { PORTAL_NETWORK_SLOTS } from './portalNetworks';
+import { ACCESS_LIST_RESOURCE_TYPES } from './accessListCatalog';
 import { REPORT_GROUP_ENTITY, REPORT_GROUP_RESOURCE_TYPE, REPORT_RESOURCE_TYPE } from './reportEntities';
 
 type TypeJson = Record<string, unknown>;
@@ -107,7 +110,7 @@ const contextType = (): TypeJson =>
  * Bumped whenever the generated schema changes in a way the NAMES of its types and
  * actions do not show (the signature below, and so the preparsed copy, follows).
  */
-const SCHEMA_REVISION = 5;
+const SCHEMA_REVISION = 6;
 
 type EntityTypeJson = { memberOfTypes?: string[]; shape: { attributes: Record<string, TypeJson> } };
 
@@ -154,6 +157,24 @@ function applyMessagingShape(entityTypes: Record<string, TypeJson>, resourceEnti
   if (!agent) return;
   agent.memberOfTypes = [...new Set([...(agent.memberOfTypes ?? []), deploymentName])];
   agent.shape.attributes.channelDeployment = attr(entity(deploymentName), false);
+}
+
+/**
+ * The shared resources that carry an access list (accessListCatalog.ts: an MCP server, a skill) get the same three
+ * attributes as a Portal: mode / allowedUsers / allowedGroups. Optional: a record asked about without them matches
+ * no `access` rule and the managed boundary refuses its `<type>.use` (accessList.ts always sends them).
+ */
+function applyAccessListShape(entityTypes: Record<string, TypeJson>, resourceEntityTypes: Record<string, string>): void {
+  for (const type of ACCESS_LIST_RESOURCE_TYPES) {
+    const name = resourceEntityTypes[type];
+    const entityType = name ? (entityTypes[name] as EntityTypeJson | undefined) : undefined;
+    if (!entityType) continue;
+    Object.assign(entityType.shape.attributes, {
+      mode: attr(str(), false),
+      allowedUsers: attr(setOf(entity('User')), false),
+      allowedGroups: attr(setOf(entity('Group')), false),
+    });
+  }
 }
 
 /**
@@ -252,6 +273,7 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
   applyPortalShape(entityTypes, resourceEntityTypes);
   applyMessagingShape(entityTypes, resourceEntityTypes);
   applyAgentShape(entityTypes, resourceEntityTypes);
+  applyAccessListShape(entityTypes, resourceEntityTypes);
   applyReportShape(entityTypes, resourceEntityTypes);
 
   const actions: Record<string, TypeJson> = {};

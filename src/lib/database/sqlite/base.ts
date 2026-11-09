@@ -1104,6 +1104,9 @@ export class SQLiteProviderBase {
     // normaliser needs it to keep an existing binding armed.
     this.ensureTableColumn(db, TABLES.mcpServers, 'guardrail', 'guardrail TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'lastError', 'lastError TEXT');
+    // Who may use the server's tools in an agent run (IResourceAccessList, JSON); NULL = everyone who can run the agent.
+    this.ensureTableColumn(db, TABLES.mcpServers, 'access', 'access TEXT');
+    this.ensureTableColumn(db, TABLES.agentSkills, 'access', 'access TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerType', 'callerType TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerUserId', 'callerUserId TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'transport', 'transport TEXT');

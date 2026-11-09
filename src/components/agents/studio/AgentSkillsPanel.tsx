@@ -19,9 +19,12 @@ import {
     Select,
     Stack,
     Text,
+    Tooltip,
 } from '@mantine/core';
-import { IconBulb, IconInfoCircle, IconPlus } from '@tabler/icons-react';
+import { IconBulb, IconInfoCircle, IconLock, IconPlus } from '@tabler/icons-react';
 import SkillEditorModal from '@/components/skills/SkillEditorModal';
+import { isRestrictedAccess } from '@/components/access/AccessListFields';
+import { useTranslations } from '@/lib/i18n';
 import type { IAgentSkillPolicy } from '@/lib/database/provider/types.domain';
 import type { SkillView } from '@/components/skills/types';
 
@@ -36,6 +39,7 @@ export interface AgentSkillsPanelProps {
 
 export default function AgentSkillsPanel({ skills, policy, library, onChange, onLibraryAdd }: AgentSkillsPanelProps) {
     const [creating, setCreating] = useState(false);
+    const tAccess = useTranslations('resourceAccess');
     const options = useMemo(
         () => library
             .filter((s) => s.status === 'active' || skills.includes(s.key))
@@ -113,6 +117,13 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                                 ) : null}
                                 {skill.minModelTier ? (
                                     <Badge size="xs" variant="outline">{skill.minModelTier} models only</Badge>
+                                ) : null}
+                                {isRestrictedAccess(skill.access) ? (
+                                    <Tooltip label={tAccess('selectedHint', { resource: tAccess('resourceSkill') })} multiline w={280} withArrow>
+                                        <Badge size="xs" color="orange" variant="light" leftSection={<IconLock size={10} />}>
+                                            {tAccess('badgeRestricted')}
+                                        </Badge>
+                                    </Tooltip>
                                 ) : null}
                             </Group>
                             <Text size="xs" c="dimmed" lineClamp={2}>{skill.header}</Text>

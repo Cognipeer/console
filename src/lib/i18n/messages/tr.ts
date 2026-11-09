@@ -6,6 +6,7 @@
  * incrementally translated by overriding their keys here.
  */
 
+import { resourceAccessTr } from './resourceAccess.tr';
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
 import { agentChannelsTr } from './agentChannels.tr';
@@ -1340,6 +1341,14 @@ export const tr: typeof en = {
         name: 'API token\'ları sahipleri adına onaylar',
         description: 'Bir API token\'ı, bir araç çağrısını ancak sahibi onaylayabiliyorsa onaylayabilir. Token\'ın kendi kapsamı ve proje sınırları bunun üstüne yine uygulanır.',
       },
+      'access-use': {
+        name: 'Erişim listesindeki kişiler paylaşılan MCP sunucusunu ya da skill\'i ajan çalıştırmalarında kullanabilir',
+        description: 'Bir ajan çalıştırması, bir MCP sunucusunun araçlarını ya da proje kütüphanesindeki bir skill\'i, o MCP sunucusunun ya da skill\'in erişim listesi çalıştırmanın yapıldığı kişiyi kabul ediyorsa alır: ajanı çalıştırabilen herkes (varsayılan) ya da listede adı geçen kişi ve gruplar. Liste MCP sunucusunda ya da skill\'de düzenlenir; kayıt başına saklanan bir kural yoktur.',
+      },
+      'access-use-boundary': {
+        name: 'Kısıtlı bir MCP sunucusunu ya da skill\'i ajan çalıştırmalarında yalnızca erişim listesi açar',
+        description: 'Bir MCP sunucusu ya da skill onu kimlerin kullanabileceğini belirtiyorsa, başka birinin çalıştırması onu almaz; rolü ya da bir izin kuralı ne derse desin (listede olmayan bir çalışma alanı sahibi de dışarıda kalır). Bir akış adımı ya da herkese açık bir uç nokta gibi hiçbir kişi adına yapılmayan bir çalıştırma da onu almaz. Engelleme kuralları listedeki kişileri yine de engelleyebilir.',
+      },
     },
     errors: {
       validation: 'İstek geçerli değil',
@@ -1380,6 +1389,8 @@ export const tr: typeof en = {
   projectTabs: projectTabsTr,
   accountPage: accountPageTr,
   // Slack ve Microsoft Teams'teki ajanlar (Enterprise): ekran başına bir dosya (agentChannels*.tr.ts).
+  // Who may use a shared MCP server or skill in agent runs (resourceAccess.*.ts).
+  resourceAccess: resourceAccessTr,
   agentChannels: {
     ...agentChannelsTr,
     ...agentChannelsListTr,
@@ -2042,6 +2053,8 @@ export const tr: typeof en = {
       messagingHelp: 'Bir ajanı Slack ya da Microsoft Teams üzerinden kimin çalıştırabileceğine, ajanın bağlantıdaki dağıtımının erişim listesi karar verir. Bu kurallar o listeyi okur; bu yüzden dağıtım başına saklanan bir kural yoktur. Engelleme kuralları yine de kişileri engelleyebilir.',
       agentBased: 'Ajan onayları',
       agentHelp: 'Bir ajan oturumundaki araç çağrısını kimin onaylayabileceğine oturumun sahibi ile ajanın "kimler onaylayabilir" ayarı karar verir. Bu kurallar ikisini de okur; bu yüzden ajan başına saklanan bir kural yoktur. Kendi izin kurallarınız daha fazla onaylayıcı atayabilir, engelleme kuralları da kişileri engelleyebilir.',
+      accessBased: 'Paylaşılan MCP sunucuları ve skill\'ler',
+      accessHelp: 'Bir MCP sunucusunun araçlarını ya da bir skill\'i bir ajan çalıştırmasında kimin kullanabileceğine, çalıştırmanın yapıldığı kişi için o MCP sunucusunun ya da skill\'in erişim listesi karar verir. Bu kurallar listeyi okur; bu yüzden kayıt başına saklanan bir kural yoktur. Engelleme kuralları listedeki kişileri yine de engelleyebilir.',
       badge: 'Yerleşik',
       showCedar: 'Cedar\'ı göster',
       hideCedar: 'Cedar\'ı gizle',
@@ -2331,6 +2344,10 @@ export const tr: typeof en = {
       approvalReason: {
         rule: 'Bu kişi oturumu başlatmış, ajan onu onaylayıcı olarak kabul ediyor ya da izin kurallarınızdan biri onu onaylayıcı atıyor.',
         noRule: 'Hiçbir şey bu kişiyi onaylayıcı atamıyor: araç çağrılarını yalnızca oturumu başlatan kişi, ajanın kabul ettikleri ({approvers}) ve kendi izin kurallarınızın adını andığı kişiler onaylayabilir.',
+      },
+      accessReason: {
+        list: 'Bu MCP sunucusunun ya da skill\'in erişim listesi bu kişiyi kabul ediyor.',
+        boundary: 'Bu MCP sunucusunun ya da skill\'in erişim listesi bu kişiyi kabul etmiyor; bu yüzden kişinin ajan çalıştırmaları onu almıyor.',
       },
       approvers: {
         owner: 'yalnızca oturumu başlatan kişi',

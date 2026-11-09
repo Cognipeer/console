@@ -1,3 +1,4 @@
+import { resourceAccessEn } from './resourceAccess.en';
 import { accountPageEn } from './accountPage.en';
 import { agentChannelsEn } from './agentChannels.en';
 import { agentChannelsDeployEn } from './agentChannelsDeploy.en';
@@ -1443,6 +1444,14 @@ export const en = {
         name: 'API tokens approve on behalf of their owner',
         description: 'An API token may approve a tool call exactly when its owner may. The token\'s own scope and the project limits still apply on top.',
       },
+      'access-use': {
+        name: 'People on an access list can use the shared MCP server or skill in agent runs',
+        description: 'An agent run gets the tools of an MCP server, or a skill of the project\'s library, when the access list of that MCP server or skill admits the person the run is made for: everyone who can run the agent (the default), or the people and groups it names. The list is edited on the MCP server or the skill; no rule is stored per record.',
+      },
+      'access-use-boundary': {
+        name: 'Only the access list lets agent runs use a restricted MCP server or skill',
+        description: 'When an MCP server or a skill names who may use it, the run of anybody else does not get it, whatever their role or any allow rule says (a workspace owner who is not on the list is kept out too). A run made for no person, such as a flow step or a public endpoint, does not get it either. Deny rules can still block people who are on the list.',
+      },
     },
     errors: {
       validation: 'The request is not valid',
@@ -1474,6 +1483,8 @@ export const en = {
   projectTabs: projectTabsEn,
   accountPage: accountPageEn,
   // Agents in Slack and Microsoft Teams (Enterprise): one file per screen, spread together (agentChannels*.en.ts).
+  // Who may use a shared MCP server or skill in agent runs (resourceAccess.*.ts).
+  resourceAccess: resourceAccessEn,
   agentChannels: {
     ...agentChannelsEn,
     ...agentChannelsListEn,
@@ -2752,6 +2763,8 @@ export const en = {
       messagingHelp: 'Who may run an agent from Slack or Microsoft Teams is decided by the access list of its deployment on the connection. These rules read that list, so no rule is stored per deployment. Deny rules can still block people.',
       agentBased: 'Agent approvals',
       agentHelp: 'Who may approve a tool call of an agent session is decided by the session\'s owner and the agent\'s "who can approve" setting. These rules read both, so no rule is stored per agent. Your own allow rules can appoint more approvers, and deny rules can block people.',
+      accessBased: 'Shared MCP servers and skills',
+      accessHelp: 'Who may use an MCP server\'s tools or a skill in an agent run is decided by the access list of that MCP server or skill, for the person the run is made for. These rules read the list, so no rule is stored per record. Deny rules can still block people who are on a list.',
       badge: 'Built-in',
       showCedar: 'Show Cedar',
       hideCedar: 'Hide Cedar',
@@ -3041,6 +3054,10 @@ export const en = {
       approvalReason: {
         rule: 'This person started the session, the agent accepts them as an approver, or one of your allow rules appoints them.',
         noRule: 'Nothing appoints this person as an approver: only the person who started the session, whoever the agent accepts ({approvers}) and the people your own allow rules name may approve its tool calls.',
+      },
+      accessReason: {
+        list: 'The access list of this MCP server or skill admits this person.',
+        boundary: 'The access list of this MCP server or skill does not admit this person, so their agent runs do not get it.',
       },
       approvers: {
         owner: 'only the person who started the session',

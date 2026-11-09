@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { parseAccessListInput } from '@/lib/iam/accessList';
 import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type {
   IMcpAuthConfig,
@@ -754,6 +755,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const instructionsError = mcpInstructionsInputError(body.instructions);
       if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
+      const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (access && !access.ok) return reply.code(400).send({ error: access.error });
+
       const server = await createMcpServer(
         ctx.tenantDbName,
         ctx.tenantId,
@@ -774,6 +778,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
           exposure: parseExposure(body.exposure),
           aegis: aegisConfig,
           guardrail: guardrailConfig,
+          ...(access?.ok ? { access: access.access } : {}),
         },
         auditContextFor(request, ctx.tokenRecord.userId),
       );
@@ -849,6 +854,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const instructionsError = mcpInstructionsInputError(body.instructions);
       if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
+      const nextAccess = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (nextAccess && !nextAccess.ok) return reply.code(400).send({ error: nextAccess.error });
+
       const updated = await updateMcpServer(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, {
         key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
@@ -863,6 +871,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
         guardrail: nextGuardrail,
+        ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],

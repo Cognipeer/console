@@ -2105,6 +2105,7 @@ export const TENANT_SCHEMA_SQL = `
     header TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL DEFAULT '',
     minModelTier TEXT,
+    access TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
@@ -2254,6 +2255,7 @@ export const TENANT_SCHEMA_SQL = `
     -- and the read-time normaliser folds it into the guardrail column.
     aegis TEXT,
     guardrail TEXT,
+    access TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     endpointSlug TEXT NOT NULL,
     totalRequests INTEGER DEFAULT 0,

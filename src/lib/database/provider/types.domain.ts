@@ -3033,11 +3033,33 @@ export interface IAgentSkill {
   body: string;
   /** Hide this skill from a small-tier model — see agent-sdk's `SkillModelTier`. */
   minModelTier?: 'small' | 'large';
+  /** Who may use this skill in an agent run. Absent = everyone who can run the agent (see `IResourceAccessList`). */
+  access?: IResourceAccessList;
   status: 'active' | 'inactive';
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * Who may USE a shared resource of a project in an agent run: the tools of an MCP server, a skill.
+ *
+ *   mode 'all'       everyone who can run the agent (the default: a record without a list behaves as before)
+ *   mode 'selected'  only the people and groups named; the run of anybody else does not get the resource,
+ *                    and neither does a run that is made for no person (a flow step, a public endpoint)
+ *
+ * The same shape as the access list of a portal and of a messaging deployment. IAM reads it as the resource's
+ * built-in policy (`managed:access:*`, managedPolicies.ts): the list is stored on the record, never as a policy, and
+ * custom deny rules still apply on top. It is the shape resource sharing grows on (an agent shared inside the
+ * company), so a new shareable resource takes this field rather than a shape of its own.
+ */
+export interface IResourceAccessList {
+  mode: 'all' | 'selected';
+  /** Console user ids. */
+  userIds: string[];
+  /** Console group ids. */
+  groupIds: string[];
 }
 
 export interface IAgentSkillPolicy {

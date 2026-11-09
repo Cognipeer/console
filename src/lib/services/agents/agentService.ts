@@ -213,6 +213,7 @@ import { getConfig } from '@/lib/core/config';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { mayUseSharedResource } from './sharedResourceAccess';
 import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import {
     buildCostEstimator,
@@ -2496,6 +2497,16 @@ export async function buildBoundTools(
             const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId);
             if (!server || server.status !== 'active') {
                 logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
+                continue;
+            }
+            // The server's access list decides for the person this run is made for (managed:access:*); a server they
+            // may not use is left out, so the model never sees its tools.
+            const mayUse = await mayUseSharedResource(
+                { tenantDbName, tenantId, caller: mcpIdentity, source: runtimeContext?.source },
+                { type: 'mcp-server', id: String(server._id ?? ''), key: server.key, projectId: server.projectId, access: server.access },
+            );
+            if (!mayUse) {
+                logger.info('MCP server is not open to the person this run is made for; its tools are left out', { key: binding.sourceKey });
                 continue;
             }
 
@@ -5110,7 +5121,13 @@ async function buildLocalAgentRun(input: {
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
-    const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
+    // A skill whose access list keeps this run's person out is left out of the catalog (managed:access:*).
+    const skills = await buildAgentSkills(tenantDbName, projectId, config.skills, {
+        tenantDbName,
+        tenantId,
+        caller: identity,
+        source: runtimeContext?.source,
+    });
     const outputSchema = resolveTurnOutputSchema(config, input.responseFormat);
     const skillPolicy = resolveAgentSkillPolicy(config);
     // A hidden agent a flow owns is traced under its flow even when no flow run started the turn (the Build editor's playground).

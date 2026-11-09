@@ -1,6 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type { IModelPricing, IUsageAttributionFields } from './types.base';
-import type { GuardrailAction, GuardrailHookId, GuardrailType } from './types.domain';
+import type { GuardrailAction, GuardrailHookId, GuardrailType, IResourceAccessList } from './types.domain';
 // ── Memory types ─────────────────────────────────────────────────────────
 
 export type MemoryScope = 'user' | 'agent' | 'session' | 'global';
@@ -353,6 +353,8 @@ export interface IMcpServer {
   aegis?: IMcpAegisConfig;
   /** Guardrail binding for tool.pre / tool.post enforcement. */
   guardrail?: IMcpGuardrailConfig;
+  /** Who may use this server's tools in an agent run. Absent = everyone who can run the agent (`IResourceAccessList`). */
+  access?: IResourceAccessList;
   status: McpServerStatus;
   /** Unique slug used in the public MCP endpoint URL */
   endpointSlug: string;

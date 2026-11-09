@@ -25,6 +25,13 @@ import FormShell, {
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView } from '@/lib/services/mcp';
+import {
+  AccessListFields,
+  openAccessValue,
+  useAccessSummary,
+  type AccessListValue,
+} from '@/components/access/AccessListFields';
+import { useTranslations } from '@/lib/i18n';
 
 interface CreateMcpModalProps {
   opened: boolean;
@@ -260,6 +267,10 @@ export default function CreateMcpModal({
   const [instanceOptions, setInstanceOptions] = useState<Record<string, InternalInstanceOption[]>>({});
   const [hubs, setHubs] = useState<McpHubOption[]>([]);
   const [memberOptions, setMemberOptions] = useState<McpMemberOption[]>([]);
+  // Who may use the server's tools in agent runs; outside the form values, it has its own editor.
+  const [access, setAccess] = useState<AccessListValue>(openAccessValue);
+  const tAccess = useTranslations('resourceAccess');
+  const accessSummary = useAccessSummary(access);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -341,6 +352,7 @@ export default function CreateMcpModal({
   useEffect(() => {
     if (!opened) {
       form.reset();
+      setAccess(openAccessValue());
       return;
     }
     // Runtime capabilities decide which source/execution options are offered.
@@ -530,6 +542,9 @@ export default function CreateMcpModal({
             }
           : undefined,
       };
+
+      // An open list is the default: only a restricted one is sent and stored.
+      if (access.mode === 'selected') payload.access = access;
 
       if (v.sourceType === 'openapi') {
         payload.openApiSpec = v.openApiSpec;
@@ -794,6 +809,7 @@ export default function CreateMcpModal({
         {v.accessMode === 'public' ? (
           <SummaryKV label="Custom path" value={v.endpointSlug.trim() || 'Auto-generated'} />
         ) : null}
+        <SummaryKV label={tAccess('title')} value={accessSummary} />
         {v.guardrailMode !== 'off' ? (
           <SummaryKV
             label="Guardrail"
@@ -1335,6 +1351,14 @@ export default function CreateMcpModal({
             default tool guardrail instead.
           </Alert>
         ) : null}
+      </FormSection>
+
+      <FormSection
+        number={v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 5 : 6}
+        title={tAccess('title')}
+        done
+      >
+        <AccessListFields value={access} onChange={setAccess} resource="mcp" disabled={loading} />
       </FormSection>
     </FormShell>
   );

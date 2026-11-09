@@ -10,7 +10,7 @@
  */
 
 import slugify from 'slugify';
-import { getDatabase, type IAgentSkill } from '@/lib/database';
+import { getDatabase, type IAgentSkill, type IResourceAccessList } from '@/lib/database';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 20;
@@ -37,6 +37,8 @@ export interface CreateSkillInput {
     header: string;
     body: string;
     minModelTier?: IAgentSkill['minModelTier'];
+    /** Who may use the skill in an agent run (omit = everyone who can run the agent). */
+    access?: IResourceAccessList;
     status?: IAgentSkill['status'];
 }
 
@@ -45,6 +47,8 @@ export interface UpdateSkillInput {
     header?: string;
     body?: string;
     minModelTier?: IAgentSkill['minModelTier'] | null;
+    /** Full replacement of who may use the skill in an agent run. */
+    access?: IResourceAccessList;
     status?: IAgentSkill['status'];
 }
 
@@ -88,6 +92,8 @@ export async function createSkill(
         header: payload.header,
         body: payload.body,
         minModelTier: payload.minModelTier,
+        // Omitted when not given (a skill without a list is open), never `undefined` (BSON null on Mongo).
+        ...(payload.access ? { access: payload.access } : {}),
         status: payload.status ?? 'active',
         createdBy: userId,
         updatedBy: userId,
@@ -112,6 +118,7 @@ export async function updateSkill(
         header: updates.header,
         body: updates.body,
         minModelTier: updates.minModelTier === null ? undefined : (updates.minModelTier ?? existing.minModelTier),
+        ...(updates.access ? { access: updates.access } : {}),
         status: updates.status,
         updatedBy: userId,
     });

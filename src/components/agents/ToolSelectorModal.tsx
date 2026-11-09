@@ -21,6 +21,7 @@ import {
   Select,
   Divider,
   ThemeIcon,
+  Tooltip,
 } from '@mantine/core';
 import {
   IconChevronDown,
@@ -33,8 +34,10 @@ import {
   IconBrowser,
   IconWorldSearch,
   IconWorldDownload,
+  IconLock,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { isRestrictedAccess } from '@/components/access/AccessListFields';
 import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
 import { useFlowToolSource } from '@/components/enterprise/EnterpriseFlowAgentUi';
 import { useChannelToolGroup } from '@/components/enterprise/EnterpriseChannelToolsUi';
@@ -55,6 +58,8 @@ interface ToolSourceGroup {
   typeLabel: string;
   /** A connector's tool (managed by another module): listed with a Connector badge. */
   managed?: boolean;
+  /** An MCP server only some people may use (its access list): only their runs get its tools. */
+  restricted?: boolean;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
@@ -138,6 +143,7 @@ export function ToolSelectorModal({
 }: ToolSelectorModalProps) {
   const t = useTranslations('agents');
   const tm = useTranslations('managedTools');
+  const tAccess = useTranslations('resourceAccess');
   // Flows as a tool source, where Flows are available (Enterprise): null otherwise.
   const flowTools = useFlowToolSource();
   // Tools that write to Slack / Teams as the agent's own bot, where Channels are available (Enterprise): null otherwise.
@@ -233,17 +239,18 @@ export function ToolSelectorModal({
         allGroups.push(...toolGroups);
       }
 
-      // Legacy MCP servers (backward compat)
+      // MCP servers of the project's MCP hub
       const mcpRes = await fetch('/api/mcp?status=active', { cache: 'no-store' });
       if (mcpRes.ok) {
         const mcpData = await mcpRes.json();
         const mcpGroups: ToolSourceGroup[] = (mcpData.servers ?? []).map(
-          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[]; disabledTools?: string[] }) => ({
+          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[]; disabledTools?: string[]; access?: unknown }) => ({
             source: 'mcp' as const,
             sourceKey: s.key,
             name: s.name,
             description: s.description,
-            typeLabel: 'MCP (legacy)',
+            typeLabel: 'MCP server',
+            restricted: isRestrictedAccess(s.access),
             tools: (s.tools ?? []).filter(
               (t) => !(s.disabledTools ?? []).includes(t.name),
             ),
@@ -565,6 +572,13 @@ export function ToolSelectorModal({
                           <Badge size="xs" variant="light" color="grape">
                             {tm('badge')}
                           </Badge>
+                        )}
+                        {group.restricted && (
+                          <Tooltip label={tAccess('selectedHint', { resource: tAccess('resourceMcp') })} multiline w={280} withArrow>
+                            <Badge size="xs" variant="light" color="orange" leftSection={<IconLock size={10} />}>
+                              {tAccess('badgeRestricted')}
+                            </Badge>
+                          </Tooltip>
                         )}
                         <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>
                           {group.typeLabel}
