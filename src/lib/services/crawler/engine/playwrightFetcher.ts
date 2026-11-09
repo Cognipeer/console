@@ -18,7 +18,7 @@ import {
 import { looksLikeJsShell } from './links';
 import { parseContentTypeBase } from './normalize';
 import { createHostBlocker } from './thirdPartyBlocklist';
-import { assertSafeUrl } from './ssrf';
+import { assertResolvedUrl } from './ssrf';
 import type { CrawlHttpConfig } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
 
@@ -234,16 +234,18 @@ export class PlaywrightSession {
         );
       }
       // Block heavy resources to speed crawls up, and re-validate every
-      // navigation (including server redirects and client-side location
-      // changes) against the SSRF guard: Chromium follows redirect chains
+      // request (navigations, redirects and sub-resources) against the
+      // outbound network policy: Chromium follows redirect chains
       // itself, so the original URL passing `assertSafeUrl()` in the caller
       // is not enough — a public seed can 3xx straight to a private/
       // metadata host and the browser would navigate there transparently.
-      await this.context.route('**/*', (route) => {
+      await this.context.route('**/*', async (route) => {
         const request = route.request();
-        if (request.isNavigationRequest()) {
+        // Every http(s) request (navigations, redirects and sub-resources) is
+        // resolved and checked against the outbound network policy.
+        if (/^https?:/i.test(request.url())) {
           try {
-            assertSafeUrl(request.url(), this.http.allowPrivateNetwork);
+            await assertResolvedUrl(request.url(), this.http.allowPrivateNetwork);
           } catch {
             return route.abort('blockedbyclient').catch(() => undefined);
           }

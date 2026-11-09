@@ -1,60 +1,85 @@
 /**
- * SSRF guard – reject URLs that resolve to private / link-local / metadata
- * IP space unless the caller explicitly opts in.
+ * Network policy for crawler requests.
  *
- * Limitation: in F1 we only inspect the host literal. A motivated attacker
- * can still use a DNS name that resolves to a private IP. F2 will add an
- * async resolve step before fetch.
+ * Crawl targets, redirect hops, browser sub-requests and webhook URLs follow
+ * the shared outbound policy (`security/outboundFetch`): hostnames are
+ * resolved and refused when any address is private, loopback, link-local,
+ * CGNAT or metadata space, unless the host is on `OUTBOUND_HTTP_ALLOWED_HOSTS`.
+ *
+ * A crawler's `http.allowPrivateNetwork` flag only takes effect where the
+ * deployment allows it (`CRAWLER_ALLOW_PRIVATE_NETWORK_OPT_IN`; default on for
+ * self-hosted installs, off for hosted ones).
+ *
+ * `assertSafeUrl` is the cheap synchronous pre-check (literal addresses and
+ * internal-only names); `assertResolvedUrl` additionally resolves DNS.
  */
 
-const PRIVATE_HOSTS = new Set([
-  'localhost',
-  '127.0.0.1',
-  '::1',
-  '0.0.0.0',
-  '169.254.169.254', // AWS / GCP metadata
-]);
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
+import {
+  assertPublicUrl,
+  isPrivateIpAddress,
+  privateNetworkBlockApplies,
+  type OutboundGuardOptions,
+} from '@/lib/security/outboundFetch';
 
-function isPrivateIPv4(host: string): boolean {
-  const parts = host.split('.');
-  if (parts.length !== 4) return false;
-  const nums = parts.map((p) => Number(p));
-  if (nums.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) return false;
-  const [a, b] = nums;
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 0) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  return false;
+const log = createLogger('crawler:network-policy');
+
+const INTERNAL_NAME_SUFFIXES = [
+  '.localhost',
+  '.local',
+  '.internal',
+  '.svc',
+  '.cluster.local',
+  '.lan',
+  '.home.arpa',
+];
+
+let optInWarned = false;
+
+/** Whether the crawler's private-network flag takes effect for this request. */
+export function resolveAllowPrivate(requested?: boolean): boolean {
+  if (!requested) return false;
+  const { crawlerAllowPrivateOptIn } = getConfig().outboundHttp;
+  if (crawlerAllowPrivateOptIn && !getConfig().deployment.isOnPrem && !optInWarned) {
+    optInWarned = true;
+    log.warn(
+      'CRAWLER_ALLOW_PRIVATE_NETWORK_OPT_IN is enabled on a hosted deployment: crawlers may opt in to private-network targets',
+    );
+  }
+  return crawlerAllowPrivateOptIn;
 }
 
-function isPrivateIPv6(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === '::1' || h === '::') return true;
-  if (h.startsWith('fc') || h.startsWith('fd')) return true;
-  if (h.startsWith('fe80')) return true;
-  return false;
+/** Guard options for the shared outbound helpers. */
+export function crawlerGuardOptions(requested?: boolean): OutboundGuardOptions {
+  return { allowPrivate: resolveAllowPrivate(requested) };
 }
 
 export function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (PRIVATE_HOSTS.has(h)) return true;
-  if (isPrivateIPv4(h)) return true;
-  if (h.includes(':') && isPrivateIPv6(h)) return true;
-  return false;
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (h === 'localhost' || h === '0.0.0.0') return true;
+  if (h.includes(':') || /^[0-9.]+$/.test(h)) return isPrivateIpAddress(h);
+  if (!h.includes('.')) return true; // single-label names only resolve inside a network
+  return INTERNAL_NAME_SUFFIXES.some((suffix) => h.endsWith(suffix));
 }
 
+/** Synchronous check on the literal host. Throws when the target is refused. */
 export function assertSafeUrl(rawUrl: string, allowPrivate?: boolean): void {
-  if (allowPrivate) return;
+  const options = crawlerGuardOptions(allowPrivate);
+  let u: URL;
   try {
-    const u = new URL(rawUrl);
-    if (isPrivateHost(u.hostname)) {
-      throw new Error(`Refusing to crawl private/loopback host: ${u.hostname}`);
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith('Refusing')) throw err;
-    // URL parse error – let the fetcher surface it as a fetch failure
+    u = new URL(rawUrl);
+  } catch {
+    // URL parse error: let the fetcher surface it as a fetch failure.
+    return;
   }
+  if (!privateNetworkBlockApplies(u.hostname, options)) return;
+  if (isPrivateHost(u.hostname)) {
+    throw new Error(`Refusing to crawl private/loopback host: ${u.hostname}`);
+  }
+}
+
+/** Resolves the host and refuses non-public targets. */
+export async function assertResolvedUrl(rawUrl: string, allowPrivate?: boolean): Promise<void> {
+  await assertPublicUrl(rawUrl, crawlerGuardOptions(allowPrivate));
 }
