@@ -327,6 +327,53 @@ export const WEBSEARCH_PROVIDER_CONTRACTS = [
   DuckDuckGoWebSearchProviderContract,
 ] as unknown as ProviderContract<WebSearchProviderRuntime, unknown, unknown>[];
 
+/**
+ * The search options of an instance on a provider whose driver has no form of its own: a platform or managed
+ * provider, where the host picks the upstream, so no driver describes them. Every field is behavior. The search
+ * service hands them to the hosted search with each request; `searchDepth` also decides the units (advanced = 2).
+ */
+export const HOSTED_WEBSEARCH_INSTANCE_FORM: ProviderFormSchema = {
+  sections: [
+    {
+      title: 'Search Settings',
+      fields: [
+        {
+          name: 'searchDepth',
+          label: 'Search Depth',
+          type: 'select',
+          scope: 'settings',
+          settingsTarget: 'behavior',
+          defaultValue: 'basic',
+          description: 'Advanced searches more thoroughly and counts as two searches.',
+          options: [
+            { label: 'Basic', value: 'basic' },
+            { label: 'Advanced', value: 'advanced' },
+          ],
+        },
+        {
+          name: 'language',
+          label: 'Language',
+          type: 'text',
+          scope: 'settings',
+          settingsTarget: 'behavior',
+          placeholder: 'en',
+          description: 'Language code of the results, e.g. en or tr.',
+        },
+        {
+          name: 'country',
+          label: 'Country',
+          type: 'text',
+          scope: 'settings',
+          settingsTarget: 'behavior',
+          placeholder: 'US',
+          description: 'Country code of the results, e.g. US or TR.',
+        },
+        safeSearchField(),
+      ],
+    },
+  ],
+};
+
 /** Settings keys a driver keeps on the provider record (the connection); every other settings key is behavior. */
 export function webSearchConnectionKeys(driver: string): string[] {
   const contract = WEBSEARCH_PROVIDER_CONTRACTS.find((c) => c.id === driver);

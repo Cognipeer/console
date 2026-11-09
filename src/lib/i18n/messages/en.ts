@@ -28,6 +28,7 @@ import { managedToolsEn } from './managedTools.en';
 import { tracingHealthEn } from './tracingHealth.en';
 import { projectsAccessEn } from './projectsAccess.en';
 import { modelCatalogEn } from './modelCatalog.en';
+import { webSearchEn } from './webSearch.en';
 
 export const en = {
   // Projects list / create / detail / limits / settings (projectsAccess.en.ts).
@@ -6500,6 +6501,8 @@ export const en = {
   },
   // The "Add model" catalog of what a provider serves, and the Model ID autocomplete (modelCatalog.en.ts).
   modelCatalog: modelCatalogEn,
+  // The Web Search pages: instances on top of provider connections (webSearch.en.ts).
+  webSearch: webSearchEn,
   modelPriceCatalog: {
     confidence: {
       exact: 'Exact',

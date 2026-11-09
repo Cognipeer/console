@@ -18,173 +18,188 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
-import { providerRequestError } from '@/components/providers/providerFormModel';
-import type { ProviderDescriptor } from '@/lib/providers/types';
-import type { ProviderConfigView } from '@/lib/services/providers/providerService';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
+import WebSearchInstanceCreate from '@/components/websearch/WebSearchInstanceCreate';
+import WebSearchInstanceFormModal from '@/components/websearch/WebSearchInstanceFormModal';
+import {
+  canManageWebSearch,
+  hasAiAnswer,
+  hasCache,
+  instanceOfRow,
+  isUnavailable,
+  listRows,
+  rowAbilities,
+  type WebSearchListRow,
+} from '@/components/websearch/webSearchModel';
+import type { WebSearchInstanceView } from '@/lib/services/webSearch/webSearchInstanceView';
 
-const WEBSEARCH_DOMAIN = 'websearch' as const;
-
-function hasAiAnswer(p: ProviderConfigView): boolean {
-  return (
-    ((p.settings as Record<string, unknown>)?.aiAnswer as { enabled?: boolean } | undefined)
-      ?.enabled === true
-  );
-}
+const detailHref = (row: WebSearchListRow) => `/dashboard/websearch/${encodeURIComponent(row.key)}`;
 
 export default function WebSearchListPage() {
   const router = useRouter();
+  const t = useTranslations('webSearch.list');
+  const tScope = useTranslations('webSearch.scope');
+  const tNoInstance = useTranslations('webSearch.noInstance');
+  const tPlatform = useTranslations('webSearch.platform');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
-  const [instances, setInstances] = useState<ProviderConfigView[]>([]);
+  const canManage = canManageWebSearch(useDashboardUser()?.role);
+
+  const [rows, setRows] = useState<WebSearchListRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState('');
-
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
-  const [editingInstance, setEditingInstance] = useState<ProviderConfigView | null>(null);
+  // Creating: open, and the provider picked to start with (a row that has no instance yet).
+  const [creating, setCreating] = useState<{ providerKey: string | null } | null>(null);
+  const [editing, setEditing] = useState<WebSearchInstanceView | null>(null);
 
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
+      // The compatible list: the instances, then the providers whose key no instance has.
       const res = await fetch('/api/websearch/providers', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load web search instances');
-      const data = await res.json();
-      setInstances(data.providers ?? []);
+      if (!res.ok) throw new Error(t('loadFailed'));
+      const data = (await res.json()) as { providers?: WebSearchListRow[] };
+      setRows(listRows(data.providers ?? []));
     } catch (err) {
       notifications.show({
         color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        title: t('title'),
+        message: err instanceof Error ? err.message : t('loadFailed'),
       });
     } finally {
       setRefreshing(false);
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const loadDrivers = useCallback(async () => {
-    setDriversLoading(true);
-    try {
-      const res = await fetch('/api/websearch/providers/drivers', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load drivers');
-      const data = await res.json();
-      setDrivers(data.drivers ?? []);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to load drivers',
-      });
-    } finally {
-      setDriversLoading(false);
-    }
-  }, []);
-
-  const openCreateModal = () => {
-    setEditingInstance(null);
-    setConfigOpen(true);
-    void loadDrivers();
-  };
-
-  const openEditModal = (instance: ProviderConfigView) => {
-    setEditingInstance(instance);
-    setConfigOpen(true);
-    void loadDrivers();
-  };
-
   const summary = useMemo(() => {
-    const active = instances.filter((p) => p.status === 'active').length;
-    const aiEnabled = instances.filter(hasAiAnswer).length;
-    return { total: instances.length, active, aiEnabled };
-  }, [instances]);
+    const instances = rows.filter((row) => row.kind === 'instance');
+    return {
+      total: instances.length,
+      active: instances.filter((row) => row.status === 'active').length,
+      aiEnabled: instances.filter((row) => hasAiAnswer(row.settings)).length,
+    };
+  }, [rows]);
 
   const filtered = useMemo(() => {
-    if (!query) return instances;
+    if (!query) return rows;
     const q = query.toLowerCase();
-    return instances.filter(
-      (p) =>
-        p.label.toLowerCase().includes(q) ||
-        p.key.toLowerCase().includes(q) ||
-        p.driver.toLowerCase().includes(q),
-    );
-  }, [instances, query]);
+    return rows.filter((row) =>
+      [row.label, row.key, row.driver, row.provider?.label ?? '', row.providerKey ?? '']
+        .some((value) => value.toLowerCase().includes(q)));
+  }, [rows, query]);
 
-  async function confirmDelete(target: ProviderConfigView) {
+  const openCreate = (providerKey: string | null = null) => setCreating({ providerKey });
+
+  async function confirmDelete(row: WebSearchListRow) {
     const deleted = await deleteResource({
       noun: tConfirm('nouns.websearchInstance'),
-      name: target.label,
-      type: 'provider',
-      id: String(target._id),
+      name: row.label,
+      type: 'websearch-instance',
+      id: String(row._id),
       extraWarning: tConfirm('extras.websearchKeyFails'),
       action: async () => {
-        const res = await fetch(
-          `/api/providers/${encodeURIComponent(String(target._id))}`,
-          { method: 'DELETE' },
-        );
+        const res = await fetch(`/api/websearch/instances/${encodeURIComponent(row.key)}`, { method: 'DELETE' });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          throw new Error(body?.error || 'Failed to delete');
+          throw new Error(body?.error || t('deleteFailed'));
         }
       },
     });
     if (!deleted) return;
-    notifications.show({ color: 'teal', title: 'Deleted', message: 'Instance removed' });
+    notifications.show({ color: 'teal', title: t('deleted'), message: row.label });
     await load();
   }
 
-  const columns: DataGridColumn<ProviderConfigView>[] = [
+  const platformBadge = <span className="ds-badge ds-badge-info">{tPlatform('badge')}</span>;
+
+  const columns: DataGridColumn<WebSearchListRow>[] = [
     {
       key: 'label',
-      label: 'Instance',
-      render: (p) => (
+      label: t('colInstance'),
+      render: (row) => (
         <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
-          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
-            {p.label}
-          </span>
-          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{p.key}</span>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>{row.label}</span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{row.key}</span>
+          {row.kind === 'provider' ? (
+            <span className="ds-badge ds-badge-warn" title={tNoInstance('hint')} style={{ alignSelf: 'flex-start' }}>
+              {tNoInstance('badge')}
+            </span>
+          ) : null}
+          {row.kind === 'instance' && row.platform ? <span style={{ alignSelf: 'flex-start' }}>{platformBadge}</span> : null}
         </div>
       ),
     },
     {
+      key: 'provider',
+      label: t('colProvider'),
+      render: (row) => {
+        // A provider row is the provider itself.
+        const provider = row.kind === 'provider'
+          ? { label: row.label, key: row.key, platform: row.platform === true }
+          : row.provider ? { label: row.provider.label, key: row.provider.key, platform: row.provider.platform } : null;
+        if (!provider) return <span className="ds-faint ds-mono" style={{ fontSize: 12 }}>{row.providerKey ?? '—'}</span>;
+        return (
+          <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+            <span style={{ fontSize: 12.5 }}>{provider.label}</span>
+            {provider.platform ? <span style={{ alignSelf: 'flex-start' }}>{platformBadge}</span> : (
+              <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{provider.key}</span>
+            )}
+          </div>
+        );
+      },
+    },
+    {
       key: 'driver',
-      label: 'Engine',
-      render: (p) => <span className="ds-badge">{p.driver}</span>,
+      label: t('colEngine'),
+      render: (row) => <span className="ds-badge">{row.driver || '—'}</span>,
     },
     {
       key: 'ai',
-      label: 'AI answer',
-      render: (p) =>
-        hasAiAnswer(p) ? (
+      label: t('colAi'),
+      render: (row) =>
+        hasAiAnswer(row.settings) ? (
           <span className="ds-badge ds-badge-ok">
             <IconSparkles size={11} style={{ verticalAlign: -1, marginRight: 3 }} />
-            on
+            {t('on')}
           </span>
         ) : (
-          <span className="ds-faint">off</span>
+          <span className="ds-faint">{t('off')}</span>
         ),
     },
     {
-      key: 'credentials',
-      label: 'Credentials',
-      render: (p) =>
-        p.hasCredentials ? (
-          <span className="ds-badge ds-badge-ok">configured</span>
-        ) : (
-          <span className="ds-faint">—</span>
-        ),
+      key: 'cache',
+      label: t('colCache'),
+      render: (row) =>
+        hasCache(row.settings)
+          ? <span className="ds-badge ds-badge-ok">{t('on')}</span>
+          : <span className="ds-faint">{t('off')}</span>,
+    },
+    {
+      key: 'scope',
+      label: t('colScope'),
+      render: (row) =>
+        row.kind === 'instance'
+          ? <span style={{ fontSize: 12.5 }}>{row.tenantWide ? tScope('tenant') : tScope('project')}</span>
+          : <span className="ds-faint">—</span>,
     },
     {
       key: 'status',
-      label: 'Status',
-      render: (p) => (
-        <StatusBadge status={p.status === 'active' ? 'active' : 'paused'} />
+      label: t('colStatus'),
+      render: (row) => (
+        <span className="ds-row" style={{ gap: 6, flexWrap: 'wrap' }}>
+          <StatusBadge status={row.status === 'active' ? 'active' : 'paused'} />
+          {isUnavailable(row) ? (
+            <span className="ds-badge ds-badge-warn" title={tPlatform('unavailableHint')}>
+              {tPlatform('unavailable')}
+            </span>
+          ) : null}
+        </span>
       ),
     },
   ];
@@ -192,155 +207,112 @@ export default function WebSearchListPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Data · Web Search"
-        title="Web Search"
-        subtitle="Create search instances backed by Bing, Brave, Serper, Tavily, self-hosted SearxNG or keyless DuckDuckGo. Open one to run queries and inspect its logs."
-        actions={
+        eyebrow={t('eyebrow')}
+        title={t('title')}
+        subtitle={t('subtitle')}
+        actions={canManage ? (
           <Button
             color="teal"
             size="sm"
             leftSection={<IconPlus size={14} stroke={1.7} />}
-            onClick={openCreateModal}
+            onClick={() => openCreate()}
           >
-            Create instance
+            {t('create')}
           </Button>
-        }
+        ) : undefined}
       />
 
       <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
         <StatTile
-          label="Instances"
+          label={t('statInstances')}
           icon={<IconWorldSearch size={14} stroke={1.7} />}
           value={summary.total}
         />
-        <StatTile label="Active" value={summary.active} />
-        <StatTile label="AI answers enabled" value={summary.aiEnabled} />
+        <StatTile label={t('statActive')} value={summary.active} />
+        <StatTile label={t('statAi')} value={summary.aiEnabled} />
       </div>
 
-      <DataGrid<ProviderConfigView>
+      <DataGrid<WebSearchListRow>
         records={filtered}
         loading={loading}
-        rowKey={(p) => String(p._id)}
-        onRowClick={(p) => router.push(`/dashboard/websearch/${encodeURIComponent(p.key)}`)}
+        rowKey={(row) => `${row.kind}:${row.key}`}
+        onRowClick={(row) => router.push(detailHref(row))}
         columns={columns}
         search={{
           value: query,
           onChange: setQuery,
-          placeholder: 'Search by name, key, engine…',
+          placeholder: t('searchPlaceholder'),
         }}
         onRefresh={load}
         refreshing={refreshing}
         empty={{
           icon: <IconWorldSearch size={26} stroke={1.7} />,
-          title: 'No web search instances yet',
-          description:
-            'Create an instance (Bing, Brave, Serper, Tavily, SearxNG or DuckDuckGo) to search the web from agents, the API and this dashboard.',
-          primaryAction: {
-            label: 'Create your first instance',
-            icon: <IconPlus size={14} stroke={1.7} />,
-            onClick: openCreateModal,
-          },
+          title: t('emptyTitle'),
+          description: t('emptyDescription'),
+          primaryAction: canManage
+            ? {
+              label: t('emptyAction'),
+              icon: <IconPlus size={14} stroke={1.7} />,
+              onClick: () => openCreate(),
+            }
+            : undefined,
         }}
-        footerLeft={`Showing ${filtered.length} of ${instances.length} instances`}
-        rowActions={(p) => [
-          {
-            id: 'open',
-            label: 'Open instance',
-            icon: <IconEye size={14} />,
-            onClick: () => router.push(`/dashboard/websearch/${encodeURIComponent(p.key)}`),
-          },
-          {
-            id: 'edit',
-            label: 'Edit',
-            icon: <IconEdit size={14} />,
-            onClick: () => openEditModal(p),
-          },
-          { divider: true },
-          {
-            id: 'delete',
-            label: 'Delete',
-            icon: <IconTrash size={14} />,
-            color: 'red',
-            onClick: () => void confirmDelete(p),
-          },
-        ]}
+        footerLeft={t('footer', { shown: filtered.length, total: rows.length })}
+        rowActions={(row) => {
+          const can = rowAbilities(row, canManage);
+          return [
+            {
+              id: 'open',
+              label: t('open'),
+              icon: <IconEye size={14} />,
+              onClick: () => router.push(detailHref(row)),
+            },
+            {
+              id: 'create-instance',
+              label: tNoInstance('action'),
+              icon: <IconPlus size={14} />,
+              hidden: !can.createInstance,
+              onClick: () => openCreate(row.key),
+            },
+            {
+              id: 'edit',
+              label: t('edit'),
+              icon: <IconEdit size={14} />,
+              hidden: !can.edit,
+              onClick: () => setEditing(instanceOfRow(row)),
+            },
+            {
+              id: 'delete',
+              label: t('delete'),
+              icon: <IconTrash size={14} />,
+              color: 'red',
+              divider: true,
+              hidden: !can.remove,
+              onClick: () => void confirmDelete(row),
+            },
+          ];
+        }}
       />
 
-      <ProviderConfigModal
-        hideProjects
-        skipAssignStep
-        opened={configOpen}
-        onClose={() => {
-          setConfigOpen(false);
-          setEditingInstance(null);
+      <WebSearchInstanceCreate
+        opened={creating !== null}
+        onClose={() => setCreating(null)}
+        initialProviderKey={creating?.providerKey ?? null}
+        onCreated={(instance) => {
+          setCreating(null);
+          router.push(`/dashboard/websearch/${encodeURIComponent(instance.key)}`);
         }}
-        mode={editingInstance ? 'edit' : 'create'}
-        provider={editingInstance ?? undefined}
-        drivers={drivers}
-        driversLoading={driversLoading}
-        domain={WEBSEARCH_DOMAIN}
-        onSubmit={async (options) => {
-          if (editingInstance) {
-            const updatePayload: Record<string, unknown> = {
-              label: options.values.base.label,
-              description: options.values.base.description,
-              status: options.values.base.status,
-              settings: options.values.settings,
-              metadata: options.values.metadata,
-            };
-            if (Object.keys(options.values.credentials).length > 0) {
-              updatePayload.credentials = options.values.credentials;
-            }
-            const res = await fetch(
-              `/api/providers/${encodeURIComponent(String(editingInstance._id))}`,
-              {
-                method: 'PATCH',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify(updatePayload),
-              },
-            );
-            const body = await res.json().catch(() => null);
-            // The refusal names the form field it is about: the edit form marks it.
-            if (!res.ok) throw providerRequestError(body, 'Failed to update instance');
-            notifications.show({
-              color: 'teal',
-              title: 'Web Search',
-              message: 'Instance updated',
-            });
-          } else {
-            const payload: Record<string, unknown> = {
-              key: options.values.base.key,
-              label: options.values.base.label,
-              description: options.values.base.description,
-              driver: options.driver,
-              type: WEBSEARCH_DOMAIN,
-              status: options.values.base.status,
-              credentials: options.values.credentials,
-              settings: options.values.settings,
-              metadata: options.values.metadata,
-            };
-            const res = await fetch('/api/providers', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(payload),
-            });
-            const body = await res.json().catch(() => null);
-            // The refusal names the form field it is about: the form marks it, as it does for an edit.
-            if (!res.ok) throw providerRequestError(body, 'Failed to create instance');
-            notifications.show({
-              color: 'teal',
-              title: 'Web Search',
-              message: 'Instance created',
-            });
-            const createdKey = body?.provider?.key ?? options.values.base.key;
-            setConfigOpen(false);
-            setEditingInstance(null);
-            router.push(`/dashboard/websearch/${encodeURIComponent(String(createdKey))}`);
-            return;
-          }
-          setConfigOpen(false);
-          setEditingInstance(null);
-          await load();
+      />
+
+      <WebSearchInstanceFormModal
+        opened={editing !== null}
+        onClose={() => setEditing(null)}
+        mode="edit"
+        instance={editing}
+        resetKey={editing?.key ?? ''}
+        onSaved={() => {
+          setEditing(null);
+          void load();
         }}
       />
     </PageContainer>

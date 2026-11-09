@@ -37,6 +37,7 @@ import { managedToolsTr } from './managedTools.tr';
 import { tracingHealthTr } from './tracingHealth.tr';
 import { projectsAccessTr } from './projectsAccess.tr';
 import { modelCatalogTr } from './modelCatalog.tr';
+import { webSearchTr } from './webSearch.tr';
 
 export const tr: typeof en = {
   ...en,
@@ -4741,6 +4742,8 @@ export const tr: typeof en = {
   },
   // Sağlayıcının sunduğu modellerin "Model ekle" kataloğu ve Model ID otomatik tamamlama (modelCatalog.tr.ts).
   modelCatalog: modelCatalogTr,
+  // Web Arama sayfaları: sağlayıcı bağlantıları üzerindeki örnekler (webSearch.tr.ts).
+  webSearch: webSearchTr,
   modelPriceCatalog: {
     confidence: {
       exact: 'Birebir',

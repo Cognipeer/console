@@ -21,6 +21,7 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
 import { ManagedProviderReadOnlyError, PlatformRecordReadOnlyError } from '@/lib/services/providers/providerService';
 import { ProviderSettingsError } from '@/lib/providers/errors';
+import { HOSTED_WEBSEARCH_INSTANCE_FORM } from '@/lib/providers/contracts/webSearchContracts';
 import {
   createWebSearchInstance,
   deleteWebSearchInstance,
@@ -129,6 +130,20 @@ describe('createWebSearchInstance', () => {
     await expect(make('ok', { providerKey: 'searx', settings: { baseUrl: 'https://x.example' } }))
       .rejects.toThrow(/belongs to the provider connection/);
     await expect(make('ok', { providerKey: 'searx', settings: { engines: 'a,b' } })).resolves.toBeTruthy();
+  });
+
+  it('accepts the search options of the hosted form on a platform provider', async () => {
+    // The form the UI shows for an instance on a platform or managed provider: no driver describes these options.
+    const names = HOSTED_WEBSEARCH_INSTANCE_FORM.sections.flatMap((section) => section.fields).map((field) => field.name);
+    expect(names).toEqual(['searchDepth', 'language', 'country', 'safeSearch']);
+
+    await provider('hosted', { driver: 'hosted-search', platform: true });
+    const settings = { searchDepth: 'advanced', language: 'tr', country: 'TR', safeSearch: 'strict' };
+    await expect(make('hosted-docs', { providerKey: 'hosted', settings })).resolves.toMatchObject({ settings });
+    const updated = await updateWebSearchInstance(TENANT_DB, T, 'hosted-docs', {
+      settings: { ...settings, searchDepth: 'basic' },
+    });
+    expect(updated.settings).toEqual({ ...settings, searchDepth: 'basic' });
   });
 });
 
