@@ -15,6 +15,10 @@ vi.mock('@/lib/security/outboundFetch', () => ({
   safeFetch: vi.fn(),
 }));
 
+vi.mock('@/lib/services/providers/providerEndpointGuard', () => ({
+  endpointGuardOptions: vi.fn(() => ({ forceBlock: true })),
+}));
+
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { callWebSearchProvider, parseDuckDuckGoHtml } from '@/lib/services/webSearch/webSearchAdapter';
 import { safeFetch } from '@/lib/security/outboundFetch';
@@ -76,7 +80,8 @@ describe('driver dispatch and credential validation', () => {
 
 describe('Bing normalization', () => {
   it('maps webPages.value to normalized results and applies params', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.mocked(safeFetch);
+    fetchMock.mockResolvedValue(
       jsonResponse({
         webPages: {
           value: [
@@ -86,7 +91,6 @@ describe('Bing normalization', () => {
         },
       }),
     );
-    global.fetch = fetchMock as typeof fetch;
 
     const record = providerRecord('bing', { country: 'en-US', safeSearch: 'strict' });
     const out = await callWebSearchProvider(record, { apiKey: 'k' }, { query: 'hello', count: 5 });
@@ -102,27 +106,34 @@ describe('Bing normalization', () => {
     expect(calledUrl.searchParams.get('count')).toBe('5');
     expect(calledUrl.searchParams.get('mkt')).toBe('en-US');
     expect(calledUrl.searchParams.get('safeSearch')).toBe('Strict');
-    expect(fetchMock.mock.calls[0][1].headers['Ocp-Apim-Subscription-Key']).toBe('k');
+    expect((fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers['Ocp-Apim-Subscription-Key']).toBe('k');
+    // Guarded call: redirects are handed back and the deployment's guard options apply.
+    expect(fetchMock.mock.calls[0][2]).toMatchObject({ followRedirects: false, forceBlock: true });
   });
 
-  it('surfaces provider HTTP errors with status and body excerpt', async () => {
-    global.fetch = vi
-      .fn()
-      .mockResolvedValue(new Response('quota exceeded', { status: 429 })) as typeof fetch;
+  it('refuses a configured endpoint that the outbound guard rejects', async () => {
+    vi.mocked(safeFetch).mockRejectedValue(new Error('blocked target'));
     await expect(
-      callWebSearchProvider(providerRecord('bing'), { apiKey: 'k' }, { query: 'x' }),
-    ).rejects.toThrow(/Bing search failed \(429\): quota exceeded/);
+      callWebSearchProvider(providerRecord('bing', { endpoint: 'http://10.0.0.5/search' }), { apiKey: 'k' }, { query: 'x' }),
+    ).rejects.toThrow(/blocked target/);
+    expect(vi.mocked(safeFetch).mock.calls[0][0]).toContain('http://10.0.0.5/search');
+  });
+
+  it('surfaces provider HTTP errors with the status only', async () => {
+    vi.mocked(safeFetch).mockResolvedValue(new Response('quota exceeded', { status: 429 }));
+    const error = await callWebSearchProvider(providerRecord('bing'), { apiKey: 'k' }, { query: 'x' }).catch((e) => e as Error);
+    expect((error as Error).message).toBe('Bing search failed (429)');
   });
 });
 
 describe('Tavily normalization', () => {
   it('returns answer and scored results', async () => {
-    global.fetch = vi.fn().mockResolvedValue(
+    vi.mocked(safeFetch).mockResolvedValue(
       jsonResponse({
         answer: 'The answer.',
         results: [{ title: 'T', url: 'https://t.example', content: 'C', score: 0.9 }],
       }),
-    ) as typeof fetch;
+    );
 
     const out = await callWebSearchProvider(
       providerRecord('tavily', { includeAnswer: true }),

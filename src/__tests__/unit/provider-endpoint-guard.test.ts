@@ -88,6 +88,15 @@ describe('assertProviderEndpointsAllowed', () => {
       .resolves.toBeUndefined();
   });
 
+  it('guards OCR and web search endpoints like model endpoints', async () => {
+    use(saas);
+    for (const type of ['ocr', 'websearch']) {
+      await expect(assertProviderEndpointsAllowed(type, scope, { baseUrl: 'http://10.0.0.5/v1' }, { endpoint: 'http://169.254.169.254' }), type)
+        .rejects.toMatchObject({ code: 'provider_endpoint_not_allowed' });
+      await expect(assertProviderEndpointsAllowed(type, scope, { endpoint: 'https://93.184.216.34/v1' }), type).resolves.toBeUndefined();
+    }
+  });
+
   it('guards file stores like model endpoints, and reads their bare hosts as https', async () => {
     use(saas);
     for (const endpoint of ['http://10.0.0.5:9000', 'http://127.0.0.1:9000', 'http://169.254.169.254', '10.0.0.5:9000', 'localhost:9000']) {
