@@ -1,7 +1,7 @@
 /**
  * AI-judged regression: PII detector behavior.
  *
- * The regex-based detector at `src/lib/services/guardrail/piiDetector.ts` is
+ * The regex-based detector at `src/lib/services/pii/detector.ts` is
  * already unit-tested for exact pattern matches. This suite adds a second
  * line of defense: an LLM judge evaluates whether the DETECTOR'S OUTPUT
  * matches what a human would have flagged. That catches:
@@ -15,20 +15,18 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { runPiiDetection } from '@/lib/services/guardrail/piiDetector';
+import { detect } from '@/lib/services/pii/detector';
 import { resolveJudgeBackend, type JudgeBackend } from './judge';
 
 // Resolve backend at import time so describe.skipIf gets the right flag.
 const JUDGE = resolveJudgeBackend();
 
-const PII_POLICY = {
-  enabled: true,
-  action: 'block' as const,
+const PII_CONFIG = {
   categories: {
     email: true,
     phone: true,
     creditCard: true,
-    nationalId: true,
+    ssn_us: true,
     iban: true,
   },
 };
@@ -73,7 +71,7 @@ describe.skipIf(!JUDGE)('AI-judged: PII detector behavior', () => {
   const backend = JUDGE as JudgeBackend;
 
   it.each(CASES)('$id', async (testCase) => {
-    const findings = runPiiDetection(testCase.text, PII_POLICY);
+    const findings = detect(testCase.text, PII_CONFIG);
     const verdict = await backend.judge({
       testId: `pii-${testCase.id}`,
       rubric: testCase.rubric,
