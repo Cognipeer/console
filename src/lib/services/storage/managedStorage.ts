@@ -143,7 +143,21 @@ export function wrapNameScopedVectorRuntime(
       const physical = managedIndexName(token, input.name);
       const handle = await inner.createIndex({ ...input, name: physical });
       const arn = ownArn(handle?.externalId);
-      if (!arn || !arn.endsWith(`/index/${physical}`)) return refuse('created index');
+      if (!arn || !arn.endsWith(`/index/${physical}`)) {
+        // The driver hands back the bare physical name when it could not read the index it just created. A bare name
+        // is never accepted as a handle later (the driver cannot address an index by it, and a tenant could send any
+        // name), so the index that now exists is removed before the call is refused: no orphan is left behind.
+        if (handle?.externalId === physical) {
+          try {
+            await inner.deleteIndex({ externalId: physical });
+          } catch (error) {
+            log.error('Could not remove a created index the wrapper refused', {
+              error: error instanceof Error ? error.message : error,
+            });
+          }
+        }
+        return refuse('created index');
+      }
       // The tenant keeps its own name; nothing of the backend (bucket, account) is handed back but the ARN, which the
       // services keep operator-side.
       return { ...handle, externalId: arn, name: input.name, metadata: {} };
@@ -163,6 +177,9 @@ export function wrapNameScopedVectorRuntime(
     upsertVectors: async (handle, items) => inner.upsertVectors(checked(handle), items),
     queryVectors: async (handle, query) => inner.queryVectors(checked(handle), query),
     deleteVectors: async (handle, ids) => inner.deleteVectors(checked(handle), ids),
+    ...(inner.existingVectorIds
+      ? { existingVectorIds: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectorIds!(checked(handle), ids) }
+      : {}),
     listVectors: async (handle, input) => inner.listVectors(checked(handle), input),
   };
   if (inner.close) runtime.close = () => inner.close?.();
@@ -243,7 +260,11 @@ export async function loadStorageProvider(
   let settings: Record<string, unknown> | null;
   if (driver === NAME_SCOPED_VECTOR_DRIVER) {
     const bucket = connection.settings.vectorBucketName;
-    settings = typeof bucket === 'string' && bucket.trim() !== '' ? { ...connection.settings } : null;
+    const arn = connection.settings.vectorBucketArn;
+    // The ownership check compares the bucket by name, but the driver prefers the ARN when both are set: a route that
+    // carries an ARN could point the driver at another bucket than the one checked.
+    const hasArn = typeof arn === 'string' ? arn.trim() !== '' : arn !== undefined && arn !== null;
+    settings = typeof bucket === 'string' && bucket.trim() !== '' && !hasArn ? { ...connection.settings } : null;
   } else {
     settings = scopeStorageSettings(driver, connection.settings, token);
   }
@@ -285,13 +306,88 @@ export async function getManagedStorageRuntime<TRuntime>(
       metadata: {},
       logger: createLogger(`${kind}:${record.key}`),
     });
-    if (kind === 'vector' && managed.driver === NAME_SCOPED_VECTOR_DRIVER) {
-      return wrapNameScopedVectorRuntime(
+    const confined = kind === 'vector' && managed.driver === NAME_SCOPED_VECTOR_DRIVER
+      ? wrapNameScopedVectorRuntime(
         runtime as unknown as VectorProviderRuntime,
         managed.token,
         String(managed.settings.vectorBucketName),
-      ) as unknown as TRuntime;
+      ) as unknown as TRuntime
+      : runtime;
+    return withoutBackendIdentifiers(confined as unknown as object, backendIdentifiers(managed), kind) as TRuntime;
+  });
+}
+
+/** Values shorter than this are not matched: they would turn almost every message into the generic one. */
+const MIN_IDENTIFIER_LENGTH = 3;
+
+/**
+ * What in an error message would name the operator's backend: the settings that locate it (bucket, endpoint host,
+ * folders, prefix), the tenant's token and any ARN. Settings that core scoped to the tenant are listed with and
+ * without the token, so the backend's own root is covered too.
+ */
+export function backendIdentifiers(managed: Pick<ManagedStorageConnection, 'settings' | 'token'>): string[] {
+  const { settings, token } = managed;
+  const found = new Set<string>([token, 'arn:aws:']);
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (trimmed.length >= MIN_IDENTIFIER_LENGTH) found.add(trimmed);
+  };
+  for (const key of ['bucket', 'vectorBucketName', 'vectorBucketArn', 'basePath', 'subdirectory', 'prefix'] as const) {
+    const value = settings[key];
+    add(value);
+    if (typeof value === 'string') {
+      const parent = value.trim().replace(new RegExp(`[/\\\\]?${token}$`), '');
+      add(parent);
     }
-    return runtime;
+  }
+  const endpoint = settings.endpoint;
+  if (typeof endpoint === 'string' && endpoint.trim() !== '') {
+    add(endpoint);
+    try {
+      const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint.trim()) ? endpoint.trim() : `https://${endpoint.trim()}`);
+      add(url.host);
+      add(url.hostname);
+    } catch {
+      // Not a URL: the raw value above stands.
+    }
+  }
+  // The built-in data directory is the root of a local driver whose settings name none.
+  add(getConfig().storage.dataDir);
+  return [...found];
+}
+
+/**
+ * The runtime with every failure checked before the tenant can read it: an error whose message holds one of the
+ * backend's identifiers is logged as it is and rethrown with the generic message. An error without one passes
+ * unchanged ("file not found"). A 4xx status of the original is kept, anything else becomes the refusal's own.
+ */
+export function withoutBackendIdentifiers<T extends object>(runtime: T, identifiers: string[], kind: ManagedStorageKind): T {
+  const clean = (error: unknown): unknown => {
+    const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+    if (!message || !identifiers.some((needle) => message.includes(needle))) return error;
+    log.error('Managed storage call failed with a message naming the backend', { kind, error: message });
+    const refusal = new ManagedProviderError(MANAGED_STORAGE_UNAVAILABLE);
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      Object.defineProperty(refusal, 'status', { value: status });
+    }
+    return refusal;
+  };
+  return new Proxy(runtime, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== 'function' || typeof prop === 'symbol' || prop === 'close') return value;
+      return (...args: unknown[]) => {
+        try {
+          const result = value.apply(target, args);
+          return result && typeof result.then === 'function'
+            ? result.then(undefined, (error: unknown) => { throw clean(error); })
+            : result;
+        } catch (error) {
+          throw clean(error);
+        }
+      };
+    },
   });
 }

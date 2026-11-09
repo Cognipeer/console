@@ -40,13 +40,16 @@ import { registerManagedCreditsHost, resetManagedCreditsHostForTests, type Manag
 import { ManagedProviderError } from '@/lib/services/providers/managedProviderErrors';
 import type { FileProviderRuntime } from '@/lib/providers/domains/file';
 import type { VectorIndexHandle, VectorProviderRuntime } from '@/lib/providers/domains/vector';
+import { providerRegistry } from '@/lib/providers/registry';
 import {
   MANAGED_STORAGE_DRIVERS,
+  backendIdentifiers,
   getManagedStorageRuntime,
   loadStorageProvider,
   managedIndexName,
   scopeStorageSettings,
   tenantStorageToken,
+  withoutBackendIdentifiers,
   wrapNameScopedVectorRuntime,
 } from '@/lib/services/storage/managedStorage';
 
@@ -214,6 +217,128 @@ describe('the name-scoped vector runtime', () => {
       await expect(runtime.deleteIndex({ externalId })).rejects.toBeInstanceOf(ManagedProviderError);
     }
     expect(seen).toEqual([]);
+  });
+});
+
+describe('the name-scoped vector runtime: created index and existing ids', () => {
+  const token = tenantStorageToken('tenant-a');
+  const arn = (bucket: string, name: string) => `arn:aws:s3vectors:eu-central-1:123456789012:bucket/${bucket}/index/${name}`;
+  const handle = (externalId: string): VectorIndexHandle => ({ externalId, name: 'docs', dimension: 3, metric: 'cosine', metadata: {} });
+  const baseInner = (over: Partial<VectorProviderRuntime>): VectorProviderRuntime => ({
+    createIndex: async () => { throw new Error('unused'); },
+    deleteIndex: async () => undefined,
+    listIndexes: async () => [],
+    upsertVectors: async () => undefined,
+    queryVectors: async () => ({ matches: [] }),
+    deleteVectors: async () => undefined,
+    listVectors: async () => ({ items: [] }),
+    ...over,
+  });
+
+  it('removes an index whose handle came back as the bare physical name, then refuses (no orphan, no bare-name handle)', async () => {
+    const deleted: string[] = [];
+    let physical = '';
+    const inner = baseInner({
+      createIndex: async (input) => { physical = input.name; return handle(input.name); },
+      deleteIndex: async ({ externalId }) => { deleted.push(externalId); },
+    });
+    await expect(wrapNameScopedVectorRuntime(inner, token, 'vb').createIndex({ name: 'docs', dimension: 3 }))
+      .rejects.toBeInstanceOf(ManagedProviderError);
+    expect(deleted).toEqual([physical]);
+  });
+
+  it('does not delete anything for a handle that is not the generated name', async () => {
+    const deleted: string[] = [];
+    const inner = baseInner({
+      createIndex: async () => handle(`${token}-other-00000000`),
+      deleteIndex: async ({ externalId }) => { deleted.push(externalId); },
+    });
+    await expect(wrapNameScopedVectorRuntime(inner, token, 'vb').createIndex({ name: 'docs', dimension: 3 }))
+      .rejects.toBeInstanceOf(ManagedProviderError);
+    expect(deleted).toEqual([]);
+  });
+
+  it('passes existingVectorIds through with the same ownership check, and offers it only when the driver has it', async () => {
+    const seen: string[] = [];
+    const inner = baseInner({ existingVectorIds: async (h0, ids) => { seen.push(h0.externalId); return ids.slice(0, 1); } });
+    const runtime = wrapNameScopedVectorRuntime(inner, token, 'vb');
+    const own = arn('vb', `${token}-docs-11111111`);
+    expect(await runtime.existingVectorIds!(handle(own), ['a', 'b'])).toEqual(['a']);
+    expect(seen).toEqual([own]);
+    await expect(runtime.existingVectorIds!(handle(arn('vb', 'tother-docs-22222222')), ['a'])).rejects.toBeInstanceOf(ManagedProviderError);
+    expect(wrapNameScopedVectorRuntime(baseInner({}), token, 'vb').existingVectorIds).toBeUndefined();
+  });
+});
+
+describe('error messages of a platform storage runtime', () => {
+  const token = tenantStorageToken('tenant-a');
+  const settings = { bucket: 'ops-bucket', endpoint: 'https://s3.internal.example:9000', prefix: `tenants/${token}`, basePath: '/srv/ops-data' };
+  const identifiers = backendIdentifiers({ settings, token });
+
+  it('lists the backend settings, the token and any ARN, with and without the tenant token', () => {
+    expect(identifiers).toEqual(expect.arrayContaining([
+      token, 'arn:aws:', 'ops-bucket', 's3.internal.example:9000', 's3.internal.example', 'tenants', '/srv/ops-data',
+    ]));
+  });
+
+  it('replaces a message that names the backend with the generic one', async () => {
+    const runtime = withoutBackendIdentifiers({
+      async a() { throw new Error('The specified bucket ops-bucket does not exist'); },
+      async b() { throw new Error('ENOENT: no such file /srv/ops-data/x/y'); },
+      async c() { throw new Error(`access denied for arn:aws:s3vectors:eu:1:bucket/x/index/y`); },
+      async d() { throw new Error(`key ${token}/docs missing`); },
+      async e() { throw new Error('connect ECONNREFUSED s3.internal.example:9000'); },
+      f() { throw new Error('sync failure at ops-bucket'); },
+    }, identifiers, 'file');
+    for (const call of [runtime.a(), runtime.b(), runtime.c(), runtime.d(), runtime.e()]) {
+      await expect(call).rejects.toMatchObject({ message: 'This provider is not available right now.' });
+      await expect(call).rejects.toBeInstanceOf(ManagedProviderError);
+    }
+    expect(() => runtime.f()).toThrow('This provider is not available right now.');
+  });
+
+  it('leaves a message without an identifier untouched and keeps only a 4xx status of the original', async () => {
+    const plain = Object.assign(new Error('file not found'), { status: 404 });
+    const runtime = withoutBackendIdentifiers({
+      async missing() { throw plain; },
+      async conflict() { throw Object.assign(new Error('Conflict at ops-bucket'), { status: 409 }); },
+      async broken() { throw Object.assign(new Error('Boom at ops-bucket'), { status: 503 }); },
+      async fine() { return 'ok'; },
+      close() { return 'closed'; },
+    }, identifiers, 'file');
+    await expect(runtime.missing()).rejects.toBe(plain);
+    await expect(runtime.conflict()).rejects.toMatchObject({ status: 409, message: 'This provider is not available right now.' });
+    await expect(runtime.broken()).rejects.toMatchObject({ status: 400, message: 'This provider is not available right now.' });
+    expect(await runtime.fine()).toBe('ok');
+    expect(runtime.close()).toBe('closed');
+  });
+
+  it('applies to the runtime getManagedStorageRuntime returns (a file runtime here)', async () => {
+    h.records.set('platform-files', platformRecord('platform-files', 'file'));
+    h.connection = { driver: 'aws-s3-files', settings: { bucket: 'ops-bucket-xyz', region: 'r' }, credentials: {} };
+    const create = vi.spyOn(providerRegistry, 'createRuntime').mockResolvedValue({
+      downloadFile: async () => { throw new Error('NoSuchBucket: ops-bucket-xyz'); },
+    } as never);
+    try {
+      const loaded = await loadStorageProvider('file', { tenantDbName: 'db', tenantId: 'tenant-sanitize', providerKey: 'platform-files' });
+      const runtime = await getManagedStorageRuntime<FileProviderRuntime>('file', loaded as any, { tenantId: 'tenant-sanitize' });
+      await expect(runtime.downloadFile('k')).rejects.toThrow('This provider is not available right now.');
+    } finally {
+      create.mockRestore();
+    }
+  });
+});
+
+describe('a platform vector route with a bucket ARN', () => {
+  it('is refused: the driver would prefer the ARN to the bucket name that was checked', async () => {
+    h.records.set('platform-vector', platformRecord('platform-vector', 'vector'));
+    const context = { tenantDbName: 'db', tenantId: 't1', providerKey: 'platform-vector' };
+    for (const arn of ['arn:aws:s3vectors:eu:1:bucket/other', 'x']) {
+      h.connection = { driver: 'aws-s3-vectors', settings: { vectorBucketName: 'vb', vectorBucketArn: arn }, credentials: {} };
+      await expect(loadStorageProvider('vector', context)).rejects.toThrow('This provider is not available right now.');
+    }
+    h.connection = { driver: 'aws-s3-vectors', settings: { vectorBucketName: 'vb', vectorBucketArn: '' }, credentials: {} };
+    expect((await loadStorageProvider('vector', context)).managed?.driver).toBe('aws-s3-vectors');
   });
 });
 
