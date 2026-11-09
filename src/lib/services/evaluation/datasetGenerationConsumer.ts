@@ -20,7 +20,7 @@ const log = createLogger('eval-dataset-gen:consumer');
 let started = false;
 
 /** How many generation jobs may run concurrently on this node. */
-const CONCURRENCY = getConfig().queues.datasetGenConcurrency;
+const concurrency = () => getConfig().queues.datasetGenConcurrency;
 
 export async function startDatasetGenerationConsumer(): Promise<void> {
   if (started) return;
@@ -34,8 +34,8 @@ export async function startDatasetGenerationConsumer(): Promise<void> {
       }
       throw new Error(`Unknown dataset generation job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Dataset generation queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Dataset generation queue consumer registered', { concurrency: concurrency() });
 }

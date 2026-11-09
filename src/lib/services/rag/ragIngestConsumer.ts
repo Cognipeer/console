@@ -27,7 +27,7 @@ let started = false;
  * rather than whole corpora, but still modest: each one streams its chunks
  * through the embedding provider, and going wide mostly buys rate-limit errors.
  */
-const CONCURRENCY = getConfig().queues.ragIngestConcurrency;
+const concurrency = () => getConfig().queues.ragIngestConcurrency;
 
 export async function startRagIngestQueueConsumer(): Promise<void> {
   if (started) return;
@@ -41,8 +41,8 @@ export async function startRagIngestQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown Knowledge Engine ingest job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Knowledge Engine ingest queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Knowledge Engine ingest queue consumer registered', { concurrency: concurrency() });
 }

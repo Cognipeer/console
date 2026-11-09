@@ -31,7 +31,7 @@ type InvokePayload = McpInvokeJob | LegacyInvokeJob;
  * Concurrent MCP tool invocations per node. Stdio servers stay bounded by
  * MCP_STDIO_MAX_CONCURRENT underneath this.
  */
-const CONCURRENCY = getConfig().queues.mcpInvokeConcurrency;
+const concurrency = () => getConfig().queues.mcpInvokeConcurrency;
 
 function resolveJobTarget(payload: InvokePayload): { tenantId: string; serverId: string } {
   const legacy = (payload as Partial<LegacyInvokeJob>).server;
@@ -82,7 +82,7 @@ export async function startMcpQueueConsumer(): Promise<void> {
       return invokeMcpJob(ctx.data as unknown as InvokePayload);
     }
     throw new Error(`Unknown mcp job: ${ctx.name}`);
-  }, { concurrency: CONCURRENCY });
+  }, { concurrency: concurrency() });
   started = true;
-  log.info('MCP queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('MCP queue consumer registered', { concurrency: concurrency() });
 }

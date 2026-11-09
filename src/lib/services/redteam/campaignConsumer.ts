@@ -15,7 +15,7 @@ const log = createLogger('redteam:consumer');
 let started = false;
 
 /** How many scans may run concurrently on this node. */
-const CONCURRENCY = getConfig().queues.redteamScanConcurrency;
+const concurrency = () => getConfig().queues.redteamScanConcurrency;
 
 export async function startRedTeamQueueConsumer(): Promise<void> {
   if (started) return;
@@ -29,8 +29,8 @@ export async function startRedTeamQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown red-team job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Red-team scan queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Red-team scan queue consumer registered', { concurrency: concurrency() });
 }

@@ -22,7 +22,7 @@ interface ItemPayload {
 }
 
 /** Per-item processing concurrency (BullMQ worker / memory drain). */
-const CONCURRENCY = getConfig().queues.batchItemConcurrency;
+const concurrency = () => getConfig().queues.batchItemConcurrency;
 
 export async function startBatchQueueConsumer(): Promise<void> {
   if (started) return;
@@ -37,8 +37,8 @@ export async function startBatchQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown batch job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Batch queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Batch queue consumer registered', { concurrency: concurrency() });
 }

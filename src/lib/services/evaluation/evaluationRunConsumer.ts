@@ -16,7 +16,7 @@ const log = createLogger('evaluation:consumer');
 let started = false;
 
 /** How many evaluation runs may execute concurrently on this node. */
-const CONCURRENCY = getConfig().queues.evaluationRunConcurrency;
+const concurrency = () => getConfig().queues.evaluationRunConcurrency;
 
 export async function startEvaluationRunQueueConsumer(): Promise<void> {
   if (started) return;
@@ -30,8 +30,8 @@ export async function startEvaluationRunQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown evaluation job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Evaluation run queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Evaluation run queue consumer registered', { concurrency: concurrency() });
 }

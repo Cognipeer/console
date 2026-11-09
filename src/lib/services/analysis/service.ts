@@ -64,7 +64,7 @@ const MAX_KEY_ATTEMPTS = 50;
  * via ANALYSIS_MAX_RUN_CONVERSATIONS (default 5000) — a high-but-bounded cap so
  * one run can't accidentally fan out an unbounded number of model calls.
  */
-const MAX_RUN_CONVERSATIONS = getConfig().queues.analysisMaxRunConversations;
+const maxRunConversations = () => getConfig().queues.analysisMaxRunConversations;
 /** Parallel write-back updates. Bounded so a 5k-item run can't storm the DB. */
 const WRITE_BACK_CONCURRENCY = 20;
 
@@ -443,29 +443,29 @@ async function selectConversations(
   if (sel.strategy === 'keys') {
     const keys = sel.conversationKeys ?? [];
     const found = await Promise.all(keys.map((k) => db.findAnalysisConversationByKey(k, projectId)));
-    return found.filter((c): c is IAnalysisConversation => c !== null).slice(0, MAX_RUN_CONVERSATIONS);
+    return found.filter((c): c is IAnalysisConversation => c !== null).slice(0, maxRunConversations());
   }
 
   if (sel.strategy === 'random') {
-    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: maxRunConversations() });
     const size = Math.max(1, Math.min(sel.sampleSize ?? candidates.length, candidates.length));
     return shuffle(candidates).slice(0, size);
   }
 
   if (sel.strategy === 'unanalyzed') {
-    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
-    return candidates.filter((c) => !c.lastAnalyzedAt).slice(0, MAX_RUN_CONVERSATIONS);
+    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: maxRunConversations() });
+    return candidates.filter((c) => !c.lastAnalyzedAt).slice(0, maxRunConversations());
   }
 
   if (sel.strategy === 'changed') {
     // An imported conversation never changes, so "changed" is "no result by this definition yet".
-    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+    const candidates = await db.listAnalysisConversations({ projectId, tag: sel.tag, limit: maxRunConversations() });
     const existing = await loadResultsBySource(db, projectId ?? '', definitionKey, 'conversation', candidates.map((c) => c.key));
     return candidates.filter((c) => !existing.has(c.key));
   }
 
   // 'all' or 'tag'
-  return db.listAnalysisConversations({ projectId, tag: sel.tag, limit: MAX_RUN_CONVERSATIONS });
+  return db.listAnalysisConversations({ projectId, tag: sel.tag, limit: maxRunConversations() });
 }
 
 /** Page through a dataset's items, applying the label filter server-side. */
@@ -476,7 +476,7 @@ async function loadDatasetItems(
 ): Promise<IEvaluationDatasetItem[]> {
   const pageSize = 500;
   const all: IEvaluationDatasetItem[] = [];
-  for (let skip = 0; all.length < MAX_RUN_CONVERSATIONS; skip += pageSize) {
+  for (let skip = 0; all.length < maxRunConversations(); skip += pageSize) {
     const page = await db.listEvaluationDatasetItems(datasetId, {
       skip,
       limit: pageSize,
@@ -485,7 +485,7 @@ async function loadDatasetItems(
     all.push(...page);
     if (page.length < pageSize) break;
   }
-  return all.slice(0, MAX_RUN_CONVERSATIONS);
+  return all.slice(0, maxRunConversations());
 }
 
 /**
@@ -573,7 +573,7 @@ export async function resolveRun(
       target,
       selection: params.selection,
       legacyKeys: params.conversationKeys,
-      max: MAX_RUN_CONVERSATIONS,
+      max: maxRunConversations(),
     });
     return { kind: 'agent_sessions', target, ids };
   }
@@ -797,7 +797,7 @@ async function executeAgentSessionRun(
       definitionKey: definition.key,
       target,
       selection: params.selection,
-      max: MAX_RUN_CONVERSATIONS,
+      max: maxRunConversations(),
     }));
 
   await db.updateAnalysisRun(runId, { status: 'running', startedAt: new Date() });

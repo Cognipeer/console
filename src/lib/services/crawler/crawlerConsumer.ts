@@ -35,7 +35,7 @@ interface RunPayload {
  * to as many as 16 concurrent fetches and may drive a Chromium instance, so the
  * real footprint is this number multiplied by that fan-out.
  */
-const CONCURRENCY = getConfig().queues.crawlerRunConcurrency;
+const concurrency = () => getConfig().queues.crawlerRunConcurrency;
 
 export async function startCrawlerQueueConsumer(): Promise<void> {
   if (started) return;
@@ -47,7 +47,7 @@ export async function startCrawlerQueueConsumer(): Promise<void> {
       return { ok: true };
     }
     throw new Error(`Unknown crawler job: ${ctx.name}`);
-  }, { concurrency: CONCURRENCY });
+  }, { concurrency: concurrency() });
   started = true;
-  log.info('Crawler queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Crawler queue consumer registered', { concurrency: concurrency() });
 }

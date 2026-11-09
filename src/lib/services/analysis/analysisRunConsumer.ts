@@ -16,7 +16,7 @@ const log = createLogger('analysis:consumer');
 let started = false;
 
 /** How many analysis runs may execute concurrently on this node. */
-const CONCURRENCY = getConfig().queues.analysisRunConcurrency;
+const concurrency = () => getConfig().queues.analysisRunConcurrency;
 
 export async function startAnalysisRunQueueConsumer(): Promise<void> {
   if (started) return;
@@ -30,8 +30,8 @@ export async function startAnalysisRunQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown analysis job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Analysis run queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Analysis run queue consumer registered', { concurrency: concurrency() });
 }

@@ -20,7 +20,7 @@ const log = createLogger('snapshots:consumer');
 let started = false;
 
 /** How many snapshot jobs may run concurrently on this node. */
-const CONCURRENCY = getConfig().queues.snapshotJobConcurrency;
+const concurrency = () => getConfig().queues.snapshotJobConcurrency;
 
 export async function startSnapshotQueueConsumer(): Promise<void> {
   if (started) return;
@@ -34,8 +34,8 @@ export async function startSnapshotQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown snapshot job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Snapshot queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Snapshot queue consumer registered', { concurrency: concurrency() });
 }
