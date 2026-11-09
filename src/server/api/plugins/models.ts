@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import {
+  addPlatformModelsToProject,
   createDynamicModel,
   createModel,
   createModelProvider,
@@ -11,6 +12,7 @@ import {
   listModels,
   listPlatformModelProviders,
   listUsageLogs,
+  removePlatformModelFromProject,
   updateModel,
 } from '@/lib/services/models/modelService';
 import { parseMetadataGroupByKey, type UsageBreakdownGroupBy } from '@/lib/services/usage/usageBreakdown';
@@ -32,6 +34,7 @@ import {
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota, type QuotaContext } from '@/lib/quota';
 import { providerRegistry } from '@/lib/providers';
+import { PlatformModelSelectionError } from '@/lib/services/providers/managedProviderErrors';
 import { ManagedProviderError, redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   ProjectContextError,
@@ -673,6 +676,36 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  /**
+   * Adds platform models (by key) to the active project. The permission is the one of creating a model. A model whose
+   * provider is not assigned to the project, or that is not available, is refused (409) and nothing is added.
+   */
+  app.post('/models/platform/add', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const keys = Array.isArray(body.keys) ? body.keys : null;
+      if (!keys || keys.length === 0 || keys.length > 200 || keys.some((k) => typeof k !== 'string' || !k.trim())) {
+        return reply.code(400).send({ error: 'keys must be a non-empty list of model keys' });
+      }
+      const added = await addPlatformModelsToProject(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        keys as string[],
+        session.userId,
+      );
+      return reply.code(200).send({ added });
+    } catch (error) {
+      if (error instanceof PlatformModelSelectionError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code, key: error.key });
+      }
+      logger.error('Add platform models error', { error });
+      return sendProjectError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
   app.post('/models/dynamic', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -1033,6 +1066,12 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
+      // A platform model is never deleted by a tenant: deleting it takes it out of this project.
+      const target = await getModelById(session.tenantDbName, id, projectId);
+      if (target?.platform) {
+        await removePlatformModelFromProject(session.tenantDbName, session.tenantId, projectId, target.key, session.userId);
+        return reply.code(200).send({ removed: true });
+      }
       const deleted = await deleteModel(session.tenantDbName, projectId, id);
 
       if (!deleted) {

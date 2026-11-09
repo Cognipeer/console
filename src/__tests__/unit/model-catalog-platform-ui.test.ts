@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
  * Platform providers in "Add model" (jsdom, same harness style as model-catalog-ui.test.ts):
- * the "Not in this project" group, the read-only catalog of a platform provider (Unavailable badge, no add buttons),
+ * the "Not in this project" group, the catalog of a platform provider (locked while it is not in the project; once it is,
+ * selectable rows, "Added" locked rows, Unavailable disabled rows, credits, "Add N models", no Configure),
  * "Use in this project" for owners and admins (exactly `{ projectIds }` to the tenant-scoped provider route), the note
  * for everyone else, the info line when assigned, and the create form never offering a platform provider.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
@@ -19,6 +20,7 @@ import { resetProviderModelCatalogCache } from '@/components/models/catalog/useP
 import {
   isPlatformCatalog,
   mergeProjectIds,
+  platformCatalogToModels,
   withoutPlatformProviders,
   type PlatformCatalogData,
   type PlatformProviderView,
@@ -55,8 +57,9 @@ const platformCatalog = (assigned: boolean): PlatformCatalogData => ({
   platform: true,
   assigned,
   models: [
-    { key: 'fast', name: 'Fast model', category: 'llm', unavailable: false },
-    { key: 'big', name: 'Big model', category: 'llm', description: 'Large', unavailable: true },
+    { key: 'fast', name: 'Fast model', category: 'llm', unavailable: false, added: false, credits: { perCall: 1, perMillionTokens: 2 } },
+    { key: 'big', name: 'Big model', category: 'llm', description: 'Large', unavailable: true, added: false },
+    { key: 'mine', name: 'Added model', category: 'llm', unavailable: false, added: true, capabilities: { contextWindow: 128000, supportsToolCalls: true } },
   ],
 });
 
@@ -165,22 +168,22 @@ describe('ModelCatalogModal with platform providers', () => {
     expect(text()).toContain('OpenAI');
   });
 
-  it('shows a platform catalog read-only: models with category and Unavailable badge, no add or configure buttons', async () => {
+  it('shows the catalog of a provider that is not in the project locked: nothing can be picked or added yet', async () => {
     await render(modal({ providers: [] }));
     await pickProvider('Hosted models');
     expect(catalogCalls('hosted')).toBe(1);
-    expect(document.body.querySelectorAll('[data-platform-model]')).toHaveLength(2);
     expect(text()).toContain('Fast model');
     expect(text()).toContain('Big model');
     expect(text().match(/Unavailable/g)).toHaveLength(1);
-    expect(document.body.querySelectorAll('li input.ds-checkbox')).toHaveLength(0);
+    const boxes = [...document.body.querySelectorAll<HTMLInputElement>('li input.ds-checkbox')];
+    expect(boxes).toHaveLength(3);
+    expect(boxes.every((box) => box.disabled)).toBe(true);
     expect(buttonByText('Configure')).toBeUndefined();
     expect(buttonByText('Enter custom model')).toBeUndefined();
     expect(buttonByText(/^Add \d+ models$/)).toBeUndefined();
     // The side panel says where the models come from and whether they are here, not an API listing or a selection.
     expect(text()).toContain('Managed by the platform');
     expect(text()).toContain('Availability');
-    expect(text()).not.toContain('Already added');
     expect(text()).not.toContain('Nothing selected yet.');
   });
 
@@ -198,7 +201,7 @@ describe('ModelCatalogModal with platform providers', () => {
     expect(JSON.parse(String(patches()[0][1].body))).toEqual({ projectIds: ['p-default', 'p-other', 'p-active'] });
     expect(onProviderAssigned).toHaveBeenCalledTimes(1);
     expect(catalogCalls('hosted')).toBe(2);
-    expect(text()).toContain('Already available in this project');
+    expect(text()).toContain('This provider is available in this project');
   });
 
   it('falls back to the list at hand when the fresh read fails, keeping a legacy single project id', async () => {
@@ -231,14 +234,38 @@ describe('ModelCatalogModal with platform providers', () => {
     expect(buttonByText('Use in this project')).toBeUndefined();
   });
 
-  it('says an assigned platform provider is already available, with no assign button', async () => {
+  it('lists an assigned provider like any catalog: selectable rows, Added locked, Unavailable disabled, credits, no Configure', async () => {
     hostedCatalog = platformCatalog(true);
     await render(modal({ providers: [hostedAssigned as unknown as ModelProviderView], platformProviders: [hostedAssigned] }, 'admin'));
     await pickProvider('Hosted models');
-    expect(text()).toContain('Already available in this project');
+    expect(text()).toContain('This provider is available in this project');
     expect(buttonByText('Use in this project')).toBeUndefined();
     expect(buttonByText('Configure')).toBeUndefined();
-    expect(text()).not.toContain('Not in this project');
+    expect(buttonByText('Enter custom model')).toBeUndefined();
+    const boxes = [...document.body.querySelectorAll<HTMLInputElement>('li input.ds-checkbox')];
+    expect(boxes.map((box) => box.disabled)).toEqual([false, true, true]);
+    expect(text()).toContain('Added');
+    expect(text()).toContain('1 credit / call');
+    expect(text()).toContain('2 credits / 1M tokens');
+    expect(text()).toContain('Nothing selected yet.');
+  });
+
+  it('adds the picked platform models with one request, then refreshes the list', async () => {
+    hostedCatalog = platformCatalog(true);
+    const onProviderAssigned = vi.fn();
+    await render(modal({ providers: [hostedAssigned as unknown as ModelProviderView], platformProviders: [hostedAssigned], onProviderAssigned }, 'admin'));
+    await pickProvider('Hosted models');
+    await click(document.body.querySelector('li input.ds-checkbox'));
+    expect(buttonByText('Add 1 models')).toBeDefined();
+    fetchMock.mockImplementationOnce(async () => reply(200, {}));
+    await click(buttonByText('Add 1 models'));
+    await wait(0);
+    await wait(0);
+    const adds = fetchMock.mock.calls.filter(([url]) => String(url) === '/api/models/platform/add') as Array<[string, RequestInit]>;
+    expect(adds).toHaveLength(1);
+    expect(adds[0][1].method).toBe('POST');
+    expect(JSON.parse(String(adds[0][1].body))).toEqual({ keys: ['fast'] });
+    expect(onProviderAssigned).toHaveBeenCalledTimes(1);
   });
 
   it('speaks Turkish', async () => {
@@ -273,6 +300,15 @@ describe('platform provider helpers', () => {
     expect(mergeProjectIds({ projectId: 'legacy' }, 'c')).toEqual(['legacy', 'c']);
     expect(mergeProjectIds({ projectId: 'a', projectIds: ['a', 'b'] }, 'c')).toEqual(['a', 'b', 'c']);
     expect(mergeProjectIds({}, 'c')).toEqual(['c']);
+  });
+
+  it('turns a platform catalog into rows: key as id, added as registered, unavailable and credits carried', () => {
+    const rows = platformCatalogToModels(platformCatalog(true));
+    expect(rows.map((row) => row.id)).toEqual(['fast', 'big', 'mine']);
+    expect(rows.map((row) => row.registeredModelKeys)).toEqual([undefined, undefined, ['mine']]);
+    expect(rows.map((row) => row.unavailable)).toEqual([false, true, false]);
+    expect(rows[0].credits).toEqual({ perCall: 1, perMillionTokens: 2 });
+    expect(rows[2]).toMatchObject({ contextWindow: 128000, supportsToolCalls: true });
   });
 
   it('filters platform providers and recognises a platform catalog', () => {

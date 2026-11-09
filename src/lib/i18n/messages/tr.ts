@@ -5040,8 +5040,29 @@ export const tr: typeof en = {
     piiFindings: 'PII bulguları',
     openDataset: 'Veri setini aç',
   },
+  models: {
+    ...en.models,
+    actions: {
+      ...en.models.actions,
+      removeFromProject: 'Projeden çıkar',
+      removeTitle: 'Bu model projeden çıkarılsın mı?',
+      removeConfirm: 'Model, katalogdan yeniden eklenebilir olarak kalır.',
+      removeSuccess: 'Model projeden çıkarıldı.',
+    },
+  },
   modelDetail: {
     ...en.modelDetail,
+    actions: {
+      ...en.modelDetail.actions,
+      removeFromProject: 'Projeden çıkar',
+      removeTitle: 'Bu model projeden çıkarılsın mı?',
+      removeConfirm: 'Model, katalogdan yeniden eklenebilir olarak kalır.',
+    },
+    notifications: {
+      ...en.modelDetail.notifications,
+      removeSuccessTitle: 'Model çıkarıldı',
+      removeSuccessMessage: 'Model bu projeden çıkarıldı.',
+    },
     logs: {
       ...en.modelDetail.logs,
       finishReason: 'Bitiş',

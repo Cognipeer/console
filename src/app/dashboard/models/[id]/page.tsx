@@ -49,7 +49,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
+import { useConfirm, useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import ModelPlayground from '@/components/playground/ModelPlayground';
 import SttPlayground from '@/components/playground/SttPlayground';
@@ -484,6 +484,7 @@ export default function ModelDetailPage() {
   const t = useTranslations('modelDetail');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
 
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   // The editor opens in place (an overlay); `?edit=1` is how old /edit links arrive.
@@ -710,25 +711,35 @@ export default function ModelDetailPage() {
     if (!model || deleting) return;
     setDeleting(true);
     try {
-      const deleted = await deleteResource({
-        noun: tConfirm('nouns.model'),
-        name: model.name,
-        type: 'model',
-        id: String(model._id),
-        action: async () => {
-          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-          if (!response.ok) {
-            const error = await response
-              .json()
-              .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
-            throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
-          }
-        },
-      });
+      const action = async () => {
+        const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+        if (!response.ok) {
+          const error = await response
+            .json()
+            .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
+          throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
+        }
+      };
+      // A platform model is never deleted: it leaves this project and can be added again from the catalog.
+      const deleted = model.platform
+        ? await confirmAction({
+            title: t('actions.removeTitle'),
+            message: t('actions.removeConfirm'),
+            confirmLabel: t('actions.removeFromProject'),
+            tone: 'danger',
+            action,
+          })
+        : await deleteResource({
+            noun: tConfirm('nouns.model'),
+            name: model.name,
+            type: 'model',
+            id: String(model._id),
+            action,
+          });
       if (!deleted) return;
       notifications.show({
-        title: t('notifications.deleteSuccessTitle'),
-        message: t('notifications.deleteSuccessMessage'),
+        title: model.platform ? t('notifications.removeSuccessTitle') : t('notifications.deleteSuccessTitle'),
+        message: model.platform ? t('notifications.removeSuccessMessage') : t('notifications.deleteSuccessMessage'),
         color: 'teal',
       });
       navigate('/dashboard/models');
@@ -1025,7 +1036,7 @@ export default function ModelDetailPage() {
                 disabled={deleting}
                 onClick={() => void handleDelete()}
               >
-                {t('actions.delete')}
+                {model?.platform ? t('actions.removeFromProject') : t('actions.delete')}
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>

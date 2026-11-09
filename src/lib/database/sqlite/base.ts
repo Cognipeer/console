@@ -374,6 +374,7 @@ export class SQLiteProviderBase {
     // Platform-provided records visible in every project of the tenant (0/1). Existing rows read as 0.
     this.ensureTableColumn(db, TABLES.providers, 'platform', 'platform INTEGER NOT NULL DEFAULT 0');
     this.ensureTableColumn(db, TABLES.models, 'platform', 'platform INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.models, 'projectIds', 'projectIds TEXT');
 
     // Project membership origin ('manual' | 'directory'). Legacy rows read as
     // NULL, which the mapper treats as 'manual' — no data migration needed.

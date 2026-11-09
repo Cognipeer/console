@@ -51,7 +51,9 @@ import {
   isPlatformCatalog,
   mergeProjectIds,
   type PlatformCatalogData,
+  platformCatalogToModels,
   type PlatformProviderView,
+  type PlatformRowModel,
 } from './platformProviders';
 
 /** Rows drawn at once. A provider can list a couple of thousand models; the search narrows them. */
@@ -124,6 +126,17 @@ function formatPrice(value: number, locale: string): string {
   }).format(value);
 }
 
+/** "1 credit / call", "2 credits / 1M tokens": what a platform model costs, when its record says so. */
+function creditsText(model: PlatformRowModel, t: Translate, locale: string): string | undefined {
+  const parts: string[] = [];
+  const { perCall, perMillionTokens } = model.credits ?? {};
+  if (perCall) parts.push(t(countKey('platform.creditsPerCall', perCall), { count: perCall.toLocaleString(locale) }));
+  if (perMillionTokens) {
+    parts.push(t(countKey('platform.creditsPerMillion', perMillionTokens), { count: perMillionTokens.toLocaleString(locale) }));
+  }
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
 function takesImages(model: CatalogModel): boolean {
   return Array.isArray(model.inputModalities) && model.inputModalities.includes('image');
 }
@@ -147,6 +160,7 @@ export default function ModelCatalogModal({
   const role = useDashboardUser()?.role;
   const canManage = role === 'owner' || role === 'admin';
   const [assigning, setAssigning] = useState(false);
+  const [addingPlatform, setAddingPlatform] = useState(false);
   const [providerKey, setProviderKey] = useState<string | undefined>(undefined);
   const [query, setQuery] = useState('');
   // null = not picked by hand: the default category applies while the provider lists models of it.
@@ -201,7 +215,8 @@ export default function ModelCatalogModal({
   // A platform provider answers its own shape (no discovery): kept apart so the listing code below never sees it.
   const platformData: PlatformCatalogData | undefined = isPlatformCatalog(catalog.data) ? catalog.data : undefined;
   const data = platformData ? undefined : (catalog.data as ProviderModelCatalog | undefined);
-  const models = useMemo(() => data?.models ?? [], [data]);
+  const platformModels = useMemo(() => (platformData ? platformCatalogToModels(platformData) : []), [platformData]);
+  const models: PlatformRowModel[] = useMemo(() => (platformData ? platformModels : data?.models ?? []), [platformData, platformModels, data]);
 
   const searchMatches = useMemo(
     () => filterCatalogModels(models, { query, hideRegistered }),
@@ -228,7 +243,9 @@ export default function ModelCatalogModal({
     const byId = new Map(models.map((model) => [model.id, model]));
     return selected
       .map((id) => byId.get(id))
-      .filter((model): model is CatalogModel => Boolean(model) && !isCatalogModelRegistered(model as CatalogModel));
+      .filter((model): model is PlatformRowModel => Boolean(model)
+        && !isCatalogModelRegistered(model as CatalogModel)
+        && (model as PlatformRowModel).unavailable !== true);
   }, [models, selected]);
   const registeredCount = useMemo(() => models.filter(isCatalogModelRegistered).length, [models]);
 
@@ -335,6 +352,41 @@ export default function ModelCatalogModal({
     }
   };
 
+  /** Adds the selected platform models to the active project (one request; the records exist already). */
+  const addPlatformSelected = async () => {
+    if (!platformData?.assigned || selectedModels.length === 0 || addingPlatform) return;
+    const keys = selectedModels.map((model) => model.id);
+    setAddingPlatform(true);
+    try {
+      const response = await fetch('/api/models/platform/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys }),
+      });
+      const body = await response.json().catch(() => null) as { added?: string[]; error?: unknown } | null;
+      if (!response.ok) {
+        throw new Error(typeof body?.error === 'string' && body.error ? body.error : t('platform.addFailed'));
+      }
+      const addedCount = Array.isArray(body?.added) ? body.added.length : keys.length;
+      notifications.show({
+        color: 'green',
+        title: t('platform.addedTitle'),
+        message: t(countKey('platform.addedMessage', addedCount), { count: addedCount }),
+      });
+      setSelected([]);
+      catalog.refresh();
+      onProviderAssigned?.();
+    } catch (error) {
+      notifications.show({
+        color: 'red',
+        title: t('platform.addFailed'),
+        message: error instanceof Error ? error.message : t('platform.addFailed'),
+      });
+    } finally {
+      setAddingPlatform(false);
+    }
+  };
+
   /** "Use in this project": adds the active project to the provider's projects, then lists and reloads. */
   const assignToProject = async () => {
     if (!provider || assigning) return;
@@ -392,7 +444,27 @@ export default function ModelCatalogModal({
 
   const count = selectedModels.length;
   const primaryAction: FormShellAction = isPlatform
-    ? { label: t('platform.done'), onClick: close }
+    ? !platformData?.assigned
+      ? { label: t('platform.done'), onClick: close }
+      : addingPlatform
+        ? {
+            label: t('platform.adding'),
+            icon: <Loader size={12} color="gray" />,
+            disabled: true,
+            onClick: () => undefined,
+          }
+        : count === 0
+          ? {
+              label: t('actions.selectModel'),
+              disabled: true,
+              disabledReason: t('actions.selectModelHint'),
+              onClick: () => undefined,
+            }
+          : {
+              label: t('actions.addMany', { count }),
+              icon: <IconPlus size={13} />,
+              onClick: () => void addPlatformSelected(),
+            }
     : bulk
     ? {
         label: t('actions.adding', { done: bulk.done, total: bulk.total }),
@@ -460,7 +532,7 @@ export default function ModelCatalogModal({
           />
         </SummaryGroup>
       )}
-      {!platformData && <SummaryGroup title={t('summary.selected', { count })}>
+      {(!platformData || platformData.assigned) && <SummaryGroup title={t('summary.selected', { count })}>
         {count === 0 ? (
           <span className="ds-faint" style={{ fontSize: 12.5 }}>{t('summary.nothingSelected')}</span>
         ) : (
@@ -471,7 +543,7 @@ export default function ModelCatalogModal({
                   <div style={{ fontSize: 12.5, fontWeight: 500, overflowWrap: 'anywhere' }}>{model.name}</div>
                   <div className="ds-faint ds-mono" style={{ fontSize: 11, overflowWrap: 'anywhere' }}>{model.id}</div>
                   <div className="ds-muted ds-mono" style={{ fontSize: 11 }}>
-                    {model.pricing ? priceText(model, t, locale) : t('summary.unpriced')}
+                    {platformData ? (creditsText(model, t, locale) ?? '') : model.pricing ? priceText(model, t, locale) : t('summary.unpriced')}
                   </div>
                 </div>
                 <ActionIcon
@@ -479,7 +551,7 @@ export default function ModelCatalogModal({
                   color="gray"
                   size="sm"
                   aria-label={t('summary.remove', { name: model.name })}
-                  disabled={Boolean(bulk)}
+                  disabled={Boolean(bulk) || addingPlatform}
                   onClick={() => toggle(model.id)}
                 >
                   <IconX size={13} />
@@ -557,36 +629,96 @@ export default function ModelCatalogModal({
         {platformData.models.length === 0 ? (
           <span className="ds-muted" style={{ fontSize: 13 }}>{t('platform.noModels')}</span>
         ) : (
-          <div className="ds-card" style={{ overflow: 'hidden' }}>
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-              {platformData.models.map((model, index) => (
-                <li
-                  key={model.key}
-                  data-platform-model={model.key}
-                  style={{ padding: '9px 14px', borderTop: index === 0 ? undefined : '1px solid var(--ds-border-soft)' }}
-                >
-                  <div className="ds-row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 13, fontWeight: 500, overflowWrap: 'anywhere' }}>{model.name}</span>
-                    <Badge size="sm" variant="light" color={CATEGORY_COLORS[model.category] ?? 'gray'}>
-                      {t(`categories.${model.category}`)}
-                    </Badge>
-                    {model.unavailable ? (
-                      <span className="ds-badge ds-badge-warn" title={t('platform.unavailableHint')}>
-                        {t('platform.unavailable')}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="ds-faint ds-mono" style={{ fontSize: 11.5, overflowWrap: 'anywhere' }}>{model.key}</div>
-                  {model.description ? (
-                    <Text size="xs" c="dimmed" lineClamp={1} title={model.description}>
-                      {model.description}
-                    </Text>
-                  ) : null}
-                </li>
+          renderListing()
+        )}
+      </>
+    );
+  }
+
+  // The search box, category chips and rows of the models in `models` (a provider's listing or a platform catalog).
+  function renderListing(): ReactNode {
+    return (
+      <>
+        <div className="ds-row" style={{ gap: 12 }}>
+          <TextInput
+            style={{ flex: '1 1 240px' }}
+            aria-label={t('models.searchLabel')}
+            placeholder={t('models.searchPlaceholder')}
+            leftSection={<IconSearch size={14} />}
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+          />
+          <Switch
+            size="sm"
+            label={t('models.hideAdded')}
+            checked={hideRegistered}
+            onChange={(event) => setHideRegistered(event.currentTarget.checked)}
+            disabled={registeredCount === 0 && !hideRegistered}
+          />
+        </div>
+
+        {presentCategories.length > 1 ? (
+          <div role="group" aria-label={t('models.categoryLabel')}>
+            <ChipPicker<CatalogCategoryFilter>
+              options={[
+                { value: 'all', label: t('models.chip', { label: t('models.all'), count: searchMatches.length }) },
+                ...presentCategories.map((entry) => ({
+                  value: entry.category,
+                  label: t('models.chip', {
+                    label: t(`categories.${entry.category}`),
+                    count: matchCounts.get(entry.category) ?? 0,
+                  }),
+                })),
+              ]}
+              value={category}
+              onChange={(next) => setChosenCategory(next as CatalogCategoryFilter)}
+            />
+          </div>
+        ) : null}
+
+        {visible.length === 0 ? (
+          <CatalogState icon={<IconSearch size={24} />} title={t('states.noMatchTitle')} text={t('states.noMatchText')}>
+            <Button
+              size="sm"
+              variant="default"
+              onClick={() => {
+                setQuery('');
+                setHideRegistered(false);
+                setChosenCategory('all');
+              }}
+            >
+              {t('states.clearFilters')}
+            </Button>
+          </CatalogState>
+        ) : (
+          <div className="ds-card" style={{ position: 'relative', overflow: 'hidden' }}>
+            {catalog.refreshing ? <div className="ds-refresh-bar" /> : null}
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }} aria-busy={catalog.refreshing || undefined}>
+              {rows.map((model, index) => (
+                <CatalogRow
+                  key={model.id}
+                  model={model}
+                  first={index === 0}
+                  selected={selected.includes(model.id)}
+                  locked={Boolean(bulk) || addingPlatform || (isPlatform && !platformData?.assigned)}
+                  platform={isPlatform}
+                  onToggle={() => toggle(model.id)}
+                  onConfigure={() => configure(model)}
+                  t={t}
+                  locale={locale}
+                />
               ))}
             </ul>
           </div>
         )}
+        {visible.length > rows.length ? (
+          <span className="ds-muted" style={{ fontSize: 12 }}>
+            {t('models.showing', {
+              shown: rows.length.toLocaleString(locale),
+              total: visible.length.toLocaleString(locale),
+            })}
+          </span>
+        ) : null}
       </>
     );
   }
@@ -676,85 +808,7 @@ export default function ModelCatalogModal({
         ) : null}
         <Notices notices={data.notices} t={t} locale={locale} />
 
-        <div className="ds-row" style={{ gap: 12 }}>
-          <TextInput
-            style={{ flex: '1 1 240px' }}
-            aria-label={t('models.searchLabel')}
-            placeholder={t('models.searchPlaceholder')}
-            leftSection={<IconSearch size={14} />}
-            value={query}
-            onChange={(event) => setQuery(event.currentTarget.value)}
-          />
-          <Switch
-            size="sm"
-            label={t('models.hideAdded')}
-            checked={hideRegistered}
-            onChange={(event) => setHideRegistered(event.currentTarget.checked)}
-            disabled={registeredCount === 0 && !hideRegistered}
-          />
-        </div>
-
-        {presentCategories.length > 1 ? (
-          <div role="group" aria-label={t('models.categoryLabel')}>
-            <ChipPicker<CatalogCategoryFilter>
-              options={[
-                { value: 'all', label: t('models.chip', { label: t('models.all'), count: searchMatches.length }) },
-                ...presentCategories.map((entry) => ({
-                  value: entry.category,
-                  label: t('models.chip', {
-                    label: t(`categories.${entry.category}`),
-                    count: matchCounts.get(entry.category) ?? 0,
-                  }),
-                })),
-              ]}
-              value={category}
-              onChange={(next) => setChosenCategory(next as CatalogCategoryFilter)}
-            />
-          </div>
-        ) : null}
-
-        {visible.length === 0 ? (
-          <CatalogState icon={<IconSearch size={24} />} title={t('states.noMatchTitle')} text={t('states.noMatchText')}>
-            <Button
-              size="sm"
-              variant="default"
-              onClick={() => {
-                setQuery('');
-                setHideRegistered(false);
-                setChosenCategory('all');
-              }}
-            >
-              {t('states.clearFilters')}
-            </Button>
-          </CatalogState>
-        ) : (
-          <div className="ds-card" style={{ position: 'relative', overflow: 'hidden' }}>
-            {catalog.refreshing ? <div className="ds-refresh-bar" /> : null}
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }} aria-busy={catalog.refreshing || undefined}>
-              {rows.map((model, index) => (
-                <CatalogRow
-                  key={model.id}
-                  model={model}
-                  first={index === 0}
-                  selected={selected.includes(model.id)}
-                  locked={Boolean(bulk)}
-                  onToggle={() => toggle(model.id)}
-                  onConfigure={() => configure(model)}
-                  t={t}
-                  locale={locale}
-                />
-              ))}
-            </ul>
-          </div>
-        )}
-        {visible.length > rows.length ? (
-          <span className="ds-muted" style={{ fontSize: 12 }}>
-            {t('models.showing', {
-              shown: rows.length.toLocaleString(locale),
-              total: visible.length.toLocaleString(locale),
-            })}
-          </span>
-        ) : null}
+        {renderListing()}
       </>
     );
   }
@@ -1019,21 +1073,26 @@ function CatalogRow({
   first,
   selected,
   locked,
+  platform = false,
   onToggle,
   onConfigure,
   t,
   locale,
 }: {
-  model: CatalogModel;
+  model: PlatformRowModel;
   first: boolean;
   selected: boolean;
   locked: boolean;
+  /** A platform model: it is added to the project as it is, so there is no Configure and no price, and it may be unavailable. */
+  platform?: boolean;
   onToggle: () => void;
   onConfigure: () => void;
   t: Translate;
   locale: string;
 }) {
   const registered = isCatalogModelRegistered(model);
+  const unavailable = platform && model.unavailable === true;
+  const credits = platform ? creditsText(model, t, locale) : undefined;
   const contextHint = [
     model.contextWindow ? t('row.contextWindowHint', { tokens: model.contextWindow.toLocaleString(locale) }) : null,
     model.maxOutputTokens ? t('row.maxOutputHint', { tokens: model.maxOutputTokens.toLocaleString(locale) }) : null,
@@ -1050,16 +1109,16 @@ function CatalogRow({
           // instead of squeezing the name and id into a narrow column (long translations, long names).
           flexWrap: 'wrap',
           alignItems: 'flex-start',
-          cursor: registered || locked ? 'default' : 'pointer',
+          cursor: registered || locked || unavailable ? 'default' : 'pointer',
           background: selected ? 'var(--ds-hover)' : undefined,
         }}
       >
-        <span style={{ display: 'inline-flex', paddingTop: 2 }} title={registered ? t('row.addedLocked') : undefined}>
+        <span style={{ display: 'inline-flex', paddingTop: 2 }} title={registered ? t(platform ? 'platform.addedLocked' : 'row.addedLocked') : undefined}>
           <input
             type="checkbox"
             className="ds-checkbox"
             checked={selected}
-            disabled={registered || locked}
+            disabled={registered || locked || unavailable}
             onChange={onToggle}
             aria-label={t('row.select', { name: model.name })}
           />
@@ -1073,10 +1132,15 @@ function CatalogRow({
             {model.deprecated ? (
               <span className="ds-badge ds-badge-warn" title={t('row.deprecatedHint')}>{t('row.deprecated')}</span>
             ) : null}
+            {unavailable ? (
+              <span className="ds-badge ds-badge-warn" title={t('platform.unavailableHint')}>
+                {t('platform.unavailable')}
+              </span>
+            ) : null}
             {registered ? (
               <span
                 className="ds-badge ds-badge-ok"
-                title={t('row.addedHint', { keys: (model.registeredModelKeys ?? []).join(', ') })}
+                title={platform ? undefined : t('row.addedHint', { keys: (model.registeredModelKeys ?? []).join(', ') })}
               >
                 {t('row.added')}
               </span>
@@ -1116,26 +1180,32 @@ function CatalogRow({
               {t('row.contextWindow', { tokens: formatTokens(model.contextWindow) })}
             </span>
           ) : null}
-          <span
-            className={`ds-mono ${model.pricing ? 'ds-muted' : 'ds-faint'}`}
-            style={{ fontSize: 11.5, whiteSpace: 'nowrap', minWidth: 120, textAlign: 'right' }}
-            title={priceHint(model, t)}
-          >
-            {priceText(model, t, locale)}
-          </span>
-          <Button
-            variant="subtle"
-            size="compact-xs"
-            title={t('row.configureHint')}
-            disabled={locked}
-            onClick={(event) => {
-              // Inside the row's label: the click configures, it does not also pick the row.
-              event.preventDefault();
-              onConfigure();
-            }}
-          >
-            {t('row.configure')}
-          </Button>
+          {platform ? (
+            credits ? <span className="ds-mono ds-muted" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>{credits}</span> : null
+          ) : (
+            <>
+              <span
+                className={`ds-mono ${model.pricing ? 'ds-muted' : 'ds-faint'}`}
+                style={{ fontSize: 11.5, whiteSpace: 'nowrap', minWidth: 120, textAlign: 'right' }}
+                title={priceHint(model, t)}
+              >
+                {priceText(model, t, locale)}
+              </span>
+              <Button
+                variant="subtle"
+                size="compact-xs"
+                title={t('row.configureHint')}
+                disabled={locked}
+                onClick={(event) => {
+                  // Inside the row's label: the click configures, it does not also pick the row.
+                  event.preventDefault();
+                  onConfigure();
+                }}
+              >
+                {t('row.configure')}
+              </Button>
+            </>
+          )}
         </div>
       </label>
     </li>

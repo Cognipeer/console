@@ -16,6 +16,10 @@ vi.mock('@/lib/services/models/modelService', () => ({
   listModels: vi.fn(),
   createModel: vi.fn(),
   deleteModel: vi.fn(),
+  updateModel: vi.fn(),
+  getModelById: vi.fn(),
+  addPlatformModelsToProject: vi.fn(),
+  removePlatformModelFromProject: vi.fn(),
   listModelProviders: vi.fn(),
   listPlatformModelProviders: vi.fn(),
 }));
@@ -31,8 +35,18 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   return { resolveProjectContext: vi.fn(), ProjectContextError };
 });
 
-import { createModel, deleteModel, listModels, listModelProviders, listPlatformModelProviders } from '@/lib/services/models/modelService';
-import { PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import {
+  addPlatformModelsToProject,
+  createModel,
+  deleteModel,
+  getModelById,
+  listModels,
+  listModelProviders,
+  listPlatformModelProviders,
+  removePlatformModelFromProject,
+  updateModel,
+} from '@/lib/services/models/modelService';
+import { PlatformModelSelectionError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
 import { checkResourceQuota } from '@/lib/quota';
 import { resolveProjectContext } from '@/lib/services/projects/projectContext';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
@@ -78,6 +92,41 @@ describe('/api/models and platform records', () => {
     const res = await app.inject({ method: 'DELETE', url: '/api/models/model-1', headers: { ...HEADERS, 'content-type': undefined as never } });
     expect(res.statusCode).toBe(403);
     expect(parseJsonBody<{ code: string }>(res.body).code).toBe('platform_record_read_only');
+  });
+
+  it('deleting a platform model removes it from the active project and never deletes the record', async () => {
+    (getModelById as ReturnType<typeof vi.fn>).mockResolvedValue({ _id: 'pm-1', key: 'plat-a', platform: true });
+    const res = await app.inject({ method: 'DELETE', url: '/api/models/pm-1', headers: { ...HEADERS, 'content-type': undefined as never } });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ removed: boolean }>(res.body).removed).toBe(true);
+    expect(removePlatformModelFromProject).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'plat-a', 'user-1');
+    expect(deleteModel).not.toHaveBeenCalled();
+  });
+
+  it('keeps answering 403 when a platform model is changed', async () => {
+    (updateModel as ReturnType<typeof vi.fn>).mockRejectedValue(new PlatformRecordReadOnlyError());
+    const res = await app.inject({ method: 'PUT', url: '/api/models/pm-1', headers: HEADERS, payload: JSON.stringify({ name: 'X' }) });
+    expect(res.statusCode).toBe(403);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('platform_record_read_only');
+  });
+
+  it('adds platform models to the active project by key', async () => {
+    (addPlatformModelsToProject as ReturnType<typeof vi.fn>).mockResolvedValue(['a', 'b']);
+    const res = await app.inject({ method: 'POST', url: '/api/models/platform/add', headers: HEADERS, payload: JSON.stringify({ keys: ['a', 'b'] }) });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ added: string[] }>(res.body).added).toEqual(['a', 'b']);
+    expect(addPlatformModelsToProject).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', ['a', 'b'], 'user-1');
+  });
+
+  it('refuses an add without keys (400) and answers the typed refusals of the service', async () => {
+    const bad = await app.inject({ method: 'POST', url: '/api/models/platform/add', headers: HEADERS, payload: JSON.stringify({ keys: [] }) });
+    expect(bad.statusCode).toBe(400);
+    (addPlatformModelsToProject as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PlatformModelSelectionError('provider_not_in_project', 'Make the provider available in this project first.', 409, 'a'),
+    );
+    const res = await app.inject({ method: 'POST', url: '/api/models/platform/add', headers: HEADERS, payload: JSON.stringify({ keys: ['a'] }) });
+    expect(res.statusCode).toBe(409);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('provider_not_in_project');
   });
 
   it('answers 403 when a model is added to a platform provider', async () => {

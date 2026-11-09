@@ -130,7 +130,48 @@ export interface PlatformProviderModelCatalog {
     category: ModelCategory;
     description?: string;
     unavailable: boolean;
+    /** Whether the model is already added to the active project. */
+    added: boolean;
+    isMultimodal?: boolean;
+    capabilities?: {
+      contextWindow?: number;
+      maxOutputTokens?: number;
+      supportsToolCalls?: boolean;
+      supportsReasoning?: boolean;
+    };
+    /** What a call costs in credits, when the record says so. */
+    credits?: { perCall?: number; perMillionTokens?: number };
   }>;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+/** The public facts of a platform model's metadata: capabilities and credits only, never any other key. */
+function platformModelFacts(metadata: unknown): Pick<PlatformProviderModelCatalog['models'][number], 'capabilities' | 'credits'> {
+  const meta = recordOf(metadata);
+  const caps = recordOf(meta?.capabilities);
+  const credits = recordOf(meta?.credits);
+  const capabilities = caps
+    ? {
+      contextWindow: positiveNumber(caps.contextWindow),
+      maxOutputTokens: positiveNumber(caps.maxOutputTokens),
+      supportsToolCalls: typeof caps.supportsToolCalls === 'boolean' ? caps.supportsToolCalls : undefined,
+      supportsReasoning: typeof caps.supportsReasoning === 'boolean' ? caps.supportsReasoning : undefined,
+    }
+    : undefined;
+  const creditFacts = credits
+    ? { perCall: positiveNumber(credits.perCall), perMillionTokens: positiveNumber(credits.perMillionTokens) }
+    : undefined;
+  return {
+    capabilities: capabilities && Object.values(capabilities).some((v) => v !== undefined) ? capabilities : undefined,
+    credits: creditFacts && Object.values(creditFacts).some((v) => v !== undefined) ? creditFacts : undefined,
+  };
 }
 
 /**
@@ -156,6 +197,9 @@ async function getPlatformProviderCatalog(
         category: model.category,
         description: model.description,
         unavailable: model.metadata?.inactive === true,
+        added: Array.isArray(model.projectIds) && model.projectIds.map(String).includes(String(projectId)),
+        isMultimodal: typeof model.isMultimodal === 'boolean' ? model.isMultimodal : undefined,
+        ...platformModelFacts(model.metadata),
       })),
   };
 }

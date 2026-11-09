@@ -45,3 +45,20 @@ export class PlatformRecordReadOnlyError extends Error {
     this.name = 'PlatformRecordReadOnlyError';
   }
 }
+
+/**
+ * A platform model could not be added to a project: the key is not a platform model of the tenant (HTTP 404,
+ * `platform_model_not_found`), its provider is not assigned to the project (HTTP 409, `provider_not_in_project`), or the
+ * model is not available (HTTP 409, `model_unavailable`).
+ */
+export class PlatformModelSelectionError extends Error {
+  constructor(
+    readonly code: 'platform_model_not_found' | 'provider_not_in_project' | 'model_unavailable',
+    message: string,
+    readonly status: 404 | 409,
+    readonly key?: string,
+  ) {
+    super(message);
+    this.name = 'PlatformModelSelectionError';
+  }
+}

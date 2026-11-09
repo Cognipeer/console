@@ -48,7 +48,7 @@ import { ModelUsageSkeleton } from '@/components/models/ModelSkeletons';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
-import { useDeleteResource } from '@/components/common/confirm';
+import { useConfirm, useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelCatalogModal from '@/components/models/catalog/ModelCatalogModal';
@@ -169,6 +169,8 @@ interface ModelDto {
   isMultimodal?: boolean;
   /** Set on a platform model an operator switched off: listed, but it cannot be called. */
   unavailable?: boolean;
+  /** A platform model: deleting it takes it out of this project. */
+  platform?: boolean;
   /** What the model resolves to (an explicit choice, else detected from its id). */
   capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
@@ -230,6 +232,7 @@ export default function ModelsPage() {
   const tCatalog = useTranslations('modelCatalog');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
   const tNav = useTranslations('navigation');
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
@@ -471,20 +474,30 @@ export default function ModelsPage() {
 
   const handleDeleteModel = async (model: ModelDto) => {
     try {
-      const deleted = await deleteResource({
-        noun: tConfirm('nouns.model'),
-        name: model.name,
-        type: 'model',
-        id: model._id,
-        action: async () => {
-          setDeletingModelId(model._id);
-          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-          if (!response.ok) {
-            const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
-            throw new Error(error.error ?? 'Failed to delete model');
-          }
-        },
-      });
+      const action = async () => {
+        setDeletingModelId(model._id);
+        const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
+          throw new Error(error.error ?? 'Failed to delete model');
+        }
+      };
+      // A platform model is never deleted: it leaves this project and can be added again from the catalog.
+      const deleted = model.platform
+        ? await confirmAction({
+            title: t('actions.removeTitle'),
+            message: t('actions.removeConfirm'),
+            confirmLabel: t('actions.removeFromProject'),
+            tone: 'danger',
+            action,
+          })
+        : await deleteResource({
+            noun: tConfirm('nouns.model'),
+            name: model.name,
+            type: 'model',
+            id: model._id,
+            action,
+          });
       if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
       // The catalog's remembered listing still marks the model "Added": it is listed again on its next opening.
@@ -492,8 +505,8 @@ export default function ModelsPage() {
       void loadDashboard();
       notifications.show({
         color: 'green',
-        title: t('actions.delete'),
-        message: t('actions.deleteSuccess'),
+        title: model.platform ? t('actions.removeFromProject') : t('actions.delete'),
+        message: model.platform ? t('actions.removeSuccess') : t('actions.deleteSuccess'),
       });
     } catch (error) {
       notifications.show({
@@ -707,25 +720,29 @@ export default function ModelsPage() {
               icon: <IconEye size={14} />,
               onClick: () => navigate(modelDetailHref(m)),
             },
-            {
-              id: 'edit',
-              label: t('actions.edit'),
-              icon: <IconEdit size={14} />,
-              onClick: () =>
-                dynamicConfigOf(m)
-                  ? openDynamicEdit(m)
-                  : setEditModelId(m._id),
-            },
-            { divider: true },
-            {
-              id: 'guardrail',
-              label: 'Guardrail settings',
-              icon: <IconShield size={14} />,
-              onClick: () => setGuardrailModel(m),
-            },
+            ...(m.platform
+              ? []
+              : [
+                  {
+                    id: 'edit',
+                    label: t('actions.edit'),
+                    icon: <IconEdit size={14} />,
+                    onClick: () =>
+                      dynamicConfigOf(m)
+                        ? openDynamicEdit(m)
+                        : setEditModelId(m._id),
+                  },
+                  { divider: true as const },
+                  {
+                    id: 'guardrail',
+                    label: 'Guardrail settings',
+                    icon: <IconShield size={14} />,
+                    onClick: () => setGuardrailModel(m),
+                  },
+                ]),
             {
               id: 'delete',
-              label: t('actions.delete'),
+              label: m.platform ? t('actions.removeFromProject') : t('actions.delete'),
               icon: <IconTrash size={14} />,
               color: 'red',
               disabled: deletingModelId === m._id,

@@ -21,7 +21,7 @@ import {
   type ProviderConfigView,
   type ProviderStatus,
 } from '@/lib/services/providers/providerService';
-import { PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import { PlatformModelSelectionError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
 import { isManagedProviderRecord } from '@/enterprise/managed-credits';
 import {
   getUsageBreakdown,
@@ -739,6 +739,88 @@ export async function deleteModel(
   const deleted = await db.deleteModel(modelId);
   await invalidateModelMetaCache(tenantDbName, projectId, [existing.key]);
   return deleted;
+}
+
+function providerAssignedTo(config: { projectId?: unknown; projectIds?: unknown }, projectId: string): boolean {
+  return String(config.projectId) === String(projectId)
+    || (Array.isArray(config.projectIds) && config.projectIds.map(String).includes(String(projectId)));
+}
+
+/**
+ * Adds platform models to a project, by key. A platform model is visible in a project only when its platform provider is
+ * assigned to the project and the model was added to it here. Every key is checked before any is written; adding a model
+ * that is already added is a no-op. Returns the keys that are added to the project afterwards.
+ */
+export async function addPlatformModelsToProject(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  keys: readonly string[],
+  actor?: string,
+): Promise<string[]> {
+  const wanted = [...new Set(keys.map((k) => String(k).trim()).filter(Boolean))];
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const platformModels = (await db.listModels({})).filter((m) => m.platform && m.tenantId === tenantId);
+
+  const targets: IModel[] = [];
+  const assignment = new Map<string, boolean>();
+  for (const key of wanted) {
+    const model = platformModels.find((m) => m.key === key);
+    if (!model) {
+      throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+    }
+    if (!assignment.has(model.providerKey)) {
+      const provider = await getProviderConfigByKey(tenantDbName, tenantId, model.providerKey);
+      assignment.set(
+        model.providerKey,
+        Boolean(provider?.platform && provider.tenantId === tenantId && providerAssignedTo(provider, projectId)),
+      );
+    }
+    if (!assignment.get(model.providerKey)) {
+      throw new PlatformModelSelectionError(
+        'provider_not_in_project',
+        'Make the provider available in this project first.',
+        409,
+        key,
+      );
+    }
+    if (model.metadata?.inactive === true) {
+      throw new PlatformModelSelectionError('model_unavailable', 'This model is not available.', 409, key);
+    }
+    targets.push(model);
+  }
+
+  for (const model of targets) {
+    const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
+    if (current.includes(projectId)) continue;
+    await db.updateModel(String(model._id), { projectIds: [...current, projectId] });
+  }
+  await invalidateModelMetaCache(tenantDbName, projectId, wanted);
+  logger.info('Platform models added to a project', { projectId, count: wanted.length, actor });
+  return wanted;
+}
+
+/** Takes a platform model out of a project. The record stays, so it can be added again. Idempotent. */
+export async function removePlatformModelFromProject(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  key: string,
+  actor?: string,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const model = (await db.listModels({})).find((m) => m.platform && m.tenantId === tenantId && m.key === key);
+  if (!model) {
+    throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+  }
+  const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
+  if (current.includes(projectId)) {
+    await db.updateModel(String(model._id), { projectIds: current.filter((id) => id !== projectId) });
+  }
+  await invalidateModelMetaCache(tenantDbName, projectId, [key]);
+  logger.info('Platform model removed from a project', { projectId, key, actor });
 }
 
 function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string): string {

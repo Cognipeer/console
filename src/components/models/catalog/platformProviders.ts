@@ -1,5 +1,6 @@
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { ModelCategory } from '@/lib/database';
+import type { CatalogModel } from '@/lib/services/models/catalog/types';
 
 /** A platform provider of the workspace, as `GET /api/models?includePlatform=true` lists it. */
 export type PlatformProviderView = ModelProviderView & {
@@ -18,7 +19,45 @@ export interface PlatformCatalogData {
     category: ModelCategory;
     description?: string;
     unavailable: boolean;
+    /** Already added to the active project. */
+    added?: boolean;
+    isMultimodal?: boolean;
+    capabilities?: {
+      contextWindow?: number;
+      maxOutputTokens?: number;
+      supportsToolCalls?: boolean;
+      supportsReasoning?: boolean;
+    };
+    credits?: { perCall?: number; perMillionTokens?: number };
   }>;
+}
+
+/** A catalog row of a provider, or of a platform catalog (which may carry credits and be unavailable). */
+export type PlatformRowModel = CatalogModel & {
+  unavailable?: boolean;
+  credits?: { perCall?: number; perMillionTokens?: number };
+};
+
+/**
+ * A platform catalog as rows the wizard lists like any provider's catalog: the model key is the row id, a model already
+ * added to the project reads as registered (locked), and an unavailable one is flagged.
+ */
+export function platformCatalogToModels(data: PlatformCatalogData): PlatformRowModel[] {
+  return data.models.map((model) => ({
+    id: model.key,
+    name: model.name,
+    description: model.description,
+    category: model.category,
+    contextWindow: model.capabilities?.contextWindow,
+    maxOutputTokens: model.capabilities?.maxOutputTokens,
+    supportsToolCalls: model.capabilities?.supportsToolCalls,
+    supportsReasoning: model.capabilities?.supportsReasoning,
+    inputModalities: model.isMultimodal ? ['text', 'image'] : undefined,
+    source: 'static' as CatalogModel['source'],
+    registeredModelKeys: model.added ? [model.key] : undefined,
+    unavailable: model.unavailable,
+    credits: model.credits,
+  }));
 }
 
 export function isPlatformCatalog(value: unknown): value is PlatformCatalogData {

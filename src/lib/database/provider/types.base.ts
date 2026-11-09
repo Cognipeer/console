@@ -1117,6 +1117,11 @@ export interface IModel {
    * visible in the projects its platform provider is assigned to.
    */
   platform?: boolean;
+  /**
+   * Platform models only: the projects the model was added to. A platform model is visible in a project only when its
+   * platform provider is assigned to it and the project is listed here. Absent means added nowhere.
+   */
+  projectIds?: string[];
   name: string;
   description?: string;
   key: string;

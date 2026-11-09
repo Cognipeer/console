@@ -152,8 +152,8 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     }
 
     /**
-     * Models visible in a project: its own, plus platform models whose provider is a platform provider assigned to it
-     * (legacy `projectId` or `projectIds`).
+     * Models visible in a project: its own, plus platform models the project added (`projectIds`) whose provider is a
+     * platform provider assigned to it (legacy `projectId` or `projectIds`).
      */
     protected async projectModelVisibility(projectId: string): Promise<Array<Record<string, unknown>>> {
       const db = this.getTenantDb();
@@ -163,7 +163,7 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         .project({ key: 1 })
         .toArray();
       const keys = providers.map((p) => (p as { key?: string }).key).filter((k): k is string => typeof k === 'string');
-      return [{ projectId }, { platform: true, providerKey: { $in: keys } }];
+      return [{ projectId }, { platform: true, projectIds: projectId, providerKey: { $in: keys } }];
     }
 
     async listModels(filters?: {

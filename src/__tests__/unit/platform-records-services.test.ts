@@ -53,8 +53,14 @@ import {
   listProviderConfigs,
   redactPlatformProvider,
 } from '@/lib/services/providers/providerService';
-import { ManagedProviderError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
-import { createModel, deleteModel, updateModel } from '@/lib/services/models/modelService';
+import { ManagedProviderError, PlatformModelSelectionError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import {
+  addPlatformModelsToProject,
+  createModel,
+  deleteModel,
+  removePlatformModelFromProject,
+  updateModel,
+} from '@/lib/services/models/modelService';
 import { sendProviderConfigError } from '@/server/api/providerConfigErrors';
 
 const provider = (overrides: Record<string, unknown> = {}) => ({
@@ -389,5 +395,69 @@ describe('redactPlatformProvider', () => {
     expect(out).not.toHaveProperty('description');
     const plain = { ...provider(), platform: false, hasCredentials: true } as never;
     expect(redactPlatformProvider(plain)).toBe(plain);
+  });
+});
+
+describe('adding platform models to a project, one by one', () => {
+  const platformModel = (key: string, overrides: Record<string, unknown> = {}) => model({
+    _id: `id-${key}`, key, projectId: undefined, platform: true, providerKey: 'platform', projectIds: [], ...overrides,
+  });
+  const assigned = (projectIds: string[]) => wideProvider({ projectIds });
+
+  beforeEach(() => {
+    cacheDel.mockReset();
+    hoisted.db.listModels.mockReset().mockResolvedValue([
+      platformModel('a'),
+      platformModel('b', { projectIds: ['p1'] }),
+      platformModel('off', { metadata: { inactive: true } }),
+      model({ key: 'own-m', providerKey: 'own' }),
+    ]);
+    hoisted.db.findProviderByKey.mockReset().mockResolvedValue(assigned(['p1']));
+  });
+
+  it('adds the project to the model, keeps the other projects, and drops the project caches of those keys', async () => {
+    await expect(addPlatformModelsToProject('db', 'tenant-1', 'p1', ['a', 'b'], 'u1')).resolves.toEqual(['a', 'b']);
+    // `b` already has p1: idempotent, written once for `a` only.
+    expect(hoisted.db.updateModel).toHaveBeenCalledTimes(1);
+    expect(hoisted.db.updateModel).toHaveBeenCalledWith('id-a', { projectIds: ['p1'] });
+    expect(cacheDel).toHaveBeenCalledWith('model-meta:db:p1:a');
+    expect(cacheDel).toHaveBeenCalledWith('model-meta:db:p1:b');
+  });
+
+  it('keeps the projects the model was added to elsewhere', async () => {
+    hoisted.db.listModels.mockResolvedValue([platformModel('a', { projectIds: ['p9'] })]);
+    await addPlatformModelsToProject('db', 'tenant-1', 'p1', ['a']);
+    expect(hoisted.db.updateModel).toHaveBeenCalledWith('id-a', { projectIds: ['p9', 'p1'] });
+  });
+
+  it('refuses a model whose provider is not assigned to the project (409), writing nothing', async () => {
+    hoisted.db.findProviderByKey.mockResolvedValue(assigned(['p2']));
+    const error = await addPlatformModelsToProject('db', 'tenant-1', 'p1', ['a']).catch((e) => e);
+    expect(error).toBeInstanceOf(PlatformModelSelectionError);
+    expect(error).toMatchObject({ status: 409, code: 'provider_not_in_project', message: 'Make the provider available in this project first.' });
+    expect(hoisted.db.updateModel).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unavailable model (409) and an unknown or non-platform key (404), writing nothing, even if another key is fine', async () => {
+    await expect(addPlatformModelsToProject('db', 'tenant-1', 'p1', ['a', 'off'])).rejects.toMatchObject({ status: 409, code: 'model_unavailable' });
+    await expect(addPlatformModelsToProject('db', 'tenant-1', 'p1', ['a', 'own-m'])).rejects.toMatchObject({ status: 404, code: 'platform_model_not_found' });
+    await expect(addPlatformModelsToProject('db', 'tenant-1', 'p1', ['nope'])).rejects.toMatchObject({ status: 404 });
+    expect(hoisted.db.updateModel).not.toHaveBeenCalled();
+  });
+
+  it('does not take another tenant\'s platform model', async () => {
+    hoisted.db.listModels.mockResolvedValue([platformModel('a', { tenantId: 'tenant-2' })]);
+    await expect(addPlatformModelsToProject('db', 'tenant-1', 'p1', ['a'])).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('removes the project from the model, never deletes the record, and is idempotent', async () => {
+    await removePlatformModelFromProject('db', 'tenant-1', 'p1', 'b', 'u1');
+    expect(hoisted.db.updateModel).toHaveBeenCalledWith('id-b', { projectIds: [] });
+    expect(hoisted.db.deleteModel).not.toHaveBeenCalled();
+    expect(cacheDel).toHaveBeenCalledWith('model-meta:db:p1:b');
+    hoisted.db.updateModel.mockClear();
+    await removePlatformModelFromProject('db', 'tenant-1', 'p1', 'a');
+    expect(hoisted.db.updateModel).not.toHaveBeenCalled();
+    await expect(removePlatformModelFromProject('db', 'tenant-1', 'p1', 'own-m')).rejects.toMatchObject({ status: 404 });
   });
 });
