@@ -18,7 +18,7 @@ import {
   SESSION_ISSUANCE_RATE_LIMIT,
   type RateLimitConfig,
 } from '@/lib/services/auth/rateLimiter';
-import { checkSharedRateLimit } from '@/lib/services/auth/sharedRateCounter';
+import { checkSharedRateLimit, peekSharedRateLimit } from '@/lib/services/auth/sharedRateCounter';
 import { DIRECTORY_READ_ONLY_FIELDS, isDirectoryManaged, providerOf } from '@/lib/iam/identity';
 import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
 import {
@@ -55,9 +55,9 @@ const PROFILE_EDIT_RATE_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSecond
 const MIN_PROFILE_NAME_LENGTH = 2;
 const MAX_PROFILE_NAME_LENGTH = 120;
 /**
- * Window of the per-account sign-in limit (AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS attempts per account, whatever
- * address they come from, counted across replicas when RATE_LIMIT_PROVIDER=redis). Sits next to the
- * per-address login limit.
+ * Window of the per-account sign-in limit (AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS failed attempts per account
+ * and client address, counted across replicas when RATE_LIMIT_PROVIDER=redis). Successful sign-ins do
+ * not count. Sits next to the per-address login limit.
  */
 export const LOGIN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 
@@ -94,9 +94,13 @@ function invalidBody(reply: FastifyReply): FastifyReply {
   return reply.code(400).send({ error: 'Invalid request body', code: 'invalid_body' });
 }
 
-/** Rate-limit key for the sign-in attempts of one account; the address is stored as a digest. */
-function loginAccountRateLimitKey(normalizedEmail: string): string {
-  return `login-account:${createHash('sha256').update(normalizedEmail).digest('base64url')}`;
+/**
+ * Rate-limit key for the failed sign-ins of one account from one client address; the account
+ * is stored as a digest.
+ */
+function loginAccountRateLimitKey(normalizedEmail: string, clientAddress: string | null | undefined): string {
+  const digest = createHash('sha256').update(normalizedEmail).digest('base64url');
+  return clientRateLimitKey(`login-account:${digest}`, clientAddress);
 }
 
 /**
@@ -390,11 +394,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       const normalizedEmail = email.trim().toLowerCase();
 
       const accountMaxAttempts = getConfig().auth.loginAccountMaxAttempts;
+      const accountRateConfig: RateLimitConfig = {
+        maxAttempts: accountMaxAttempts,
+        windowSeconds: LOGIN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS,
+      };
+      const accountRateKey = loginAccountRateLimitKey(normalizedEmail, clientIp);
       const accountLimit = accountMaxAttempts > 0
-        ? await checkSharedRateLimit(loginAccountRateLimitKey(normalizedEmail), {
-          maxAttempts: accountMaxAttempts,
-          windowSeconds: LOGIN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS,
-        })
+        ? await peekSharedRateLimit(accountRateKey, accountRateConfig)
         : null;
       if (accountLimit && !accountLimit.allowed) {
         sendRateLimitHeaders(
@@ -409,6 +415,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           .code(429)
           .send({ error: 'Too many login attempts. Please try again later.' });
       }
+
+      const recordFailedAccountAttempt = async (): Promise<void> => {
+        if (accountMaxAttempts > 0) await checkSharedRateLimit(accountRateKey, accountRateConfig);
+      };
 
       const db = await getDatabase();
 
@@ -474,6 +484,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
 
         if (!slugAuthResult) {
+          await recordFailedAccountAttempt();
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
@@ -607,6 +618,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         }
 
         if (!tenant || !user) {
+          await recordFailedAccountAttempt();
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });

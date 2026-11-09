@@ -157,33 +157,50 @@ describe('POST /api/auth/login', () => {
       expect(bcrypt.compare).not.toHaveBeenCalled();
     });
 
-    it('limits sign-in attempts per account across client addresses', async () => {
-      (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
-      const maxAttempts = getConfig().auth.loginAccountMaxAttempts;
-      expect(maxAttempts).toBe(20);
-      for (let i = 0; i < maxAttempts; i++) {
-        const res = await login(
-          { email: 'admin@acme.com', password: `guess-${i}`, slug: 'acme-corp' },
-          {},
-          `198.51.100.${i + 1}`,
-        );
-        expect(res.statusCode, `attempt ${i + 1}`).toBe(401);
+    async function withAccountLimit(max: string, fn: () => Promise<void>) {
+      process.env.AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS = max;
+      reloadConfig();
+      try {
+        await fn();
+      } finally {
+        delete process.env.AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS;
+        reloadConfig();
       }
-      const refused = await login(
-        { email: ' ADMIN@acme.com ', password: 'guess-last', slug: 'acme-corp' },
-        {},
-        '198.51.100.250',
-      );
-      expect(refused.statusCode).toBe(429);
-      expect(Number(refused.headers['retry-after'])).toBeGreaterThan(0);
+    }
 
-      // Another account is not affected.
-      const other = await login(
-        { email: 'someone@acme.com', password: 'guess', slug: 'acme-corp' },
-        {},
-        '198.51.100.251',
-      );
-      expect(other.statusCode).toBe(401);
+    it('limits failed sign-ins per account and client address', async () => {
+      await withAccountLimit('3', async () => {
+        const credentials = { email: 'admin@acme.com', slug: 'acme-corp' };
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        for (let i = 0; i < 3; i++) {
+          const res = await login({ ...credentials, password: `guess-${i}` }, {}, '198.51.100.7');
+          expect(res.statusCode, `attempt ${i + 1}`).toBe(401);
+        }
+        const refused = await login({ ...credentials, email: ' ADMIN@acme.com ', password: 'guess-last' }, {}, '198.51.100.7');
+        expect(refused.statusCode).toBe(429);
+        expect(Number(refused.headers['retry-after'])).toBeGreaterThan(0);
+
+        // The same account from another address, and another account from this one, are not affected.
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+        const elsewhere = await login({ ...credentials, password: 'password123' }, {}, '198.51.100.8');
+        expect(elsewhere.statusCode).toBe(200);
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        const other = await login({ email: 'someone@acme.com', slug: 'acme-corp', password: 'guess' }, {}, '198.51.100.7');
+        expect(other.statusCode).toBe(401);
+      });
+    });
+
+    it('does not count successful sign-ins against the per-account limit', async () => {
+      await withAccountLimit('3', async () => {
+        const credentials = { email: 'admin@acme.com', slug: 'acme-corp' };
+        for (let i = 0; i < 6; i++) {
+          const res = await login({ ...credentials, password: 'password123' }, {}, '198.51.100.20');
+          expect(res.statusCode, `sign-in ${i + 1}`).toBe(200);
+        }
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        const failed = await login({ ...credentials, password: 'guess' }, {}, '198.51.100.20');
+        expect(failed.statusCode).toBe(401);
+      });
     });
 
     it('does not limit per account when AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS is 0', async () => {
