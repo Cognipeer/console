@@ -29,6 +29,7 @@ import { tracingHealthEn } from './tracingHealth.en';
 import { projectsAccessEn } from './projectsAccess.en';
 import { modelCatalogEn } from './modelCatalog.en';
 import { webSearchEn } from './webSearch.en';
+import { platformStorageEn } from './platformStorage.en';
 
 export const en = {
   // Projects list / create / detail / limits / settings (projectsAccess.en.ts).
@@ -6503,6 +6504,8 @@ export const en = {
   modelCatalog: modelCatalogEn,
   // The Web Search pages: instances on top of provider connections (webSearch.en.ts).
   webSearch: webSearchEn,
+  // Platform file and vector providers (platformStorage.en.ts).
+  platformStorage: platformStorageEn,
   modelPriceCatalog: {
     confidence: {
       exact: 'Exact',

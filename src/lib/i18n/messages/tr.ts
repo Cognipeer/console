@@ -38,6 +38,7 @@ import { tracingHealthTr } from './tracingHealth.tr';
 import { projectsAccessTr } from './projectsAccess.tr';
 import { modelCatalogTr } from './modelCatalog.tr';
 import { webSearchTr } from './webSearch.tr';
+import { platformStorageTr } from './platformStorage.tr';
 
 export const tr: typeof en = {
   ...en,
@@ -4744,6 +4745,8 @@ export const tr: typeof en = {
   modelCatalog: modelCatalogTr,
   // Web Arama sayfaları: sağlayıcı bağlantıları üzerindeki örnekler (webSearch.tr.ts).
   webSearch: webSearchTr,
+  // Platform dosya ve vektör sağlayıcıları (platformStorage.tr.ts).
+  platformStorage: platformStorageTr,
   modelPriceCatalog: {
     confidence: {
       exact: 'Birebir',
