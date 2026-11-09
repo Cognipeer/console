@@ -1,15 +1,22 @@
 'use client';
 
 /**
- * The single left menu (see sidebarNav.ts): Home, Reports, the services the person can open under their categories,
- * Settings, help and a toggle to an icon-only strip. Someone with few services gets one plain list instead of
- * categories. Nothing is pinned: every service has its one row, and search (⌘K) and Home's recently opened services
- * are the shortcuts.
+ * The single left menu (see sidebarNav.ts): Home, Reports, Favorites, the services the person can open under their
+ * categories, Settings, help and a toggle to an icon-only strip. Someone with few services gets one plain list instead
+ * of categories.
+ *
+ * Favorites are the services the person pinned, in the order pinned, kept in this browser (useLauncherState, the store
+ * the old rail used). Every service row has a pin: shown on hover or keyboard focus with a pointer, always on a touch
+ * screen. A service's own level has one in its header. Favorites stay closed: a row under Home and Reports (with their
+ * count) opens them as a level of their own, the icon strip has one button that opens them in a menu, and the nested
+ * style folds them, closed. A favorite is a shortcut to the service's page and keeps its pin shown to take it out
+ * again; while that service is in view it is only named, and the service's own row is the one marked.
  *
  * Its style is SIDEBAR_STYLE:
  * - `drill` (the menu): one level at a time. The first lists the services; one with several pages opens a level of its
- *   own (its pages and a way back) and one with a single page is a plain link. Reports and Settings are levels too. The
- *   menu opens at the level of the page in view, and the first level names that page next to its service.
+ *   own (its pages, a way back and its pin) and one with a single page is a plain link. Reports, Favorites and Settings
+ *   are levels too. The menu opens at the level of the page in view (never Favorites), and the first level names that
+ *   page next to its service.
  * - `tree` (kept): each category folds; the service in view opens its pages in place, Settings its grouped pages while
  *   one of them is in view. The page under the service's own name (Agents › Agents) is not repeated there: the
  *   service's row is that page.
@@ -26,7 +33,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Tooltip } from '@mantine/core';
+import { Menu, Tooltip } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import {
   IconArrowLeft,
@@ -37,6 +44,8 @@ import {
   IconLayoutDashboard,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
+  IconPin,
+  IconPinFilled,
   IconSettings,
   type Icon,
 } from '@tabler/icons-react';
@@ -63,10 +72,13 @@ const COLLAPSED_KEY = 'cgn:sidebar:collapsed';
 const CLOSED_GROUPS_KEY = 'cgn:sidebar:closed-groups';
 const HOME_HREF = '/dashboard/overview';
 
-/** The levels of the step-by-step style: the first one, Settings, Reports, or a service's id. */
+/** The levels of the step-by-step style: the first one, Settings, Reports, Favorites, or a service's id. */
 const ROOT_LEVEL = '';
 const SETTINGS_LEVEL = '@settings';
 const REPORTS_LEVEL = '@reports';
+const FAVORITES_LEVEL = '@favorites';
+
+const NO_PINS: ReadonlySet<string> = new Set();
 
 function readStored<T>(key: string, fallback: T): T {
   try {
@@ -172,6 +184,10 @@ export interface SidebarProps {
   reportsItems?: SubNavItem[];
   /** A Reports page is in view. */
   reportsActive?: boolean;
+  /** The ids of the services the person pinned, in the order pinned: listed under Favorites. */
+  pinnedIds?: ReadonlySet<string>;
+  /** Pins or unpins a service. Without it the menu offers no pin and shows no Favorites. */
+  onTogglePin?: (id: string) => void;
   /** Opens the docs panel on the page of the service in view. */
   onHelpClick: () => void;
   pathname: string;
@@ -193,6 +209,8 @@ export default function Sidebar({
   settingsActive,
   reportsItems,
   reportsActive = false,
+  pinnedIds = NO_PINS,
+  onTogglePin,
   onHelpClick,
   pathname,
   variant = 'side',
@@ -221,6 +239,14 @@ export default function Sidebar({
   const listed = useMemo(() => sidebarServices(services), [services]);
   const groups = useMemo(() => sidebarGroups(services), [services]);
   const reports = reportsItems ?? [];
+  // A pin that names a service the person can no longer open is skipped (it stays stored for when they can again).
+  const favorites = useMemo(() => {
+    if (!onTogglePin) return [];
+    const byId = new Map(listed.map((service) => [String(service.id), service]));
+    return [...pinnedIds]
+      .map((id) => byId.get(id))
+      .filter((service): service is DashboardServiceDefinition => service !== undefined);
+  }, [listed, pinnedIds, onTogglePin]);
   const homeActive = pathname === '/dashboard' || pathname.startsWith(HOME_HREF);
   const showSettings = settingsItems.length > 0;
   const servicePages = (service: DashboardServiceDefinition) =>
@@ -246,6 +272,13 @@ export default function Sidebar({
     setLevel(levelInView);
     setLevelMotion(null);
   }
+  // Favorites' level closes once its last favorite is taken out: a pin added later must not open it again.
+  if (level === FAVORITES_LEVEL && favorites.length === 0) {
+    setLevel(ROOT_LEVEL);
+    setLevelMotion('back');
+  }
+  // The nested style's Favorites fold, closed on every page load.
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
   // Where focus and the list's scroll go once a level is shown: the way back on the way in, the row that opened the
   // level (and the first level's scroll) on the way back.
   const levelMove = useRef<{ focus: string; scrollTop: number } | null>(null);
@@ -253,9 +286,13 @@ export default function Sidebar({
 
   // The page in view stays in sight in a long menu (a Settings page sits below every category): the last marked
   // entry is the deepest one, the page under its service. Checked again when the rows above it settle — the reports
-  // arrive after the first render (from the reports API) and the services once the engine has answered.
+  // arrive after the first render (from the reports API), the favorites once the browser's pins are read, and the
+  // services once the engine has answered.
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The icon strip's Favorites button, for its tooltip.
+  const favoritesButton = useRef<HTMLButtonElement>(null);
   const reportsCount = reports.length;
+  const favoritesCount = favorites.length;
   const listedCount = listed.length;
   useEffect(() => {
     const container = scrollRef.current;
@@ -268,7 +305,7 @@ export default function Sidebar({
     if (rect.top < box.top || rect.bottom > box.bottom) {
       container.scrollTop += rect.top - box.top - box.height / 3;
     }
-  }, [pathname, collapsed, settingsActive, reportsCount, listedCount, drill]);
+  }, [pathname, collapsed, settingsActive, reportsCount, favoritesCount, listedCount, drill]);
 
   useEffect(() => {
     const move = levelMove.current;
@@ -286,7 +323,14 @@ export default function Sidebar({
     setLevel(next);
   };
   const closeLevel = () => {
-    const service = level === SETTINGS_LEVEL ? 'settings' : level === REPORTS_LEVEL ? 'reports' : `service-${level}`;
+    const service =
+      level === SETTINGS_LEVEL
+        ? 'settings'
+        : level === REPORTS_LEVEL
+          ? 'reports'
+          : level === FAVORITES_LEVEL
+            ? 'favorites'
+            : `service-${level}`;
     levelMove.current = cameFrom.current ?? { focus: `row-${service}`, scrollTop: 0 };
     cameFrom.current = null;
     setLevelMotion('back');
@@ -351,6 +395,51 @@ export default function Sidebar({
           {reports.length > 0
             ? iconLink(REPORTS_HREF, IconChartBar, tNav('sidebarReports'), reportsActive ? 'page' : null, 'sidebar-reports')
             : null}
+          {favorites.length > 0 ? (
+            // One button: the favorites open in a menu beside it (shortcuts; the service in view is marked below).
+            <>
+              <Menu position="right-start" offset={8} shadow="md" width={240}>
+                <Menu.Target>
+                  <button
+                    ref={favoritesButton}
+                    type="button"
+                    className={classes.iconBtn}
+                    aria-label={tNav('sidebarFavorites')}
+                    data-testid="sidebar-favorites"
+                  >
+                    <IconPin size={18} stroke={1.7} />
+                  </button>
+                </Menu.Target>
+                <Menu.Dropdown data-testid="sidebar-favorites-menu">
+                  <Menu.Label>{tNav('sidebarFavorites')}</Menu.Label>
+                  {favorites.map((service) => {
+                    const ServiceIcon = service.icon;
+                    return (
+                      <Menu.Item
+                        key={service.id}
+                        component={Link}
+                        href={service.href}
+                        leftSection={<ServiceIcon size={16} stroke={1.7} />}
+                        data-testid={`sidebar-favorite-${service.id}`}
+                        {...getIntentProps(service.href)}
+                      >
+                        {tNav(service.navLabelKey)}
+                      </Menu.Item>
+                    );
+                  })}
+                </Menu.Dropdown>
+              </Menu>
+              {/* Pointed at the button, not wrapped around it: wrapped, the menu's aria-* would land on the tooltip. */}
+              <Tooltip
+                label={tNav('sidebarFavorites')}
+                target={favoritesButton}
+                position="right"
+                withArrow
+                offset={8}
+                openDelay={120}
+              />
+            </>
+          ) : null}
           {stripGroups.map((group) => (
             <Fragment key={group.category}>
               <div className={classes.iconDivider} />
@@ -469,33 +558,101 @@ export default function Sidebar({
       </div>
     ) : null;
 
-  /** A service's own link; in the tree style the service in view opens its pages under it. */
-  const serviceRow = (service: DashboardServiceDefinition, opts: { opensPages: boolean }) => {
+  /**
+   * Pins or unpins a service. `row`: on a service row, shown on hover or focus (`beforeArrow` on a row that opens a
+   * level, so the arrow stays at the edge); `favorite`: on a favorite, always shown; `level`: in a service level's header.
+   */
+  const pinButton = (
+    service: DashboardServiceDefinition,
+    label: string,
+    place: 'row' | 'beforeArrow' | 'favorite' | 'level',
+    testId: string,
+  ) => {
+    if (!onTogglePin) return null;
+    const isPinned = pinnedIds.has(String(service.id));
+    const action = tNav(isPinned ? 'sidebarUnpin' : 'sidebarPin', { service: label });
+    const placeClass =
+      place === 'level'
+        ? classes.levelPin
+        : place === 'favorite'
+          ? `${classes.pin} ${classes.pinStay}`
+          : place === 'beforeArrow'
+            ? `${classes.pin} ${classes.pinBeforeArrow}`
+            : classes.pin;
+    return (
+      <button
+        type="button"
+        className={`${placeClass} ${isPinned ? classes.pinned : ''}`}
+        aria-label={action}
+        aria-pressed={isPinned}
+        title={action}
+        onClick={() => onTogglePin(String(service.id))}
+        data-testid={testId}
+      >
+        {isPinned ? <IconPinFilled size={place === 'level' ? 15 : 13} /> : <IconPin size={place === 'level' ? 15 : 13} />}
+      </button>
+    );
+  };
+
+  /**
+   * A service's own link; in the tree style the service in view opens its pages under it. A favorite is the same link
+   * as a shortcut: it opens nothing under it and is only named while the service is in view.
+   */
+  const serviceRow = (service: DashboardServiceDefinition, opts: { opensPages: boolean; favorite?: boolean }) => {
     const ServiceIcon = service.icon;
     const label = tNav(service.navLabelKey);
     const active = activeService?.id === service.id;
-    const shown = opts.opensPages && active ? pagesUnder(activeItems) : [];
-    const mark = !active ? null : shown.some(itemActive) ? 'ancestor' : 'page';
+    const shown = opts.opensPages && !opts.favorite && active ? pagesUnder(activeItems) : [];
+    const mark = !active ? null : opts.favorite || shown.some(itemActive) ? 'ancestor' : 'page';
+    const scope = opts.favorite ? 'favorite' : 'service';
     return (
-      <Fragment key={`service-${service.id}`}>
+      <Fragment key={`${scope}-${service.id}`}>
         <div className={classes.row}>
           <Link
             href={service.href}
             className={`${classes.item} ${markClass(mark)}`}
             aria-current={mark === 'page' ? 'page' : mark ? 'true' : undefined}
             data-pending={pendingFor(service.href, active)}
-            data-testid={`sidebar-service-${service.id}`}
+            data-testid={`sidebar-${scope}-${service.id}`}
             onNavigate={onNavigate}
             {...getIntentProps(service.href)}
           >
             <ServiceIcon size={16} stroke={1.7} />
             <span className={classes.label}>{label}</span>
           </Link>
+          {opts.favorite
+            ? pinButton(service, label, 'favorite', `sidebar-pin-favorite-${service.id}`)
+            : pinButton(service, label, 'row', `sidebar-pin-${service.id}`)}
         </div>
         {pages(shown, label)}
       </Fragment>
     );
   };
+
+  /** The favorites, in the order pinned: what Favorites opens (its level step by step, its fold nested). */
+  const favoriteRows = () => favorites.map((service) => serviceRow(service, { opensPages: false, favorite: true }));
+
+  /** Nested style: Favorites folds under Home and Reports, closed; nothing while nothing is pinned. */
+  const favoritesFold = () =>
+    favorites.length > 0 ? (
+      <div className={classes.section}>
+        <div className={classes.group}>
+          <button
+            type="button"
+            className={classes.groupHeader}
+            aria-expanded={favoritesOpen}
+            aria-controls="sidebar-favorites-list"
+            onClick={() => setFavoritesOpen((open) => !open)}
+            data-testid="sidebar-favorites"
+          >
+            {favoritesOpen ? <IconChevronDown size={12} stroke={2} /> : <IconChevronRight size={12} stroke={2} />}
+            <span className={classes.label}>{tNav('sidebarFavorites')}</span>
+            <span className={classes.count}>{favorites.length}</span>
+          </button>
+          {favoritesOpen ? <div id="sidebar-favorites-list">{favoriteRows()}</div> : null}
+        </div>
+      </div>
+    ) : null;
 
   // Reports: the summary and the reports under their groups (a level of its own step by step, pages in place nested).
   const reportsShown = reportsActive ? reports : [];
@@ -545,6 +702,7 @@ export default function Sidebar({
           {pages(reportsShown, tNav('sidebarReports'))}
         </>
       ) : null}
+      {favoritesFold()}
 
       {flat ? (
         <div className={classes.section}>
@@ -605,6 +763,8 @@ export default function Sidebar({
     mark: 'page' | 'ancestor' | null;
     testId: string;
     after?: ReactNode;
+    /** The service's pin, beside the button (a button cannot hold another). */
+    pin?: ReactNode;
   }) => {
     const RowIcon = opts.icon;
     const current = opts.active ? opts.items.find(itemActive) : undefined;
@@ -626,6 +786,7 @@ export default function Sidebar({
           {hint ? <span className={classes.hint}>{hint}</span> : (opts.after ?? null)}
           <IconChevronRight size={14} stroke={1.8} className={classes.chev} />
         </button>
+        {opts.pin ?? null}
       </div>
     );
   };
@@ -635,15 +796,17 @@ export default function Sidebar({
     // One page: the service's own link.
     if (!items || items.length <= 1) return serviceRow(service, { opensPages: false });
     const active = activeService?.id === service.id;
+    const label = tNav(service.navLabelKey);
     return levelRow({
       rowKey: `row-service-${service.id}`,
       level: service.id,
       icon: service.icon,
-      label: tNav(service.navLabelKey),
+      label,
       items,
       active,
       mark: active ? 'page' : null,
       testId: `sidebar-service-${service.id}`,
+      pin: pinButton(service, label, 'beforeArrow', `sidebar-pin-${service.id}`),
     });
   };
 
@@ -664,6 +827,19 @@ export default function Sidebar({
         : reports.length === 1
           ? reportsLink
           : null}
+      {favorites.length > 0
+        ? levelRow({
+            rowKey: 'row-favorites',
+            level: FAVORITES_LEVEL,
+            icon: IconPin,
+            label: tNav('sidebarFavorites'),
+            items: [],
+            active: false,
+            mark: null,
+            testId: 'sidebar-favorites',
+            after: <span className={classes.count}>{favorites.length}</span>,
+          })
+        : null}
       {flat ? (
         <div className={classes.section}>{listed.map((service) => drillServiceRow(service))}</div>
       ) : (
@@ -699,31 +875,60 @@ export default function Sidebar({
     </>
   );
 
-  /** A level of its own: the way back under the owner's name, and its pages with their group headings. */
-  const ownLevel = (ownerLabel: string, items: SubNavItem[]) => (
+  /** A level's header: the way back under the owner's name, and a service's pin (not for Reports, Favorites or Settings). */
+  const levelHeader = (ownerLabel: string, service?: DashboardServiceDefinition) => (
+    <div className={classes.levelHeader}>
+      <button
+        type="button"
+        className={classes.backBtn}
+        onClick={closeLevel}
+        title={tNav('sidebarBack')}
+        data-testid="sidebar-back"
+        data-focus-key="back"
+      >
+        <IconArrowLeft size={16} stroke={1.8} />
+        <span className={classes.levelTitle}>{ownerLabel}</span>
+        <span className={classes.srOnly}>{tNav('sidebarBack')}</span>
+      </button>
+      {service ? pinButton(service, ownerLabel, 'level', 'sidebar-level-pin') : null}
+    </div>
+  );
+
+  /** A level of its own: its header, and its pages with their group headings. */
+  const ownLevel = (ownerLabel: string, items: SubNavItem[], service?: DashboardServiceDefinition) => (
     <>
-      <div className={classes.levelHeader}>
-        <button
-          type="button"
-          className={classes.backBtn}
-          onClick={closeLevel}
-          title={tNav('sidebarBack')}
-          data-testid="sidebar-back"
-          data-focus-key="back"
-        >
-          <IconArrowLeft size={16} stroke={1.8} />
-          <span className={classes.levelTitle}>{ownerLabel}</span>
-          <span className={classes.srOnly}>{tNav('sidebarBack')}</span>
-        </button>
-      </div>
+      {levelHeader(ownerLabel, service)}
       <div className={classes.levelPages} role="group" aria-label={ownerLabel}>
         {items.map((item) => pageLink(item, { level: true, ownerLabel }))}
       </div>
     </>
   );
 
+  /** Favorites' level: its header, and the favorites in the order pinned, each with its pin. */
+  const favoritesLevel = () => (
+    <>
+      {levelHeader(tNav('sidebarFavorites'))}
+      <div className={classes.levelPages} role="group" aria-label={tNav('sidebarFavorites')}>
+        {favoriteRows()}
+      </div>
+    </>
+  );
+
   const stepByStep = () => {
-    const special = level === SETTINGS_LEVEL || level === REPORTS_LEVEL;
+    // Favorites' level shows while something is pinned: taking out the last favorite there goes back to the first level.
+    if (level === FAVORITES_LEVEL && favorites.length > 0) {
+      return (
+        <div
+          key="level-favorites"
+          className={classes.level}
+          data-motion={levelMotion ?? undefined}
+          data-testid="sidebar-level-favorites"
+        >
+          {favoritesLevel()}
+        </div>
+      );
+    }
+    const special = level === SETTINGS_LEVEL || level === REPORTS_LEVEL || level === FAVORITES_LEVEL;
     const levelService = level && !special ? listed.find((service) => service.id === level) : undefined;
     const levelItems =
       level === SETTINGS_LEVEL
@@ -752,7 +957,9 @@ export default function Sidebar({
         data-motion={levelMotion ?? undefined}
         data-testid={`sidebar-level-${testLevel}`}
       >
-        {shownLevel === ROOT_LEVEL || !levelItems ? firstLevel() : ownLevel(ownerLabel, levelItems)}
+        {shownLevel === ROOT_LEVEL || !levelItems
+          ? firstLevel()
+          : ownLevel(ownerLabel, levelItems, special ? undefined : levelService)}
       </div>
     );
   };

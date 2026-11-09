@@ -244,13 +244,17 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
 
   const settingsHref = settingsServices[0]?.href ?? '/dashboard/tokens';
 
+  // The single left menu's Favorites start empty: the person pins from the menu. The icon rail starts with the
+  // services marked defaultPinned. Pins kept in this browser show either way.
   const defaultPinnedIds = useMemo(
     () =>
-      allowedServices
-        .filter(
-          (svc) => svc.defaultPinned && svc.id !== 'services-home' && !svc.isSettings,
-        )
-        .map((svc) => svc.id),
+      SIDEBAR_NAV
+        ? []
+        : allowedServices
+            .filter(
+              (svc) => svc.defaultPinned && svc.id !== 'services-home' && !svc.isSettings,
+            )
+            .map((svc) => svc.id),
     [allowedServices],
   );
 
@@ -470,6 +474,9 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                 settingsActive={isSettingsActive}
                 reportsItems={reportsItems}
                 reportsActive={reportsActive}
+                pinnedIds={pinned}
+                // The pins are read from this browser after the first render: none to change before then.
+                onTogglePin={hydrated ? togglePin : undefined}
                 onHelpClick={openServiceDocs}
                 pathname={pathname}
               />
@@ -553,6 +560,8 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                     settingsActive={isSettingsActive}
                     reportsItems={reportsItems}
                     reportsActive={reportsActive}
+                    pinnedIds={pinned}
+                    onTogglePin={hydrated ? togglePin : undefined}
                     onHelpClick={openServiceDocs}
                     pathname={pathname}
                   />
