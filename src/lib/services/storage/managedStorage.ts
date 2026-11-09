@@ -169,6 +169,18 @@ export function wrapNameScopedVectorRuntime(
   return runtime;
 }
 
+/**
+ * The driver whose contract describes a provider's capabilities: the route's driver for a platform record (the record's
+ * own driver is a placeholder), the record's driver otherwise. Only the route's driver id is read, never its connection.
+ */
+export function storageCapabilityDriverOf(
+  kind: ManagedStorageKind,
+  record: { key: string; driver: string; platform?: boolean },
+): string {
+  if (!record.platform) return record.driver;
+  return listManagedRoutes({ providerKey: record.key, kind })[0]?.driver ?? record.driver;
+}
+
 export interface StorageProviderContext {
   tenantDbName: string;
   tenantId: string;

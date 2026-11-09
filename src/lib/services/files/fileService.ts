@@ -14,12 +14,14 @@ import {
     type FileObjectHandle,
     type ProviderCapabilityFlags,
 } from '@/lib/providers';
+import { listManagedRoutes } from '@/enterprise/managed-credits';
+import { getManagedStorageRuntime, loadStorageProvider } from '@/lib/services/storage/managedStorage';
 import { hasLoneSurrogate, maxStorageDownloadBytes } from '@/lib/providers/contracts/storageLimits';
 import {
     createProviderConfig,
     getProviderConfigByKey,
     listProviderConfigs,
-    loadProviderRuntimeData,
+    redactPlatformProvider,
     type CreateProviderConfigInput,
     type ProviderConfigView,
 } from '@/lib/services/providers/providerService';
@@ -97,7 +99,27 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
     return db;
 }
 
+/** The capability keys a view of a platform provider may carry: what the store can do, never what serves it. */
+const PLATFORM_FILE_CAPABILITY_KEYS = ['supportsMarkdownConversion', 'supportsBulkListing'] as const;
+
 export function attachDriverCapabilities(provider: ProviderConfigView): FileProviderView {
+    if (provider.platform) {
+        // The record's own driver is a placeholder; the route's contract says what the store can do.
+        const view: FileProviderView = { ...redactPlatformProvider(provider) };
+        const driver = listManagedRoutes({ providerKey: provider.key, kind: 'file' })[0]?.driver;
+        if (!driver) return view;
+        try {
+            const capabilities = providerRegistry.getContract(driver).capabilities ?? {};
+            const shown: ProviderCapabilityFlags = {};
+            for (const key of PLATFORM_FILE_CAPABILITY_KEYS) {
+                if (capabilities[key] !== undefined) shown[key] = capabilities[key];
+            }
+            return { ...view, driverCapabilities: shown };
+        } catch {
+            return view;
+        }
+    }
+
     try {
         const contract = providerRegistry.getContract(provider.driver);
         return {
@@ -400,18 +422,23 @@ async function buildRuntimeContext(
     // files and removed knowledge sources are still cleaned up.
     if (!options.cleanup) await assertServiceEnabled({ tenantDbName, tenantId }, 'files');
 
-    const { record, credentials } = await loadProviderRuntimeData(
+    const loaded = await loadStorageProvider('file', {
         tenantDbName,
-        {
-            tenantId,
-            key: providerKey,
-            projectId,
-        },
-    ).catch((error: unknown) => {
+        tenantId,
+        providerKey,
+        projectId,
+    }).catch((error: unknown) => {
         throw explainProviderLookupFailure(error, providerKey);
     });
+    const { record, credentials } = loaded;
 
     ensureFileProvider(record);
+
+    // A platform provider: the operator's backend, confined to the tenant's own root. Its connection is never read here.
+    if (loaded.managed) {
+        const runtime = await getManagedStorageRuntime<FileProviderRuntime>('file', { ...loaded, managed: loaded.managed }, { tenantId, projectId });
+        return { runtime, record };
+    }
 
     // The file service's own pool namespace: another caller that pools a runtime of the same provider (the sandbox
     // volumes do, under `file:<tenant>:<key>`) hashes it differently, and two callers that share a pool key but not

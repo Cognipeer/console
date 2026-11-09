@@ -28,6 +28,8 @@ import {
   getVectorIndexQueryStats,
   VectorAttachRequiresDetailsError,
   VectorAttachNotFoundError,
+  VectorAttachNotAvailableError,
+  VectorMigrationNotAvailableError,
 } from '@/lib/services/vector';
 import type { VectorMetric } from '@/lib/services/vector/types';
 import type { VectorMigrationStatus } from '@/lib/database/provider/types.base';
@@ -414,6 +416,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ index });
     } catch (error) {
+      if (error instanceof VectorAttachNotAvailableError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code });
+      }
       if (error instanceof VectorAttachRequiresDetailsError) {
         return reply.code(422).send({ error: error.message, code: 'VECTOR_ATTACH_REQUIRES_DETAILS' });
       }
@@ -851,6 +856,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ migration });
     } catch (error) {
+      if (error instanceof VectorMigrationNotAvailableError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code });
+      }
       if (error instanceof Error && (error.message.includes('not found') || error.message.includes('cannot be the same'))) {
         return reply.code(400).send({ error: error.message });
       }

@@ -22,7 +22,8 @@ import {
   queryVectorIndex,
   updateVectorIndex,
   upsertVectors,
-  type VectorIndexRecord,
+  VectorAttachNotAvailableError,
+  type VectorIndexView,
   type VectorMetric,
 } from '@/lib/services/vector';
 import {
@@ -37,7 +38,7 @@ import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-vector');
 
-function serializeIndex(index: VectorIndexRecord) {
+function serializeIndex(index: VectorIndexView) {
   return {
     ...index,
     indexId: index.key,
@@ -213,6 +214,9 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ index: serializeIndex(index) });
     } catch (error) {
+      if (error instanceof VectorAttachNotAvailableError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code });
+      }
       logger.error('Create client vector index error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
