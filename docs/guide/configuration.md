@@ -364,6 +364,26 @@ shared by all replicas.
 | `QUEUE_PREFIX` | BullMQ key prefix | `console:q:` |
 | `QUEUE_DEFAULT_ATTEMPTS` | Default retry attempts per job | `3` |
 | `QUEUE_DEFAULT_BACKOFF_MS` | Default backoff between retries | `1000` |
+| `REDTEAM_SCAN_CONCURRENCY` | Red-team scans run at once per node | `2` |
+| `DATASET_GEN_CONCURRENCY` | Dataset generation jobs run at once per node | `2` |
+| `EVALUATION_RUN_CONCURRENCY` | Evaluation runs executed at once per node | `2` |
+| `ANALYSIS_RUN_CONCURRENCY` | Analysis runs executed at once per node | `2` |
+| `ANALYSIS_MAX_RUN_CONVERSATIONS` | Upper bound of conversations one analysis run reads | `5000` |
+| `RAG_INGEST_CONCURRENCY` | Documents indexed at once per node | `2` |
+| `RAG_INGEST_BOOT_RESUME_MAX` | Interrupted ingest jobs resumed at startup | `500` |
+| `RAG_REINDEX_CONCURRENCY` | Reindex jobs run at once per node | `1` |
+| `VECTOR_MIGRATION_CONCURRENCY` | Vector migration jobs run at once per node | `2` |
+| `CRAWLER_RUN_CONCURRENCY` | Crawl runs executed at once per node | `2` |
+| `CRAWLER_RESTART_ORPHANED_RUNS` | Re-queue crawl runs that were in flight when the process stopped; `false` disables | `true` |
+| `BROWSER_ACTION_CONCURRENCY` | Browser actions executed at once per node | `4` |
+| `BATCH_ITEM_CONCURRENCY` | Batch items processed at once per node | `4` |
+| `BATCH_MAX_REQUESTS` | Maximum requests accepted in one batch | `10000` |
+| `SNAPSHOT_JOB_CONCURRENCY` | Snapshot jobs run at once per node | `2` |
+| `MCP_INVOKE_CONCURRENCY` | MCP tool invocations at once per node | `4` |
+| `EVALUATION_INVOKER` | `gateway` routes evaluation model calls through the gateway; any other value invokes in-process | in-process |
+| `TENANT_SCOPE_STRICT` | Set to `1` to make a tenant query outside a `runWithTenantScope()` scope throw instead of warn (recommended for dev/CI) | off |
+
+The concurrency and limit values are positive integers; an unset, zero or non-numeric value uses the default.
 
 See [Cluster](/guide/cluster) for the full topology / assignment model.
 
