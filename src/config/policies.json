@@ -251,8 +251,11 @@
       "endpoints": [
         "/api/websearch/providers",
         "/api/websearch/providers/*",
+        "/api/websearch/instances",
+        "/api/websearch/instances/*",
         "/api/websearch/search",
         "/api/client/v1/websearch/providers",
+        "/api/client/v1/websearch/instances",
         "/api/client/v1/websearch/search"
       ]
     },

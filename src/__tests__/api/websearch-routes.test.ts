@@ -23,6 +23,13 @@ vi.mock('@/lib/services/webSearch', () => ({
   runWebSearch: vi.fn(),
 }));
 
+vi.mock('@/lib/services/webSearch/webSearchInstanceService', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/services/webSearch/webSearchInstanceService')>(
+    '@/lib/services/webSearch/webSearchInstanceService',
+  );
+  return { ...actual, getWebSearchInstance: vi.fn(), listWebSearchInstances: vi.fn() };
+});
+
 vi.mock('@/lib/services/providers/providerService', () => ({
   getProviderConfigByKey: vi.fn(),
   redactPlatformProvider: (view: unknown) => view,
@@ -69,6 +76,10 @@ import {
   runWebSearch,
 } from '@/lib/services/webSearch';
 import { getProviderConfigByKey } from '@/lib/services/providers/providerService';
+import {
+  getWebSearchInstance,
+  listWebSearchInstances,
+} from '@/lib/services/webSearch/webSearchInstanceService';
 import { requireApiTokenFromHeader, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
@@ -148,6 +159,8 @@ beforeEach(() => {
   (listWebSearchRunLogs as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_LOGS);
   (runWebSearch as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_RESULT);
   (getProviderConfigByKey as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_PROVIDER);
+  (listWebSearchInstances as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  (getWebSearchInstance as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
 });
 
@@ -311,7 +324,7 @@ describe('GET /api/client/v1/websearch/providers', () => {
     expect(res.statusCode).toBe(200);
     const body = parseJsonBody<{ providers: Array<Record<string, unknown>> }>(res.body);
     expect(body.providers).toEqual([
-      { key: 'brave-main', driver: 'brave-search', label: 'Brave', status: 'active', aiAnswer: true },
+      { key: 'brave-main', driver: 'brave-search', label: 'Brave', status: 'active', aiAnswer: true, kind: 'provider' },
     ]);
   });
 
@@ -322,7 +335,7 @@ describe('GET /api/client/v1/websearch/providers', () => {
       url: '/api/client/v1/websearch/providers',
       headers: { authorization: 'Bearer tok_abc' },
     });
-    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1');
+    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', undefined);
   });
 
   it('returns 401 for an invalid token', async () => {
