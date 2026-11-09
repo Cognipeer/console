@@ -399,6 +399,12 @@ export interface AppConfig {
     providerPrivateNetworksDeny: string[];
     /** Default timeout applied to guarded outbound requests (ms). */
     defaultTimeoutMs: number;
+    /**
+     * What happens to a provider runtime call (model, embedding, image, speech, moderation, OCR and web search
+     * requests) whose target the outbound guard refuses. `enforce` refuses it. `warn` logs a rate-limited warning
+     * and lets the call through. The endpoint checks made when a provider is saved are the same in both modes.
+     */
+    providerRuntimeGuard: 'enforce' | 'warn';
   };
 
   systemModels: {
@@ -1130,6 +1136,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       providerPrivateNetworks: semicolonList(source, 'PROVIDER_PRIVATE_NETWORKS', []),
       providerPrivateNetworksDeny: list(source, 'PROVIDER_PRIVATE_NETWORKS_DENY', []),
       defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),
+      providerRuntimeGuard: oneOf(source, 'PROVIDER_RUNTIME_GUARD', ['enforce', 'warn'], 'warn'),
     },
 
     systemModels: {

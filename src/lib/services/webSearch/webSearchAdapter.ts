@@ -16,7 +16,7 @@ import { withResilience } from '@/lib/core/resilience';
 import { currentTurnSignal } from '@/lib/core/turnSignal';
 import { getRequestContext } from '@/lib/core/requestContext';
 import { safeFetch } from '@/lib/security/outboundFetch';
-import { endpointGuardOptions } from '@/lib/services/providers/providerEndpointGuard';
+import { providerRuntimeGuardOptions } from '@/lib/services/providers/runtimeGuard';
 import type { IProviderRecord } from '@/lib/database';
 import { DEFAULT_RESULTS, asSafeSearch, asString, clampCount } from './searchOptions';
 import type { WebSearchInput, WebSearchResultItem } from './types';
@@ -77,13 +77,11 @@ export async function callWebSearchProvider(
 /**
  * Every search call goes through the outbound guard: the target (including a configured endpoint) is validated and
  * pinned for the connection, and a redirect is handed back instead of followed, so credential headers stay with the
- * host they were configured for.
+ * host they were configured for. `PROVIDER_RUNTIME_GUARD=warn` logs a refused target instead of refusing it.
  */
-function searchFetch(url: string | URL, init: RequestInit): Promise<Response> {
-  return safeFetch(String(url), init, {
-    ...endpointGuardOptions(getRequestContext()?.tenantId),
-    followRedirects: false,
-  });
+async function searchFetch(url: string | URL, init: RequestInit): Promise<Response> {
+  const target = String(url);
+  return safeFetch(target, init, await providerRuntimeGuardOptions(target, getRequestContext()?.tenantId));
 }
 
 function requireApiKey(input: DriverCallInput, providerLabel: string): string {

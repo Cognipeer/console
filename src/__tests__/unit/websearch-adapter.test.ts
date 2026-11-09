@@ -19,6 +19,7 @@ vi.mock('@/lib/services/providers/providerEndpointGuard', () => ({
   endpointGuardOptions: vi.fn(() => ({ forceBlock: true })),
 }));
 
+import { reloadConfig } from '@/lib/core/config';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { callWebSearchProvider, parseDuckDuckGoHtml } from '@/lib/services/webSearch/webSearchAdapter';
 import { safeFetch } from '@/lib/security/outboundFetch';
@@ -49,10 +50,14 @@ const realFetch = global.fetch;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  process.env.PROVIDER_RUNTIME_GUARD = 'enforce';
+  reloadConfig();
 });
 
 afterEach(() => {
   global.fetch = realFetch;
+  delete process.env.PROVIDER_RUNTIME_GUARD;
+  reloadConfig();
 });
 
 describe('driver dispatch and credential validation', () => {
