@@ -23,7 +23,7 @@ export const usageLimitsEn = {
     },
     storage_quota_exceeded: {
       title: 'Storage is full',
-      message: 'This would take your workspace over its storage allowance. Remove some files and try again.',
+      message: 'This would take your workspace over its storage allowance. Remove some files or vectors and try again.',
     },
     seat_limit_reached: {
       title: 'Seat limit reached',

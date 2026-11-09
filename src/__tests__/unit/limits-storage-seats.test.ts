@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   plan: { tenantId: 't1', mode: 'on', limits: null } as any,
   db: {
     sumFileRecordBytes: vi.fn(async () => 0),
+    sumVectorIndexStoredBytes: vi.fn(async () => 0),
     iamCountUsers: vi.fn(async (_f: unknown) => 0),
   },
   events: [] as any[],
@@ -20,6 +21,7 @@ import {
   assertStorageStock,
   checkStorageStock,
   clearStorageCacheForTests,
+  getStoredBytes,
   noteStoredBytes,
 } from '@/lib/limits/storage';
 import { assertSeats, checkSeats } from '@/lib/limits/seats';
@@ -37,6 +39,8 @@ beforeEach(() => {
   h.events.length = 0;
   h.db.sumFileRecordBytes.mockReset();
   h.db.sumFileRecordBytes.mockResolvedValue(0);
+  h.db.sumVectorIndexStoredBytes.mockReset();
+  h.db.sumVectorIndexStoredBytes.mockResolvedValue(0);
   h.db.iamCountUsers.mockReset();
   h.db.iamCountUsers.mockResolvedValue(0);
 });
@@ -76,6 +80,16 @@ describe('checkStorageStock', () => {
     expect(h.db.sumFileRecordBytes).toHaveBeenCalledTimes(1);
     noteStoredBytes('t1', -5000);
     expect((await checkStorageStock({ tenantId: 't1', incomingBytes: 1 })).used).toBe(0);
+  });
+
+  it('counts the vectors on platform providers with the files', async () => {
+    setPlan('on', { storageBytes: 1000 });
+    h.db.sumFileRecordBytes.mockResolvedValue(400);
+    h.db.sumVectorIndexStoredBytes.mockResolvedValue(550);
+    expect(await getStoredBytes('t1')).toBe(950);
+    const d = await checkStorageStock({ tenantId: 't1', incomingBytes: 100 });
+    expect(d).toMatchObject({ allowed: false, used: 950 });
+    h.db.sumVectorIndexStoredBytes.mockResolvedValue(0);
   });
 
   it('fails open when the sum cannot be read', async () => {

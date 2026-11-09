@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   plan: { tenantId: 't1', mode: 'on', limits: null } as any,
-  db: { sumFileRecordBytes: vi.fn(async () => 0) },
+  db: { sumFileRecordBytes: vi.fn(async () => 0), sumVectorIndexStoredBytes: vi.fn(async () => 0) },
   events: [] as any[],
 }));
 

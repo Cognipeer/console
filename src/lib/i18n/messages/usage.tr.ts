@@ -65,7 +65,7 @@ export const usageTr: typeof usageEn = {
   },
   storageRealtime: {
     title: 'Depolama ve gerçek zamanlı',
-    storage: 'Saklanan dosyalar',
+    storage: 'Saklanan dosyalar ve vektörler',
     realtime: 'Gerçek zamanlı oturumlar',
     sandbox: 'Kum havuzları',
   },

@@ -1304,6 +1304,9 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'decisionModelKey', 'decisionModelKey TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'source', 'source TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'review', 'review TEXT');
+    // The metered size of an index on a platform vector provider (server-owned).
+    this.ensureTableColumn(db, TABLES.vectorIndexes, 'storedBytes', 'storedBytes INTEGER');
+    this.ensureTableColumn(db, TABLES.vectorIndexes, 'storedVectors', 'storedVectors INTEGER');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);

@@ -64,7 +64,7 @@ export const usageEn = {
   },
   storageRealtime: {
     title: 'Storage and realtime',
-    storage: 'Stored files',
+    storage: 'Stored files and vectors',
     realtime: 'Realtime sessions',
     sandbox: 'Sandboxes',
   },

@@ -24,7 +24,7 @@ export const usageLimitsTr: typeof usageLimitsEn = {
     },
     storage_quota_exceeded: {
       title: 'Depolama dolu',
-      message: 'Bu işlem çalışma alanınızı depolama hakkının üzerine çıkarır. Bazı dosyaları silin ve tekrar deneyin.',
+      message: 'Bu işlem çalışma alanınızı depolama hakkının üzerine çıkarır. Bazı dosyaları veya vektörleri silin ve tekrar deneyin.',
     },
     seat_limit_reached: {
       title: 'Koltuk sınırına ulaşıldı',

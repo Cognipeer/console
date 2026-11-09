@@ -667,6 +667,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     >,
   ): Promise<IVectorIndexRecord | null>;
   deleteVectorIndex(id: string): Promise<boolean>;
+  /**
+   * Atomically adds to the metered size of a platform index (`storedBytes`, `storedVectors`), each clamped at 0.
+   * Returns the record after the change, or null when it does not exist.
+   */
+  adjustVectorIndexStorage(
+    id: string,
+    bytesDelta: number,
+    vectorsDelta: number,
+  ): Promise<IVectorIndexRecord | null>;
+  /** The metered bytes of every vector index of the tenant database. */
+  sumVectorIndexStoredBytes(): Promise<number>;
   /** Record one similarity query for the index analytics panel. */
   createVectorQueryLog(
     log: Omit<IVectorQueryLog, '_id'>,

@@ -873,6 +873,12 @@ export interface IVectorIndexRecord {
   dimension: number;
   metric: 'cosine' | 'dot' | 'euclidean';
   metadata?: Record<string, unknown>;
+  /**
+   * Server-owned, never taken from a request: the estimated bytes and the vectors an index on a platform provider
+   * holds. They feed the plan storage count. Own providers are not metered and leave both unset.
+   */
+  storedBytes?: number;
+  storedVectors?: number;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

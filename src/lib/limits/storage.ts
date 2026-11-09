@@ -1,7 +1,8 @@
 /**
- * Stored-bytes limit. The byte sum comes from the existing tenant-wide file
- * record sum (`sumFileRecordBytes()` without a project filter), which reads the
- * TENANT db: call this inside the caller's tenant scope (upload routes are).
+ * Stored-bytes limit. The byte sum is the tenant-wide file record sum
+ * (`sumFileRecordBytes()` without a project filter) plus the metered size of the
+ * vector indexes on platform providers (`sumVectorIndexStoredBytes()`). Both read
+ * the TENANT db: call this inside the caller's tenant scope (upload routes are).
  */
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
@@ -28,12 +29,13 @@ function setCached(tenantId: string, bytes: number): void {
   }
 }
 
-/** Stored bytes of the tenant (cached 60 s). Throws when the sum cannot be read. */
+/** Stored bytes of the tenant: files and vectors (cached 60 s). Throws when the sum cannot be read. */
 export async function getStoredBytes(tenantId: string): Promise<number> {
   const hit = cache.get(tenantId);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.bytes;
   const db = await getDatabase();
-  const bytes = await db.sumFileRecordBytes();
+  const [fileBytes, vectorBytes] = await Promise.all([db.sumFileRecordBytes(), db.sumVectorIndexStoredBytes()]);
+  const bytes = fileBytes + vectorBytes;
   setCached(tenantId, bytes);
   return bytes;
 }
