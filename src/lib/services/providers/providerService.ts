@@ -115,7 +115,7 @@ export interface UpdateProviderConfigInput {
  * Loaded lazily: it reaches the vector and model services, which themselves
  * depend on this module.
  */
-async function validateWebSearchSettings(
+export async function validateWebSearchSettings(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,

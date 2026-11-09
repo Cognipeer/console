@@ -1867,6 +1867,27 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_reranker_run_logs_key_createdAt ON reranker_run_logs(rerankerKey, createdAt DESC);
 
+  -- Web search instances (behavior on top of a websearch provider record)
+  CREATE TABLE IF NOT EXISTS websearch_instances (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    providerKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    settings TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    platform INTEGER NOT NULL DEFAULT 0,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_websearch_instances_tenant_key ON websearch_instances(tenantId, key);
+  CREATE INDEX IF NOT EXISTS idx_websearch_instances_tenant_project ON websearch_instances(tenantId, projectId);
+
   -- Web search run logs (per Web Search instance = websearch provider record)
   CREATE TABLE IF NOT EXISTS websearch_run_logs (
     id TEXT PRIMARY KEY,

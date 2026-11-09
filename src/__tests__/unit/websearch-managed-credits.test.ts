@@ -19,6 +19,11 @@ vi.mock('@/lib/services/providers/providerService', () => ({
   loadProviderRuntimeData: vi.fn(),
 }));
 vi.mock('@/lib/services/webSearch/webSearchAdapter', () => ({ callWebSearchProvider: vi.fn() }));
+// These tests keep to the legacy provider path: no instance exists.
+vi.mock('@/lib/services/webSearch/webSearchInstanceService', () => ({
+  getWebSearchInstance: vi.fn().mockResolvedValue(null),
+  listWebSearchInstances: vi.fn().mockResolvedValue([]),
+}));
 vi.mock('@/lib/services/models/inferenceService', () => ({ handleChatCompletion: vi.fn() }));
 vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota: vi.fn() }));
 vi.mock('@/lib/services/availability/serviceAvailability', () => ({ assertServiceEnabled: vi.fn() }));

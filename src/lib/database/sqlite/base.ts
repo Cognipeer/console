@@ -89,6 +89,7 @@ export const TABLES = {
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
+  websearchInstances: 'websearch_instances',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',

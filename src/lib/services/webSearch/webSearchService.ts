@@ -12,7 +12,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
-import { getDatabase, type IWebSearchRunLog } from '@/lib/database';
+import { getDatabase, type IWebSearchInstance, type IWebSearchRunLog } from '@/lib/database';
 import {
   listProviderConfigs,
   loadProviderRuntimeData,
@@ -28,7 +28,10 @@ import {
 } from '@/enterprise/managed-credits';
 import { shouldTryNextReplica } from '@/lib/services/models/replicaPool';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { splitWebSearchSettings } from '@/lib/providers/contracts/webSearchContracts';
 import { callWebSearchProvider } from './webSearchAdapter';
+import { getWebSearchInstance, listWebSearchInstances } from './webSearchInstanceService';
+import { asSafeSearch, asString } from './searchOptions';
 import { resolveWebSearchCacheSettings } from './cacheSettings';
 import type {
   WebSearchAiAnswerSettings,
@@ -47,7 +50,7 @@ const LOGGED_SNIPPET_MAX = 300;
 const AI_ANSWER_RESULTS_LIMIT = 10;
 
 export interface RunWebSearchOptions extends WebSearchInput {
-  /** Instance key. Omit to use the project's single active instance. */
+  /** Instance key, or a legacy websearch provider key. Omit to use the project's single active instance. */
   providerKey?: string;
   /** Attribution only (dashboard test vs API). */
   source?: 'dashboard' | 'api';
@@ -192,13 +195,47 @@ async function callManagedRoutes(params: {
   throw lastError;
 }
 
-async function resolveProviderKey(
+export interface ResolvedWebSearchTarget {
+  /** The instance whose behavior applies; null on the legacy path (a provider key used directly). */
+  instance: IWebSearchInstance | null;
+  /** The provider record key: connection, credentials, managed routes and credits. */
+  providerKey: string;
+}
+
+function multipleError(keys: string[]): Error {
+  return new Error(
+    `Multiple web search instances are configured (${keys.join(', ')}). Specify one with the \`provider\` field or the /websearch/:key/search endpoint.`,
+  );
+}
+
+/**
+ * Explicit key: an instance with that key visible in the project, else a websearch provider with that key (legacy:
+ * the provider row's own settings act as the behavior). No key: the project's single active instance, else the
+ * single active visible one, else the single active own provider, else the first managed one.
+ */
+export async function resolveWebSearchTarget(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
   explicitKey: string | undefined,
-): Promise<string> {
-  if (explicitKey) return explicitKey;
+): Promise<ResolvedWebSearchTarget> {
+  if (explicitKey) {
+    const instance = await getWebSearchInstance(tenantDbName, tenantId, explicitKey, projectId);
+    if (instance) return { instance, providerKey: instance.providerKey };
+    logger.debug('Web search key resolved as a provider (no visible instance with that key)', {
+      tenantId,
+      projectId,
+      key: explicitKey,
+    });
+    return { instance: null, providerKey: explicitKey };
+  }
+
+  const instances = (await listWebSearchInstances(tenantDbName, tenantId, projectId))
+    .filter((i) => i.status === 'active');
+  for (const group of [instances.filter((i) => projectId && i.projectId === projectId), instances]) {
+    if (group.length > 1) throw multipleError(group.map((i) => i.key));
+    if (group.length === 1) return { instance: group[0], providerKey: group[0].providerKey };
+  }
 
   const providers = await listWebSearchProviders(tenantDbName, tenantId, projectId);
   const allActive = providers.filter((p) => p.status === 'active');
@@ -207,19 +244,14 @@ async function resolveProviderKey(
   const managed = allActive
     .filter((p) => isManagedProviderRecord(p))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  if (own.length === 0 && managed.length > 0) return managed[0].key;
-  const active = own;
-  if (active.length === 0) {
+  if (own.length === 0 && managed.length > 0) return { instance: null, providerKey: managed[0].key };
+  if (own.length === 0) {
     throw new Error(
       'No active web search instance is configured. Create one under Data → Web Search.',
     );
   }
-  if (active.length > 1) {
-    throw new Error(
-      `Multiple web search instances are configured (${active.map((p) => p.key).join(', ')}). Specify one with the \`provider\` field or the /websearch/:key/search endpoint.`,
-    );
-  }
-  return active[0].key;
+  if (own.length > 1) throw multipleError(own.map((p) => p.key));
+  return { instance: null, providerKey: own[0].key };
 }
 
 function aiAnswerSettingsOf(settings: Record<string, unknown> | undefined): WebSearchAiAnswerSettings {
@@ -296,7 +328,7 @@ async function openCacheSession(params: {
   tenantDbName: string;
   tenantId: string;
   projectId: string | undefined;
-  providerKey: string;
+  searchKey: string;
   driver: string;
   instanceSettings: Record<string, unknown>;
   query: string;
@@ -327,7 +359,7 @@ async function openCacheSession(params: {
     scope: {
       tenantId: params.tenantId,
       projectId: params.projectId,
-      searchKey: params.providerKey,
+      searchKey: params.searchKey,
       driver: params.driver,
       instanceSettings: params.instanceSettings,
       input: params.input,
@@ -374,12 +406,14 @@ export async function runWebSearch(
   const query = options.query?.trim();
   if (!query) throw new Error('`query` is required.');
 
-  const providerKey = await resolveProviderKey(
+  const { instance, providerKey } = await resolveWebSearchTarget(
     tenantDbName,
     tenantId,
     projectId,
     options.providerKey,
   );
+  // Quota, run logs, usage and the cache are keyed by the instance when there is one (the provider key otherwise).
+  const searchKey = instance?.key ?? providerKey;
 
   // A managed provider is served by the operator's live routes; the host knows none for a tenant's own instance.
   const routes = listManagedRoutes({ providerKey, kind: 'search' });
@@ -399,30 +433,41 @@ export async function runWebSearch(
   if (record.type !== 'websearch') {
     throw new Error(`Provider "${providerKey}" is not a web search provider.`);
   }
+  if (instance && instance.status !== 'active') {
+    throw new Error(`Instance "${instance.key}" is not active.`);
+  }
   if (record.status !== 'active') {
     throw new Error(`Provider "${providerKey}" is not active.`);
   }
+  // The behavior comes from the instance; on the legacy path the provider row's own settings act as the behavior.
+  const behavior = (instance?.settings ?? record.settings ?? {}) as Record<string, unknown>;
+  const runRecord = instance
+    ? {
+      ...record,
+      settings: { ...splitWebSearchSettings(record.driver, record.settings).connection, ...behavior },
+    }
+    : record;
 
   await enforceServiceQuota(
     { tenantDbName, tenantId, projectId },
-    { domain: 'websearch', resourceKey: providerKey, cost: { requests: 1 } },
+    { domain: 'websearch', resourceKey: searchKey, cost: { requests: 1 } },
   );
 
   // An answer is a best-effort extra on top of the search, never a reason to
   // fail it: agents set `includeAnswer` on their own and API callers cannot see
   // the instance settings. When AI answers are off (or have no model) the
   // search still runs and the response says why there is no AI answer.
-  const aiSettings = aiAnswerSettingsOf(record.settings as Record<string, unknown>);
+  const aiSettings = aiAnswerSettingsOf(behavior);
   const warnings: string[] = [];
   let answerModelKey: string | undefined;
   if (options.includeAnswer) {
     if (aiSettings.enabled !== true) {
       warnings.push(
-        `AI answers are not enabled on instance "${providerKey}"; returning search results only. Enable them under Configuration → AI Answer.`,
+        `AI answers are not enabled on instance "${searchKey}"; returning search results only. Enable them under Configuration → AI Answer.`,
       );
     } else if (!aiSettings.modelKey) {
       warnings.push(
-        `Instance "${providerKey}" has AI answers enabled but no model selected; returning search results only. Pick a model under Configuration → AI Answer.`,
+        `Instance "${searchKey}" has AI answers enabled but no model selected; returning search results only. Pick a model under Configuration → AI Answer.`,
       );
     } else {
       answerModelKey = aiSettings.modelKey;
@@ -433,7 +478,7 @@ export async function runWebSearch(
   const logEntry: Pick<IWebSearchRunLog, 'tenantId' | 'projectId' | 'searchKey' | 'driver' | 'query' | 'source'> = {
     tenantId,
     projectId,
-    searchKey: providerKey,
+    searchKey,
     driver: record.driver,
     query,
     source: options.source ?? 'api',
@@ -443,9 +488,9 @@ export async function runWebSearch(
       tenantDbName,
       tenantId,
       projectId,
-      providerKey,
+      searchKey,
       driver: record.driver,
-      instanceSettings: (record.settings ?? {}) as Record<string, unknown>,
+      instanceSettings: behavior,
       query,
       input: options,
     });
@@ -459,8 +504,8 @@ export async function runWebSearch(
     } else {
       const host = managed ? getManagedCreditsHost() : null;
       const units = managed
-        ? requestedSearchUnits(options.searchDepth)
-        : searchUnitsOf(record.settings as Record<string, unknown> | undefined);
+        ? requestedSearchUnits(options.searchDepth ?? (instance ? asString(behavior.searchDepth) : undefined))
+        : searchUnitsOf(behavior);
       if (host) {
         lease = await host.reserve({
           tenantId,
@@ -482,14 +527,23 @@ export async function runWebSearch(
             routes,
             first: loaded,
             load: (connectionId) => loadRuntime(connectionId),
-            options: { ...options, query },
+            // A managed connection carries no tenant behavior: the instance's locale defaults ride on the request.
+            options: instance
+              ? {
+                ...options,
+                query,
+                language: options.language ?? asString(behavior.language),
+                country: options.country ?? asString(behavior.country),
+                safeSearch: options.safeSearch ?? asSafeSearch(behavior.safeSearch),
+              }
+              : { ...options, query },
             depth: units > 1 ? 'advanced' : 'basic',
             tenantId,
             projectId,
             providerKey,
           })
           : await callWebSearchProvider(
-            record,
+            runRecord,
             credentials as Record<string, unknown>,
             { ...options, query },
           );
@@ -542,8 +596,9 @@ export async function runWebSearch(
       status: 'success',
       results: loggableResults(results),
       answer,
-      metadata: answerModel || warnings.length > 0 || cache
+      metadata: answerModel || warnings.length > 0 || cache || instance
         ? {
+          ...(instance ? { providerKey } : {}),
           ...(answerModel ? { answerModel } : {}),
           ...(warnings.length > 0 ? { warnings } : {}),
           ...(cache ? { cache } : {}),
@@ -552,7 +607,7 @@ export async function runWebSearch(
     });
 
     return {
-      providerKey,
+      providerKey: searchKey,
       driver: record.driver,
       query,
       results,

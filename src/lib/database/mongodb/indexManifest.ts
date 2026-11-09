@@ -273,6 +273,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { createdAt: 1 }, options: { name: 'idx_createdAt' } },
   ],
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
+  websearch_instances: [
+    { key: { tenantId: 1, key: 1 }, options: { name: 'idx_tenant_key', unique: true } },
+    { key: { tenantId: 1, projectId: 1 }, options: { name: 'idx_tenant_project' } },
+  ],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [
     { key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } },

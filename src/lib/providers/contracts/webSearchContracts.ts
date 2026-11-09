@@ -41,6 +41,7 @@ function safeSearchField() {
     label: 'Safe Search',
     type: 'select' as const,
     scope: 'settings' as const,
+    settingsTarget: 'behavior' as const,
     defaultValue: 'moderate',
     options: [
       { label: 'Off', value: 'off' },
@@ -91,6 +92,7 @@ export const BingWebSearchProviderContract: ProviderContract<
       label: 'Endpoint',
       type: 'text',
       scope: 'settings',
+      settingsTarget: 'connection',
       placeholder: 'https://api.bing.microsoft.com/v7.0/search',
       description: 'Override for Azure regional / custom endpoints. Leave empty for the global endpoint.',
     },
@@ -99,6 +101,7 @@ export const BingWebSearchProviderContract: ProviderContract<
       label: 'Market (mkt)',
       type: 'text',
       scope: 'settings',
+      settingsTarget: 'behavior',
       placeholder: 'en-US',
     },
   ]),
@@ -123,6 +126,7 @@ export const BraveWebSearchProviderContract: ProviderContract<
       label: 'Country',
       type: 'text',
       scope: 'settings',
+      settingsTarget: 'behavior',
       placeholder: 'US',
     },
     {
@@ -130,6 +134,7 @@ export const BraveWebSearchProviderContract: ProviderContract<
       label: 'Search Language',
       type: 'text',
       scope: 'settings',
+      settingsTarget: 'behavior',
       placeholder: 'en',
     },
   ]),
@@ -154,6 +159,7 @@ export const SerperWebSearchProviderContract: ProviderContract<
       label: 'Country (gl)',
       type: 'text',
       scope: 'settings',
+      settingsTarget: 'behavior',
       placeholder: 'us',
     },
     {
@@ -161,6 +167,7 @@ export const SerperWebSearchProviderContract: ProviderContract<
       label: 'Language (hl)',
       type: 'text',
       scope: 'settings',
+      settingsTarget: 'behavior',
       placeholder: 'en',
     },
   ]),
@@ -185,6 +192,7 @@ export const TavilyWebSearchProviderContract: ProviderContract<
       label: 'Search Depth',
       type: 'select',
       scope: 'settings',
+      settingsTarget: 'behavior',
       defaultValue: 'basic',
       options: [
         { label: 'Basic', value: 'basic' },
@@ -196,6 +204,7 @@ export const TavilyWebSearchProviderContract: ProviderContract<
       label: 'Include synthesized answer',
       type: 'switch',
       scope: 'settings',
+      settingsTarget: 'behavior',
       defaultValue: false,
     },
   ]),
@@ -225,6 +234,7 @@ export const SearxngWebSearchProviderContract: ProviderContract<
             type: 'text',
             required: true,
             scope: 'settings',
+            settingsTarget: 'connection',
             placeholder: 'https://searx.example.com',
             description: 'Root URL of the SearxNG instance. The JSON format must be enabled in its settings.yml.',
           },
@@ -233,6 +243,7 @@ export const SearxngWebSearchProviderContract: ProviderContract<
             label: 'Engines',
             type: 'text',
             scope: 'settings',
+            settingsTarget: 'behavior',
             placeholder: 'google,bing,duckduckgo',
             description: 'Optional comma-separated engine list forwarded to SearxNG.',
           },
@@ -241,6 +252,7 @@ export const SearxngWebSearchProviderContract: ProviderContract<
             label: 'Language',
             type: 'text',
             scope: 'settings',
+            settingsTarget: 'behavior',
             placeholder: 'en',
           },
         ],
@@ -294,6 +306,7 @@ export const DuckDuckGoWebSearchProviderContract: ProviderContract<
             label: 'Region (kl)',
             type: 'text',
             scope: 'settings',
+            settingsTarget: 'behavior',
             placeholder: 'us-en',
             description: 'DuckDuckGo region code, e.g. us-en, tr-tr, wt-wt (no region).',
           },
@@ -313,3 +326,30 @@ export const WEBSEARCH_PROVIDER_CONTRACTS = [
   SearxngWebSearchProviderContract,
   DuckDuckGoWebSearchProviderContract,
 ] as unknown as ProviderContract<WebSearchProviderRuntime, unknown, unknown>[];
+
+/** Settings keys a driver keeps on the provider record (the connection); every other settings key is behavior. */
+export function webSearchConnectionKeys(driver: string): string[] {
+  const contract = WEBSEARCH_PROVIDER_CONTRACTS.find((c) => c.id === driver);
+  if (!contract) return [];
+  return contract.form.sections
+    .flatMap((section) => section.fields)
+    .filter((field) => field.scope === 'settings' && field.settingsTarget === 'connection')
+    .map((field) => field.name);
+}
+
+/**
+ * Splits a web search settings object into the part that belongs to the provider (connection) and the part that
+ * belongs to an instance (behavior). Unknown keys are behavior.
+ */
+export function splitWebSearchSettings(
+  driver: string,
+  settings: Record<string, unknown> | undefined | null,
+): { connection: Record<string, unknown>; behavior: Record<string, unknown> } {
+  const connectionKeys = new Set(webSearchConnectionKeys(driver));
+  const connection: Record<string, unknown> = {};
+  const behavior: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(settings ?? {})) {
+    (connectionKeys.has(key) ? connection : behavior)[key] = value;
+  }
+  return { connection, behavior };
+}

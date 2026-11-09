@@ -116,6 +116,7 @@ import type {
   IReranker,
   IRerankerRunLog,
   IWebSearchRunLog,
+  IWebSearchInstance,
   RerankerStatus,
   ITenant,
   ITenantUserDirectoryEntry,
@@ -1755,6 +1756,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRerankerRunLog[]>;
 
   // ── Web Search operations (tenant-specific) ──
+  // ── Web search instances (tenant-specific; behavior on top of a websearch provider) ──
+  createWebSearchInstance(
+    instance: Omit<IWebSearchInstance, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IWebSearchInstance>;
+  updateWebSearchInstance(
+    id: string,
+    data: Partial<Omit<IWebSearchInstance, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IWebSearchInstance | null>;
+  deleteWebSearchInstance(id: string): Promise<boolean>;
+  /** Tenant-wide lookup by key (visibility is the service's concern). */
+  findWebSearchInstanceByKey(tenantId: string, key: string): Promise<IWebSearchInstance | null>;
+  listWebSearchInstances(tenantId: string, filters?: { providerKey?: string }): Promise<IWebSearchInstance[]>;
+
   createWebSearchRunLog(
     log: Omit<IWebSearchRunLog, '_id' | 'createdAt'>,
   ): Promise<IWebSearchRunLog>;

@@ -35,6 +35,11 @@ export interface ProviderFormField {
   defaultValue?: unknown;
   scope?: 'credentials' | 'settings' | 'metadata';
   /**
+   * For a `settings` field of a driver that splits its record in two layers (web search): `connection` fields live
+   * on the provider record, `behavior` fields on the instance that points at it. Unset = `behavior`.
+   */
+  settingsTarget?: 'connection' | 'behavior';
+  /**
    * Show this field only while another field of the same form holds one of the given values (an Azure Blob
    * credential belongs to one authentication method, for example). Presentation only: the runtime ignores the values
    * of fields that do not apply, and the server does not evaluate this.
