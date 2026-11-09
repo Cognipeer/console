@@ -1099,7 +1099,9 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_targets_key ON evaluation_targets(key);
+  -- Plain key lookup index. Uniqueness is per (projectId, key) and is created in
+  -- applyTenantIndexes (expression index; also replaces the old GLOBAL unique one).
+  CREATE INDEX IF NOT EXISTS idx_eval_targets_key ON evaluation_targets(key);
 
   CREATE TABLE IF NOT EXISTS evaluation_datasets (
     id TEXT PRIMARY KEY,
@@ -1119,7 +1121,9 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_datasets_key ON evaluation_datasets(key);
+  -- Plain key lookup index. Uniqueness is per (projectId, key) and is created in
+  -- applyTenantIndexes (expression index; also replaces the old GLOBAL unique one).
+  CREATE INDEX IF NOT EXISTS idx_eval_datasets_key ON evaluation_datasets(key);
 
   -- One row per dataset item (split out of evaluation_datasets.items so a
   -- dataset is no longer bounded by a single row/document).
@@ -1163,7 +1167,9 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_suites_key ON evaluation_suites(key);
+  -- Plain key lookup index. Uniqueness is per (projectId, key) and is created in
+  -- applyTenantIndexes (expression index; also replaces the old GLOBAL unique one).
+  CREATE INDEX IF NOT EXISTS idx_eval_suites_key ON evaluation_suites(key);
 
   CREATE TABLE IF NOT EXISTS evaluation_runs (
     id TEXT PRIMARY KEY,
@@ -1181,11 +1187,15 @@ export const TENANT_SCHEMA_SQL = `
     error TEXT,
     startedAt TEXT,
     finishedAt TEXT,
+    cancelRequestedAt TEXT,
+    heartbeatAt TEXT,
+    itemsTruncated INTEGER,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_eval_runs_suiteKey ON evaluation_runs(suiteKey);
+  CREATE INDEX IF NOT EXISTS idx_eval_runs_status_createdAt ON evaluation_runs(status, createdAt);
   CREATE INDEX IF NOT EXISTS idx_eval_runs_createdAt ON evaluation_runs(createdAt);
 
   -- Red-team service (adversarial agent/model testing)

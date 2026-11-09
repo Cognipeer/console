@@ -348,6 +348,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   evaluation_runs: [
     { key: { projectId: 1, suiteKey: 1, createdAt: -1 }, options: { name: 'idx_project_suite_createdAt' } },
     { key: { projectId: 1, status: 1 }, options: { name: 'idx_project_status' } },
+    // Run list pages (newest first) and the tenant-wide reconciler scans
+    // (status + age) both filtered without a usable index.
+    { key: { projectId: 1, createdAt: -1 }, options: { name: 'idx_project_createdAt' } },
+    { key: { status: 1, createdAt: 1 }, options: { name: 'idx_status_createdAt' } },
   ],
   // Red-team: keys are unique per project; the active-run check reads project + campaign
   // newest-first, the reaper reads by status and lease. Attempt rows are written by

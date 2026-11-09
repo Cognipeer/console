@@ -22,6 +22,16 @@
  * through (OpenAI function format, tool_choice 'auto') as a single-step
  * decision test — emitted calls are captured (via the SDK's normalised
  * toolCalls, or `extractToolCalls` on the gateway path), never executed.
+ * An AGENT target's calls are different: the agent really runs its tools, and
+ * its response carries only messages, so they are read from the `steps` the turn
+ * persisted on the item's conversation (the agent's own calls; a delegated
+ * child's internal steps are not in them).
+ *
+ * Reliability: model / rag targets and the judge retry transient transport
+ * errors (retry.ts) and run under a timeout; an agent target is NEVER retried
+ * (its tools may have side effects) but has a timeout. A target's
+ * `defaultParams` (temperature, top_p, max_tokens, seed, stop, penalties) are
+ * applied on both the SDK and the gateway path.
  * Model targets also surface provider token usage and price it with the
  * target model's hub pricing (`calculateCost`) into `TargetOutput.usage`.
  *
@@ -36,17 +46,21 @@
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   invokeChatViaSdk,
+  parseToolArguments,
   prepareSdkInvocation,
   SdkProviderMappingError,
   type PreparedSdkInvocation,
   type SdkChatResult,
+  type SdkSamplingParams,
 } from './sdkInvoker';
+import { callWithPolicy, envMs, DEFAULT_RETRY_BACKOFF_MS } from './retry';
 import { calculateCost } from '@/lib/services/models/usageLogger';
 import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationTarget, IModelPricing } from '@/lib/database';
+import type { IAgentConversationMessage, IAgentConversationStep } from '@/lib/database/provider/types.domain';
 import { selectorForStoredDefault, type AgentRunSelector } from '@/lib/services/agents/agentRevision';
 import { kbCallerForActor, runtimeContextForActor } from './kbCaller';
 import { sideCallReasoning } from '@/lib/services/agents/agentReasoning';
@@ -54,6 +68,7 @@ import type {
   DatasetItem,
   EmbedInvoker,
   EvalUsage,
+  JudgeCompletion,
   JudgeInvoker,
   NormalizedToolCall,
   RetrievedChunk,
@@ -124,7 +139,9 @@ const JUDGE_DEFAULT_MAX_TOKENS = 4096;
  * (`choices[0].message.tool_calls[].function` with a JSON-string `arguments`)
  * and is tolerant of Responses-shaped output (`output[]` items of type
  * `function_call` / `tool_call`, cf. extractAgentText). Invalid JSON arguments
- * become `{ __raw: <string> }` rather than throwing.
+ * become `{ __raw: <string> }` rather than throwing (the one convention shared
+ * with sdkInvoker's `parseToolArguments`). NOT for agent targets: an agent
+ * response never carries tool calls (see the agent branch).
  */
 export function extractToolCalls(response: unknown): NormalizedToolCall[] {
   const calls: NormalizedToolCall[] = [];
@@ -151,18 +168,6 @@ export function extractToolCalls(response: unknown): NormalizedToolCall[] {
     }
   }
   return calls;
-}
-
-function parseToolArguments(raw: unknown): Record<string, unknown> {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
-  if (typeof raw !== 'string' || raw.trim() === '') return {};
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-    return { __raw: raw };
-  } catch {
-    return { __raw: raw };
-  }
 }
 
 /** Canonical gateway usage (input includes cache read/write; those are subsets). */
@@ -298,6 +303,119 @@ export function toProviderMessages(input: DatasetItem['input']): Array<Record<st
   }
   closeOpenCalls();
   return wire;
+}
+
+/** Agent chat usage (OpenAI Responses shape) → EvalUsage. Not priced: an agent may route across several models. */
+function agentUsageToEval(response: unknown): EvalUsage | undefined {
+  const usage = (response as {
+    usage?: {
+      input_tokens?: unknown;
+      output_tokens?: unknown;
+      input_tokens_details?: { cached_tokens?: unknown };
+      output_tokens_details?: { reasoning_tokens?: unknown };
+    };
+  } | null | undefined)?.usage;
+  if (!usage || typeof usage !== 'object') return undefined;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const inputTokens = num(usage.input_tokens);
+  const outputTokens = num(usage.output_tokens);
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  const cached = num(usage.input_tokens_details?.cached_tokens);
+  const reasoning = num(usage.output_tokens_details?.reasoning_tokens);
+  // Optional keys only when present: Mongo stores `undefined` as null.
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cached ? { cachedInputTokens: cached } : {}),
+    ...(reasoning ? { reasoningTokens: reasoning } : {}),
+  };
+}
+
+type PersistedAssistantTurn = Pick<IAgentConversationMessage, 'steps' | 'usage'>;
+
+/** The last assistant message of a conversation (what the turn that just ran wrote), or null when unreadable. */
+async function lastAssistantTurn(tenantDbName: string, conversationId: string): Promise<PersistedAssistantTurn | null> {
+  try {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    const conversation = await db.findAgentConversationById(conversationId);
+    const messages = conversation?.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i];
+    }
+  } catch {
+    // Bookkeeping only: the answer text is already in hand.
+  }
+  return null;
+}
+
+/** The agent's calls, from the steps its turn persisted. Same `__raw` convention for unparseable arguments. */
+function toolCallsFromSteps(steps: IAgentConversationStep[]): NormalizedToolCall[] {
+  const calls: NormalizedToolCall[] = [];
+  for (const step of steps) {
+    if (typeof step?.name !== 'string' || !step.name) continue;
+    calls.push({ name: step.name, args: parseToolArguments(step.args) });
+  }
+  return calls;
+}
+
+/** The persisted (already priced) usage of a turn → EvalUsage, optional keys only when present. */
+function messageUsageToEval(usage: NonNullable<IAgentConversationMessage['usage']>): EvalUsage | undefined {
+  const evalUsage: EvalUsage = {
+    ...(typeof usage.inputTokens === 'number' ? { inputTokens: usage.inputTokens } : {}),
+    ...(typeof usage.outputTokens === 'number' ? { outputTokens: usage.outputTokens } : {}),
+    ...(usage.cachedInputTokens ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(usage.cachedWriteTokens ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+    ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
+    ...(typeof usage.costUsd === 'number' ? { costUsd: usage.costUsd } : {}),
+  };
+  return Object.keys(evalUsage).length > 0 ? evalUsage : undefined;
+}
+
+/** Sampling parameters a model target pins, normalised (R9). */
+export interface TargetSamplingParams extends SdkSamplingParams {
+  maxTokens?: number;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Read a target's `defaultParams` into the parameters both invocation paths
+ * understand. Accepts the OpenAI snake_case spelling and camelCase; unknown keys
+ * are ignored (they are not part of the request contract and must never reach
+ * a provider body unchecked). An explicit `target.maxTokens` beats a
+ * `max_tokens` default.
+ */
+export function resolveTargetParams(target: Pick<IEvaluationTarget, 'defaultParams' | 'maxTokens'>): TargetSamplingParams {
+  const raw = target.defaultParams && typeof target.defaultParams === 'object' && !Array.isArray(target.defaultParams)
+    ? target.defaultParams as Record<string, unknown>
+    : {};
+  const pick = (...keys: string[]) => {
+    for (const key of keys) if (raw[key] !== undefined && raw[key] !== null) return raw[key];
+    return undefined;
+  };
+  const params: TargetSamplingParams = {};
+  const temperature = finiteNumber(pick('temperature'));
+  if (temperature !== undefined) params.temperature = temperature;
+  const topP = finiteNumber(pick('top_p', 'topP'));
+  if (topP !== undefined) params.topP = topP;
+  const seed = finiteNumber(pick('seed'));
+  if (seed !== undefined && Number.isInteger(seed)) params.seed = seed;
+  const presence = finiteNumber(pick('presence_penalty', 'presencePenalty'));
+  if (presence !== undefined) params.presencePenalty = presence;
+  const frequency = finiteNumber(pick('frequency_penalty', 'frequencyPenalty'));
+  if (frequency !== undefined) params.frequencyPenalty = frequency;
+  const stop = pick('stop');
+  if (typeof stop === 'string' && stop !== '') params.stop = [stop];
+  else if (Array.isArray(stop)) {
+    const list = stop.filter((entry): entry is string => typeof entry === 'string' && entry !== '');
+    if (list.length > 0) params.stop = list;
+  }
+  const maxTokens = finiteNumber(target.maxTokens) ?? finiteNumber(pick('max_tokens', 'maxTokens'));
+  if (maxTokens !== undefined && maxTokens > 0) params.maxTokens = Math.floor(maxTokens);
+  return params;
 }
 
 async function invokeModel(
@@ -469,6 +587,31 @@ function withSystemPrompt(input: DatasetItem['input'], systemPrompt: string): Da
   return [{ role: 'system' as const, content: systemPrompt }, ...input.filter((m) => m.role !== 'system')];
 }
 
+/** Retry (x2) + timeout for model / rag targets and the judge; both limits are env-tunable. */
+function modelCallPolicy(label: string, timeoutEnv = 'EVALUATION_TARGET_TIMEOUT_MS', fallbackMs = 180_000) {
+  return { timeoutMs: envMs(timeoutEnv, fallbackMs), retries: 2, backoffMs: DEFAULT_RETRY_BACKOFF_MS, label };
+}
+
+/**
+ * The item's earlier user / assistant TEXT turns, i.e. everything before its last user turn.
+ * Seeded into an agent's conversation so a multi-turn item is not graded without its context.
+ * System turns are dropped (the agent runs its own prompt); recorded tool exchanges and tool-call-only
+ * assistant turns are not seeded (a tool result is a fact about an environment the agent no longer has).
+ */
+function priorTextTurns(item: DatasetItem): Array<{ role: 'user' | 'assistant'; content: string }> {
+  let lastUser = -1;
+  for (let i = item.input.length - 1; i >= 0; i--) {
+    if (item.input[i].role === 'user') { lastUser = i; break; }
+  }
+  if (lastUser <= 0) return [];
+  const prior: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (const m of item.input.slice(0, lastUser)) {
+    if ((m.role !== 'user' && m.role !== 'assistant') || typeof m.content !== 'string' || m.content.trim() === '') continue;
+    prior.push({ role: m.role, content: m.content });
+  }
+  return prior;
+}
+
 export interface TargetInvokerOptions {
   /**
    * Agent targets: the config this run pinned as it started. Without it the
@@ -503,8 +646,11 @@ export function buildTargetInvoker(
       // silently drops production's JSON schema grades a different system.
       const responseFormat = target.responseFormat ?? item.responseFormat;
       const path = await resolveInvocationPath();
+      const params = resolveTargetParams(target);
+      const policy = modelCallPolicy('Target model call');
       if (path.mode === 'sdk') {
-        const result = await invokeChatViaSdk(
+        const { maxTokens, ...sampling } = params;
+        const result = await callWithPolicy((signal) => invokeChatViaSdk(
           { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },
           path.prepared.model,
           messages,
@@ -512,9 +658,11 @@ export function buildTargetInvoker(
             tools: item.tools,
             config: path.prepared.config,
             responseFormat,
-            maxTokens: target.maxTokens,
+            maxTokens,
+            params: sampling,
+            signal,
           },
-        );
+        ), policy);
         assertAnswered(result);
         const output: TargetOutput = {
           text: result.text,
@@ -534,7 +682,13 @@ export function buildTargetInvoker(
       // that omits both is measuring a different system.
       const extraBody: Record<string, unknown> = {};
       if (responseFormat) extraBody.response_format = responseFormat;
-      if (typeof target.maxTokens === 'number') extraBody.max_tokens = target.maxTokens;
+      if (params.maxTokens !== undefined) extraBody.max_tokens = params.maxTokens;
+      if (params.temperature !== undefined) extraBody.temperature = params.temperature;
+      if (params.topP !== undefined) extraBody.top_p = params.topP;
+      if (params.seed !== undefined) extraBody.seed = params.seed;
+      if (params.stop) extraBody.stop = params.stop;
+      if (params.presencePenalty !== undefined) extraBody.presence_penalty = params.presencePenalty;
+      if (params.frequencyPenalty !== undefined) extraBody.frequency_penalty = params.frequencyPenalty;
       if (item.tools && item.tools.length > 0) {
         extraBody.tools = item.tools.map((t) => ({
           type: 'function',
@@ -542,7 +696,11 @@ export function buildTargetInvoker(
         }));
         extraBody.tool_choice = 'auto';
       }
-      const { text, latencyMs, raw, usage, finishReason } = await invokeModel(ctx, target.modelKey, messages, extraBody);
+      const modelKey = target.modelKey;
+      const { text, latencyMs, raw, usage, finishReason } = await callWithPolicy(
+        () => invokeModel(ctx, modelKey, messages, extraBody),
+        policy,
+      );
       const output: TargetOutput = {
         text,
         latencyMs,
@@ -581,31 +739,68 @@ export function buildTargetInvoker(
         `Eval ${target.key} · ${item.id}`,
         { source: 'evaluation' },
       );
-      const started = Date.now();
-      const response = await executeAgentChat({
-        tenantDbName: ctx.tenantDbName,
-        tenantId: ctx.tenantId,
-        projectId: ctx.projectId,
-        agentKey: target.agentKey,
-        conversationId: String(conversation._id),
-        userMessage: toUserMessage(item),
-        userId,
-        // No one is present during a suite run: a gated tool follows the agent's
-        // `humanInTheLoop.unattended` setting (deny by default).
-        unattended: true,
-        // A run pins its config up front (`options.agentRun`) so every item
-        // tests the same one. Without that, follow the target's own default:
-        // a pinned version, the draft, or whatever is published.
-        ...(options.agentRun ?? selectorForStoredDefault(target.agentVersion)),
-        // Its knowledge tools read as the person who started the suite (or the token it was started with).
-        ...(evaluationRuntime ? { runtimeContext: evaluationRuntime } : {}),
-      });
-      return {
-        text: extractAgentText(response),
-        latencyMs: Date.now() - started,
-        raw: response,
-        toolCalls: extractToolCalls(response),
-      };
+      // Prior turns of a multi-turn item go into the conversation BEFORE the last user message, in the shape
+      // `executeAgentChat` loads as history (`{ role, content, timestamp }` rows of `conversation.messages`).
+      // Under `perTurn` the runner hands each turn an input that already holds the agent's OWN earlier
+      // answers, so seeding them gives the agent the same view as a live session.
+      const prior = priorTextTurns(item);
+      const conversationId = String(conversation._id);
+      const agentKey = target.agentKey;
+      try {
+        if (prior.length > 0) {
+          const db = await getDatabase();
+          await db.switchToTenant(ctx.tenantDbName);
+          const now = new Date();
+          const seeded = await db.updateAgentConversation(conversationId, {
+            messages: prior.map((m) => ({ role: m.role, content: m.content, timestamp: now })),
+          });
+          if (!seeded) throw new Error(`Could not seed the earlier turns of item "${item.id}" into the agent conversation`);
+        }
+        const started = Date.now();
+        // NO retry: a tool may have side effects. A timeout still frees the runner slot.
+        const response = await callWithPolicy((signal) => executeAgentChat({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentKey,
+          conversationId,
+          userMessage: toUserMessage(item),
+          userId,
+          // No one is present during a suite run: a gated tool follows the agent's
+          // `humanInTheLoop.unattended` setting (deny by default).
+          unattended: true,
+          signal,
+          // A run pins its config up front (`options.agentRun`) so every item
+          // tests the same one. Without that, follow the target's own default:
+          // a pinned version, the draft, or whatever is published.
+          ...(options.agentRun ?? selectorForStoredDefault(target.agentVersion)),
+          // Its knowledge tools read as the person who started the suite (or the token it was started with).
+          ...(evaluationRuntime ? { runtimeContext: evaluationRuntime } : {}),
+        }), { timeoutMs: envMs('EVALUATION_AGENT_TIMEOUT_MS', 600_000), retries: 0, label: 'Agent target call' });
+        const latencyMs = Date.now() - started;
+        // The Responses-shaped result holds messages only (no function_call items), so the agent's own tool
+        // calls and its priced usage are read back from the turn the runtime just persisted (`steps` = this
+        // turn's tool history; a delegated child's internal calls are not in it), BEFORE the conversation is
+        // deleted below. `executeAgentChat` has no tool-event hook to listen on instead.
+        const turn = await lastAssistantTurn(ctx.tenantDbName, conversationId);
+        const usage = turn?.usage ? messageUsageToEval(turn.usage) : agentUsageToEval(response);
+        return {
+          text: extractAgentText(response),
+          latencyMs,
+          raw: response,
+          toolCalls: turn?.steps ? toolCallsFromSteps(turn.steps) : extractToolCalls(response),
+          ...(usage ? { usage } : {}),
+        };
+      } finally {
+        // The conversation only existed for this item: remove it once the output is captured. Best effort -
+        // a failed delete must never fail (or change) the item.
+        try {
+          const { deleteConversation } = await import('@/lib/services/agents/agentService');
+          await deleteConversation(ctx.tenantDbName, conversationId);
+        } catch {
+          // leave it; it is tagged `metadata.source: 'evaluation'`
+        }
+      }
     }
     if (target.kind === 'rag') {
       if (!target.ragModuleKey) {
@@ -618,13 +813,14 @@ export function buildTargetInvoker(
       // not load just because the evaluation engine was imported.
       const { queryRag } = await import('@/lib/services/rag/ragService');
       // A knowledge base with access control answers with what the person running the suite may read.
-      const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId || undefined, {
-        ragModuleKey: target.ragModuleKey,
+      const ragModuleKey = target.ragModuleKey;
+      const result = await callWithPolicy(() => queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId || undefined, {
+        ragModuleKey,
         query: toUserMessage(item),
         topK: target.retrievalTopK,
         minScore: target.retrievalMinScore,
         includeContent: true,
-      }, { caller: kbCallerForActor(ctx.userId, ctx.tokenId) });
+      }, { caller: kbCallerForActor(ctx.userId, ctx.tokenId) }), modelCallPolicy('Retrieval call'));
       const retrieved: RetrievedChunk[] = result.matches.map((match, index) => ({
         id: match.id,
         score: match.score,
@@ -675,14 +871,23 @@ export function buildJudgeInvoker(judgeModelKey: string | undefined, ctx: Evalua
   const resolveInvocationPath = judgeModelKey
     ? buildInvocationPathResolver(ctx, judgeModelKey)
     : undefined;
-  return async (messages) => {
+  const resolvePricing = judgeModelKey
+    ? buildPricingResolver(ctx, judgeModelKey)
+    : () => Promise.resolve<EvalPricedModel | null>(null);
+  return async (messages): Promise<JudgeCompletion> => {
     if (!judgeModelKey || !resolveInvocationPath) {
       throw new Error('judgeModelKey is required when a suite uses llm-judge scorers');
     }
     const wire = messages.map((m) => ({ role: m.role, content: m.content }));
     const path = await resolveInvocationPath();
+    // Transient transport errors retry x2 (1s, 3s; Retry-After honoured) and each attempt has a timeout.
+    // Parse failures are the scorer's to retry - this layer only knows the transport.
+    // No `temperature: 0`: whether a judge model accepts one (reasoning models reject it) is not known
+    // reliably here, and a rejected parameter would fail every judge call. Revisit if the model record
+    // ever exposes "accepts temperature".
+    const policy = modelCallPolicy('Judge call', 'EVALUATION_JUDGE_TIMEOUT_MS', 120_000);
     if (path.mode === 'sdk') {
-      const result = await invokeChatViaSdk(
+      const result = await callWithPolicy((signal) => invokeChatViaSdk(
         { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },
         path.prepared.model,
         wire,
@@ -692,14 +897,17 @@ export function buildJudgeInvoker(judgeModelKey: string | undefined, ctx: Evalua
           // the MODEL-level default (it then gets thinking headroom for any effort that remains).
           defaultMaxTokens: JUDGE_DEFAULT_MAX_TOKENS,
           reasoning: sideCallReasoning(path.prepared.model),
+          signal,
         },
-      );
+      ), policy);
       assertAnswered(result);
-      return result.text;
+      const usage = toEvalUsage(result.usage, await resolvePricing());
+      return { text: result.text, ...(usage ? { usage } : {}) };
     }
     // The gateway resolves the judge's output limit itself (the model's own setting, else the driver default):
     // a limit in the body would be a CALLER's cap and beat the "Default max tokens" the operator configured.
-    const { text } = await invokeModel(ctx, judgeModelKey, wire);
-    return text;
+    const { text, usage } = await callWithPolicy(() => invokeModel(ctx, judgeModelKey, wire), policy);
+    const evalUsage = toEvalUsage(usage, await resolvePricing());
+    return { text, ...(evalUsage ? { usage: evalUsage } : {}) };
   };
 }

@@ -372,6 +372,46 @@ describe('invokeChatViaSdk', () => {
   });
 });
 
+describe('invokeChatViaSdk — target-pinned sampling params (R9)', () => {
+  it('sends params and the abort signal; a param temperature beats the model record', async () => {
+    const controller = new AbortController();
+    await invokeChatViaSdk(
+      { tenantDbName: 'tenant_db', projectId: 'p1' },
+      makeModel({ settings: { temperature: 0.9 } }),
+      [{ role: 'user', content: 'hi' }],
+      {
+        config: { provider: 'openai', apiKey: 'sk-test' },
+        params: { temperature: 0, topP: 0.5, seed: 4, stop: ['X'], presencePenalty: 0.1, frequencyPenalty: 0.2 },
+        signal: controller.signal,
+      },
+    );
+    expect(h.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        temperature: 0,
+        topP: 0.5,
+        seed: 4,
+        stop: ['X'],
+        presencePenalty: 0.1,
+        frequencyPenalty: 0.2,
+        signal: controller.signal,
+      }),
+    );
+  });
+
+  it('leaves the request unchanged without params', async () => {
+    await invokeChatViaSdk(
+      { tenantDbName: 'tenant_db', projectId: 'p1' },
+      makeModel({ settings: { temperature: 0.3 } }),
+      [{ role: 'user', content: 'hi' }],
+      { config: { provider: 'openai', apiKey: 'sk-test' } },
+    );
+    const request = h.complete.mock.calls.at(-1)![0] as Record<string, unknown>;
+    expect(request.temperature).toBe(0.3);
+    expect(request).not.toHaveProperty('topP');
+    expect(request).not.toHaveProperty('signal');
+  });
+});
+
 describe('adapter wiring — buildTargetInvoker (model targets)', () => {
   const target = { key: 'tgt', kind: 'model', modelKey: 'gpt-4o' } as IEvaluationTarget;
   const item: DatasetItem = {
@@ -461,7 +501,8 @@ describe('adapter wiring — buildJudgeInvoker', () => {
 
     const text = await buildJudgeInvoker('judge', CTX)(judgeMessages);
 
-    expect(text).toBe('verdict: pass');
+    // The judge returns { text, usage } so the scorer can account for its spend.
+    expect(typeof text === 'string' ? text : text.text).toBe('verdict: pass');
     expect(h.handleChatCompletion).not.toHaveBeenCalled();
     const request = h.complete.mock.calls[0][0];
     expect(request.tools).toBeUndefined();
@@ -479,7 +520,7 @@ describe('adapter wiring — buildJudgeInvoker', () => {
 
     const text = await buildJudgeInvoker('judge', CTX)(judgeMessages);
 
-    expect(text).toBe('gateway-verdict');
+    expect(typeof text === 'string' ? text : text.text).toBe('gateway-verdict');
     expect(h.createProvider).not.toHaveBeenCalled();
   });
 });

@@ -45,9 +45,11 @@ describe('alert metric catalog', () => {
     expect(ids.filter((id) => !ALL_METRICS.includes(id))).toEqual([]);
   });
 
-  it('covers the 37 metrics that existed before entity health', () => {
+  it('covers the 37 metrics that existed before entity health, plus evaluation_error_rate', () => {
     const legacy = ALERT_METRIC_CATALOG.filter((d) => d.source === 'legacy');
-    expect(legacy).toHaveLength(37);
+    // evaluation_error_rate joined the evaluation collector later; it is computed the same way as the others.
+    expect(legacy).toHaveLength(38);
+    expect(legacy.map((d) => d.id)).toContain('evaluation_error_rate');
   });
 
   it('gives every metric a label, a module of the union and a valid mode list', () => {

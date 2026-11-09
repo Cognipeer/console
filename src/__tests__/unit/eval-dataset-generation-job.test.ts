@@ -8,12 +8,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const createDataset = vi.fn();
-const updateDataset = vi.fn();
+const getDataset = vi.fn();
+const listDatasetItems = vi.fn();
+const appendDatasetItems = vi.fn();
+const patchDatasetMetadata = vi.fn();
 vi.mock('@/lib/services/evaluation/service', () => ({
   createDataset: (...a: unknown[]) => createDataset(...a),
-  updateDataset: (...a: unknown[]) => updateDataset(...a),
+  getDataset: (...a: unknown[]) => getDataset(...a),
+  listDatasetItems: (...a: unknown[]) => listDatasetItems(...a),
+  appendDatasetItems: (...a: unknown[]) => appendDatasetItems(...a),
+  patchDatasetMetadata: (...a: unknown[]) => patchDatasetMetadata(...a),
 }));
-
 const generateDatasetItems = vi.fn();
 vi.mock('@/lib/services/evaluation/datasetGeneration', () => ({
   generateDatasetItems: (...a: unknown[]) => generateDatasetItems(...a),
@@ -79,17 +84,43 @@ describe('enqueueDatasetGeneration', () => {
 });
 
 describe('runDatasetGenerationJob', () => {
-  it('marks running then ready with generated items', async () => {
+  const generation = (n: number) => patchDatasetMetadata.mock.calls[n][2].generation;
+  const lastGeneration = () => generation(patchDatasetMetadata.mock.calls.length - 1);
+
+  beforeEach(() => {
+    getDataset.mockResolvedValue({ id: 'ds1', metadata: { generation: { status: 'pending' } } });
+    listDatasetItems.mockResolvedValue({ items: [], total: 0 });
+    appendDatasetItems.mockResolvedValue({ added: 2, total: 2 });
+    patchDatasetMetadata.mockResolvedValue({ id: 'ds1' });
+  });
+
+  it('marks running then ready and appends the generated items', async () => {
     generateDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1' }, { id: 'gen-2' }] });
 
     await runDatasetGenerationJob(basePayload);
 
-    // first update = running
-    expect(updateDataset.mock.calls[0][3].metadata.generation).toMatchObject({ status: 'running' });
-    // last update = ready with items
-    const last = updateDataset.mock.calls[updateDataset.mock.calls.length - 1][3];
-    expect(last.metadata.generation).toMatchObject({ status: 'ready', generated: 2 });
-    expect(last.items).toHaveLength(2);
+    expect(generation(0)).toMatchObject({ status: 'running' });
+    expect(appendDatasetItems).toHaveBeenCalledWith('t', 'ds1', [{ id: 'gen-1' }, { id: 'gen-2' }]);
+    expect(lastGeneration()).toMatchObject({ status: 'ready', generated: 2 });
+  });
+
+  it('records the shortfall warning', async () => {
+    generateDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1' }], warning: 'Generated 1 of 4' });
+
+    await runDatasetGenerationJob(basePayload);
+
+    expect(lastGeneration()).toMatchObject({ status: 'ready', warning: 'Generated 1 of 4' });
+  });
+
+  it('renames generated ids that clash with items already in the dataset', async () => {
+    listDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1', tags: [] }], total: 1 });
+    generateDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1' }] });
+
+    await runDatasetGenerationJob(basePayload);
+
+    const appended = appendDatasetItems.mock.calls[0][2];
+    expect(appended).toHaveLength(1);
+    expect(appended[0].id).not.toBe('gen-1');
   });
 
   it('passes the dataset creator on with the source', async () => {
@@ -103,12 +134,47 @@ describe('runDatasetGenerationJob', () => {
     }));
   });
 
-  it('marks failed and rethrows on generation error', async () => {
+  it('does nothing when the dataset was deleted', async () => {
+    getDataset.mockResolvedValue(null);
+
+    await runDatasetGenerationJob(basePayload);
+
+    expect(generateDatasetItems).not.toHaveBeenCalled();
+    expect(patchDatasetMetadata).not.toHaveBeenCalled();
+  });
+
+  it('does not generate twice when the job is redelivered after it finished', async () => {
+    getDataset.mockResolvedValue({ id: 'ds1', metadata: { generation: { status: 'ready' } } });
+
+    await runDatasetGenerationJob(basePayload);
+
+    expect(generateDatasetItems).not.toHaveBeenCalled();
+  });
+
+  it('finalises instead of regenerating when an earlier attempt already appended its items', async () => {
+    getDataset.mockResolvedValue({ id: 'ds1', metadata: { generation: { status: 'running', startedAt: 'x' } } });
+    listDatasetItems.mockResolvedValue({ items: [{ id: 'gen-1', tags: ['generated'] }], total: 1 });
+
+    await runDatasetGenerationJob(basePayload);
+
+    expect(generateDatasetItems).not.toHaveBeenCalled();
+    expect(lastGeneration()).toMatchObject({ status: 'ready', generated: 1 });
+  });
+
+  it('writes failed and rethrows on the last attempt', async () => {
     generateDatasetItems.mockRejectedValue(new Error('model down'));
 
-    await expect(runDatasetGenerationJob(basePayload)).rejects.toThrow('model down');
+    await expect(runDatasetGenerationJob(basePayload, { attemptsMade: 1 })).rejects.toThrow('model down');
 
-    const last = updateDataset.mock.calls[updateDataset.mock.calls.length - 1][3];
-    expect(last.metadata.generation).toMatchObject({ status: 'failed', error: 'model down' });
+    expect(lastGeneration()).toMatchObject({ status: 'failed', error: 'model down' });
+  });
+
+  it('keeps running (no failed write) while a retry is left', async () => {
+    generateDatasetItems.mockRejectedValue(new Error('model down'));
+
+    await expect(runDatasetGenerationJob(basePayload, { attemptsMade: 0 })).rejects.toThrow('model down');
+
+    expect(lastGeneration()).toMatchObject({ status: 'running', lastError: 'model down' });
+    expect(patchDatasetMetadata.mock.calls.some((c) => c[2].generation.status === 'failed')).toBe(false);
   });
 });

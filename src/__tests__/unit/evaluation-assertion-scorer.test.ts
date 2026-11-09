@@ -18,11 +18,42 @@ function out(text: string): TargetOutput {
 }
 
 describe('assertionScorer', () => {
-  it('treats absence of expectations as a passing no-op', () => {
+  it('skips an item with nothing to check instead of passing for free', () => {
     const r = scoreAssertion(item(undefined), out('anything'), CONFIG);
+    expect(r.skipped).toBe(true);
+    expect(r.passed).toBe(false);
+    expect(r.score).toBe(0);
+    expect(r.detail?.reason).toMatch(/no assertion checks/);
+  });
+
+  it('skips when the only entries are empty strings (they match every text)', () => {
+    const r = scoreAssertion(item({ mustContain: [''], mustNotContain: [''] }), out('abc'), CONFIG);
+    expect(r.skipped).toBe(true);
+  });
+
+  it('does not throw on non-string equals / mustContain entries', () => {
+    const odd = { equals: 42, mustContain: [7, null, true, { a: 1 }], mustNotContain: [3] } as unknown as DatasetItem['expected'];
+    const r = scoreAssertion(item(odd), out('42 and 7 and true'), CONFIG);
+    expect(r.error).toBeUndefined();
+    // equals "42" fails against the full text; contains 7 / true pass; notContains 3 passes.
+    expect(r.detail?.total).toBe(4);
+    expect(r.detail?.passedCount).toBe(3);
+  });
+
+  it('reports a schema keyword it cannot honour as a scorer error', () => {
+    const schema = { type: 'object', patternProperties: { '^a': { type: 'string' } } } as unknown as NonNullable<DatasetItem['expected']>['jsonSchema'];
+    const r = scoreAssertion(item({ jsonSchema: schema }), out('{"a":"x"}'), CONFIG);
+    expect(r.error).toMatch(/patternProperties/);
+    expect(r.passed).toBe(false);
+  });
+
+  it('json-path: inherited names do not exist, and bracket keys address dotted keys', () => {
+    const r = scoreAssertion(
+      item({ jsonPath: [{ path: 'toString', exists: false }, { path: '["a.b"]', equals: 1 }] }),
+      out('{"a.b":1}'),
+      CONFIG,
+    );
     expect(r.passed).toBe(true);
-    expect(r.score).toBe(1);
-    expect(r.detail?.total).toBe(0);
   });
 
   it('passes exact equals (trimmed) and fails otherwise', () => {

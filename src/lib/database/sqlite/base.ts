@@ -1140,6 +1140,11 @@ export class SQLiteProviderBase {
     // so every "pinned" suite quietly tested the published version.
     this.ensureTableColumn(db, TABLES.evaluationTargets, 'agentVersion', 'agentVersion TEXT');
     this.ensureTableColumn(db, TABLES.evaluationRuns, 'agentRevision', 'agentRevision TEXT');
+    // Run lifecycle: cooperative cancel, liveness stamp for stale-run
+    // detection, and the "item details were shrunk to fit" flag.
+    this.ensureTableColumn(db, TABLES.evaluationRuns, 'cancelRequestedAt', 'cancelRequestedAt TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationRuns, 'heartbeatAt', 'heartbeatAt TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationRuns, 'itemsTruncated', 'itemsTruncated INTEGER');
     this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'agentVersion', 'agentVersion TEXT');
     this.ensureTableColumn(db, TABLES.redTeamRuns, 'agentRevision', 'agentRevision TEXT');
     // Red-team run lifecycle (claim, lease, cancel) and the attempt-row store.
@@ -1448,6 +1453,7 @@ export class SQLiteProviderBase {
     // indexes). The base schema creates these as plain indexes; upgrade them
     // in place, best-effort — skipped if pre-existing duplicates would violate
     // the constraint, and never leaving the table without an index.
+    this.scopeEvaluationKeyIndexes(db);
     this.upgradeToUniqueIndex(db, 'idx_models_key', TABLES.models, '(key)');
     this.upgradeToUniqueIndex(
       db,
@@ -1455,6 +1461,51 @@ export class SQLiteProviderBase {
       TABLES.providers,
       '(key)',
     );
+  }
+
+  /**
+   * Evaluation targets / datasets / suites were unique per `key` GLOBALLY in a
+   * tenant DB, so two projects could not both own a "smoke" suite (MongoDB
+   * never had that limit). Replace the global unique index with a unique
+   * (projectId, key) one. `COALESCE` makes legacy rows without a project
+   * collide on key too (NULLs are otherwise distinct in a unique index).
+   *
+   * Safe on existing data: the new index is created FIRST, and the old one is
+   * only dropped when that succeeded. The old index was stricter, so the new
+   * one cannot fail on data it admitted; if it somehow does, the old index
+   * stays and boot continues. The key stays covered by a plain index.
+   */
+  private scopeEvaluationKeyIndexes(db: Database.Database): void {
+    const specs: Array<{ table: string; legacy: string; scoped: string }> = [
+      { table: TABLES.evaluationTargets, legacy: 'idx_eval_targets_key', scoped: 'idx_eval_targets_project_key' },
+      { table: TABLES.evaluationDatasets, legacy: 'idx_eval_datasets_key', scoped: 'idx_eval_datasets_project_key' },
+      { table: TABLES.evaluationSuites, legacy: 'idx_eval_suites_key', scoped: 'idx_eval_suites_project_key' },
+    ];
+    for (const { table, legacy, scoped } of specs) {
+      try {
+        db.exec(
+          `CREATE UNIQUE INDEX IF NOT EXISTS ${scoped} ON ${table}(COALESCE(projectId, ''), key)`,
+        );
+        const indexes = db.prepare(`PRAGMA index_list(${table})`).all() as Array<{
+          name?: unknown;
+          unique?: unknown;
+        }>;
+        const legacyIsUnique = indexes.some(
+          (index) => String(index.name) === legacy && Number(index.unique) === 1,
+        );
+        if (!legacyIsUnique) continue;
+        db.transaction(() => {
+          db.exec(`DROP INDEX IF EXISTS ${legacy}`);
+          db.exec(`CREATE INDEX IF NOT EXISTS ${legacy} ON ${table}(key)`);
+        })();
+        logger.info('SQLite schema migration applied', { table, migration: 'unique key scoped to project' });
+      } catch (error) {
+        logger.warn('Could not scope evaluation key uniqueness to the project; keeping the global index', {
+          table,
+          error,
+        });
+      }
+    }
   }
 
   private upgradeToUniqueIndex(

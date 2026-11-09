@@ -15,6 +15,7 @@ import { convertFileToText } from '@/lib/services/rag/ragService';
 import type { CloneDatasetFilter, UpdateSuiteInput, UpdateTargetInput } from '@/lib/services/evaluation/service';
 import {
   appendDatasetItems,
+  cancelRun,
   cloneDataset,
   compareRuns,
   createDataset,
@@ -32,15 +33,18 @@ import {
   listAllDatasetItemLabels,
   listDatasetItems,
   listDatasets,
-  listRuns,
+  listRunSummaries,
   listSuites,
   listTargets,
+  patchDatasetMetadata,
   updateDataset,
   updateDatasetItem,
   updateSuite,
   updateTarget,
 } from '@/lib/services/evaluation/service';
 import { enqueueSuiteRun } from '@/lib/services/evaluation/evaluationRunJob';
+import { EvaluationConflictError, EvaluationInputError } from '@/lib/services/evaluation/errors';
+import { normalizeDatasetItem, normalizeDatasetItems } from '@/lib/services/evaluation/itemValidation';
 import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
 import { parseAgentRevision, parseAgentRunOverride, toStoredAgentVersion } from '@/lib/shared/agentRevision';
 import { summarizeLabels } from '@/lib/services/evaluation/labelSummary';
@@ -61,6 +65,7 @@ import { readClearableText, readRequiredText } from './partial-update';
 
 const logger = createLogger('api:evaluations');
 
+const RUN_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled'] as const;
 const VALID_KINDS: EvaluationTargetKind[] = ['agent', 'model', 'external', 'rag'];
 // Mirror the scorer registry rather than a hand-kept copy: this list drifted
 // behind `SUPPORTED_SCORERS` and left 'tool-call' unreachable — the scorer, its
@@ -85,6 +90,9 @@ function sanitizeMinScore(raw: unknown): number | undefined {
 }
 
 function internalError(reply: import('fastify').FastifyReply, error: unknown) {
+  // Typed service errors: a refused state is the caller's to fix, never a 500.
+  if (error instanceof EvaluationConflictError) return reply.code(409).send({ error: error.message });
+  if (error instanceof EvaluationInputError) return reply.code(400).send({ error: error.message });
   return (
     sendProjectContextError(reply, error)
     ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' })
@@ -122,10 +130,35 @@ function sanitizeLabelKey(raw: unknown): string | null {
 function sanitizeRunConfig(raw: unknown): { concurrency?: number; turnMode?: EvaluationTurnMode } | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const config = raw as Record<string, unknown>;
-  const concurrency = Number(config.concurrency) || undefined;
+  // Clamped like the runner does (EVAL_MAX_CONCURRENCY): a stored 5000 would otherwise look like a setting that
+  // is honoured while every run quietly used the cap.
+  const requested = Math.trunc(Number(config.concurrency));
+  const concurrency = Number.isFinite(requested) && requested !== 0
+    ? Math.min(Math.max(requested, 1), MAX_RUN_CONCURRENCY)
+    : undefined;
   const turnMode = config.turnMode === 'perTurn' ? 'perTurn' : config.turnMode === 'single' ? 'single' : undefined;
   if (concurrency === undefined && turnMode === undefined) return undefined;
   return { ...(concurrency !== undefined ? { concurrency } : {}), ...(turnMode ? { turnMode } : {}) };
+}
+
+/** Mirrors the runner's EVAL_MAX_CONCURRENCY. */
+const MAX_RUN_CONCURRENCY = 32;
+
+/** Upper bounds for dataset generation requests (D1). */
+const GENERATE_MAX_COUNT = 200;
+const GENERATE_MAX_CHUNKS = 500;
+/** Pasted text and uploaded files are both capped at 5 MB of source. */
+const GENERATE_MAX_SOURCE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Strict integer query parameter. A non-numeric value is the caller's mistake
+ * (400); it used to fall through to NaN and a 500 from the database layer.
+ * `undefined` means the parameter was not sent.
+ */
+function parseIntParam(raw: unknown, name: string): number | undefined | { error: string } {
+  if (raw === undefined || raw === '') return undefined;
+  if (typeof raw !== 'string' || !/^-?\d+$/.test(raw.trim())) return { error: `${name} must be an integer` };
+  return Number.parseInt(raw, 10);
 }
 
 /** Item ceiling for the label-distribution scan (see the endpoint's note). */
@@ -167,31 +200,6 @@ function sanitizeLabels(raw: unknown): Record<string, unknown> | null {
   return labels;
 }
 
-/**
- * Validate an incoming dataset-items payload: every item needs an object
- * shape, an `input` message array and a non-empty unique string `id` (items
- * are addressed by id under a unique (dataset, id) constraint — catching
- * duplicates here turns a would-be destructive 409/500 into a clean 400).
- * Returns an error string or null.
- */
-function validateItemsPayload(items: unknown[]): string | null {
-  const seen = new Set<string>();
-  for (let i = 0; i < items.length; i += 1) {
-    const item = items[i] as Record<string, unknown> | null;
-    if (!item || typeof item !== 'object' || !Array.isArray(item.input)) {
-      return `items[${i}] must be an object with an "input" message array`;
-    }
-    if (typeof item.id !== 'string' || item.id.trim() === '') {
-      return `items[${i}] must have a non-empty string "id"`;
-    }
-    if (seen.has(item.id)) {
-      return `items[${i}] duplicates item id "${item.id}"`;
-    }
-    seen.add(item.id);
-  }
-  return null;
-}
-
 /** Map dataset-item service errors onto 409 (duplicate) / 404 (gone). */
 function sendItemError(reply: import('fastify').FastifyReply, error: unknown) {
   if (!(error instanceof Error)) return null;
@@ -200,13 +208,45 @@ function sendItemError(reply: import('fastify').FastifyReply, error: unknown) {
   return null;
 }
 
-function sanitizeScorers(raw: unknown): IEvaluationScorerConfig[] | null {
-  if (!Array.isArray(raw)) return null;
+const APPLY_WHEN_VALUES = ['has-reference', 'has-expected-tool-calls'] as const;
+
+/**
+ * Returns the scorers, or an error naming the offending entry: a weight or
+ * threshold that is silently kept as NaN/negative/out of range poisons every
+ * score of every later run of the suite.
+ */
+function sanitizeScorers(raw: unknown): { scorers: IEvaluationScorerConfig[] } | { error: string } {
+  if (!Array.isArray(raw)) return { error: 'scorers must be an array' };
   const scorers: IEvaluationScorerConfig[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') return null;
+  for (let i = 0; i < raw.length; i += 1) {
+    const entry: unknown = raw[i];
+    if (!entry || typeof entry !== 'object') return { error: `scorers[${i}] must be an object` };
     const e = entry as Record<string, unknown>;
-    if (typeof e.type !== 'string' || !VALID_SCORERS.includes(e.type)) return null;
+    if (typeof e.type !== 'string' || !VALID_SCORERS.includes(e.type)) {
+      return { error: `scorers[${i}].type must be one of ${VALID_SCORERS.map((s) => `"${s}"`).join(', ')}` };
+    }
+    if (e.weight !== undefined && e.weight !== null && (typeof e.weight !== 'number' || !Number.isFinite(e.weight) || e.weight < 0)) {
+      return { error: `scorers[${i}].weight must be a finite number >= 0` };
+    }
+    if (
+      e.threshold !== undefined
+      && e.threshold !== null
+      && (typeof e.threshold !== 'number' || !Number.isFinite(e.threshold) || e.threshold < 0 || e.threshold > 1)
+    ) {
+      return { error: `scorers[${i}].threshold must be a number between 0 and 1` };
+    }
+    if (
+      e.applyWhen !== undefined
+      && e.applyWhen !== null
+      && !(APPLY_WHEN_VALUES as readonly string[]).includes(e.applyWhen as string)
+    ) {
+      return { error: `scorers[${i}].applyWhen must be one of ${APPLY_WHEN_VALUES.map((v) => `"${v}"`).join(', ')}` };
+    }
+    for (const flag of ['allowExtraCalls', 'strict'] as const) {
+      if (e[flag] !== undefined && e[flag] !== null && typeof e[flag] !== 'boolean') {
+        return { error: `scorers[${i}].${flag} must be a boolean` };
+      }
+    }
     // Every field a scorer can be configured with has to be listed here: an
     // unlisted key is dropped silently and the scorer runs on its defaults,
     // which is indistinguishable from the knob having no effect.
@@ -218,9 +258,12 @@ function sanitizeScorers(raw: unknown): IEvaluationScorerConfig[] | null {
       selectionWeight: typeof e.selectionWeight === 'number' ? e.selectionWeight : undefined,
       sequenceWeight: typeof e.sequenceWeight === 'number' ? e.sequenceWeight : undefined,
       argsWeight: typeof e.argsWeight === 'number' ? e.argsWeight : undefined,
+      applyWhen: typeof e.applyWhen === 'string' ? (e.applyWhen as IEvaluationScorerConfig['applyWhen']) : undefined,
+      allowExtraCalls: typeof e.allowExtraCalls === 'boolean' ? e.allowExtraCalls : undefined,
+      strict: typeof e.strict === 'boolean' ? e.strict : undefined,
     });
   }
-  return scorers;
+  return { scorers };
 }
 
 export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -393,14 +436,16 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.items !== undefined && !Array.isArray(body.items)) {
         return reply.code(400).send({ error: 'items must be an array' });
       }
+      let items: IEvaluationDatasetItem[] | undefined;
       if (Array.isArray(body.items)) {
-        const invalid = validateItemsPayload(body.items);
-        if (invalid) return reply.code(400).send({ error: invalid });
+        const parsed = normalizeDatasetItems(body.items);
+        if ('error' in parsed) return reply.code(400).send({ error: parsed.error });
+        items = parsed.items as unknown as IEvaluationDatasetItem[];
       }
       const dataset = await createDataset(session.tenantDbName, session.tenantId, session.userId, {
         name: body.name.trim(),
         description: typeof body.description === 'string' ? body.description : undefined,
-        items: body.items as IEvaluationDatasetItem[] | undefined,
+        items,
         projectId,
       });
       return reply.code(201).send({ dataset });
@@ -428,6 +473,48 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'sourceType must be "rag", "text", or "file"' });
       }
 
+      // The request enqueues a chain of model calls billed to the tenant, so every size knob is bounded: `count`
+      // is a whole number of pairs, `maxChunks` a whole number of chunks, the source text a fixed number of bytes.
+      let count = 10;
+      if (body.count !== undefined && body.count !== null) {
+        if (typeof body.count !== 'number' || !Number.isInteger(body.count) || body.count < 1 || body.count > GENERATE_MAX_COUNT) {
+          return reply.code(400).send({ error: `count must be an integer between 1 and ${GENERATE_MAX_COUNT}` });
+        }
+        count = body.count;
+      }
+      let maxChunks: number | undefined;
+      if (body.maxChunks !== undefined && body.maxChunks !== null) {
+        if (typeof body.maxChunks !== 'number' || !Number.isInteger(body.maxChunks) || body.maxChunks < 1 || body.maxChunks > GENERATE_MAX_CHUNKS) {
+          return reply.code(400).send({ error: `maxChunks must be an integer between 1 and ${GENERATE_MAX_CHUNKS}` });
+        }
+        maxChunks = body.maxChunks;
+      }
+      if (sourceType === 'text' && typeof body.text === 'string' && Buffer.byteLength(body.text, 'utf8') > GENERATE_MAX_SOURCE_BYTES) {
+        return reply.code(400).send({ error: `text must be at most ${GENERATE_MAX_SOURCE_BYTES / (1024 * 1024)} MB` });
+      }
+      if (sourceType === 'file' && typeof body.fileData === 'string') {
+        // Base64 inflates by 4/3; check the encoded length before decoding it into a buffer.
+        if (Math.ceil((body.fileData.length * 3) / 4) > GENERATE_MAX_SOURCE_BYTES) {
+          return reply.code(400).send({ error: `file must be at most ${GENERATE_MAX_SOURCE_BYTES / (1024 * 1024)} MB` });
+        }
+      }
+      // Required source fields are checked before the quota is charged, so a malformed request costs nothing.
+      if (sourceType === 'rag' && (typeof body.ragModuleKey !== 'string' || body.ragModuleKey === '')) {
+        return reply.code(400).send({ error: 'ragModuleKey is required for sourceType "rag"' });
+      }
+      if (sourceType === 'text' && (typeof body.text !== 'string' || body.text.trim() === '')) {
+        return reply.code(400).send({ error: 'text is required for sourceType "text"' });
+      }
+      if (sourceType === 'file' && (typeof body.fileData !== 'string' || typeof body.fileName !== 'string')) {
+        return reply.code(400).send({ error: 'fileName and fileData are required for sourceType "file"' });
+      }
+      // Same quota as a run: generation spends the tenant's models just as a run does. Charged before the
+      // file conversion below, which is itself real work.
+      await enforceServiceQuota(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        { domain: 'jobs', resourceKey: 'evaluation', cost: { requests: 1 } },
+      );
+
       let source: DatasetGenerationSource;
       if (sourceType === 'rag') {
         if (typeof body.ragModuleKey !== 'string' || body.ragModuleKey === '') {
@@ -436,7 +523,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         source = {
           type: 'rag',
           ragModuleKey: body.ragModuleKey,
-          maxChunks: typeof body.maxChunks === 'number' ? body.maxChunks : undefined,
+          maxChunks,
         };
       } else if (sourceType === 'text') {
         if (typeof body.text !== 'string' || body.text.trim() === '') {
@@ -461,6 +548,10 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
             source: 'evaluation',
           },
         );
+        // The converted text counts against the same cap (a small PDF can expand a lot).
+        if (Buffer.byteLength(text, 'utf8') > GENERATE_MAX_SOURCE_BYTES) {
+          return reply.code(400).send({ error: `the file's text must be at most ${GENERATE_MAX_SOURCE_BYTES / (1024 * 1024)} MB` });
+        }
         source = { type: 'text', text };
       }
 
@@ -476,12 +567,13 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         generationModelKey: body.generationModelKey,
         source,
         sourceKind: sourceType,
-        count: typeof body.count === 'number' && body.count > 0 ? body.count : 10,
+        count,
         language: typeof body.language === 'string' ? body.language : undefined,
       });
 
       return reply.code(202).send({ dataset, status: 'pending' });
     } catch (error) {
+      if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Generate evaluation dataset error', { error });
       return sendProjectContextError(reply, error) ?? internalError(reply, error);
     }
@@ -513,9 +605,11 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.items !== undefined && !Array.isArray(body.items)) {
         return reply.code(400).send({ error: 'items must be an array' });
       }
+      let normalizedItems: IEvaluationDatasetItem[] | undefined;
       if (Array.isArray(body.items)) {
-        const invalid = validateItemsPayload(body.items);
-        if (invalid) return reply.code(400).send({ error: invalid });
+        const parsed = normalizeDatasetItems(body.items);
+        if ('error' in parsed) return reply.code(400).send({ error: parsed.error });
+        normalizedItems = parsed.items as unknown as IEvaluationDatasetItem[];
       }
       // Only include provided fields: a `$set` with an explicit `undefined`
       // would null the field in Mongo, so an items-only PATCH must not touch
@@ -523,7 +617,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const data: Partial<Pick<IEvaluationDataset, 'name' | 'description' | 'items'>> = {};
       if (typeof body.name === 'string' && body.name.trim() !== '') data.name = body.name;
       if (typeof body.description === 'string') data.description = body.description;
-      if (Array.isArray(body.items)) data.items = body.items as IEvaluationDatasetItem[];
+      if (normalizedItems) data.items = normalizedItems;
       const dataset = await updateDataset(session.tenantDbName, id, session.userId, data);
       if (!dataset) return reply.code(404).send({ error: 'Dataset not found' });
       return reply.code(200).send({ dataset });
@@ -567,8 +661,12 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         labelValue?: string;
         labeled?: string;
       };
-      const limit = query.limit ? Math.min(Math.max(Number.parseInt(query.limit, 10) || 50, 1), 500) : 50;
-      const skip = query.skip ? Math.max(Number.parseInt(query.skip, 10) || 0, 0) : 0;
+      const rawLimit = parseIntParam(query.limit, 'limit');
+      if (typeof rawLimit === 'object') return reply.code(400).send({ error: rawLimit.error });
+      const rawSkip = parseIntParam(query.skip, 'skip');
+      if (typeof rawSkip === 'object') return reply.code(400).send({ error: rawSkip.error });
+      const limit = rawLimit === undefined ? 50 : Math.min(Math.max(rawLimit, 1), 500);
+      const skip = rawSkip === undefined ? 0 : Math.max(rawSkip, 0);
       const search = typeof query.search === 'string' && query.search.trim() !== '' ? query.search.trim() : undefined;
       const labelKey = sanitizeLabelKey(query.label);
       if (query.label !== undefined && !labelKey) {
@@ -602,12 +700,12 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!rawItems || rawItems.length === 0) {
         return reply.code(400).send({ error: 'items must be a non-empty array' });
       }
-      const invalid = validateItemsPayload(rawItems);
-      if (invalid) return reply.code(400).send({ error: invalid });
+      const parsed = normalizeDatasetItems(rawItems);
+      if ('error' in parsed) return reply.code(400).send({ error: parsed.error });
       const { added, total } = await appendDatasetItems(
         session.tenantDbName,
         id,
-        rawItems as IEvaluationDatasetItem[],
+        parsed.items as unknown as IEvaluationDatasetItem[],
       );
       return reply.code(201).send({ added, total });
     } catch (error) {
@@ -627,16 +725,14 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Dataset not found' });
       }
       const body = readJsonBody<Record<string, unknown>>(request);
-      if (body.input !== undefined && !Array.isArray(body.input)) {
-        return reply.code(400).send({ error: 'input must be a message array' });
-      }
+      // Messages and tool blocks are validated and normalised (OpenAI spellings mapped to the canonical ones);
+      // `labelMeta` is never taken from the client — it is stamped below.
+      const parsed = normalizeDatasetItem(body, 'item', { partial: true });
+      if ('error' in parsed) return reply.code(400).send({ error: parsed.error });
       const data: Partial<Omit<IEvaluationDatasetItem, 'id'>> = {};
-      if (Array.isArray(body.input)) data.input = body.input as IEvaluationDatasetItem['input'];
-      if (body.expected !== undefined) data.expected = body.expected as IEvaluationDatasetItem['expected'];
-      if (body.tools !== undefined) data.tools = body.tools as IEvaluationDatasetItem['tools'];
-      if (body.toolResults !== undefined) data.toolResults = body.toolResults as IEvaluationDatasetItem['toolResults'];
-      if (body.responseFormat !== undefined) data.responseFormat = body.responseFormat as IEvaluationDatasetItem['responseFormat'];
-      if (body.tags !== undefined) data.tags = body.tags as string[];
+      for (const key of ['input', 'expected', 'tools', 'toolResults', 'responseFormat', 'tags'] as const) {
+        if (parsed.value[key] !== undefined) (data as Record<string, unknown>)[key] = parsed.value[key];
+      }
       // A label edit through this route is a human decision: stamp the
       // provenance server-side so a later AI labeling run leaves it alone.
       if (body.labels !== undefined) {
@@ -778,24 +874,45 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         { domain: 'jobs', resourceKey: 'analysis', cost: { requests: 1 } },
       );
-      const run = await enqueueDefinitionRun({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        projectId,
-        createdBy: session.userId,
-        definitionKey,
-        selection,
-        target: { kind: 'dataset', datasetId: id, datasetKey: dataset.key, datasetName: dataset.name },
+      // Mirror the snapshot/generation convention: park the job handle on the dataset so a reloaded page can
+      // pick the progress banner back up. The block is written BEFORE the run is enqueued (a run that finishes
+      // quickly must not find its handle missing, and a failed write must not leave a started run behind) and
+      // only that one key is patched, so a concurrent writer of another metadata block is not overwritten.
+      const startedAt = new Date().toISOString();
+      await patchDatasetMetadata(session.tenantDbName, id, {
+        labeling: { definitionKey, status: 'pending', startedAt },
       });
-
-      // Mirror the snapshot/generation convention: park the job handle on the
-      // dataset so a reloaded page can pick the progress banner back up.
-      await updateDataset(session.tenantDbName, id, session.userId, {
-        metadata: {
-          ...(dataset.metadata ?? {}),
-          labeling: { runId: run.id, definitionKey, status: run.status, startedAt: new Date().toISOString() },
-        },
-      });
+      let run: Awaited<ReturnType<typeof enqueueDefinitionRun>>;
+      try {
+        run = await enqueueDefinitionRun({
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          projectId,
+          createdBy: session.userId,
+          definitionKey,
+          selection,
+          target: { kind: 'dataset', datasetId: id, datasetKey: dataset.key, datasetName: dataset.name },
+        });
+      } catch (enqueueError) {
+        // Do not leave a banner that says "labeling" for a run that never started.
+        await patchDatasetMetadata(session.tenantDbName, id, {
+          labeling: {
+            definitionKey,
+            status: 'failed',
+            startedAt,
+            error: enqueueError instanceof Error ? enqueueError.message : 'Could not start labeling',
+          },
+        }).catch((patchError) => logger.warn('Could not mark labeling as failed', { error: patchError }));
+        throw enqueueError;
+      }
+      try {
+        await patchDatasetMetadata(session.tenantDbName, id, {
+          labeling: { runId: run.id, definitionKey, status: run.status, startedAt },
+        });
+      } catch (patchError) {
+        // The run is already started: report it rather than failing the request over the handle.
+        logger.warn('Could not record the labeling run on the dataset', { error: patchError });
+      }
 
       return reply.code(202).send({ run });
     } catch (error) {
@@ -848,8 +965,10 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.targetKey !== 'string' || typeof body.datasetKey !== 'string') {
         return reply.code(400).send({ error: 'targetKey and datasetKey are required' });
       }
-      const scorers = sanitizeScorers(body.scorers);
-      if (!scorers || scorers.length === 0) {
+      const parsedScorers = sanitizeScorers(body.scorers);
+      if ('error' in parsedScorers) return reply.code(400).send({ error: parsedScorers.error });
+      const scorers = parsedScorers.scorers;
+      if (scorers.length === 0) {
         return reply.code(400).send({
           error: `scorers must be a non-empty array of { type: ${VALID_SCORERS.map((s) => `"${s}"`).join(' | ')} }`,
         });
@@ -902,11 +1021,9 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         ?? readClearableText(body, 'embeddingModelKey', data, { blankClears: true });
       if (invalid) return reply.code(400).send({ error: invalid });
       if (body.scorers !== undefined) {
-        const scorers = sanitizeScorers(body.scorers);
-        if (!scorers) {
-          return reply.code(400).send({ error: 'scorers must be an array of { type: "assertion" | "llm-judge" }' });
-        }
-        data.scorers = scorers;
+        const parsedScorers = sanitizeScorers(body.scorers);
+        if ('error' in parsedScorers) return reply.code(400).send({ error: parsedScorers.error });
+        data.scorers = parsedScorers.scorers;
       }
       const runConfig = body.runConfig !== undefined ? sanitizeRunConfig(body.runConfig) : undefined;
       if (runConfig) data.runConfig = runConfig;
@@ -970,6 +1087,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const refused = sendAgentTestRefusal(reply, error);
       if (refused) return refused;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
+      if (error instanceof EvaluationConflictError || error instanceof EvaluationInputError) return internalError(reply, error);
       logger.error('Run evaluation suite error', { error });
       if (error instanceof AgentRevisionError) return reply.code(400).send({ error: error.message });
       if (error instanceof Error && error.message.toLowerCase().includes('not found')) {
@@ -985,17 +1103,46 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/evaluation/runs', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const query = (request.query ?? {}) as { suiteKey?: string; limit?: string; skip?: string };
-      const runs = await listRuns(session.tenantDbName, {
+      const query = (request.query ?? {}) as { suiteKey?: string; status?: string; limit?: string; skip?: string };
+      const rawLimit = parseIntParam(query.limit, 'limit');
+      if (typeof rawLimit === 'object') return reply.code(400).send({ error: rawLimit.error });
+      const rawSkip = parseIntParam(query.skip, 'skip');
+      if (typeof rawSkip === 'object') return reply.code(400).send({ error: rawSkip.error });
+      if (query.status !== undefined && !RUN_STATUSES.includes(query.status as (typeof RUN_STATUSES)[number])) {
+        return reply.code(400).send({ error: `status must be one of ${RUN_STATUSES.map((v) => `"${v}"`).join(', ')}` });
+      }
+      // The list never carries per-item detail (a run can hold thousands of items and a page of them is megabytes);
+      // the run page loads one run in full. Summaries have no items, so there is nothing to withhold per viewer.
+      const { runs, total } = await listRunSummaries(session.tenantDbName, {
         projectId,
         suiteKey: query.suiteKey,
-        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 200) : undefined,
-        skip: query.skip ? Number.parseInt(query.skip, 10) : undefined,
+        status: query.status as (typeof RUN_STATUSES)[number] | undefined,
+        limit: rawLimit === undefined ? 50 : Math.min(Math.max(rawLimit, 1), 200),
+        skip: rawSkip === undefined ? 0 : Math.max(rawSkip, 0),
       });
-      const viewer = { tenantDbName: session.tenantDbName, viewerUserId: session.userId };
-      const shown = [];
-      for (const run of runs) shown.push(await withoutRestrictedRunItems(request, viewer, run));
-      return reply.code(200).send({ runs: shown });
+      return reply.code(200).send({ runs, total });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  // Stop a run: a pending run is cancelled on the spot, a running one is asked to stop (the worker notices on its
+  // next heartbeat and finalises the items processed so far).
+  app.post('/evaluation/runs/:id/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { id } = request.params as { id: string };
+      const result = await cancelRun(session.tenantDbName, id, projectId);
+      if (!result) return reply.code(404).send({ error: 'Run not found' });
+      const run = await withoutRestrictedRunItems(
+        request,
+        { tenantDbName: session.tenantDbName, viewerUserId: session.userId },
+        result.run,
+      );
+      if (result.outcome === 'already_finished') {
+        return reply.code(409).send({ error: 'Run already finished', run });
+      }
+      return reply.code(200).send({ run, outcome: result.outcome });
     } catch (error) {
       return internalError(reply, error);
     }

@@ -61,8 +61,127 @@ real `handleChatCompletion` adapter or a fake in tests.
 - **llm-judge** — an LLM grades the output against a `rubric`, normalised to
   0–1, backed by the suite's `judgeModelKey`.
 
-Per-item `score` is the weighted mean of the scorers; the item `passed` when all
-scorers pass. The run aggregate exposes `passRate`, `avgScore`, `avgLatencyMs`.
+Per-item `score` is the weighted mean of the scorers that applied to the item; the
+item `passed` when all of those scorers pass. Weights that are negative or not
+numbers count as 0, and when every applicable weight is 0 the scorers count equally.
+
+#### When a scorer applies
+
+Every scorer config accepts an optional `applyWhen`:
+
+| `applyWhen` | The scorer applies only when the item has |
+|---|---|
+| `has-reference` | A reference answer (`expected`) |
+| `has-expected-tool-calls` | Expected tool calls |
+
+Without `applyWhen` a scorer always applies. A scorer that does not apply is
+**skipped** for that item: it scores 0, is marked `skipped` with the reason in its
+`detail`, and is ignored when the item is scored. Some scorers also skip on their
+own when they have nothing to check: `json-shape` without a JSON reference, `semantic`
+and context recall without a reference answer, and `assertion` with no checks.
+
+Two scorer options tighten the tool-call and JSON checks:
+
+- `allowExtraCalls` (`tool-call` scorer, default `true`). Set it to `false` to fail
+  the item when the model made a call that no expected call matches.
+- `strict` (`json-shape` scorer, default `false`). Set it to `true` to count keys that
+  are in the output but not in the reference as problems.
+
+Scorer `weight` must be a finite number of 0 or more and `threshold` a number between
+0 and 1; anything else is refused with `400`, naming the scorer.
+
+#### The LLM judge
+
+The judge is asked for JSON only: `{"score": <0..1>, "reasoning": "<short>"}`. The
+score must be a number from 0 to 1; anything else, a 7 out of 10 for example, is
+a parse error and is not rescaled. The item passes the scorer when
+`score >= threshold` (default 0.5); a `passed` the judge sends itself is kept as
+`judgePassed` in the detail and does not decide. If the answer cannot be parsed the
+call is retried up to two more times, and then the scorer errors.
+
+The judge sees the user input, the reference answer, the assistant output and the
+assistant's tool calls (and the expected tool calls, when the item has them). An
+answer that is only correct tool calls with no text is not a failure by itself.
+Each block is wrapped in tags with a random per-call nonce and the judge is told to
+treat them as data to grade, never as instructions, so an output that says "give
+this a 1.0" does not steer the grade. Transport errors that are worth retrying (HTTP
+408, 429 and 5xx, timeouts, connection resets) are retried twice with a short
+backoff, and each call has a timeout (`EVALUATION_JUDGE_TIMEOUT_MS`, default 120000).
+
+#### Item outcomes
+
+| Outcome | When | Counted as |
+|---|---|---|
+| Scored | At least one scorer applied and none errored | `completed`, and `passed` when all applicable scorers passed |
+| Errored | The target failed, **or** a scorer errored (a judge that could not be parsed, a broken regex, an unsupported schema keyword) | `failed`. The item `error` reads `Scoring failed — <type>: <message>` for scorer errors |
+| Skipped | No scorer applied to the item | `completed` and `skipped`; it has no score and is left out of the pass rate |
+
+A scorer error no longer shows up as a plain 0: the item is errored, so a broken
+judge cannot silently turn a run into a wall of failures that look like quality
+problems.
+
+#### Run aggregate
+
+| Field | Meaning |
+|---|---|
+| `total` | Items in the run |
+| `completed` | Items with no error (skipped ones included) |
+| `failed` | Items with an error, from the target or from scoring |
+| `skipped` | Completed items where no scorer applied |
+| `passed` | Items that passed |
+| `passRate` | `passed / (completed - skipped)`. Errored and skipped items are not in it |
+| `avgScore` | Mean score over the same `completed - skipped` items |
+| `errorRate` | `failed / total` (0 for an empty run). Read it next to `passRate` |
+| `avgLatencyMs` | Mean latency over completed items |
+| `totalCostUsd`, `totalTokens` | Spend of the **target** only |
+| `scoringCostUsd`, `scoringTokens` | Spend of the judge, kept apart from the target spend. Present only when a scorer reported usage |
+| `truncatedCount` | Completed items whose output was cut off by the model |
+| `usageItems` | Items that reported usage; the number to divide the totals by for per-item averages |
+
+A run recorded before these fields existed does not have them; `errorRate` can be
+read as `failed / total`.
+
+Stored results are bounded: output text is cut at 20,000 characters, long tool-call
+arguments and large score details are shortened, and if a run is still too big to
+store, details are dropped step by step. When that happens the run has
+`itemsTruncated: true` and the aggregate is still complete.
+
+#### Cancelling and stuck runs
+
+A run can be cancelled while it is `pending` or `running`. A pending run becomes
+`cancelled` at once. A running run is asked to stop: no new items start, the items in
+flight finish, and the run ends as `cancelled` with the items processed so far and an
+aggregate over them. A running run reports a heartbeat; if the server restarts or the
+worker stops responding (default 10 minutes without a heartbeat), a periodic check
+marks the run `failed` with a message instead of leaving it `running` forever. A run
+that stays `pending` for more than 24 hours is failed the same way.
+
+#### Multi-turn items and tools
+
+When an item has several turns, `perTurn` mode runs each user turn in order. Tool
+exchanges recorded in the item (an assistant tool call followed by its tool result)
+are replayed in place, and the model is called again after a trailing tool result,
+so it can answer the result. An **agent target** gets the item's earlier user and
+assistant text turns as conversation history before the last turn is sent; recorded
+tool exchanges are not replayed to an agent. Each item runs in its own
+conversation, and that conversation is deleted when the item finishes, so a run
+leaves no chat history behind.
+
+#### Datasets, deleting and empty runs
+
+- Starting a run on a dataset with no items answers `400`.
+- A target or dataset that a suite still uses cannot be deleted (`409`, naming the
+  suites), and a suite cannot be deleted while it has a `pending` or `running` run.
+- Comparing two runs needs both to be `completed` and to come from the same dataset
+  (`409` otherwise). In a comparison an item that errored or was skipped in either run
+  is `not_comparable`; `regressed` and `fixed` only describe two scored outcomes.
+
+#### Generating a dataset
+
+Generation is bounded: `count` is 1 to 200, `maxChunks` 1 to 500, and the source text
+or file is limited to 5 MB. A source with too few usable passages can produce fewer
+items than asked; the dataset then carries `metadata.generation.warning` saying how
+many were generated.
 
 ### Walkthrough
 
@@ -270,6 +389,11 @@ Alerts service) on the `analysis` or `evaluation` module:
 | `analysis` | `analysis_avg_accuracy` | Mean extraction accuracy. |
 | `evaluation` | `evaluation_pass_rate` | Mean pass rate. |
 | `evaluation` | `evaluation_avg_score` | Mean weighted score. |
+| `evaluation` | `evaluation_error_rate` | Mean share of items that errored (target or scoring errors). Runs recorded before the error rate existed use `failed / total`. |
+
+Pass rate and average score leave out errored and skipped items, so a run where
+most items errored can still show a high pass rate. Alert on `evaluation_error_rate`
+as well to catch that.
 
 The collectors average the persisted run aggregate over completed runs in the
 rule's window (excluding runs where the metric is null), honouring the project

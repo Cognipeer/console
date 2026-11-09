@@ -31,6 +31,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { assertMetadataPatchKeys } from '../provider/evaluationItemFields';
 import { agentRevisionFromColumn, agentVersionFromColumn, agentVersionToColumn } from './agentRevisionColumns';
 import {
   hasAnyLabel,
@@ -136,6 +137,47 @@ function toIso(value: Date | string | undefined | null): string | null {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
+/** Run columns without the (potentially huge) `items` JSON. */
+const RUN_SUMMARY_COLUMNS =
+  'id, tenantId, projectId, suiteKey, targetKey, datasetKey, status, mode, progress, aggregate, agentRevision, error, startedAt, finishedAt, cancelRequestedAt, heartbeatAt, itemsTruncated, createdBy, createdAt, updatedAt';
+
+/** Integer >= 0 for values interpolated into LIMIT/OFFSET (never raw input). */
+function toNonNegativeInt(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (value === undefined || value === null || !Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.floor(n));
+}
+
+/**
+ * WHERE clause shared by the run list / summaries / count methods. `status`
+ * and `statuses` intersect; an empty `statuses` is ignored (same semantics as
+ * the MongoDB provider).
+ */
+function buildRunListWhere(filters?: {
+  projectId?: string;
+  suiteKey?: string;
+  status?: EvaluationRunStatus;
+  statuses?: EvaluationRunStatus[];
+}): { where: string; params: Record<string, unknown> } {
+  const clauses: string[] = [];
+  const params: Record<string, unknown> = {};
+  if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+  if (filters?.suiteKey !== undefined) { clauses.push('suiteKey = @suiteKey'); params.suiteKey = filters.suiteKey; }
+  let allowed = filters?.statuses && filters.statuses.length > 0 ? filters.statuses : undefined;
+  if (filters?.status !== undefined) {
+    allowed = allowed ? allowed.filter((s) => s === filters.status) : [filters.status];
+  }
+  if (allowed) {
+    if (allowed.length === 0) {
+      clauses.push('0');
+    } else {
+      const names = allowed.map((s, i) => { params[`status${i}`] = s; return `@status${i}`; });
+      clauses.push(`status IN (${names.join(', ')})`);
+    }
+  }
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
 }
 
 export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
@@ -751,9 +793,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       db.prepare(`
         INSERT INTO ${TABLES.evaluationRuns}
         (id, tenantId, projectId, suiteKey, targetKey, datasetKey, status, mode, progress,
-         aggregate, items, agentRevision, error, startedAt, finishedAt, createdBy, createdAt, updatedAt)
+         aggregate, items, agentRevision, error, startedAt, finishedAt, cancelRequestedAt, heartbeatAt, itemsTruncated,
+         createdBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @suiteKey, @targetKey, @datasetKey, @status, @mode, @progress,
-         @aggregate, @items, @agentRevision, @error, @startedAt, @finishedAt, @createdBy, @createdAt, @updatedAt)
+         @aggregate, @items, @agentRevision, @error, @startedAt, @finishedAt, @cancelRequestedAt, @heartbeatAt, @itemsTruncated,
+         @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: run.tenantId,
@@ -770,6 +814,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         error: run.error ?? null,
         startedAt: toIso(run.startedAt),
         finishedAt: toIso(run.finishedAt),
+        cancelRequestedAt: toIso(run.cancelRequestedAt),
+        heartbeatAt: toIso(run.heartbeatAt),
+        itemsTruncated: run.itemsTruncated === undefined ? null : run.itemsTruncated ? 1 : 0,
         createdBy: run.createdBy,
         createdAt: now,
         updatedAt: now,
@@ -794,6 +841,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (data.startedAt !== undefined) { sets.push('startedAt = @startedAt'); params.startedAt = toIso(data.startedAt); }
       if (data.finishedAt !== undefined) { sets.push('finishedAt = @finishedAt'); params.finishedAt = toIso(data.finishedAt); }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
+      if (data.cancelRequestedAt !== undefined) { sets.push('cancelRequestedAt = @cancelRequestedAt'); params.cancelRequestedAt = toIso(data.cancelRequestedAt); }
+      if (data.heartbeatAt !== undefined) { sets.push('heartbeatAt = @heartbeatAt'); params.heartbeatAt = toIso(data.heartbeatAt); }
+      if (data.itemsTruncated !== undefined) { sets.push('itemsTruncated = @itemsTruncated'); params.itemsTruncated = data.itemsTruncated ? 1 : 0; }
       db.prepare(`UPDATE ${TABLES.evaluationRuns} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findEvaluationRunById(id);
     }
@@ -804,20 +854,164 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       return row ? this.mapEvaluationRunRow(row) : null;
     }
 
-    async listEvaluationRuns(filters?: { projectId?: string; suiteKey?: string; status?: EvaluationRunStatus; limit?: number; skip?: number }): Promise<IEvaluationRun[]> {
+    async listEvaluationRuns(filters?: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+      limit?: number;
+      skip?: number;
+    }): Promise<IEvaluationRun[]> {
       const db = this.getTenantDb();
-      const clauses: string[] = [];
-      const params: Record<string, unknown> = {};
-      if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
-      if (filters?.suiteKey !== undefined) { clauses.push('suiteKey = @suiteKey'); params.suiteKey = filters.suiteKey; }
-      if (filters?.status !== undefined) { clauses.push('status = @status'); params.status = filters.status; }
-      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-      const limit = filters?.limit ?? 50;
-      const skip = filters?.skip ?? 0;
+      const { where, params } = buildRunListWhere(filters);
+      const limit = toNonNegativeInt(filters?.limit, 50);
+      const skip = toNonNegativeInt(filters?.skip, 0);
+      // `id` tiebreak keeps newest-first total when createdAt collides.
       const rows = db.prepare(
-        `SELECT * FROM ${TABLES.evaluationRuns} ${where} ORDER BY createdAt DESC LIMIT ${limit} OFFSET ${skip}`,
+        `SELECT * FROM ${TABLES.evaluationRuns} ${where} ORDER BY createdAt DESC, id DESC LIMIT ${limit} OFFSET ${skip}`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapEvaluationRunRow(r));
+    }
+
+    async listEvaluationRunSummaries(filters: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+      limit?: number;
+      skip?: number;
+    }): Promise<IEvaluationRun[]> {
+      const db = this.getTenantDb();
+      const { where, params } = buildRunListWhere(filters);
+      const limit = toNonNegativeInt(filters?.limit, 50);
+      const skip = toNonNegativeInt(filters?.skip, 0);
+      const rows = db.prepare(
+        `SELECT ${RUN_SUMMARY_COLUMNS} FROM ${TABLES.evaluationRuns} ${where} ORDER BY createdAt DESC, id DESC LIMIT ${limit} OFFSET ${skip}`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapEvaluationRunRow(r));
+    }
+
+    async countEvaluationRuns(filters: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+    }): Promise<number> {
+      const db = this.getTenantDb();
+      const { where, params } = buildRunListWhere(filters);
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM ${TABLES.evaluationRuns} ${where}`).get(params) as SqliteRow;
+      return Number(row?.n ?? 0);
+    }
+
+    async listEvaluationRunsByStatus(
+      statuses: EvaluationRunStatus[],
+      opts?: { createdBefore?: Date; limit?: number },
+    ): Promise<IEvaluationRun[]> {
+      if (statuses.length === 0) return [];
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = {};
+      const names = statuses.map((s, i) => { params[`status${i}`] = s; return `@status${i}`; });
+      let where = `status IN (${names.join(', ')})`;
+      if (opts?.createdBefore) {
+        where += ' AND createdAt < @createdBefore';
+        params.createdBefore = opts.createdBefore.toISOString();
+      }
+      const limit = Math.max(1, Math.min(toNonNegativeInt(opts?.limit, 1000) || 1000, 5000));
+      const rows = db.prepare(
+        `SELECT ${RUN_SUMMARY_COLUMNS} FROM ${TABLES.evaluationRuns} WHERE ${where} ORDER BY createdAt ASC, id ASC LIMIT ${limit}`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapEvaluationRunRow(r));
+    }
+
+    // ── Run lifecycle (conditional updates: the WHERE carries the guard) ──
+
+    async claimEvaluationRun(id: string, startedAt: Date): Promise<IEvaluationRun | null> {
+      const db = this.getTenantDb();
+      const at = toIso(startedAt) ?? this.now();
+      const changed = db.prepare(
+        `UPDATE ${TABLES.evaluationRuns}
+         SET status = 'running', startedAt = @at, heartbeatAt = @at, updatedAt = @now
+         WHERE id = @id AND status = 'pending'`,
+      ).run({ id, at, now: this.now() }).changes;
+      if (changed !== 1) return null;
+      return this.findEvaluationRunById(id);
+    }
+
+    async touchEvaluationRun(id: string, at: Date): Promise<boolean> {
+      const db = this.getTenantDb();
+      const changed = db.prepare(
+        `UPDATE ${TABLES.evaluationRuns} SET heartbeatAt = @at WHERE id = @id AND status = 'running'`,
+      ).run({ id, at: toIso(at) ?? this.now() }).changes;
+      return changed === 1;
+    }
+
+    async requestEvaluationRunCancel(id: string, at: Date): Promise<IEvaluationRun | null> {
+      const db = this.getTenantDb();
+      const atIso = toIso(at) ?? this.now();
+      const now = this.now();
+      const cancelled = db.prepare(
+        `UPDATE ${TABLES.evaluationRuns}
+         SET status = 'cancelled', finishedAt = @at, error = 'Cancelled before it started', updatedAt = @now
+         WHERE id = @id AND status = 'pending'`,
+      ).run({ id, at: atIso, now }).changes;
+      if (cancelled !== 1) {
+        // Not pending: flag a running run; terminal / missing runs match nothing.
+        db.prepare(
+          `UPDATE ${TABLES.evaluationRuns}
+           SET cancelRequestedAt = @at, updatedAt = @now
+           WHERE id = @id AND status = 'running'`,
+        ).run({ id, at: atIso, now });
+      }
+      return this.findEvaluationRunById(id);
+    }
+
+    async failStaleEvaluationRuns(heartbeatBefore: Date, message: string): Promise<number> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      // ISO-8601 UTC strings sort chronologically, so text comparison is safe.
+      return db.prepare(
+        `UPDATE ${TABLES.evaluationRuns}
+         SET status = 'failed', error = @message, finishedAt = @now, updatedAt = @now
+         WHERE status = 'running' AND COALESCE(heartbeatAt, startedAt, createdAt) < @cutoff`,
+      ).run({ message, now, cutoff: heartbeatBefore.toISOString() }).changes;
+    }
+
+    // ── Dataset metadata (atomic per-block patch) ───────────────────
+
+    async patchEvaluationDatasetMetadata(
+      id: string,
+      patch: Record<string, unknown>,
+      opts?: { unlessParityStatusIn?: string[] },
+    ): Promise<IEvaluationDataset | null> {
+      assertMetadataPatchKeys(patch);
+      const db = this.getTenantDb();
+      // One UPDATE with nested json_set / json_remove: keys were validated
+      // above so the `$."<key>"` paths are safe to build; values are bound.
+      const base = "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END";
+      let expr = base;
+      const params: Record<string, unknown> = { id, now: this.now() };
+      let n = 0;
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) {
+          expr = `json_remove(${expr}, '$."${key}"')`;
+        } else {
+          params[`v${n}`] = this.toJson(value);
+          expr = `json_set(${expr}, '$."${key}"', json(@v${n}))`;
+          n += 1;
+        }
+      }
+      let guard = '';
+      const statuses = opts?.unlessParityStatusIn?.filter((s) => typeof s === 'string') ?? [];
+      if (statuses.length > 0) {
+        const names = statuses.map((s, i) => { params[`p${i}`] = s; return `@p${i}`; });
+        // Absent status -> '' -> not in the list -> the write proceeds.
+        guard = ` AND COALESCE(json_extract(${base}, '$.parity.status'), '') NOT IN (${names.join(', ')})`;
+      }
+      const changed = db.prepare(
+        `UPDATE ${TABLES.evaluationDatasets} SET metadata = ${expr}, updatedAt = @now WHERE id = @id${guard}`,
+      ).run(params).changes;
+      if (changed !== 1) return null;
+      return this.findEvaluationDatasetById(id);
     }
 
     // ── Row mappers ──────────────────────────────────────────────────
@@ -937,6 +1131,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         error: (r.error as string | null) ?? undefined,
         startedAt: this.toDate(r.startedAt),
         finishedAt: this.toDate(r.finishedAt),
+        cancelRequestedAt: this.toDate(r.cancelRequestedAt),
+        heartbeatAt: this.toDate(r.heartbeatAt),
+        itemsTruncated: r.itemsTruncated == null ? undefined : Number(r.itemsTruncated) === 1,
         createdBy: r.createdBy as string,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),

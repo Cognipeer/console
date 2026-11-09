@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Paper, Stack, Text } from '@mantine/core';
+import { Alert, Button, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
@@ -40,13 +40,26 @@ export default function EvaluationTargetDetailPage() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // A server or network failure is not "not found": keep the two apart so a blip never reads as a deletion.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
 
   const load = async () => {
     if (!id) return;
-    const res = await fetch(`/api/evaluation/targets/${id}`, { cache: 'no-store' });
-    if (res.status === 404) { setNotFound(true); return; }
-    if (res.ok) setTarget((await res.json()).target ?? null);
+    try {
+      const res = await fetch(`/api/evaluation/targets/${id}`, { cache: 'no-store' });
+      if (res.status === 404) { setNotFound(true); return; }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setLoadError((data as { error?: string }).error || `Failed to load the target (${res.status})`);
+        return;
+      }
+      setNotFound(false);
+      setLoadError(null);
+      setTarget((await res.json()).target ?? null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load the target');
+    }
   };
 
   useEffect(() => {
@@ -71,7 +84,11 @@ export default function EvaluationTargetDetailPage() {
       id: target.id,
       action: async () => {
         const res = await fetch(`/api/evaluation/targets/${target.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(tq('deleteFailed'));
+        if (!res.ok) {
+          // A 409 names the suites that still use this target; show that instead of a generic failure.
+          const data = await res.json().catch(() => ({}));
+          throw new Error((data as { error?: string }).error || tq('deleteFailed'));
+        }
       },
     });
     if (!done) return;
@@ -87,6 +104,19 @@ export default function EvaluationTargetDetailPage() {
 
   if (loading) {
     return <PageContainer><Group justify="center" mt={80}><Loader /></Group></PageContainer>;
+  }
+  if (!target && !notFound && loadError) {
+    return (
+      <PageContainer>
+        <PageHeader eyebrow="Operate · Evaluations" title="Could not load the target" actions={backButton} />
+        <Alert color="red" variant="light" title="Failed to load the target" maw={620}>
+          {loadError}{' '}
+          <Button size="compact-xs" variant="subtle" onClick={() => void load()}>
+            Retry
+          </Button>
+        </Alert>
+      </PageContainer>
+    );
   }
   if (notFound || !target) {
     return (

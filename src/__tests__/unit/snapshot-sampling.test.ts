@@ -415,9 +415,12 @@ describe('mapTracingSession multi-cut', () => {
       { name: 'get_weather', argsMatch: 'subset', args: { city: 'Paris' } },
       { name: 'get_weather', argsMatch: 'subset', args: { city: 'Rome' } },
     ]);
-    // Results pair back to the two synthesized call ids in order.
+    // Parallel calls are ONE assistant turn carrying both calls (as the model made them), and the results
+    // pair back to the two synthesized call ids in order.
     const final = items[1];
-    expect(final.input.map((turn) => turn.toolCallId)).toEqual([undefined, undefined, undefined, 'trcall_1', 'trcall_2']);
+    expect(final.input.map((turn) => turn.role)).toEqual(['user', 'assistant', 'tool', 'tool']);
+    expect(final.input[1].toolCalls?.map((call) => call.id)).toEqual(['trcall_1', 'trcall_2']);
+    expect(final.input.map((turn) => turn.toolCallId)).toEqual([undefined, undefined, 'trcall_1', 'trcall_2']);
     expect(final.tools).toHaveLength(1);
   });
 

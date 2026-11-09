@@ -31,9 +31,19 @@ function buildContextHeaders(request: FastifyRequest) {
 
 export async function createFastifyApiTestApp(
   plugin: FastifyPluginAsync,
-  options: { trustProxy?: boolean | string[]; /** The production JSON parser: the body stays the raw string, an empty one reaches the handler. */ rawJsonBody?: boolean } = {},
+  options: {
+    trustProxy?: boolean | string[];
+    /** The production JSON parser: the body stays the raw string, an empty one reaches the handler. */
+    rawJsonBody?: boolean;
+    /** Request body limit in bytes (Fastify's default is 1 MiB; production allows NEXT_BODY_SIZE_LIMIT, 10 MB by default). */
+    bodyLimit?: number;
+  } = {},
 ) {
-  const app = Fastify({ logger: false, ...(options.trustProxy !== undefined ? { trustProxy: options.trustProxy } : {}) });
+  const app = Fastify({
+    logger: false,
+    ...(options.trustProxy !== undefined ? { trustProxy: options.trustProxy } : {}),
+    ...(options.bodyLimit !== undefined ? { bodyLimit: options.bodyLimit } : {}),
+  });
   await app.register(cookie);
   if (options.rawJsonBody) {
     app.removeContentTypeParser('application/json');

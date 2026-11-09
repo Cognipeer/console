@@ -28,7 +28,9 @@ export async function startDatasetGenerationConsumer(): Promise<void> {
     DATASET_GEN_QUEUE,
     async (ctx: JobContext<QueuePayload>) => {
       if (ctx.name === DATASET_GEN_JOB) {
-        await runDatasetGenerationJob(ctx.data as unknown as DatasetGenerationJobPayload);
+        await runDatasetGenerationJob(ctx.data as unknown as DatasetGenerationJobPayload, {
+          attemptsMade: ctx.attemptsMade,
+        });
         return { ok: true };
       }
       throw new Error(`Unknown dataset generation job: ${ctx.name}`);

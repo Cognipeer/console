@@ -47,6 +47,8 @@ export default function EvaluationDatasetDetailPage() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // A server or network failure is not "not found": keep the two apart so a blip never reads as a deletion.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
 
   // Items are paginated server-side — datasets can hold thousands of items.
@@ -79,9 +81,20 @@ export default function EvaluationDatasetDetailPage() {
 
   const loadDataset = useCallback(async () => {
     if (!id) return;
-    const res = await fetch(`/api/evaluation/datasets/${id}`, { cache: 'no-store' });
-    if (res.status === 404) { setNotFound(true); return; }
-    if (res.ok) setDataset((await res.json()).dataset ?? null);
+    try {
+      const res = await fetch(`/api/evaluation/datasets/${id}`, { cache: 'no-store' });
+      if (res.status === 404) { setNotFound(true); return; }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setLoadError((data as { error?: string }).error || `Failed to load the dataset (${res.status})`);
+        return;
+      }
+      setNotFound(false);
+      setLoadError(null);
+      setDataset((await res.json()).dataset ?? null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load the dataset');
+    }
   }, [id]);
 
   const loadItems = useCallback(async (signal?: AbortSignal) => {
@@ -188,30 +201,54 @@ export default function EvaluationDatasetDetailPage() {
   // The run handle is parked on the dataset, so a reload picks the banner back
   // up instead of leaving a background job invisible.
   const activeLabelRunId = labelRun?.id ?? dataset?.metadata?.labeling?.runId ?? null;
-  const labelRunSettled = labelRun?.status === 'completed' || labelRun?.status === 'failed';
+  // A run that 404s (deleted) can never settle by status, so remember it and stop polling.
+  const [goneLabelRunId, setGoneLabelRunId] = useState<string | null>(null);
+  const labelRunSettled =
+    labelRun?.status === 'completed' ||
+    labelRun?.status === 'failed' ||
+    labelRun?.status === 'cancelled' ||
+    (activeLabelRunId !== null && goneLabelRunId === activeLabelRunId);
   const notifiedRunRef = useRef<string | null>(null);
+  // The "finished" toast is for runs that ended while this page was open, not for a run that
+  // was already over when the page loaded.
+  const sawActiveRunRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!activeLabelRunId || labelRunSettled) return;
     let cancelled = false;
     const tick = async () => {
-      const res = await fetch(`/api/analysis/runs/${activeLabelRunId}`, { cache: 'no-store' });
-      if (!res.ok || cancelled) return;
-      const run = (await res.json()).run as AnalysisRunView | undefined;
+      let res: Response;
+      try {
+        res = await fetch(`/api/analysis/runs/${activeLabelRunId}`, { cache: 'no-store' });
+      } catch {
+        return; // transient network error: the next tick retries
+      }
+      if (cancelled) return;
+      if (res.status === 404) {
+        setGoneLabelRunId(activeLabelRunId);
+        return;
+      }
+      if (!res.ok) return;
+      const run = (await res.json().catch(() => ({}))).run as AnalysisRunView | undefined;
       if (!run || cancelled) return;
       setLabelRun(run);
-      if (run.status !== 'completed' && run.status !== 'failed') return;
+      if (run.status === 'pending' || run.status === 'running') sawActiveRunRef.current = run.id;
+      if (run.status !== 'completed' && run.status !== 'failed' && run.status !== 'cancelled') return;
       if (notifiedRunRef.current !== run.id) {
         notifiedRunRef.current = run.id;
-        notifications.show(
-          run.status === 'completed'
-            ? {
-                title: 'Labeling finished',
-                message: `${run.aggregate?.completed ?? run.progress.completed} item(s) labeled`,
-                color: 'teal',
-              }
-            : { title: 'Labeling failed', message: run.error ?? 'The labeling run failed', color: 'red' },
-        );
+        if (sawActiveRunRef.current === run.id) {
+          notifications.show(
+            run.status === 'completed'
+              ? {
+                  title: 'Labeling finished',
+                  message: `${run.aggregate?.completed ?? run.progress.completed} item(s) labeled`,
+                  color: 'teal',
+                }
+              : run.status === 'cancelled'
+                ? { title: 'Labeling cancelled', message: 'The labeling run was cancelled', color: 'yellow' }
+                : { title: 'Labeling failed', message: run.error ?? 'The labeling run failed', color: 'red' },
+          );
+        }
       }
       await Promise.all([loadItems(), loadLabelSummary(), loadDataset()]);
     };
@@ -232,6 +269,7 @@ export default function EvaluationDatasetDetailPage() {
     const run = (data as { run?: AnalysisRunView }).run ?? null;
     if (run) {
       notifiedRunRef.current = null;
+      sawActiveRunRef.current = run.id;
       setLabelRun(run);
       notifications.show({ title: 'Labeling started', message: `${run.progress.total} item(s) queued`, color: 'teal' });
     }
@@ -259,7 +297,7 @@ export default function EvaluationDatasetDetailPage() {
     return { dataset: result.dataset, copied: result.copied ?? 0 };
   };
 
-  const onSaveLabels = async (labels: Record<string, string>) => {
+  const onSaveLabels = async (labels: Record<string, string | number | boolean>) => {
     if (!dataset || !labelingItem) return;
     setSavingLabels(true);
     try {
@@ -294,7 +332,11 @@ export default function EvaluationDatasetDetailPage() {
       id: dataset.id,
       action: async () => {
         const res = await fetch(`/api/evaluation/datasets/${dataset.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(tq('deleteFailed'));
+        if (!res.ok) {
+          // A 409 names the suites that still use this dataset; show that instead of a generic failure.
+          const data = await res.json().catch(() => ({}));
+          throw new Error((data as { error?: string }).error || tq('deleteFailed'));
+        }
       },
     });
     if (!done) return;
@@ -452,6 +494,19 @@ export default function EvaluationDatasetDetailPage() {
   if (loading) {
     return <PageContainer><Group justify="center" mt={80}><Loader /></Group></PageContainer>;
   }
+  if (!dataset && !notFound && loadError) {
+    return (
+      <PageContainer>
+        <PageHeader eyebrow="Operate · Evaluations" title="Could not load the dataset" actions={backButton} />
+        <Alert color="red" variant="light" title="Failed to load the dataset" maw={620}>
+          {loadError}{' '}
+          <Button size="compact-xs" variant="subtle" onClick={() => void loadDataset()}>
+            Retry
+          </Button>
+        </Alert>
+      </PageContainer>
+    );
+  }
   if (notFound || !dataset) {
     return (
       <PageContainer>
@@ -504,11 +559,20 @@ export default function EvaluationDatasetDetailPage() {
           : gen?.status === 'failed'
             ? { title: 'Dataset generation failed', error: gen.error }
             : null;
-        return failure ? (
-          <Alert color="red" variant="light" title={failure.title} mb="lg" maw={620}>
-            {failure.error ?? 'No error detail was recorded.'}
-          </Alert>
-        ) : null;
+        return (
+          <>
+            {failure ? (
+              <Alert color="red" variant="light" title={failure.title} mb="lg" maw={620}>
+                {failure.error ?? 'No error detail was recorded.'}
+              </Alert>
+            ) : null}
+            {gen?.status === 'ready' && gen.warning ? (
+              <Alert color="yellow" variant="light" title="Generation finished with a warning" mb="lg" maw={620}>
+                {gen.warning}
+              </Alert>
+            ) : null}
+          </>
+        );
       })()}
 
       <Paper withBorder radius="md" p="lg" maw={620} mb="lg">

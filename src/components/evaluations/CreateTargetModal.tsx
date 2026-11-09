@@ -90,11 +90,26 @@ async function loadList<T>(url: string, field: string, apply: (rows: T[]) => voi
 }
 
 /** Assemble the OpenAI-shaped response_format the target will send. */
-function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined {
+function buildResponseFormat(v: FormValues, stored?: Record<string, unknown> | null): Record<string, unknown> | undefined {
   if (v.responseMode === 'none') return undefined;
   if (v.responseMode === 'json_object') return { type: 'json_object' };
   try {
-    return { type: 'json_schema', json_schema: { name: 'evaluation_output', strict: true, schema: JSON.parse(v.jsonSchema) } };
+    let schema: unknown = JSON.parse(v.jsonSchema);
+    // The text field holds the bare JSON schema. A pasted already-wrapped `{ name, schema }`
+    // object is unwrapped so the schema is never wrapped twice.
+    const wrapped = schema as { name?: unknown; schema?: unknown } | null;
+    if (wrapped && typeof wrapped === 'object' && typeof wrapped.name === 'string' && wrapped.schema && typeof wrapped.schema === 'object') {
+      schema = wrapped.schema;
+    }
+    const prev = (stored?.json_schema ?? {}) as { name?: unknown; strict?: unknown };
+    return {
+      type: 'json_schema',
+      json_schema: {
+        name: typeof prev.name === 'string' && prev.name ? prev.name : 'evaluation_output',
+        strict: typeof prev.strict === 'boolean' ? prev.strict : true,
+        schema,
+      },
+    };
   } catch {
     return undefined;
   }
@@ -151,8 +166,9 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         promptKey: editing.promptKey ?? '',
         systemPrompt: editing.systemPrompt ?? '',
         responseMode: (editing.responseFormat?.type as FormValues['responseMode']) ?? 'none',
-        jsonSchema: editing.responseFormat?.json_schema
-          ? JSON.stringify(editing.responseFormat.json_schema, null, 2)
+        // Only the schema itself: buildResponseFormat adds the { name, strict } wrapper back.
+        jsonSchema: (editing.responseFormat?.json_schema as { schema?: unknown } | undefined)?.schema
+          ? JSON.stringify((editing.responseFormat?.json_schema as { schema: unknown }).schema, null, 2)
           : '',
         maxTokens: editing.maxTokens ?? '',
       });
@@ -236,7 +252,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         // rejected at run time (an agent runs its own prompt).
         promptKey: v.kind === 'model' ? (v.promptMode === 'promptKey' ? v.promptKey : null) : undefined,
         systemPrompt: v.kind === 'model' ? (v.promptMode === 'inline' ? v.systemPrompt : null) : undefined,
-        responseFormat: v.kind === 'model' ? (buildResponseFormat(v) ?? null) : undefined,
+        responseFormat: v.kind === 'model' ? (buildResponseFormat(v, editing?.responseFormat) ?? null) : undefined,
         maxTokens: v.kind === 'model' ? (typeof v.maxTokens === 'number' ? v.maxTokens : null) : undefined,
       };
       const res = await fetch(

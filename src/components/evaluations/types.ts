@@ -64,6 +64,8 @@ export interface EvalDatasetItemView {
   /** Canned tool results; key format: `name + '(' + canonicalJson(args) + ')'`. */
   toolResults?: Record<string, unknown>;
   tags?: string[];
+  /** Structured-output contract recorded with the request (OpenAI response_format shape). */
+  responseFormat?: Record<string, unknown>;
   /** Structured segment labels (intent, complexity, …) — see EvalLabelMetaView. */
   labels?: Record<string, unknown>;
   labelMeta?: EvalLabelMetaView;
@@ -121,6 +123,8 @@ export interface EvalDatasetGenerationMeta {
   source: 'rag' | 'text' | 'file';
   generated?: number;
   error?: string;
+  /** Set when fewer items than requested could be generated (e.g. the source ran out of distinct passages). */
+  warning?: string;
 }
 
 export interface EvalDatasetView {
@@ -150,11 +154,19 @@ export type EvalScorerTypeView =
   | 'context-precision'
   | 'groundedness';
 
+/** Opt-in per-item applicability: the scorer is skipped on items without the named field. */
+export type EvalScorerApplyWhen = 'has-reference' | 'has-expected-tool-calls';
+
 export interface EvalScorerView {
   type: EvalScorerTypeView;
   weight?: number;
   rubric?: string;
   threshold?: number;
+  applyWhen?: EvalScorerApplyWhen;
+  /** tool-call: `false` fails the item when the target makes calls that were not expected (default true). */
+  allowExtraCalls?: boolean;
+  /** json-shape: `true` also flags keys the output has but the reference does not (default false). */
+  strict?: boolean;
 }
 
 export interface EvalSuiteView {
@@ -178,6 +190,10 @@ export interface EvalScoreView {
   weight: number;
   detail?: Record<string, unknown>;
   error?: string;
+  /** The scorer did not apply to this item (`detail.reason` says why); it is left out of the item score. */
+  skipped?: boolean;
+  /** Judge spend for this score (llm-judge scorers). */
+  usage?: EvalUsageView;
 }
 
 /** Token / cost usage reported for one item's target invocation. */
@@ -185,7 +201,19 @@ export interface EvalUsageView {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  cachedWriteTokens?: number;
+  reasoningTokens?: number;
   costUsd?: number;
+}
+
+/** One recorded turn of a `perTurn` run item. */
+export interface EvalRunTurnView {
+  index: number;
+  question: string;
+  text: string;
+  toolCalls?: EvalToolCallView[];
+  latencyMs?: number;
+  usage?: EvalUsageView;
 }
 
 export interface EvalRunItemView {
@@ -194,12 +222,21 @@ export interface EvalRunItemView {
     text: string;
     latencyMs?: number;
     toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+    /** `perTurn` runs: what the target said at every turn. */
+    turns?: EvalRunTurnView[];
+    /** The target stopped because it hit its output limit. */
+    truncated?: boolean;
   };
   scores: EvalScoreView[];
   score: number;
   passed: boolean;
   latencyMs?: number;
   usage?: EvalUsageView;
+  /** Judge spend for this item, kept apart from the target's `usage`. */
+  scoringUsage?: EvalUsageView;
+  /** No scorer applied to this item; it counts neither as passed nor as failed. */
+  skipped?: boolean;
+  /** The target or a scorer failed; the item counts in `aggregate.failed`. */
   error?: string;
   /** The item used knowledge base documents this viewer may not read: its output and scorer details are left out. */
   restricted?: boolean;
@@ -216,6 +253,17 @@ export interface EvalRunAggregateView {
   /** Present only when at least one item reported provider usage. */
   totalCostUsd?: number;
   totalTokens?: number;
+  /** Completed items no scorer applied to (excluded from passRate/avgScore). Absent on older runs. */
+  skipped?: number;
+  /** failed / total. Absent on older runs (derive it from failed / total). */
+  errorRate?: number;
+  /** Completed items whose output hit the output limit. */
+  truncatedCount?: number;
+  /** Items that reported target usage — the denominator for per-item token or cost averages. */
+  usageItems?: number;
+  /** Judge spend, separate from the target's totalCostUsd / totalTokens. */
+  scoringCostUsd?: number;
+  scoringTokens?: number;
 }
 
 export interface EvalRunView {
@@ -231,9 +279,26 @@ export interface EvalRunView {
   error?: string;
   /** Agent targets only: the configuration this run tested. */
   agentRevision?: IAgentRunRevision;
+  /** Set while a cancel request waits for in-flight items to finish. */
+  cancelRequestedAt?: string;
+  heartbeatAt?: string;
+  /** Item details were shortened so the run fits in one document. */
+  itemsTruncated?: boolean;
   startedAt?: string;
   finishedAt?: string;
   createdAt?: string;
+}
+
+/** GET /api/evaluation/runs — summaries (items left out) plus the total for paging. */
+export interface EvalRunListView {
+  runs: EvalRunView[];
+  total: number;
+}
+
+/** POST /api/evaluation/runs/:id/cancel */
+export interface EvalRunCancelView {
+  run: EvalRunView;
+  outcome: 'cancelled' | 'cancel_requested' | 'already_finished';
 }
 
 export interface ModelOption {
@@ -241,7 +306,8 @@ export interface ModelOption {
   label: string;
 }
 
-export type EvalComparisonStatus = 'regressed' | 'fixed' | 'unchanged' | 'added' | 'removed';
+/** `not_comparable`: the item errored or was skipped in at least one of the two runs. */
+export type EvalComparisonStatus = 'regressed' | 'fixed' | 'unchanged' | 'added' | 'removed' | 'not_comparable';
 
 export interface EvalComparisonItemView {
   itemId: string;

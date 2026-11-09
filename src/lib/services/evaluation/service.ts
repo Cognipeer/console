@@ -26,7 +26,9 @@ import type {
   AgentRevision,
   IAgentRunRevision,
 } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import { runEvaluation } from './runner';
+import { EvaluationConflictError, EvaluationInputError } from './errors';
 import { KnowledgeExposure, runWithKnowledgeExposure } from '@/lib/services/rag/access/exposure';
 import { EMBEDDING_SCORERS, JUDGE_SCORERS } from './scorers';
 import { compareEvaluationRuns, type EvalComparison } from './compare';
@@ -39,6 +41,8 @@ import {
   startAgentRevision,
   type StartedAgentRevision,
 } from '@/lib/services/agents/agentRevision';
+
+const logger = createLogger('evaluation:service');
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
@@ -69,11 +73,14 @@ async function generateUniqueKey(desired: string, exists: (key: string) => Promi
 }
 
 function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
+  // Optional keys are spread only when present: a stored scorer written before
+  // `applyWhen` existed (or read back from Mongo with a null) means "always applies".
+  const base = config.applyWhen ? { applyWhen: config.applyWhen } : {};
   if (config.type === 'llm-judge') {
-    return { type: 'llm-judge', weight: config.weight, rubric: config.rubric ?? '', threshold: config.threshold };
+    return { type: 'llm-judge', weight: config.weight, rubric: config.rubric ?? '', threshold: config.threshold, ...base };
   }
   if (config.type === 'semantic') {
-    return { type: 'semantic', weight: config.weight, threshold: config.threshold };
+    return { type: 'semantic', weight: config.weight, threshold: config.threshold, ...base };
   }
   if (config.type === 'tool-call') {
     return {
@@ -83,18 +90,31 @@ function mapScorer(config: IEvaluationScorerConfig): ScorerConfig {
       selectionWeight: config.selectionWeight,
       sequenceWeight: config.sequenceWeight,
       argsWeight: config.argsWeight,
+      ...(typeof config.allowExtraCalls === 'boolean' ? { allowExtraCalls: config.allowExtraCalls } : {}),
+      ...base,
+    };
+  }
+  if (config.type === 'json-shape') {
+    // Without this branch a json-shape scorer fell through to `assertion` and
+    // silently graded something else.
+    return {
+      type: 'json-shape',
+      weight: config.weight,
+      threshold: config.threshold,
+      ...(typeof config.strict === 'boolean' ? { strict: config.strict } : {}),
+      ...base,
     };
   }
   if (config.type === 'context-recall') {
-    return { type: 'context-recall', weight: config.weight, threshold: config.threshold };
+    return { type: 'context-recall', weight: config.weight, threshold: config.threshold, ...base };
   }
   if (config.type === 'context-precision') {
-    return { type: 'context-precision', weight: config.weight, threshold: config.threshold };
+    return { type: 'context-precision', weight: config.weight, threshold: config.threshold, ...base };
   }
   if (config.type === 'groundedness') {
-    return { type: 'groundedness', weight: config.weight, threshold: config.threshold };
+    return { type: 'groundedness', weight: config.weight, threshold: config.threshold, ...base };
   }
-  return { type: 'assertion', weight: config.weight };
+  return { type: 'assertion', weight: config.weight, ...base };
 }
 
 /** Turn evidence kept per item on a `perTurn` run (a run is one document). */
@@ -110,46 +130,178 @@ const EVAL_RUN_TURN_TEXT_CAP = 4000;
  */
 const EVAL_RUN_RETRIEVAL_TEXT_CAP = 8000;
 
-function toRunItem(result: RunItemResult): IEvaluationRunItem {
+// Persistence caps (spec F). They apply ONLY when a result is written to the
+// run document, never inside `runEvaluation`: the in-memory result stays whole
+// (the EE optimizer reads it).
+const EVAL_RUN_TEXT_CAP = 20000;
+const EVAL_RUN_ERROR_CAP = 2000;
+const EVAL_RUN_DETAIL_CAP = 4096;
+const EVAL_RUN_REASONING_CAP = 2000;
+const EVAL_RUN_REASON_CAP = 500;
+const EVAL_RUN_TOOL_CALLS_CAP = 32;
+const EVAL_RUN_TOOL_ARGS_CAP = 4096;
+const EVAL_RUN_TOOL_ARGS_PREVIEW = 500;
+/** Whole-run guard: serialized items above this are degraded before the write (Mongo's limit is 16MB). */
+const EVAL_RUN_ITEMS_BYTES_CAP = 8 * 1024 * 1024;
+/** After the guard strips output text, this much of it is kept. */
+const EVAL_RUN_DEGRADED_TEXT_CAP = 1000;
+
+/** A running run whose last sign of life is older than this no longer blocks a new one. */
+const EVAL_RUN_RUNNING_GUARD_MS = 60 * 60 * 1000;
+/** Progress counts are flushed at most this often; the items array less often still. */
+const EVAL_RUN_PROGRESS_FLUSH_MS = 1_500;
+const EVAL_RUN_ITEMS_FLUSH_MS = 5_000;
+
+/** `EVALUATION_RUN_CANCEL_POLL_MS` (default 5 s) is how often a running executor looks for a cancel request. */
+function envMs(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** A copy of `value` without its `undefined` members (a store would persist them as null). */
+function withoutUndefined(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined));
+}
+
+/** A pending run older than this is treated as lost (the reconciler fails it). */
+export const EVAL_RUN_PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function capString(value: string | undefined, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value.length > max ? value.slice(0, max) : value;
+}
+
+/** Serialized length, or Infinity when the value cannot be serialized (a cycle, a BigInt). */
+function serializedSize(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/** Stored tool calls: at most 32, each `args` at most 4 KB serialized (else a marker object with a preview). */
+export function capToolCalls(
+  calls: ReadonlyArray<{ name: string; args?: Record<string, unknown> | null }> | undefined,
+): Array<{ name: string; args: Record<string, unknown> }> {
+  if (!Array.isArray(calls)) return [];
+  return calls.slice(0, EVAL_RUN_TOOL_CALLS_CAP).map((call) => {
+    const args = call.args ?? {};
+    if (serializedSize(args) <= EVAL_RUN_TOOL_ARGS_CAP) return { name: call.name, args };
+    let preview = '';
+    try {
+      preview = (JSON.stringify(args) ?? '').slice(0, EVAL_RUN_TOOL_ARGS_PREVIEW);
+    } catch {
+      preview = '';
+    }
+    return { name: call.name, args: { __truncated: true, preview } };
+  });
+}
+
+/**
+ * The part of a score detail that survives shrinking: the judge's reasoning
+ * (capped), the verdict inputs, and every numeric field. Chunk lists, per-call
+ * breakdowns and the like are what make a detail large.
+ */
+function whitelistScoreDetail(detail: Record<string, unknown>): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(detail)) {
+    if (typeof value === 'number' && Number.isFinite(value)) kept[key] = value;
+  }
+  if (typeof detail.reasoning === 'string') kept.reasoning = detail.reasoning.slice(0, EVAL_RUN_REASONING_CAP);
+  if (typeof detail.reason === 'string') kept.reason = detail.reason.slice(0, EVAL_RUN_REASON_CAP);
+  if (typeof detail.judgePassed === 'boolean') kept.judgePassed = detail.judgePassed;
+  kept.truncated = true;
+  return kept;
+}
+
+/** A score detail as stored: untouched while it fits ~4 KB, otherwise its whitelisted core plus `truncated: true`. */
+export function capScoreDetail(detail: Record<string, unknown> | undefined | null): Record<string, unknown> | undefined {
+  if (!detail || typeof detail !== 'object') return undefined;
+  return serializedSize(detail) <= EVAL_RUN_DETAIL_CAP ? detail : whitelistScoreDetail(detail);
+}
+
+/** The run item as stored — optional keys are present only when they have a value (Mongo turns `undefined` into null). */
+export function toRunItem(result: RunItemResult): IEvaluationRunItem {
+  const output = result.output;
+  const error = capString(result.error, EVAL_RUN_ERROR_CAP);
   return {
     itemId: result.itemId,
-    output: result.output
+    ...(output
       ? {
-          text: result.output.retrieved
-            ? result.output.text.slice(0, EVAL_RUN_RETRIEVAL_TEXT_CAP)
-            : result.output.text,
-          latencyMs: result.output.latencyMs,
-          toolCalls: result.output.toolCalls,
-          // A run is ONE document; a long conversation replayed per turn would
-          // otherwise put unbounded transcript on every item.
-          ...(result.output.turns?.length
-            ? {
-                turns: result.output.turns.slice(0, EVAL_RUN_TURNS_CAP).map((turn) => ({
-                  index: turn.index,
-                  question: turn.question,
-                  text: turn.text.slice(0, EVAL_RUN_TURN_TEXT_CAP),
-                  ...(turn.toolCalls?.length ? { toolCalls: turn.toolCalls } : {}),
-                  ...(turn.latencyMs !== undefined ? { latencyMs: turn.latencyMs } : {}),
-                })),
-              }
-            : {}),
+          output: {
+            text:
+              capString(output.text ?? '', output.retrieved ? EVAL_RUN_RETRIEVAL_TEXT_CAP : EVAL_RUN_TEXT_CAP) ?? '',
+            ...(output.latencyMs !== undefined ? { latencyMs: output.latencyMs } : {}),
+            ...(Array.isArray(output.toolCalls) ? { toolCalls: capToolCalls(output.toolCalls) } : {}),
+            ...(output.truncated ? { truncated: true } : {}),
+            // A run is ONE document; a long conversation replayed per turn would
+            // otherwise put unbounded transcript on every item.
+            ...(output.turns?.length
+              ? {
+                  turns: output.turns.slice(0, EVAL_RUN_TURNS_CAP).map((turn) => ({
+                    index: turn.index,
+                    question: turn.question,
+                    text: turn.text.slice(0, EVAL_RUN_TURN_TEXT_CAP),
+                    ...(turn.toolCalls?.length ? { toolCalls: capToolCalls(turn.toolCalls) } : {}),
+                    ...(turn.latencyMs !== undefined ? { latencyMs: turn.latencyMs } : {}),
+                    ...(turn.usage ? { usage: turn.usage } : {}),
+                  })),
+                }
+              : {}),
+          },
         }
-      : undefined,
-    scores: result.scores.map((s) => ({
-      scorerType: s.scorerType,
-      score: s.score,
-      passed: s.passed,
-      weight: s.weight,
-      detail: s.detail,
-      error: s.error,
-    })),
+      : {}),
+    scores: result.scores.map((s) => {
+      const detail = capScoreDetail(s.detail);
+      const scoreError = capString(s.error, EVAL_RUN_ERROR_CAP);
+      return {
+        scorerType: s.scorerType,
+        score: s.score,
+        passed: s.passed,
+        weight: s.weight,
+        ...(detail ? { detail } : {}),
+        ...(scoreError ? { error: scoreError } : {}),
+        ...(s.skipped ? { skipped: true } : {}),
+        ...(s.usage ? { usage: s.usage } : {}),
+      };
+    }),
     score: result.score,
     passed: result.passed,
-    latencyMs: result.latencyMs,
-    usage: result.usage,
-    error: result.error,
+    ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}),
+    ...(result.usage ? { usage: result.usage } : {}),
+    ...(error ? { error } : {}),
+    ...(result.skipped ? { skipped: true } : {}),
+    ...(result.scoringUsage ? { scoringUsage: result.scoringUsage } : {}),
     ...(result.kbRestricted?.length ? { kbRestricted: result.kbRestricted } : {}),
   };
+}
+
+/**
+ * Whole-run guard before a write: a run is one document, and items past ~8 MB
+ * would make the write fail and lose the run's spend. Degrade in steps — score
+ * details down to their whitelisted core, then output text to 1000 chars with
+ * the turns dropped, then no items at all — and say so through `degraded`
+ * (stored as `itemsTruncated`). The aggregate is never touched.
+ */
+export function fitRunItems(items: IEvaluationRunItem[]): { items: IEvaluationRunItem[]; degraded: boolean } {
+  if (serializedSize(items) <= EVAL_RUN_ITEMS_BYTES_CAP) return { items, degraded: false };
+
+  const slim = items.map((item) => ({
+    ...item,
+    scores: item.scores.map((s) => (s.detail ? { ...s, detail: whitelistScoreDetail(s.detail) } : s)),
+  }));
+  if (serializedSize(slim) <= EVAL_RUN_ITEMS_BYTES_CAP) return { items: slim, degraded: true };
+
+  const minimal = slim.map((item) => {
+    if (!item.output) return item;
+    const rest = { ...item.output };
+    delete rest.turns;
+    return { ...item, output: { ...rest, text: rest.text.slice(0, EVAL_RUN_DEGRADED_TEXT_CAP) } };
+  });
+  if (serializedSize(minimal) <= EVAL_RUN_ITEMS_BYTES_CAP) return { items: minimal, degraded: true };
+
+  return { items: [], degraded: true };
 }
 
 // ── Targets ────────────────────────────────────────────────────────────────
@@ -262,9 +414,32 @@ export async function updateTarget(
   return updated ? toView(updated) : null;
 }
 
+/** Suites of the same project that name `key` through `field`. */
+async function suitesReferencing(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  owner: { projectId?: string | null; key: string },
+  field: 'targetKey' | 'datasetKey',
+): Promise<IEvaluationSuite[]> {
+  const suites = await db.listEvaluationSuites({ [field]: owner.key });
+  return suites.filter(
+    (suite) => suite[field] === owner.key && (suite.projectId ?? null) === (owner.projectId ?? null),
+  );
+}
+
+function referencedByMessage(kind: 'target' | 'dataset', key: string, suites: IEvaluationSuite[]): string {
+  const names = suites.slice(0, 5).map((suite) => `"${suite.key}"`).join(', ');
+  const more = suites.length > 5 ? ` and ${suites.length - 5} more` : '';
+  return `The ${kind} "${key}" is still used by ${suites.length === 1 ? 'suite' : 'suites'} ${names}${more}; change or delete ${suites.length === 1 ? 'it' : 'them'} first`;
+}
+
 export async function deleteTarget(tenantDbName: string, id: string): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+  const target = await db.findEvaluationTargetById(id);
+  if (target) {
+    const suites = await suitesReferencing(db, target, 'targetKey');
+    if (suites.length > 0) throw new EvaluationConflictError(referencedByMessage('target', target.key, suites));
+  }
   return db.deleteEvaluationTarget(id);
 }
 
@@ -486,9 +661,32 @@ export async function updateDataset(
   return updated ? toView(updated) : null;
 }
 
+/**
+ * Merge top-level metadata blocks into a dataset atomically (a value of
+ * `undefined` unsets that block). Used where a writer owns ONE block
+ * (`labeling`, `generation`, `parity`, ...): replacing the whole `metadata`
+ * would erase what a concurrent writer put in another block.
+ */
+export async function patchDatasetMetadata(
+  tenantDbName: string,
+  id: string,
+  patch: Record<string, unknown>,
+  opts?: { unlessParityStatusIn?: string[] },
+): Promise<WithId<IEvaluationDataset> | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const updated = await db.patchEvaluationDatasetMetadata(id, patch, opts);
+  return updated ? toView(updated) : null;
+}
+
 export async function deleteDataset(tenantDbName: string, id: string): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+  const dataset = await db.findEvaluationDatasetById(id);
+  if (dataset) {
+    const suites = await suitesReferencing(db, dataset, 'datasetKey');
+    if (suites.length > 0) throw new EvaluationConflictError(referencedByMessage('dataset', dataset.key, suites));
+  }
   return db.deleteEvaluationDataset(id);
 }
 
@@ -702,6 +900,21 @@ export async function updateSuite(
 export async function deleteSuite(tenantDbName: string, id: string): Promise<boolean> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
+  const suite = await db.findEvaluationSuiteById(id);
+  if (suite) {
+    // Deleting under a live run would leave it failing on "suite not found" halfway through.
+    const active = await db.listEvaluationRuns({
+      projectId: suite.projectId,
+      suiteKey: suite.key,
+      statuses: ['pending', 'running'],
+      limit: 1,
+    });
+    if (active.length > 0) {
+      throw new EvaluationConflictError(
+        `Suite "${suite.key}" has a run in progress; cancel it or wait for it to finish before deleting the suite`,
+      );
+    }
+  }
   return db.deleteEvaluationSuite(id);
 }
 
@@ -709,11 +922,29 @@ export async function deleteSuite(tenantDbName: string, id: string): Promise<boo
 
 export async function listRuns(
   tenantDbName: string,
-  filters?: { projectId?: string; suiteKey?: string; limit?: number; skip?: number },
+  filters?: { projectId?: string; suiteKey?: string; status?: IEvaluationRun['status']; limit?: number; skip?: number },
 ): Promise<WithId<IEvaluationRun>[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return (await db.listEvaluationRuns(filters)).map(toView);
+}
+
+/**
+ * One page of runs WITHOUT their items (a run is one document and its items are
+ * the bulk of it) plus the total for the same filter, so a list view can page.
+ */
+export async function listRunSummaries(
+  tenantDbName: string,
+  filters: { projectId?: string; suiteKey?: string; status?: IEvaluationRun['status']; limit?: number; skip?: number },
+): Promise<{ runs: WithId<IEvaluationRun>[]; total: number }> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const { limit: _limit, skip: _skip, ...countFilters } = filters;
+  const [runs, total] = await Promise.all([
+    db.listEvaluationRunSummaries(filters),
+    db.countEvaluationRuns(countFilters),
+  ]);
+  return { runs: runs.map(toView), total };
 }
 
 export async function getRun(tenantDbName: string, id: string): Promise<WithId<IEvaluationRun> | null> {
@@ -723,9 +954,48 @@ export async function getRun(tenantDbName: string, id: string): Promise<WithId<I
   return record ? toView(record) : null;
 }
 
+export type CancelRunOutcome = 'cancelled' | 'cancel_requested' | 'already_finished';
+
+/**
+ * Cancel a run. A pending run is cancelled at once (its queued job then fails
+ * the claim and does nothing); a running one only records the request — the
+ * executing node sees it on its next heartbeat, stops dispatching items, and
+ * finalises the run as `cancelled` with what it had. A finished run is
+ * returned unchanged. `null` when the run is missing or belongs to another project.
+ */
+export async function cancelRun(
+  tenantDbName: string,
+  id: string,
+  projectId?: string,
+): Promise<{ run: WithId<IEvaluationRun>; outcome: CancelRunOutcome } | null> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const existing = await db.findEvaluationRunById(id);
+  if (!existing) return null;
+  if (existing.projectId && existing.projectId !== projectId) return null;
+
+  const updated = await db.requestEvaluationRunCancel(id, new Date());
+  if (!updated) return null;
+
+  let outcome: CancelRunOutcome;
+  if (updated.status === 'running') outcome = 'cancel_requested';
+  else if (updated.status === 'cancelled' && existing.status === 'pending') outcome = 'cancelled';
+  else outcome = 'already_finished';
+  return { run: toView(updated), outcome };
+}
+
+/** Record a run as failed outside the executor (a job that could not be queued). Unconditional: the run has not started. */
+export async function markRunFailed(tenantDbName: string, id: string, message: string): Promise<void> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  await db.updateEvaluationRun(id, { status: 'failed', error: capString(message, EVAL_RUN_ERROR_CAP), finishedAt: new Date() });
+}
+
 /**
  * Diff a run against a baseline run (typically an earlier run of the same
- * suite). Returns null if either run is missing.
+ * suite). Returns null if either run is missing. Two runs only compare when
+ * both finished and graded the same dataset: a pending run has no items, and
+ * different datasets share no item ids, so every row would read "added/removed".
  */
 export async function compareRuns(
   tenantDbName: string,
@@ -739,6 +1009,16 @@ export async function compareRuns(
     db.findEvaluationRunById(baselineRunId),
   ]);
   if (!current || !baseline) return null;
+  for (const [label, run] of [['run', current], ['baseline run', baseline]] as const) {
+    if (run.status !== 'completed') {
+      throw new EvaluationConflictError(`The ${label} is ${run.status}; only completed runs can be compared`);
+    }
+  }
+  if (current.datasetKey !== baseline.datasetKey) {
+    throw new EvaluationConflictError(
+      `The runs used different datasets ("${baseline.datasetKey}" and "${current.datasetKey}") and cannot be compared`,
+    );
+  }
   return compareEvaluationRuns(baseline, current);
 }
 
@@ -816,23 +1096,36 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
     );
   }
 
-  // Guard against duplicate/concurrent runs of the same suite. Reject if a
-  // recent run is still in progress; stale 'running' rows (>1h, from a hard
-  // crash) are ignored so a suite can never get permanently locked. Runs that
-  // test different revisions of the agent are not duplicates — comparing the
-  // draft with the published version is the point of asking for one — but a
-  // run with no recorded revision could be testing anything, so it blocks.
-  const inFlight = await db.listEvaluationRuns({ projectId, suiteKey: suite.key, status: 'running', limit: 20 });
-  const conflict = inFlight.some((other) => {
-    const recentStart = other.startedAt ? new Date(other.startedAt).getTime() : 0;
-    if (Date.now() - recentStart >= 60 * 60 * 1000) return false;
+  // Guard against duplicate/concurrent runs of the same suite. A run that is
+  // pending (queued, within the last 24 h) or running counts. A running row
+  // counts while its heartbeat (or start) is under an hour old, so a hard crash
+  // can never lock a suite for good. Runs that test different revisions of the
+  // agent are not duplicates — comparing the draft with the published version
+  // is the point of asking for one — but a run with no recorded revision could
+  // be testing anything, so it blocks.
+  const suiteKey2 = suite.key;
+  const conflicts = (other: IEvaluationRun): boolean => {
+    if (other.status === 'running') {
+      const alive = Math.max(
+        other.heartbeatAt ? new Date(other.heartbeatAt).getTime() : 0,
+        other.startedAt ? new Date(other.startedAt).getTime() : 0,
+      );
+      if (Date.now() - alive >= EVAL_RUN_RUNNING_GUARD_MS) return false;
+    } else if (other.status === 'pending') {
+      const created = other.createdAt ? new Date(other.createdAt).getTime() : 0;
+      if (Date.now() - created >= EVAL_RUN_PENDING_MAX_AGE_MS) return false;
+    } else {
+      return false;
+    }
     return !other.agentRevision || !agentRevision || sameAgentRevision(other.agentRevision.requested, agentRevision.requested);
-  });
-  if (conflict) {
-    throw new Error(
-      `A run for suite "${suite.key}" is already in progress${agentRevision ? ` on ${agentRevisionLabel(agentRevision.requested)}` : ''}`,
-    );
-  }
+  };
+  const duplicateMessage = `A run for suite "${suiteKey2}" is already in progress${agentRevision ? ` on ${agentRevisionLabel(agentRevision.requested)}` : ''}`;
+  const listInFlight = () =>
+    db.listEvaluationRuns({ projectId, suiteKey: suiteKey2, statuses: ['pending', 'running'], limit: 50 });
+  if ((await listInFlight()).some(conflicts)) throw new EvaluationConflictError(duplicateMessage);
+
+  const total = dataset.itemCount || (await db.countEvaluationDatasetItems(String(dataset._id)));
+  if (!total) throw new EvaluationInputError(`Dataset "${dataset.key}" has no items to evaluate`);
 
   const run = await db.createEvaluationRun({
     tenantId,
@@ -842,15 +1135,28 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
     datasetKey: dataset.key,
     status: 'pending',
     mode,
-    progress: {
-      total: dataset.itemCount ?? (await db.countEvaluationDatasetItems(String(dataset._id))),
-      completed: 0,
-      failed: 0,
-    },
+    progress: { total, completed: 0, failed: 0 },
     items: [],
     ...(agentRevision ? { agentRevision } : {}),
     createdBy,
   });
+
+  // The check above and this insert are not one atomic step: two requests can
+  // both pass it. Re-read after inserting; of two racing runs the OLDER one
+  // (ties broken by id) stays and the newer one withdraws, so exactly one runs.
+  const runId = String(run._id);
+  const runCreated = run.createdAt ? new Date(run.createdAt).getTime() : Date.now();
+  const older = (await listInFlight()).some((other) => {
+    const otherId = String(other._id);
+    if (otherId === runId || !conflicts(other)) return false;
+    // A row without createdAt predates this check: treat it as the older one.
+    const otherCreated = other.createdAt ? new Date(other.createdAt).getTime() : 0;
+    return otherCreated < runCreated || (otherCreated === runCreated && otherId < runId);
+  });
+  if (older) {
+    await db.updateEvaluationRun(runId, { status: 'failed', error: duplicateMessage, finishedAt: new Date() });
+    throw new EvaluationConflictError(duplicateMessage);
+  }
   return toView(run);
 }
 
@@ -868,8 +1174,24 @@ export async function executeRun(
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
+  // Only one executor may own a run. A duplicate delivery, a run cancelled
+  // while it waited, or one the reconciler already failed is left alone — and
+  // not thrown, so the queue does not retry it.
+  const claimed = await db.claimEvaluationRun(runId, new Date());
+  if (!claimed) {
+    const stored = await db.findEvaluationRunById(runId);
+    if (!stored) throw new Error(`Evaluation run "${runId}" not found`);
+    logger.info('Evaluation run not executed: it is not pending', { runId, status: stored.status });
+    return toView(stored);
+  }
+
+  const heartbeatMs = envMs('EVALUATION_RUN_HEARTBEAT_MS', 30_000);
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let cancelTimer: ReturnType<typeof setInterval> | undefined;
+  let stopRequested = false;
+
   try {
-    // Inside the try so the run is recorded as failed rather than left pending
+    // Inside the try so the run is recorded as failed rather than left running
     // when the service has been switched off since it was queued.
     await assertServiceEnabled({ tenantDbName, tenantId }, 'evaluations');
     const suite = await db.findEvaluationSuiteByKey(suiteKey, projectId);
@@ -880,10 +1202,9 @@ export async function executeRun(
     // created (an agent target needs Write on Agents, asked then). A suite
     // pointed elsewhere while the run waited would run a target nobody was
     // asked about, so the run stops instead.
-    const created = await db.findEvaluationRunById(runId);
-    if (created && created.targetKey !== target.key) {
+    if (claimed.targetKey !== target.key) {
       throw new Error(
-        `Suite "${suite.key}" now points at target "${target.key}", not at "${created.targetKey}" this run was started for; start the run again`,
+        `Suite "${suite.key}" now points at target "${target.key}", not at "${claimed.targetKey}" this run was started for; start the run again`,
       );
     }
     const dataset = await db.findEvaluationDatasetByKey(suite.datasetKey, projectId);
@@ -893,6 +1214,9 @@ export async function executeRun(
     assertTurnModeSupported(target, suite.runConfig?.turnMode);
 
     const datasetItems = await loadAllDatasetItems(db, String(dataset._id));
+    if (datasetItems.length === 0) {
+      throw new EvaluationInputError(`Dataset "${dataset.key}" has no items to evaluate`);
+    }
     const items: DatasetItem[] = datasetItems.map((it) => ({
       id: it.id,
       input: it.input,
@@ -908,15 +1232,28 @@ export async function executeRun(
     // right now, so every item runs one config even if someone publishes midway.
     let started: StartedAgentRevision | undefined;
     if (target.kind === 'agent' && target.agentKey) {
-      const requested = created?.agentRevision?.requested ?? params.agentVersion ?? storedAgentRevision(target.agentVersion);
+      const requested = claimed.agentRevision?.requested ?? params.agentVersion ?? storedAgentRevision(target.agentVersion);
       started = await startAgentRevision(tenantDbName, target.agentKey, projectId, requested);
     }
+    if (started) await db.updateEvaluationRun(runId, { agentRevision: started.revision });
 
-    await db.updateEvaluationRun(runId, {
-      status: 'running',
-      startedAt: new Date(),
-      ...(started ? { agentRevision: started.revision } : {}),
-    });
+    // Liveness + cancellation. The heartbeat tells the reconciler this node is
+    // alive; the poll reads `cancelRequestedAt` through the item-less summary
+    // listing, so it does not drag a large run document over the wire.
+    const suiteKeyForPoll = suite.key;
+    heartbeatTimer = setInterval(() => {
+      void db.touchEvaluationRun(runId, new Date()).catch(() => {});
+    }, heartbeatMs);
+    heartbeatTimer.unref?.();
+    cancelTimer = setInterval(() => {
+      void db
+        .listEvaluationRunSummaries({ projectId, suiteKey: suiteKeyForPoll, status: 'running', limit: 50 })
+        .then((rows) => {
+          if (rows.some((row) => String(row._id) === runId && row.cancelRequestedAt)) stopRequested = true;
+        })
+        .catch(() => {});
+    }, envMs('EVALUATION_RUN_CANCEL_POLL_MS', 5_000));
+    cancelTimer.unref?.();
 
     const ctx: EvaluationModelContext = {
       tenantDbName,
@@ -935,9 +1272,30 @@ export async function executeRun(
     const needEmbed = scorers.some((s) => EMBEDDING_SCORERS.includes(s.type));
 
     // Persist incremental progress so the dashboard can show step-by-step
-    // results live (throttled to avoid hammering the DB on large datasets).
+    // results live. Flushes are serialised — one in flight at a time, so a slow
+    // write can never land after a newer one or after the final write — and the
+    // (large) items array is rewritten at most every ~5 s.
     const partial: RunItemResult[] = [];
     let lastFlush = 0;
+    let lastItemsFlush = 0;
+    let flushChain: Promise<void> | null = null;
+    const flush = (): Promise<void> => {
+      const now = Date.now();
+      const withItems = now - lastItemsFlush >= EVAL_RUN_ITEMS_FLUSH_MS;
+      lastFlush = now;
+      if (withItems) lastItemsFlush = now;
+      const snapshot = partial.slice();
+      const completed = snapshot.filter((p) => !p.error).length;
+      const failed = snapshot.length - completed;
+      const fitted = withItems ? fitRunItems(snapshot.map(toRunItem)) : undefined;
+      return db
+        .updateEvaluationRun(runId, {
+          progress: { total: items.length, completed, failed },
+          ...(fitted ? { items: fitted.items, ...(fitted.degraded ? { itemsTruncated: true } : {}) } : {}),
+        })
+        .then(() => undefined)
+        .catch(() => undefined);
+    };
     const result = await runEvaluation({
       items,
       scorers,
@@ -945,6 +1303,7 @@ export async function executeRun(
       invokeJudge: needJudge ? makeJudge(suite.judgeModelKey, ctx) : undefined,
       invokeEmbed: needEmbed ? makeEmbed(suite.embeddingModelKey, ctx) : undefined,
       config: { concurrency: suite.runConfig?.concurrency, turnMode: suite.runConfig?.turnMode },
+      shouldStop: () => stopRequested,
       // Each item's work (target and scorers) in its own exposure: its stored copy and its model calls are marked
       // with what it handed on of documents not open to everyone.
       scope: async (_item, run) => {
@@ -954,45 +1313,68 @@ export async function executeRun(
       },
       onItem: (item) => {
         partial.push(item);
-        const now = Date.now();
-        if (now - lastFlush >= 1500) {
-          lastFlush = now;
-          const completed = partial.filter((p) => !p.error).length;
-          const failed = partial.filter((p) => p.error).length;
-          void db
-            .updateEvaluationRun(runId, {
-              progress: { total: items.length, completed, failed },
-              items: partial.map(toRunItem),
-            })
-            .catch(() => {});
-        }
+        if (flushChain || Date.now() - lastFlush < EVAL_RUN_PROGRESS_FLUSH_MS) return;
+        flushChain = flush().finally(() => {
+          flushChain = null;
+        });
       },
     });
+    // The final write must not race a flush still in flight.
+    if (flushChain) await flushChain;
+    clearInterval(heartbeatTimer);
+    clearInterval(cancelTimer);
+    heartbeatTimer = undefined;
+    cancelTimer = undefined;
 
     // A draft is read afresh by every item, so a save during the run means the
     // later items may have run a different config than the earlier ones.
     const draftChanged = started?.revision.version === null && (await started.draftChanged());
 
-    const updated = await db.updateEvaluationRun(runId, {
-      status: 'completed',
+    const cancelled = result.stopped === true;
+    const fitted = fitRunItems(result.items.map(toRunItem));
+    const aggregate = withoutUndefined(result.aggregate as unknown as Record<string, unknown>) as unknown as NonNullable<
+      IEvaluationRun['aggregate']
+    >;
+    const finalData: Parameters<typeof db.updateEvaluationRun>[1] = {
+      status: cancelled ? 'cancelled' : 'completed',
+      // '' clears a failure message a reaper may have written while this worker was silent (the write
+      // below lands anyway); an empty error reads as "no error" everywhere.
+      error: cancelled ? 'Cancelled while running' : '',
       progress: {
-        total: result.aggregate.total,
+        total: cancelled ? items.length : result.aggregate.total,
         completed: result.aggregate.completed,
         failed: result.aggregate.failed,
       },
-      aggregate: result.aggregate,
-      items: result.items.map(toRunItem),
+      aggregate,
+      items: fitted.items,
+      ...(fitted.degraded ? { itemsTruncated: true } : {}),
       ...(started && draftChanged ? { agentRevision: { ...started.revision, draftChanged: true } } : {}),
       finishedAt: new Date(),
-    });
+    };
+    // Unconditional: the run's spend must reach the row even if a reaper
+    // failed it meanwhile. If the document is still too large for the store,
+    // keep the aggregate and drop the items rather than losing the run.
+    let updated: IEvaluationRun | null;
+    try {
+      updated = await db.updateEvaluationRun(runId, finalData);
+    } catch (writeError) {
+      logger.warn('Final evaluation run write failed; retrying without items', {
+        runId,
+        error: writeError instanceof Error ? writeError.message : String(writeError),
+      });
+      updated = await db.updateEvaluationRun(runId, { ...finalData, items: [], itemsTruncated: true });
+    }
     return toView(updated ?? (await db.findEvaluationRunById(runId))!);
   } catch (err) {
     await db.updateEvaluationRun(runId, {
       status: 'failed',
-      error: (err as Error).message,
+      error: capString((err as Error).message, EVAL_RUN_ERROR_CAP),
       finishedAt: new Date(),
     });
     throw err;
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (cancelTimer) clearInterval(cancelTimer);
   }
 }
 

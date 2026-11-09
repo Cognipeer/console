@@ -23,6 +23,36 @@
 const MAX_BLOCK_CANDIDATES = 20;
 
 /**
+ * The balanced object / array literal that opens at `start` (respecting string
+ * literals and escapes), or undefined when there is no bracket there or it
+ * never closes.
+ */
+export function balancedBlockAt(text: string, start: number): string | undefined {
+  const open = text[start];
+  if (open !== '{' && open !== '[') return undefined;
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth += 1;
+    else if (ch === close) {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Yields every balanced object / array literal in `text`, one per opening
  * bracket, respecting string literals and escapes.
  */
@@ -32,29 +62,8 @@ export function* balancedJsonBlocks(text: string): Generator<string> {
     const open = text[start];
     if (open !== '{' && open !== '[') continue;
     if (++candidates > MAX_BLOCK_CANDIDATES) return;
-
-    const close = open === '{' ? '}' : ']';
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = start; i < text.length; i += 1) {
-      const ch = text[i];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (ch === '\\') escaped = true;
-        else if (ch === '"') inString = false;
-        continue;
-      }
-      if (ch === '"') inString = true;
-      else if (ch === open) depth += 1;
-      else if (ch === close) {
-        depth -= 1;
-        if (depth === 0) {
-          yield text.slice(start, i + 1);
-          break;
-        }
-      }
-    }
+    const block = balancedBlockAt(text, start);
+    if (block !== undefined) yield block;
   }
 }
 

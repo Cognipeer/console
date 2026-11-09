@@ -57,6 +57,17 @@ beforeAll(async () => {
     status: 'completed', mode: 'sync', progress: { total: 2, completed: 2, failed: 0 }, items: [], createdBy: 'sys',
     aggregate: { total: 2, completed: 2, failed: 0, passed: 1, passRate: 0.6, avgScore: 0.9, avgLatencyMs: 120 },
   });
+  // Error-rate runs (project p3): one with the stored errorRate, one legacy (derives failed / total)
+  await db.createEvaluationRun({
+    tenantId: TENANT_ID, projectId: 'p3', suiteKey: 's1', targetKey: 't1', datasetKey: 'ds1',
+    status: 'completed', mode: 'sync', progress: { total: 4, completed: 4, failed: 0 }, items: [], createdBy: 'sys',
+    aggregate: { total: 4, completed: 3, failed: 1, passed: 3, passRate: 1, avgScore: 1, avgLatencyMs: 10, errorRate: 0.25 },
+  });
+  await db.createEvaluationRun({
+    tenantId: TENANT_ID, projectId: 'p3', suiteKey: 's1', targetKey: 't1', datasetKey: 'ds1',
+    status: 'completed', mode: 'sync', progress: { total: 4, completed: 4, failed: 0 }, items: [], createdBy: 'sys',
+    aggregate: { total: 4, completed: 4, failed: 3, passed: 1, passRate: 1, avgScore: 1, avgLatencyMs: 10 },
+  });
 });
 
 afterAll(async () => {
@@ -103,5 +114,11 @@ describe('EvaluationCollector', () => {
     const score = await collector.collect({ ...base, metric: 'evaluation_avg_score', scope: { projectId: 'p1' } });
     expect(score.value).toBeCloseTo(90, 5);
     expect(score.sampleCount).toBe(1);
+  });
+
+  it('averages errorRate and derives it from failed / total for older runs', async () => {
+    const r = await collector.collect({ ...base, metric: 'evaluation_error_rate', scope: { projectId: 'p3' } });
+    expect(r.value).toBeCloseTo(50, 5); // (0.25 + 0.75) / 2
+    expect(r.sampleCount).toBe(2);
   });
 });

@@ -6,9 +6,10 @@
  * trigger-oriented — designed for CI/automation:
  *
  *   GET  /client/v1/evaluation/suites             – list configured suites
- *   POST /client/v1/evaluation/suites/:key/run    – run a suite (synchronous);
- *        optional body `{ agent_version }`: "published", "draft" or a version
- *        number, for agent targets. Running an agent target also needs write
+ *   POST /client/v1/evaluation/suites/:key/run    – run a suite (synchronous by
+ *        default; `{ wait: false }` queues it and answers 202 with the pending run
+ *        to poll); optional body `{ agent_version }`: "published", "draft" or a
+ *        version number, for agent targets. Running an agent target also needs write
  *        access to Agents (403 otherwise), whichever version is asked for
  *   GET  /client/v1/evaluation/runs               – list runs (?suite_key, ?limit)
  *   GET  /client/v1/evaluation/runs/:id           – get one run + per-item scores
@@ -24,6 +25,8 @@ import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getRun, listRuns, listSuites, runSuite } from '@/lib/services/evaluation/service';
+import { enqueueSuiteRun } from '@/lib/services/evaluation/evaluationRunJob';
+import { EvaluationConflictError, EvaluationInputError } from '@/lib/services/evaluation/errors';
 import { AgentRevisionError } from '@/lib/services/agents/agentRevision';
 import { parseAgentRunOverride } from '@/lib/shared/agentRevision';
 import {
@@ -55,6 +58,8 @@ function fail(reply: import('fastify').FastifyReply, error: unknown, scope: stri
   const refused = sendAgentTestRefusal(reply, error);
   if (refused) return refused;
   logger.error(`Client evaluation ${scope} error`, { error });
+  if (error instanceof EvaluationConflictError) return reply.code(409).send({ error: error.message });
+  if (error instanceof EvaluationInputError) return reply.code(400).send({ error: error.message });
   const message = error instanceof Error ? error.message : 'Internal error';
   return (
     sendApiTokenError(reply, error)
@@ -88,10 +93,29 @@ export const clientEvaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const revision = parseAgentRunOverride(body.agent_version, 'agent_version');
       if (!revision.ok) return reply.code(400).send({ error: revision.error });
+      if (body.wait !== undefined && typeof body.wait !== 'boolean') {
+        return reply.code(400).send({ error: '`wait` must be a boolean' });
+      }
+      const wait = body.wait !== false;
       await enforceServiceQuota(
         { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
         { domain: 'jobs', resourceKey: 'evaluation', cost: { requests: 1 } },
       );
+      if (!wait) {
+        // Queue and return at once (a long suite outlives most HTTP clients' and proxies' timeouts); the caller
+        // polls GET /runs/:id. Same quota and agent authorisation as the synchronous path.
+        const pending = await enqueueSuiteRun({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          createdBy: ctx.tokenRecord.userId ?? 'api-token',
+          ...(ctx.tokenRecord._id ? { apiTokenId: String(ctx.tokenRecord._id) } : {}),
+          suiteKey: key,
+          agentVersion: revision.revision,
+          authorizeAgentRun: () => requireAgentTestAccess(request),
+        });
+        return reply.code(202).send({ run: toRunSummary(pending) });
+      }
       const run = await runSuite({
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,

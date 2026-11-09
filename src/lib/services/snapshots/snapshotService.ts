@@ -305,8 +305,12 @@ export function mapGatewayRow(row: IModelUsageLog, anonymize: AnonymizeOptions):
       const fn = asRecord(call?.function);
       if (!fn || typeof fn.name !== 'string') continue;
       let args: Record<string, unknown> = {};
-      if (typeof fn.arguments === 'string') {
-        const cleaned = cleanText(fn.arguments, anonymize, counter);
+      // Most gateways record `arguments` as a JSON string; some record the object itself.
+      const rawArguments = typeof fn.arguments === 'string'
+        ? fn.arguments
+        : asRecord(fn.arguments) ? JSON.stringify(fn.arguments) : undefined;
+      if (rawArguments !== undefined) {
+        const cleaned = cleanText(rawArguments, anonymize, counter);
         try {
           const parsed = JSON.parse(cleaned);
           args = asRecord(parsed) ?? { __raw: cleaned };
@@ -332,13 +336,19 @@ export function mapGatewayRow(row: IModelUsageLog, anonymize: AnonymizeOptions):
     if (role === 'tool') {
       // Full fidelity: the tool response stays IN the conversation (replay
       // needs it) and ALSO rides along as toolResults for the trajectory mock.
-      const key = typeof message.tool_call_id === 'string' ? message.tool_call_id : `tool_${i}`;
+      const sourceId = typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0
+        ? message.tool_call_id
+        : undefined;
+      // The made-up `tool_<i>` is only a key of toolResults. It is never stored as toolCallId: at replay it would
+      // match no declared call, so the real call would be closed with a stand-in and a second one invented. An
+      // absent id links to the oldest open call instead.
+      const key = sourceId ?? `tool_${i}`;
       const cleaned = text !== undefined ? cleanText(text, anonymize, counter) : '';
       toolResults[key] = cleaned;
       input.push({
         role: 'tool',
         content: cleaned,
-        toolCallId: key,
+        ...(sourceId ? { toolCallId: sourceId } : {}),
         ...(typeof message.name === 'string' ? { name: message.name } : {}),
       });
       continue;
@@ -394,13 +404,18 @@ export function mapGatewayRow(row: IModelUsageLog, anonymize: AnonymizeOptions):
       for (const call of assistant.tool_calls) {
         const fn = asRecord(asRecord(call)?.function);
         if (!fn || typeof fn.name !== 'string') continue;
-        let args: unknown;
-        if (typeof fn.arguments === 'string') {
-          const cleaned = cleanText(fn.arguments, anonymize, counter);
+        let args: Record<string, unknown> | undefined;
+        const rawArguments = typeof fn.arguments === 'string'
+          ? fn.arguments
+          : asRecord(fn.arguments) ? JSON.stringify(fn.arguments) : undefined;
+        if (rawArguments !== undefined) {
+          const cleaned = cleanText(rawArguments, anonymize, counter);
           try {
-            args = JSON.parse(cleaned);
+            // Unparseable or non-object arguments give a name-only expectation: a string `args` (or a `__raw`
+            // marker) could never match a real call's arguments.
+            args = asRecord(JSON.parse(cleaned));
           } catch {
-            args = cleaned; // keep the anonymized raw string when unparseable
+            args = undefined;
           }
         }
         toolCalls.push({ name: fn.name, argsMatch: 'subset', ...(args !== undefined ? { args } : {}) });
@@ -422,6 +437,29 @@ export function mapGatewayRow(row: IModelUsageLog, anonymize: AnonymizeOptions):
 }
 
 // ── Tracing mapping ────────────────────────────────────────────────────────
+
+/**
+ * Fold CONSECUTIVE tool-call turns (parallel calls issued together) into one assistant message with N calls.
+ * The tracing mapper converts every turn 1:1 so item inputs can be prefix slices; the merge runs on the emitted
+ * slices only. Slices never cut inside a run of calls, so a run is always whole. Results stay linked by id.
+ */
+export function mergeParallelCalls(messages: SnapshotDatasetItem['input']): SnapshotDatasetItem['input'] {
+  const out: SnapshotDatasetItem['input'] = [];
+  for (const message of messages) {
+    const previous = out[out.length - 1];
+    if (
+      previous
+      && message.role === 'assistant' && previous.role === 'assistant'
+      && message.toolCalls?.length && previous.toolCalls?.length
+      && !message.content && !previous.content
+    ) {
+      out[out.length - 1] = { ...previous, toolCalls: [...previous.toolCalls, ...message.toolCalls] };
+      continue;
+    }
+    out.push(message);
+  }
+  return out;
+}
 
 interface TracingMessage {
   role: 'system' | 'user' | 'assistant';
@@ -785,7 +823,7 @@ export function mapTracingSession(
       position: action.start,
       item: {
         id: `tr-${session.sessionId}#${i + 1}`,
-        input: converted.slice(0, action.start),
+        input: mergeParallelCalls(converted.slice(0, action.start)),
         expected: {
           toolCalls: action.calls.map((call) => ({
             name: call.name,
@@ -804,7 +842,7 @@ export function mapTracingSession(
   // input = everything before the last assistant message, reference = its
   // text. Sessions with messages but no assistant answer keep the whole
   // conversation as input with no expected, as before.
-  const finalInput = lastAssistant >= 0 ? converted.slice(0, lastAssistant) : converted;
+  const finalInput = mergeParallelCalls(lastAssistant >= 0 ? converted.slice(0, lastAssistant) : converted);
   if (finalInput.length > 0) {
     const reference = lastAssistant >= 0 ? turns[lastAssistant] : undefined;
     const finalPosition = lastAssistant >= 0 ? lastAssistant : turns.length;
@@ -868,14 +906,18 @@ async function scanGatewayRows(
     ? [filters.modelKey]
     : (await db.listModels({ projectId: ctx.projectId })).map((model) => model.key);
 
+  // Round-robin over the models, one page each per round, so the shared cap is spread over every model instead of
+  // the first models' history using it all up. Within one model the order stays newest-first.
+  const cursors = modelKeys.map((modelKey) => ({ modelKey, skip: 0, done: false }));
   let scanned = 0;
-  for (const modelKey of modelKeys) {
-    let skip = 0;
-    for (;;) {
+  for (;;) {
+    const active = cursors.filter((cursor) => !cursor.done);
+    if (active.length === 0) return { scanned, scanCapped: false };
+    for (const cursor of active) {
       if (scanned >= SNAPSHOT_SCAN_CAP) return { scanned, scanCapped: true };
       const page = await db.listModelUsageLogs(
-        modelKey,
-        { limit: PAGE_SIZE, skip, from: filters.from, to: filters.to },
+        cursor.modelKey,
+        { limit: PAGE_SIZE, skip: cursor.skip, from: filters.from, to: filters.to },
         ctx.projectId,
       );
       for (const row of page) {
@@ -883,11 +925,10 @@ async function scanGatewayRows(
         if (onRow(row) === false) return { scanned, scanCapped: false };
         if (scanned >= SNAPSHOT_SCAN_CAP) return { scanned, scanCapped: true };
       }
-      if (page.length < PAGE_SIZE) break;
-      skip += page.length;
+      if (page.length < PAGE_SIZE) cursor.done = true;
+      else cursor.skip += page.length;
     }
   }
-  return { scanned, scanCapped: false };
 }
 
 /** A gateway row whose call carried passages of knowledge base documents not open to everyone. */

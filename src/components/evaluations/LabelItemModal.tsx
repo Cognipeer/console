@@ -23,6 +23,7 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import type { AnalysisDefinitionView } from '@/components/analysis/types';
+import { coerceLabelValue } from './datasetItemHelpers';
 import type { EvalDatasetItemView } from './types';
 
 interface LabelRow {
@@ -37,7 +38,7 @@ interface LabelItemModalProps {
   definition: AnalysisDefinitionView | null;
   saving?: boolean;
   onClose: () => void;
-  onSave: (labels: Record<string, string>) => void;
+  onSave: (labels: Record<string, string | number | boolean>) => void;
 }
 
 function toRows(item: EvalDatasetItemView | null, definition: AnalysisDefinitionView | null): LabelRow[] {
@@ -85,8 +86,13 @@ export default function LabelItemModal({
 
   const handleSave = () => {
     if (!valid) return;
-    const labels: Record<string, string> = {};
-    for (const row of filled) labels[row.key.trim()] = row.value.trim();
+    // Give each value back the type it had (field type from the definition, else the stored
+    // value's own type) so reviewing a numeric or boolean label does not turn it into a string.
+    const labels: Record<string, string | number | boolean> = {};
+    for (const row of filled) {
+      const key = row.key.trim();
+      labels[key] = coerceLabelValue(row.value, fieldByKey.get(key)?.type, item?.labels?.[key]) as string | number | boolean;
+    }
     onSave(labels);
   };
 

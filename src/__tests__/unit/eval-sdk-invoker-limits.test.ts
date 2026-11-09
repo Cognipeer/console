@@ -454,7 +454,7 @@ describe('llm-judge — output limit', () => {
 
   it('hands a cut-off verdict with text to the scorer (which cannot parse it, and says so)', async () => {
     h.complete.mockResolvedValue(sdkResponse({ content: '{"score": 0.', finishReason: 'length' }));
-    await expect(buildJudgeInvoker('judge', CTX)(judgeMessages)).resolves.toBe('{"score": 0.');
+    await expect(buildJudgeInvoker('judge', CTX)(judgeMessages)).resolves.toMatchObject({ text: '{"score": 0.' });
   });
 });
 
@@ -494,7 +494,7 @@ describe('gateway fallback — route and truncation', () => {
     h.handleChatCompletion.mockResolvedValue({
       response: { choices: [{ finish_reason: 'stop', message: { content: 'verdict' } }] },
     });
-    await expect(buildJudgeInvoker('judge', CTX)([{ role: 'user', content: 'Grade.' }])).resolves.toBe('verdict');
+    await expect(buildJudgeInvoker('judge', CTX)([{ role: 'user', content: 'Grade.' }])).resolves.toMatchObject({ text: 'verdict' });
 
     const call = h.handleChatCompletion.mock.calls[0][0];
     expect(call.route).toBe('evaluation');

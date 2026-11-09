@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Menu, Paper, Stack, Text, Tooltip } from '@mantine/core';
+import { Alert, Button, Group, Loader, Menu, Paper, Stack, Text, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
@@ -15,6 +15,7 @@ import { configVersionTag, runVersionTag } from '@/components/agents/agentVersio
 import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
 import { useAgentVersionOptions } from '@/components/agents/useAgentVersionOptions';
 import type { AgentRevision } from '@/lib/shared/agentRevision';
+import { RUN_PAGE_SIZE, deriveErrorRate, isRunActive, readErrorMessage, scoredCount } from '@/components/evaluations/runViewHelpers';
 import type { EvalDatasetView, EvalRunView, EvalSuiteView, EvalTargetView, ModelOption } from '@/components/evaluations/types';
 
 const RUN_STATUS_BADGE: Record<string, string> = {
@@ -52,6 +53,9 @@ export default function EvaluationSuiteDetailPage() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // A failed fetch is not "not found": keep the two apart so a 500 can be retried.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
 
@@ -62,40 +66,73 @@ export default function EvaluationSuiteDetailPage() {
   const runBlocked = isAgentTarget && !canRunAgentTests;
   const agentVersions = useAgentVersionOptions(target?.agentKey, isAgentTarget && !runBlocked);
 
+  /** Run summaries for this suite (the server leaves the items out). */
   const loadRuns = async (suiteKey: string) => {
-    const res = await fetch(`/api/evaluation/runs?suiteKey=${encodeURIComponent(suiteKey)}`, { cache: 'no-store' });
-    if (res.ok) setRuns((await res.json()).runs ?? []);
+    try {
+      const res = await fetch(`/api/evaluation/runs?suiteKey=${encodeURIComponent(suiteKey)}&limit=${RUN_PAGE_SIZE}`, { cache: 'no-store' });
+      if (!res.ok) {
+        setRunsError(await readErrorMessage(res, 'Could not load runs'));
+        return;
+      }
+      setRuns((await res.json()).runs ?? []);
+      setRunsError(null);
+    } catch (err) {
+      setRunsError(err instanceof Error ? err.message : 'Could not load runs');
+    }
   };
 
   const loadSuite = async (): Promise<EvalSuiteView | null> => {
     if (!id) return null;
-    const res = await fetch(`/api/evaluation/suites/${id}`, { cache: 'no-store' });
-    if (res.status === 404) { setNotFound(true); return null; }
-    if (!res.ok) return null;
-    const s = (await res.json()).suite ?? null;
-    setSuite(s);
-    return s;
+    try {
+      const res = await fetch(`/api/evaluation/suites/${id}`, { cache: 'no-store' });
+      if (res.status === 404) { setNotFound(true); return null; }
+      if (!res.ok) {
+        setLoadError(await readErrorMessage(res, 'Could not load the suite'));
+        return null;
+      }
+      const s = (await res.json()).suite ?? null;
+      setLoadError(null);
+      setSuite(s);
+      return s;
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not load the suite');
+      return null;
+    }
+  };
+
+  const loadPage = async () => {
+    try {
+      const s = await loadSuite();
+      if (s) await loadRuns(s.key);
+      const [tRes, dRes, mRes] = await Promise.all([
+        fetch('/api/evaluation/targets', { cache: 'no-store' }),
+        fetch('/api/evaluation/datasets', { cache: 'no-store' }),
+        fetch('/api/models?category=llm', { cache: 'no-store' }),
+      ]);
+      if (tRes.ok) setTargets((await tRes.json()).targets ?? []);
+      if (dRes.ok) setDatasets((await dRes.json()).datasets ?? []);
+      if (mRes.ok) setModels(((await mRes.json()).models ?? []).map((m: { key: string; name: string }) => ({ value: m.key, label: m.name })));
+    } catch (err) {
+      console.error('Failed to load suite page', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    (async () => {
-      try {
-        const s = await loadSuite();
-        if (s) await loadRuns(s.key);
-        const [tRes, dRes, mRes] = await Promise.all([
-          fetch('/api/evaluation/targets', { cache: 'no-store' }),
-          fetch('/api/evaluation/datasets', { cache: 'no-store' }),
-          fetch('/api/models?category=llm', { cache: 'no-store' }),
-        ]);
-        if (tRes.ok) setTargets((await tRes.json()).targets ?? []);
-        if (dRes.ok) setDatasets((await dRes.json()).datasets ?? []);
-        if (mRes.ok) setModels(((await mRes.json()).models ?? []).map((m: { key: string; name: string }) => ({ value: m.key, label: m.name })));
-      } finally {
-        setLoading(false);
-      }
-    })();
+    void loadPage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Runs execute in the background: refresh the table while any listed run is queued or running.
+  const hasActiveRuns = runs.some((r) => isRunActive(r.status));
+  const suiteKey = suite?.key;
+  useEffect(() => {
+    if (!hasActiveRuns || !suiteKey) return;
+    const timer = setInterval(() => { void loadRuns(suiteKey); }, 4000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasActiveRuns, suiteKey]);
 
   /** No `revision` runs the target's default; one given overrides it for this run only. */
   const runNow = async (revision?: AgentRevision) => {
@@ -139,7 +176,14 @@ export default function EvaluationSuiteDetailPage() {
 
   const runColumns: DataGridColumn<EvalRunView>[] = [
     { key: 'status', label: 'Status', render: (r) => <span className={`ds-badge ${RUN_STATUS_BADGE[r.status] ?? ''}`}>{r.status}</span> },
-    { key: 'pass', label: 'Pass rate', render: (r) => <span>{r.aggregate ? `${r.aggregate.passed}/${r.aggregate.total} (${pct(r.aggregate.passRate)})` : '—'}</span> },
+    { key: 'pass', label: 'Pass rate', render: (r) => (
+      <span title="Pass rate excludes errored and skipped items.">
+        {r.aggregate ? `${r.aggregate.passed}/${scoredCount(r.aggregate)} (${pct(r.aggregate.passRate)})` : '—'}
+        {r.aggregate && r.aggregate.failed > 0 ? (
+          <span className="ds-faint" style={{ fontSize: 11 }}>{` · ${r.aggregate.failed} errored (${pct(deriveErrorRate(r.aggregate))})`}</span>
+        ) : null}
+      </span>
+    ) },
     { key: 'score', label: 'Avg score', render: (r) => <span>{r.aggregate ? pct(r.aggregate.avgScore) : '—'}</span> },
     { key: 'agent', label: 'Agent', render: (r) => {
       const runTarget = targets.find((t) => t.key === r.targetKey);
@@ -165,6 +209,17 @@ export default function EvaluationSuiteDetailPage() {
 
   if (loading) {
     return <PageContainer><Group justify="center" mt={80}><Loader /></Group></PageContainer>;
+  }
+  if (!notFound && !suite && loadError) {
+    return (
+      <PageContainer>
+        <PageHeader eyebrow="Operate · Evaluations" title="Suite" actions={backButton} />
+        <Alert color="red" variant="light" title="Could not load this suite">
+          <Text size="sm" mb="xs">{loadError}</Text>
+          <Button size="xs" variant="default" onClick={() => { setLoading(true); void loadPage(); }}>Retry</Button>
+        </Alert>
+      </PageContainer>
+    );
   }
   if (notFound || !suite) {
     return (
@@ -249,6 +304,14 @@ export default function EvaluationSuiteDetailPage() {
       </Paper>
 
       <Text fw={600} size="sm" mb="xs">Runs for this suite</Text>
+      {runsError ? (
+        <Alert color="red" variant="light" mb="sm" title="Could not load runs">
+          <Group justify="space-between" wrap="nowrap">
+            <span>{runsError}</span>
+            <Button size="xs" variant="default" onClick={() => void loadRuns(suite.key)}>Retry</Button>
+          </Group>
+        </Alert>
+      ) : null}
       <DataGrid<EvalRunView>
         records={runs}
         rowKey={(r) => r.id}

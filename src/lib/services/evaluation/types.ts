@@ -36,12 +36,34 @@ export interface EvalMessage {
   name?: string;
 }
 
-/** Minimal JSON-schema subset supported without an external dependency. */
+/**
+ * JSON-schema subset supported without an external dependency. A keyword
+ * outside this subset is reported as a scorer error instead of being ignored,
+ * so a schema never "passes" on rules nobody checked.
+ */
 export interface JsonSchema {
   type?: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
   required?: string[];
   properties?: Record<string, JsonSchema>;
   items?: JsonSchema;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  minItems?: number;
+  maxItems?: number;
+  additionalProperties?: boolean | JsonSchema;
+  anyOf?: JsonSchema[];
+  oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  /** Annotation keywords are accepted and ignored. */
+  description?: string;
+  title?: string;
 }
 
 /** A single JSON-path assertion against the (parsed) target output. */
@@ -217,21 +239,40 @@ export interface ReplayTurn {
 /** Injected: how to run the target under test for one item. */
 export type TargetInvoker = (item: DatasetItem) => Promise<TargetOutput>;
 
-/** Injected: how to call a judge model. Returns the raw completion text. */
-export type JudgeInvoker = (messages: EvalMessage[]) => Promise<string>;
+/** A judge completion with the spend it caused (when the transport knows it). */
+export interface JudgeCompletion {
+  text: string;
+  usage?: EvalUsage;
+}
+
+/**
+ * Injected: how to call a judge model. Returns the raw completion text, or a
+ * `JudgeCompletion` when the transport can report usage. A plain string keeps
+ * working so existing invokers need no change.
+ */
+export type JudgeInvoker = (messages: EvalMessage[]) => Promise<string | JudgeCompletion>;
 
 /** Injected: how to embed a batch of texts. Returns one vector per input. */
 export type EmbedInvoker = (texts: string[]) => Promise<number[][]>;
 
 // ── Scorer configs (discriminated union) ──────────────────────────────
 
-export interface AssertionScorerConfig {
+/**
+ * Opt-in per-item applicability shared by every scorer. Absent = the scorer
+ * applies to every item. When the condition is not met the scorer is skipped
+ * for that item (not scored as 0, and ignored by the item's combine).
+ */
+export interface ScorerConfigBase {
+  applyWhen?: 'has-reference' | 'has-expected-tool-calls';
+}
+
+export interface AssertionScorerConfig extends ScorerConfigBase {
   type: 'assertion';
   /** Weight in the aggregate item score (default 1). */
   weight?: number;
 }
 
-export interface LlmJudgeScorerConfig {
+export interface LlmJudgeScorerConfig extends ScorerConfigBase {
   type: 'llm-judge';
   weight?: number;
   /** Rubric describing what a good answer looks like. */
@@ -240,14 +281,14 @@ export interface LlmJudgeScorerConfig {
   threshold?: number;
 }
 
-export interface SemanticScorerConfig {
+export interface SemanticScorerConfig extends ScorerConfigBase {
   type: 'semantic';
   weight?: number;
   /** Pass threshold on the cosine similarity in [0..1] (default 0.75). */
   threshold?: number;
 }
 
-export interface ToolCallScorerConfig {
+export interface ToolCallScorerConfig extends ScorerConfigBase {
   type: 'tool-call';
   weight?: number;
   /** Pass threshold on the combined 0..1 score (default 0.75). */
@@ -258,6 +299,12 @@ export interface ToolCallScorerConfig {
   sequenceWeight?: number;
   /** Component weight for argument matching (default 0.3). */
   argsWeight?: number;
+  /**
+   * Whether calls beyond the expected ones are tolerated (default `true`: they
+   * only lower the selection / sequence components). `false` fails the scorer
+   * when any actual call is not matched to an expected call.
+   */
+  allowExtraCalls?: boolean;
 }
 
 /**
@@ -265,11 +312,16 @@ export interface ToolCallScorerConfig {
  * `semantic` on purpose: embedding similarity happily passes a response that
  * kept the gist but dropped required JSON fields.
  */
-export interface JsonShapeScorerConfig {
+export interface JsonShapeScorerConfig extends ScorerConfigBase {
   type: 'json-shape';
   weight?: number;
   /** Fraction of the reference's keys that must arrive correctly (default 1 — exact shape). */
   threshold?: number;
+  /**
+   * Default `false`: only the reference's own keys count. `true`: keys present
+   * in the output but absent from the reference count as problems too.
+   */
+  strict?: boolean;
 }
 
 /**
@@ -278,7 +330,7 @@ export interface JsonShapeScorerConfig {
  * question in different words is a hit, and an exact-match scorer would call
  * it a miss.
  */
-export interface ContextRecallScorerConfig {
+export interface ContextRecallScorerConfig extends ScorerConfigBase {
   type: 'context-recall';
   weight?: number;
   /** Pass threshold on the 0..1 coverage score (default 0.7). */
@@ -290,7 +342,7 @@ export interface ContextRecallScorerConfig {
  * relevant passage at rank 1 counts for more than the same passage at rank 10,
  * because that is the one the generator reads first.
  */
-export interface ContextPrecisionScorerConfig {
+export interface ContextPrecisionScorerConfig extends ScorerConfigBase {
   type: 'context-precision';
   weight?: number;
   /** Pass threshold on the 0..1 rank-weighted relevant share (default 0.5). */
@@ -302,7 +354,7 @@ export interface ContextPrecisionScorerConfig {
  * half of retrieval quality: perfect context still produces a hallucination if
  * the generator ignores it.
  */
-export interface GroundednessScorerConfig {
+export interface GroundednessScorerConfig extends ScorerConfigBase {
   type: 'groundedness';
   weight?: number;
   /** Pass threshold on the 0..1 support score (default 0.7). */
@@ -330,6 +382,13 @@ export interface ScoreResult {
   weight: number;
   detail?: Record<string, unknown>;
   error?: string;
+  /**
+   * The scorer does not apply to this item (`detail.reason` says why). Carries
+   * `score: 0`, `passed: false` and is ignored when the item's score is combined.
+   */
+  skipped?: boolean;
+  /** Judge spend for this score, when the judge transport reported it. */
+  usage?: EvalUsage;
 }
 
 export interface RunItemResult {
@@ -343,6 +402,10 @@ export interface RunItemResult {
   latencyMs?: number;
   /** Token / cost usage for this item's target invocation, when reported. */
   usage?: EvalUsage;
+  /** No scorer applied to this item (all skipped, or none configured); not a failure. */
+  skipped?: boolean;
+  /** Sum of `scores[].usage` — judge spend, kept apart from the target's `usage`. */
+  scoringUsage?: EvalUsage;
   error?: string;
   /**
    * The knowledge bases (`<projectId>:<key>` tags) whose documents not open to everyone the item's work handed on
@@ -354,17 +417,29 @@ export interface RunItemResult {
 
 export interface RunAggregate {
   total: number;
-  /** Items that produced a result (i.e. the target did not throw). */
+  /** Items with no `error` (skipped ones included). */
   completed: number;
-  /** Items whose target invocation threw. */
+  /** Items with an `error`: the target threw OR a scorer failed. */
   failed: number;
   /** Items where `passed === true`. */
   passed: number;
-  /** passed / completed, in [0, 1]. */
+  /** Completed items where no scorer applied. */
+  skipped: number;
+  /** passed / (completed - skipped), in [0, 1]. Errored and skipped items are not in the denominator. */
   passRate: number;
-  /** Mean item score over completed items, in [0, 1]. */
+  /** failed / total, in [0, 1] (0 when total is 0). */
+  errorRate: number;
+  /** Mean item score over (completed - skipped) items, in [0, 1]. */
   avgScore: number;
+  /** Mean latency over completed items only. */
   avgLatencyMs: number | null;
+  /** Completed items whose output was cut off at the output limit. */
+  truncatedCount?: number;
+  /** Items that reported target usage — the denominator for per-item token / cost averages. */
+  usageItems?: number;
+  /** Judge spend; present only when some score reported usage. Never folded into the target totals. */
+  scoringCostUsd?: number;
+  scoringTokens?: number;
   /** Sum of per-item usage.costUsd; present only if any item reported usage. */
   totalCostUsd?: number;
   /** Sum of per-item tokens (input + output; cached is a subset of input); ditto. */
@@ -374,7 +449,12 @@ export interface RunAggregate {
 export interface RunResult {
   aggregate: RunAggregate;
   items: RunItemResult[];
+  /** The run was stopped before every item was dispatched; `items` holds only the processed ones. */
+  stopped?: boolean;
 }
+
+/** Hard cap on parallel item executions; `RunConfig.concurrency` is clamped to [1, this]. */
+export const EVAL_MAX_CONCURRENCY = 32;
 
 export interface RunConfig {
   /** Parallel item executions (default 4). */

@@ -258,6 +258,73 @@ describe('toolCallScorer — combination / threshold', () => {
   });
 });
 
+describe('toolCallScorer — assignment, extras, schema errors', () => {
+  it('assigns same-name calls optimally when they arrive in a different order', () => {
+    const r = scoreToolCall(
+      item([
+        { name: 'search', args: { q: 'a' }, argsMatch: 'exact' },
+        { name: 'search', args: { q: 'b' }, argsMatch: 'exact' },
+      ]),
+      out([
+        { name: 'search', args: { q: 'b' } },
+        { name: 'search', args: { q: 'a' } },
+      ]),
+      CONFIG,
+    );
+    expect(r.detail?.args).toBe(1);
+  });
+
+  it('allows extra calls by default but fails when allowExtraCalls is false', () => {
+    const expected = item([{ name: 'search', argsMatch: 'ignore' }]);
+    const actual = out([{ name: 'search', args: {} }, { name: 'delete_all', args: {} }]);
+    const lenient = scoreToolCall(expected, actual, { ...CONFIG, threshold: 0.3 });
+    expect(lenient.passed).toBe(true);
+    const strict = scoreToolCall(expected, actual, { ...CONFIG, threshold: 0.3, allowExtraCalls: false });
+    expect(strict.passed).toBe(false);
+    expect(strict.detail?.unexpectedCalls).toEqual(['delete_all']);
+    expect(String(strict.detail?.reason)).toContain('delete_all');
+  });
+
+  it('does not count a call matched to an expected call as an extra', () => {
+    const r = scoreToolCall(
+      item([{ name: 'search', argsMatch: 'ignore' }]),
+      out([{ name: 'search', args: {} }]),
+      { ...CONFIG, allowExtraCalls: false },
+    );
+    expect(r.passed).toBe(true);
+  });
+
+  it('survives actual calls whose args are missing', () => {
+    const r = scoreToolCall(
+      item([{ name: 'search', args: {}, argsMatch: 'exact' }]),
+      out([{ name: 'search' } as unknown as NormalizedToolCall]),
+      CONFIG,
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.detail?.args).toBe(1);
+  });
+
+  it('inherited property names are not present args in subset mode', () => {
+    const r = scoreToolCall(
+      item([{ name: 'f', args: { toString: 'x' }, argsMatch: 'subset' }]),
+      out([{ name: 'f', args: {} }]),
+      CONFIG,
+    );
+    expect(r.detail?.args).toBe(0);
+  });
+
+  it('turns an unsupported argsSchema keyword into a scorer error', () => {
+    const argsSchema = { type: 'object', patternProperties: {} } as unknown as ExpectedToolCall['argsSchema'];
+    const r = scoreToolCall(
+      item([{ name: 'f', argsSchema, argsMatch: 'schema' }]),
+      out([{ name: 'f', args: {} }]),
+      CONFIG,
+    );
+    expect(r.error).toMatch(/patternProperties/);
+    expect(r.passed).toBe(false);
+  });
+});
+
 describe('extractToolCalls', () => {
   it('parses the OpenAI chat-completion tool_calls shape', () => {
     const response = {

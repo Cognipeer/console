@@ -4,11 +4,22 @@
  * Supports: exact equals, substring inclusion/exclusion, regex match,
  * minimal JSON-schema validation, and JSON-path value/existence assertions.
  * The score is the fraction of checks that passed; with no checks present the
- * scorer is a no-op (score 1, passed).
+ * scorer does not apply to the item (skipped), rather than passing for free.
  */
 
 import type { AssertionScorerConfig, DatasetItem, ScoreResult, TargetOutput } from '../types';
-import { deepEqual, extractJson, getByPath, validateSchema } from './json';
+import { deepEqual, extractJson, getByPath, UnsupportedSchemaError, validateSchema } from './json';
+
+/**
+ * Dataset JSON is not type-checked: an `equals` / `mustContain` entry can arrive
+ * as a number, boolean or null. Numbers and booleans are compared as their text;
+ * anything else, and the empty string (which every text contains), is not a check.
+ */
+function checkText(value: unknown): string | undefined {
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value !== 'string' || value === '') return undefined;
+  return value;
+}
 
 interface Check {
   name: string;
@@ -26,16 +37,20 @@ export function scoreAssertion(
   const text = output.text ?? '';
   const checks: Check[] = [];
 
-  if (expected.equals !== undefined) {
-    checks.push({ name: 'equals', passed: text.trim() === expected.equals.trim() });
+  const equalsText = checkText(expected.equals);
+  if (equalsText !== undefined) {
+    checks.push({ name: 'equals', passed: text.trim() === equalsText.trim() });
   }
 
-  for (const sub of expected.mustContain ?? []) {
-    checks.push({ name: `contains:${sub}`, passed: text.includes(sub) });
+  const asList = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  for (const entry of asList(expected.mustContain)) {
+    const sub = checkText(entry);
+    if (sub !== undefined) checks.push({ name: `contains:${sub}`, passed: text.includes(sub) });
   }
 
-  for (const sub of expected.mustNotContain ?? []) {
-    checks.push({ name: `notContains:${sub}`, passed: !text.includes(sub) });
+  for (const entry of asList(expected.mustNotContain)) {
+    const sub = checkText(entry);
+    if (sub !== undefined) checks.push({ name: `notContains:${sub}`, passed: !text.includes(sub) });
   }
 
   if (expected.regex !== undefined) {
@@ -51,12 +66,21 @@ export function scoreAssertion(
     if (!parsed.ok) {
       checks.push({ name: 'jsonSchema', passed: false, detail: parsed.error });
     } else {
-      const schemaErrors = validateSchema(parsed.value, expected.jsonSchema);
-      checks.push({ name: 'jsonSchema', passed: schemaErrors.length === 0, detail: schemaErrors[0] });
+      try {
+        const schemaErrors = validateSchema(parsed.value, expected.jsonSchema);
+        checks.push({ name: 'jsonSchema', passed: schemaErrors.length === 0, detail: schemaErrors[0] });
+      } catch (err) {
+        // A schema keyword this validator cannot honour must not pass (or fail) silently.
+        if (err instanceof UnsupportedSchemaError) {
+          return { scorerType: 'assertion', score: 0, passed: false, weight, error: `jsonSchema: ${err.message}` };
+        }
+        throw err;
+      }
     }
   }
 
-  for (const assertion of expected.jsonPath ?? []) {
+  for (const assertion of asList(expected.jsonPath) as NonNullable<typeof expected.jsonPath>) {
+    if (!assertion || typeof assertion.path !== 'string' || assertion.path === '') continue;
     const parsed = extractJson(text);
     if (!parsed.ok) {
       checks.push({ name: `jsonPath:${assertion.path}`, passed: false, detail: parsed.error });
@@ -70,12 +94,22 @@ export function scoreAssertion(
   }
 
   const total = checks.length;
+  if (total === 0) {
+    return {
+      scorerType: 'assertion',
+      score: 0,
+      passed: false,
+      weight,
+      skipped: true,
+      detail: { reason: 'no assertion checks configured on this item' },
+    };
+  }
   const passedCount = checks.filter((c) => c.passed).length;
 
   return {
     scorerType: 'assertion',
-    score: total === 0 ? 1 : passedCount / total,
-    passed: total === 0 ? true : passedCount === total,
+    score: passedCount / total,
+    passed: passedCount === total,
     weight,
     detail: { total, passedCount, checks },
   };

@@ -28,9 +28,33 @@ run      →  one execution of a suite over its dataset, with aggregate + per-it
 | `assertion` | Deterministic checks against `expected`: `mustContain`, `equals`, `regex`, `jsonSchema`, `jsonPath`. |
 | `llm-judge` | An LLM grades the output against a `rubric` (0–1), backed by `judgeModelKey`. |
 
-A run's per-item `score` is the weighted mean of its scorer scores; `passed` is
-true when every scorer passes. The aggregate reports `passRate`, `avgScore`, and
-`avgLatencyMs`.
+A run's per-item `score` is the weighted mean of the scorers that applied to the
+item; `passed` is true when every applicable scorer passes. A scorer that does not
+apply is `skipped`; a scorer that errors makes the item errored. See
+[Item outcomes](#item-outcomes) and [Aggregate](#aggregate).
+
+Every scorer config also accepts these optional fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `weight` | number | Finite and `>= 0`; default `1`. |
+| `threshold` | number | Finite, between 0 and 1. For `llm-judge`, the score at or above which the scorer passes (default `0.5`). |
+| `applyWhen` | `"has-reference" \| "has-expected-tool-calls"` | Apply the scorer only to items that have a reference answer or expected tool calls. Otherwise it is skipped for that item. |
+| `allowExtraCalls` | boolean | `tool-call` scorer. Default `true`; `false` fails the item when a call matches no expected call. |
+| `strict` | boolean | `json-shape` scorer. Default `false`; `true` counts keys missing from the reference as problems. |
+
+An invalid `weight` or `threshold` answers `400` and names the scorer by index.
+
+#### LLM judge
+
+The judge returns `{"score": <0..1>, "reasoning": "<short>"}`. `score` must be a
+number from 0 to 1 (no rescaling); `passed` is `score >= threshold`, and a `passed`
+sent by the judge is kept only as `detail.judgePassed`. An unparseable answer is
+retried up to two more times, then the scorer errors. Retryable transport errors
+(408, 429, 5xx, timeouts, connection resets) are retried twice, with a timeout of
+`EVALUATION_JUDGE_TIMEOUT_MS` (default 120000). The judge sees the input, the
+reference, the output, the assistant's tool calls and the expected tool calls; each
+block is delimited with nonce tags and treated as data, never as instructions.
 
 ## Targets
 
@@ -109,7 +133,9 @@ DELETE /api/evaluation/datasets/:id
 Dataset items are stored in their own collection (`evaluation_dataset_items`,
 one document/row per item) — dataset responses carry an `itemCount` instead of
 an inline `items` array, and items are read/written through the item endpoints
-below. Deleting a dataset cascades to its items.
+below. Deleting a dataset cascades to its items. A dataset that a suite in the
+same project still uses cannot be deleted: the call answers `409` and names the
+suites.
 
 ### Create
 
@@ -180,9 +206,12 @@ DELETE /api/evaluation/suites/:id
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `targetKey` / `datasetKey` | string | yes | Keys of an existing target and dataset. |
-| `scorers` | array | yes | Non-empty; each `{ type, weight?, rubric?, threshold? }`. |
+| `scorers` | array | yes | Non-empty; each `{ type, weight?, rubric?, threshold?, applyWhen?, allowExtraCalls?, strict? }`. |
 | `judgeModelKey` | string | when an `llm-judge` scorer is present | Model used for grading. |
-| `runConfig.concurrency` | number | no | Parallel items per run. |
+| `runConfig.concurrency` | integer | no | Parallel items per run. Clamped to 1-32. |
+
+Deleting a target answers `409` the same way while a suite still uses it, and
+deleting a suite answers `409` while it has a `pending` or `running` run.
 
 ## Runs
 
@@ -199,8 +228,13 @@ with bounded concurrency, scores each output, and persists the result. Poll
 `GET /api/evaluation/runs/:id` to watch it finish.
 
 > The token-authenticated client surface
-> (`POST /api/client/v1/evaluation/suites/{key}/run`, below) stays
-> **synchronous** and returns `201` with the completed run.
+> (`POST /api/client/v1/evaluation/suites/{key}/run`, below) is **synchronous** by
+> default and returns `201` with the completed run; send `wait: false` to get the
+> asynchronous `202` behaviour there too.
+
+A dataset with no items answers `400` (`Dataset "<key>" has no items to evaluate`)
+and starts nothing. If the run cannot be queued, it is marked `failed` and the call
+fails.
 
 #### Request body
 
@@ -260,7 +294,7 @@ Once completed, the run carries its aggregate and per-item scores:
     "id": "…",
     "suiteKey": "faq-accuracy",
     "status": "completed",
-    "aggregate": { "total": 12, "completed": 12, "failed": 0, "passed": 11, "passRate": 0.916, "avgScore": 0.94, "avgLatencyMs": 410 },
+    "aggregate": { "total": 12, "completed": 12, "failed": 0, "skipped": 0, "passed": 11, "passRate": 0.916, "avgScore": 0.94, "errorRate": 0, "avgLatencyMs": 410 },
     "items": [
       { "itemId": "q1", "passed": true, "score": 1, "scores": [ { "scorerType": "assertion", "score": 1, "passed": true, "weight": 1 } ], "output": { "text": "4", "latencyMs": 380 } }
     ]
@@ -270,6 +304,72 @@ Once completed, the run carries its aggregate and per-item scores:
 
 A target/judge error on an item is recorded on that item (`error`) and counted
 in `aggregate.failed`; it does not abort the run.
+
+#### Item outcomes
+
+| Outcome | When | Counted as |
+|---|---|---|
+| Scored | At least one scorer applied and none errored | `completed`; `passed` when every applicable scorer passed |
+| Errored | The target threw, or a scorer errored. A scorer error reads `Scoring failed — <type>: <message>` | `failed` |
+| Skipped | No scorer applied to the item (`skipped: true`, `score: 0`, no `error`) | `completed` and `skipped` |
+
+A skipped score has `skipped: true`, `score: 0`, `passed: false` and a `detail.reason`.
+It is ignored when the item score is computed. Each score may carry `usage` (judge
+spend), and the item carries `scoringUsage`, their sum.
+
+#### Aggregate
+
+| Field | Meaning |
+|---|---|
+| `total` | Items in the run. |
+| `completed` | Items with no `error`, skipped ones included. |
+| `failed` | Items with an `error`, from the target or from scoring. |
+| `skipped` | Completed items where no scorer applied. |
+| `passed` | Items that passed. |
+| `passRate` | `passed / (completed - skipped)`. Errored and skipped items are not in it. |
+| `avgScore` | Mean score over the same items. |
+| `errorRate` | `failed / total`; `0` for an empty run. Runs recorded before it existed lack it: use `failed / total`. |
+| `avgLatencyMs` | Mean over completed items. |
+| `totalCostUsd`, `totalTokens` | Target spend only. |
+| `scoringCostUsd`, `scoringTokens` | Judge spend, kept apart from the target spend; present only when a score reported usage. |
+| `truncatedCount` | Completed items whose output was cut off (`output.truncated`). |
+| `usageItems` | Items that reported usage; the divisor for per-item averages. |
+
+#### Stored size
+
+Stored items are bounded: `output.text` at 20,000 characters, `error` at 2,000,
+score `detail` at about 4 KB, at most 32 tool calls per output or turn with `args`
+over 4 KB replaced by `{ "__truncated": true, "preview": "..." }`. If the items of a
+run are still too large, details are dropped step by step, and the run carries
+`itemsTruncated: true`. The aggregate is always kept.
+
+#### Multi-turn items
+
+With `perTurn`, each user turn is run in order. Recorded tool exchanges are replayed
+in place, and the model is called again after a trailing tool result. Output turns
+are kept in `output.turns`, with `usage` per turn. For an **agent target**, the item's
+earlier user and assistant text turns are given to the agent as conversation history
+(recorded tool exchanges are not), and each item runs in its own conversation, which
+is deleted once the item finishes.
+
+#### Cancel a run
+
+```http
+POST /api/evaluation/runs/:id/cancel
+```
+
+| Run status | Result |
+|---|---|
+| `pending` | `200 { "run": ..., "outcome": "cancelled" }`. The run is `cancelled` at once. |
+| `running` | `200 { "run": ..., "outcome": "cancel_requested" }`. `cancelRequestedAt` is set; no new items start, items in flight finish, and the run ends `cancelled` with the items processed so far. |
+| `completed`, `failed`, `cancelled` | `409 { "error": "Run already finished", "run": ... }`. |
+
+An unknown run, or one from another project, answers `404`.
+
+A running run records a heartbeat (`heartbeatAt`). If the server restarts, or no
+heartbeat arrives for `EVALUATION_RUN_STALE_MS` (default 10 minutes), the run is
+marked `failed` with an explanatory `error`. A run that stays `pending` for more
+than 24 hours is failed too.
 
 #### Which version answered
 
@@ -320,12 +420,23 @@ POST /api/evaluation/datasets/generate
 Synthesizes dataset items (e.g. from a prompt or seed) and returns the generated
 dataset.
 
+Limits: `count` is an integer from 1 to 200, `maxChunks` an integer from 1 to 500,
+and the source text or file is capped at 5 MB; values outside them answer `400`.
+Generation counts against the evaluation quota like a run. If fewer items than
+`count` could be generated, the dataset has a `metadata.generation.warning` string
+saying so.
+
 ### List / get runs
 
 ```http
-GET /api/evaluation/runs?suiteKey=faq-accuracy&limit=50
+GET /api/evaluation/runs?suiteKey=faq-accuracy&limit=50&skip=0
 GET /api/evaluation/runs/:id
 ```
+
+`GET /runs` returns `{ "runs": [...], "total": 123 }`. The runs are summaries: the
+aggregate and metadata, with `items` empty. Fetch one run by id for its items.
+`limit` defaults to 50 (maximum 200) and `skip` to 0; a value that is not a number
+answers `400`.
 
 ### Compare runs
 
@@ -334,7 +445,11 @@ GET /api/evaluation/runs/:id/compare?baseline=<runId>
 ```
 
 Returns a per-item and aggregate diff between run `:id` and the `baseline` run,
-for tracking regressions across runs of the same suite.
+for tracking regressions across runs of the same suite. Both runs must be
+`completed` and use the same dataset, otherwise the call answers `409`. An item that
+errored or was skipped in either run has status `not_comparable` (counted in
+`summary.not_comparable`); `regressed` and `fixed` are only reported between two
+scored outcomes.
 
 ## Client API (token-authenticated)
 
@@ -374,8 +489,9 @@ GET /api/client/v1/evaluation/suites
 
 ### Run a suite
 
-Runs the suite synchronously over its dataset and returns the scored result. The
-suite, its target and its dataset must already exist.
+Runs the suite over its dataset and returns the scored result. By default the call
+waits for the run to finish. The suite, its target and its dataset must already
+exist.
 
 ```http
 POST /api/client/v1/evaluation/suites/{key}/run
@@ -393,6 +509,7 @@ agent this run tests, instead of the target's default:
 | Field | Type | Notes |
 |---|---|---|
 | `agent_version` | `"published" \| "draft" \| integer` | `"published"` follows the published version, `"draft"` tests the saved draft, an integer (or digits in a string, `"3"`) a published version. Leave it out, or send `null`, to use the target's default. Agent targets only. |
+| `wait` | boolean | Default `true`: the call returns `201` with the finished run. `false` queues the run and returns `202` with the `pending` run straight away; poll `GET /runs/{id}` until it ends. Same quota and agent authorisation either way. |
 
 No body, `{}` and a literal `null` all mean no override. A body that is not a JSON
 object, an invalid `agent_version`, or an `agent_version` sent for a target that is
@@ -406,7 +523,9 @@ cannot run twice at once on the same version: the second call answers `409`
 (`A run for suite "…" is already in progress on draft`), while a run of another version
 starts normally.
 
-#### Response — `201 Created`
+#### Response — `201 Created` (`202 Accepted` with `wait: false`)
+
+With `wait: false` the run has status `pending` and no aggregate yet. Otherwise:
 
 ```json
 {
@@ -417,8 +536,8 @@ starts normally.
     "dataset_key": "faq-set",
     "status": "completed",
     "aggregate": {
-      "total": 24, "completed": 24, "failed": 0, "passed": 22,
-      "pass_rate": 0.9167, "avg_score": 0.94, "avg_latency_ms": 812
+      "total": 24, "completed": 24, "failed": 0, "skipped": 0, "passed": 22,
+      "pass_rate": 0.9167, "avg_score": 0.94, "error_rate": 0, "avg_latency_ms": 812
     },
     "items": [
       {
@@ -448,6 +567,9 @@ The run of an agent target also carries `agent_revision`, next to `target_key`:
 The field is absent for any other kind of target, and on runs recorded before agent
 versions existed.
 
+The aggregate has the same fields as the [dashboard run](#aggregate) in snake_case
+(`skipped`, `error_rate`, `scoring_cost_usd`, ...). `status` can also be `cancelled`.
+
 ### List / get runs
 
 `/runs` returns summaries (aggregate only); fetch a single run by id for the
@@ -470,11 +592,17 @@ const { run } = await fetch(
   { method: 'POST', headers },
 ).then((r) => r.json());
 
-if ((run.aggregate?.pass_rate ?? 0) < 0.9) {
-  console.error(`Evaluation gate failed: ${run.aggregate.passed}/${run.aggregate.total}`);
+const agg = run.aggregate;
+// The pass rate leaves out errored and skipped items, so gate on the status and on
+// the error rate too: a run where most items errored must not pass.
+if (run.status !== 'completed' || !agg || (agg.error_rate ?? 0) > 0.05 || agg.pass_rate < 0.9) {
+  console.error(`Evaluation gate failed: ${run.status}, ${agg?.passed}/${agg?.total} passed, ${agg?.failed} failed`);
   process.exit(1);
 }
 ```
+
+For a long suite, send `{ "wait": false }`, then poll `GET /runs/{id}` until `status`
+is `completed`, `failed` or `cancelled` and apply the same checks.
 
 To check a change before you publish it, run the suite on the saved draft and on the
 published version. Runs of different versions can overlap, and each call returns when
@@ -510,6 +638,10 @@ Run aggregates feed the alert system through the `evaluation` module:
 |---|---|
 | `evaluation_pass_rate` | `aggregate.passRate` × 100, averaged over completed runs in the window. |
 | `evaluation_avg_score` | `aggregate.avgScore` × 100, same. |
+| `evaluation_error_rate` | `aggregate.errorRate` × 100, same. Runs without `errorRate` use `failed / total`. |
+
+Pass rate and average score leave out errored and skipped items, so use
+`evaluation_error_rate` to catch runs where items fail to execute or to score.
 
 A run on the draft or on an older version counts like any other completed run.
 
@@ -521,9 +653,9 @@ to be notified when quality regresses. See the
 
 | Status | Cause |
 |---|---|
-| 400 | Missing `name`, bad `kind`, empty `scorers`, non-array `items`. On a run: an `agentVersion` (`agent_version` on the client API) that is not `"published"`, `"draft"` or a version number, a body that is not a JSON object, or a version asked for a target that is not an agent target. |
+| 400 | Missing `name`, bad `kind`, empty `scorers`, non-array `items`, a scorer `weight` or `threshold` out of range, a non-numeric `limit`/`skip`, generation limits exceeded, malformed dataset items, a dataset with no items on run. On a run: an `agentVersion` (`agent_version` on the client API) that is not `"published"`, `"draft"` or a version number, a body that is not a JSON object, or a version asked for a target that is not an agent target. |
 | 403 | Write access to Agents is missing: running a suite on an agent target, or creating or changing an agent target. The body has `code: "forbidden"`, `service: "agents"` and `required: "write"`. |
 | 404 | Target / dataset / suite / run not found (or unknown `suiteKey` on run). On a run of an agent target: an agent, or a version of it, that does not exist. |
-| 409 | A run of the suite on the same agent version is already in progress; a dataset item id already exists. |
+| 409 | A run of the suite on the same agent version is already in progress; a dataset item id already exists; deleting a target or dataset that a suite uses, or a suite with an active run; cancelling a run that already finished; comparing runs that are not completed or use different datasets. |
 | 500 | Internal error. |
 | 503 | The authorization engine could not decide (`code: "authorization_unavailable"`); retry after the `Retry-After` header. |

@@ -8,12 +8,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Badge, Button, Card, Group, Select, Stack, Table, Text } from '@mantine/core';
+import { Alert, Badge, Button, Card, Group, Select, Stack, Table, Text } from '@mantine/core';
 import { IconArrowRight } from '@tabler/icons-react';
 import AgentWithVersion from '@/components/agents/AgentWithVersion';
 import { runVersionTag } from '@/components/agents/agentVersionTag';
 import { describeRunRevision } from '@/lib/shared/agentRevision';
 import type { EvalComparisonStatus, EvalComparisonView, EvalRunView } from './types';
+import { COMPARE_STATUS_LABEL, compareMismatchWarning, readErrorMessage, summaryCount } from './runViewHelpers';
 
 const STATUS_COLOR: Record<EvalComparisonStatus, string> = {
   regressed: 'red',
@@ -21,6 +22,7 @@ const STATUS_COLOR: Record<EvalComparisonStatus, string> = {
   added: 'blue',
   removed: 'gray',
   unchanged: 'gray',
+  not_comparable: 'yellow',
 };
 
 function signedPct(v: number): string {
@@ -56,16 +58,23 @@ export default function EvaluationRunCompare({ run }: Props) {
   const [baselineId, setBaselineId] = useState<string | null>(null);
   const [comparison, setComparison] = useState<EvalComparisonView | null>(null);
   const [loading, setLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [candidatesError, setCandidatesError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch(`/api/evaluation/runs?suiteKey=${encodeURIComponent(run.suiteKey)}&limit=50`, { cache: 'no-store' });
-        if (!res.ok) return;
+        if (!res.ok) {
+          setCandidatesError(await readErrorMessage(res, 'Could not load earlier runs'));
+          return;
+        }
         const runs: EvalRunView[] = (await res.json()).runs ?? [];
+        setCandidatesError(null);
         setCandidates(runs.filter((r) => r.id !== run.id && r.status === 'completed' && r.aggregate));
       } catch (err) {
         console.error('Failed to load baseline candidates', err);
+        setCandidatesError(err instanceof Error ? err.message : 'Could not load earlier runs');
       }
     })();
   }, [run.suiteKey, run.id]);
@@ -83,6 +92,8 @@ export default function EvaluationRunCompare({ run }: Props) {
   const baselineRevision = candidates.find((r) => r.id === (comparison?.baselineRunId ?? baselineId))?.agentRevision;
   // The target may have been pointed at another agent between the two runs; the versions alone would then read
   // as one agent's change.
+  const baselineRun = candidates.find((r) => r.id === (comparison?.baselineRunId ?? baselineId));
+  const mismatchWarning = compareMismatchWarning(baselineRun, run);
   const agentMoved = Boolean(
     baselineRevision?.agentKey && run.agentRevision?.agentKey && baselineRevision.agentKey !== run.agentRevision.agentKey,
   );
@@ -90,12 +101,20 @@ export default function EvaluationRunCompare({ run }: Props) {
   const runCompare = async () => {
     if (!baselineId) return;
     setLoading(true);
+    setCompareError(null);
+    setComparison(null);
     try {
       const res = await fetch(`/api/evaluation/runs/${run.id}/compare?baseline=${encodeURIComponent(baselineId)}`, { cache: 'no-store' });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) setComparison(data.comparison ?? null);
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setComparison(data.comparison ?? null);
+      } else {
+        // The server's own message matters here: a 409 says why these two runs cannot be compared.
+        setCompareError(await readErrorMessage(res, 'Compare failed'));
+      }
     } catch (err) {
       console.error('Compare failed', err);
+      setCompareError(err instanceof Error ? err.message : 'Compare failed');
     } finally {
       setLoading(false);
     }
@@ -151,7 +170,13 @@ export default function EvaluationRunCompare({ run }: Props) {
             placeholder={options.length ? 'Select a baseline run' : 'No earlier runs'}
             data={options}
             value={baselineId}
-            onChange={setBaselineId}
+            onChange={(value) => {
+              // A result for the previous baseline must not stay under the new selection.
+              setBaselineId(value);
+              setComparison(null);
+              setCompareError(null);
+            }}
+            searchable
             disabled={!options.length}
             w={320}
             size="xs"
@@ -159,6 +184,22 @@ export default function EvaluationRunCompare({ run }: Props) {
           <Button size="xs" onClick={runCompare} loading={loading} disabled={!baselineId}>Compare</Button>
         </Group>
       </Group>
+
+      {candidatesError ? (
+        <Alert color="red" variant="light" mb="sm" title="Could not load earlier runs">{candidatesError}</Alert>
+      ) : null}
+
+      {candidates.length >= 50 ? (
+        <Text size="xs" c="dimmed" mb="sm">Showing the 50 most recent earlier runs of this suite.</Text>
+      ) : null}
+
+      {compareError ? (
+        <Alert color="red" variant="light" mb="sm" title="Could not compare these runs">{compareError}</Alert>
+      ) : null}
+
+      {mismatchWarning ? (
+        <Alert color="yellow" variant="light" mb="sm" title="Different datasets">{mismatchWarning}</Alert>
+      ) : null}
 
       {baselineRevision && run.agentRevision ? (
         <Text size="xs" c="dimmed" mb="sm">
@@ -173,6 +214,11 @@ export default function EvaluationRunCompare({ run }: Props) {
             <Badge color="red" variant="light" size="lg">{comparison.summary.regressed} regressed</Badge>
             <Badge color="teal" variant="light" size="lg">{comparison.summary.fixed} fixed</Badge>
             <Badge color="gray" variant="light" size="lg">{comparison.summary.unchanged} unchanged</Badge>
+            {summaryCount(comparison.summary, 'not_comparable') ? (
+              <Badge color="yellow" variant="light" title="The item errored or was skipped in one of the runs">
+                {summaryCount(comparison.summary, 'not_comparable')} {COMPARE_STATUS_LABEL.not_comparable}
+              </Badge>
+            ) : null}
             {comparison.summary.added ? <Badge color="blue" variant="light">{comparison.summary.added} new</Badge> : null}
             {comparison.summary.removed ? <Badge color="gray" variant="outline">{comparison.summary.removed} removed</Badge> : null}
           </Group>
@@ -247,7 +293,7 @@ export default function EvaluationRunCompare({ run }: Props) {
                         </Text>
                       )}
                     </Table.Td>
-                    <Table.Td><Badge size="xs" color={STATUS_COLOR[c.status]} variant="outline">{c.status}</Badge></Table.Td>
+                    <Table.Td><Badge size="xs" color={STATUS_COLOR[c.status] ?? 'gray'} variant="outline">{COMPARE_STATUS_LABEL[c.status] ?? c.status}</Badge></Table.Td>
                   </Table.Tr>
                 ))}
               </Table.Tbody>

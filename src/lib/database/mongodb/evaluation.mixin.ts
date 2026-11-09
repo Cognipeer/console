@@ -33,6 +33,8 @@ import type {
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { definedFields } from './definedFields';
+import { toObjectId } from './objectIds';
+import { assertMetadataPatchKeys, pickEvaluationItemFields } from '../provider/evaluationItemFields';
 import { hasAnyLabel, matchesLabel, mongoLabelCandidates } from '../provider/labelMatch';
 
 /** True when the error is a Mongo duplicate-key violation (code 11000). */
@@ -116,6 +118,29 @@ function itemFilter(
   return filter;
 }
 
+/**
+ * Status filter shared by the run list/count methods. `status` and `statuses`
+ * intersect when both are given; an empty `statuses` array is ignored (no
+ * filter) so a caller that built the list from optional input does not
+ * accidentally match nothing.
+ */
+function runStatusFilter(filters?: {
+  status?: EvaluationRunStatus;
+  statuses?: EvaluationRunStatus[];
+}): { $in: EvaluationRunStatus[] } | undefined {
+  let allowed = filters?.statuses && filters.statuses.length > 0 ? filters.statuses : undefined;
+  if (filters?.status !== undefined) {
+    allowed = allowed ? allowed.filter((s) => s === filters.status) : [filters.status];
+  }
+  return allowed ? { $in: allowed } : undefined;
+}
+
+/** Normalise a run document read with a string `_id`; `items` defaults to []. */
+function mapRunDoc(doc: unknown): IEvaluationRun {
+  const d = doc as IEvaluationRun & { _id?: ObjectId | string };
+  return { ...d, _id: d._id?.toString(), items: d.items ?? [] } as IEvaluationRun;
+}
+
 export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class EvaluationOps extends Base {
     // ── Targets ──────────────────────────────────────────────────────
@@ -135,23 +160,29 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationTarget, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IEvaluationTarget | null> {
       const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
       const updateData = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IEvaluationTarget>(COLLECTIONS.evaluationTargets)
-        .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
+        .findOneAndUpdate({ _id: oid }, { $set: updateData }, { returnDocument: 'after' });
       if (!result) return null;
       return { ...result, _id: result._id?.toString() } as IEvaluationTarget;
     }
 
     async deleteEvaluationTarget(id: string): Promise<boolean> {
       const db = this.getTenantDb();
-      const result = await db.collection(COLLECTIONS.evaluationTargets).deleteOne({ _id: new ObjectId(id) });
+      const oid = toObjectId(id);
+      if (!oid) return false;
+      const result = await db.collection(COLLECTIONS.evaluationTargets).deleteOne({ _id: oid });
       return result.deletedCount === 1;
     }
 
     async findEvaluationTargetById(id: string): Promise<IEvaluationTarget | null> {
       const db = this.getTenantDb();
-      const doc = await db.collection(COLLECTIONS.evaluationTargets).findOne({ _id: new ObjectId(id) });
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      const doc = await db.collection(COLLECTIONS.evaluationTargets).findOne({ _id: oid });
       return doc as unknown as IEvaluationTarget | null;
     }
 
@@ -214,24 +245,37 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationDataset, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IEvaluationDataset | null> {
       const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
       const { items, ...rest } = data;
+      // Reject a bad payload BEFORE the header is touched: a failed replace
+      // must not leave a renamed header over the old items.
+      if (items !== undefined) assertUniqueItemIds(items);
       const updateData: Record<string, unknown> = { ...definedFields(rest), updatedAt: new Date() };
       if (items !== undefined) updateData.itemCount = items.length;
       const result = await db
         .collection<IEvaluationDataset>(COLLECTIONS.evaluationDatasets)
-        .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
+        .findOneAndUpdate({ _id: oid }, { $set: updateData }, { returnDocument: 'after' });
       if (!result) return null;
       if (items !== undefined) {
         // Full replace, mirroring the old embedded-array semantics. Also
         // clears any legacy embedded array still on the document.
-        await this.writeDatasetItemsReplacing(db, result, items);
+        try {
+          await this.writeDatasetItemsReplacing(db, result, items);
+        } catch (error) {
+          // The optimistic itemCount above would lie about the restored rows.
+          await this.stampDatasetItemCount(db, id).catch(() => {});
+          throw error;
+        }
       }
       return this.mapDatasetDoc(result);
     }
 
     async deleteEvaluationDataset(id: string): Promise<boolean> {
       const db = this.getTenantDb();
-      const result = await db.collection(COLLECTIONS.evaluationDatasets).deleteOne({ _id: new ObjectId(id) });
+      const oid = toObjectId(id);
+      if (!oid) return false;
+      const result = await db.collection(COLLECTIONS.evaluationDatasets).deleteOne({ _id: oid });
       // Cascade the item rows; a dataset that never migrated has none.
       await db.collection(COLLECTIONS.evaluationDatasetItems).deleteMany({ datasetId: id });
       return result.deletedCount === 1;
@@ -239,9 +283,11 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     async findEvaluationDatasetById(id: string): Promise<IEvaluationDataset | null> {
       const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
       const doc = await db
         .collection(COLLECTIONS.evaluationDatasets)
-        .findOne({ _id: new ObjectId(id) }, { projection: { items: 0 } });
+        .findOne({ _id: oid }, { projection: { items: 0 } });
       if (!doc) return null;
       return this.withResolvedItemCount(db, this.mapDatasetDoc(doc as unknown as IEvaluationDataset));
     }
@@ -396,12 +442,12 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       await this.ensureDatasetItemIndexes(db);
       const now = new Date();
       const docs = items.map((item, i) => {
-        // System fields LAST so a hostile/extra field on the item can never
-        // override the row's parent linkage or ordering.
-        const rest = { ...(item as IEvaluationDatasetItem & { _id?: unknown }) };
-        delete rest._id;
+        // Only whitelisted item fields are copied (unknown keys are dropped),
+        // and system fields come LAST so nothing on the item can override the
+        // row's parent linkage or ordering.
         return {
-          ...rest,
+          ...pickEvaluationItemFields(item),
+          id: item.id,
           _id: new ObjectId(),
           datasetId,
           tenantId,
@@ -479,11 +525,13 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     /** Recount item rows and stamp the parent document's itemCount. */
     private async stampDatasetItemCount(db: Db, datasetId: string): Promise<void> {
+      const oid = toObjectId(datasetId);
+      if (!oid) return;
       const count = await db
         .collection(COLLECTIONS.evaluationDatasetItems)
         .countDocuments({ datasetId });
       await db.collection(COLLECTIONS.evaluationDatasets).updateOne(
-        { _id: new ObjectId(datasetId) },
+        { _id: oid },
         { $set: { itemCount: count, updatedAt: new Date() } },
       );
     }
@@ -499,8 +547,34 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       assertUniqueItemIds(items);
       const datasetId = String(dataset._id);
       await this.ensureDatasetItemIndexes(db);
-      await db.collection(COLLECTIONS.evaluationDatasetItems).deleteMany({ datasetId });
-      await this.insertDatasetItems(db, datasetId, dataset.tenantId, dataset.projectId, items, 0);
+      const itemColl = db.collection(COLLECTIONS.evaluationDatasetItems);
+      // Mongo has no multi-collection transaction here, so the old rows are
+      // held in memory while the new ones are written: if the insert fails
+      // after the delete, the old rows are put back - a failed replace must
+      // never leave the dataset empty. (insertDatasetItems already removes
+      // its own partial prefix.)
+      const previous = await itemColl.find({ datasetId }).toArray();
+      await itemColl.deleteMany({ datasetId });
+      try {
+        await this.insertDatasetItems(db, datasetId, dataset.tenantId, dataset.projectId, items, 0);
+      } catch (error) {
+        if (previous.length > 0) {
+          try {
+            // ordered:false + duplicates ignored: rows a concurrent writer
+            // already re-created are left as they are.
+            await itemColl.insertMany(previous, { ordered: false });
+          } catch (restoreError) {
+            const writeErrors = (restoreError as { writeErrors?: Array<{ code?: number }> }).writeErrors;
+            const onlyDuplicates =
+              isDuplicateKeyError(restoreError)
+              || (Array.isArray(writeErrors)
+                && writeErrors.length > 0
+                && writeErrors.every((e) => e?.code === 11000 || e?.code === 11001));
+            if (!onlyDuplicates) throw restoreError;
+          }
+        }
+        throw error;
+      }
       // Clear any legacy embedded array and stamp the count from the actual
       // rows (the caller's optimistic $set can lie if anything went sideways).
       await db.collection(COLLECTIONS.evaluationDatasets).updateOne(
@@ -644,11 +718,9 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
     ): Promise<IEvaluationDatasetItemRecord | null> {
       const db = this.getTenantDb();
       await this.migrateLegacyEmbeddedItems(db, datasetId);
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      // Never let an update move the row or rewrite system fields.
-      for (const key of ['_id', 'id', 'datasetId', 'tenantId', 'projectId', 'position', 'createdAt']) {
-        delete updateData[key];
-      }
+      // Whitelist: an update can only touch the item's own fields - never
+      // system fields, and never arbitrary keys.
+      const updateData: Record<string, unknown> = { ...pickEvaluationItemFields(data), updatedAt: new Date() };
       // `null` means "clear this optional field" (expected/tools/…): $unset
       // instead of persisting a literal null.
       const unset: Record<string, 1> = {};
@@ -666,10 +738,13 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
           { returnDocument: 'after' },
         );
       if (!result) return null;
-      await db.collection(COLLECTIONS.evaluationDatasets).updateOne(
-        { _id: new ObjectId(datasetId) },
-        { $set: { updatedAt: new Date() } },
-      );
+      const datasetOid = toObjectId(datasetId);
+      if (datasetOid) {
+        await db.collection(COLLECTIONS.evaluationDatasets).updateOne(
+          { _id: datasetOid },
+          { $set: { updatedAt: new Date() } },
+        );
+      }
       return { ...result, _id: result._id?.toString() } as IEvaluationDatasetItemRecord;
     }
 
@@ -701,23 +776,29 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationSuite, 'tenantId' | 'key' | 'createdBy'>>,
     ): Promise<IEvaluationSuite | null> {
       const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
       const updateData = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IEvaluationSuite>(COLLECTIONS.evaluationSuites)
-        .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
+        .findOneAndUpdate({ _id: oid }, { $set: updateData }, { returnDocument: 'after' });
       if (!result) return null;
       return { ...result, _id: result._id?.toString() } as IEvaluationSuite;
     }
 
     async deleteEvaluationSuite(id: string): Promise<boolean> {
       const db = this.getTenantDb();
-      const result = await db.collection(COLLECTIONS.evaluationSuites).deleteOne({ _id: new ObjectId(id) });
+      const oid = toObjectId(id);
+      if (!oid) return false;
+      const result = await db.collection(COLLECTIONS.evaluationSuites).deleteOne({ _id: oid });
       return result.deletedCount === 1;
     }
 
     async findEvaluationSuiteById(id: string): Promise<IEvaluationSuite | null> {
       const db = this.getTenantDb();
-      const doc = await db.collection(COLLECTIONS.evaluationSuites).findOne({ _id: new ObjectId(id) });
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      const doc = await db.collection(COLLECTIONS.evaluationSuites).findOne({ _id: oid });
       return doc as unknown as IEvaluationSuite | null;
     }
 
@@ -753,9 +834,11 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
     ): Promise<IEvaluationRun> {
       const db = this.getTenantDb();
       const now = new Date();
-      const doc = { ...run, createdAt: now, updatedAt: now };
+      // Defined keys only: the driver would store an explicit `undefined` as
+      // `null`, and readers should see "absent" for fields never set.
+      const doc = { ...definedFields(run), createdAt: now, updatedAt: now };
       const result = await db.collection(COLLECTIONS.evaluationRuns).insertOne(doc);
-      return { ...doc, _id: result.insertedId.toString() };
+      return { ...doc, _id: result.insertedId.toString() } as unknown as IEvaluationRun;
     }
 
     async updateEvaluationRun(
@@ -763,35 +846,211 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
     ): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      const updateData: Record<string, unknown> = { ...definedFields(data), updatedAt: new Date() };
       const result = await db
         .collection<IEvaluationRun>(COLLECTIONS.evaluationRuns)
-        .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
+        .findOneAndUpdate({ _id: oid }, { $set: updateData }, { returnDocument: 'after' });
       if (!result) return null;
       return { ...result, _id: result._id?.toString() } as IEvaluationRun;
     }
 
     async findEvaluationRunById(id: string): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
-      const doc = await db.collection(COLLECTIONS.evaluationRuns).findOne({ _id: new ObjectId(id) });
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      const doc = await db.collection(COLLECTIONS.evaluationRuns).findOne({ _id: oid });
       return doc as unknown as IEvaluationRun | null;
     }
 
-    async listEvaluationRuns(filters?: { projectId?: string; suiteKey?: string; status?: EvaluationRunStatus; limit?: number; skip?: number }): Promise<IEvaluationRun[]> {
-      const db = this.getTenantDb();
+    /** Filter shared by list / summaries / count. */
+    private runListFilter(filters?: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+    }): Record<string, unknown> {
       const filter: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.suiteKey !== undefined) filter.suiteKey = filters.suiteKey;
-      if (filters?.status !== undefined) filter.status = filters.status;
+      const status = runStatusFilter(filters);
+      if (status) filter.status = status;
+      return filter;
+    }
+
+    async listEvaluationRuns(filters?: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+      limit?: number;
+      skip?: number;
+    }): Promise<IEvaluationRun[]> {
+      const db = this.getTenantDb();
       const docs = await db
         .collection(COLLECTIONS.evaluationRuns)
-        .find(filter)
-        .sort({ createdAt: -1 })
+        .find(this.runListFilter(filters))
+        // `_id` tiebreak: newest-first stays total (and pages stay stable)
+        // when two runs share a createdAt millisecond.
+        .sort({ createdAt: -1, _id: -1 })
         .skip(filters?.skip ?? 0)
         .limit(filters?.limit ?? 50)
         .toArray();
       return docs as unknown as IEvaluationRun[];
+    }
+
+    async listEvaluationRunSummaries(filters: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+      limit?: number;
+      skip?: number;
+    }): Promise<IEvaluationRun[]> {
+      const db = this.getTenantDb();
+      const docs = await db
+        .collection(COLLECTIONS.evaluationRuns)
+        .find(this.runListFilter(filters), { projection: { items: 0 } })
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(filters?.skip ?? 0)
+        .limit(filters?.limit ?? 50)
+        .toArray();
+      return docs.map(mapRunDoc);
+    }
+
+    async countEvaluationRuns(filters: {
+      projectId?: string;
+      suiteKey?: string;
+      status?: EvaluationRunStatus;
+      statuses?: EvaluationRunStatus[];
+    }): Promise<number> {
+      const db = this.getTenantDb();
+      return db.collection(COLLECTIONS.evaluationRuns).countDocuments(this.runListFilter(filters));
+    }
+
+    async listEvaluationRunsByStatus(
+      statuses: EvaluationRunStatus[],
+      opts?: { createdBefore?: Date; limit?: number },
+    ): Promise<IEvaluationRun[]> {
+      if (statuses.length === 0) return [];
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { status: { $in: statuses } };
+      if (opts?.createdBefore) filter.createdAt = { $lt: opts.createdBefore };
+      const docs = await db
+        .collection(COLLECTIONS.evaluationRuns)
+        .find(filter, { projection: { items: 0 } })
+        .sort({ createdAt: 1, _id: 1 })
+        .limit(Math.max(1, Math.min(opts?.limit ?? 1000, 5000)))
+        .toArray();
+      return docs.map(mapRunDoc);
+    }
+
+    // ── Run lifecycle (conditional updates: the filter carries the guard) ──
+
+    async claimEvaluationRun(id: string, startedAt: Date): Promise<IEvaluationRun | null> {
+      const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      // CAS on status: of two workers racing for the same run only one matches.
+      const result = await db
+        .collection<IEvaluationRun>(COLLECTIONS.evaluationRuns)
+        .findOneAndUpdate(
+          { _id: oid, status: 'pending' } as Record<string, unknown>,
+          { $set: { status: 'running', startedAt, heartbeatAt: startedAt, updatedAt: new Date() } },
+          { returnDocument: 'after' },
+        );
+      if (!result) return null;
+      return { ...result, _id: result._id?.toString() } as IEvaluationRun;
+    }
+
+    async touchEvaluationRun(id: string, at: Date): Promise<boolean> {
+      const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return false;
+      const result = await db
+        .collection(COLLECTIONS.evaluationRuns)
+        .updateOne({ _id: oid, status: 'running' }, { $set: { heartbeatAt: at } });
+      return result.matchedCount === 1;
+    }
+
+    async requestEvaluationRunCancel(id: string, at: Date): Promise<IEvaluationRun | null> {
+      const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      const coll = db.collection<IEvaluationRun>(COLLECTIONS.evaluationRuns);
+      const now = new Date();
+      // pending -> cancelled. Each transition is its own conditional update, so
+      // a run that moved on between the two attempts is simply caught by the
+      // next one (or falls through to "already finished").
+      const cancelled = await coll.findOneAndUpdate(
+        { _id: oid, status: 'pending' } as Record<string, unknown>,
+        { $set: { status: 'cancelled', finishedAt: at, error: 'Cancelled before it started', updatedAt: now } },
+        { returnDocument: 'after' },
+      );
+      if (cancelled) return { ...cancelled, _id: cancelled._id?.toString() } as IEvaluationRun;
+      const requested = await coll.findOneAndUpdate(
+        { _id: oid, status: 'running' } as Record<string, unknown>,
+        { $set: { cancelRequestedAt: at, updatedAt: now } },
+        { returnDocument: 'after' },
+      );
+      if (requested) return { ...requested, _id: requested._id?.toString() } as IEvaluationRun;
+      const current = await coll.findOne({ _id: oid } as Record<string, unknown>);
+      return current ? ({ ...current, _id: current._id?.toString() } as IEvaluationRun) : null;
+    }
+
+    async failStaleEvaluationRuns(heartbeatBefore: Date, message: string): Promise<number> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      // `heartbeatAt ?? startedAt ?? createdAt` older than the cutoff, expressed
+      // in the FILTER so a heartbeat that lands meanwhile wins the race.
+      const result = await db.collection(COLLECTIONS.evaluationRuns).updateMany(
+        {
+          status: 'running',
+          $or: [
+            { heartbeatAt: { $lt: heartbeatBefore } },
+            { heartbeatAt: null, startedAt: { $lt: heartbeatBefore } },
+            { heartbeatAt: null, startedAt: null, createdAt: { $lt: heartbeatBefore } },
+          ],
+        },
+        { $set: { status: 'failed', error: message, finishedAt: now, updatedAt: now } },
+      );
+      return result.modifiedCount;
+    }
+
+    // ── Dataset metadata (atomic per-block patch) ───────────────────
+
+    async patchEvaluationDatasetMetadata(
+      id: string,
+      patch: Record<string, unknown>,
+      opts?: { unlessParityStatusIn?: string[] },
+    ): Promise<IEvaluationDataset | null> {
+      assertMetadataPatchKeys(patch);
+      const db = this.getTenantDb();
+      const oid = toObjectId(id);
+      if (!oid) return null;
+      const set: Record<string, unknown> = { updatedAt: new Date() };
+      const unset: Record<string, 1> = {};
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) unset[`metadata.${key}`] = 1;
+        else set[`metadata.${key}`] = value;
+      }
+      const coll = db.collection<IEvaluationDataset>(COLLECTIONS.evaluationDatasets);
+      // `$set metadata.x` fails on a document whose metadata is null (the
+      // undefined->null trap); normalise that first. No-op for healthy docs.
+      await coll.updateOne({ _id: oid, metadata: null } as Record<string, unknown>, { $set: { metadata: {} } });
+      const filter: Record<string, unknown> = { _id: oid };
+      if (opts?.unlessParityStatusIn && opts.unlessParityStatusIn.length > 0) {
+        // $nin also matches a missing field: "absent or not in the list".
+        filter['metadata.parity.status'] = { $nin: opts.unlessParityStatusIn };
+      }
+      const result = await coll.findOneAndUpdate(
+        filter,
+        { $set: set, ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}) },
+        { returnDocument: 'after', projection: { items: 0 } },
+      );
+      if (!result) return null;
+      return this.withResolvedItemCount(db, this.mapDatasetDoc(result));
     }
   };
 }

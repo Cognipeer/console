@@ -87,4 +87,9 @@ export interface CreateImportedDatasetResult {
   skipped: ImportSkipCounts;
   /** Total PII findings replaced across all persisted strings. */
   piiFindings: number;
+  /** Present only when something needs the user's attention. */
+  warnings?: {
+    /** Items that expect tool calls but have no tool definitions (they score 0 on the tool-call scorer). */
+    toolCallsWithoutTools?: number;
+  };
 }
