@@ -2,7 +2,8 @@
  * The single left menu: one labelled column instead of the icon rail plus the service sub-nav. It lists only what the
  * person can open, under the launcher's categories (Build, Data, Operate; an empty one is left out), and goes step by
  * step: a service's pages (filtered like the sub-nav), the reports and Settings' grouped pages are levels of their own.
- * Nothing is pinned. The nested style is kept behind SIDEBAR_STYLE. Someone with seven services or fewer gets one plain
+ * Favorites, under Home and Reports, are the services the person pins from the menu (kept in the browser, in the order
+ * pinned). The nested style is kept behind SIDEBAR_STYLE. Someone with seven services or fewer gets one plain
  * list, without categories. The top bar beside it is slim (no launcher). SIDEBAR_NAV switches back to the rail and the
  * sub-nav, which are kept. A phone gets the same menu in the top bar's drawer.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
@@ -133,28 +134,27 @@ describe('the menu', () => {
     expect(html).toContain('data-testid="sidebar-subitem-webhooks"');
   });
 
-  it('nothing is pinned: no pinned list and no pin button, in either style, side menu or drawer', () => {
+  it('without the pin store (no onTogglePin) it offers no pin and shows no Favorites, in either style or variant', () => {
     for (const menuStyle of ['tree', 'drill'] as const) {
       for (const variant of ['side', 'drawer'] as const) {
-        const first = sidebar({ services: owner, menuStyle, variant, pathname: '/dashboard/overview' });
+        const first = sidebar({ services: owner, menuStyle, variant, pinnedIds: new Set(['agents']), pathname: '/dashboard/overview' });
         const level = sidebar({
           services: owner,
           menuStyle,
           variant,
           activeService: agents,
           activeItems: visibleSubNavItems(SUBNAV_CONFIG.agents, () => true, true),
+          pinnedIds: new Set(['agents']),
           pathname: '/dashboard/agents/tools',
         });
         for (const html of [first, level]) {
-          expect(html).not.toContain('data-testid="sidebar-pinned');
+          expect(html).not.toContain('data-testid="sidebar-favorites"');
+          expect(html).not.toContain('data-testid="sidebar-favorite-');
+          expect(html).not.toContain('data-testid="sidebar-pin-');
           expect(html).not.toContain('data-testid="sidebar-level-pin"');
-          expect(html).not.toMatch(/aria-label="(Un)?[Pp]in /);
-          expect(html).not.toContain('>Pinned<');
         }
       }
     }
-    const source = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.tsx'), 'utf8');
-    expect(source).not.toMatch(/pinnedIds|onTogglePin|IconPin/);
   });
 
   it('a page the person cannot use is not offered under its service (Webhooks without the Webhooks service)', () => {
@@ -165,13 +165,11 @@ describe('the menu', () => {
     expect(html).not.toContain('data-testid="sidebar-subitem-webhooks"');
   });
 
-  it('for few services: one plain list, no categories, no pins', () => {
+  it('for few services: one plain list, no categories', () => {
     const member = memberServices(['agents', 'prompts', 'rag']);
     const html = sidebar({ services: member });
     expect(html).toContain('data-flat="true"');
     expect(html).not.toContain('data-testid="sidebar-group-');
-    expect(html).not.toContain('data-testid="sidebar-pinned"');
-    expect(html).not.toContain('aria-label="Pin ');
     expect(html).toContain('data-testid="sidebar-service-agents"');
     expect(html).not.toContain('data-testid="sidebar-service-models"');
   });
@@ -286,7 +284,8 @@ describe('the menu on a phone', () => {
     );
     const css = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.module.css'), 'utf8');
     expect(css).toMatch(/\.sidebar\.drawer \{\s*display: flex;/);
-    expect(css).not.toMatch(/\.(pin|levelPin|pinned|pinStay)\b/);
+    // A finger gets a larger pin on a service's level.
+    expect(css).toMatch(/\.drawer \.levelPin \{\s*width: 40px;\s*height: 40px;/);
     // The drawer gets the reports too.
     expect(layout).toMatch(/<Sidebar\s+variant="drawer"[\s\S]*?reportsItems=\{reportsItems\}\s+reportsActive=\{reportsActive\}/);
   });
@@ -325,8 +324,8 @@ describe('the switch and the old menu', () => {
   it('has its words in both languages, with the same placeholders', () => {
     const keys = [
       'sidebarLabel', 'sidebarHome', 'sidebarReports', 'sidebarHelp', 'sidebarCollapse', 'sidebarExpand', 'sidebarBack',
-      'sidebarAllOf', 'reportsSummary', 'reportsGroupUsage', 'reportsGroupQuality', 'reportsGroupSafety',
-      'reportsGroupInfrastructure',
+      'sidebarAllOf', 'sidebarFavorites', 'sidebarPin', 'sidebarUnpin', 'reportsSummary', 'reportsGroupUsage',
+      'reportsGroupQuality', 'reportsGroupSafety', 'reportsGroupInfrastructure',
     ] as const;
     const enNav = en.navigation as Record<string, string>;
     const trNav = tr.navigation as Record<string, string>;
@@ -336,7 +335,7 @@ describe('the switch and the old menu', () => {
       expect(trNav[key], key).not.toBe(enNav[key]);
       expect(trNav[key].match(/\{\w+\}/g) ?? [], key).toEqual(enNav[key].match(/\{\w+\}/g) ?? []);
     }
-    for (const key of ['sidebarPinned', 'sidebarAllServices', 'sidebarPin', 'sidebarUnpin']) {
+    for (const key of ['sidebarPinned', 'sidebarAllServices']) {
       expect(enNav[key], key).toBeUndefined();
     }
     const enAccount = en.account as Record<string, string>;
@@ -413,7 +412,6 @@ describe('no page twice, and the step-by-step menu', () => {
     expect(html).toContain('data-testid="sidebar-level-agents"');
     expect(tag(html, 'sidebar-back')).toMatch(/^<button/);
     expect(html).toContain('Back to the main menu');
-    expect(html).not.toContain('data-testid="sidebar-level-pin"');
     expect(html).toMatch(/data-testid="sidebar-subitem-list"[^>]*>.*?<span[^>]*>All Agents<\/span>/);
     expect(tag(html, 'sidebar-subitem-tools')).toContain('aria-current="page"');
     expect(html).toContain('>Sessions<');
@@ -423,7 +421,7 @@ describe('no page twice, and the step-by-step menu', () => {
 
   it('step by step: Settings is a level of its own while one of its pages is in view, in the viewer’s language', () => {
     const html = sidebar(
-      { services: owner, settingsItems, settingsActive: true, menuStyle: 'drill', pathname: '/dashboard/projects' },
+      { services: owner, settingsItems, settingsActive: true, menuStyle: 'drill', pathname: '/dashboard/projects', onTogglePin: () => undefined },
       'tr',
     );
     expect(html).toContain('data-testid="sidebar-level-settings"');
@@ -432,7 +430,7 @@ describe('no page twice, and the step-by-step menu', () => {
     expect(html).not.toContain('data-testid="sidebar-level-pin"');
   });
 
-  it('step by step with few services: one plain list, and no pin on a service’s level', () => {
+  it('step by step with few services: one plain list, and a service’s level has its pin', () => {
     const member = memberServices(['agents', 'prompts', 'rag']);
     const first = sidebar({ services: member, pagesFor, menuStyle: 'drill', pathname: '/dashboard/overview' });
     expect(first).toContain('data-flat="true"');
@@ -443,10 +441,12 @@ describe('no page twice, and the step-by-step menu', () => {
       menuStyle: 'drill',
       activeService: agents,
       activeItems: allAgentPages,
+      pinnedIds: new Set<string>(),
+      onTogglePin: () => undefined,
       pathname: '/dashboard/agents/tools',
     });
     expect(level).toContain('data-testid="sidebar-level-agents"');
-    expect(level).not.toContain('data-testid="sidebar-level-pin"');
+    expect(level).toContain('data-testid="sidebar-level-pin"');
   });
 
   it('the menu goes step by step; the nested style is kept behind one constant, and no choice is offered', () => {
@@ -602,5 +602,197 @@ describe('Reports in the menu', () => {
     expect(layout).toContain('const reportsItems = useReportsNav(SIDEBAR_NAV);');
     expect(layout).toContain('const reportsActive = isReportsPath(pathname);');
     expect(layout.match(/reportsItems=\{reportsItems\}/g) ?? []).toHaveLength(2);
+  });
+});
+
+describe('Favorites: pinned from the menu', () => {
+  const tag = (html: string, testId: string) => html.match(new RegExp(`<[^>]*data-testid="${testId}"[^>]*>`))?.[0] ?? '';
+  const pagesFor = (service: DashboardServiceDefinition) => visibleSubNavItems(SUBNAV_CONFIG[service.id], () => true, true);
+  const allAgentPages = visibleSubNavItems(SUBNAV_CONFIG.agents, () => true, true);
+  const onTogglePin = () => undefined;
+  const at = (html: string, testId: string) => html.indexOf(`data-testid="${testId}"`);
+
+  it('every service row has a pin named for its service, beside the row (a level’s arrow stays at the edge); nothing pinned, no Favorites', () => {
+    const html = sidebar({ services: owner, pagesFor, pinnedIds: new Set(), onTogglePin, pathname: '/dashboard/overview' });
+    for (const service of sidebarServices(owner)) {
+      expect(html).toContain(`data-testid="sidebar-pin-${service.id}"`);
+    }
+    expect(tag(html, 'sidebar-pin-agents')).toContain('aria-label="Add Agents to Favorites"');
+    expect(tag(html, 'sidebar-pin-agents')).toContain('aria-pressed="false"');
+    // Agents opens its level: the pin follows that button (a button cannot hold another), before the arrow.
+    expect(tag(html, 'sidebar-pin-agents')).toMatch(/class="[^"]*pinBeforeArrow/);
+    expect(html).toMatch(/data-testid="sidebar-service-agents"[\s\S]*?<\/button><button[^>]*data-testid="sidebar-pin-agents"/);
+    // Files is a plain link: its pin follows the link.
+    expect(html).toMatch(/data-testid="sidebar-service-files"[\s\S]*?<\/a><button[^>]*data-testid="sidebar-pin-files"/);
+    expect(html).not.toContain('data-testid="sidebar-favorites"');
+  });
+
+  it('under Home and Reports, above the categories, in the order pinned: links to the service, each with its pin shown', () => {
+    const html = sidebar({
+      services: owner,
+      pagesFor,
+      reportsItems: reportItems,
+      pinnedIds: new Set(['rag', 'agents']),
+      onTogglePin,
+      pathname: '/dashboard/overview',
+    });
+    expect(at(html, 'sidebar-favorites')).toBeGreaterThan(at(html, 'sidebar-reports'));
+    expect(at(html, 'sidebar-favorites')).toBeLessThan(at(html, 'sidebar-category-build'));
+    expect(html).toContain('>Favorites<');
+    expect(at(html, 'sidebar-favorite-rag')).toBeLessThan(at(html, 'sidebar-favorite-agents'));
+    // A shortcut to the service's page, although Agents opens a level in the list below, where it keeps its row.
+    expect(tag(html, 'sidebar-favorite-agents')).toMatch(new RegExp(`^<a\\b[^>]*href="${agents.href}"`));
+    expect(tag(html, 'sidebar-service-agents')).toMatch(/^<button[^>]*data-opens="level"/);
+    expect(tag(html, 'sidebar-pin-favorite-agents')).toContain('aria-label="Remove Agents from Favorites"');
+    expect(tag(html, 'sidebar-pin-favorite-agents')).toContain('aria-pressed="true"');
+    expect(tag(html, 'sidebar-pin-favorite-agents')).toMatch(/class="[^"]*pinStay/);
+    expect(tag(html, 'sidebar-pin-agents')).toContain('aria-pressed="true"');
+    expect(tag(html, 'sidebar-pin-models')).toContain('aria-pressed="false"');
+    // Without Reports (community, no license) Favorites follow Home.
+    const noReports = sidebar({ services: owner, pagesFor, pinnedIds: new Set(['rag']), onTogglePin, pathname: '/dashboard/overview' });
+    expect(at(noReports, 'sidebar-favorites')).toBeGreaterThan(at(noReports, 'sidebar-home'));
+    expect(at(noReports, 'sidebar-favorites')).toBeLessThan(at(noReports, 'sidebar-category-build'));
+  });
+
+  it('a pin for a service the person cannot open (any more) is left out', () => {
+    const member = memberServices(['agents', 'prompts', 'rag']);
+    const html = sidebar({ services: member, pagesFor, pinnedIds: new Set(['models', 'agents', 'gone']), onTogglePin });
+    expect(html).toContain('data-testid="sidebar-favorite-agents"');
+    expect(html).not.toContain('data-testid="sidebar-favorite-models"');
+    expect(html).not.toContain('data-testid="sidebar-favorite-gone"');
+    expect(html.match(/data-testid="sidebar-favorite-/g)).toHaveLength(1);
+  });
+
+  it('a favorite in view is only named: the service’s own row (or its page) is the one marked', () => {
+    const files = findDashboardService('files')!;
+    const drill = sidebar({
+      services: owner,
+      pagesFor,
+      activeService: files,
+      activeItems: SUBNAV_CONFIG.files,
+      pinnedIds: new Set(['files']),
+      onTogglePin,
+      pathname: '/dashboard/files',
+    });
+    expect(tag(drill, 'sidebar-favorite-files')).toContain('aria-current="true"');
+    expect(tag(drill, 'sidebar-service-files')).toContain('aria-current="page"');
+    expect(drill.match(/aria-current="page"/g)).toHaveLength(1);
+    const tree = sidebar({
+      services: owner,
+      menuStyle: 'tree',
+      activeService: agents,
+      activeItems: allAgentPages,
+      pinnedIds: new Set(['agents']),
+      onTogglePin,
+      pathname: '/dashboard/agents/tools',
+    });
+    expect(tag(tree, 'sidebar-favorite-agents')).toContain('aria-current="true"');
+    expect(tag(tree, 'sidebar-subitem-tools')).toContain('aria-current="page"');
+    expect(tree.match(/aria-current="page"/g)).toHaveLength(1);
+    // The pages open under the service's own row only.
+    expect(tree.match(/data-testid="sidebar-subitem-tools"/g)).toHaveLength(1);
+  });
+
+  it('a service’s level has its pin beside the way back, side menu and drawer; Reports and Settings have none', () => {
+    for (const variant of ['side', 'drawer'] as const) {
+      const props = {
+        services: owner,
+        pagesFor,
+        variant,
+        activeService: agents,
+        activeItems: allAgentPages,
+        onTogglePin,
+        pathname: '/dashboard/agents/tools',
+      };
+      const unpinned = sidebar({ ...props, pinnedIds: new Set<string>() });
+      expect(unpinned).toMatch(/data-testid="sidebar-back"[\s\S]*?<\/button><button[^>]*data-testid="sidebar-level-pin"/);
+      expect(tag(unpinned, 'sidebar-level-pin')).toContain('aria-label="Add Agents to Favorites"');
+      expect(tag(unpinned, 'sidebar-level-pin')).toContain('aria-pressed="false"');
+      const pinned = sidebar({ ...props, pinnedIds: new Set(['agents']) });
+      expect(tag(pinned, 'sidebar-level-pin')).toContain('aria-label="Remove Agents from Favorites"');
+      expect(tag(pinned, 'sidebar-level-pin')).toContain('aria-pressed="true"');
+      // A level shows its pages only: Favorites are on the first level.
+      expect(pinned).not.toContain('data-testid="sidebar-favorites"');
+    }
+    const reports = sidebar({
+      services: owner,
+      pagesFor,
+      reportsItems: reportItems,
+      reportsActive: true,
+      onTogglePin,
+      pathname: '/dashboard/analytics/cost-spend',
+    });
+    expect(reports).toContain('data-testid="sidebar-level-reports"');
+    expect(reports).not.toContain('data-testid="sidebar-level-pin"');
+  });
+
+  it('nested style and the phone’s drawer: the same Favorites under Home and Reports, and a pin on every service row', () => {
+    for (const props of [{ menuStyle: 'tree' as const }, { variant: 'drawer' as const }]) {
+      const html = sidebar({
+        services: owner,
+        pagesFor,
+        reportsItems: reportItems,
+        pinnedIds: new Set(['agents']),
+        onTogglePin,
+        pathname: '/dashboard/overview',
+        ...props,
+      });
+      expect(at(html, 'sidebar-favorites')).toBeGreaterThan(at(html, 'sidebar-reports'));
+      expect(html).toContain('data-testid="sidebar-favorite-agents"');
+      const rows = [...html.matchAll(/data-testid="sidebar-service-([\w-]+)"/g)].map((match) => match[1]);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const id of rows) expect(html).toContain(`data-testid="sidebar-pin-${id}"`);
+    }
+  });
+
+  it('the icon strip: the favorites after Home and Reports, before the services, without pins', () => {
+    media.narrow = true;
+    try {
+      const html = sidebar({
+        services: owner,
+        reportsItems: reportItems,
+        pinnedIds: new Set(['rag', 'agents']),
+        onTogglePin,
+        pathname: '/dashboard/overview',
+      });
+      expect(html).toContain('data-collapsed="true"');
+      expect(at(html, 'sidebar-favorite-rag')).toBeGreaterThan(at(html, 'sidebar-reports'));
+      expect(at(html, 'sidebar-favorite-rag')).toBeLessThan(at(html, 'sidebar-favorite-agents'));
+      expect(at(html, 'sidebar-favorite-agents')).toBeLessThan(html.indexOf('data-testid="sidebar-service-'));
+      expect(html).not.toContain('data-testid="sidebar-pin-');
+      // The services keep their one icon each.
+      expect(html.match(/data-testid="sidebar-service-/g)).toHaveLength(sidebarServices(owner).length);
+    } finally {
+      media.narrow = false;
+    }
+  });
+
+  it('speaks the viewer’s language', () => {
+    const trNav = tr.navigation as Record<string, string>;
+    const label = trNav[agents.navLabelKey];
+    expect(label).toBeTruthy();
+    const html = sidebar({ services: owner, pagesFor, pinnedIds: new Set(['agents']), onTogglePin, pathname: '/dashboard/overview' }, 'tr');
+    expect(html).toContain('>Favoriler<');
+    expect(tag(html, 'sidebar-pin-favorite-agents')).toContain(`aria-label="Favorilerden çıkar: ${label}"`);
+    expect(tag(html, 'sidebar-pin-models')).toContain('aria-label="Favorilere ekle: ');
+  });
+
+  it('a pointer shows a row’s pin on hover or keyboard focus; a touch screen always, with room to tap it', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/layout/launcher/Sidebar.module.css'), 'utf8');
+    expect(css).toMatch(/\.pin \{[^}]*opacity: 0;/);
+    expect(css).toMatch(/\.pin:focus-visible,\s*\.pinStay \{\s*opacity: 1;/);
+    expect(css).toMatch(/@media \(hover: hover\) \{[\s\S]*?\.row:hover \.pin \{\s*opacity: 1;/);
+    const touch = css.slice(css.indexOf('@media (hover: none) {'));
+    expect(css.indexOf('@media (hover: none) {')).toBeGreaterThan(-1);
+    expect(touch).toMatch(/^@media \(hover: none\) \{\s*\.pin \{\s*opacity: 1;\s*width: 32px;\s*height: 32px;/);
+  });
+
+  it('the shell: Favorites start empty with the single menu (the rail keeps its defaults), and both menus get the pins', () => {
+    const layout = readFileSync(join(process.cwd(), 'src/components/layout/DashboardLayout.tsx'), 'utf8');
+    expect(layout).toMatch(/SIDEBAR_NAV\s*\?\s*\[\]\s*:\s*allowedServices\s*\.filter\(\s*\(svc\) => svc\.defaultPinned/);
+    expect(layout).toContain('useLauncherState(defaultPinnedIds)');
+    const handed = layout.match(/pinnedIds=\{pinned\}\s+(?:\/\/[^\n]*\n\s*)?onTogglePin=\{hydrated \? togglePin : undefined\}/g) ?? [];
+    expect(handed).toHaveLength(2);
+    expect(layout).toMatch(/<Sidebar\s+variant="drawer"[\s\S]*?pinnedIds=\{pinned\}/);
   });
 });

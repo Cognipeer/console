@@ -328,6 +328,79 @@
   margin-top: 10px;
 }
 
+/* ── Pins (Favorites) ─────────────────────────────────────────── */
+
+/* A service row's pin shows on hover or keyboard focus; a favorite keeps its pin shown, to take it out again. */
+.pin {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ds-text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--ds-m-fast),
+    background-color var(--ds-m-fast);
+}
+
+.pin:focus-visible,
+.pinStay {
+  opacity: 1;
+}
+
+.pinned {
+  color: var(--ds-accent);
+}
+
+/* Room for the pin while it shows, so it never covers the name. */
+.row:has(> .pin:not(.pinBeforeArrow)):focus-within .item,
+.row:has(> .pinStay) .item {
+  padding-right: 32px;
+}
+
+/* A row that opens a level keeps its arrow at the edge: the pin sits just before it, in room the arrow makes. */
+.pinBeforeArrow {
+  right: 24px;
+}
+
+.drawer .pinBeforeArrow {
+  right: 26px;
+}
+
+.row:has(> .pinBeforeArrow):focus-within .chev {
+  margin-left: 26px;
+}
+
+/* A service level's own pin, beside the way back. */
+.levelPin {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-text-faint);
+  cursor: pointer;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+/* After .levelPin: a pinned service's pin keeps the accent colour here too. */
+.levelPin.pinned {
+  color: var(--ds-accent);
+}
+
 /* ── Icon-only strip ──────────────────────────────────────────── */
 
 .iconBtn {
@@ -429,6 +502,11 @@
   font-size: 15px;
 }
 
+.drawer .levelPin {
+  width: 40px;
+  height: 40px;
+}
+
 /* Above the phone's home indicator. */
 .drawer .footer {
   padding: 8px 10px max(8px, env(safe-area-inset-bottom));
@@ -452,7 +530,8 @@
     color: var(--ds-text);
   }
 
-  .backBtn:hover {
+  .backBtn:hover,
+  .levelPin:hover {
     background: var(--ds-surface-2);
     color: var(--ds-text);
   }
@@ -460,6 +539,46 @@
   .iconBtn:hover {
     background: var(--ds-surface-2);
     color: var(--ds-text);
+  }
+
+  .row:hover .pin {
+    opacity: 1;
+  }
+
+  /* On the row's hover colour: the pin's own square stands out from it. */
+  .pin:hover {
+    background: var(--ds-surface-1);
+    color: var(--ds-text);
+  }
+
+  .row:has(> .pin:not(.pinBeforeArrow)):hover .item {
+    padding-right: 32px;
+  }
+
+  .row:has(> .pinBeforeArrow):hover .chev {
+    margin-left: 26px;
+  }
+}
+
+/* A touch screen has no hover: the pin stays shown with room to tap it (unseen, it could be tapped by accident). */
+@media (hover: none) {
+  .pin {
+    opacity: 1;
+    width: 32px;
+    height: 32px;
+    right: 2px;
+  }
+
+  .pinBeforeArrow {
+    right: 24px;
+  }
+
+  .row:has(> .pin:not(.pinBeforeArrow)) .item {
+    padding-right: 38px;
+  }
+
+  .row:has(> .pinBeforeArrow) .chev {
+    margin-left: 36px;
   }
 }
 
