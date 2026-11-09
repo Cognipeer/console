@@ -4,7 +4,20 @@
  * behavior with a stubbed model runtime.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const { executeModelCall, managedKeys } = vi.hoisted(() => ({
+  executeModelCall: vi.fn(),
+  managedKeys: new Set<string>(),
+}));
+
+vi.mock('@/lib/services/models/gatewayCore', () => ({ executeModelCall }));
+
+vi.mock('@/enterprise/managed-credits', () => ({
+  isManagedModel: (model: { providerKey?: string }) => managedKeys.has(model?.providerKey ?? ''),
+}));
 
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
@@ -232,5 +245,67 @@ describe('prompt construction', () => {
     const userPrompt = messages[1].content;
     expect(userPrompt).toMatch(/<<<MSG_[0-9a-f]{8}>>>/);
     expect(userPrompt).toContain('UNTRUSTED USER DATA');
+  });
+});
+
+// ── Managed judge model ───────────────────────────────────────────────────────
+
+describe('judge on a managed model', () => {
+  const MANAGED_MODEL = {
+    category: 'llm',
+    tenantId: 'tenant-1',
+    projectId: 'proj-1',
+    providerKey: 'hosted',
+    modelId: 'judge-1',
+    settings: {},
+  };
+
+  it('goes through the gateway with the model guardrails skipped, never the native client', async () => {
+    const create = vi.fn();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue({
+      switchToTenant: vi.fn(),
+      findModelByKey: vi.fn().mockResolvedValue(MANAGED_MODEL),
+    });
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: { createNativeChatClient: create } });
+    managedKeys.add('hosted');
+    executeModelCall.mockResolvedValue({
+      requestId: 'r1',
+      usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+      result: { response: { content: JSON.stringify({ allowed: true, violations: [] }) } },
+    });
+
+    const findings = await runModerationPolicy('hello', MODERATION_POLICY, CTX, 'block');
+
+    expect(findings).toEqual([]);
+    expect(executeModelCall).toHaveBeenCalledTimes(1);
+    const call = executeModelCall.mock.calls[0][0];
+    expect(call.modelKey).toBe('judge-model');
+    expect(call.projectId).toBe('proj-1');
+    expect(call.tenantDbName).toBe('tenant_acme');
+    expect(call.context.skipModelGuardrails).toBe(true);
+    expect(buildModelRuntime).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('keeps the direct path for a model that is not managed', async () => {
+    managedKeys.clear();
+    const invoke = primeLlm(JSON.stringify({ allowed: true, violations: [] }));
+    await runModerationPolicy('hello', MODERATION_POLICY, CTX, 'block');
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(executeModelCall).not.toHaveBeenCalled();
+  });
+
+  it('is not reachable from a request: no HTTP layer names the option', () => {
+    const root = path.resolve(__dirname, '../../server');
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name) && fs.readFileSync(full, 'utf8').includes('skipModelGuardrails')) hits.push(full);
+      }
+    };
+    walk(root);
+    expect(hits).toEqual([]);
   });
 });

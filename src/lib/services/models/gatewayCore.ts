@@ -855,7 +855,7 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
   // findings rewrite the user message before it reaches the provider, and chain
   // through the rest of the bound guardrails.
   const guardrailAnnotations: Record<string, GuardrailAnnotation> = {};
-  const inputGuardrailKeys = resolveBindings(model, 'input.pre');
+  const inputGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'input.pre');
   if (inputGuardrailKeys.length > 0) {
     const latest = latestUserTextNative(request.messages);
     // A caller that calls the model repeatedly inside one turn (an agent's tool
@@ -908,7 +908,7 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
   // guardrail's `policyVersion` (`key@updatedAt`) when the record is cheaply
   // available, so an edit to a policy also retires the entries produced under
   // the old one.
-  const outputGuardrailKeys = resolveBindings(model, 'output.pre');
+  const outputGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'output.pre');
   const includeReasoning = shouldReturnReasoning(model.settings, wire) && context.showReasoning !== false;
   const cacheEnabled = Boolean(
     !stream && tenantId && isSemanticCacheEnabled(model) && isCacheableConversation(request, wire, route)
@@ -1380,8 +1380,8 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
   // The two hooks are resolved SEPARATELY because a multi-binding model can
   // scope a guardrail to the real-time gate and not to the terminal audit, or
   // the other way round.
-  const streamGuardrailKeys = resolveBindings(model, 'output.stream.delta');
-  const auditGuardrailKeys = resolveBindings(model, 'output.pre');
+  const streamGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'output.stream.delta');
+  const auditGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'output.pre');
 
   const streamHeaders: Record<string, string> = {};
   const gate = streamGuardrailKeys.length > 0

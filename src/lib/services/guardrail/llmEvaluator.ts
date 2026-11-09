@@ -14,6 +14,8 @@ import { logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogge
 
 const logger = createLogger('guardrail-evaluator');
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
+import { isManagedModel } from '@/enterprise/managed-credits';
+import type { GatewayChatRequest } from '@/lib/services/models/gatewayTypes';
 import type { GuardrailFinding } from './types';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 import {
@@ -49,6 +51,39 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
   }
   if (model.category !== 'llm') {
     throw new Error(`Model "${ctx.modelKey}" is not an LLM model`);
+  }
+
+  // A managed model may only run through the model gateway: it picks the route,
+  // fails over and reserves/settles credits, and writes the usage row. The judge
+  // asks for no guardrails of the model's own (that would recurse).
+  if (isManagedModel(model)) {
+    const { executeModelCall } = await import('@/lib/services/models/gatewayCore');
+    const outcome = await withResilience(
+      () => executeModelCall({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: model.tenantId,
+        projectId: ctx.projectId ?? model.projectId ?? '',
+        modelKey: ctx.modelKey,
+        request: {
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+        } as GatewayChatRequest,
+        context: {
+          route: 'guardrail',
+          skipModelGuardrails: true,
+          requestTags: { purpose: 'guardrail-judge' },
+          logPrompt: false,
+          logFailures: true,
+        },
+      }),
+      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
+    );
+    return {
+      content: outcome.result?.response.content ?? '',
+      usage: outcome.usage ?? {},
+    };
   }
 
   const { runtime } = await buildModelRuntime(
