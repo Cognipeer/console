@@ -15,15 +15,7 @@
  */
 
 import type { Detector, DetectorContext, DetectionSignal } from '../types';
-
-/** Treat a pattern as a regex if it compiles, else fall back to substring. */
-function patternHit(haystack: string, pattern: string): boolean {
-  try {
-    return new RegExp(pattern, 'i').test(haystack);
-  } catch {
-    return haystack.includes(pattern);
-  }
-}
+import { scanPatterns } from './safePattern';
 
 export function createPatternDetector(): Detector {
   return {
@@ -46,8 +38,9 @@ export function createPatternDetector(): Detector {
         };
       }
 
-      const matched = (expect.forbiddenPatterns ?? []).find((p) => patternHit(haystack, p));
-      if (matched) {
+      // Regex sources run within a time budget (see safePattern.ts); a literal falls back to a substring check.
+      const { matched, undecided } = scanPatterns(haystack, expect.forbiddenPatterns ?? []);
+      if (matched !== undefined) {
         return {
           detectorKey: 'pattern',
           kind: 'deterministic',
@@ -56,6 +49,20 @@ export function createPatternDetector(): Detector {
           score: 1,
           confidence: 0.95,
           rationale: `Output matched a forbidden pattern (${matched}).`,
+        };
+      }
+      if (undecided.length > 0) {
+        // A pattern that could not finish proves nothing either way: report it as an errored
+        // signal, which the decision policy records but never decides on.
+        return {
+          detectorKey: 'pattern',
+          kind: 'deterministic',
+          cost: 'free',
+          hit: false,
+          score: 0,
+          confidence: 0,
+          rationale: `${undecided.length} forbidden pattern(s) took too long to evaluate.`,
+          error: 'pattern evaluation exceeded its time budget',
         };
       }
 

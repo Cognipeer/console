@@ -194,7 +194,10 @@ export const clientRedTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { id } = request.params as { id: string };
       const run = await getRun(ctx.tenantDbName, id);
-      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      // A token reads the runs of its own project; legacy rows without a projectId stay readable.
+      if (!run || (run.projectId && String(run.projectId) !== String(ctx.projectId))) {
+        return reply.code(404).send({ error: 'Run not found' });
+      }
       const viewer = { tenantDbName: ctx.tenantDbName, viewerUserId: ctx.tokenRecord.userId ?? null };
       return reply.code(200).send({ run: toRunView(await withoutRestrictedAttempts(request, viewer, run)) });
     } catch (error) {

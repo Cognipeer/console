@@ -74,6 +74,18 @@ function internalError(reply: import('fastify').FastifyReply, error: unknown) {
 }
 
 /**
+ * Campaigns, runs and custom probes are opened and changed in the caller's
+ * active project: a record of another project answers like a missing one, and
+ * owners and admins reach it by switching to its project. Rows stored before
+ * records carried a projectId stay reachable.
+ */
+function inActiveProject<T extends { projectId?: string | null }>(record: T | null, projectId: string): T | null {
+  if (!record) return null;
+  if (!record.projectId) return record;
+  return String(record.projectId) === String(projectId) ? record : null;
+}
+
+/**
  * Validate probe keys against the built-in catalog plus the tenant's custom
  * probe keys. Returns null if any key is unknown.
  */
@@ -413,9 +425,9 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/redteam/campaigns/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const campaign = await getCampaign(session.tenantDbName, id);
+      const campaign = inActiveProject(await getCampaign(session.tenantDbName, id), projectId);
       if (!campaign) return reply.code(404).send({ error: 'Campaign not found' });
       return reply.code(200).send({ campaign });
     } catch (error) {
@@ -425,7 +437,7 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/redteam/campaigns/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       // Only the keys the body carries reach the update: an absent key leaves the stored value alone, `null`
@@ -456,14 +468,14 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const revision = parseAgentRevision(body.agentVersion);
       if (!revision.ok) return reply.code(400).send({ error: revision.error });
-      const existing = await getCampaign(session.tenantDbName, id);
+      const existing = inActiveProject(await getCampaign(session.tenantDbName, id), projectId);
       if (!existing) return reply.code(404).send({ error: 'Campaign not found' });
       const isAgent = existing.targetKind === 'agent';
       // The stored kind decides, not the body: a PATCH cannot move a campaign between kinds, and a saved
       // campaign can run the agent later on its schedule.
       if (isAgent) await requireAgentTestAccess(request);
       if (body.probeKeys !== undefined) {
-        const customKeys = await loadCustomProbeKeys(session.tenantDbName, existing.projectId);
+        const customKeys = await loadCustomProbeKeys(session.tenantDbName, projectId);
         const probeKeys = sanitizeProbeKeys(body.probeKeys, customKeys);
         if (!probeKeys) {
           return reply.code(400).send({ error: 'probeKeys must reference built-in or existing custom probes' });
@@ -499,8 +511,11 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/redteam/campaigns/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!inActiveProject(await getCampaign(session.tenantDbName, id), projectId)) {
+        return reply.code(404).send({ error: 'Campaign not found' });
+      }
       const deleted = await deleteCampaign(session.tenantDbName, id);
       if (!deleted) return reply.code(404).send({ error: 'Campaign not found' });
       return reply.code(200).send({ success: true });
@@ -584,9 +599,9 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/redteam/runs/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const run = await getRun(session.tenantDbName, id);
+      const run = inActiveProject(await getRun(session.tenantDbName, id), projectId);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       return reply.code(200).send({ run: await withoutRestrictedAttempts(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, run) });
     } catch (error) {
@@ -597,10 +612,14 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Baseline comparison ────────────────────────────────────────────
   app.get('/redteam/runs/:id/compare', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const { baseline } = (request.query ?? {}) as { baseline?: string };
       if (!baseline) return reply.code(400).send({ error: 'baseline run id is required' });
+      const [current, base] = await Promise.all([getRun(session.tenantDbName, id), getRun(session.tenantDbName, baseline)]);
+      if (!inActiveProject(current, projectId) || !inActiveProject(base, projectId)) {
+        return reply.code(404).send({ error: 'Run or baseline not found' });
+      }
       const comparison = await compareRuns(session.tenantDbName, id, baseline);
       if (!comparison) return reply.code(404).send({ error: 'Run or baseline not found' });
       return reply.code(200).send({ comparison });
@@ -612,11 +631,14 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
   // ── HITL review ────────────────────────────────────────────────────
   app.post('/redteam/runs/:id/attempts/:attemptId/review', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id, attemptId } = request.params as { id: string; attemptId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       if (!VALID_OUTCOMES.includes(body.outcome as RedTeamOutcome)) {
         return reply.code(400).send({ error: 'outcome must be "safe", "vulnerable", or "needs_review"' });
+      }
+      if (!inActiveProject(await getRun(session.tenantDbName, id), projectId)) {
+        return reply.code(404).send({ error: 'Run not found' });
       }
       const run = await reviewAttempt(session.tenantDbName, id, attemptId, {
         outcome: body.outcome as RedTeamOutcome,
@@ -663,9 +685,9 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      const probe = await getCustomProbe(session.tenantDbName, id);
+      const probe = inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId);
       if (!probe) return reply.code(404).send({ error: 'Custom probe not found' });
       return reply.code(200).send({ probe });
     } catch (error) {
@@ -675,11 +697,14 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.patch('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       const result = sanitizeCustomProbe(body);
       if ('error' in result) return reply.code(400).send({ error: result.error });
+      if (!inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId)) {
+        return reply.code(404).send({ error: 'Custom probe not found' });
+      }
       // The sanitizer fills in the create-time detectors when the body has none; a PATCH keeps the stored ones.
       const { detectors, ...input } = result.input;
       const probe = await updateCustomProbe(session.tenantDbName, id, session.userId, {
@@ -700,8 +725,11 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
     try {
-      const session = requireSessionContext(request);
+      const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      if (!inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId)) {
+        return reply.code(404).send({ error: 'Custom probe not found' });
+      }
       const deleted = await deleteCustomProbe(session.tenantDbName, id);
       if (!deleted) return reply.code(404).send({ error: 'Custom probe not found' });
       return reply.code(200).send({ success: true });

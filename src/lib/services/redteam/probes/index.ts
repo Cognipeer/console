@@ -119,4 +119,11 @@ export {
   createPiiGenerationProbe,
   createDataExtractionProbe,
 };
-export { buildCustomProbe, validateCustomProbe, CustomProbeError, CUSTOM_PROBE_PREFIX, isCustomProbeKey } from './customProbe';
+export {
+  buildCustomProbe,
+  validateCustomProbe,
+  validateCustomProbePatterns,
+  CustomProbeError,
+  CUSTOM_PROBE_PREFIX,
+  isCustomProbeKey,
+} from './customProbe';
