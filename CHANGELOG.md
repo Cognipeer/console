@@ -703,6 +703,120 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   labelled **Notification channels**, and the IAM center's Audit tab (denials and policy changes) is now
   **Authorization log**.
 
+### Overview and empty states
+
+- The Overview shows a number only to someone who can read its service, so a person without access sees no tile
+  instead of a zero. The tiles are Agent sessions, Tokens, Models and Vector indexes. "API Requests" counted agent
+  sessions, and "Active Sessions" could count at most the 10 most recent ones. The session and token lines come from
+  the daily series the API already returns; they were placeholder curves before.
+- "Get started" ticks its steps from what the project already has: an LLM, knowledge (an embedding model and a vector
+  index, optional) and the first agent session. It offers only steps whose service the person can open and whose
+  progress they can read. It disappears once the required steps are done, and "Hide" removes it in this browser.
+- "Activity" is now "Recent agent sessions". Each row opens its session and shows the duration and tokens instead of
+  an API path.
+- The counts moved onto the service cards ("4 LLM · 0 embedding", "12 indexes", "1,240 sessions"). "Top resources"
+  and the plan badges are gone, and "Recently opened" lists the services visited last.
+- The subtitle names the project and the period the numbers cover. The Alerts link shows only to people who can open
+  Alerts.
+- Enterprise: the person's own sections come first, and the dashboards grid moves to the end. The grid card is left out
+  when the person has no dashboard, and the health card is left out while no entity has reported anything.
+- Vector: with no provider in the project, the empty state says why. Someone who can write to Vector gets "Add vector
+  provider" (a full-screen form); the index form opens with the new provider selected.
+- In a two-column row, a card left alone takes the whole row.
+
+### Create what a form needs, in place
+
+- A picker whose list is empty, or missing what you need, offers to create it over the form and selects the result,
+  instead of a link that leaves the unsaved form: "Add model" when creating an agent; "New knowledge engine", "New
+  guardrail", "New PII policy", "New memory store" and "New tool" on the agent's Build tab; "Add embedding model",
+  "Add provider" and "Create index" in the Knowledge Engine create form. A new guardrail is attached with the hooks
+  it declares and starts in monitor mode, which the list says.
+- Each action shows only to someone who can write to that service; everyone else reads one line saying who can add it.
+- A Knowledge Engine module created from its page opens on the Documents tab.
+- With forms stacked, Escape closes only the top one (it used to close all of them).
+- "Add provider" in the model form (Model Hub's "Enter custom model", and "Add model" inside another form) opens the
+  provider form over the model form and comes back to it with the new provider selected. From Model Hub's custom model
+  form it used to close the form and open the catalog.
+- Vector's "Create index" (header and empty list) shows only to someone who can write to Vector; anyone else reads who
+  creates indexes.
+
+### Agent page: Build, Overview and Ship
+
+- **Build** lists its sections in a fixed order — Essentials (General, Prompt), Capabilities (Delegation, Skills,
+  Memory, Files, Sandbox, Client tools), Behavior (Approvals & questions, Callback & budget, Runtime, Variables,
+  Structured output) — with a sticky index beside them on wide screens. The index marks a section that differs from
+  the published version (●) and one the agent does not use (○), follows the page as it scrolls, and jumps to the parts
+  of General (Knowledge Engine, Guardrails, PII protection, Tools).
+- A section the agent does not use is one line, "Not set", with **Set up** to open it. A link to such a section opens
+  it. Sections that differ from the published version or hold unsaved edits always stay open.
+- The save bar says how many sections have **unsaved changes** and which ones, and offers **Discard** (asks first,
+  then reloads the saved draft). Opening a tab no longer scrolls past the header to its first section.
+- The header shows **Draft · N changes** while the saved draft differs from the published version. Compare, Update
+  from file and Export moved into a **⋯** menu.
+- **Overview** opens with **Needs attention** when there is something to act on: changes not published (or nothing
+  published yet), tools that failed, runs that ended in an error, references that no longer resolve — each with a
+  button to where it is fixed. A right column shows **Where it runs** (API, A2A, triggers and the portals, channels and
+  voice models that use the agent) and **Uses and used by**, which used to sit at the bottom of the page.
+- **Ship** opens with a summary: the published version and its date, what publishing would change, where the agent
+  runs, and Compare and Publish. Its version history lists five versions per page; the two picked for Compare stay
+  picked across pages and are named above the list.
+- A section lays out by the width it gets rather than the window's: below 60rem its heading goes above its fields. The
+  per-tool approvals table no longer runs out of its section — its columns take what they need, tool names wrap
+  between words, and on a narrow screen the table scrolls inside the section.
+
+### Narrow windows, tablets and phones
+
+- The top bar keeps every control on screen. From about 1090px down, search and the services launcher show only their
+  icons, and the name and plan beside the avatar show from 1200px. At about 820px the theme, docs and account buttons
+  used to be past the right edge, so the account menu could not be opened.
+- A page header's buttons and filters wrap at the header's width instead of running past the edge.
+- Overview: Health and Active incidents (and Recent sessions and Resources) stack on a narrow screen instead of
+  squeezing side by side, and the four numbers stay on one row on a tablet and make two rows of two on a phone.
+- On a phone, stat cards sit two to a row. Table columns keep a readable width and the table scrolls sideways in its
+  frame, instead of every column squeezing until text broke a letter a line. A name beside its badges wraps inside its
+  column instead of running under the next one.
+- Full-screen forms on a phone: the header grows with its subtitle (the title was pushed off the top), the Escape hint
+  is left out, and the footer's buttons wrap to a second row (Cancel was out of sight).
+- Detail pages (a portal, a provider, a connector, an incident and the others with a back button): when the buttons
+  beside the title don't fit, they move under it. On a phone the title had been squeezed to nothing and the buttons
+  ran past the edge.
+- A model's page on a phone: its columns stack at the width of the screen (a long curl example had pushed every card
+  past the right edge), and the buttons go under the name instead of squeezing the badges into a narrow column.
+- Sandbox overview: By state and Recent sandboxes stack on a narrow screen and the list scrolls in its card.
+  Telephony: the test call's fields stack on a phone, and the public URL ends in an ellipsis (copy button beside it)
+  instead of being cut off.
+- In a phone's browser the dashboard fits the visible screen: the browser's bars had covered the bottom of every page
+  (the last rows of a list, a form's buttons).
+
+### One left menu
+
+- The icon rail and the second column with the pages of the service in view are one labelled menu that goes step by
+  step. Its first level lists Home, Reports and every service the person can open under Build, Data and Operate (a
+  category with nothing to open is left out). Nothing is pinned: every service has its one place. A service with
+  several pages opens a level of its own: a way back under the service's name and its pages, filtered as before
+  (Webhooks only with access to Webhooks); the page under the service's own name is "All {service}" there (All Agents,
+  not Agents › Agents). A service with one page is a plain link, and Settings is a level of its own with its pages by
+  group.
+- Reports (enterprise) opens a level with the summary and every report the person may read, under Usage & cost,
+  Quality & reliability, Safety & compliance and Infrastructure. With a single report it is a plain link; without the
+  reports license, or with nothing to read, there is no Reports row.
+- The menu opens at the level of the page in view, and the first level names that page next to its service
+  ("Agents  Tools ›"). One row is marked as the page in view.
+- With seven services or fewer the first level is one plain list, without categories.
+- "Collapse menu" turns it into an icon strip (Home, Reports, then every service) that still shows the pages of the
+  service in view; the browser remembers it.
+- The top bar is the logo, the project, a wide search and the account menu. The Services launcher, the portals, theme
+  and docs buttons are gone: the services are in the left menu, the theme and the person's portals in the account menu,
+  the docs under Help at the bottom of the left menu.
+- On a phone the menu button opens this same menu in a drawer, in place of the old one with Browse all services,
+  Pinned and Recent, with rows sized for a finger. Following a link closes it; moving between levels does not. A
+  tapped row does not stay highlighted (there is no hover on a touch screen).
+- On a narrow window or a tablet (992px and below) the menu starts as the icon strip, whatever was chosen on a wide
+  screen, so the page keeps its width; opening it there lasts for the visit.
+- Service names, addresses and the ⌘K search are unchanged. `SIDEBAR_STYLE` in `sidebarNav.ts` brings back the nested
+  style (folding categories, the pages of the service in view under it); `SIDEBAR_NAV` switches back to the rail and
+  the sub-nav. Both are kept.
+
 ### Entity health and alerting
 
 - Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept

@@ -8,6 +8,8 @@
   grid-template-columns: 56px var(--subnav-w, 0px) 1fr;
   grid-template-rows: 60px minmax(0, 1fr);
   height: 100vh;
+  /* The visible screen: on a phone the browser's bars cover the bottom of a 100vh box (only the main area scrolls). */
+  height: 100dvh;
   position: relative;
   background: transparent;
 }
@@ -197,9 +199,40 @@
   min-width: 0;
 }
 
-@media (min-width: 64em) {
+/* The name and plan beside the avatar only where the bar has room for them (below this the avatar alone; the
+   menu shows the account). */
+@media (min-width: 75em) {
   .accountInfo {
     display: flex;
+  }
+}
+
+/* A narrow window or a tablet: search and the services launcher keep only their icons, so every control of the bar
+   stays on screen (the theme, docs and account buttons ran past the right edge from about 1060px down). Phones
+   have their own bar (below). */
+@media (max-width: 68em) {
+  .searchBox {
+    flex: 0 0 36px;
+    width: 36px;
+    min-width: 0;
+    padding: 0;
+    margin: 0 0 0 auto;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .searchPlaceholder,
+  .searchBox .kbd {
+    display: none;
+  }
+
+  .svcTrigger {
+    padding: 0 10px;
+    gap: 6px;
+  }
+
+  .svcTrigger > .dotGridSm + span {
+    display: none;
   }
 }
 
@@ -927,6 +960,11 @@
   animation: mobileNavSlideIn 0.2s cubic-bezier(0.3, 0.7, 0.4, 1);
 }
 
+/* With the single left menu inside: the menu scrolls its own list and keeps its footer at the bottom. */
+.mobileNavPanelMenu {
+  overflow: hidden;
+}
+
 @keyframes mobileNavSlideIn {
   from {
     transform: translateX(-12px);
@@ -1116,5 +1154,50 @@
   .subnavItem[data-pending='true'],
   .mobileNavItem[data-pending='true'] {
     animation: none;
+  }
+}
+
+/* The slim bar (with the single left menu): logo, project, search and the account. With nothing else in the bar, search
+   keeps its field on a narrow window or a tablet, and on a phone it is an icon that opens it (the full bar hides it
+   there). After the rules above, which it overrides. */
+.searchBoxWide {
+  max-width: 640px;
+}
+
+@media (max-width: 68em) {
+  .searchBoxWide {
+    flex: 1;
+    width: auto;
+    min-width: 160px;
+    padding: 0 14px;
+    margin: 0 auto;
+    justify-content: flex-start;
+    cursor: text;
+  }
+
+  .searchBoxWide .searchPlaceholder {
+    display: block;
+  }
+
+  .searchBoxWide .kbd {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 48em) {
+  .searchBoxWide {
+    display: inline-flex;
+    flex: 0 0 36px;
+    width: 36px;
+    min-width: 0;
+    padding: 0;
+    margin: 0 0 0 auto;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .searchBoxWide .searchPlaceholder,
+  .searchBoxWide .kbd {
+    display: none;
   }
 }

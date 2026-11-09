@@ -74,9 +74,10 @@ describe('agents.sessionAccess (who started a session, who may answer it)', () =
     expect(lookup('tr', `agents.sessionAccess.${key}`), `tr:${key}`).not.toBe(lookup('en', `agents.sessionAccess.${key}`));
   });
 
-  it('is not tucked into the dashboard quick start, where it was once pasted', () => {
+  it('is not tucked into the dashboard home steps, where it was once pasted (the old quick start)', () => {
     for (const locale of ['en', 'tr'] as const) {
-      expect(Object.keys(lookup(locale, 'dashboardOverview.quickStart.steps.agents') as object).sort()).toEqual(['description', 'title']);
+      expect(lookup(locale, 'dashboardOverview.quickStart')).toBeUndefined();
+      expect(Object.keys(lookup(locale, 'dashboardOverview.getStarted.steps.agent') as object).sort()).toEqual(['action', 'description', 'title']);
     }
   });
 });

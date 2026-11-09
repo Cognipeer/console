@@ -18,6 +18,10 @@ import ServiceSubNav, {
   type SubNavItem,
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
+import Sidebar from './launcher/Sidebar';
+import { SIDEBAR_NAV } from './launcher/sidebarNav';
+import { isReportsPath, useReportsNav } from './launcher/reportsNav';
+import sidebarClasses from './launcher/Sidebar.module.css';
 import { useEffectivePermissions } from './useEffectivePermissions';
 import { LauncherProvider } from './launcher/LauncherContext';
 import { DashboardUserProvider, type DashboardUser } from './DashboardUserContext';
@@ -31,9 +35,11 @@ import { useNavigationFeedback } from '@/components/common/navigation/useNavigat
 import { isDocId, normalizeDocsBaseUrl, resolveDoc, type DocTarget } from '@/lib/docs/docsLinks';
 import {
   canUseDashboardService,
+  canWriteDashboardService,
   enterpriseModuleForPath,
   getDashboardServices,
   SETTINGS_NAV_SECTION,
+  type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { EnterpriseUpsell } from '@/components/enterprise/EnterpriseUpsell';
 import type { PermissionService, UserServicePermissions } from '@/lib/security/rbac';
@@ -105,6 +111,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const docsBaseUrl = useMemo(() => normalizeDocsBaseUrl(configuredDocsBaseUrl), [configuredDocsBaseUrl]);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
   const t = useTranslations('layout');
   const locale = useLocale();
   const tNotifications = useTranslations('notifications');
@@ -189,6 +196,14 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const canUseService = useCallback(
     (service: PermissionService) =>
       canUseDashboardService(
+        { role: defaultUser.role, servicePermissions: defaultUser.servicePermissions, effectivePermissions },
+        service,
+      ),
+    [defaultUser.role, defaultUser.servicePermissions, effectivePermissions],
+  );
+  const canWriteService = useCallback(
+    (service: PermissionService) =>
+      canWriteDashboardService(
         { role: defaultUser.role, servicePermissions: defaultUser.servicePermissions, effectivePermissions },
         service,
       ),
@@ -295,6 +310,16 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   const hasSubnav = Boolean(
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
   );
+  // The reports the person may read, for the single left menu's Reports row (none in community or without the license).
+  const reportsItems = useReportsNav(SIDEBAR_NAV);
+  const reportsActive = isReportsPath(pathname);
+
+  // Any service's pages, filtered the same way: the single left menu's step-by-step style opens a service not in view.
+  const sidebarPagesFor = useCallback(
+    (service: DashboardServiceDefinition) =>
+      visibleSubNavItems(SUBNAV_CONFIG[service.id], (permission) => canUseService(permission), isTenantAdmin),
+    [canUseService, isTenantAdmin],
+  );
 
   // The Documentation entries (top bar, rail, service menu, mobile menu) open the page of the
   // service in view; outside any service, the start of the guide.
@@ -370,6 +395,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       openLauncher: () => setLauncherOpen(true),
       hydrated,
       canUseService,
+      canWriteService,
     }),
     [
       pinned,
@@ -382,6 +408,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       isTenantAdmin,
       hydrated,
       canUseService,
+      canWriteService,
     ],
   );
 
@@ -405,14 +432,17 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
             paddingBottom: 0,
             paddingLeft: 0,
             paddingRight: 0,
-            height: '100vh',
-            minHeight: '100vh',
+            // The visible screen (dvh), not the tallest one (vh): on a phone the browser's bars stay out while only
+            // the main area scrolls, and 100vh put the bottom of every page under them.
+            height: '100dvh',
+            minHeight: '100dvh',
             overflow: 'hidden',
           },
         }}
       >
         <AppShell.Main>
-          <div className={`${classes.shell} ${hasSubnav ? classes.shellWithSubnav : ''}`}>
+          {/* SIDEBAR_NAV (sidebarNav.ts) picks the single left menu or the icon rail with the service sub-nav. */}
+          <div className={SIDEBAR_NAV ? sidebarClasses.shell : `${classes.shell} ${hasSubnav ? classes.shellWithSubnav : ''}`}>
             <TopbarV2
               user={defaultUser}
               isTenantAdmin={isTenantAdmin}
@@ -425,29 +455,49 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               onNavigate={handleNavigate}
               onMobileNavClick={() => setMobileNavOpen(true)}
               settingsHref={settingsHref}
+              // With the single left menu the top bar is slim: no launcher, theme and portals in the account menu.
+              variant={SIDEBAR_NAV ? 'slim' : 'full'}
             />
 
-            <SlimRail
-              pinned={pinnedServices}
-              recents={recentServices}
-              activeServiceId={isSettingsActive ? null : (activeService?.id ?? null)}
-              onLauncherClick={() => setLauncherOpen(true)}
-              onHelpClick={openServiceDocs}
-              settingsHref={settingsHref}
-              settingsActive={isSettingsActive}
-            />
-
-            {activeService && hasSubnav ? (
-              <ServiceSubNav
-                service={isSettingsActive ? SETTINGS_NAV_SECTION : activeService}
+            {SIDEBAR_NAV ? (
+              <Sidebar
+                services={allowedServices}
+                activeService={isSettingsActive ? null : activeService}
+                activeItems={serviceSubnavItems}
+                settingsItems={settingsNavItems}
+                pagesFor={sidebarPagesFor}
+                settingsHref={settingsHref}
+                settingsActive={isSettingsActive}
+                reportsItems={reportsItems}
+                reportsActive={reportsActive}
+                onHelpClick={openServiceDocs}
                 pathname={pathname}
-                isPinned={pinned.has(activeService.id)}
-                onTogglePin={() => togglePin(activeService.id)}
-                onOpenDocs={openServiceDocs}
-                items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
-                hidePin={isSettingsActive}
               />
-            ) : null}
+            ) : (
+              <>
+                <SlimRail
+                  pinned={pinnedServices}
+                  recents={recentServices}
+                  activeServiceId={isSettingsActive ? null : (activeService?.id ?? null)}
+                  onLauncherClick={() => setLauncherOpen(true)}
+                  onHelpClick={openServiceDocs}
+                  settingsHref={settingsHref}
+                  settingsActive={isSettingsActive}
+                />
+
+                {activeService && hasSubnav ? (
+                  <ServiceSubNav
+                    service={isSettingsActive ? SETTINGS_NAV_SECTION : activeService}
+                    pathname={pathname}
+                    isPinned={pinned.has(activeService.id)}
+                    onTogglePin={() => togglePin(activeService.id)}
+                    onOpenDocs={openServiceDocs}
+                    items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
+                    hidePin={isSettingsActive}
+                  />
+                ) : null}
+              </>
+            )}
 
             <main className={classes.main}>
               <div className={classes.mainBreadcrumb}>
@@ -472,7 +522,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
           {hydrated ? (
             <MobileNavDrawer
               open={mobileNavOpen}
-              onClose={() => setMobileNavOpen(false)}
+              onClose={closeMobileNav}
               pathname={pathname}
               pinned={pinnedServices}
               recents={recentServices}
@@ -488,6 +538,27 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               }
               settingsHref={settingsHref}
               settingsActive={isSettingsActive}
+              // A phone gets the single left menu itself, with the same filtered lists (SIDEBAR_NAV).
+              menu={
+                SIDEBAR_NAV ? (
+                  <Sidebar
+                    variant="drawer"
+                    onNavigate={closeMobileNav}
+                    services={allowedServices}
+                    activeService={isSettingsActive ? null : activeService}
+                    activeItems={serviceSubnavItems}
+                    settingsItems={settingsNavItems}
+                    pagesFor={sidebarPagesFor}
+                    settingsHref={settingsHref}
+                    settingsActive={isSettingsActive}
+                    reportsItems={reportsItems}
+                    reportsActive={reportsActive}
+                    onHelpClick={openServiceDocs}
+                    pathname={pathname}
+                  />
+                ) : undefined
+              }
+              menuTitle={SIDEBAR_NAV ? tNavigation('sidebarLabel') : undefined}
             />
           ) : null}
         </AppShell.Main>

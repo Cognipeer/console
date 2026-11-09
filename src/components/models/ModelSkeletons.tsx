@@ -107,7 +107,7 @@ export function ModelDetailSkeleton() {
   return (
     <SkeletonRegion className="ds-page">
       <div className="ds-page-header" style={{ alignItems: 'center' }}>
-        <div className="ds-row ds-gap-md" style={{ flex: 1, minWidth: 0 }}>
+        <div className="ds-row ds-gap-md" style={{ minWidth: 0 }}>
           <Skeleton width={52} height={52} radius={12} style={{ flexShrink: 0 }} />
           <div style={{ minWidth: 0, flex: 1 }}>
             <div

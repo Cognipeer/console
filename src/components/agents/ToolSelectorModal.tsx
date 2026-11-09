@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import CreateMcpModal from '@/components/mcp/CreateMcpModal';
+import CreateToolModal from '@/components/tools/CreateToolModal';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import {
   Modal,
   Stack,
@@ -151,10 +153,14 @@ export function ToolSelectorModal({
 
   // Selection state – keyed by "source::sourceKey::toolName"
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  // An MCP server created from here: once the list reloads, all its tools
-  // are selected — the reason it was created from inside the agent.
+  // A tool or an MCP server created from here: once the list reloads, all its
+  // tools are selected — the reason it was created from inside the agent.
+  // Offered only to someone who can add one (the API decides anyway).
+  const canCreateTool = useCanWriteService('tools');
+  const canCreateMcp = useCanWriteService('mcp');
   const [createMcpOpen, setCreateMcpOpen] = useState(false);
-  const [pendingServerKey, setPendingServerKey] = useState<string | null>(null);
+  const [createToolOpen, setCreateToolOpen] = useState(false);
+  const [pendingCreated, setPendingCreated] = useState<{ source: 'tool' | 'mcp'; key: string } | null>(null);
 
   // Per-binding config state for system tools (e.g. browser_use needs a browserId)
   const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
@@ -323,17 +329,17 @@ export function ToolSelectorModal({
   }, [opened, loadSources]);
 
   useEffect(() => {
-    if (!pendingServerKey) return;
-    const group = sources.find((g) => g.source === 'mcp' && g.sourceKey === pendingServerKey);
+    if (!pendingCreated) return;
+    const group = sources.find((g) => g.source === pendingCreated.source && g.sourceKey === pendingCreated.key);
     if (!group) return;
     setSelected((prev) => {
       const next = new Set(prev);
-      for (const tool of group.tools) next.add(toKey('mcp', group.sourceKey, tool.name));
+      for (const tool of group.tools) next.add(toKey(group.source, group.sourceKey, tool.name));
       return next;
     });
-    setExpandedSources((prev) => new Set(prev).add(`mcp::${group.sourceKey}`));
-    setPendingServerKey(null);
-  }, [pendingServerKey, sources]);
+    setExpandedSources((prev) => new Set(prev).add(`${group.source}::${group.sourceKey}`));
+    setPendingCreated(null);
+  }, [pendingCreated, sources]);
 
   // ── Toggle helpers ──────────────────────────────────────────────
 
@@ -454,19 +460,49 @@ export function ToolSelectorModal({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <Button variant="light" leftSection={<IconPlus size={14} />} onClick={() => setCreateMcpOpen(true)}>
-            New MCP server
-          </Button>
+          {canCreateTool ? (
+            <Button
+              variant="light"
+              leftSection={<IconPlus size={14} />}
+              onClick={() => setCreateToolOpen(true)}
+              data-testid="tool-create-inline"
+            >
+              New tool
+            </Button>
+          ) : null}
+          {canCreateMcp ? (
+            <Button
+              variant="subtle"
+              leftSection={<IconPlus size={14} />}
+              onClick={() => setCreateMcpOpen(true)}
+              data-testid="mcp-create-inline"
+            >
+              New MCP server
+            </Button>
+          ) : null}
         </Group>
-        <CreateMcpModal
-          opened={createMcpOpen}
-          onClose={() => setCreateMcpOpen(false)}
-          onCreated={(server) => {
-            setCreateMcpOpen(false);
-            setPendingServerKey(server.key);
-            void loadSources();
-          }}
-        />
+        {canCreateMcp ? (
+          <CreateMcpModal
+            opened={createMcpOpen}
+            onClose={() => setCreateMcpOpen(false)}
+            onCreated={(server) => {
+              setCreateMcpOpen(false);
+              setPendingCreated({ source: 'mcp', key: server.key });
+              void loadSources();
+            }}
+          />
+        ) : null}
+        {canCreateTool ? (
+          <CreateToolModal
+            opened={createToolOpen}
+            onClose={() => setCreateToolOpen(false)}
+            onCreated={(tool) => {
+              setCreateToolOpen(false);
+              setPendingCreated({ source: 'tool', key: tool.key });
+              void loadSources();
+            }}
+          />
+        ) : null}
 
         {loading ? (
           <Center py="xl">

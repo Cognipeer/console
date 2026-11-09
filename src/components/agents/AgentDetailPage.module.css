@@ -53,3 +53,47 @@
   border-top: 1px solid var(--mantine-color-default-border);
   box-shadow: 0 -6px 16px -12px rgba(0, 0, 0, 0.25);
 }
+
+/*
+ * Build with its section index: a narrow sticky column of jumps beside the
+ * sections. Below a laptop width the index goes and the page is one column.
+ */
+.buildLayout {
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: var(--mantine-spacing-lg);
+}
+
+.buildIndexColumn {
+  min-width: 0;
+}
+
+@media (max-width: 75em) {
+  .buildLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .buildIndexColumn {
+    display: none;
+  }
+}
+
+.unsavedDot {
+  color: var(--mantine-color-orange-6);
+  font-size: 10px;
+  vertical-align: 1px;
+}
+
+/* Overview: the agent's numbers on the left, where it runs and what it uses on the right. */
+.overviewLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  gap: var(--mantine-spacing-lg);
+  align-items: start;
+}
+
+@media (max-width: 75em) {
+  .overviewLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

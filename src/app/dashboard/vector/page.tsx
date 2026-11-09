@@ -26,6 +26,8 @@ import type {
   VectorProviderView,
 } from '@/lib/services/vector';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
+import VectorProviderModal from '@/components/vector/VectorProviderModal';
+import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -68,6 +70,10 @@ export default function VectorIndexPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
+  // Adding a provider or an index is a write to Vector (POST /api/vector/providers, /api/vector/indexes). Unknown until
+  // the session answers: the page then explains instead of offering a button that may be refused.
+  const canWriteVector = useCanWriteService('vector');
   const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(
     null,
   );
@@ -201,6 +207,13 @@ export default function VectorIndexPage() {
     router.push(`/dashboard/vector/${provider.key}/${index.key}`);
   };
 
+  /** A provider was added from the empty state: the index form comes next, with it selected. */
+  const handleProviderCreated = (provider: VectorProviderView) => {
+    setProviders((current) => (current.some((p) => p.key === provider.key) ? current : [...current, provider]));
+    setProviderModalOpen(false);
+    setCreateModalOpen(true);
+  };
+
   const columns: DataGridColumn<VectorIndexRow>[] = [
     {
       key: 'name',
@@ -273,14 +286,16 @@ export default function VectorIndexPage() {
             >
               Migrations
             </Button>
-            <Button
-              color="teal"
-              size="sm"
-              leftSection={<IconPlus size={14} stroke={1.7} />}
-              onClick={() => setCreateModalOpen(true)}
-            >
-              Create index
-            </Button>
+            {canWriteVector ? (
+              <Button
+                color="teal"
+                size="sm"
+                leftSection={<IconPlus size={14} stroke={1.7} />}
+                onClick={() => setCreateModalOpen(true)}
+              >
+                Create index
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -341,20 +356,37 @@ export default function VectorIndexPage() {
         ]}
         onRefresh={loadProvidersAndIndexes}
         refreshing={refreshing}
-        empty={{
-          icon: <IconDatabase size={26} stroke={1.7} />,
-          title:
-            providers.length === 0 ? 'No vector providers' : 'No indexes yet',
-          description:
-            providers.length === 0
-              ? 'Configure a vector provider first to start creating indexes.'
-              : 'Create your first vector index to store and query embeddings.',
-          primaryAction: {
-            label: 'Create index',
-            icon: <IconPlus size={14} stroke={1.7} />,
-            onClick: () => setCreateModalOpen(true),
-          },
-        }}
+        empty={
+          providers.length === 0
+            ? {
+                icon: <IconDatabase size={26} stroke={1.7} />,
+                title: 'No vector provider in this project',
+                description: canWriteVector
+                  ? 'Indexes live in a vector provider. Add one, then create the index.'
+                  : 'Indexes live in a vector provider. Someone with write access to Vector in this project adds one; after that you can create indexes here.',
+                primaryAction: canWriteVector
+                  ? {
+                      label: 'Add vector provider',
+                      icon: <IconPlus size={14} stroke={1.7} />,
+                      onClick: () => setProviderModalOpen(true),
+                    }
+                  : undefined,
+              }
+            : {
+                icon: <IconDatabase size={26} stroke={1.7} />,
+                title: 'No indexes yet',
+                description: canWriteVector
+                  ? 'Create your first vector index to store and query embeddings.'
+                  : 'Someone with write access to Vector in this project creates indexes; they will be listed here.',
+                primaryAction: canWriteVector
+                  ? {
+                      label: 'Create index',
+                      icon: <IconPlus size={14} stroke={1.7} />,
+                      onClick: () => setCreateModalOpen(true),
+                    }
+                  : undefined,
+              }
+        }
         footerLeft={`Showing ${filtered.length} of ${rows.length} indexes`}
         rowActions={(r) => [
           {
@@ -380,6 +412,12 @@ export default function VectorIndexPage() {
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
         onCreated={handleIndexCreated}
+      />
+
+      <VectorProviderModal
+        opened={providerModalOpen}
+        onClose={() => setProviderModalOpen(false)}
+        onCreated={handleProviderCreated}
       />
     </PageContainer>
   );

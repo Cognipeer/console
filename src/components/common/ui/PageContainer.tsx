@@ -30,7 +30,9 @@ export function PageHeader({ title, subtitle, eyebrow, actions }: PageHeaderProp
           </p>
         ) : null}
       </div>
-      {actions ? <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>{actions}</div> : null}
+      {/* Beside the title while they fit; on their own line they wrap at the header's width instead of running
+          past the screen edge (a narrow window or a phone). */}
+      {actions ? <div className="ds-row ds-gap-sm" style={{ flexShrink: 0, maxWidth: '100%' }}>{actions}</div> : null}
     </header>
   );
 }

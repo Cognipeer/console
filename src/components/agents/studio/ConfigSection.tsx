@@ -13,9 +13,10 @@
  */
 
 import type { ReactNode } from 'react';
-import { Badge, Box, Divider, Group, Stack, Text } from '@mantine/core';
+import { Badge, Box, Button, Divider, Group, Stack, Text } from '@mantine/core';
 import type { ComboboxItem, ComboboxLikeRenderOptionInput } from '@mantine/core';
-import { IconCheck } from '@tabler/icons-react';
+import { IconCheck, IconPlus } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
 import classes from './ConfigSection.module.css';
 
 export interface DescribedSelectOption {
@@ -55,6 +56,8 @@ export interface ConfigBlockProps {
     icon?: ReactNode;
     title: string;
     children: ReactNode;
+    /** Anchor for the Build index (`config-<id>`), for a block worth jumping to inside a long section. */
+    id?: string;
 }
 
 /**
@@ -65,9 +68,9 @@ export interface ConfigBlockProps {
  * ("is a knowledge engine attached?", "which guardrails run?") that reading
  * the page should answer on its own.
  */
-export function ConfigBlock({ icon, title, children }: ConfigBlockProps) {
+export function ConfigBlock({ icon, title, children, id }: ConfigBlockProps) {
     return (
-        <Box>
+        <Box id={id ? `config-${id}` : undefined} className={id ? classes.section : undefined}>
             <Group gap={6} mb="xs">
                 {icon}
                 <Text size="sm" fw={600}>{title}</Text>
@@ -89,6 +92,12 @@ export interface ConfigSectionProps {
     first?: boolean;
     /** Differs from the published version — flagged so a reviewer finds it. */
     changed?: boolean;
+    /**
+     * The agent does not use this section. It renders as one line — the title, "Not set" and a "Set up" button —
+     * instead of a form of empty fields, so the page reads as what the agent has. `onSetUp` opens the full section.
+     */
+    unset?: boolean;
+    onSetUp?: () => void;
 }
 
 export default function ConfigSection({
@@ -99,31 +108,73 @@ export default function ConfigSection({
     children,
     first,
     changed,
+    unset,
+    onSetUp,
 }: ConfigSectionProps) {
+    const t = useTranslations('agents.build');
+    if (unset) {
+        return (
+            <>
+                {!first ? <Divider my="md" /> : null}
+                <div className={classes.frame}>
+                    <Group
+                        id={`config-${id}`}
+                        data-unset="true"
+                        gap="xl"
+                        wrap="nowrap"
+                        className={classes.section}
+                    >
+                        <Stack gap={2} className={classes.label}>
+                            <Text fw={600}>{title}</Text>
+                        </Stack>
+                        <Group justify="space-between" wrap="nowrap" className={classes.content} gap="md">
+                            <Text size="sm" c="dimmed" lineClamp={2}>
+                                {t('notSet')}{description ? ` · ${description}` : ''}
+                            </Text>
+                            {onSetUp ? (
+                                <Button
+                                    size="xs"
+                                    variant="default"
+                                    leftSection={<IconPlus size={13} />}
+                                    onClick={onSetUp}
+                                    data-testid={`config-setup-${id}`}
+                                    style={{ flexShrink: 0 }}
+                                >
+                                    {t('setUp')}
+                                </Button>
+                            ) : null}
+                        </Group>
+                    </Group>
+                </div>
+            </>
+        );
+    }
     return (
         <>
             {!first ? <Divider my="xl" /> : null}
-            <Group
-                id={`config-${id}`}
-                align="flex-start"
-                gap="xl"
-                wrap="nowrap"
-                className={classes.section}
-            >
-                <Stack gap={4} className={classes.label}>
-                    <Group gap={6} wrap="nowrap">
-                        <Text fw={600}>{title}</Text>
-                        {changed ? (
-                            <Badge size="xs" variant="light" color="orange">Changed</Badge>
-                        ) : null}
-                    </Group>
-                    {description ? <Text size="sm" c="dimmed">{description}</Text> : null}
-                    {meta}
-                </Stack>
-                <Box className={classes.content}>
-                    {children}
-                </Box>
-            </Group>
+            <div className={classes.frame}>
+                <Group
+                    id={`config-${id}`}
+                    align="flex-start"
+                    gap="xl"
+                    wrap="nowrap"
+                    className={classes.section}
+                >
+                    <Stack gap={4} className={classes.label}>
+                        <Group gap={6} wrap="nowrap">
+                            <Text fw={600}>{title}</Text>
+                            {changed ? (
+                                <Badge size="xs" variant="light" color="orange">{t('changedBadge')}</Badge>
+                            ) : null}
+                        </Group>
+                        {description ? <Text size="sm" c="dimmed">{description}</Text> : null}
+                        {meta}
+                    </Stack>
+                    <Box className={classes.content}>
+                        {children}
+                    </Box>
+                </Group>
+            </div>
         </>
     );
 }

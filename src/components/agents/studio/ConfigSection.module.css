@@ -1,3 +1,12 @@
+/*
+ * Each section lays out by the width it gets, not the window's: the dashboard sidebar and Build's section index both
+ * take from it, so a 1440px window can leave a section narrower than a phone in landscape. Below 60rem the heading
+ * goes above its fields instead of beside them, and the fields get the whole width.
+ */
+.frame {
+  container-type: inline-size;
+}
+
 .section {
   /* Deep links land here; clear the sticky page chrome above. */
   scroll-margin-block-start: 5rem;
@@ -18,9 +27,10 @@
   max-width: 52rem;
 }
 
-@media (max-width: 62em) {
+@container (max-width: 60rem) {
   .section {
     flex-direction: column;
+    align-items: stretch;
     gap: var(--app-space-2);
   }
 

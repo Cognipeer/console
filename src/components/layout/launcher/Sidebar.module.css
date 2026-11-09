@@ -1,0 +1,524 @@
+/* ============================================================
+   Single left menu (Sidebar.tsx). Same tokens as the rail and the
+   sub-nav it replaces (LauncherShell.module.css), so both themes match.
+   Hover rules sit under `@media (hover: hover)` at the end: a touch
+   screen keeps a tapped row "hovered" until the next tap.
+   ============================================================ */
+
+/* The shell grid with the menu: its column is as wide as the menu (labelled or icon-only); the middle column of the
+   rail layout stays empty, so the main area keeps its place (grid column 3). */
+.shell {
+  display: grid;
+  grid-template-columns: auto 0px minmax(0, 1fr);
+  grid-template-rows: 60px minmax(0, 1fr);
+  height: 100vh;
+  /* The visible screen: on a phone the browser's bars cover the bottom of a 100vh box (only the main area scrolls). */
+  height: 100dvh;
+  position: relative;
+  background: transparent;
+}
+
+.sidebar {
+  grid-column: 1;
+  grid-row: 2;
+  width: 248px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--ds-surface-raised);
+  border-right: 1px solid var(--ds-border-soft);
+}
+
+.collapsed {
+  width: 60px;
+  align-items: center;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px;
+  gap: 1px;
+  scrollbar-width: thin;
+}
+
+.collapsed .scroll {
+  align-items: center;
+  padding: 10px 0;
+  gap: 4px;
+  width: 100%;
+}
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px;
+  border-top: 1px solid var(--ds-border-soft);
+}
+
+.collapsed .footer {
+  align-items: center;
+  padding: 8px 0;
+  gap: 4px;
+  width: 100%;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 10px;
+}
+
+.sectionHeading {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+  padding: 4px 10px 4px;
+}
+
+.spacer {
+  flex: 1;
+  min-height: 12px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Rows ─────────────────────────────────────────────────────── */
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.itemActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+/* The service (Settings, Reports) the page in view is under while that page is marked below it: named in the accent
+   colour, not filled, so one row is marked as the page. */
+.itemAncestor {
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+.item[data-pending='true'],
+.page[data-pending='true'],
+.iconBtn[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: sidebarPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
+.label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  margin-left: auto;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ds-surface-2);
+  color: var(--ds-text-muted);
+  font-weight: 500;
+}
+
+/* ── Categories ───────────────────────────────────────────────── */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  margin-top: 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* ── Pages of the service in view (tree style) ────────────────── */
+
+.pages {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 6px 18px;
+  padding-left: 8px;
+  border-left: 1px solid var(--ds-border-soft);
+}
+
+.pagesHeading {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+  padding: 8px 8px 2px;
+}
+
+.page {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: var(--ds-text-muted);
+  font-size: 12.5px;
+  text-decoration: none;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.pageActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+/* ── Step-by-step style: one level at a time ──────────────────── */
+
+/* A level fills the list, so Settings stays at the bottom of the first one. */
+.level {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 0 auto;
+}
+
+.level[data-motion='in'] {
+  animation: sidebarLevelIn var(--ds-m-base) both;
+}
+
+.level[data-motion='back'] {
+  animation: sidebarLevelBack var(--ds-m-base) both;
+}
+
+/* The page in view, named after its service on the first level: "Agents  Tools ›". */
+.hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 48%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ds-text-faint);
+}
+
+.itemActive .hint {
+  color: var(--ds-accent);
+  opacity: 0.8;
+}
+
+.chev {
+  flex-shrink: 0;
+  margin-right: -2px;
+  color: var(--ds-text-faint);
+}
+
+.itemActive .chev {
+  color: var(--ds-accent);
+}
+
+.levelHeader {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.backBtn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-text);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.levelTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.levelPages {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.levelHeading {
+  margin-top: 10px;
+}
+
+/* ── Icon-only strip ──────────────────────────────────────────── */
+
+.iconBtn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ds-text-muted);
+  cursor: pointer;
+  transition:
+    background-color var(--ds-m-fast),
+    color var(--ds-m-fast);
+}
+
+.iconBtnSmall {
+  width: 32px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.iconBtnActive {
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+}
+
+.iconBtnAncestor {
+  color: var(--ds-accent);
+}
+
+.iconDivider {
+  width: 24px;
+  height: 1px;
+  margin: 6px 0;
+  flex-shrink: 0;
+  background: var(--ds-border-soft);
+}
+
+/* ── Phone drawer (variant="drawer", inside MobileNavDrawer) ──── */
+
+/* The drawer's panel holds it: full width and height, its list scrolls and the footer stays at the bottom. */
+.drawer {
+  grid-column: auto;
+  grid-row: auto;
+  width: 100%;
+  flex: 1;
+  border-right: none;
+  background: transparent;
+}
+
+/* Rows a finger can hit (the side menu's are sized for a pointer). */
+.drawer .scroll {
+  padding: 8px 10px 12px;
+}
+
+.drawer .item {
+  padding: 10px 12px;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.drawer .sectionHeading {
+  padding: 8px 12px 4px;
+}
+
+.drawer .groupHeader {
+  padding: 10px 12px;
+  font-size: 11px;
+}
+
+.drawer .pages {
+  margin-left: 20px;
+}
+
+.drawer .pagesHeading {
+  padding: 10px 10px 4px;
+}
+
+.drawer .page {
+  padding: 9px 10px;
+  gap: 10px;
+  font-size: 13.5px;
+}
+
+.drawer .count {
+  font-size: 11px;
+}
+
+.drawer .hint {
+  font-size: 12.5px;
+}
+
+.drawer .backBtn {
+  padding: 10px 12px;
+  font-size: 15px;
+}
+
+/* Above the phone's home indicator. */
+.drawer .footer {
+  padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+}
+
+/* ── Hover: a pointer only ────────────────────────────────────── */
+
+@media (hover: hover) {
+  .item:hover {
+    background: var(--ds-surface-2);
+    color: var(--ds-text);
+  }
+
+  .groupHeader:hover {
+    background: var(--ds-surface-2);
+    color: var(--ds-text-muted);
+  }
+
+  .page:hover {
+    background: var(--ds-surface-2);
+    color: var(--ds-text);
+  }
+
+  .backBtn:hover {
+    background: var(--ds-surface-2);
+    color: var(--ds-text);
+  }
+
+  .iconBtn:hover {
+    background: var(--ds-surface-2);
+    color: var(--ds-text);
+  }
+}
+
+/* Development only: React Query's devtools button sits in the bottom-left corner, over the menu's last rows. */
+:global(body:has(.tsqd-parent-container)) .footer {
+  padding-bottom: 64px;
+}
+
+@keyframes sidebarPendingPulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.6;
+  }
+}
+
+@keyframes sidebarLevelIn {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sidebarLevelBack {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .item[data-pending='true'],
+  .page[data-pending='true'],
+  .iconBtn[data-pending='true'],
+  .level[data-motion] {
+    animation: none;
+  }
+}
+
+/* Phones have no side column: the top bar's drawer (MobileNavDrawer) shows this menu as `variant="drawer"`. */
+@media (max-width: 48em) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .sidebar.drawer {
+    display: flex;
+  }
+}

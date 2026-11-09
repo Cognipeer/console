@@ -18,7 +18,7 @@
  * A tool's exceptions (by argument) are edited in `AgentToolExceptionsModal`.
  */
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import {
     Alert,
     Badge,
@@ -42,6 +42,31 @@ import AgentToolExceptionsModal from './AgentToolExceptionsModal';
 import ConfirmModal from '@/components/common/ui/ConfirmModal';
 import { hitlToolRows, patchHitl, setToolChoice, setToolExceptions, type HitlToolKinds, type HitlToolRow } from './hitlSettings';
 import type { AgentToolConfig } from '../session/sessionTools';
+
+/** Pieces of a tool name that it may wrap between: after its separators (`_`, `.`, `-`), never inside a word. */
+export function toolNameBreaks(name: string): string[] {
+    const parts: string[] = [];
+    for (const piece of name.split(/([_.-]+)/)) {
+        if (!piece) continue;
+        if (/^[_.-]+$/.test(piece) && parts.length > 0) parts[parts.length - 1] += piece;
+        else parts.push(piece);
+    }
+    return parts;
+}
+
+function ToolName({ name }: { name: string }) {
+    const parts = toolNameBreaks(name);
+    return (
+        <>
+            {parts.map((part, index) => (
+                <Fragment key={index}>
+                    {part}
+                    {index < parts.length - 1 ? <wbr /> : null}
+                </Fragment>
+            ))}
+        </>
+    );
+}
 
 export interface AgentHumanInTheLoopPanelProps {
     value: IAgentHumanInTheLoopConfig | undefined;
@@ -156,90 +181,95 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                 {rows.length === 0 ? (
                                     <Text size="xs" c="dimmed" fs="italic">{t('toolsEmpty')}</Text>
                                 ) : (
-                                    <Table verticalSpacing={6} withTableBorder>
-                                        <Table.Thead>
-                                            <Table.Tr>
-                                                <Table.Th>{t('toolColumn')}</Table.Th>
-                                                <Table.Th w={150}>{t('sourceColumn')}</Table.Th>
-                                                <Table.Th w={110}>{t('kindColumn')}</Table.Th>
-                                                <Table.Th w={300}>{t('policyColumn')}</Table.Th>
-                                                <Table.Th w={150}>{t('exceptionsColumn')}</Table.Th>
-                                            </Table.Tr>
-                                        </Table.Thead>
-                                        <Table.Tbody>
-                                            {rows.map((row) => (
-                                                <Table.Tr key={row.name}>
-                                                    <Table.Td>
-                                                        <Group gap={6} wrap="wrap">
-                                                            <Text size="sm" ff="monospace">{row.name}</Text>
-                                                            {row.stale ? (
-                                                                <Badge size="xs" variant="light" color="yellow">{t('staleHint')}</Badge>
-                                                            ) : null}
-                                                        </Group>
-                                                    </Table.Td>
-                                                    <Table.Td>
-                                                        <Text size="xs" c="dimmed">
-                                                            {row.origin === 'unknown' ? '—' : row.origin}
-                                                            {row.sourceKey ? ` · ${row.sourceKey}` : ''}
-                                                        </Text>
-                                                    </Table.Td>
-                                                    <Table.Td>
-                                                        <Tooltip label={kindHint[row.kind]} withArrow multiline w={260}>
-                                                            <Badge size="xs" variant="light" color={kindColor[row.kind]}>{kindLabel[row.kind]}</Badge>
-                                                        </Tooltip>
-                                                    </Table.Td>
-                                                    <Table.Td>
-                                                        {row.readOnly || row.stale ? (
-                                                            <Group gap="xs" wrap="wrap">
-                                                                <Text size="xs" c="dimmed">{t(row.effective === 'always' ? 'willAsk' : 'willNotAsk')}</Text>
-                                                                {row.choice !== 'default' ? (
-                                                                    // A setting stored for a read-only tool, or for a tool the agent no longer has: visible, and removable.
-                                                                    <Button
-                                                                        size="compact-xs"
-                                                                        variant="subtle"
-                                                                        color="gray"
-                                                                        onClick={() => onChange(setToolChoice(value, row.name, 'default'))}
-                                                                    >
-                                                                        {t('choiceReset', { choice: row.choice === 'always' ? t('policyAlways') : t('policyNever') })}
-                                                                    </Button>
+                                    // Columns take what their content needs (a button) and the tool name wraps. Two columns are set: the
+                                    // badge's, as a badge shrinks to an ellipsis, and the approval's, which keeps the Ask / Never ask control
+                                    // whole. Below the minimum width the table scrolls inside the section instead of running out of it.
+                                    <Table.ScrollContainer minWidth={600} type="native">
+                                        <Table verticalSpacing={6} withTableBorder>
+                                            <Table.Thead>
+                                                <Table.Tr>
+                                                    <Table.Th>{t('toolColumn')}</Table.Th>
+                                                    <Table.Th>{t('sourceColumn')}</Table.Th>
+                                                    <Table.Th w={110}>{t('kindColumn')}</Table.Th>
+                                                    <Table.Th w={300}>{t('policyColumn')}</Table.Th>
+                                                    <Table.Th style={{ whiteSpace: 'nowrap' }}>{t('exceptionsColumn')}</Table.Th>
+                                                </Table.Tr>
+                                            </Table.Thead>
+                                            <Table.Tbody>
+                                                {rows.map((row) => (
+                                                    <Table.Tr key={row.name}>
+                                                        <Table.Td>
+                                                            <Group gap={6} wrap="wrap">
+                                                                <Text size="sm" ff="monospace" style={{ overflowWrap: 'break-word' }}><ToolName name={row.name} /></Text>
+                                                                {row.stale ? (
+                                                                    <Badge size="xs" variant="light" color="yellow">{t('staleHint')}</Badge>
                                                                 ) : null}
                                                             </Group>
-                                                        ) : (
-                                                            <SegmentedControl
-                                                                size="xs"
-                                                                value={row.effective === 'always' ? 'ask' : 'never'}
-                                                                onChange={(choice) => {
-                                                                    if (choice === 'never') {
-                                                                        setConfirmNever(row);
-                                                                        return;
-                                                                    }
-                                                                    // "Ask" is the default; where this tool's default is not to ask it has to be said out loud.
-                                                                    onChange(setToolChoice(value, row.name, row.askChoice));
-                                                                }}
-                                                                data={[
-                                                                    { value: 'ask', label: t('choiceAsk') },
-                                                                    { value: 'never', label: t('policyNever') },
-                                                                ]}
-                                                                aria-label={row.name}
-                                                            />
-                                                        )}
-                                                    </Table.Td>
-                                                    <Table.Td>
-                                                        <Button
-                                                            size="compact-xs"
-                                                            variant={row.exceptions.length > 0 ? 'light' : 'subtle'}
-                                                            color={row.exceptions.length > 0 ? 'blue' : 'gray'}
-                                                            leftSection={row.exceptions.length > 0 ? <IconFilter size={12} /> : <IconPlus size={12} />}
-                                                            onClick={() => setEditing(row)}
-                                                            aria-label={t('editExceptions', { tool: row.name })}
-                                                        >
-                                                            {row.exceptions.length > 0 ? exceptionCount(row.exceptions.length) : t('addException')}
-                                                        </Button>
-                                                    </Table.Td>
-                                                </Table.Tr>
-                                            ))}
-                                        </Table.Tbody>
-                                    </Table>
+                                                        </Table.Td>
+                                                        <Table.Td>
+                                                            <Text size="xs" c="dimmed" style={{ overflowWrap: 'break-word' }}>
+                                                                {row.origin === 'unknown' ? '—' : row.origin}
+                                                                {row.sourceKey ? ` · ${row.sourceKey}` : ''}
+                                                            </Text>
+                                                        </Table.Td>
+                                                        <Table.Td>
+                                                            <Tooltip label={kindHint[row.kind]} withArrow multiline w={260}>
+                                                                <Badge size="xs" variant="light" color={kindColor[row.kind]}>{kindLabel[row.kind]}</Badge>
+                                                            </Tooltip>
+                                                        </Table.Td>
+                                                        <Table.Td>
+                                                            {row.readOnly || row.stale ? (
+                                                                <Group gap="xs" wrap="wrap">
+                                                                    <Text size="xs" c="dimmed">{t(row.effective === 'always' ? 'willAsk' : 'willNotAsk')}</Text>
+                                                                    {row.choice !== 'default' ? (
+                                                                        // A setting stored for a read-only tool, or for a tool the agent no longer has: visible, and removable.
+                                                                        <Button
+                                                                            size="compact-xs"
+                                                                            variant="subtle"
+                                                                            color="gray"
+                                                                            onClick={() => onChange(setToolChoice(value, row.name, 'default'))}
+                                                                        >
+                                                                            {t('choiceReset', { choice: row.choice === 'always' ? t('policyAlways') : t('policyNever') })}
+                                                                        </Button>
+                                                                    ) : null}
+                                                                </Group>
+                                                            ) : (
+                                                                <SegmentedControl
+                                                                    size="xs"
+                                                                    value={row.effective === 'always' ? 'ask' : 'never'}
+                                                                    onChange={(choice) => {
+                                                                        if (choice === 'never') {
+                                                                            setConfirmNever(row);
+                                                                            return;
+                                                                        }
+                                                                        // "Ask" is the default; where this tool's default is not to ask it has to be said out loud.
+                                                                        onChange(setToolChoice(value, row.name, row.askChoice));
+                                                                    }}
+                                                                    data={[
+                                                                        { value: 'ask', label: t('choiceAsk') },
+                                                                        { value: 'never', label: t('policyNever') },
+                                                                    ]}
+                                                                    aria-label={row.name}
+                                                                />
+                                                            )}
+                                                        </Table.Td>
+                                                        <Table.Td>
+                                                            <Button
+                                                                size="compact-xs"
+                                                                variant={row.exceptions.length > 0 ? 'light' : 'subtle'}
+                                                                color={row.exceptions.length > 0 ? 'blue' : 'gray'}
+                                                                leftSection={row.exceptions.length > 0 ? <IconFilter size={12} /> : <IconPlus size={12} />}
+                                                                onClick={() => setEditing(row)}
+                                                                aria-label={t('editExceptions', { tool: row.name })}
+                                                            >
+                                                                {row.exceptions.length > 0 ? exceptionCount(row.exceptions.length) : t('addException')}
+                                                            </Button>
+                                                        </Table.Td>
+                                                    </Table.Tr>
+                                                ))}
+                                            </Table.Tbody>
+                                        </Table>
+                                    </Table.ScrollContainer>
                                 )}
                             </Stack>
 

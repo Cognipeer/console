@@ -6,7 +6,7 @@ import { IconChevronDown, IconExternalLink } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import classes from './LauncherShell.module.css';
 
-interface MyPortal {
+export interface MyPortal {
   key: string;
   name: string;
   description?: string;
@@ -14,15 +14,14 @@ interface MyPortal {
 }
 
 /**
- * Quick links to the portals the signed-in user may open. The list comes from the enterprise
- * `/api/portal/my` endpoint; where the endpoint is missing (community), unlicensed, or returns no
- * portals, nothing is rendered.
+ * The portals the signed-in user may open, from the enterprise `/api/portal/my` endpoint; empty where the endpoint is
+ * missing (community), unlicensed, or returns no portals.
  */
-export default function PortalSwitcher() {
-  const t = useTranslations('navigation');
+export function useMyPortals(enabled = true): MyPortal[] {
   const [portals, setPortals] = useState<MyPortal[]>([]);
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     fetch('/api/portal/my', { credentials: 'same-origin' })
       .then((res) => (res.ok ? res.json() : null))
@@ -33,7 +32,23 @@ export default function PortalSwitcher() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [enabled]);
+
+  return portals;
+}
+
+/** A portal's address: it opens in a tab of its own. */
+export function portalHref(portal: MyPortal): string {
+  return `/p/${encodeURIComponent(portal.key)}`;
+}
+
+/**
+ * Quick links to the portals the signed-in user may open (the old top bar); nothing is rendered without portals. The
+ * slim top bar lists them in the account menu instead.
+ */
+export default function PortalSwitcher() {
+  const t = useTranslations('navigation');
+  const portals = useMyPortals();
 
   if (portals.length === 0) return null;
 
@@ -54,7 +69,7 @@ export default function PortalSwitcher() {
           <Menu.Item
             key={portal.key}
             component="a"
-            href={`/p/${encodeURIComponent(portal.key)}`}
+            href={portalHref(portal)}
             target="_blank"
             rel="noopener noreferrer"
             leftSection={

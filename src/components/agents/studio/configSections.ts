@@ -44,7 +44,9 @@ export function configSectionTitle(id: string, translate: (key: string) => strin
 }
 
 export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
-    basic: ['modelKey', 'reasoningEffort', 'reasoningBudgetTokens', 'showReasoning', 'additionalModels', 'knowledgeEngineKey', 'toolBindings', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey', 'piiProtection'],
+    // `knowledgeBindings` / `knowledgeToolMode` replaced `knowledgeEngineKey` (which a save now clears): without them a
+    // knowledge base attached or removed since the published version did not count as a change.
+    basic: ['modelKey', 'reasoningEffort', 'reasoningBudgetTokens', 'showReasoning', 'additionalModels', 'knowledgeEngineKey', 'knowledgeBindings', 'knowledgeToolMode', 'toolBindings', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey', 'piiProtection'],
     prompt: ['systemPrompt', 'promptKey', 'promptVariables'],
     subagents: ['subagents', 'subagentPolicy'],
     skills: ['skills', 'skillPolicy'],
@@ -53,7 +55,9 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     callback: ['callback', 'budget'],
     files: ['attachments'],
     hitl: ['humanInTheLoop'],
-    clienttools: ['clientTools'],
+    // Where the client tools are offered is part of the section: without it an edit there read as "saved" and a
+    // surface changed since the published version did not count as a change.
+    clienttools: ['clientTools', 'clientToolSurfaces'],
     advanced: ['runtime', 'reminders', 'maxTokens'],
     variables: ['variables'],
     output: ['structuredOutput'],
@@ -77,6 +81,38 @@ function canonical(value: unknown): string {
         return input;
     };
     return JSON.stringify(normalise(value) ?? null);
+}
+
+/**
+ * How Build lists its sections: the order on the page and the groups of its section index. What an agent is
+ * comes first, then what it can do, then how it behaves.
+ */
+export const BUILD_SECTION_GROUPS: ReadonlyArray<{ id: 'essentials' | 'capabilities' | 'behavior'; sections: readonly string[] }> = [
+    { id: 'essentials', sections: ['basic', 'prompt'] },
+    { id: 'capabilities', sections: ['subagents', 'skills', 'memory', 'files', 'sandbox', 'clienttools'] },
+    { id: 'behavior', sections: ['hitl', 'callback', 'advanced', 'variables', 'output'] },
+];
+
+export const BUILD_SECTION_ORDER: readonly string[] = BUILD_SECTION_GROUPS.flatMap((group) => group.sections);
+
+/**
+ * Sections that are one line ("Not set · Set up") while the agent does not use them. Not General or Prompt (every
+ * agent has them), not Approvals & questions (absent means tool approval is ON) and not Runtime (its fields are
+ * defaults that apply either way).
+ */
+export const COLLAPSIBLE_WHEN_UNSET: ReadonlySet<string> = new Set([
+    'subagents', 'skills', 'memory', 'files', 'sandbox', 'clienttools', 'callback', 'variables', 'output',
+]);
+
+/** Of the sections that can fold, those whose keys are all absent (or empty) in `config`. */
+export function unsetConfigSections(config: Record<string, unknown> | undefined): Set<string> {
+    const unset = new Set<string>();
+    for (const section of COLLAPSIBLE_WHEN_UNSET) {
+        const keys = CONFIG_SECTION_KEYS[section] ?? [];
+        const values = Object.fromEntries(keys.map((key) => [key, config?.[key]]));
+        if (canonical(values) === 'null') unset.add(section);
+    }
+    return unset;
 }
 
 /**

@@ -22,6 +22,8 @@ export interface LauncherContextValue {
    * service's menu (Webhooks, in Agents) and so are not in `services`.
    */
   canUseService?: (service: PermissionService) => boolean;
+  /** Whether the person may create in a permission service (write or admin), judged the same way. */
+  canWriteService?: (service: PermissionService) => boolean;
 }
 
 const LauncherContext = createContext<LauncherContextValue | null>(null);
@@ -47,4 +49,13 @@ export function useLauncher() {
 
 export function useOptionalLauncher() {
   return useContext(LauncherContext);
+}
+
+/**
+ * Whether the person may create in `service` (write or admin) in the active project, for a picker's "+ New …".
+ * Outside the dashboard shell (and in tests without one) it answers true: the server decides the request anyway.
+ */
+export function useCanWriteService(service: PermissionService): boolean {
+  const launcher = useContext(LauncherContext);
+  return launcher?.canWriteService ? launcher.canWriteService(service) : true;
 }

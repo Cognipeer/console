@@ -116,7 +116,8 @@ export default function RagDashboardPage() {
 
   const handleCreated = (ragModule: Record<string, unknown>) => {
     setCreateModalOpen(false);
-    router.push(`/dashboard/rag/${encodeURIComponent(ragModule.key as string)}`);
+    // A new module is empty: its next step is adding documents.
+    router.push(`/dashboard/rag/${encodeURIComponent(ragModule.key as string)}?tab=documents`);
   };
 
   const filtered = useMemo(() => {

@@ -75,7 +75,7 @@ describe('clientToolErrors', () => {
 describe('section registration', () => {
   it('has a title, config key and translated heading', () => {
     expect(CONFIG_SECTION_TITLES.clienttools).toBe('Client tools');
-    expect(CONFIG_SECTION_KEYS.clienttools).toEqual(['clientTools']);
+    expect(CONFIG_SECTION_KEYS.clienttools).toEqual(['clientTools', 'clientToolSurfaces']);
     const translate = (messages: typeof en) => (key: string) =>
       key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], (messages as unknown as { agents: unknown }).agents) as string;
     expect(configSectionTitle('clienttools', translate(en))).toBe('Client tools');

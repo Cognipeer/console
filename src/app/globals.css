@@ -687,6 +687,25 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
   height: 36px;
 }
 
+/* Phones: two numbers a row (one card a row filled the screen before the list began). */
+@media (max-width: 48em) {
+  .ds-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .ds-stat {
+    padding: 14px 14px 12px;
+  }
+  .ds-stat-value {
+    font-size: 22px;
+  }
+  /* The line under the number wraps in a half-width card instead of being cut at its edge. */
+  .ds-stat-delta {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
 /* Tabs */
 .ds-tabs {
   display: flex;
@@ -781,6 +800,20 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
 /* Row whose link navigation is in flight (instant click acknowledgement). */
 .ds-tbl tbody tr[data-pending='true'] { background: var(--ds-accent-soft); }
 .ds-tbl tbody tr[data-pending='true'] > td:first-child { box-shadow: inset 2px 0 0 var(--ds-accent); }
+/* Phones: a column keeps a readable width and the table scrolls sideways in its frame, instead of every column
+   squeezing until text breaks a letter a line. The selection and row-action columns keep their own width. */
+@media (max-width: 48em) {
+  .ds-tbl th,
+  .ds-tbl td {
+    min-width: 5.5rem;
+  }
+  .ds-tbl th:empty,
+  .ds-tbl td:empty,
+  .ds-tbl :is(th, td):has(> input[type='checkbox']:only-child),
+  .ds-tbl :is(th, td):has(> .mantine-ActionIcon-root:only-child) {
+    min-width: 0;
+  }
+}
 
 /* Skeleton placeholders (components/common/ui/Skeletons.tsx) */
 .ds-skeleton .ds-eyebrow::before,
@@ -999,10 +1032,11 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   box-shadow: var(--ds-shadow-xs);
 }
 
-/* Detail page grid responsive collapse */
+/* Detail page grid responsive collapse. minmax(0, 1fr), not 1fr: a plain 1fr column is never narrower than its
+   widest unbreakable line (a curl example), and on a phone that ran every card past the right edge. */
 @media (max-width: 960px) {
   .ds-detail-grid {
-    grid-template-columns: 1fr !important;
+    grid-template-columns: minmax(0, 1fr) !important;
   }
 }
 
@@ -1551,6 +1585,10 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   gap: 16px;
 }
+/* A card left alone (its neighbour hid itself, e.g. without access) takes the whole row. */
+.ds-grid-two > :only-child {
+  grid-column: 1 / -1;
+}
 @media (max-width: 960px) {
   .ds-grid-two {
     grid-template-columns: 1fr;
@@ -1983,6 +2021,39 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   }
 }
 
+/* The footer's buttons keep their labels whole; a long status line gives way instead. */
+.form-footer > .mantine-Button-root {
+  flex-shrink: 0;
+}
+
+/* Phones: the header grows with a subtitle that wraps (at a fixed 56px the title was pushed off the top), there is
+   no Escape key to hint at (the close button stays), and the footer's buttons wrap to a second row rather than
+   running past the edge (Cancel was out of sight). */
+@media (max-width: 48em) {
+  .form-header {
+    height: auto;
+    min-height: 56px;
+    padding: 10px 12px;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  .form-header-hint {
+    display: none;
+  }
+  .form-header-sub {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .form-footer {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 8px;
+    padding: 10px 14px;
+  }
+}
+
 /* ====================================================================
    DetailShell — detail page layout helpers (detail-*)
    ==================================================================== */
@@ -1991,6 +2062,9 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   align-items: center;
   gap: 14px;
   margin-bottom: 14px;
+  /* The actions take their own line when they don't fit beside the title (DetailShell gives it a 220px basis). */
+  flex-wrap: wrap;
+  row-gap: 10px;
 }
 .detail-back {
   flex-shrink: 0;
@@ -2920,6 +2994,13 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
 .ds-badge-cluster .mantine-Badge-label {
   overflow: visible;
   text-overflow: clip;
+}
+/* The text beside the badges (a name) wraps inside a narrow column instead of running under the next one; the
+   badges keep their width. */
+.ds-badge-cluster > :not(.mantine-Badge-root) {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 /* Project switcher dropdown: Mantine's default filled-primary highlight

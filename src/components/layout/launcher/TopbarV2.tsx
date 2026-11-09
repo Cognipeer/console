@@ -16,6 +16,7 @@ import {
   IconBook,
   IconCertificate,
   IconChevronDown,
+  IconExternalLink,
   IconLifebuoy,
   IconLogout,
   IconMenu2,
@@ -26,7 +27,7 @@ import {
   IconUserCircle,
 } from '@tabler/icons-react';
 import ProjectPill from '@/components/projects/ProjectPill';
-import PortalSwitcher from './PortalSwitcher';
+import PortalSwitcher, { portalHref, useMyPortals } from './PortalSwitcher';
 import { useTranslations } from '@/lib/i18n';
 import classes from './LauncherShell.module.css';
 
@@ -48,6 +49,12 @@ interface TopbarV2Props {
   onNavigate: (href: string) => void;
   onMobileNavClick: () => void;
   settingsHref?: string;
+  /**
+   * `slim` (with the single left menu): the logo, the project, a wide search and the account. The menu lists every
+   * service and search finds them, so there is no launcher; help is at the bottom of the menu; the theme and the
+   * portals are in the account menu. `full` is the bar of the icon rail.
+   */
+  variant?: 'full' | 'slim';
 }
 
 export default function TopbarV2({
@@ -62,10 +69,14 @@ export default function TopbarV2({
   onNavigate,
   onMobileNavClick,
   settingsHref = '/dashboard/tokens',
+  variant = 'full',
 }: TopbarV2Props) {
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const tNav = useTranslations('navigation');
   const tAccount = useTranslations('account');
+  const slim = variant === 'slim';
+  // The slim bar lists the portals in the account menu; the full one has its own switcher (which asks for them).
+  const portals = useMyPortals(slim);
 
   const isDark = colorScheme === 'dark';
 
@@ -106,24 +117,26 @@ export default function TopbarV2({
         />
       </Link>
 
-      <button
-        type="button"
-        onClick={onLauncherClick}
-        className={classes.svcTrigger}
-        aria-label={tNav('servicesLabel')}
-      >
-        <span className={classes.dotGridSm} aria-hidden="true">
-          {Array.from({ length: 9 }).map((_, i) => (
-            <i key={i} />
-          ))}
-        </span>
-        <span>{tNav('services')}</span>
-        <IconChevronDown size={13} stroke={2} />
-      </button>
+      {slim ? null : (
+        <button
+          type="button"
+          onClick={onLauncherClick}
+          className={classes.svcTrigger}
+          aria-label={tNav('servicesLabel')}
+        >
+          <span className={classes.dotGridSm} aria-hidden="true">
+            {Array.from({ length: 9 }).map((_, i) => (
+              <i key={i} />
+            ))}
+          </span>
+          <span>{tNav('services')}</span>
+          <IconChevronDown size={13} stroke={2} />
+        </button>
+      )}
 
       <UnstyledButton
         onClick={onSearchClick}
-        className={classes.searchBox}
+        className={slim ? `${classes.searchBox} ${classes.searchBoxWide}` : classes.searchBox}
         aria-label={tNav('globalSearchPlaceholder')}
       >
         <IconSearch size={15} stroke={1.7} />
@@ -135,36 +148,40 @@ export default function TopbarV2({
 
       <ProjectPill />
 
-      <PortalSwitcher />
+      {slim ? null : (
+        <>
+          <PortalSwitcher />
 
-      <Tooltip label={isDark ? 'Light mode' : 'Dark mode'} withArrow>
-        <ActionIcon
-          variant="subtle"
-          color="gray"
-          radius="md"
-          size="lg"
-          onClick={() => toggleColorScheme()}
-          aria-label="Toggle theme"
-        >
-          {isDark ? <IconSun size={16} /> : <IconMoon size={16} />}
-        </ActionIcon>
-      </Tooltip>
+          <Tooltip label={isDark ? 'Light mode' : 'Dark mode'} withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              radius="md"
+              size="lg"
+              onClick={() => toggleColorScheme()}
+              aria-label="Toggle theme"
+            >
+              {isDark ? <IconSun size={16} /> : <IconMoon size={16} />}
+            </ActionIcon>
+          </Tooltip>
 
-      <Tooltip label={tNav('docs')} withArrow>
-        <ActionIcon
-          variant="subtle"
-          color="gray"
-          radius="md"
-          size="lg"
-          className={classes.hideOnMobile}
-          onClick={onDocsClick}
-          aria-label={tNav('docs')}
-        >
-          <IconBook size={16} />
-        </ActionIcon>
-      </Tooltip>
+          <Tooltip label={tNav('docs')} withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              radius="md"
+              size="lg"
+              className={classes.hideOnMobile}
+              onClick={onDocsClick}
+              aria-label={tNav('docs')}
+            >
+              <IconBook size={16} />
+            </ActionIcon>
+          </Tooltip>
+        </>
+      )}
 
-      <Menu shadow="md" width={220} position="bottom-end">
+      <Menu shadow="md" width={slim ? 260 : 220} position="bottom-end">
         <Menu.Target>
           <UnstyledButton className={classes.accountBtn} aria-label="Account menu">
             <Group gap="xs" wrap="nowrap">
@@ -206,6 +223,16 @@ export default function TopbarV2({
           >
             {tAccount('settings')}
           </Menu.Item>
+          {slim ? (
+            <Menu.Item
+              leftSection={isDark ? <IconSun size={14} /> : <IconMoon size={14} />}
+              onClick={() => toggleColorScheme()}
+              closeMenuOnClick={false}
+              data-testid="topbar-theme"
+            >
+              {tAccount(isDark ? 'themeLight' : 'themeDark')}
+            </Menu.Item>
+          ) : null}
           {isTenantAdmin ? (
             <Menu.Item
               leftSection={<IconCertificate size={14} />}
@@ -218,6 +245,32 @@ export default function TopbarV2({
             <Menu.Item leftSection={<IconLifebuoy size={14} />} onClick={onSupportClick}>
               {tAccount('support')}
             </Menu.Item>
+          ) : null}
+          {slim && portals.length > 0 ? (
+            <>
+              <Menu.Divider />
+              <Menu.Label>{tNav('portalsYours')}</Menu.Label>
+              {portals.map((portal) => (
+                <Menu.Item
+                  key={portal.key}
+                  component="a"
+                  href={portalHref(portal)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  leftSection={
+                    <Avatar size={18} radius="sm" src={portal.logo} color="teal">
+                      {portal.name.charAt(0).toUpperCase()}
+                    </Avatar>
+                  }
+                  rightSection={<IconExternalLink size={12} />}
+                  data-testid="topbar-portal"
+                >
+                  <Text size="sm" lineClamp={1}>
+                    {portal.name}
+                  </Text>
+                </Menu.Item>
+              ))}
+            </>
           ) : null}
           <Menu.Divider />
           <Menu.Item color="red" leftSection={<IconLogout size={14} />} onClick={onLogout}>

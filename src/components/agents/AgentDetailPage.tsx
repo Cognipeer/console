@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
+import { Fragment, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
@@ -22,6 +22,7 @@ import {
   Switch,
   SegmentedControl,
   Alert,
+  Menu,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -47,9 +48,11 @@ import {
   IconTopologyStar3,
   IconX,
   IconUpload,
+  IconDots,
+  IconFileExport,
 } from '@tabler/icons-react';
-import { useTranslations } from '@/lib/i18n';
-import { ResourceUsageSection } from '@/components/common/confirm';
+import { useLocale, useTranslations } from '@/lib/i18n';
+import { fetchResourceUsage, useConfirm, type ResourceUsageResponse } from '@/components/common/confirm';
 import EmptyState from '@/components/common/EmptyState';
 import GuardrailBindingList, {
   bindingRowsFromLegacySlots,
@@ -84,6 +87,7 @@ import AgentExportPanel from './studio/AgentExportPanel';
 import ImportAgentShell from './ImportAgentShell';
 import AgentPromptPanel, { type PromptOption } from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
+import AgentOverviewAside, { splitAgentUsedBy } from './studio/AgentOverviewAside';
 import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
@@ -100,7 +104,14 @@ import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
 import { boundToolKinds, type KindSourceRecord } from './studio/hitlSettings';
 import ClientToolsSurfaces from './studio/ClientToolsSurfaces';
 import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
-import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
+import {
+  BUILD_SECTION_GROUPS,
+  BUILD_SECTION_ORDER,
+  changedConfigSections,
+  configSectionTitle,
+  unsetConfigSections,
+} from './studio/configSections';
+import BuildSectionIndex, { type BuildIndexGroup } from './studio/BuildSectionIndex';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
@@ -259,6 +270,11 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   flows: { top: 'flows' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
+  // Parts of General, each with its own anchor (the Overview's "Needs attention" links here).
+  knowledge: { top: 'configure', sub: 'knowledge' },
+  guardrails: { top: 'configure', sub: 'guardrails' },
+  pii: { top: 'configure', sub: 'pii' },
+  tools: { top: 'configure', sub: 'tools' },
   variables: { top: 'configure', sub: 'variables' },
   deploy: { top: 'deploy' },
   versions: { top: 'deploy', sub: 'versions' },
@@ -276,6 +292,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
 
 /** Build sections that make no sense for a flow-owned agent: it is never called by URL, callback or a chat client. */
 const OWNED_HIDDEN_SECTIONS: ReadonlySet<string> = new Set(['callback', 'clienttools']);
+
+/** Versions per page in Ship's version history. */
+const VERSIONS_PAGE_SIZE = 5;
 
 function resolveTabFromQuery(raw: string | null): string {
   return TAB_ALIASES[raw ?? '']?.top ?? 'overview';
@@ -309,6 +328,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const agentId = agentIdProp ?? (params.agentId as string);
   const t = useTranslations('agents');
   const tPii = useTranslations('piiProtection');
+  const locale = useLocale();
   const tIdentity = useTranslations('consoleIdentity');
   const flowTexts = useFlowDetailTexts();
   const flowsPermission = useFlowsAccess();
@@ -383,6 +403,16 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   // the Usage tab and the Overview quick start wait for it, because a call runs the snapshot, not the draft.
   const [publishedConfigKey, setPublishedConfigKey] = useState<string | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
+  // Build: what Save would send for the config as last loaded or saved, to tell which sections have unsaved edits.
+  // `hydration` counts loads, so the baseline is taken once the loaded config has rendered.
+  const [savedPayload, setSavedPayload] = useState<Record<string, unknown> | null>(null);
+  const [hydration, setHydration] = useState(0);
+  // Sections the agent does not use that were opened with "Set up" (or a link to them): they stay open.
+  const [expandedUnset, setExpandedUnset] = useState<ReadonlySet<string>>(() => new Set());
+  // Overview and Ship: what uses the agent and what it uses (one request, shared), and how many triggers start it.
+  const [agentUsage, setAgentUsage] = useState<ResourceUsageResponse | null>(null);
+  const [agentUsageFailed, setAgentUsageFailed] = useState(false);
+  const [triggerCount, setTriggerCount] = useState<number | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
   const [updateFromFileOpen, setUpdateFromFileOpen] = useState(false);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
@@ -419,6 +449,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [compareVersionA, setCompareVersionA] = useState<string | null>(null);
   const [compareVersionB, setCompareVersionB] = useState<string | null>(null);
+  // Ship lists the versions five at a time (newest first); the two picked for Compare stay picked across pages.
+  const [versionsPage, setVersionsPage] = useState(1);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
 
   // Sessions list (for the Sessions tab — the actual chat now lives at its
@@ -517,6 +549,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         setGuardrailBindings(Array.isArray(cfg.guardrails)
           ? bindingRowsFromStored(cfg.guardrails)
           : bindingRowsFromLegacySlots(cfg.inputGuardrailKey, cfg.outputGuardrailKey));
+        setHydration((count) => count + 1);
       }
     } catch (err) {
       console.error('Failed to load agent', err);
@@ -535,6 +568,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         const data = await res.json();
         setVersions(data.versions ?? []);
         setVersionsTotal(data.total ?? 0);
+        // A reload follows a publish: the new version is on the first page.
+        setVersionsPage(1);
       }
     } catch (err) {
       console.error('Failed to load versions', err);
@@ -724,6 +759,13 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     // sub-target is a section anchor to scroll to.
     const section = activeTab === 'configure' ? configureTab : activeTab === 'deploy' ? deployTab : null;
     if (!section || !agent) return;
+    // The first section is where the tab opens anyway: scrolling to it only hid the header and tabs (and, on Ship,
+    // the summary above Versions).
+    if ((activeTab === 'configure' && section === 'basic') || (activeTab === 'deploy' && section === 'versions')) return;
+    // A link to a section the agent does not use opens it, instead of landing on its one-line "Not set".
+    if (activeTab === 'configure') {
+      setExpandedUnset((current) => (current.has(section) ? current : new Set([...current, section])));
+    }
     const frame = requestAnimationFrame(() => {
       document.getElementById(`config-${section}`)
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -785,15 +827,36 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     return () => { cancelled = true; };
   }, [agentId, publishedVersionNumber]);
 
+  // Loaded when Overview or Ship is shown, again after a load, save or publish changed what the agent uses.
+  const agentRecordId = agent?._id ? String(agent._id) : null;
+  const agentKind = agent?.config?.kind;
+  const needsUsage = activeTab === 'overview' || activeTab === 'deploy';
+  const usageRefreshKey = `${agent?.publishedVersion ?? 0}:${agent?.metadata?.a2a?.enabled === true}`;
+  useEffect(() => {
+    if (!agentRecordId || !needsUsage || ownedByFlow) return undefined;
+    const controller = new AbortController();
+    setAgentUsageFailed(false);
+    fetchResourceUsage('agent', agentRecordId, controller.signal)
+      .then((usage) => setAgentUsage(usage))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return;
+        setAgentUsageFailed(true);
+      });
+    if (agentKind !== 'external') {
+      fetch(`/api/agents/${agentId}/triggers`, { cache: 'no-store', signal: controller.signal })
+        .then(async (res) => (res.ok ? (await res.json()) as { data?: unknown[] } : null))
+        .then((data) => setTriggerCount(data ? (data.data ?? []).length : null))
+        .catch(() => { if (!controller.signal.aborted) setTriggerCount(null); });
+    }
+    return () => controller.abort();
+  }, [agentRecordId, agentKind, agentId, needsUsage, ownedByFlow, savedPayload, usageRefreshKey]);
+
   const changedSections = useMemo(
     () => changedConfigSections(agent?.config as Record<string, unknown> | undefined, publishedConfig),
     [agent?.config, publishedConfig],
   );
 
   const sectionVisible = (id: string) => !onlyChanged || changedSections.has(id);
-  // The divider above a section is skipped for the first one SHOWN — with
-  // "only changed" on, that is not always General.
-  const firstVisibleSection = (agent?.config?.kind === 'external' || agent?.config?.kind === 'flow' ? ['basic'] : Object.keys(CONFIG_SECTION_KEYS)).find(sectionVisible);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
@@ -927,10 +990,11 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     }
 
     try {
+      const payload = buildConfigPayload(options.bindings);
       const res = await fetch(`/api/agents/${agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config: buildConfigPayload(options.bindings) }),
+        body: JSON.stringify({ config: payload }),
       });
 
       if (!res.ok) {
@@ -956,6 +1020,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
 
       const data = await res.json();
       setAgent(data.agent);
+      setSavedPayload(payload);
       setFilesSaveRefused(false);
       setConfigIssues(Array.isArray(data.warnings) && data.warnings.length > 0
         ? { errors: [], warnings: data.warnings }
@@ -1039,6 +1104,31 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         color: 'red',
       });
     }
+  };
+
+  // ── Unsaved changes ─────────────────────────────────────────
+  // The baseline is what Save would send for the config just loaded — built by the same function, so a value the
+  // form normalises on load (legacy knowledge key, old reasoning fields) never reads as an edit. Taken after the
+  // loaded state has rendered (and after any panel's first adjustment), from the latest render's builder.
+  const buildPayloadRef = useRef(buildConfigPayload);
+  buildPayloadRef.current = buildConfigPayload;
+  useEffect(() => {
+    if (hydration === 0) return undefined;
+    const timer = window.setTimeout(() => setSavedPayload(buildPayloadRef.current()), 0);
+    return () => window.clearTimeout(timer);
+  }, [hydration]);
+  const unsavedSections = savedPayload ? changedConfigSections(buildConfigPayload(), savedPayload) : new Set<string>();
+  const { confirm } = useConfirm();
+  const discardUnsaved = async () => {
+    const ok = await confirm({
+      title: t('build.discardTitle'),
+      message: t('build.discardMessage'),
+      confirmLabel: t('build.discard'),
+      tone: 'danger',
+    });
+    if (!ok) return;
+    setConfigIssues(null);
+    await loadAgent();
   };
 
   // ── Config Save ──────────────────────────────────────────────
@@ -1215,17 +1305,32 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             Prompt record's template inline) to earn its own block instead of
             sharing this one with the model picker. */}
 
-        <ConfigBlock icon={<IconDatabase size={15} />} title={t('config.knowledgeEngine')}>
+        <ConfigBlock id="knowledge" icon={<IconDatabase size={15} />} title={t('config.knowledgeEngine')}>
           <KnowledgeBindingsEditor
             modules={ragModules}
             bindings={configForm.values.knowledgeBindings}
             mode={configForm.values.knowledgeToolMode}
             onBindingsChange={(next) => configForm.setFieldValue('knowledgeBindings', next)}
             onModeChange={(mode) => configForm.setFieldValue('knowledgeToolMode', mode)}
+            onModuleCreated={(created) =>
+              setRagModules((current) =>
+                current.some((m) => m.key === created.key)
+                  ? current
+                  : [
+                      ...current,
+                      {
+                        _id: String(created._id ?? created.key),
+                        key: created.key,
+                        name: created.name,
+                        status: String(created.status ?? 'active'),
+                      },
+                    ],
+              )
+            }
           />
         </ConfigBlock>
 
-        <ConfigBlock icon={<IconShield size={15} />} title={t('config.guardrails')}>
+        <ConfigBlock id="guardrails" icon={<IconShield size={15} />} title={t('config.guardrails')}>
           {/*
             One guardrail per row, each naming the hooks it covers on THIS
             agent. The tool hooks are the new capability here: an agent's own
@@ -1240,7 +1345,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           />
         </ConfigBlock>
 
-        <ConfigBlock icon={<IconShieldLock size={15} />} title={tPii('title')}>
+        <ConfigBlock id="pii" icon={<IconShieldLock size={15} />} title={tPii('title')}>
           <Stack gap="xs">
             <Text size="xs" c="dimmed">{tPii('agent.description')}</Text>
             <PiiProtectionField
@@ -1253,7 +1358,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           </Stack>
         </ConfigBlock>
 
-        <ConfigBlock icon={<IconTool size={15} />} title={t('config.tools')}>
+        <ConfigBlock id="tools" icon={<IconTool size={15} />} title={t('config.tools')}>
           <Stack gap="sm">
             <Text size="xs" c="dimmed">{t('config.toolsDescription')}</Text>
 
@@ -1307,19 +1412,256 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     hasAny: hasReminders,
   });
 
+  const sectionShown = (id: string) =>
+    (id === 'basic' || !(isConnected || isFlow)) && !(ownedByFlow && OWNED_HIDDEN_SECTIONS.has(id)) && sectionVisible(id);
+  // The divider above a section is skipped for the first one SHOWN — with "only changed" on, that is not always General.
+  const firstShownSection = BUILD_SECTION_ORDER.find(sectionShown);
+  // A section the agent does not use is one line ("Not set · Set up") — unless someone opened it, it differs from the
+  // published version (the reviewer has to see what was removed) or it has unsaved edits. Judged on the saved draft,
+  // so clearing a field while editing does not fold the section away under the cursor.
+  const foldedSections = unsetConfigSections(savedPayload ?? (agent.config as Record<string, unknown> | undefined));
+  for (const id of [...foldedSections]) {
+    if (expandedUnset.has(id) || changedSections.has(id) || unsavedSections.has(id)) foldedSections.delete(id);
+  }
+  const openSection = (id: string) => setExpandedUnset((current) => new Set([...current, id]));
+  const jumpToSection = (id: string) =>
+    document.getElementById(`config-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
   const buildSection = (id: string, description: string, body: ReactNode, meta?: ReactNode) =>
-    (id === 'basic' || !(isConnected || isFlow)) && !(ownedByFlow && OWNED_HIDDEN_SECTIONS.has(id)) && sectionVisible(id) ? (
+    sectionShown(id) ? (
       <ConfigSection
         id={id}
         title={configSectionTitle(id, t)}
         description={description}
         meta={meta}
         changed={changedSections.has(id)}
-        first={id === firstVisibleSection}
+        first={id === firstShownSection}
+        unset={foldedSections.has(id)}
+        onSetUp={readOnly ? undefined : () => openSection(id)}
       >
         {body}
       </ConfigSection>
     ) : null;
+
+  // The index beside a native agent's Build page: every section shown, in page order, grouped.
+  const buildIndexGroups: BuildIndexGroup[] = BUILD_SECTION_GROUPS.map((group) => ({
+    id: group.id,
+    title: t(`build.groups.${group.id}`),
+    items: group.sections.filter(sectionShown).map((id) => ({
+      id,
+      title: configSectionTitle(id, t),
+      state: changedSections.has(id) ? 'changed' as const : foldedSections.has(id) ? 'unset' as const : null,
+      parts: id === 'basic' && !isFlow
+        ? [
+          { id: 'knowledge', title: t('config.knowledgeEngine') },
+          { id: 'guardrails', title: t('config.guardrails') },
+          { id: 'pii', title: tPii('title') },
+          { id: 'tools', title: t('config.tools') },
+        ]
+        : undefined,
+    })),
+  }));
+  const showBuildIndex = !(isConnected || isFlow) && buildIndexGroups.reduce((sum, group) => sum + group.items.length, 0) > 2;
+  const unsavedTitles = BUILD_SECTION_ORDER.filter((id) => unsavedSections.has(id)).map((id) => configSectionTitle(id, t));
+  const changedTitles = BUILD_SECTION_ORDER.filter((id) => changedSections.has(id)).map((id) => configSectionTitle(id, t));
+  const versionPageCount = Math.max(1, Math.ceil(versions.length / VERSIONS_PAGE_SIZE));
+  // Clamped: the list can shrink under the page asked for (a reload with fewer versions).
+  const shownVersionsPage = Math.min(versionsPage, versionPageCount);
+  const publishedVersionRecord = agent.publishedVersion
+    ? versions.find((version) => version.version === agent.publishedVersion) ?? null
+    : null;
+
+  const buildSectionElements: Record<string, ReactNode> = {
+    basic: buildSection(
+      'basic',
+      isFlow ? flowTexts.flowBuildDescription : 'What this agent is, which model answers, and the tools it can call.',
+      renderBasicSettings(),
+    ),
+    prompt: buildSection(
+      'prompt',
+      'Inline text, or a prompt from the Prompts module — editable right here.',
+      <AgentPromptPanel
+        mode={configForm.values.promptMode}
+        onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+        systemPrompt={configForm.values.systemPrompt}
+        onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+        promptKey={configForm.values.promptKey}
+        onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+        prompts={prompts}
+        onPromptsChanged={setPrompts}
+        onSaveAgentConfig={handleSaveConfig}
+      />,
+    ),
+    subagents: buildSection(
+      'subagents',
+      'Roles this agent can hand work to, and the guards around that.',
+      <AgentSubagentsPanel
+        subagents={subagents}
+        policy={subagentPolicy}
+        agents={projectAgents}
+        models={models.map((model) => ({ key: model.key, name: model.name }))}
+        currentAgentKey={agent.key}
+        onChange={(nextSubagents, nextPolicy) => {
+          setSubagents(nextSubagents);
+          setSubagentPolicy(nextPolicy);
+        }}
+      />,
+      subagents.length > 0 ? (
+        <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
+      ) : null,
+    ),
+    skills: buildSection(
+      'skills',
+      "Capabilities this agent can discover and open on demand, from the project's skill library.",
+      <AgentSkillsPanel
+        skills={skills}
+        policy={skillPolicy}
+        library={skillLibrary}
+        onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
+        onChange={(nextSkills, nextPolicy) => {
+          setSkills(nextSkills);
+          setSkillPolicy(nextPolicy);
+        }}
+      />,
+      skills.length > 0 ? (
+        <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
+      ) : null,
+    ),
+    memory: buildSection(
+      'memory',
+      'What this agent remembers across runs, backed by a store from the Memory module.',
+      <AgentMemoryPanel
+        value={memoryConfig}
+        onChange={setMemoryConfig}
+        stores={memoryStores}
+        onStoreCreated={(store) =>
+          setMemoryStores((current) =>
+            current.some((s) => s.key === store.key) ? current : [...current, store],
+          )
+        }
+      />,
+      memoryConfig?.enabled ? (
+        <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
+      ) : null,
+    ),
+    sandbox: buildSection(
+      'sandbox',
+      'An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets.',
+      <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} agentId={agentId} />,
+      sandboxConfig?.enabled ? (
+        <Badge size="xs" color="grape" variant="light" w="fit-content">
+          {SANDBOX_MODE_BADGES[resolveSandboxMode(sandboxConfig.mode)]}
+        </Badge>
+      ) : null,
+    ),
+    callback: buildSection(
+      'callback',
+      t('runSettings.sectionDescription'),
+      <AgentRunSettingsPanel
+        callback={callbackConfig}
+        onCallbackChange={setCallbackConfig}
+        budget={budgetConfig}
+        onBudgetChange={setBudgetConfig}
+      />,
+      callbackConfig?.url ? (
+        <Badge size="xs" color="indigo" variant="light" w="fit-content">{t('runSettings.badgeCallback')}</Badge>
+      ) : null,
+    ),
+    files: buildSection(
+      'files',
+      t('attachments.sectionDescription'),
+      <AgentFilesPanel
+        value={attachmentsConfig}
+        onChange={handleFilesChange}
+        agentKey={agent.key}
+        showErrors={filesSaveRefused}
+      />,
+      filesEnabled(attachmentsConfig) ? (
+        <Badge size="xs" color="teal" variant="light" w="fit-content">
+          {t('attachments.badgeOn', {
+            files: attachmentsConfig?.maxFiles ?? SESSION_FILES_DEFAULTS.maxFiles,
+            days: attachmentsConfig?.retentionDays ?? SESSION_FILES_DEFAULTS.retentionDays,
+          })}
+        </Badge>
+      ) : (
+        <Badge size="xs" color="gray" variant="light" w="fit-content">{t('attachments.badgeOff')}</Badge>
+      ),
+    ),
+    clienttools: buildSection(
+      'clienttools',
+      t('clientTools.sectionDescription'),
+      <Stack gap="lg">
+        <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />
+        <ClientToolsSurfaces value={clientToolSurfaces} onChange={setClientToolSurfaces} />
+      </Stack>,
+      clientToolsConfig && clientToolsConfig.length > 0 ? (
+        <Badge size="xs" color="grape" variant="light" w="fit-content">
+          {t('clientTools.badgeCount', { count: clientToolsConfig.length })}
+        </Badge>
+      ) : null,
+    ),
+    hitl: buildSection(
+      'hitl',
+      t('hitl.sectionDescription'),
+      <AgentHumanInTheLoopPanel
+        value={hitlConfig}
+        onChange={setHitlConfig}
+        clientTools={clientToolsConfig}
+        toolKinds={toolKinds}
+        toolConfig={{
+          toolBindings,
+          knowledgeBindings: configForm.values.knowledgeBindings.filter((b) => b.key),
+          knowledgeToolMode: configForm.values.knowledgeToolMode,
+          subagents,
+          skills,
+          memory: memoryConfig,
+          sandbox: sandboxConfig,
+        }}
+      />,
+      hitlConfig?.toolApproval?.enabled !== false || hitlConfig?.askUser?.enabled ? (
+        <Badge size="xs" color="orange" variant="light" w="fit-content">
+          {[hitlConfig?.toolApproval?.enabled !== false ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
+            .filter(Boolean).join(' + ')}
+        </Badge>
+      ) : null,
+    ),
+    advanced: buildSection(
+      'advanced',
+      'How the agent loop behaves: planning, budgets, context handling and reasoning.',
+      <>
+      <AgentAdvancedSettings
+        value={runtimeConfig}
+        onChange={setRuntimeConfig}
+        toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+        maxTokens={maxTokens}
+        onMaxTokensChange={(next) => setMaxTokens(next !== undefined && next > 0 ? Math.floor(next) : undefined)}
+        maxTokensLabels={{
+          label: t('config.maxTokensPerCall'),
+          description: t('config.maxTokensPerCallDescription'),
+          placeholder: t('config.maxTokensPerCallPlaceholder'),
+        }}
+      />
+      <AgentRemindersSettings
+        value={remindersConfig}
+        onChange={setRemindersConfig}
+        onGoToSection={(section) => document.getElementById(`config-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+      />
+      </>,
+    ),
+    variables: buildSection(
+      'variables',
+      t('variables.sectionDescription'),
+      <AgentVariablesEditor value={variablesConfig} onChange={setVariablesConfig} />,
+      variablesConfig?.length ? (
+        <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('variables.badge', { count: variablesConfig.length })}</Badge>
+      ) : null,
+    ),
+    output: buildSection(
+      'output',
+      'Make the agent answer with JSON that matches a schema instead of free text.',
+      <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />,
+    ),
+  };
 
   return (
     <PageContainer>
@@ -1329,26 +1671,6 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         subtitle={ownedByFlow ? agent.description || undefined : agent.description || agent.key}
         actions={
           <Group gap="sm">
-            {!isConnected ? (
-              <Button
-                size="xs"
-                variant="default"
-                leftSection={<IconUpload size={14} />}
-                onClick={() => setUpdateFromFileOpen(true)}
-              >
-                Update from file
-              </Button>
-            ) : null}
-            {!isConnected && !isFlow && !ownedByFlow && (agent.latestVersion ?? 0) > 0 ? (
-              <Button
-                size="xs"
-                variant="default"
-                leftSection={<IconArrowsLeftRight size={14} />}
-                onClick={() => setCompareOpen(true)}
-              >
-                Compare
-              </Button>
-            ) : null}
             <Button
               size="xs"
               variant="light"
@@ -1372,6 +1694,14 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
                     {t('publish.neverPublished')}
                   </Badge>
                 )}
+                {/* What publishing would change, in the header of every tab — not only as a count on Build. */}
+                {agent.publishedVersion && changedSections.size > 0 ? (
+                  <Tooltip label={t('header.draftTooltip', { sections: changedTitles.join(', ') })} withArrow multiline maw={320}>
+                    <Badge size="sm" variant="outline" color="orange" data-testid="agent-draft-badge">
+                      {changedSections.size === 1 ? t('header.draftOne') : t('header.draftMany', { count: changedSections.size })}
+                    </Badge>
+                  </Tooltip>
+                ) : null}
                 <Button
                   size="xs"
                   leftSection={<IconRocket size={14} />}
@@ -1381,6 +1711,39 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
                 </Button>
               </>
             )}
+            {/* Less frequent actions, one click away instead of three more buttons in the header. */}
+            {!isConnected ? (
+              <Menu position="bottom-end" withinPortal shadow="md">
+                <Menu.Target>
+                  <ActionIcon variant="default" size="md" aria-label={t('header.more')} data-testid="agent-header-more">
+                    <IconDots size={16} />
+                  </ActionIcon>
+                </Menu.Target>
+                <Menu.Dropdown>
+                  {!isFlow && !ownedByFlow && (agent.latestVersion ?? 0) > 0 ? (
+                    <Menu.Item leftSection={<IconArrowsLeftRight size={14} />} onClick={() => setCompareOpen(true)}>
+                      {t('header.compare')}
+                    </Menu.Item>
+                  ) : null}
+                  <Menu.Item leftSection={<IconUpload size={14} />} onClick={() => setUpdateFromFileOpen(true)}>
+                    {t('header.updateFromFile')}
+                  </Menu.Item>
+                  {ownedByFlow ? null : (
+                    <Menu.Item
+                      leftSection={<IconFileExport size={14} />}
+                      onClick={() => {
+                        setActiveTab('deploy');
+                        setDeployTab('export');
+                        // Already on Export: the state does not change, so scroll here as well.
+                        requestAnimationFrame(() => requestAnimationFrame(() => jumpToSection('export')));
+                      }}
+                    >
+                      {t('header.export')}
+                    </Menu.Item>
+                  )}
+                </Menu.Dropdown>
+              </Menu>
+            ) : null}
           </Group>
         }
       />
@@ -1443,6 +1806,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         {/* ── Overview ────────────────────────────────────────── */}
         {ownedByFlow ? null : (
         <Tabs.Panel value="overview">
+          <div className={classes.overviewLayout}>
           <AgentOverviewPanel
             agent={agent}
             variables={callVariables}
@@ -1460,11 +1824,22 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
               if (!alias.sub) return;
               if (alias.top === 'configure') setConfigureTab(alias.sub);
               if (alias.top === 'deploy') setDeployTab(alias.sub);
+              // Same target again (the state does not change): scroll here as well.
+              requestAnimationFrame(() => requestAnimationFrame(() => jumpToSection(alias.sub as string)));
             }}
+            unpublishedSections={changedTitles}
+            brokenReferences={(agentUsage?.uses ?? []).filter((edge) => edge.status !== 'ok')}
           />
-          <Paper withBorder radius="md" p="md" mt="md">
-            <ResourceUsageSection type="agent" id={String(agent._id)} showUses />
-          </Paper>
+          <AgentOverviewAside
+            usage={agentUsage}
+            usageFailed={agentUsageFailed}
+            isConnected={isConnected}
+            publishedVersion={agent.publishedVersion ?? null}
+            a2aEnabled={a2aEnabled}
+            triggerCount={triggerCount}
+            onManage={() => setActiveTab('deploy')}
+          />
+          </div>
         </Tabs.Panel>
         )}
 
@@ -1547,7 +1922,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         <Tabs.Panel value="configure">
           <Group justify="space-between" mb="sm">
             <Text size="sm" c="dimmed">
-              {isConnected || isFlow ? 1 : Object.keys(CONFIG_SECTION_KEYS).length} sections
+              {isConnected || isFlow ? 1 : BUILD_SECTION_ORDER.filter((id) => !(ownedByFlow && OWNED_HIDDEN_SECTIONS.has(id))).length} sections
               {ownedByFlow
                 ? ''
                 : agent.publishedVersion
@@ -1566,188 +1941,16 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
               </Button>
             ) : null}
           </Group>
-          <Paper withBorder radius="md" p="xl">
-            {buildSection(
-              'basic',
-              isFlow ? flowTexts.flowBuildDescription : 'What this agent is, which model answers, and the tools it can call.',
-              renderBasicSettings(),
-            )}
-            {buildSection(
-              'prompt',
-              'Inline text, or a prompt from the Prompts module — editable right here.',
-              <AgentPromptPanel
-                mode={configForm.values.promptMode}
-                onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
-                systemPrompt={configForm.values.systemPrompt}
-                onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
-                promptKey={configForm.values.promptKey}
-                onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
-                prompts={prompts}
-                onPromptsChanged={setPrompts}
-                onSaveAgentConfig={handleSaveConfig}
-              />,
-            )}
-            {buildSection(
-              'subagents',
-              'Roles this agent can hand work to, and the guards around that.',
-              <AgentSubagentsPanel
-                subagents={subagents}
-                policy={subagentPolicy}
-                agents={projectAgents}
-                models={models.map((model) => ({ key: model.key, name: model.name }))}
-                currentAgentKey={agent.key}
-                onChange={(nextSubagents, nextPolicy) => {
-                  setSubagents(nextSubagents);
-                  setSubagentPolicy(nextPolicy);
-                }}
-              />,
-              subagents.length > 0 ? (
-                <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'skills',
-              "Capabilities this agent can discover and open on demand, from the project's skill library.",
-              <AgentSkillsPanel
-                skills={skills}
-                policy={skillPolicy}
-                library={skillLibrary}
-                onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
-                onChange={(nextSkills, nextPolicy) => {
-                  setSkills(nextSkills);
-                  setSkillPolicy(nextPolicy);
-                }}
-              />,
-              skills.length > 0 ? (
-                <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'memory',
-              'What this agent remembers across runs, backed by a store from the Memory module.',
-              <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />,
-              memoryConfig?.enabled ? (
-                <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'sandbox',
-              'An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets.',
-              <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} agentId={agentId} />,
-              sandboxConfig?.enabled ? (
-                <Badge size="xs" color="grape" variant="light" w="fit-content">
-                  {SANDBOX_MODE_BADGES[resolveSandboxMode(sandboxConfig.mode)]}
-                </Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'callback',
-              t('runSettings.sectionDescription'),
-              <AgentRunSettingsPanel
-                callback={callbackConfig}
-                onCallbackChange={setCallbackConfig}
-                budget={budgetConfig}
-                onBudgetChange={setBudgetConfig}
-              />,
-              callbackConfig?.url ? (
-                <Badge size="xs" color="indigo" variant="light" w="fit-content">{t('runSettings.badgeCallback')}</Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'files',
-              t('attachments.sectionDescription'),
-              <AgentFilesPanel
-                value={attachmentsConfig}
-                onChange={handleFilesChange}
-                agentKey={agent.key}
-                showErrors={filesSaveRefused}
-              />,
-              filesEnabled(attachmentsConfig) ? (
-                <Badge size="xs" color="teal" variant="light" w="fit-content">
-                  {t('attachments.badgeOn', {
-                    files: attachmentsConfig?.maxFiles ?? SESSION_FILES_DEFAULTS.maxFiles,
-                    days: attachmentsConfig?.retentionDays ?? SESSION_FILES_DEFAULTS.retentionDays,
-                  })}
-                </Badge>
-              ) : (
-                <Badge size="xs" color="gray" variant="light" w="fit-content">{t('attachments.badgeOff')}</Badge>
-              ),
-            )}
-            {buildSection(
-              'clienttools',
-              t('clientTools.sectionDescription'),
-              <Stack gap="lg">
-                <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />
-                <ClientToolsSurfaces value={clientToolSurfaces} onChange={setClientToolSurfaces} />
-              </Stack>,
-              clientToolsConfig && clientToolsConfig.length > 0 ? (
-                <Badge size="xs" color="grape" variant="light" w="fit-content">
-                  {t('clientTools.badgeCount', { count: clientToolsConfig.length })}
-                </Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'hitl',
-              t('hitl.sectionDescription'),
-              <AgentHumanInTheLoopPanel
-                value={hitlConfig}
-                onChange={setHitlConfig}
-                clientTools={clientToolsConfig}
-                toolKinds={toolKinds}
-                toolConfig={{
-                  toolBindings,
-                  knowledgeBindings: configForm.values.knowledgeBindings.filter((b) => b.key),
-                  knowledgeToolMode: configForm.values.knowledgeToolMode,
-                  subagents,
-                  skills,
-                  memory: memoryConfig,
-                  sandbox: sandboxConfig,
-                }}
-              />,
-              hitlConfig?.toolApproval?.enabled !== false || hitlConfig?.askUser?.enabled ? (
-                <Badge size="xs" color="orange" variant="light" w="fit-content">
-                  {[hitlConfig?.toolApproval?.enabled !== false ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
-                    .filter(Boolean).join(' + ')}
-                </Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'advanced',
-              'How the agent loop behaves: planning, budgets, context handling and reasoning.',
-              <>
-              <AgentAdvancedSettings
-                value={runtimeConfig}
-                onChange={setRuntimeConfig}
-                toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
-                maxTokens={maxTokens}
-                onMaxTokensChange={(next) => setMaxTokens(next !== undefined && next > 0 ? Math.floor(next) : undefined)}
-                maxTokensLabels={{
-                  label: t('config.maxTokensPerCall'),
-                  description: t('config.maxTokensPerCallDescription'),
-                  placeholder: t('config.maxTokensPerCallPlaceholder'),
-                }}
-              />
-              <AgentRemindersSettings
-                value={remindersConfig}
-                onChange={setRemindersConfig}
-                onGoToSection={(section) => document.getElementById(`config-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-              />
-              </>,
-            )}
-            {buildSection(
-              'variables',
-              t('variables.sectionDescription'),
-              <AgentVariablesEditor value={variablesConfig} onChange={setVariablesConfig} />,
-              variablesConfig?.length ? (
-                <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('variables.badge', { count: variablesConfig.length })}</Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'output',
-              'Make the agent answer with JSON that matches a schema instead of free text.',
-              <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />,
-            )}
-          </Paper>
+          <div className={showBuildIndex ? classes.buildLayout : undefined}>
+            {showBuildIndex ? (
+              <div className={classes.buildIndexColumn}>
+                <BuildSectionIndex groups={buildIndexGroups} onJump={jumpToSection} />
+              </div>
+            ) : null}
+            <Paper withBorder radius="md" p="xl" style={{ minWidth: 0 }}>
+              {BUILD_SECTION_ORDER.map((id) => <Fragment key={id}>{buildSectionElements[id]}</Fragment>)}
+            </Paper>
+          </div>
 
           {/*
             One save for the whole page. Every section above edits the same
@@ -1783,8 +1986,37 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           ) : null}
           {/* A FlowBase agent saves from its own card: the form here describes a model loop. */}
           {isFlow || readOnly ? null : (
-            <Group justify="flex-end" className={classes.configSaveBar}>
-              <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
+            <Group justify="space-between" wrap="nowrap" gap="md" className={classes.configSaveBar} data-testid="build-save-bar">
+              <Text
+                size="sm"
+                c={unsavedSections.size > 0 ? undefined : 'dimmed'}
+                fw={unsavedSections.size > 0 ? 500 : undefined}
+                role="status"
+                aria-live="polite"
+                lineClamp={2}
+                data-testid="build-unsaved"
+                data-count={unsavedSections.size}
+              >
+                {savedPayload === null
+                  ? null
+                  : unsavedSections.size === 0
+                    ? t('build.saved')
+                    : (
+                      <>
+                        <span className={classes.unsavedDot} aria-hidden="true">●</span>{' '}
+                        {unsavedSections.size === 1 ? t('build.unsavedOne') : t('build.unsavedMany', { count: unsavedSections.size })}
+                        <Text span size="sm" c="dimmed" fw={400}> · {t('build.unsavedIn', { sections: unsavedTitles.join(', ') })}</Text>
+                      </>
+                    )}
+              </Text>
+              <Group gap="xs" wrap="nowrap">
+                {unsavedSections.size > 0 ? (
+                  <Button variant="default" onClick={() => void discardUnsaved()} disabled={savingConfig} data-testid="build-discard">
+                    {t('build.discard')}
+                  </Button>
+                ) : null}
+                <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
+              </Group>
             </Group>
           )}
         </Tabs.Panel>
@@ -1816,12 +2048,68 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             published, exposed, scheduled?" is answered by scrolling, not by
             clicking through a rail. `?tab=versions` etc. scroll here.
           */}
+          {/* What is live and what publishing would change, before the sections that act on it. */}
+          {!isConnected ? (
+            <Paper withBorder radius="md" p="md" mb="md" data-testid="ship-summary">
+              <Group justify="space-between" wrap="wrap" gap="md">
+                <Stack gap={2} style={{ minWidth: 0 }}>
+                  <Group gap={8}>
+                    <Text fw={600}>
+                      {agent.publishedVersion ? t('ship.published', { version: agent.publishedVersion }) : t('ship.neverPublished')}
+                    </Text>
+                    {publishedVersionRecord ? (
+                      <Text size="sm" c="dimmed">
+                        {new Date(publishedVersionRecord.createdAt).toLocaleDateString(locale, { day: 'numeric', month: 'short', year: 'numeric' })}
+                      </Text>
+                    ) : null}
+                  </Group>
+                  <Text size="sm" c={agent.publishedVersion && changedSections.size > 0 ? 'orange.8' : 'dimmed'}>
+                    {!agent.publishedVersion
+                      ? t('ship.firstPublishHint')
+                      : changedSections.size === 0
+                        ? t('ship.draftSame')
+                        : changedSections.size === 1
+                          ? t('ship.draftChangedOne', { sections: changedTitles.join(', ') })
+                          : t('ship.draftChangedMany', { count: changedSections.size, sections: changedTitles.join(', ') })}
+                  </Text>
+                </Stack>
+                <Group gap="xs" wrap="wrap">
+                  {splitAgentUsedBy(agentUsage?.usedBy ?? []).surfaces.map((edge, index) => (
+                    <span key={`${edge.other.type}:${edge.other.id ?? index}`} className="ds-badge">
+                      {edge.other.name ?? edge.other.key}
+                    </span>
+                  ))}
+                  {triggerCount ? (
+                    <span className="ds-badge">
+                      {triggerCount === 1 ? t('overview.triggersOne') : t('overview.triggersMany', { count: triggerCount })}
+                    </span>
+                  ) : null}
+                  <span className="ds-badge">{a2aEnabled ? t('overview.a2aOn') : t('overview.a2aOff')}</span>
+                  {!isFlow && (agent.latestVersion ?? 0) > 0 ? (
+                    <Button size="xs" variant="default" leftSection={<IconArrowsLeftRight size={14} />} onClick={() => setCompareOpen(true)}>
+                      {t('header.compare')}
+                    </Button>
+                  ) : null}
+                  <Button size="xs" leftSection={<IconRocket size={14} />} onClick={() => setPublishModalOpen(true)}>
+                    {t('publish.button')}
+                  </Button>
+                </Group>
+              </Group>
+            </Paper>
+          ) : null}
           <Paper withBorder radius="md" p="xl">
             {!isConnected ? (
             <ConfigSection first id="versions" title={t('versions.title')} description={t('versions.description')}>
               <Stack gap="md">
                 <Group justify="flex-end" align="center">
                   <Group gap="xs">
+                    {compareVersionA || compareVersionB ? (
+                      <Text size="xs" c="dimmed" data-testid="versions-compare-selection">
+                        {t('versions.selected', {
+                          versions: [compareVersionA, compareVersionB].filter(Boolean).map((v) => `v${v}`).join(' ↔ '),
+                        })}
+                      </Text>
+                    ) : null}
                     <Badge size="sm" variant="light">{versionsTotal} total</Badge>
                     <Button
                       size="xs"
@@ -1846,8 +2134,28 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
                   />
                 ) : (
                   <DataGrid<AgentVersion>
-                    records={versions}
+                    records={versions.slice((shownVersionsPage - 1) * VERSIONS_PAGE_SIZE, shownVersionsPage * VERSIONS_PAGE_SIZE)}
                     rowKey={(v) => String(v.version)}
+                    footerLeft={
+                      versions.length > VERSIONS_PAGE_SIZE
+                        ? t('versions.showing', {
+                          from: (shownVersionsPage - 1) * VERSIONS_PAGE_SIZE + 1,
+                          to: Math.min(shownVersionsPage * VERSIONS_PAGE_SIZE, versions.length),
+                          total: versions.length,
+                        })
+                        : undefined
+                    }
+                    pagination={
+                      versions.length > VERSIONS_PAGE_SIZE
+                        ? {
+                          page: shownVersionsPage,
+                          onPageChange: setVersionsPage,
+                          pageSize: VERSIONS_PAGE_SIZE,
+                          total: versions.length,
+                          hasMore: shownVersionsPage < versionPageCount,
+                        }
+                        : undefined
+                    }
                     columns={[
                       {
                         key: 'select',
