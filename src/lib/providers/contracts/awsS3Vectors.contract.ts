@@ -3,6 +3,7 @@ import {
     DeleteIndexCommand,
     DeleteVectorsCommand,
     GetIndexCommand,
+    GetVectorsCommand,
     ListIndexesCommand,
     ListVectorsCommand,
     PutVectorsCommand,
@@ -291,6 +292,9 @@ function buildHandle(
         metadata: combinedMetadata,
     };
 }
+
+/** The most keys one GetVectors call accepts. */
+const GET_VECTORS_MAX_KEYS = 100;
 
 function extractIndexSource(handle: VectorIndexHandle): IndexSource {
     const metadata = handle.metadata ?? {};
@@ -736,6 +740,24 @@ export const AwsS3VectorsProviderContract: ProviderContract<
                     count: ids.length,
                     index: handle.externalId,
                 });
+            },
+            async existingVectorIds(handle: VectorIndexHandle, ids: string[]) {
+                const source = extractIndexSource(handle);
+                const found: string[] = [];
+                for (let start = 0; start < ids.length; start += GET_VECTORS_MAX_KEYS) {
+                    const response = await client.send(
+                        new GetVectorsCommand({
+                            indexArn: source.indexArn,
+                            keys: ids.slice(start, start + GET_VECTORS_MAX_KEYS),
+                            returnData: false,
+                            returnMetadata: false,
+                        }),
+                    );
+                    for (const vector of response.vectors ?? []) {
+                        if (vector.key) found.push(vector.key);
+                    }
+                }
+                return found;
             },
             async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
                 const source = extractIndexSource(handle);

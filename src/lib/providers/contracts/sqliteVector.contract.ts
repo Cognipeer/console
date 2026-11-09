@@ -349,6 +349,21 @@ export const SqliteVectorProviderContract: ProviderContract<
         });
       },
 
+      /* ---- existingVectorIds ---- */
+      async existingVectorIds(handle: VectorIndexHandle, ids: string[]): Promise<string[]> {
+        const found: string[] = [];
+        // Chunked below SQLite's bound-variable limit.
+        for (let start = 0; start < ids.length; start += 500) {
+          const chunk = ids.slice(start, start + 500);
+          const placeholders = chunk.map(() => '?').join(',');
+          const rows = db.prepare(
+            `SELECT id FROM vector_entries WHERE index_id = ? AND id IN (${placeholders})`,
+          ).all(handle.externalId, ...chunk) as Array<{ id: string }>;
+          for (const row of rows) found.push(row.id);
+        }
+        return found;
+      },
+
       /* ---- queryVectors ---- */
       async queryVectors(
         handle: VectorIndexHandle,
