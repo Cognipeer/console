@@ -354,8 +354,9 @@ describe('fitting the section', () => {
 
   it('the per-tool approvals table scrolls inside its section and wraps tool names between words', () => {
     const panel = readFileSync(join(process.cwd(), 'src/components/agents/studio/AgentHumanInTheLoopPanel.tsx'), 'utf8');
+    // The table scrolls instead of squeezing its columns: the approval column keeps the width the Ask / Never ask
+    // control needs (agent-session-activity-ui checks that width).
     expect(panel).toContain('<Table.ScrollContainer minWidth={600} type="native">');
-    expect(panel).not.toContain('<Table.Th w={300}>');
     expect(toolNameBreaks('get_resource_labels')).toEqual(['get_', 'resource_', 'labels']);
     expect(toolNameBreaks('mcp__crm__search.v2')).toEqual(['mcp__', 'crm__', 'search.', 'v2']);
     expect(toolNameBreaks('search')).toEqual(['search']);
