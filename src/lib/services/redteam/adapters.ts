@@ -19,7 +19,8 @@ import { CONTEXT_WINDOW_EXCEEDED_REASON, OutputTokenLimitError } from '@/lib/ser
 import { AGENT_REASONING_OVERRIDE, type NormalizedReasoning } from '@/lib/services/models/reasoning';
 import { extractAgentText, extractAssistantText } from '@/lib/services/evaluation/adapters';
 import type { AgentRunSelector } from '@/lib/services/agents/agentRevision';
-import type { AttackerInvoker, JudgeInvoker, RedTeamMessage, RedTeamOutput, TargetInvoker } from './types';
+import { clampMaxOutputTokens } from './limits';
+import type { AttackerInvoker, JudgeInvoker, RedTeamMessage, RedTeamOutput, TargetCallContext, TargetInvoker } from './types';
 import { runtimeContextForActor } from '@/lib/services/evaluation/kbCaller';
 
 export interface RedTeamModelContext {
@@ -40,6 +41,8 @@ export interface RedTeamTargetSpec {
   agentKey?: string;
   /** Which agent configuration every call hits; absent follows the published version. */
   agentRun?: AgentRunSelector;
+  /** Model targets: the output-token cap sent with every call (`max_tokens`). An agent keeps its own setting. */
+  maxOutputTokens?: number;
 }
 
 /** A judge replies with one JSON verdict and the attacker with one message: these are caps, not targets. */
@@ -78,7 +81,14 @@ async function invokeModel(
   ctx: RedTeamModelContext,
   modelKey: string,
   messages: RedTeamMessage[],
-  options?: { temperature?: number; sideCall?: { maxTokens: number } },
+  options?: {
+    temperature?: number;
+    sideCall?: { maxTokens: number };
+    /** The output-token cap of a plain (target) call; a side call plans its own. */
+    maxTokens?: number;
+    /** Aborts the request. */
+    signal?: AbortSignal;
+  },
 ): Promise<ModelCall> {
   const side = options?.sideCall ? await resolveSideCall(ctx, modelKey, options.sideCall.maxTokens) : undefined;
   const send = async (maxTokens?: number): Promise<ChatResult> => (await handleChatCompletion({
@@ -86,6 +96,7 @@ async function invokeModel(
     tenantId: ctx.tenantId,
     modelKey,
     projectId: ctx.projectId,
+    ...(options?.signal ? { signal: options.signal } : {}),
     body: {
       messages,
       ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
@@ -99,7 +110,7 @@ async function invokeModel(
     raw: result.response,
   });
 
-  if (!side) return output(await send());
+  if (!side) return output(await send(options?.maxTokens));
 
   // No text at all (the thinking took the limit) comes back as an OutputTokenLimitError; text that ends
   // mid-way comes back as a `length` finish. Either way the call is repeated once with a larger limit.
@@ -137,16 +148,23 @@ function lastUser(messages: RedTeamMessage[]): string {
 }
 
 export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelContext): TargetInvoker {
-  // Each attempt gets its own agent conversation so multi-turn attacks share
-  // state WITHIN an attempt but never bleed across attempts. The runner feeds a
-  // fresh history (no assistant turns yet) at the start of every attempt — we
-  // mint a new conversation id whenever we see that.
-  let conversationId = `redteam-${target.key}-${crypto.randomUUID()}`;
+  // Each attempt gets its own agent conversation, so multi-turn attacks share
+  // state WITHIN an attempt but never bleed across attempts, even when attempts
+  // run in parallel. The runner names the attempt on every call (`call.attemptKey`)
+  // and marks its opening turn (`turnIndex === 0`): a new conversation starts there.
+  const conversations = new Map<string, string>();
+  // Without a call context (a caller that is not the runner) the old rule applies:
+  // a history with no assistant turn yet starts a new conversation.
+  let fallbackConversationId = `redteam-${target.key}-${crypto.randomUUID()}`;
+  const maxTokens = typeof target.maxOutputTokens === 'number' ? clampMaxOutputTokens(target.maxOutputTokens) : undefined;
 
-  return async (messages: RedTeamMessage[]): Promise<RedTeamOutput> => {
+  return async (messages: RedTeamMessage[], call?: TargetCallContext): Promise<RedTeamOutput> => {
     if (target.kind === 'model') {
       if (!target.modelKey) throw new Error(`Red-team target "${target.key}" has no modelKey configured`);
-      return invokeModel(ctx, target.modelKey, messages);
+      return invokeModel(ctx, target.modelKey, messages, {
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(call?.signal ? { signal: call.signal } : {}),
+      });
     }
     if (target.kind === 'agent') {
       if (!target.agentKey) throw new Error(`Red-team target "${target.key}" has no agentKey configured`);
@@ -154,10 +172,10 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
       // loaded when an agent target actually runs.
       const { executeAgentChat, createConversation } = await import('@/lib/services/agents/agentService');
       const redTeamRuntime = runtimeContextForActor(ctx.userId, ctx.tokenId, 'redteam');
-      // A fresh attempt (no assistant turns yet) gets its own conversation, so
-      // multi-turn state is shared within an attempt but never across attempts.
+      const opensAttempt = call ? call.turnIndex === 0 : !messages.some((m) => m.role === 'assistant');
+      let conversationId = call ? conversations.get(call.attemptKey) : fallbackConversationId;
       // The conversation must exist before executeAgentChat (it loads by id).
-      if (!messages.some((m) => m.role === 'assistant')) {
+      if (opensAttempt || !conversationId) {
         const convo = await createConversation(
           ctx.tenantDbName,
           ctx.tenantId,
@@ -168,6 +186,8 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
           { source: 'redteam' },
         );
         conversationId = String(convo._id);
+        if (call) conversations.set(call.attemptKey, conversationId);
+        else fallbackConversationId = conversationId;
       }
       const started = Date.now();
       const response = await executeAgentChat({
@@ -184,6 +204,8 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
         unattended: true,
         // Its knowledge tools read as the person who started the scan (or the token it was started with).
         ...(redTeamRuntime ? { runtimeContext: redTeamRuntime } : {}),
+        // The call's time limit (or the run's stop) ends the turn.
+        ...(call?.signal ? { signal: call.signal } : {}),
       });
       return { text: extractAgentText(response), latencyMs: Date.now() - started, raw: response };
     }

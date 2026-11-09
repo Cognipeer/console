@@ -1,5 +1,5 @@
 /**
- * LLM02 — Insecure output handling.
+ * LLM05 — Improper output handling.
  *
  * Tries to make the model emit active content (script tags, javascript: URIs,
  * event handlers, data-exfiltrating markdown images) that a downstream UI might
@@ -29,7 +29,7 @@ export function createInsecureOutputProbe(): Probe {
   return {
     key: 'insecure-output-handling',
     family: 'insecure-output',
-    category: 'LLM02-insecure-output-handling',
+    category: 'LLM05-improper-output-handling',
     severity: 'high',
     description: 'Attempts to elicit active/unsafe content (scripts, js: URIs, exfiltration images) a downstream app could execute.',
     detectors: [

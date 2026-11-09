@@ -2,14 +2,17 @@
  * Red-team dashboard API plugin (session-authenticated, `/api/redteam/*`).
  *
  * Authoring + operating surface for the console UI: probe catalog, campaign
- * CRUD, async scan trigger, run history, and the human-in-the-loop review
- * endpoint that overrides a machine verdict (and recomputes the aggregate).
+ * CRUD, async scan trigger, run history, scan cancel, and the human-in-the-loop
+ * review endpoint that overrides a machine verdict (and recomputes the aggregate).
  */
 
 import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { BUILTIN_PROBE_KEYS, listProbeCatalog } from '@/lib/services/redteam/probes';
+import { BUILTIN_PROBE_KEYS, listProbeCatalog, validateCustomProbeDefinition } from '@/lib/services/redteam/probes';
+import { ATTEMPT_ID_PATTERN, CUSTOM_PROBE_LIMITS } from '@/lib/services/redteam/limits';
+import { ATTEMPT_KEY_SEPARATOR } from '@/lib/services/redteam/attemptKey';
+import { OWASP_LLM_CATEGORIES, isKnownOwaspCategory, normalizeOwaspCategory } from '@/lib/services/redteam/owasp';
 import type { IRedTeamCustomAttempt, IRedTeamCustomDetectors, RedTeamSeverity } from '@/lib/database';
 import { validateCron } from '@/lib/services/redteam/schedulePlanner';
 import { runCalibration } from '@/lib/services/redteam/calibration/calibrationRunner';
@@ -28,6 +31,7 @@ import {
   type AgentRevision,
 } from '@/lib/shared/agentRevision';
 import {
+  cancelRun,
   compareRuns,
   createCampaign,
   createCustomProbe,
@@ -39,11 +43,16 @@ import {
   getRun,
   listCampaigns,
   listCustomProbes,
-  listRuns,
+  listRunsPage,
   reviewAttempt,
   updateCampaign,
   updateCustomProbe,
+  validateCampaignInput,
   CustomProbeError,
+  RedTeamConflictError,
+  RedTeamForbiddenError,
+  RedTeamNotFoundError,
+  RedTeamValidationError,
   type CustomProbeInput,
   type RunOptions,
   type UpdateCampaignInput,
@@ -57,7 +66,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { withoutRestrictedAttempts } from '../restrictedKnowledgeRequest';
+import { restrictedKnowledgeReaderFor, withoutRestrictedAttempts } from '../restrictedKnowledgeRequest';
 import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
 import { readClearableText, readRequiredText } from './partial-update';
 
@@ -65,12 +74,45 @@ const logger = createLogger('api:redteam');
 
 const VALID_KINDS: RedTeamTargetKind[] = ['agent', 'model'];
 const VALID_OUTCOMES: RedTeamOutcome[] = ['safe', 'vulnerable', 'needs_review'];
+/** Page size of the run list: `default` when the caller names none, never more than `max`. */
+const RUN_LIST_PAGE = { default: 25, max: 100 } as const;
+
+/**
+ * The service's typed errors keep their status: a bad value is a 400, a record
+ * that is not there a 404, a refusal a 403 and a clash with the current state a
+ * 409 (a custom probe still in use also lists who uses it).
+ */
+function sendServiceError(reply: import('fastify').FastifyReply, error: unknown) {
+  if (error instanceof RedTeamValidationError || error instanceof CustomProbeError) {
+    return reply.code(400).send({ error: error.message });
+  }
+  if (error instanceof RedTeamForbiddenError) return reply.code(403).send({ error: error.message });
+  if (error instanceof RedTeamNotFoundError) return reply.code(404).send({ error: error.message });
+  if (error instanceof RedTeamConflictError) {
+    const usedBy = (error as { usedBy?: unknown }).usedBy;
+    return reply.code(409).send({
+      error: error.message,
+      ...(Array.isArray(usedBy) && usedBy.length > 0 ? { usedBy } : {}),
+    });
+  }
+  return null;
+}
 
 function internalError(reply: import('fastify').FastifyReply, error: unknown) {
   return (
     sendProjectContextError(reply, error)
+    ?? sendServiceError(reply, error)
     ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' })
   );
+}
+
+/** A query value that must be a whole number; `undefined` when the caller sent none. */
+function readQueryInteger(raw: unknown, name: string, min: number): { value?: number } | { error: string } {
+  if (raw === undefined || raw === '') return {};
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return { error: `${name} must be an integer of at least ${min}` };
+  const n = Number(raw.trim());
+  if (!Number.isSafeInteger(n) || n < min) return { error: `${name} must be an integer of at least ${min}` };
+  return { value: n };
 }
 
 /**
@@ -97,7 +139,7 @@ function sanitizeProbeKeys(raw: unknown, customKeys: string[] = []): string[] | 
   const allowed = new Set([...BUILTIN_PROBE_KEYS, ...customKeys]);
   const unknown = keys.find((k) => !allowed.has(k));
   if (unknown) return null;
-  return keys;
+  return [...new Set(keys)];
 }
 
 /** A PATCH's `probeKeys` must be a list of keys; which ones exist is checked once the campaign (and so its project) is known. */
@@ -119,9 +161,12 @@ function sanitizeSchedule(raw: unknown): ScheduleResult {
   if (typeof raw !== 'object') return { error: 'schedule must be an object' };
   const s = raw as Record<string, unknown>;
   if (typeof s.cron !== 'string') return { error: 'schedule.cron must be a string' };
-  const cronError = validateCron(s.cron);
+  const enabled = s.enabled !== false;
+  // A schedule that is switched off keeps whatever expression it was saved with; only an unusable one is refused.
+  if (!enabled && s.cron.length > 120) return { error: 'schedule.cron is too long' };
+  const cronError = validateCron(s.cron, enabled ? {} : { minInterval: false });
   if (cronError) return { error: cronError };
-  return { schedule: { cron: s.cron, enabled: s.enabled !== false } };
+  return { schedule: { cron: s.cron, enabled } };
 }
 
 /**
@@ -157,7 +202,7 @@ function sanitizeRunOptions(body: Record<string, unknown>, customKeys: string[] 
     const allowed = new Set([...BUILTIN_PROBE_KEYS, ...customKeys]);
     const unknown = keys.find((k) => !allowed.has(k));
     if (unknown) return { error: `unknown probe: ${unknown}` };
-    options.probeKeys = keys;
+    options.probeKeys = [...new Set(keys)];
   }
   if (typeof body.judgeModelKey === 'string' && body.judgeModelKey) {
     options.judgeModelKey = body.judgeModelKey;
@@ -169,16 +214,60 @@ function sanitizeRunOptions(body: Record<string, unknown>, customKeys: string[] 
 }
 
 const VALID_SEVERITIES: RedTeamSeverity[] = ['low', 'medium', 'high', 'critical'];
-const VALID_OWASP_CATEGORIES = [
-  'LLM01-prompt-injection',
-  'LLM02-insecure-output-handling',
-  'LLM04-model-dos',
-  'LLM05-supply-chain',
-  'LLM06-sensitive-information-disclosure',
-  'LLM07-system-prompt-leakage',
-  'LLM08-excessive-agency',
-  'LLM09-overreliance',
-];
+
+interface CampaignKnobs {
+  runConfig?: { concurrency?: number; maxOutputTokens?: number };
+  policy?: NonNullable<IRedTeamCampaign['policy']>;
+}
+type CampaignKnobsResult = CampaignKnobs | { error: string };
+
+/**
+ * The shape of a campaign's `runConfig` and `policy`. Only types are checked here (so what reaches the service
+ * has the right form); the ranges are the service's to decide (validateCampaignInput).
+ */
+function sanitizeCampaignKnobs(body: Record<string, unknown>): CampaignKnobsResult {
+  const out: CampaignKnobs = {};
+  const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (body.runConfig !== undefined) {
+    if (!isObject(body.runConfig)) return { error: 'runConfig must be an object' };
+    const runConfig: { concurrency?: number; maxOutputTokens?: number } = {};
+    for (const key of ['concurrency', 'maxOutputTokens'] as const) {
+      const value = body.runConfig[key];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'number' || !Number.isFinite(value)) return { error: `runConfig.${key} must be a number` };
+      runConfig[key] = value;
+    }
+    out.runConfig = runConfig;
+  }
+  if (body.policy !== undefined) {
+    if (!isObject(body.policy)) return { error: 'policy must be an object' };
+    const policy: NonNullable<IRedTeamCampaign['policy']> = {};
+    const { deterministicConfidence, reviewBand, maxJudgeVariance } = body.policy;
+    if (deterministicConfidence !== undefined) {
+      if (typeof deterministicConfidence !== 'number' || !Number.isFinite(deterministicConfidence)) {
+        return { error: 'policy.deterministicConfidence must be a number' };
+      }
+      policy.deterministicConfidence = deterministicConfidence;
+    }
+    if (reviewBand !== undefined) {
+      if (
+        !Array.isArray(reviewBand) || reviewBand.length !== 2
+        || reviewBand.some((n) => typeof n !== 'number' || !Number.isFinite(n))
+      ) {
+        return { error: 'policy.reviewBand must be a pair of numbers [low, high]' };
+      }
+      policy.reviewBand = [reviewBand[0], reviewBand[1]];
+    }
+    if (maxJudgeVariance !== undefined) {
+      if (typeof maxJudgeVariance !== 'number' || !Number.isFinite(maxJudgeVariance)) {
+        return { error: 'policy.maxJudgeVariance must be a number' };
+      }
+      policy.maxJudgeVariance = maxJudgeVariance;
+    }
+    out.policy = policy;
+  }
+  return out;
+}
 
 type ComplianceResult = { compliance: CampaignComplianceMeta | undefined } | { error: string };
 
@@ -210,9 +299,11 @@ type CustomProbeResult = { input: Omit<CustomProbeInput, 'projectId'> } | { erro
 
 /** Validate and normalise a custom-probe request body. */
 function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
+  const L = CUSTOM_PROBE_LIMITS;
   if (typeof body.name !== 'string' || body.name.trim() === '') return { error: 'name is required' };
-  if (typeof body.category !== 'string' || !VALID_OWASP_CATEGORIES.includes(body.category)) {
-    return { error: `category must be one of: ${VALID_OWASP_CATEGORIES.join(', ')}` };
+  // The 2025 keys, and the earlier ones they replace: a probe is stored under the 2025 key either way.
+  if (typeof body.category !== 'string' || !isKnownOwaspCategory(body.category)) {
+    return { error: `category must be one of: ${OWASP_LLM_CATEGORIES.join(', ')}` };
   }
   if (!VALID_SEVERITIES.includes(body.severity as RedTeamSeverity)) {
     return { error: 'severity must be "low", "medium", "high", or "critical"' };
@@ -220,23 +311,47 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
   if (!Array.isArray(body.attempts) || body.attempts.length === 0) {
     return { error: 'attempts must be a non-empty array' };
   }
+  if (body.attempts.length > L.maxAttempts) {
+    return { error: `a custom probe may have at most ${L.maxAttempts} attempts` };
+  }
   const attempts: IRedTeamCustomAttempt[] = [];
+  const seenIds = new Set<string>();
   for (let i = 0; i < body.attempts.length; i += 1) {
     const a = body.attempts[i] as Record<string, unknown>;
     if (!a || typeof a !== 'object') return { error: `attempt ${i + 1} must be an object` };
     const turns = Array.isArray(a.turns) ? a.turns.filter((t): t is string => typeof t === 'string' && t.trim() !== '') : [];
     if (turns.length === 0) return { error: `attempt ${i + 1} needs at least one non-empty turn` };
+    if (turns.length > L.maxTurnsPerAttempt) {
+      return { error: `attempt ${i + 1} may have at most ${L.maxTurnsPerAttempt} turns` };
+    }
+    if (turns.some((t) => t.length > L.maxTurnChars)) {
+      return { error: `attempt ${i + 1}: a turn may be at most ${L.maxTurnChars} characters` };
+    }
+    const id = typeof a.id === 'string' && a.id.trim() ? a.id.trim() : `attempt-${i + 1}`;
+    if (!ATTEMPT_ID_PATTERN.test(id)) {
+      return { error: `attempt ${i + 1}: id may use letters, digits, ".", "_" and "-" only, up to ${L.maxAttemptIdLength} characters` };
+    }
+    if (seenIds.has(id)) return { error: `attempt id "${id}" is used more than once; ids must be unique within the probe` };
+    seenIds.add(id);
+    const system = typeof a.system === 'string' ? a.system : undefined;
+    if (system && system.length > L.maxSystemChars) {
+      return { error: `attempt ${i + 1}: system may be at most ${L.maxSystemChars} characters` };
+    }
+    const objective = typeof a.objective === 'string' ? a.objective : undefined;
+    if (objective && objective.length > L.maxObjectiveChars) {
+      return { error: `attempt ${i + 1}: objective may be at most ${L.maxObjectiveChars} characters` };
+    }
     attempts.push({
-      id: typeof a.id === 'string' && a.id.trim() ? a.id : `attempt-${i + 1}`,
+      id,
       turns,
-      system: typeof a.system === 'string' ? a.system : undefined,
+      system,
       canary: typeof a.canary === 'string' ? a.canary : undefined,
       forbiddenPatterns: Array.isArray(a.forbiddenPatterns)
         ? a.forbiddenPatterns.filter((p): p is string => typeof p === 'string')
         : undefined,
       refusalExpected: typeof a.refusalExpected === 'boolean' ? a.refusalExpected : undefined,
       adaptive: typeof a.adaptive === 'boolean' ? a.adaptive : undefined,
-      objective: typeof a.objective === 'string' ? a.objective : undefined,
+      objective,
     });
   }
   const rawDetectors = (body.detectors ?? {}) as Record<string, unknown>;
@@ -250,6 +365,10 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
           threshold: typeof j.threshold === 'number' ? j.threshold : undefined,
         }))
     : [];
+  if (judges.length > L.maxJudges) return { error: `a custom probe may have at most ${L.maxJudges} judge lenses` };
+  if (judges.some((j) => j.rubric.length > L.maxRubricChars)) {
+    return { error: `a judge rubric may be at most ${L.maxRubricChars} characters` };
+  }
   const detectors: IRedTeamCustomDetectors = {
     refusal: rawDetectors.refusal !== false,
     pattern: rawDetectors.pattern !== false,
@@ -264,7 +383,7 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
       // Optional fields only when the body carries them, so a PATCH leaves the stored ones alone.
       ...(typeof body.description === 'string' ? { description: body.description } : {}),
       ...(typeof body.family === 'string' && body.family.trim() ? { family: body.family.trim() } : {}),
-      category: body.category,
+      category: normalizeOwaspCategory(body.category),
       severity: body.severity as RedTeamSeverity,
       attempts,
       detectors,
@@ -273,13 +392,34 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
   };
 }
 
+/**
+ * The probe definition's own rules (canary planting, pattern bounds, ...). On a PATCH the stored attempts are
+ * passed too, so an attempt whose patterns did not change is not held to rules added after it was saved.
+ */
+function definitionError(
+  input: Pick<CustomProbeInput, 'category' | 'attempts'>,
+  detectors: IRedTeamCustomDetectors,
+  storedAttempts?: IRedTeamCustomAttempt[],
+): string | null {
+  try {
+    validateCustomProbeDefinition({ category: input.category, attempts: input.attempts, detectors }, storedAttempts);
+    return null;
+  } catch (error) {
+    if (error instanceof CustomProbeError || error instanceof RedTeamValidationError) return error.message;
+    throw error;
+  }
+}
+
 export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Probe catalog (built-in + tenant custom probes) ────────────────
   app.get('/redteam/probes', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const customProbes = await listCustomProbes(session.tenantDbName, { projectId });
-      return reply.code(200).send({ probes: listProbeCatalog(customProbes) });
+      const disabledProbes = customProbes
+        .filter((def) => def.enabled === false)
+        .map((def) => ({ key: def.key, name: def.name }));
+      return reply.code(200).send({ probes: listProbeCatalog(customProbes), disabledProbes });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -290,9 +430,11 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as { limit?: string };
+      const limit = readQueryInteger(query.limit, 'limit', 1);
+      if ('error' in limit) return reply.code(400).send({ error: limit.error });
       const overview = await getOverview(session.tenantDbName, {
         projectId,
-        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 500) : undefined,
+        limit: limit.value !== undefined ? Math.min(limit.value, 500) : undefined,
       });
       return reply.code(200).send({ overview });
     } catch (error) {
@@ -307,9 +449,11 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as { limit?: string };
+      const limit = readQueryInteger(query.limit, 'limit', 1);
+      if ('error' in limit) return reply.code(400).send({ error: limit.error });
       const report = await buildComplianceReport(session.tenantDbName, new Date(), {
         projectId,
-        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 500) : undefined,
+        limit: limit.value !== undefined ? Math.min(limit.value, 500) : undefined,
       });
       return reply.code(200).send({ report });
     } catch (error) {
@@ -385,9 +529,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       if (!probeKeys) {
         return reply.code(400).send({ error: 'probeKeys must reference built-in or existing custom probes' });
       }
-      const runConfig = body.runConfig && typeof body.runConfig === 'object'
-        ? { concurrency: Number((body.runConfig as Record<string, unknown>).concurrency) || undefined }
-        : undefined;
+      const knobs = sanitizeCampaignKnobs(body);
+      if ('error' in knobs) return reply.code(400).send({ error: knobs.error });
       const sched = sanitizeSchedule(body.schedule);
       if ('error' in sched) return reply.code(400).send({ error: sched.error });
       const comp = sanitizeCompliance(body.compliance);
@@ -397,6 +540,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const isAgent = body.targetKind === 'agent';
       const draftError = isAgent ? scheduledDraftError(sched.schedule, revision.revision ?? 'published') : null;
       if (draftError) return reply.code(400).send({ error: draftError });
+      // Ranges and limits (concurrency, output tokens, decision policy, probe count): a RedTeamValidationError is a 400.
+      await validateCampaignInput({ probeKeys, runConfig: knobs.runConfig, policy: knobs.policy });
       // A saved agent campaign is scanned later (by its schedule too), so whoever saves one may spend the agent.
       if (isAgent) await requireAgentTestAccess(request);
       const campaign = await createCampaign(session.tenantDbName, session.tenantId, session.userId, {
@@ -408,8 +553,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         modelKey: typeof body.modelKey === 'string' ? body.modelKey : undefined,
         probeKeys,
         judgeModelKey: typeof body.judgeModelKey === 'string' ? body.judgeModelKey : undefined,
-        runConfig,
-        policy: (body.policy as Record<string, never> | undefined) ?? undefined,
+        runConfig: knobs.runConfig,
+        policy: knobs.policy,
         schedule: sched.schedule,
         compliance: comp.compliance,
         projectId,
@@ -454,6 +599,10 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.probeKeys !== undefined && !isProbeKeyList(body.probeKeys)) {
         return reply.code(400).send({ error: 'probeKeys must be an array of probe keys' });
       }
+      const knobs = sanitizeCampaignKnobs(body);
+      if ('error' in knobs) return reply.code(400).send({ error: knobs.error });
+      if (knobs.runConfig !== undefined) data.runConfig = knobs.runConfig;
+      if (knobs.policy !== undefined) data.policy = knobs.policy;
       if (body.schedule === null) {
         data.schedule = null;
       } else if (body.schedule !== undefined) {
@@ -482,6 +631,7 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         }
         data.probeKeys = probeKeys;
       }
+      await validateCampaignInput({ probeKeys: data.probeKeys, runConfig: data.runConfig, policy: data.policy });
       // A version number belongs to one agent: moving the campaign to another agent without naming a version
       // puts it back on the published one, as the form does.
       const agentMoved = isAgent && data.agentKey !== undefined && data.agentKey !== existing.agentKey;
@@ -564,6 +714,8 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       if (refused) return refused;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Run red-team scan error', { error });
+      const typed = sendServiceError(reply, error);
+      if (typed) return typed;
       if (error instanceof AgentRevisionError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -582,16 +734,20 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as { campaignKey?: string; limit?: string; skip?: string };
-      const runs = await listRuns(session.tenantDbName, {
+      const limit = readQueryInteger(query.limit, 'limit', 1);
+      if ('error' in limit) return reply.code(400).send({ error: limit.error });
+      const skip = readQueryInteger(query.skip, 'skip', 0);
+      if ('error' in skip) return reply.code(400).send({ error: skip.error });
+      const { runs, total } = await listRunsPage(session.tenantDbName, {
         projectId,
-        campaignKey: query.campaignKey,
-        limit: query.limit ? Math.min(Number.parseInt(query.limit, 10), 200) : undefined,
-        skip: query.skip ? Number.parseInt(query.skip, 10) : undefined,
+        campaignKey: typeof query.campaignKey === 'string' ? query.campaignKey : undefined,
+        limit: Math.min(limit.value ?? RUN_LIST_PAGE.default, RUN_LIST_PAGE.max),
+        skip: skip.value ?? 0,
       });
       const viewer = { tenantDbName: session.tenantDbName, viewerUserId: session.userId };
       const shown = [];
       for (const run of runs) shown.push(await withoutRestrictedAttempts(request, viewer, run));
-      return reply.code(200).send({ runs: shown });
+      return reply.code(200).send({ runs: shown, total });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -628,23 +784,58 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Cancel ─────────────────────────────────────────────────────────
+  // A pending run is cancelled on the spot; a running one is asked to stop and ends as `cancelled` with what
+  // finished. Same permission as starting a scan (POST under /redteam). A finished run answers 409.
+  app.post('/redteam/runs/:id/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { id } = request.params as { id: string };
+      if (!inActiveProject(await getRun(session.tenantDbName, id), projectId)) {
+        return reply.code(404).send({ error: 'Run not found' });
+      }
+      const run = await cancelRun(session.tenantDbName, id, session.userId);
+      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      return reply.code(200).send({ run: await withoutRestrictedAttempts(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, run) });
+    } catch (error) {
+      logger.error('Cancel red-team run error', { error });
+      return internalError(reply, error);
+    }
+  }));
+
   // ── HITL review ────────────────────────────────────────────────────
+  // The attempt is named by `attemptKey` (`<probeKey>::<attemptId>`) in the body, or by the path segment, which
+  // takes a key or a bare attempt id. A bare id that two probes share is refused with 409.
   app.post('/redteam/runs/:id/attempts/:attemptId/review', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const { id, attemptId } = request.params as { id: string; attemptId: string };
+      const { id, attemptId: pathAttempt } = request.params as { id: string; attemptId: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       if (!VALID_OUTCOMES.includes(body.outcome as RedTeamOutcome)) {
         return reply.code(400).send({ error: 'outcome must be "safe", "vulnerable", or "needs_review"' });
       }
+      for (const field of ['attemptKey', 'attemptId'] as const) {
+        if (body[field] !== undefined && (typeof body[field] !== 'string' || !(body[field] as string).trim())) {
+          return reply.code(400).send({ error: `${field} must be a non-empty string` });
+        }
+      }
+      const fromPath = typeof pathAttempt === 'string' && pathAttempt.trim() ? pathAttempt.trim() : undefined;
+      const ref: { attemptKey?: string; attemptId?: string } = {};
+      if (typeof body.attemptKey === 'string') ref.attemptKey = body.attemptKey.trim();
+      else if (typeof body.attemptId === 'string') ref.attemptId = body.attemptId.trim();
+      else if (fromPath && fromPath.includes(ATTEMPT_KEY_SEPARATOR)) ref.attemptKey = fromPath;
+      else if (fromPath) ref.attemptId = fromPath;
+      if (!ref.attemptKey && !ref.attemptId) {
+        return reply.code(400).send({ error: 'attemptKey or attemptId is required' });
+      }
       if (!inActiveProject(await getRun(session.tenantDbName, id), projectId)) {
         return reply.code(404).send({ error: 'Run not found' });
       }
-      const run = await reviewAttempt(session.tenantDbName, id, attemptId, {
+      const run = await reviewAttempt(session.tenantDbName, id, ref, {
         outcome: body.outcome as RedTeamOutcome,
         note: typeof body.note === 'string' ? body.note : undefined,
         reviewedBy: session.userId,
-      });
+      }, restrictedKnowledgeReaderFor(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }));
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       return reply.code(200).send({ run: await withoutRestrictedAttempts(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, run) });
     } catch (error) {
@@ -671,13 +862,14 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
       const result = sanitizeCustomProbe(body);
       if ('error' in result) return reply.code(400).send({ error: result.error });
+      const invalid = definitionError(result.input, result.input.detectors);
+      if (invalid) return reply.code(400).send({ error: invalid });
       const probe = await createCustomProbe(session.tenantDbName, session.tenantId, session.userId, {
         ...result.input,
         projectId,
       });
       return reply.code(201).send({ probe });
     } catch (error) {
-      if (error instanceof CustomProbeError) return reply.code(400).send({ error: error.message });
       logger.error('Create custom probe error', { error });
       return internalError(reply, error);
     }
@@ -700,11 +892,27 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
+      // The list's Enabled switch sends only `{ enabled }`: that toggles the probe without a full definition.
+      const bodyKeys = Object.keys(body);
+      if (bodyKeys.length === 1 && bodyKeys[0] === 'enabled') {
+        if (typeof body.enabled !== 'boolean') return reply.code(400).send({ error: 'enabled must be a boolean' });
+        if (!inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId)) {
+          return reply.code(404).send({ error: 'Custom probe not found' });
+        }
+        const toggled = await updateCustomProbe(session.tenantDbName, id, session.userId, { enabled: body.enabled });
+        if (!toggled) return reply.code(404).send({ error: 'Custom probe not found' });
+        return reply.code(200).send({ probe: toggled });
+      }
       const result = sanitizeCustomProbe(body);
       if ('error' in result) return reply.code(400).send({ error: result.error });
-      if (!inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId)) {
-        return reply.code(404).send({ error: 'Custom probe not found' });
-      }
+      const stored = inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId);
+      if (!stored) return reply.code(404).send({ error: 'Custom probe not found' });
+      const invalid = definitionError(
+        result.input,
+        body.detectors !== undefined ? result.input.detectors : stored.detectors,
+        stored.attempts,
+      );
+      if (invalid) return reply.code(400).send({ error: invalid });
       // The sanitizer fills in the create-time detectors when the body has none; a PATCH keeps the stored ones.
       const { detectors, ...input } = result.input;
       const probe = await updateCustomProbe(session.tenantDbName, id, session.userId, {
@@ -717,7 +925,6 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       if (!probe) return reply.code(404).send({ error: 'Custom probe not found' });
       return reply.code(200).send({ probe });
     } catch (error) {
-      if (error instanceof CustomProbeError) return reply.code(400).send({ error: error.message });
       logger.error('Update custom probe error', { error });
       return internalError(reply, error);
     }
@@ -727,10 +934,18 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
+      const { force } = (request.query ?? {}) as { force?: string };
       if (!inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId)) {
         return reply.code(404).send({ error: 'Custom probe not found' });
       }
-      const deleted = await deleteCustomProbe(session.tenantDbName, id);
+      // A probe campaigns still select is kept (409 with who uses it) unless the caller says ?force=true.
+      const { deleted, usedBy } = await deleteCustomProbe(session.tenantDbName, id, { force: force === 'true' });
+      if (!deleted && usedBy.length > 0) {
+        return reply.code(409).send({
+          error: `This probe is used by ${usedBy.length} ${usedBy.length === 1 ? 'campaign' : 'campaigns'}; pass force=true to delete it anyway`,
+          usedBy,
+        });
+      }
       if (!deleted) return reply.code(404).send({ error: 'Custom probe not found' });
       return reply.code(200).send({ success: true });
     } catch (error) {

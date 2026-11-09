@@ -3,7 +3,8 @@
  * End-to-end through the real detectors + decision policy: outcome bucketing,
  * attack-success / resilience aggregation, per-category & per-severity rollups,
  * multi-turn transcript accumulation, target-error isolation, and the progress
- * hook. The target invoker is a deterministic fake.
+ * hook. The target invoker is a deterministic fake. Limits, stops, partial
+ * transcripts and the adaptive attacker are in redteam-runner-limits.test.ts.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -16,7 +17,7 @@ function makeProbe(attempts: ProbeAttempt[]): Probe {
   return {
     key: 'fake',
     family: 'test',
-    category: 'LLM06-sensitive-information-disclosure',
+    category: 'LLM02-sensitive-information-disclosure',
     severity: 'high',
     description: 'fake probe',
     detectors: [createRefusalDetector(), createPatternDetector()],
@@ -53,12 +54,23 @@ describe('runRedTeam', () => {
     expect(aggregate.attackSuccessRate).toBeCloseTo(1 / 3, 5);
     expect(aggregate.resilienceScore).toBeCloseTo(2 / 3, 5);
     expect(aggregate.bySeverity.high).toBe(1);
-    expect(aggregate.byCategory['LLM06-sensitive-information-disclosure'].vulnerable).toBe(1);
+    expect(aggregate.byCategory['LLM02-sensitive-information-disclosure'].vulnerable).toBe(1);
 
     const boom = attempts.find((a) => a.attemptId === 'boom')!;
     expect(boom.error).toMatch(/exploded/);
     expect(boom.outcome).toBe('needs_review');
     expect(boom.verdict.decidedBy).toBe('target-error');
+    expect(boom.partial).toBeUndefined();
+  });
+
+  it('keeps the rates null and the run inconclusive when no attempt completed', async () => {
+    const probe = makeProbe([{ id: 'boom', turns: ['BOOM'], expect: {} }]);
+    const { aggregate } = await runRedTeam({ probes: [probe], invokeTarget: fakeTarget });
+    expect(aggregate.completed).toBe(0);
+    expect(aggregate.attackSuccessRate).toBeNull();
+    expect(aggregate.resilienceScore).toBeNull();
+    expect(aggregate.inconclusive).toBe(true);
+    expect(aggregate.inconclusiveReasons).toContain('no-completed-attempts');
   });
 
   it('accumulates multi-turn history into the transcript', async () => {

@@ -59,6 +59,7 @@ export const TABLES = {
   evaluationRuns: 'evaluation_runs',
   redTeamCampaigns: 'redteam_campaigns',
   redTeamRuns: 'redteam_runs',
+  redTeamRunAttempts: 'redteam_run_attempts',
   redTeamCustomProbes: 'redteam_custom_probes',
   analysisDefinitions: 'analysis_definitions',
   analysisConversations: 'analysis_conversations',
@@ -1141,6 +1142,25 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.evaluationRuns, 'agentRevision', 'agentRevision TEXT');
     this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'agentVersion', 'agentVersion TEXT');
     this.ensureTableColumn(db, TABLES.redTeamRuns, 'agentRevision', 'agentRevision TEXT');
+    // Red-team run lifecycle (claim, lease, cancel) and the attempt-row store.
+    // The indexes on these columns are created in applyTenantIndexes, after this.
+    for (const [column, ddl] of [
+      ['workerId', 'workerId TEXT'],
+      ['leaseUntil', 'leaseUntil TEXT'],
+      ['cancelRequested', 'cancelRequested INTEGER'],
+      ['cancelRequestedBy', 'cancelRequestedBy TEXT'],
+      ['cancelledAt', 'cancelledAt TEXT'],
+      ['attemptStore', 'attemptStore TEXT'],
+      ['skippedAttempts', 'skippedAttempts INTEGER'],
+      ['notApplicableAttempts', 'notApplicableAttempts INTEGER'],
+      ['warnings', 'warnings TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.redTeamRuns, column, ddl);
+    }
+    // Red-team campaign and custom-probe keys are unique per project, not per tenant
+    // (the by-id routes are project-scoped); the old global unique indexes go.
+    db.exec('DROP INDEX IF EXISTS idx_redteam_campaigns_key');
+    db.exec('DROP INDEX IF EXISTS idx_redteam_custom_probes_key');
     // AI labeling: structured labels + their provenance on dataset items, and
     // the run target that says an analysis run labelled a dataset rather than
     // the conversation corpus.
@@ -1310,6 +1330,16 @@ export class SQLiteProviderBase {
   }
 
   private applyTenantIndexes(db: Database.Database): void {
+    // Red-team runs: the active-run check (project + campaign, newest first) and the
+    // reaper (status + lease). Same ordering constraint as below — leaseUntil reaches
+    // legacy DBs via ensureTableColumn.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_redteam_runs_project_campaign_createdAt
+        ON ${TABLES.redTeamRuns}(projectId, campaignKey, createdAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_redteam_runs_status_lease
+        ON ${TABLES.redTeamRuns}(status, leaseUntil);
+    `);
+
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_groups_externalId
         ON ${TABLES.groups}(tenantId, externalId);

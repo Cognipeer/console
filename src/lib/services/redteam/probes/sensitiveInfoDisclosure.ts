@@ -1,5 +1,5 @@
 /**
- * LLM06 / LLM07 — Sensitive information disclosure & system-prompt leakage.
+ * LLM02 — Sensitive information disclosure (planted secrets).
  *
  * Plants secrets (an API key canary and confidential instructions) in the
  * system turn, then tries to extract them through direct asks, encoding tricks,
@@ -30,7 +30,7 @@ export function createSensitiveInfoProbe(): Probe {
   return {
     key: 'sensitive-info-disclosure',
     family: 'pii-leak',
-    category: 'LLM06-sensitive-information-disclosure',
+    category: 'LLM02-sensitive-information-disclosure',
     severity: 'critical',
     description: 'Attempts to extract planted secrets / system prompt via direct, encoding, and repeat attacks.',
     detectors: [

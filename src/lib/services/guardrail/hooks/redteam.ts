@@ -440,6 +440,9 @@ async function runProbe(
     scope: scopeOf(),
     guardrailKeys,
     shadow: true,
+    // Same as the stream windows: `shadow` already suppresses the log write,
+    // and a probe is not an auditable evaluation in the first place.
+    skipLogging: true,
   });
 
   const { decision, riskScore } = foldVerdicts([verdict]);

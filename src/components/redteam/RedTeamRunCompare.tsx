@@ -8,11 +8,14 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Badge, Button, Card, Group, Select, Stack, Table, Text } from '@mantine/core';
+import { Alert, Badge, Button, Card, Group, Select, Stack, Table, Text } from '@mantine/core';
 import { IconArrowRight } from '@tabler/icons-react';
 import AgentWithVersion from '@/components/agents/AgentWithVersion';
 import { runVersionTag } from '@/components/agents/agentVersionTag';
 import { describeRunRevision } from '@/lib/shared/agentRevision';
+import { owaspCategoryLabel } from '@/lib/services/redteam/owasp';
+import { inconclusiveReasons, pct } from './helpers';
+import { OUTCOME_COLOR } from './severity';
 import type { ComparisonStatus, RedTeamComparisonView, RedTeamRunView } from './types';
 
 const STATUS_COLOR: Record<ComparisonStatus, string> = {
@@ -21,14 +24,21 @@ const STATUS_COLOR: Record<ComparisonStatus, string> = {
   added: 'blue',
   removed: 'gray',
   unchanged: 'gray',
+  // The target failed in one of the two scans, so there is no verdict to compare.
+  errored: 'orange',
 };
 
-const OUTCOME_COLOR: Record<string, string> = { safe: 'teal', vulnerable: 'red', needs_review: 'yellow' };
-
-function signed(v: number, asPct = false): string {
+function signed(v: number | null | undefined, asPct = false): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
   const n = asPct ? Math.round(v * 100) : v;
   const s = n > 0 ? `+${n}` : `${n}`;
   return asPct ? `${s}pp` : s;
+}
+
+/** Colour for a delta: `up` when it grew, `down` when it shrank, neutral when unchanged or missing. */
+function deltaColor(v: number | null | undefined, up: string, down: string): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return 'dimmed';
+  return v > 0 ? up : v < 0 ? down : 'dimmed';
 }
 
 function fmtDate(value?: string): string {
@@ -63,7 +73,7 @@ export default function RedTeamRunCompare({ run }: Props) {
   const options = useMemo(
     () => candidates.map((r) => ({
       value: r.id,
-      label: `${fmtDate(r.finishedAt ?? r.createdAt)} · ${Math.round((r.aggregate?.resilienceScore ?? 0) * 100)}% resilient${r.agentRevision ? ` · ${describeRunRevision(r.agentRevision)}` : ''}`,
+      label: `${fmtDate(r.finishedAt ?? r.createdAt)} · ${pct(r.aggregate?.resilienceScore)} resilient${inconclusiveReasons(r.aggregate).length > 0 ? ' · inconclusive' : ''}${r.agentRevision ? ` · ${describeRunRevision(r.agentRevision)}` : ''}`,
     })),
     [candidates],
   );
@@ -89,6 +99,10 @@ export default function RedTeamRunCompare({ run }: Props) {
       setLoading(false);
     }
   };
+
+  const onlyBaseline = comparison?.onlyInBaseline?.length ?? 0;
+  const onlyCurrent = comparison?.onlyInCurrent?.length ?? 0;
+  const probeSetDiffers = Boolean(comparison?.probeSetChanged) || onlyBaseline > 0 || onlyCurrent > 0;
 
   if (run.status !== 'completed') return null;
 
@@ -126,20 +140,31 @@ export default function RedTeamRunCompare({ run }: Props) {
             <Badge color="red" variant="light" size="lg">{comparison.summary.regressed} regressed</Badge>
             <Badge color="teal" variant="light" size="lg">{comparison.summary.fixed} fixed</Badge>
             <Badge color="gray" variant="light" size="lg">{comparison.summary.unchanged} unchanged</Badge>
+            {comparison.summary.errored ? <Badge color="orange" variant="light" size="lg">{comparison.summary.errored} errored</Badge> : null}
             {comparison.summary.added ? <Badge color="blue" variant="light">{comparison.summary.added} new</Badge> : null}
             {comparison.summary.removed ? <Badge color="gray" variant="outline">{comparison.summary.removed} removed</Badge> : null}
           </Group>
 
+          {probeSetDiffers ? (
+            <Alert color="yellow" variant="light" data-testid="redteam-probe-set-changed" title="The two scans did not run the same attempts">
+              <Text size="sm">
+                Only attempts present in both scans count as regressed or fixed.
+                {onlyBaseline > 0 ? ` ${onlyBaseline} ran only in the baseline.` : ''}
+                {onlyCurrent > 0 ? ` ${onlyCurrent} ran only in this scan.` : ''}
+              </Text>
+            </Alert>
+          ) : null}
+
           <Group gap="xl">
             <Text size="sm">
               Attack success:{' '}
-              <Text span fw={600} c={comparison.deltas.attackSuccessRate > 0 ? 'red' : comparison.deltas.attackSuccessRate < 0 ? 'teal' : 'dimmed'}>
+              <Text span fw={600} c={deltaColor(comparison.deltas.attackSuccessRate, 'red', 'teal')}>
                 {signed(comparison.deltas.attackSuccessRate, true)}
               </Text>
             </Text>
             <Text size="sm">
               Resilience:{' '}
-              <Text span fw={600} c={comparison.deltas.resilienceScore < 0 ? 'red' : comparison.deltas.resilienceScore > 0 ? 'teal' : 'dimmed'}>
+              <Text span fw={600} c={deltaColor(comparison.deltas.resilienceScore, 'teal', 'red')}>
                 {signed(comparison.deltas.resilienceScore, true)}
               </Text>
             </Text>
@@ -173,7 +198,7 @@ export default function RedTeamRunCompare({ run }: Props) {
                       <Text size="sm" fw={500}>{c.probeKey}</Text>
                       <Text size="xs" c="dimmed" className="ds-mono">{c.attemptId}</Text>
                     </Table.Td>
-                    <Table.Td><Text size="xs" c="dimmed">{c.category}</Text></Table.Td>
+                    <Table.Td><Text size="xs" c="dimmed">{owaspCategoryLabel(c.category)}</Text></Table.Td>
                     <Table.Td>{c.baseline ? <Badge size="xs" color={OUTCOME_COLOR[c.baseline]} variant="light">{c.baseline.replace('_', ' ')}</Badge> : '—'}</Table.Td>
                     <Table.Td><IconArrowRight size={13} /></Table.Td>
                     <Table.Td>{c.current ? <Badge size="xs" color={OUTCOME_COLOR[c.current]} variant="light">{c.current.replace('_', ' ')}</Badge> : '—'}</Table.Td>

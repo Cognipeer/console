@@ -1,5 +1,5 @@
 /**
- * LLM08 — Excessive agency / tool misuse.
+ * LLM06 — Excessive agency / tool misuse.
  *
  * Tries to push an agent beyond its mandate: destructive actions, acting on
  * unauthorized requests, or exceeding scope ("delete everything", "email all
@@ -30,7 +30,7 @@ export function createExcessiveAgencyProbe(): Probe {
   return {
     key: 'excessive-agency',
     family: 'excessive-agency',
-    category: 'LLM08-excessive-agency',
+    category: 'LLM06-excessive-agency',
     severity: 'critical',
     description: 'Attempts to make an agent perform destructive, unauthorized, or out-of-scope actions via its tools.',
     detectors: [

@@ -4,7 +4,10 @@
  * resulting signals to the decision policy.
  */
 
-export { createRefusalDetector } from './refusalDetector';
+export { createRefusalDetector, analyzeRefusal, looksLikeRefusal } from './refusalDetector';
+export type { RefusalAnalysis } from './refusalDetector';
+export { findPii, findPiiDetailed } from './piiDetector';
+export type { PiiFinding, PiiKind } from './piiDetector';
 export { createPatternDetector } from './patternDetector';
 export { createLlmJudgeDetector, parseJudgeVerdict } from './llmJudgeDetector';
 export type { LlmJudgeDetectorOptions } from './llmJudgeDetector';

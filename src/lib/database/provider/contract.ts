@@ -205,6 +205,9 @@ import type {
   IRedTeamCampaign,
   IRedTeamRun,
   IRedTeamCustomProbe,
+  IRedTeamRunAttempt,
+  IRedTeamRunGuard,
+  IRedTeamReview,
   RedTeamRunStatus,
   IAnalysisDefinition,
   IAnalysisConversation,
@@ -1047,14 +1050,62 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Omit<IRedTeamRun, 'tenantId' | 'campaignKey' | 'createdBy'>>,
   ): Promise<IRedTeamRun | null>;
+  /** A malformed id finds nothing (null), never throws. */
   findRedTeamRunById(id: string): Promise<IRedTeamRun | null>;
   listRedTeamRuns(filters?: {
     projectId?: string;
     campaignKey?: string;
-    status?: RedTeamRunStatus;
+    status?: RedTeamRunStatus | RedTeamRunStatus[];
     limit?: number;
     skip?: number;
+    /** Leave the embedded attempts out of each run (list views); they come back as []. */
+    omitAttempts?: boolean;
   }): Promise<IRedTeamRun[]>;
+  countRedTeamRuns(filters?: {
+    projectId?: string;
+    campaignKey?: string;
+    status?: RedTeamRunStatus | RedTeamRunStatus[];
+  }): Promise<number>;
+  /**
+   * Apply `data` only when the stored run matches `guard` (compare-and-set, one
+   * atomic statement). Returns the updated run, or null when nothing matched.
+   * Used to claim a pending run, renew a lease, request a stop, and finish or
+   * reap a run without overwriting a newer state.
+   */
+  updateRedTeamRunIf(
+    id: string,
+    guard: IRedTeamRunGuard,
+    data: Partial<Omit<IRedTeamRun, 'tenantId' | 'campaignKey' | 'createdBy'>>,
+  ): Promise<IRedTeamRun | null>;
+  /**
+   * Runs the reaper should end, attempts left out: running with `leaseUntil`
+   * before `leaseExpiredBefore`; running without a lease (recorded before
+   * leases) and `updatedAt` before `legacyUpdatedBefore`; pending with
+   * `createdAt` before `pendingCreatedBefore`.
+   */
+  listStaleRedTeamRuns(params: {
+    leaseExpiredBefore: Date;
+    legacyUpdatedBefore: Date;
+    pendingCreatedBefore: Date;
+    limit?: number;
+  }): Promise<IRedTeamRun[]>;
+  /** Delete a run and its attempt rows. */
+  deleteRedTeamRun(id: string): Promise<boolean>;
+
+  /**
+   * Insert or update attempt rows, keyed by (runId, attemptKey). An update
+   * replaces every field except `review`: a row's `review` is stored only when
+   * the row is inserted (a legacy run's migration carries it that way), and
+   * afterwards only setRedTeamRunAttemptReview writes it.
+   */
+  upsertRedTeamRunAttempts(rows: Array<Omit<IRedTeamRunAttempt, '_id' | 'createdAt' | 'updatedAt'>>): Promise<void>;
+  /** A run's attempt rows in `seq` order. */
+  listRedTeamRunAttempts(runId: string, opts?: { limit?: number; skip?: number }): Promise<IRedTeamRunAttempt[]>;
+  countRedTeamRunAttempts(runId: string): Promise<number>;
+  findRedTeamRunAttempt(runId: string, attemptKey: string): Promise<IRedTeamRunAttempt | null>;
+  /** Set (or clear, with null) one attempt's review in place. Returns false when the row does not exist. */
+  setRedTeamRunAttemptReview(runId: string, attemptKey: string, review: IRedTeamReview | null): Promise<boolean>;
+  deleteRedTeamRunAttempts(runId: string): Promise<number>;
 
   createRedTeamCustomProbe(
     probe: Omit<IRedTeamCustomProbe, '_id' | 'createdAt' | 'updatedAt'>,

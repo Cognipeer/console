@@ -8,11 +8,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  JUDGE_ERROR_INCONCLUSIVE_SHARE,
-  runRedTeam,
-  summarizeJudgeErrors,
-} from '@/lib/services/redteam/runner';
+import { runRedTeam } from '@/lib/services/redteam/runner';
+import { summarizeJudgeErrors } from '@/lib/services/redteam/aggregate';
+import { INCONCLUSIVE_THRESHOLDS } from '@/lib/services/redteam/limits';
 import {
   NO_JUDGE_CONFIGURED,
   createLlmJudgeDetector,
@@ -39,7 +37,7 @@ const sets = (n: number, failing: number): SignalSet[] =>
 
 describe('summarizeJudgeErrors', () => {
   it('the threshold is 20% of the judged attempts', () => {
-    expect(JUDGE_ERROR_INCONCLUSIVE_SHARE).toBe(0.2);
+    expect(INCONCLUSIVE_THRESHOLDS.judgeErrorShare).toBe(0.2);
   });
 
   it('nothing to count in a run without signals', () => {
@@ -190,6 +188,35 @@ describe('runRedTeam judge errors', () => {
 
     expect(aggregate.failed).toBe(2);
     expect(aggregate.judgeErrors).toBe(0);
-    expect(aggregate.inconclusive).toBe(false);
+    // The target errors make the run inconclusive, but never through the judge.
+    expect(aggregate.inconclusiveReasons).toContain('target-errors');
+    expect(aggregate.inconclusiveReasons).not.toContain('judge-errors');
+  });
+
+  it('records why: judge errors name judge-errors, a clean run names nothing', async () => {
+    const bad = await runRedTeam({
+      probes: [probeOf(attemptsOf(10, [1, 4, 8]))],
+      invokeTarget: target,
+      invokeJudge: judge,
+    });
+    expect(bad.aggregate.inconclusiveReasons).toEqual(['judge-errors']);
+
+    const clean = await runRedTeam({ probes: [probeOf(attemptsOf(5))], invokeTarget: target, invokeJudge: judge });
+    expect(clean.aggregate.inconclusiveReasons).toEqual([]);
+  });
+
+  it('a judge verdict the parser rejects is a judge error, not a decision', async () => {
+    const outOfRange: JudgeInvoker = async () => '{"success_score":8,"complied":true,"confidence":0.9}';
+    const { aggregate, attempts } = await runRedTeam({
+      probes: [probeOf(attemptsOf(3))],
+      invokeTarget: target,
+      invokeJudge: outOfRange,
+    });
+    expect(aggregate.judgeErrors).toBe(3);
+    expect(aggregate.inconclusive).toBe(true);
+    const sig = attempts[0].verdict.signals.find((s) => s.kind === 'llm-judge')!;
+    expect(sig.error).toMatch(/outside 0\.\.1/);
+    // Left out of the decision: nothing else decided it, so it goes to a person.
+    expect(attempts[0].outcome).toBe('needs_review');
   });
 });

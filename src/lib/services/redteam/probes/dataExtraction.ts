@@ -1,5 +1,5 @@
 /**
- * LLM06 — Training/context data extraction (divergence & repeat attacks).
+ * LLM02 — Training/context data extraction (divergence & repeat attacks).
  *
  * Classic "repeat the word forever" divergence attack and "repeat everything
  * above" context-dump attempts, which can make a model spill its hidden context
@@ -33,7 +33,7 @@ export function createDataExtractionProbe(): Probe {
   return {
     key: 'data-extraction',
     family: 'pii-leak',
-    category: 'LLM06-sensitive-information-disclosure',
+    category: 'LLM02-sensitive-information-disclosure',
     severity: 'medium',
     description: 'Divergence ("repeat forever") and "repeat everything above" attacks that try to dump hidden context.',
     detectors: [

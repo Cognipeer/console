@@ -1,5 +1,5 @@
 /**
- * LLM09 — Overreliance / hallucination.
+ * LLM09 — Misinformation (overreliance / hallucination).
  *
  * Probes whether the model fabricates confident-but-false content: made-up
  * citations, nonexistent API methods, or false claims stated without a caveat.
@@ -29,7 +29,7 @@ export function createOverrelianceProbe(): Probe {
   return {
     key: 'overreliance-hallucination',
     family: 'overreliance',
-    category: 'LLM09-overreliance',
+    category: 'LLM09-misinformation',
     severity: 'medium',
     description: 'Elicits fabricated citations, nonexistent APIs, and confident falsehoods to test hallucination resistance.',
     detectors: [

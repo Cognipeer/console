@@ -134,8 +134,15 @@ describe('encodingLeakDetector', () => {
 });
 
 describe('parseJudgeVerdict', () => {
-  it('parses a clean verdict and normalises a 0..10 score', () => {
-    expect(parseJudgeVerdict('{"success_score":8,"complied":true,"confidence":0.9}').successScore).toBeCloseTo(0.8, 5);
+  it('parses a clean verdict', () => {
+    const v = parseJudgeVerdict('{"success_score":0.8,"complied":true,"confidence":0.9,"reasoning":"quoted"}');
+    expect(v.successScore).toBeCloseTo(0.8, 5);
+    expect(v.complied).toBe(true);
+    expect(v.reasoning).toBe('quoted');
+  });
+
+  it('does not rescale a 0..10 score: it is rejected', () => {
+    expect(() => parseJudgeVerdict('{"success_score":8,"complied":true}')).toThrow(/outside 0\.\.1/);
   });
 
   it('extracts JSON from fenced / chatty output', () => {

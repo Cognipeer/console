@@ -1211,7 +1211,7 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_redteam_campaigns_key ON redteam_campaigns(key);
+  CREATE UNIQUE INDEX IF NOT EXISTS uniq_redteam_campaigns_project_key ON redteam_campaigns(projectId, key);
 
   CREATE TABLE IF NOT EXISTS redteam_runs (
     id TEXT PRIMARY KEY,
@@ -1226,6 +1226,15 @@ export const TENANT_SCHEMA_SQL = `
     progress TEXT DEFAULT '{}',
     aggregate TEXT,
     attempts TEXT DEFAULT '[]',
+    attemptStore TEXT,
+    skippedAttempts INTEGER,
+    notApplicableAttempts INTEGER,
+    warnings TEXT,
+    workerId TEXT,
+    leaseUntil TEXT,
+    cancelRequested INTEGER,
+    cancelRequestedBy TEXT,
+    cancelledAt TEXT,
     error TEXT,
     startedAt TEXT,
     finishedAt TEXT,
@@ -1235,6 +1244,37 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_redteam_runs_campaignKey ON redteam_runs(campaignKey);
   CREATE INDEX IF NOT EXISTS idx_redteam_runs_createdAt ON redteam_runs(createdAt);
+
+  -- One row per attempt of a run (a run no longer embeds them). A new table has
+  -- every column, so its indexes may live here.
+  CREATE TABLE IF NOT EXISTS redteam_run_attempts (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    runId TEXT NOT NULL,
+    attemptKey TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    probeKey TEXT NOT NULL,
+    attemptId TEXT NOT NULL,
+    family TEXT,
+    category TEXT,
+    severity TEXT,
+    outcome TEXT NOT NULL,
+    decidedBy TEXT,
+    confidence REAL,
+    transcript TEXT DEFAULT '[]',
+    signals TEXT DEFAULT '[]',
+    latencyMs REAL,
+    error TEXT,
+    partial INTEGER,
+    review TEXT,
+    kbRestricted TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    UNIQUE(runId, attemptKey)
+  );
+  CREATE INDEX IF NOT EXISTS idx_redteam_run_attempts_run_seq ON redteam_run_attempts(runId, seq);
+  CREATE INDEX IF NOT EXISTS idx_redteam_run_attempts_createdAt ON redteam_run_attempts(createdAt);
 
   CREATE TABLE IF NOT EXISTS redteam_custom_probes (
     id TEXT PRIMARY KEY,
@@ -1254,7 +1294,7 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_redteam_custom_probes_key ON redteam_custom_probes(key);
+  CREATE UNIQUE INDEX IF NOT EXISTS uniq_redteam_custom_probes_project_key ON redteam_custom_probes(projectId, key);
 
   -- Analysis service (conversation field extraction, judge & accuracy)
   CREATE TABLE IF NOT EXISTS analysis_definitions (

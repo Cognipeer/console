@@ -11,6 +11,8 @@
 import type { IRedTeamCustomProbe } from '@/lib/database';
 import { createLlmJudgeDetector, createPatternDetector, createRefusalDetector } from '../detectors';
 import { patternListError } from '../detectors/safePattern';
+import { ATTEMPT_ID_PATTERN, CUSTOM_PROBE_LIMITS } from '../limits';
+import { isKnownOwaspCategory, normalizeOwaspCategory } from '../owasp';
 import type { Detector, OwaspLlmCategory, Probe, ProbeAttempt, Severity } from '../types';
 
 /** Selection keys for custom probes are namespaced to avoid built-in clashes. */
@@ -64,11 +66,84 @@ export function validateCustomProbePatterns(attempts: PatternAttempt[], stored: 
   }
 }
 
+const CANARY_PLACEHOLDER = /\{\{\s*canary\s*\}\}/;
+
+const tooLong = (what: string, max: number, id?: string) =>
+  new CustomProbeError(`${id === undefined ? '' : `attempt "${id}": `}${what} is longer than ${max} characters`);
+
+/**
+ * Everything checked when a custom probe is saved: the runnable minimum
+ * (`validateCustomProbe`), the size limits, unique well-formed attempt ids, a
+ * known OWASP category, a canary that is really planted, and the forbidden
+ * patterns (`validateCustomProbePatterns`; pass the stored attempts on an update
+ * so unchanged lists are not checked again).
+ *
+ * Save time only: a probe stored before these rules still runs, which is why
+ * `buildCustomProbe` calls just `validateCustomProbe`.
+ */
+export function validateCustomProbeDefinition(
+  def: Pick<IRedTeamCustomProbe, 'attempts' | 'detectors' | 'category'>,
+  stored: PatternAttempt[] = [],
+): void {
+  validateCustomProbe(def);
+  const L = CUSTOM_PROBE_LIMITS;
+
+  if (!isKnownOwaspCategory(def.category)) {
+    throw new CustomProbeError(
+      `category "${String(def.category)}" is not an OWASP Top 10 for LLM Applications (2025) category, for example LLM01-prompt-injection`,
+    );
+  }
+  if (def.attempts.length > L.maxAttempts) {
+    throw new CustomProbeError(`a custom probe can have at most ${L.maxAttempts} attempts`);
+  }
+
+  const seen = new Set<string>();
+  for (const a of def.attempts) {
+    if (typeof a.id !== 'string' || !ATTEMPT_ID_PATTERN.test(a.id)) {
+      throw new CustomProbeError(
+        `attempt id "${String(a.id)}" must be 1-${L.maxAttemptIdLength} characters: letters, digits, ".", "_" or "-"`,
+      );
+    }
+    if (seen.has(a.id)) throw new CustomProbeError(`attempt id "${a.id}" is used more than once; ids must be unique within the probe`);
+    seen.add(a.id);
+
+    if (a.turns.length > L.maxTurnsPerAttempt) {
+      throw new CustomProbeError(`attempt "${a.id}" has more than ${L.maxTurnsPerAttempt} turns`);
+    }
+    if (a.turns.some((t) => t.length > L.maxTurnChars)) throw tooLong('a turn', L.maxTurnChars, a.id);
+    if (a.system !== undefined && a.system.length > L.maxSystemChars) throw tooLong('the system prompt', L.maxSystemChars, a.id);
+    if (a.objective !== undefined && a.objective.length > L.maxObjectiveChars) throw tooLong('the objective', L.maxObjectiveChars, a.id);
+
+    if (a.canary && !(a.system && (CANARY_PLACEHOLDER.test(a.system) || a.system.includes(a.canary)))) {
+      throw new CustomProbeError(`attempt "${a.id}": Put {{canary}} in the system prompt so the canary is planted`);
+    }
+  }
+
+  const judges = def.detectors?.judges ?? [];
+  if (judges.length > L.maxJudges) throw new CustomProbeError(`a custom probe can have at most ${L.maxJudges} judge lenses`);
+  for (const j of judges) {
+    if (typeof j.rubric === 'string' && j.rubric.length > L.maxRubricChars) {
+      throw tooLong(`the rubric of judge "${j.lens}"`, L.maxRubricChars);
+    }
+  }
+
+  validateCustomProbePatterns(def.attempts, stored);
+}
+
+/**
+ * A canary or a forbidden pattern is only worth anything if something looks for
+ * it, so an attempt that has either gets the pattern detector even when the
+ * definition switched it off.
+ */
+function needsPatternDetector(def: IRedTeamCustomProbe): boolean {
+  return def.attempts.some((a) => Boolean(a.canary) || (a.forbiddenPatterns?.length ?? 0) > 0);
+}
+
 function buildDetectors(def: IRedTeamCustomProbe): Detector[] {
   const detectors: Detector[] = [];
   const d = def.detectors ?? {};
   if (d.refusal) detectors.push(createRefusalDetector());
-  if (d.pattern) detectors.push(createPatternDetector());
+  if (d.pattern || needsPatternDetector(def)) detectors.push(createPatternDetector());
   for (const judge of d.judges ?? []) {
     detectors.push(
       createLlmJudgeDetector({
@@ -107,7 +182,8 @@ export function buildCustomProbe(def: IRedTeamCustomProbe): Probe {
   return {
     key: def.key,
     family: def.family || 'custom',
-    category: def.category as OwaspLlmCategory,
+    // Definitions saved before the 2025 list carry a legacy key; the probe reports the 2025 one.
+    category: normalizeOwaspCategory(def.category) as OwaspLlmCategory,
     severity: def.severity as Severity,
     description: def.description,
     detectors,

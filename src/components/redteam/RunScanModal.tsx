@@ -16,19 +16,20 @@ import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/
 import { useAgentVersionOptions } from '@/components/agents/useAgentVersionOptions';
 import { agentRevisionLabel, storedAgentRevision, storedVersionFromPicker } from '@/lib/shared/agentRevision';
 import ProbePicker from './ProbePicker';
-import type { ProbeCatalogView, RedTeamCampaignView, SelectOption } from './types';
+import type { DisabledProbeView, ProbeCatalogView, RedTeamCampaignView, SelectOption } from './types';
 
 interface Props {
   opened: boolean;
   campaign: RedTeamCampaignView | null;
   probes: ProbeCatalogView[];
+  disabledProbes?: DisabledProbeView[];
   models: SelectOption[];
   onClose: () => void;
   /** Called with the new run id once the scan is enqueued. */
   onStarted: (runId: string) => void;
 }
 
-export default function RunScanModal({ opened, campaign, probes, models, onClose, onStarted }: Props) {
+export default function RunScanModal({ opened, campaign, probes, disabledProbes, models, onClose, onStarted }: Props) {
   const [maxTurns, setMaxTurns] = useState<number | ''>('');
   const [concurrency, setConcurrency] = useState<number | ''>(4);
   const [probeKeys, setProbeKeys] = useState<string[]>([]);
@@ -158,6 +159,7 @@ export default function RunScanModal({ opened, campaign, probes, models, onClose
               <Text size="xs" c="dimmed" mb={6}>Which probes to run this scan. Clear all to use the campaign&apos;s default selection.</Text>
               <ProbePicker
                 probes={probes}
+                disabledProbes={disabledProbes}
                 value={probeKeys}
                 onChange={setProbeKeys}
                 emptyHint="No probes selected — the campaign's default selection will run."

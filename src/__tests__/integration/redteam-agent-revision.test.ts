@@ -166,7 +166,11 @@ describe('red-team scan revision', () => {
   });
 
   it('flags a draft that was saved while the scan was running', async () => {
-    const campaign = await createCampaign(TENANT_DB_NAME, TENANT_ID, ACTOR, campaignInput('Draft edited'));
+    // An agent keeps its own instructions, so attempts that plant a system prompt are not run against it:
+    // pick a probe whose attempts are plain user turns, or the target is never called.
+    const campaign = await createCampaign(
+      TENANT_DB_NAME, TENANT_ID, ACTOR, campaignInput('Draft edited', { probeKeys: ['overreliance-hallucination'] }),
+    );
     const db = await getDatabase();
     await db.switchToTenant(TENANT_DB_NAME);
     let edited = false;
@@ -200,13 +204,19 @@ describe('red-team scan revision', () => {
 });
 
 describe('red-team concurrency guard per revision', () => {
-  async function runningRun(campaignKey: string, agentRevision?: { requested: 'draft' | 'published' | number }, startedAt = new Date()) {
+  async function runningRun(
+    campaignKey: string,
+    agentRevision?: { requested: 'draft' | 'published' | number },
+    startedAt = new Date(),
+    extra: Partial<Parameters<Awaited<ReturnType<typeof getDatabase>>['createRedTeamRun']>[0]> = {},
+  ) {
     const db = await getDatabase();
     await db.switchToTenant(TENANT_DB_NAME);
     return db.createRedTeamRun({
       tenantId: TENANT_ID, projectId: PROJECT, campaignKey, targetKind: 'agent', targetRef: AGENT_KEY,
       status: 'running', mode: 'async', startedAt, progress: { total: 1, completed: 0, failed: 0 }, attempts: [], createdBy: ACTOR,
       ...(agentRevision ? { agentRevision } : {}),
+      ...extra,
     });
   }
 
@@ -228,11 +238,24 @@ describe('red-team concurrency guard per revision', () => {
     await expect(createAsyncRun({ ...base, campaignKey: campaign.key })).rejects.toThrow(/already in progress on published/);
   });
 
-  it('ignores a scan that has been running for over an hour', async () => {
+  it('ignores a scan whose worker stopped renewing its lease', async () => {
     const campaign = await createCampaign(TENANT_DB_NAME, TENANT_ID, ACTOR, campaignInput('Guarded stale'));
-    await runningRun(campaign.key, { requested: 'published' }, new Date(Date.now() - 2 * 60 * 60 * 1000));
+    await runningRun(campaign.key, { requested: 'published' }, new Date(Date.now() - 2 * 60 * 60 * 1000), {
+      workerId: 'gone-worker',
+      leaseUntil: new Date(Date.now() - 1000),
+    });
 
     await expect(createAsyncRun({ ...base, campaignKey: campaign.key })).resolves.toBeDefined();
+  });
+
+  it('blocks while the lease of a running scan holds', async () => {
+    const campaign = await createCampaign(TENANT_DB_NAME, TENANT_ID, ACTOR, campaignInput('Guarded leased'));
+    await runningRun(campaign.key, { requested: 'published' }, new Date(), {
+      workerId: 'live-worker',
+      leaseUntil: new Date(Date.now() + 60_000),
+    });
+
+    await expect(createAsyncRun({ ...base, campaignKey: campaign.key })).rejects.toThrow(/already in progress on published/);
   });
 });
 
