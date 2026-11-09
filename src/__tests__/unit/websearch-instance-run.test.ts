@@ -115,6 +115,50 @@ describe('resolveWebSearchTarget', () => {
     await expect(resolveWebSearchTarget(TENANT_DB, T, P, undefined)).rejects.toThrow(/Multiple web search instances.*own, own-2/);
   });
 
+  describe('without a key, with a platform instance', () => {
+    const addPlatform = async (extra: Record<string, unknown> = {}) => {
+      await addProvider('platform-conn', { platform: true });
+      return addInstance('cognipeer-search', { projectId: null, providerKey: 'platform-conn', platform: true, ...extra });
+    };
+
+    it('the tenant own instance wins over the platform one', async () => {
+      await addProvider('conn');
+      await addInstance('own');
+      await addPlatform();
+      expect((await resolveWebSearchTarget(TENANT_DB, T, P, undefined)).instance?.key).toBe('own');
+    });
+
+    it('the platform instance is used when it is the only one, with its provider key', async () => {
+      await addPlatform();
+      const target = await resolveWebSearchTarget(TENANT_DB, T, P, undefined);
+      expect(target.instance?.key).toBe('cognipeer-search');
+      expect(target.providerKey).toBe('platform-conn');
+    });
+
+    it('the multiple error lists only the own keys', async () => {
+      await addProvider('conn');
+      await addInstance('own');
+      await addInstance('own-2');
+      await addPlatform();
+      const error = await resolveWebSearchTarget(TENANT_DB, T, P, undefined).catch((e: Error) => e);
+      expect((error as Error).message).toMatch(/Multiple web search instances.*own, own-2/);
+      expect((error as Error).message).not.toContain('cognipeer-search');
+    });
+
+    it('a disabled own instance falls through to the platform one', async () => {
+      await addProvider('conn', { status: 'disabled' });
+      await addInstance('own', { status: 'disabled' });
+      await addPlatform();
+      expect((await resolveWebSearchTarget(TENANT_DB, T, P, undefined)).instance?.key).toBe('cognipeer-search');
+    });
+
+    it('an own legacy provider (no instance) wins over the platform instance', async () => {
+      await addProvider('conn');
+      await addPlatform();
+      expect(await resolveWebSearchTarget(TENANT_DB, T, P, undefined)).toEqual({ instance: null, providerKey: 'conn' });
+    });
+  });
+
   it('ignores disabled instances and reports nothing configured', async () => {
     await addProvider('conn', { status: 'disabled' });
     await addInstance('off', { status: 'disabled' });

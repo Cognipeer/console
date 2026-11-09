@@ -73,8 +73,8 @@ export async function listWebSearchProviders(
 }
 
 /**
- * True when a search can run in the project without naming a key: an active instance is visible, or an active
- * provider is (the legacy path, which platform and managed providers still use).
+ * True when a search can run in the project without naming a key: an active instance is visible (platform ones
+ * included), or an active provider is (the legacy path, which managed providers still use).
  */
 export async function hasActiveWebSearch(
   tenantDbName: string,
@@ -225,8 +225,10 @@ function multipleError(keys: string[]): Error {
 
 /**
  * Explicit key: an instance with that key visible in the project, else a websearch provider with that key (legacy:
- * the provider row's own settings act as the behavior). No key: the project's single active instance, else the
- * single active visible one, else the single active own provider, else the first managed one.
+ * the provider row's own settings act as the behavior). No key, in this order: the tenant's own active instances
+ * (the project's single one, else the single visible one; several is an error), the single active own provider
+ * (legacy), the first active platform instance by key, the first managed provider by key. The tenant's own always
+ * win over what the host provides.
  */
 export async function resolveWebSearchTarget(
   tenantDbName: string,
@@ -245,8 +247,11 @@ export async function resolveWebSearchTarget(
     return { instance: null, providerKey: explicitKey };
   }
 
-  const instances = (await listWebSearchInstances(tenantDbName, tenantId, projectId))
+  const active = (await listWebSearchInstances(tenantDbName, tenantId, projectId))
     .filter((i) => i.status === 'active');
+  // The tenant's own instances come first; a platform instance is only the default when nothing of the tenant's own
+  // can answer (the same rule the provider branch below applies to managed providers).
+  const instances = active.filter((i) => i.platform !== true);
   for (const group of [instances.filter((i) => projectId && i.projectId === projectId), instances]) {
     if (group.length > 1) throw multipleError(group.map((i) => i.key));
     if (group.length === 1) return { instance: group[0], providerKey: group[0].providerKey };
@@ -254,19 +259,22 @@ export async function resolveWebSearchTarget(
 
   const providers = await listWebSearchProviders(tenantDbName, tenantId, projectId);
   const allActive = providers.filter((p) => p.status === 'active');
-  // The tenant's own instances win over managed ones (no host registered: every instance is the tenant's own).
-  const own = allActive.filter((p) => !isManagedProviderRecord(p));
-  const managed = allActive
-    .filter((p) => isManagedProviderRecord(p))
-    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  if (own.length === 0 && managed.length > 0) return { instance: null, providerKey: managed[0].key };
-  if (own.length === 0) {
-    throw new Error(
-      'No active web search instance is configured. Create one under Data → Web Search.',
-    );
-  }
+  // A platform provider is the host's, like a managed one: it must not make the tenant's own provider ambiguous.
+  const hostProvided = (p: { platform?: boolean } & Parameters<typeof isManagedProviderRecord>[0]) =>
+    p.platform === true || isManagedProviderRecord(p);
+  const own = allActive.filter((p) => !hostProvided(p));
   if (own.length > 1) throw multipleError(own.map((p) => p.key));
-  return { instance: null, providerKey: own[0].key };
+  if (own.length === 1) return { instance: null, providerKey: own[0].key };
+
+  const byKey = <T extends { key: string }>(a: T, b: T) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const platform = active.filter((i) => i.platform === true).sort(byKey);
+  if (platform.length > 0) return { instance: platform[0], providerKey: platform[0].providerKey };
+
+  const managed = allActive.filter((p) => hostProvided(p)).sort(byKey);
+  if (managed.length > 0) return { instance: null, providerKey: managed[0].key };
+  throw new Error(
+    'No active web search instance is configured. Create one under Data → Web Search.',
+  );
 }
 
 function aiAnswerSettingsOf(settings: Record<string, unknown> | undefined): WebSearchAiAnswerSettings {

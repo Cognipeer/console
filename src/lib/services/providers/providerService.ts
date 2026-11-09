@@ -270,6 +270,23 @@ function assignedProjectIds(record: Pick<IProviderRecord, 'projectId' | 'project
   return [...new Set([...(record?.projectId ? [record.projectId] : []), ...(record?.projectIds ?? [])].map(String))];
 }
 
+/** Provider metadata flag: the behavior of this web search provider lives on instances, never on the row. */
+const BEHAVIOR_ON_INSTANCES = 'behaviorOnInstances';
+
+/**
+ * The marker is owned by the server: a request's metadata never sets or clears it. `keep` says whether the
+ * stored row (or a new web search row) carries it.
+ */
+function withServerOwnedMarker(
+  metadata: Record<string, unknown> | undefined,
+  keep: boolean,
+): Record<string, unknown> | undefined {
+  const rest = { ...(metadata ?? {}) };
+  delete rest[BEHAVIOR_ON_INSTANCES];
+  if (keep) return { ...rest, [BEHAVIOR_ON_INSTANCES]: true };
+  return metadata === undefined ? undefined : rest;
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
@@ -313,7 +330,7 @@ export async function createProviderConfig(
       credentialsEnc: encryptObject(payload.credentials),
       settings: settings ?? {},
       capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
-      metadata: payload.metadata ?? undefined,
+      metadata: withServerOwnedMarker(payload.metadata, payload.type === 'websearch'),
       createdBy: payload.createdBy,
       updatedBy: payload.createdBy,
     });
@@ -536,7 +553,7 @@ export async function updateProviderConfig(
   }
 
   if (payload.metadata !== undefined) {
-    updates.metadata = payload.metadata;
+    updates.metadata = withServerOwnedMarker(payload.metadata, before?.metadata?.[BEHAVIOR_ON_INSTANCES] === true);
   }
 
   if (credentialMerge) {

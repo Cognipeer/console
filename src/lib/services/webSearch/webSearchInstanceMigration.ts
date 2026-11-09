@@ -4,9 +4,12 @@
  * provider keeps only the connection. Agent bindings, quota policies, run logs and cache entries are keyed by that
  * search key, so they keep matching.
  *
- * Idempotent: an existing instance with the key is left as it is, and the behavior keys are stripped from the
- * provider only while it still has some (a copy stays in `metadata.migratedBehavior` for one release so the change
- * can be rolled back). Credentials and connection settings are never logged.
+ * Once per provider: a provider that has been handled carries `metadata.behaviorOnInstances` (set here, and at
+ * creation for providers made after the move) and is never touched again, so an instance the user deleted does not
+ * come back and a connection-only provider does not get an instance of its own. A provider that an instance
+ * already uses gets no new one. The behavior keys are stripped from the provider (a copy stays in
+ * `metadata.migratedBehavior` for one release so the change can be rolled back). A key conflict is left unmarked so
+ * it stays visible. Credentials and connection settings are never logged.
  *
  * Runs at boot for every tenant, on both database backends, through the tenant-scoped database API.
  */
@@ -40,6 +43,10 @@ export async function migrateWebSearchProvidersForTenant(
       result.skipped += 1;
       continue;
     }
+    if (provider.metadata?.behaviorOnInstances === true) {
+      result.skipped += 1;
+      continue;
+    }
     result.providers += 1;
     const { connection, behavior } = splitWebSearchSettings(provider.driver, provider.settings);
 
@@ -55,7 +62,9 @@ export async function migrateWebSearchProvidersForTenant(
       continue;
     }
 
-    if (!existing) {
+    // An instance of any key on this provider already holds its behavior: nothing to create.
+    const used = Boolean(existing) || (await db.listWebSearchInstances(tenantId, { providerKey: provider.key })).length > 0;
+    if (!used) {
       await db.createWebSearchInstance({
         tenantId,
         projectId: null,
@@ -72,14 +81,17 @@ export async function migrateWebSearchProvidersForTenant(
       result.created += 1;
     }
 
-    if (Object.keys(behavior).length > 0) {
-      await db.updateProvider(String(provider._id), {
-        settings: connection,
-        metadata: { ...(provider.metadata ?? {}), migratedBehavior: behavior },
-        updatedBy: SYSTEM_ACTOR,
-      });
-      result.stripped += 1;
-    }
+    const hasBehavior = Object.keys(behavior).length > 0;
+    await db.updateProvider(String(provider._id), {
+      ...(hasBehavior ? { settings: connection } : {}),
+      metadata: {
+        ...(provider.metadata ?? {}),
+        ...(hasBehavior ? { migratedBehavior: behavior } : {}),
+        behaviorOnInstances: true,
+      },
+      updatedBy: SYSTEM_ACTOR,
+    });
+    if (hasBehavior) result.stripped += 1;
   }
   return result;
 }
