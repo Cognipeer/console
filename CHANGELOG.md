@@ -800,15 +800,16 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   Quality & reliability, Safety & compliance and Infrastructure. With a single report it is a plain link; without the
   reports license, or with nothing to read, there is no Reports row.
 - **Favorites**: every service row has a pin (shown on hover or keyboard focus, always on a touch screen), and a
-  service's own level has one beside the way back. Pinned services are listed under Favorites, below Home and Reports,
-  in the order pinned, as links to the service; a favorite keeps its pin shown to take it out again. Favorites start
-  empty and are kept in the browser, in the store the icon rail used (services pinned there come back); a service the
-  person can no longer open is left out.
+  service's own level has one beside the way back. Favorites is one closed row below Home and Reports, with the number
+  pinned: it opens a level of its own that lists them in the order pinned, as links to the service, each with its pin
+  shown to take it out again (the last one taken out goes back to the first level). Favorites start empty and are kept
+  in the browser, in the store the icon rail used (services pinned there come back); a service the person can no
+  longer open is left out.
 - The menu opens at the level of the page in view, and the first level names that page next to its service
   ("Agents  Tools ›"). One row is marked as the page in view.
 - With seven services or fewer the first level is one plain list, without categories.
-- "Collapse menu" turns it into an icon strip (Home, Reports, the favorites, then every service) that still shows the
-  pages of the service in view; the browser remembers it.
+- "Collapse menu" turns it into an icon strip (Home, Reports, a Favorites button that lists them in a menu, then every
+  service) that still shows the pages of the service in view; the browser remembers it.
 - The top bar is the logo, the project, a wide search and the account menu. The Services launcher, the portals, theme
   and docs buttons are gone: the services are in the left menu, the theme and the person's portals in the account menu,
   the docs under Help at the bottom of the left menu.
