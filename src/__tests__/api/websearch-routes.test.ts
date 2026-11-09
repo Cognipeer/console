@@ -82,6 +82,7 @@ import {
 } from '@/lib/services/webSearch/webSearchInstanceService';
 import { requireApiTokenFromHeader, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
+import { PlanLimitError } from '@/lib/limits/errors';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -309,6 +310,21 @@ describe('POST /api/websearch/search (dashboard)', () => {
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/no active web search provider/i);
   });
+
+  it('answers a plan-limit refusal with its own status and envelope (402 when out of credits)', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PlanLimitError({ code: 'insufficient_credits', message: 'Not enough credits for this request.', kind: 'credits', dimension: 'credits' }),
+    );
+    const app = await createFastifyApiTestApp(websearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/websearch/search',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello' }),
+    });
+    expect(res.statusCode).toBe(402);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('insufficient_credits');
+  });
 });
 
 // ── Client v1 plugin ─────────────────────────────────────────────────────────
@@ -489,5 +505,20 @@ describe('POST /api/client/v1/websearch/search', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/not a web search provider/i);
+  });
+
+  it('answers a plan-limit refusal with its own status and envelope (402 when out of credits)', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PlanLimitError({ code: 'insufficient_credits', message: 'Not enough credits for this request.', kind: 'credits', dimension: 'credits' }),
+    );
+    const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/websearch/search',
+      headers: { authorization: 'Bearer tok_abc', 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello', provider: 'cognipeer-search' }),
+    });
+    expect(res.statusCode).toBe(402);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('insufficient_credits');
   });
 });

@@ -22,6 +22,7 @@
  */
 
 import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { runWebSearch } from '@/lib/services/webSearch';
@@ -129,6 +130,8 @@ export const clientWebSearchApiPlugin: FastifyPluginAsync = async (app) => {
         latency_ms: result.latencyMs,
       });
     } catch (error) {
+      const refusal = sendPlanLimitRefusal(reply, error);
+      if (refusal) return refusal;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Run client web search error', { error });
       return reply.code(400).send({

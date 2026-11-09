@@ -42,6 +42,7 @@ import {
   toCompatRow,
   toInstanceView,
 } from '@/lib/services/webSearch/webSearchInstanceView';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import {
   readJsonBody,
@@ -349,7 +350,7 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result });
     } catch (error) {
-      const handled = sendProjectContextError(reply, error);
+      const handled = sendProjectContextError(reply, error) ?? sendPlanLimitRefusal(reply, error);
       if (handled) return handled;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Dashboard web search error', { error });
