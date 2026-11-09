@@ -116,6 +116,8 @@ describe('hasNoPage', () => {
   it('knows the folders without a page', () => {
     expect(hasNoPage(seg('/dashboard/redteam/campaigns/c1'), 2)).toBe(true);
     expect(hasNoPage(seg('/dashboard/redteam/campaigns/c1'), 3)).toBe(false);
+    expect(hasNoPage(seg('/dashboard/redteam/probes/builtin/jailbreak'), 3)).toBe(true);
+    expect(hasNoPage(seg('/dashboard/redteam/probes/builtin/jailbreak'), 2)).toBe(false);
     expect(hasNoPage(seg('/dashboard/models/m1'), 2)).toBe(false);
   });
 

@@ -154,6 +154,8 @@ export async function runRedTeam(params: RunRedTeamParams): Promise<RedTeamRunRe
   const { probes, invokeTarget, invokeJudge, invokeAttacker, config, onAttempt } = params;
   const concurrency = clampConcurrency(config?.concurrency);
   const acceptsSystem = config?.targetAcceptsSystem !== false;
+  const acceptsHistory = config?.targetAcceptsHistory !== false;
+  const targetKind = config?.targetKind;
   const maxAttempts =
     typeof config?.maxAttempts === 'number' && Number.isFinite(config.maxAttempts) && config.maxAttempts >= 1
       ? Math.floor(config.maxAttempts)
@@ -162,9 +164,11 @@ export async function runRedTeam(params: RunRedTeamParams): Promise<RedTeamRunRe
   const runnable: WorkItem[] = [];
   let notApplicable = 0;
   for (const probe of probes) {
+    const wrongKind = targetKind !== undefined && probe.targets !== undefined && !probe.targets.includes(targetKind);
     for (const attempt of probe.generate()) {
-      // A target that keeps its own instructions cannot be tested with a planted system prompt.
-      if (!acceptsSystem && attempt.system) {
+      // A target that keeps its own instructions cannot be tested with a planted system prompt, an
+      // agent keeps its own conversation (no forged history), and a probe can name the kinds it fits.
+      if (wrongKind || (!acceptsSystem && attempt.system) || (!acceptsHistory && attempt.history?.length)) {
         notApplicable += 1;
         continue;
       }
@@ -268,6 +272,7 @@ function toAggregateAttempt(a: AttemptResult) {
     category: a.category,
     latencyMs: a.latencyMs,
     signals: a.verdict.signals,
+    polarity: a.polarity,
   };
 }
 
@@ -289,6 +294,14 @@ interface Drive {
   note?: string;
   /** The run's stop ended the conversation before it was done. */
   cut?: boolean;
+}
+
+/** The messages every call starts with: the planted system turn, then the forged history. */
+function openingMessages(attempt: ProbeAttempt): { role: 'system' | 'user' | 'assistant'; content: string }[] {
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [];
+  if (attempt.system) messages.push({ role: 'system', content: attempt.system });
+  for (const m of attempt.history ?? []) messages.push({ role: m.role, content: m.content });
+  return messages;
 }
 
 async function runAttempt(probe: Probe, attempt: ProbeAttempt, env: AttemptEnv): Promise<AttemptResult> {
@@ -406,8 +419,7 @@ function errorMessage(err: unknown): string {
 async function driveTarget(attempt: ProbeAttempt, key: string, env: AttemptEnv): Promise<Drive> {
   const maxTurns = env.config?.maxTurns;
   const transcript: Turn[] = [];
-  const history: { role: 'system' | 'user' | 'assistant'; content: string }[] = [];
-  if (attempt.system) history.push({ role: 'system', content: attempt.system });
+  const history = openingMessages(attempt);
 
   const turns = typeof maxTurns === 'number' && maxTurns > 0 ? attempt.turns.slice(0, maxTurns) : attempt.turns;
   for (let i = 0; i < turns.length; i += 1) {
@@ -442,8 +454,7 @@ async function driveAdaptive(
 ): Promise<Drive> {
   const limit = Math.min(MAX_ADAPTIVE_TURNS, Math.max(1, env.config?.maxTurns ?? DEFAULT_ADAPTIVE_TURNS));
   const transcript: Turn[] = [];
-  const history: { role: 'system' | 'user' | 'assistant'; content: string }[] = [];
-  if (attempt.system) history.push({ role: 'system', content: attempt.system });
+  const history = openingMessages(attempt);
 
   let attackerMessage = attempt.turns[0] ?? attempt.objective ?? 'Hello.';
   for (let i = 0; i < limit; i += 1) {
@@ -534,5 +545,6 @@ function baseResult(probe: Probe, attempt: ProbeAttempt): Omit<AttemptResult, 't
     family: probe.family,
     category: probe.category,
     severity: probe.severity,
+    ...(probe.polarity === 'over-refusal' ? { polarity: 'over-refusal' as const } : {}),
   };
 }

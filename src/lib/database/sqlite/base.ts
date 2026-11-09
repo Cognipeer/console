@@ -1157,6 +1157,16 @@ export class SQLiteProviderBase {
     ] as const) {
       this.ensureTableColumn(db, TABLES.redTeamRuns, column, ddl);
     }
+    // Probe library: over-refusal polarity on attempt rows, polarity/origin/clone/source on custom probes.
+    this.ensureTableColumn(db, TABLES.redTeamRunAttempts, 'polarity', 'polarity TEXT');
+    for (const [column, ddl] of [
+      ['polarity', 'polarity TEXT'],
+      ['origin', 'origin TEXT'],
+      ['clonedFrom', 'clonedFrom TEXT'],
+      ['source', 'source TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.redTeamCustomProbes, column, ddl);
+    }
     // Red-team campaign and custom-probe keys are unique per project, not per tenant
     // (the by-id routes are project-scoped); the old global unique indexes go.
     db.exec('DROP INDEX IF EXISTS idx_redteam_campaigns_key');

@@ -89,6 +89,7 @@ export const NO_PAGE_PATHS: ReadonlySet<string> = new Set([
   'evaluations/snapshots',
   'prompt-optimizer/runs',
   'redteam/campaigns',
+  'redteam/probes/builtin',
 ]);
 
 /**

@@ -38,7 +38,7 @@ function withStringId<T extends { _id?: unknown }>(doc: T): T {
 }
 
 /** Attempt fields that may be absent on a row; an upsert removes them when the new row has none. */
-const OPTIONAL_ATTEMPT_FIELDS = ['projectId', 'latencyMs', 'error', 'partial', 'kbRestricted'] as const;
+const OPTIONAL_ATTEMPT_FIELDS = ['projectId', 'latencyMs', 'error', 'partial', 'kbRestricted', 'polarity'] as const;
 
 function statusFilter(status: RedTeamRunStatus | RedTeamRunStatus[]): RedTeamRunStatus | { $in: RedTeamRunStatus[] } {
   return Array.isArray(status) ? { $in: status } : status;

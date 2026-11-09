@@ -9,11 +9,26 @@
  */
 
 import type { IRedTeamCustomProbe } from '@/lib/database';
-import { createLlmJudgeDetector, createPatternDetector, createRefusalDetector } from '../detectors';
+import {
+  createLlmJudgeDetector,
+  createNamedDetector,
+  createPatternDetector,
+  createRefusalDetector,
+  isNamedDetectorKey,
+} from '../detectors';
 import { patternListError } from '../detectors/safePattern';
 import { ATTEMPT_ID_PATTERN, CUSTOM_PROBE_LIMITS } from '../limits';
 import { isKnownOwaspCategory, normalizeOwaspCategory } from '../owasp';
-import type { Detector, OwaspLlmCategory, Probe, ProbeAttempt, Severity } from '../types';
+import { NAMED_DETECTOR_KEYS } from '../types';
+import type {
+  Detector,
+  NamedDetectorKey,
+  OwaspLlmCategory,
+  Probe,
+  ProbeAttempt,
+  ProbeDetectorSpec,
+  Severity,
+} from '../types';
 
 /** Selection keys for custom probes are namespaced to avoid built-in clashes. */
 export const CUSTOM_PROBE_PREFIX = 'custom:';
@@ -37,8 +52,9 @@ export function validateCustomProbe(def: Pick<IRedTeamCustomProbe, 'attempts' | 
   }
   const d = def.detectors ?? {};
   const judgeCount = d.judges?.length ?? 0;
-  if (!d.refusal && !d.pattern && judgeCount === 0) {
-    throw new CustomProbeError('a custom probe needs at least one detector (refusal, pattern, or a judge lens)');
+  const namedCount = Array.isArray(d.named) ? d.named.length : 0;
+  if (!d.refusal && !d.pattern && namedCount === 0 && judgeCount === 0) {
+    throw new CustomProbeError('a custom probe needs at least one detector (refusal, pattern, a named detector, or a judge lens)');
   }
 }
 
@@ -66,6 +82,23 @@ export function validateCustomProbePatterns(attempts: PatternAttempt[], stored: 
   }
 }
 
+function validateHistory(history: unknown, id: string): void {
+  const L = CUSTOM_PROBE_LIMITS;
+  if (!Array.isArray(history)) throw new CustomProbeError(`attempt "${id}": history must be a list of messages`);
+  if (history.length > L.maxHistoryMessages) {
+    throw new CustomProbeError(`attempt "${id}": history has more than ${L.maxHistoryMessages} messages`);
+  }
+  for (const m of history as Array<{ role?: unknown; content?: unknown }>) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) {
+      throw new CustomProbeError(`attempt "${id}": a history message needs the role "user" or "assistant"`);
+    }
+    if (typeof m.content !== 'string' || !m.content.trim()) {
+      throw new CustomProbeError(`attempt "${id}": a history message needs content`);
+    }
+    if (m.content.length > L.maxTurnChars) throw tooLong('a history message', L.maxTurnChars, id);
+  }
+}
+
 const CANARY_PLACEHOLDER = /\{\{\s*canary\s*\}\}/;
 
 const tooLong = (what: string, max: number, id?: string) =>
@@ -82,7 +115,7 @@ const tooLong = (what: string, max: number, id?: string) =>
  * `buildCustomProbe` calls just `validateCustomProbe`.
  */
 export function validateCustomProbeDefinition(
-  def: Pick<IRedTeamCustomProbe, 'attempts' | 'detectors' | 'category'>,
+  def: Pick<IRedTeamCustomProbe, 'attempts' | 'detectors' | 'category' | 'polarity'>,
   stored: PatternAttempt[] = [],
 ): void {
   validateCustomProbe(def);
@@ -114,8 +147,35 @@ export function validateCustomProbeDefinition(
     if (a.system !== undefined && a.system.length > L.maxSystemChars) throw tooLong('the system prompt', L.maxSystemChars, a.id);
     if (a.objective !== undefined && a.objective.length > L.maxObjectiveChars) throw tooLong('the objective', L.maxObjectiveChars, a.id);
 
+    if (a.history !== undefined) validateHistory(a.history, a.id);
+
     if (a.canary && !(a.system && (CANARY_PLACEHOLDER.test(a.system) || a.system.includes(a.canary)))) {
       throw new CustomProbeError(`attempt "${a.id}": Put {{canary}} in the system prompt so the canary is planted`);
+    }
+  }
+
+  if (def.polarity !== undefined && def.polarity !== 'attack' && def.polarity !== 'over-refusal') {
+    throw new CustomProbeError('polarity must be "attack" or "over-refusal"');
+  }
+  const named = def.detectors?.named;
+  if (named !== undefined) {
+    if (!Array.isArray(named)) throw new CustomProbeError('named detectors must be a list');
+    if (named.length > L.maxNamedDetectors) {
+      throw new CustomProbeError(`a custom probe can have at most ${L.maxNamedDetectors} named detectors`);
+    }
+    const seenNamed = new Set<string>();
+    for (const key of named) {
+      if (!isNamedDetectorKey(key)) {
+        throw new CustomProbeError(`named detector "${String(key)}" is not known; use one of ${NAMED_DETECTOR_KEYS.join(', ')}`);
+      }
+      if (seenNamed.has(key)) throw new CustomProbeError(`named detector "${key}" is listed more than once`);
+      seenNamed.add(key);
+    }
+  }
+  if (def.polarity === 'over-refusal') {
+    if (!def.detectors?.refusal) throw new CustomProbeError('an over-refusal probe needs the refusal detector');
+    if (def.detectors.pattern || (named?.length ?? 0) > 0) {
+      throw new CustomProbeError('an over-refusal probe can use only the refusal detector and judge lenses');
     }
   }
 
@@ -136,7 +196,25 @@ export function validateCustomProbeDefinition(
  * definition switched it off.
  */
 function needsPatternDetector(def: IRedTeamCustomProbe): boolean {
+  if (def.polarity === 'over-refusal') return false;
   return def.attempts.some((a) => Boolean(a.canary) || (a.forbiddenPatterns?.length ?? 0) > 0);
+}
+
+/** The stored detector selection in its declarative form (what a built-in's `detectorSpec` is). */
+function buildDetectorSpec(def: IRedTeamCustomProbe): ProbeDetectorSpec {
+  const d = def.detectors ?? {};
+  const named = (d.named ?? []).filter(isNamedDetectorKey);
+  const judges = (d.judges ?? []).map((j) => ({
+    lens: j.lens,
+    rubric: j.rubric,
+    ...(j.threshold !== undefined ? { threshold: j.threshold } : {}),
+  }));
+  return {
+    ...(d.refusal ? { refusal: true } : {}),
+    ...(d.pattern || needsPatternDetector(def) ? { pattern: true } : {}),
+    ...(named.length > 0 ? { named } : {}),
+    ...(judges.length > 0 ? { judges } : {}),
+  };
 }
 
 function buildDetectors(def: IRedTeamCustomProbe): Detector[] {
@@ -144,6 +222,9 @@ function buildDetectors(def: IRedTeamCustomProbe): Detector[] {
   const d = def.detectors ?? {};
   if (d.refusal) detectors.push(createRefusalDetector());
   if (d.pattern || needsPatternDetector(def)) detectors.push(createPatternDetector());
+  for (const key of (d.named ?? []).filter(isNamedDetectorKey) as NamedDetectorKey[]) {
+    detectors.push(createNamedDetector(key));
+  }
   for (const judge of d.judges ?? []) {
     detectors.push(
       createLlmJudgeDetector({
@@ -159,6 +240,9 @@ function buildDetectors(def: IRedTeamCustomProbe): Detector[] {
 function buildAttempts(def: IRedTeamCustomProbe): ProbeAttempt[] {
   return def.attempts.map((a) => {
     const system = a.system && a.canary ? a.system.replace(/\{\{\s*canary\s*\}\}/g, a.canary) : a.system;
+    const history = (a.history ?? [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+      .map((m) => ({ role: m.role, content: m.content }));
     return {
       id: a.id,
       turns: a.turns,
@@ -170,6 +254,7 @@ function buildAttempts(def: IRedTeamCustomProbe): ProbeAttempt[] {
       },
       adaptive: a.adaptive,
       objective: a.objective,
+      ...(history.length > 0 ? { history } : {}),
     };
   });
 }
@@ -186,6 +271,8 @@ export function buildCustomProbe(def: IRedTeamCustomProbe): Probe {
     category: normalizeOwaspCategory(def.category) as OwaspLlmCategory,
     severity: def.severity as Severity,
     description: def.description,
+    polarity: def.polarity ?? 'attack',
+    detectorSpec: buildDetectorSpec(def),
     detectors,
     generate: () => attempts,
   };

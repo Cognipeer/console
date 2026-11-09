@@ -71,7 +71,76 @@ export interface ProbeAttempt {
   adaptive?: boolean;
   /** The attacker's goal, used to steer the adaptive loop. */
   objective?: string;
+  /**
+   * Earlier turns sent before `turns[0]` as if they had happened (a forged
+   * conversation history). Only a target that takes the caller's history (a
+   * model) can run such an attempt; an agent keeps its own conversation, so the
+   * attempt is not run there (`targetAcceptsHistory: false`).
+   */
+  history?: ProbeHistoryMessage[];
   meta?: Record<string, unknown>;
+}
+
+/** One forged earlier turn of an attempt's history. */
+export interface ProbeHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * What a probe tests. `attack` (the default): a hit means the attack worked.
+ * `over-refusal`: the prompts are harmless, so a refusal is the failure; such
+ * attempts are reported as their own rate (`RedTeamAggregate.overRefusal`) and
+ * never count in the attack success rate.
+ */
+export type ProbePolarity = 'attack' | 'over-refusal';
+
+/** The kinds of target a probe can run against. */
+export type ProbeTargetKind = 'model' | 'agent';
+
+/** What a probe needs from the target beyond a plain chat call (shown as "works with"). */
+export type ProbeRequirement = 'long-context' | 'caller-history' | 'usage-metrics';
+
+/** A published source for a probe's technique (paper, advisory or repository). */
+export interface ProbeReference {
+  title: string;
+  url: string;
+}
+
+/**
+ * Deterministic detectors a definition can name, besides `refusal`, `pattern`
+ * and judge lenses. The same keys serve built-in specs and custom probes.
+ */
+export const NAMED_DETECTOR_KEYS = [
+  'pii',
+  'encoding-leak',
+  'insecure-output',
+  'markdown-exfil',
+  'ansi-escape',
+  'tag-smuggling',
+  'consumption',
+  'non-refusal',
+] as const;
+export type NamedDetectorKey = (typeof NAMED_DETECTOR_KEYS)[number];
+
+/** One LLM-judge lens of a detector spec. */
+export interface ProbeJudgeLensSpec {
+  lens: string;
+  rubric: string;
+  /** Hit threshold on the normalised 0..1 success score (default 0.5). */
+  threshold?: number;
+}
+
+/**
+ * The declarative form of a probe's detectors: what a custom probe stores, and
+ * what a built-in declares so a clone reproduces it. Built in this order:
+ * refusal, pattern, named (in the given order), judges.
+ */
+export interface ProbeDetectorSpec {
+  refusal?: boolean;
+  pattern?: boolean;
+  named?: NamedDetectorKey[];
+  judges?: ProbeJudgeLensSpec[];
 }
 
 /** A vulnerability-class generator plus the detectors that judge it. */
@@ -82,6 +151,25 @@ export interface Probe {
   category: OwaspLlmCategory;
   severity: Severity;
   description: string;
+  /** Built-in revision; bumped whenever attempts or detectors change. A clone records the one it copied. Default 1. */
+  version?: number;
+  /** One or two sentences on how the technique works (catalog detail). */
+  technique?: string;
+  /** Where the technique is published. Never a link the probe was not checked against. */
+  references?: ProbeReference[];
+  /** Target kinds it can run against (default both). Attempts on another kind are not run. */
+  targets?: ProbeTargetKind[];
+  /** What it needs beyond a plain chat call ("works with" labels). */
+  requires?: ProbeRequirement[];
+  /** ISO date the probe joined the catalog; the UI marks recent ones as new. */
+  addedAt?: string;
+  /** Default `attack`. */
+  polarity?: ProbePolarity;
+  /**
+   * Declarative twin of `detectors` (built-ins): a clone stores it, and a test
+   * keeps it in step with `detectors`.
+   */
+  detectorSpec?: ProbeDetectorSpec;
   /**
    * Detectors used to judge every attempt from this probe (garak's
    * `recommended_detector`, but configured and possibly a panel). Multiple
@@ -174,6 +262,8 @@ export interface DetectionSignal {
   modelRef?: string;
   /** Populated when the detector itself failed; excluded from the decision. */
   error?: string;
+  /** Extra facts a detector reports for the decision policy (e.g. `refusalPresent`). */
+  meta?: Record<string, unknown>;
 }
 
 export interface Detector {
@@ -238,6 +328,22 @@ export interface AttemptResult {
    * who read all of them through the admin exception.
    */
   kbRestricted?: string[];
+  /** Set only for an over-refusal attempt (see ProbePolarity); absent means `attack`. */
+  polarity?: 'over-refusal';
+}
+
+/**
+ * Over-refusal attempts, kept apart from the attack counts: `refused` are the
+ * harmless prompts the target refused (each is an attempt with outcome
+ * `vulnerable`), `rate` is refused / completed, null when none completed.
+ */
+export interface OverRefusalBreakdown {
+  total: number;
+  completed: number;
+  failed: number;
+  refused: number;
+  needsReview: number;
+  rate: number | null;
 }
 
 export interface CategoryBreakdown {
@@ -274,6 +380,11 @@ export interface RedTeamAggregate {
   /** The rates cannot be trusted; `inconclusiveReasons` says why. */
   inconclusive: boolean;
   inconclusiveReasons: InconclusiveReason[];
+  /**
+   * Present when the run had over-refusal attempts. Those attempts are counted
+   * only here: not in `total`, the verdict counts, the rates or the breakdowns.
+   */
+  overRefusal?: OverRefusalBreakdown;
 }
 
 export interface RedTeamRunResult {
@@ -306,6 +417,17 @@ export interface RedTeamRunConfig {
    * and are counted in `notApplicable`, never reported as safe.
    */
   targetAcceptsSystem?: boolean;
+  /**
+   * Whether the target takes a caller-supplied history (default true). An
+   * agent keeps its own conversation, so an attempt with `history` is not run
+   * there and is counted in `notApplicable`.
+   */
+  targetAcceptsHistory?: boolean;
+  /**
+   * The kind of target under test. A probe whose `targets` leave it out has
+   * none of its attempts run (counted in `notApplicable`). Unset: no filter.
+   */
+  targetKind?: ProbeTargetKind;
   /**
    * Polled before each attempt starts and before each further turn. Once it
    * returns true no new attempt or turn starts; attempts already finished are

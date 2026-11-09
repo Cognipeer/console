@@ -1,22 +1,29 @@
 'use client';
 
 /**
- * Grouped probe picker — replaces the flat MultiSelect with an OWASP-grouped,
- * searchable checklist. Probes are bucketed by their OWASP category, each row
- * carries a severity badge and description, and every group (plus the whole
- * catalog) has a select-all toggle. Custom probes get their own group so the
- * user can tell hand-authored attacks from the built-in catalog at a glance.
+ * Grouped probe picker: a searchable checklist in four groups (built-in default
+ * set, more built-in probes, custom, imported). Each row shows severity, the
+ * OWASP category and what the probe works with. On an agent campaign a probe
+ * that cannot run against agents is dimmed and says so (it stays selectable).
+ * A menu selects every probe of one OWASP category at once.
  */
 
 import { useMemo, useState } from 'react';
-import { Badge, Checkbox, Group, Pill, ScrollArea, Stack, Text, TextInput } from '@mantine/core';
-import { IconSearch } from '@tabler/icons-react';
+import { Badge, Button, Checkbox, Group, Menu, Pill, ScrollArea, Stack, Text, TextInput } from '@mantine/core';
+import { IconChevronDown, IconSearch } from '@tabler/icons-react';
 import { OWASP_LLM_CATEGORIES, normalizeOwaspCategory, owaspCategoryLabel } from '@/lib/services/redteam/owasp';
-import { missingProbeKeys, selectedDisabledProbes } from './helpers';
+import {
+  agentFit,
+  defaultSetNote,
+  groupPickerProbes,
+  isNewProbe,
+  keysInCategory,
+  missingProbeKeys,
+  selectedDisabledProbes,
+  worksWithLabels,
+} from './helpers';
 import { SEVERITY_COLOR, SEVERITY_ORDER } from './severity';
-import type { DisabledProbeView, ProbeCatalogView } from './types';
-
-const CUSTOM_GROUP = 'Custom probes';
+import type { DisabledProbeView, ProbeCatalogView, RedTeamTargetKind } from './types';
 
 /** Position in the OWASP 2025 list; a category outside it sorts after the list. */
 function categoryRank(category: string): number {
@@ -30,17 +37,13 @@ interface Props {
   disabledProbes?: DisabledProbeView[];
   value: string[];
   onChange: (keys: string[]) => void;
-  /** Note shown when nothing is selected (e.g. "runs the full built-in catalog"). */
+  /** Overrides the note shown when nothing is selected; by default it names the default set. */
   emptyHint?: string;
+  /** The campaign's target: on an agent, probes that cannot run there are marked. */
+  targetKind?: RedTeamTargetKind;
 }
 
-interface ProbeGroup {
-  key: string;
-  label: string;
-  probes: ProbeCatalogView[];
-}
-
-export default function ProbePicker({ probes, disabledProbes, value, onChange, emptyHint }: Props) {
+export default function ProbePicker({ probes, disabledProbes, value, onChange, emptyHint, targetKind }: Props) {
   const [search, setSearch] = useState('');
   const selected = useMemo(() => new Set(value), [value]);
 
@@ -56,30 +59,14 @@ export default function ProbePicker({ probes, disabledProbes, value, onChange, e
             owaspCategoryLabel(p.category).toLowerCase().includes(q),
         )
       : probes;
-    return [...matches].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
+    return [...matches].sort(
+      (a, b) =>
+        categoryRank(normalizeOwaspCategory(a.category)) - categoryRank(normalizeOwaspCategory(b.category)) ||
+        (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
+    );
   }, [probes, search]);
 
-  const groups = useMemo<ProbeGroup[]>(() => {
-    const byGroup = new Map<string, ProbeCatalogView[]>();
-    for (const p of filtered) {
-      const groupKey = p.custom ? CUSTOM_GROUP : normalizeOwaspCategory(p.category);
-      const list = byGroup.get(groupKey) ?? [];
-      list.push(p);
-      byGroup.set(groupKey, list);
-    }
-    // Built-in OWASP groups first (sorted by category), custom group last.
-    const entries = [...byGroup.entries()];
-    entries.sort(([a], [b]) => {
-      if (a === CUSTOM_GROUP) return 1;
-      if (b === CUSTOM_GROUP) return -1;
-      return categoryRank(a) - categoryRank(b) || a.localeCompare(b);
-    });
-    return entries.map(([key, list]) => ({
-      key,
-      label: key === CUSTOM_GROUP ? CUSTOM_GROUP : owaspCategoryLabel(key),
-      probes: list,
-    }));
-  }, [filtered]);
+  const groups = useMemo(() => groupPickerProbes(filtered), [filtered]);
 
   const toggle = (key: string) => {
     const next = new Set(selected);
@@ -98,6 +85,10 @@ export default function ProbePicker({ probes, disabledProbes, value, onChange, e
   };
 
   const allKeys = useMemo(() => probes.map((p) => p.key), [probes]);
+  const categories = useMemo(() => {
+    const seen = new Set(probes.map((p) => normalizeOwaspCategory(p.category)));
+    return [...seen].sort((a, b) => categoryRank(a) - categoryRank(b) || a.localeCompare(b));
+  }, [probes]);
   // Selected keys the catalog no longer has (a custom probe that was deleted). Only judged once the catalog has loaded,
   // otherwise every selection would flash as deleted.
   const disabledKeys = useMemo(() => (disabledProbes ?? []).map((d) => d.key), [disabledProbes]);
@@ -120,6 +111,21 @@ export default function ProbePicker({ probes, disabledProbes, value, onChange, e
           onChange={(e) => setSearch(e.currentTarget.value)}
           style={{ flex: 1 }}
         />
+        <Menu position="bottom-end" withinPortal>
+          <Menu.Target>
+            <Button size="compact-xs" variant="default" rightSection={<IconChevronDown size={12} />}>Select all in…</Button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            {categories.map((c) => {
+              const keys = keysInCategory(probes, c);
+              return (
+                <Menu.Item key={c} onClick={() => setMany(keys, !keys.every((k) => selected.has(k)))}>
+                  {owaspCategoryLabel(c)} ({keys.filter((k) => selected.has(k)).length}/{keys.length})
+                </Menu.Item>
+              );
+            })}
+          </Menu.Dropdown>
+        </Menu>
         <Checkbox
           size="xs"
           label={`Select all (${allKeys.filter((k) => selected.has(k)).length}/${allKeys.length})`}
@@ -175,7 +181,7 @@ export default function ProbePicker({ probes, disabledProbes, value, onChange, e
               const groupAll = keys.every((k) => selected.has(k));
               const groupSome = keys.some((k) => selected.has(k));
               return (
-                <div key={group.key}>
+                <div key={group.id} data-testid={`redteam-picker-group-${group.id}`}>
                   <Group justify="space-between" align="center" mb={4}>
                     <Checkbox
                       size="xs"
@@ -190,37 +196,49 @@ export default function ProbePicker({ probes, disabledProbes, value, onChange, e
                     />
                   </Group>
                   <Stack gap={2} pl="md">
-                    {group.probes.map((p) => (
-                      <Group
-                        key={p.key}
-                        align="flex-start"
-                        gap="xs"
-                        wrap="nowrap"
-                        style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 6 }}
-                        onClick={() => toggle(p.key)}
-                      >
-                        <Checkbox
-                          size="xs"
-                          checked={selected.has(p.key)}
-                          aria-label={p.name}
-                          onChange={() => toggle(p.key)}
-                          onClick={(e) => e.stopPropagation()}
-                          mt={2}
-                        />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <Group gap={6} wrap="nowrap">
-                            <Text size="sm" fw={500} truncate>{p.name}</Text>
-                            <Badge size="xs" variant="light" color={SEVERITY_COLOR[p.severity] ?? 'gray'}>
-                              {p.severity}
-                            </Badge>
-                            {p.custom ? <Badge size="xs" variant="outline" color="teal">custom</Badge> : null}
-                          </Group>
-                          {p.description ? (
-                            <Text size="xs" c="dimmed" lineClamp={2}>{p.description}</Text>
-                          ) : null}
-                        </div>
-                      </Group>
-                    ))}
+                    {group.probes.map((p) => {
+                      const fit = targetKind === 'agent' ? agentFit(p) : ({ kind: 'full' } as const);
+                      const works = worksWithLabels(p);
+                      return (
+                        <Group
+                          key={p.key}
+                          align="flex-start"
+                          gap="xs"
+                          wrap="nowrap"
+                          style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 6, opacity: fit.kind === 'none' ? 0.55 : 1 }}
+                          onClick={() => toggle(p.key)}
+                        >
+                          <Checkbox
+                            size="xs"
+                            checked={selected.has(p.key)}
+                            aria-label={p.name}
+                            onChange={() => toggle(p.key)}
+                            onClick={(e) => e.stopPropagation()}
+                            mt={2}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <Group gap={6} wrap="nowrap">
+                              <Text size="sm" fw={500} truncate>{p.name}</Text>
+                              <Badge size="xs" variant="light" color={SEVERITY_COLOR[p.severity] ?? 'gray'}>
+                                {p.severity}
+                              </Badge>
+                              {isNewProbe(p.addedAt) ? <Badge size="xs" variant="filled" color="teal">NEW</Badge> : null}
+                              {p.custom && p.origin !== 'import' ? <Badge size="xs" variant="outline" color="teal">custom</Badge> : null}
+                            </Group>
+                            <Text size="xs" c="dimmed" truncate>
+                              {owaspCategoryLabel(p.category)}
+                              {works.length > 0 ? ` · ${works.join(' · ')}` : ''}
+                            </Text>
+                            {p.description ? (
+                              <Text size="xs" c="dimmed" lineClamp={2}>{p.description}</Text>
+                            ) : null}
+                            {fit.kind !== 'full' ? (
+                              <Text size="xs" c={fit.kind === 'none' ? 'orange.8' : 'dimmed'} data-testid="redteam-picker-agent-note">{fit.text}</Text>
+                            ) : null}
+                          </div>
+                        </Group>
+                      );
+                    })}
                   </Stack>
                 </div>
               );
@@ -229,8 +247,8 @@ export default function ProbePicker({ probes, disabledProbes, value, onChange, e
         </Stack>
       </ScrollArea.Autosize>
 
-      {selected.size === 0 && emptyHint ? (
-        <Text size="xs" c="dimmed">{emptyHint}</Text>
+      {selected.size === 0 ? (
+        <Text size="xs" c="dimmed">{emptyHint ?? defaultSetNote(probes)}</Text>
       ) : null}
     </Stack>
   );

@@ -37,6 +37,29 @@ export const CUSTOM_PROBE_LIMITS = {
   maxRubricChars: 4_000,
   /** Attempt ids: letters, digits, `.`, `_`, `-`; unique within the probe. */
   maxAttemptIdLength: 64,
+  /** Forged history messages per attempt (ProbeAttempt.history), each at most maxTurnChars. */
+  maxHistoryMessages: 10,
+  /** Named detectors per probe (ProbeDetectorSpec.named). */
+  maxNamedDetectors: 8,
+} as const;
+
+/** File import (redteam/import): parsed in the browser, then sent as probe drafts. */
+export const IMPORT_LIMITS = {
+  /** Largest file the import reads. */
+  maxFileBytes: 10 * 1024 * 1024,
+  /** Rows read from one file; the rest are ignored and counted. */
+  maxRows: 200_000,
+  /** Probes one import may create. */
+  maxProbesPerImport: 20,
+  /** Attempts per imported probe; more usable rows are sampled with a fixed seed. */
+  maxAttemptsPerProbe: CUSTOM_PROBE_LIMITS.maxAttempts,
+  /** Source metadata lengths. */
+  maxSourceNameChars: 200,
+  maxSourceLicenseChars: 100,
+  maxSourceAttributionChars: 500,
+  maxSourceUrlChars: 500,
+  maxSourceFormatChars: 64,
+  maxSourceFileNameChars: 255,
 } as const;
 
 export const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;

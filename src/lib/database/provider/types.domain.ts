@@ -1227,6 +1227,18 @@ export interface IRedTeamAttemptResult {
   kbRestricted?: string[];
   /** Never stored: set on the view of an attempt whose content this viewer may not read (it is left out). */
   restricted?: boolean;
+  /** Set only for an over-refusal attempt (redteam/types.ts ProbePolarity); absent means an attack attempt. */
+  polarity?: 'over-refusal';
+}
+
+/** See OverRefusalBreakdown (redteam/types.ts). */
+export interface IRedTeamOverRefusalBreakdown {
+  total: number;
+  completed: number;
+  failed: number;
+  refused: number;
+  needsReview: number;
+  rate: number | null;
 }
 
 export interface IRedTeamCategoryBreakdown {
@@ -1256,6 +1268,8 @@ export interface IRedTeamAggregate {
   inconclusive?: boolean;
   /** Absent on runs recorded before it existed (there `inconclusive` meant judge errors). */
   inconclusiveReasons?: RedTeamInconclusiveReason[];
+  /** Over-refusal attempts, counted only here (see RedTeamAggregate.overRefusal). Absent when the run had none. */
+  overRefusal?: IRedTeamOverRefusalBreakdown;
 }
 
 export interface IRedTeamRun {
@@ -1345,6 +1359,8 @@ export interface IRedTeamCustomAttempt {
   adaptive?: boolean;
   /** The attacker's goal, used to steer the adaptive loop. */
   objective?: string;
+  /** Forged earlier turns sent before the first turn (redteam/types.ts ProbeAttempt.history); models only. */
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
 /** One LLM-judge lens configured on a custom probe. */
@@ -1363,6 +1379,24 @@ export interface IRedTeamCustomDetectors {
   pattern?: boolean;
   /** A perspective-diverse panel of llm-judge lenses (needs a judge model). */
   judges?: IRedTeamCustomJudgeLens[];
+  /** Named deterministic detectors (redteam/types.ts NAMED_DETECTOR_KEYS), built after refusal and pattern. */
+  named?: string[];
+}
+
+/** Where an imported probe came from; kept for attribution. */
+export interface IRedTeamProbeSource {
+  /** Import format id (redteam/import), e.g. `harmbench-csv`. */
+  format?: string;
+  /** Dataset or project name, e.g. `HarmBench`. */
+  name: string;
+  /** License as the uploader stated or the format declares, e.g. `MIT`. */
+  license?: string;
+  attribution?: string;
+  /** http(s) link to the source. */
+  url?: string;
+  /** File name the rows came from. */
+  fileName?: string;
+  importedAt?: Date;
 }
 
 /**
@@ -1386,6 +1420,14 @@ export interface IRedTeamCustomProbe {
   attempts: IRedTeamCustomAttempt[];
   detectors: IRedTeamCustomDetectors;
   enabled?: boolean;
+  /** Default `attack`; `over-refusal` probes are reported as their own rate (redteam/types.ts ProbePolarity). */
+  polarity?: 'attack' | 'over-refusal';
+  /** How the probe was made. Absent on probes saved before it existed (read as `manual`). */
+  origin?: 'manual' | 'clone' | 'import';
+  /** The built-in this probe was cloned from, and that built-in's version at the time. */
+  clonedFrom?: { probeKey: string; version: number };
+  /** Set on imported probes. */
+  source?: IRedTeamProbeSource;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

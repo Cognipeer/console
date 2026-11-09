@@ -50,6 +50,13 @@ export {
   createPiiDetector,
   createInsecureOutputDetector,
   createEncodingLeakDetector,
+  createMarkdownExfilDetector,
+  createAnsiEscapeDetector,
+  createTagSmugglingDetector,
+  createConsumptionDetector,
+  createNonRefusalDetector,
+  createNamedDetector,
+  isNamedDetectorKey,
   analyzeRefusal,
   looksLikeRefusal,
   findPii,
@@ -59,6 +66,8 @@ export type { LlmJudgeDetectorOptions } from './detectors';
 export {
   PROBE_REGISTRY,
   BUILTIN_PROBE_KEYS,
+  DEFAULT_PROBE_KEYS,
+  builtinProbeDefinition,
   buildProbes,
   buildProbesLenient,
   validateCustomProbeDefinition,
@@ -73,7 +82,7 @@ export {
   createPiiGenerationProbe,
   createDataExtractionProbe,
 } from './probes';
-export type { ProbeCatalogEntry } from './probes';
+export type { BuiltinProbeDefinition, ProbeCatalogEntry } from './probes';
 export { buildTargetInvoker, buildJudgeInvoker, buildAttackerInvoker } from './adapters';
 export type { RedTeamModelContext, RedTeamTargetSpec } from './adapters';
 export { buildAttackerMessages, ATTACKER_STOP } from './attacker';

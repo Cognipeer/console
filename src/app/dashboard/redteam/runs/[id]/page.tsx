@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Alert, Button, Group, List, Loader, Modal, Progress, Select, Stack, Text, Textarea } from '@mantine/core';
+import { Alert, Button, Group, List, Loader, Modal, Progress, SegmentedControl, Select, Stack, Text, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconArrowLeft, IconPlayerStop } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
@@ -17,12 +17,16 @@ import {
   REVIEW_BLOCK_HINT,
   attemptKeyFor,
   effectiveOutcome,
+  filterAttemptsByKind,
   inconclusiveReasons,
   isActiveStatus,
   isFailedAttempt,
+  outcomeLabel,
+  overRefusalDetail,
   partialLabel,
   pct,
   reviewBlockedReason,
+  type AttemptKindFilter,
 } from '@/components/redteam/helpers';
 import { OUTCOME_BADGE, runStatusBadgeClass, severityBadgeClass } from '@/components/redteam/severity';
 import type { RedTeamAttemptView, RedTeamOutcome, RedTeamRunView } from '@/components/redteam/types';
@@ -46,6 +50,7 @@ export default function RedTeamRunDetailPage() {
   const [reviewOutcome, setReviewOutcome] = useState<RedTeamOutcome>('safe');
   const [reviewNote, setReviewNote] = useState('');
   const [savingReview, setSavingReview] = useState(false);
+  const [kindFilter, setKindFilter] = useState<AttemptKindFilter>('all');
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const hasRun = useRef(false);
@@ -155,7 +160,7 @@ export default function RedTeamRunDetailPage() {
       const eff = effectiveOutcome(a);
       return (
         <Group gap={4}>
-          <span className={`ds-badge ${OUTCOME_BADGE[eff]}`}>{eff.replace('_', ' ')}</span>
+          <span className={`ds-badge ${OUTCOME_BADGE[eff]}`}>{outcomeLabel(a, eff)}</span>
           {a.partial ? <span className="ds-badge ds-badge-warn" title={a.error}>{partialLabel(a)}</span> : null}
           {a.review ? <span className="ds-badge" title="Human-reviewed">✓ reviewed</span> : null}
         </Group>
@@ -165,9 +170,11 @@ export default function RedTeamRunDetailPage() {
     { key: 'confidence', label: 'Conf.', render: (a) => <span>{pct(a.confidence)}</span> },
   ];
 
-  const attempts: RedTeamAttemptView[] = Array.isArray(run?.attempts) ? run.attempts : [];
+  const allAttempts: RedTeamAttemptView[] = Array.isArray(run?.attempts) ? run.attempts : [];
+  const hasOverRefusalAttempts = allAttempts.some((a) => a.polarity === 'over-refusal');
+  const attempts = filterAttemptsByKind(allAttempts, hasOverRefusalAttempts ? kindFilter : 'all');
   const attemptsCtl = useTableControls(attempts, {
-    searchText: (a) => `${attemptKeyFor(a)} ${a.category} ${a.severity} ${a.decidedBy} ${effectiveOutcome(a)}`,
+    searchText: (a) => `${attemptKeyFor(a)} ${a.category} ${a.severity} ${a.decidedBy} ${effectiveOutcome(a)} ${outcomeLabel(a, effectiveOutcome(a))}`,
     searchPlaceholder: 'Filter by probe, verdict, or severity…',
   });
 
@@ -305,7 +312,29 @@ export default function RedTeamRunDetailPage() {
         <StatTile label="Resilience" value={agg ? pct(agg.resilienceScore) : '—'} />
         <StatTile label="Vulnerable" value={agg ? agg.vulnerable : '—'} />
         <StatTile label="Needs review" value={agg ? agg.needsReview : '—'} />
+        {agg?.overRefusal ? (
+          <StatTile
+            label="Over-refusal"
+            value={pct(agg.overRefusal.rate)}
+            delta={overRefusalDetail(agg.overRefusal)}
+          />
+        ) : null}
       </div>
+
+      {hasOverRefusalAttempts ? (
+        <Group mb="sm">
+          <SegmentedControl
+            size="xs"
+            value={kindFilter}
+            onChange={(v) => setKindFilter(v as AttemptKindFilter)}
+            data={[
+              { value: 'all', label: 'All attempts' },
+              { value: 'attack', label: 'Attacks' },
+              { value: 'over-refusal', label: 'Over-refusal' },
+            ]}
+          />
+        </Group>
+      ) : null}
 
       <DataGrid<RedTeamAttemptView>
         records={attemptsCtl.records}
@@ -339,7 +368,7 @@ export default function RedTeamRunDetailPage() {
             <div>
               <Text size="sm" fw={500}>{viewing.probeKey} · {owaspCategoryLabel(viewing.category)}</Text>
               <Text size="xs" c="dimmed" className="ds-mono">{attemptKeyFor(viewing)}</Text>
-              <Text size="xs" c="dimmed">Machine verdict: {viewing.outcome.replace('_', ' ')} ({viewing.decidedBy}, {pct(viewing.confidence)})</Text>
+              <Text size="xs" c="dimmed">Machine verdict: {outcomeLabel(viewing, viewing.outcome)} ({viewing.decidedBy}, {pct(viewing.confidence)})</Text>
               {viewing.partial ? (
                 <Text size="xs" c="yellow.8" mt={4}>{partialLabel(viewing)}: the verdict is based on the turns that completed.</Text>
               ) : null}

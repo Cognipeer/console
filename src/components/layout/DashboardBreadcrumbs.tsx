@@ -118,6 +118,7 @@ const PATH_LABEL_OVERRIDES: Record<string, string> = {
   'ai-app-gateway': 'AI App Gateway',
   'ocr-jobs': 'OCR Jobs',
   redteam: 'Red Team',
+  'redteam/probes/builtin': 'Built-in',
   websearch: 'Web Search',
   'connectors/oauth-apps': 'OAuth Apps',
   'connectors/catalog': 'Catalog',

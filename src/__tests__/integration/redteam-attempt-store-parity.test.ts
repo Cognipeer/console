@@ -521,4 +521,105 @@ describeForEachProvider('Red-team attempt rows and run lifecycle storage', (getD
       expect(await db.deleteRedTeamCustomProbe(ABSENT_ID)).toBe(false);
     });
   });
+
+  describe('probe library fields', () => {
+    it('keeps the over-refusal polarity of an attempt row, and drops it when a re-upsert lacks it', async () => {
+      const db = getDb();
+      const run = await createRun();
+      await db.upsertRedTeamRunAttempts([
+        attemptRow(run.id, 'over-refusal-control', 'a1', 0, { polarity: 'over-refusal' }),
+        attemptRow(run.id, 'jb', 'a2', 1),
+      ]);
+
+      expect((await db.findRedTeamRunAttempt(run.id, 'over-refusal-control::a1'))?.polarity).toBe('over-refusal');
+      expect((await db.findRedTeamRunAttempt(run.id, 'jb::a2'))?.polarity).toBeUndefined();
+      expect((await db.listRedTeamRunAttempts(run.id)).map((r) => r.polarity)).toEqual(['over-refusal', undefined]);
+
+      await db.upsertRedTeamRunAttempts([attemptRow(run.id, 'over-refusal-control', 'a1', 0)]);
+      expect((await db.findRedTeamRunAttempt(run.id, 'over-refusal-control::a1'))?.polarity).toBeUndefined();
+    });
+
+    it('keeps the aggregate over-refusal breakdown of a run', async () => {
+      const db = getDb();
+      const overRefusal = { total: 4, completed: 3, failed: 1, refused: 1, needsReview: 0, rate: 1 / 3 };
+      const run = await createRun();
+      await db.updateRedTeamRun(run.id, {
+        status: 'completed',
+        aggregate: {
+          total: 0, completed: 0, failed: 0, vulnerable: 0, safe: 0, needsReview: 0,
+          attackSuccessRate: null, resilienceScore: null,
+          bySeverity: { low: 0, medium: 0, high: 0, critical: 0 },
+          byCategory: {}, avgLatencyMs: null,
+          overRefusal,
+        } as unknown as IRedTeamRun['aggregate'],
+      });
+
+      expect((await db.findRedTeamRunById(run.id))?.aggregate?.overRefusal).toEqual(overRefusal);
+    });
+
+    const customProbe = (key: string, over: Record<string, unknown> = {}) => ({
+      tenantId,
+      projectId: 'p1',
+      key,
+      name: key,
+      description: '',
+      family: 'custom',
+      category: 'LLM01-prompt-injection',
+      severity: 'medium' as const,
+      attempts: [{
+        id: 'a1',
+        turns: ['and now?'],
+        history: [{ role: 'user' as const, content: 'hello' }, { role: 'assistant' as const, content: 'hi there' }],
+      }],
+      detectors: { refusal: true, pattern: false, named: ['non-refusal'] },
+      enabled: true,
+      createdBy: 'ann',
+      ...over,
+    });
+
+    it('stores history, named detectors, polarity, origin, clone lineage and source on a custom probe', async () => {
+      const db = getDb();
+      const importedAt = new Date('2026-11-09T10:00:00.000Z');
+      const created = await db.createRedTeamCustomProbe(customProbe('custom:lib', {
+        polarity: 'over-refusal',
+        origin: 'import',
+        clonedFrom: { probeKey: 'markdown-exfil', version: 2 },
+        source: { format: 'xstest-csv', name: 'XSTest', license: 'CC-BY-4.0', url: 'https://example.com/x', fileName: 'x.csv', importedAt },
+      }));
+      const id = String(created._id);
+
+      for (const probe of [created, await db.findRedTeamCustomProbeById(id), await db.findRedTeamCustomProbeByKey('custom:lib', 'p1')]) {
+        expect(probe).toMatchObject({
+          polarity: 'over-refusal',
+          origin: 'import',
+          clonedFrom: { probeKey: 'markdown-exfil', version: 2 },
+          detectors: { refusal: true, pattern: false, named: ['non-refusal'] },
+        });
+        expect(probe?.attempts[0].history).toEqual([
+          { role: 'user', content: 'hello' },
+          { role: 'assistant', content: 'hi there' },
+        ]);
+        expect(probe?.source).toMatchObject({ format: 'xstest-csv', name: 'XSTest', license: 'CC-BY-4.0', url: 'https://example.com/x', fileName: 'x.csv' });
+        expect(new Date(probe!.source!.importedAt as Date).getTime()).toBe(importedAt.getTime());
+      }
+      expect((await db.listRedTeamCustomProbes({ projectId: 'p1' }))[0].polarity).toBe('over-refusal');
+    });
+
+    it('reads a probe saved without the new fields as before, and an update changes the polarity only when given', async () => {
+      const db = getDb();
+      const created = await db.createRedTeamCustomProbe(customProbe('custom:plain', { detectors: { refusal: true, pattern: true } }));
+      const id = String(created._id);
+
+      const plain = await db.findRedTeamCustomProbeById(id);
+      expect(plain?.polarity).toBeUndefined();
+      expect(plain?.origin).toBeUndefined();
+      expect(plain?.clonedFrom).toBeUndefined();
+      expect(plain?.source).toBeUndefined();
+
+      await db.updateRedTeamCustomProbe(id, { name: 'Renamed' });
+      expect((await db.findRedTeamCustomProbeById(id))?.polarity).toBeUndefined();
+      await db.updateRedTeamCustomProbe(id, { polarity: 'over-refusal' });
+      expect((await db.findRedTeamCustomProbeById(id))?.polarity).toBe('over-refusal');
+    });
+  });
 });

@@ -1269,6 +1269,7 @@ export const TENANT_SCHEMA_SQL = `
     partial INTEGER,
     review TEXT,
     kbRestricted TEXT,
+    polarity TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL,
     UNIQUE(runId, attemptKey)
@@ -1289,6 +1290,10 @@ export const TENANT_SCHEMA_SQL = `
     attempts TEXT DEFAULT '[]',
     detectors TEXT DEFAULT '{}',
     enabled INTEGER NOT NULL DEFAULT 1,
+    polarity TEXT,
+    origin TEXT,
+    clonedFrom TEXT,
+    source TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,

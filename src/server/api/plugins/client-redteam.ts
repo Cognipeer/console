@@ -161,6 +161,7 @@ function toRunView(r: WithId<IRedTeamRun>) {
       latency_ms: a.latencyMs,
       error: a.error,
       ...(a.partial ? { partial: true } : {}),
+      ...(a.polarity ? { polarity: a.polarity } : {}),
       ...(a.restricted ? { restricted: true } : {}),
     })),
   };
