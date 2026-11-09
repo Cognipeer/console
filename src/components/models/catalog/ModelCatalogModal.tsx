@@ -419,9 +419,7 @@ export default function ModelCatalogModal({
             onClick: () => void addSelected(),
           };
 
-  const sourceLabel = platformData
-    ? '—'
-    : data
+  const sourceLabel = data
     ? t(data.error && data.models.length === 0 ? 'summary.sourceFailed' : `summary.${sourceSummaryKey(data.source)}`)
     : '—';
 
@@ -438,22 +436,31 @@ export default function ModelCatalogModal({
           <SummaryKV label="—" value={<span className="ds-faint">{t('provider.pickHint')}</span>} />
         )}
       </SummaryGroup>
-      <SummaryGroup title={t('summary.listing')}>
-        <SummaryKV label={t('summary.source')} value={sourceLabel} />
-        <SummaryKV label={t('summary.listed')} value={data ? formatRelative(data.fetchedAt, locale) : '—'} />
-        <SummaryKV
-          label={t('summary.models')}
-          value={platformData ? platformData.models.length.toLocaleString(locale) : data ? models.length.toLocaleString(locale) : '—'}
-          mono
-        />
-        <SummaryKV label={t('summary.added')} value={data ? registeredCount.toLocaleString(locale) : '—'} mono />
-        <SummaryKV
-          label={t('summary.took')}
-          value={data ? t('summary.tookValue', { ms: Math.round(data.latencyMs) }) : '—'}
-          mono
-        />
-      </SummaryGroup>
-      <SummaryGroup title={t('summary.selected', { count })}>
+      {platformData ? (
+        // A platform catalog is not a listing of the provider's API and nothing in it can be selected: what it offers
+        // and whether it is available in this project.
+        <SummaryGroup title={t('summary.listing')}>
+          <SummaryKV label={t('summary.source')} value={t('summary.sourcePlatform')} />
+          <SummaryKV label={t('summary.models')} value={platformData.models.length.toLocaleString(locale)} mono />
+          <SummaryKV
+            label={t('summary.availability')}
+            value={platformData.assigned ? t('platform.groupAssigned') : t('platform.notInProject')}
+          />
+        </SummaryGroup>
+      ) : (
+        <SummaryGroup title={t('summary.listing')}>
+          <SummaryKV label={t('summary.source')} value={sourceLabel} />
+          <SummaryKV label={t('summary.listed')} value={data ? formatRelative(data.fetchedAt, locale) : '—'} />
+          <SummaryKV label={t('summary.models')} value={data ? models.length.toLocaleString(locale) : '—'} mono />
+          <SummaryKV label={t('summary.added')} value={data ? registeredCount.toLocaleString(locale) : '—'} mono />
+          <SummaryKV
+            label={t('summary.took')}
+            value={data ? t('summary.tookValue', { ms: Math.round(data.latencyMs) }) : '—'}
+            mono
+          />
+        </SummaryGroup>
+      )}
+      {!platformData && <SummaryGroup title={t('summary.selected', { count })}>
         {count === 0 ? (
           <span className="ds-faint" style={{ fontSize: 12.5 }}>{t('summary.nothingSelected')}</span>
         ) : (
@@ -481,7 +488,7 @@ export default function ModelCatalogModal({
             ))}
           </ul>
         )}
-      </SummaryGroup>
+      </SummaryGroup>}
     </>
   );
 

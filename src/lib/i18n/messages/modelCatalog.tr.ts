@@ -171,6 +171,8 @@ export const modelCatalogTr: typeof modelCatalogEn = {
     sourceStatic: 'Yerleşik liste',
     sourceNone: 'Yok',
     sourceFailed: 'Listeleme başarısız',
+    sourcePlatform: 'Platform tarafından yönetilir',
+    availability: 'Kullanım durumu',
     selected: 'Seçilenler ({count})',
     nothingSelected: 'Henüz bir şey seçilmedi.',
     remove: '{name} seçimini kaldır',

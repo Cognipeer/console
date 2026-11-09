@@ -173,6 +173,8 @@ export const modelCatalogEn = {
     sourceStatic: 'Built-in list',
     sourceNone: 'None',
     sourceFailed: 'Listing failed',
+    sourcePlatform: 'Managed by the platform',
+    availability: 'Availability',
     selected: 'Selected ({count})',
     nothingSelected: 'Nothing selected yet.',
     remove: 'Remove {name}',

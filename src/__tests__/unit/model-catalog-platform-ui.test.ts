@@ -177,6 +177,11 @@ describe('ModelCatalogModal with platform providers', () => {
     expect(buttonByText('Configure')).toBeUndefined();
     expect(buttonByText('Enter custom model')).toBeUndefined();
     expect(buttonByText(/^Add \d+ models$/)).toBeUndefined();
+    // The side panel says where the models come from and whether they are here, not an API listing or a selection.
+    expect(text()).toContain('Managed by the platform');
+    expect(text()).toContain('Availability');
+    expect(text()).not.toContain('Already added');
+    expect(text()).not.toContain('Nothing selected yet.');
   });
 
   it('lets an owner or admin use the provider in this project: exactly the project ids, then lists and reloads', async () => {
