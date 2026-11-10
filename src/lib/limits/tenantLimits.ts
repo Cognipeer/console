@@ -1,17 +1,29 @@
 /**
  * Resolves the plan limits that apply to a tenant: the license `plan` claim,
  * else the deployment's default plan (seam), through a short in-process cache.
+ * A tenant whose stored license lapsed (expired, invalid, or paid without a
+ * `plan` claim) gets the restricted plan (seam) instead of the default one.
  * Never throws: when the tenant cannot be loaded the check fails open.
  */
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
-import { getDefaultPlanClaim } from '@/enterprise/plan-limits';
+import { getDefaultPlanClaim, getRestrictedPlanClaim } from '@/enterprise/plan-limits';
 import { LicenseManager } from '@/lib/license/license-manager';
 import type { LicensePlanClaim, LicensePlanMonthlyLimits } from '@/lib/license/planClaim';
 import { effectivePlanLimitsMode, planLimitsActive } from './mode';
 import type { PlanLimitsMode, ResolvedTenantPlan, TenantLimits } from './types';
 
 const log = createLogger('limits:tenant');
+
+type StoredLicense = { licenseId?: string | null; licenseKey?: string | null; licensePayload?: unknown; licenseStatus?: string };
+
+/** A stored license (not the 'FREE' placeholder new and reset tenants carry) that grants no plan. */
+function licenseLapsed(tenant: StoredLicense, license: { status?: string; licenseType?: string; plan?: unknown }): boolean {
+  const stored = Boolean(tenant.licenseKey || tenant.licensePayload || (tenant.licenseId && tenant.licenseId !== 'FREE'))
+    || tenant.licenseStatus === 'expired' || tenant.licenseStatus === 'invalid';
+  if (!stored || license.plan) return false;
+  return license.status !== 'active' || license.licenseType !== 'FREE';
+}
 
 const CACHE_TTL_MS = 30_000;
 const CACHE_MAX_ENTRIES = 10_000;
@@ -87,7 +99,8 @@ export async function resolveTenantPlan(tenantId: string): Promise<ResolvedTenan
     const tenant = await db.findTenantById(tenantId);
     if (!tenant) throw new Error('tenant not found');
     const license = LicenseManager.getEffectiveLicenseForTenant(tenant);
-    const claim = license.plan ?? getDefaultPlanClaim();
+    const claim = license.plan
+      ?? (licenseLapsed(tenant, license) ? getRestrictedPlanClaim() ?? getDefaultPlanClaim() : getDefaultPlanClaim());
     const mode = effectivePlanLimitsMode(claim?.enforcement);
     const value: ResolvedTenantPlan = {
       tenantId,

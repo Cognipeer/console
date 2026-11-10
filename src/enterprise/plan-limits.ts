@@ -36,6 +36,8 @@ export interface PlanCreditSummary {
 export interface PlanLimitsContribution {
   /** The plan a hosted tenant is on when its license has no `plan` claim (or it has no license). */
   defaultPlan?: () => LicensePlanClaim | null;
+  /** The plan a hosted tenant is on when its stored license expired, is invalid, or is paid without a `plan` claim. */
+  restrictedPlan?: () => LicensePlanClaim | null;
   /** The tenant's credit balance; null when credits do not apply to it. */
   creditSummary?: (tenantId: string) => Promise<PlanCreditSummary | null>;
 }
@@ -51,6 +53,15 @@ export function registerPlanLimitsContribution(next: PlanLimitsContribution): vo
 export function getDefaultPlanClaim(): LicensePlanClaim | null {
   try {
     return contribution.defaultPlan?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The restricted plan, or null when none is registered (community edition: the default plan applies). */
+export function getRestrictedPlanClaim(): LicensePlanClaim | null {
+  try {
+    return contribution.restrictedPlan?.() ?? null;
   } catch {
     return null;
   }

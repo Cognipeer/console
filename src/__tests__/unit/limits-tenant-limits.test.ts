@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   active: true,
   findTenantById: vi.fn(),
   defaultClaim: null as unknown,
+  restrictedClaim: null as unknown,
   effective: vi.fn(),
   invalidateEnterprise: vi.fn(async () => undefined),
   clearMemo: vi.fn(),
@@ -12,7 +13,10 @@ const h = vi.hoisted(() => ({
 vi.mock('@/lib/database', () => ({
   getDatabase: async () => ({ findTenantById: h.findTenantById }),
 }));
-vi.mock('@/enterprise/plan-limits', () => ({ getDefaultPlanClaim: () => h.defaultClaim }));
+vi.mock('@/enterprise/plan-limits', () => ({
+  getDefaultPlanClaim: () => h.defaultClaim,
+  getRestrictedPlanClaim: () => h.restrictedClaim,
+}));
 vi.mock('@/lib/license/license-manager', () => ({
   LicenseManager: { getEffectiveLicenseForTenant: (t: unknown) => h.effective(t) },
 }));
@@ -55,6 +59,7 @@ const claim = {
 beforeEach(() => {
   h.active = true;
   h.defaultClaim = null;
+  h.restrictedClaim = null;
   h.findTenantById.mockReset();
   h.effective.mockReset();
   clearTenantPlanCacheForTests();
@@ -125,6 +130,37 @@ describe('resolveTenantPlan', () => {
     const none = await resolveTenantPlan('t1');
     expect(none.limits).toBeNull();
     expect(none.mode).toBe('shadow');
+  });
+
+  it('puts a lapsed stored license on the restricted plan, and no license on the default plan', async () => {
+    h.defaultClaim = { id: 'community' };
+    h.restrictedClaim = { id: 'restricted' };
+    const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, string]> = [
+      ['expired', { licenseId: 'L1', licensePayload: {}, licenseStatus: 'active' }, { status: 'expired', licenseType: 'FREE' }, 'restricted'],
+      ['invalid', { licenseId: 'L1', licenseStatus: 'invalid' }, { status: 'free', licenseType: 'FREE' }, 'restricted'],
+      ['paid without a plan', { licenseId: 'L1', licensePayload: {}, licenseStatus: 'active' }, { status: 'active', licenseType: 'PRO' }, 'restricted'],
+      ['active free', { licenseId: 'L1', licensePayload: {}, licenseStatus: 'active' }, { status: 'active', licenseType: 'FREE' }, 'community'],
+      ['no license', { licenseId: 'FREE', licenseStatus: 'free' }, { status: 'free', licenseType: 'FREE' }, 'community'],
+    ];
+    for (const [name, tenant, license, plan] of cases) {
+      clearTenantPlanCacheForTests();
+      h.findTenantById.mockResolvedValue({ _id: 't1', ...tenant });
+      h.effective.mockReturnValue(license);
+      expect((await resolveTenantPlan('t1')).limits?.plan, name).toBe(plan);
+    }
+    // A plan claim still wins.
+    clearTenantPlanCacheForTests();
+    h.effective.mockReturnValue({ status: 'active', licenseType: 'PRO', plan: claim });
+    expect((await resolveTenantPlan('t1')).limits?.plan).toBe('test-plan');
+  });
+
+  it('keeps the default plan for a lapsed license when no restricted plan is registered (community edition)', async () => {
+    h.findTenantById.mockResolvedValue({ _id: 't1', licenseId: 'L1', licensePayload: {} });
+    h.effective.mockReturnValue({ status: 'expired', licenseType: 'FREE' });
+    expect((await resolveTenantPlan('t1')).limits).toBeNull();
+    clearTenantPlanCacheForTests();
+    h.defaultClaim = { id: 'dflt' };
+    expect((await resolveTenantPlan('t1')).limits?.plan).toBe('dflt');
   });
 
   it('caches, and invalidate forces a reload', async () => {
