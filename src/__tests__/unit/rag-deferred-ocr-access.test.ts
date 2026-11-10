@@ -268,6 +268,9 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       chunkConfig: CHUNK_CONFIG,
       extraction: { ocr: OCR },
       status: 'active',
+      // Same starting counters as createRagModule in the service.
+      totalDocuments: 0,
+      totalChunks: 0,
       ...(access ? { access } : {}),
       createdBy: 'seed',
     }));
