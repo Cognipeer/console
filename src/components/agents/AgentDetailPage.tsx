@@ -275,6 +275,7 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   knowledge: { top: 'configure', sub: 'knowledge' },
   guardrails: { top: 'configure', sub: 'guardrails' },
   pii: { top: 'configure', sub: 'pii' },
+  // Tools is its own Capabilities section (it used to be a part of General).
   tools: { top: 'configure', sub: 'tools' },
   variables: { top: 'configure', sub: 'variables' },
   deploy: { top: 'deploy' },
@@ -1362,16 +1363,6 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           </Stack>
         </ConfigBlock>
 
-        <ConfigBlock id="tools" icon={<IconTool size={15} />} title={t('config.tools')}>
-          <AgentToolsList
-            agentId={agentId}
-            bindings={toolBindings}
-            onBindingsChange={handleToolBindingsChange}
-            onServersChanged={() => setOwnedMcpVersion((version) => version + 1)}
-            readOnly={readOnly}
-          />
-        </ConfigBlock>
-
       </Stack>
     )
   );
@@ -1431,7 +1422,6 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           { id: 'knowledge', title: t('config.knowledgeEngine') },
           { id: 'guardrails', title: t('config.guardrails') },
           { id: 'pii', title: tPii('title') },
-          { id: 'tools', title: t('config.tools') },
         ]
         : undefined,
     })),
@@ -1449,7 +1439,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const buildSectionElements: Record<string, ReactNode> = {
     basic: buildSection(
       'basic',
-      isFlow ? flowTexts.flowBuildDescription : 'What this agent is, which model answers, and the tools it can call.',
+      isFlow ? flowTexts.flowBuildDescription : 'What this agent is, which model answers, and what it knows and is guarded by.',
       renderBasicSettings(),
     ),
     prompt: buildSection(
@@ -1465,6 +1455,17 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         prompts={prompts}
         onPromptsChanged={setPrompts}
         onSaveAgentConfig={handleSaveConfig}
+      />,
+    ),
+    tools: buildSection(
+      'tools',
+      t('config.toolsDescription'),
+      <AgentToolsList
+        agentId={agentId}
+        bindings={toolBindings}
+        onBindingsChange={handleToolBindingsChange}
+        onServersChanged={() => setOwnedMcpVersion((version) => version + 1)}
+        readOnly={readOnly}
       />,
     ),
     subagents: buildSection(
