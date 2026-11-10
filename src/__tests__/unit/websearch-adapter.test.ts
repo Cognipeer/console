@@ -187,6 +187,35 @@ describe('SearxNG', () => {
   });
 });
 
+describe('PROVIDER_RUNTIME_GUARD=warn keeps the path each call took before the setting existed', () => {
+  beforeEach(() => {
+    process.env.PROVIDER_RUNTIME_GUARD = 'warn';
+    reloadConfig();
+  });
+
+  it('SearxNG still goes through the outbound guard, with its default options', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    (safeFetch as ReturnType<typeof vi.fn>).mockResolvedValue(jsonResponse({ results: [] }));
+
+    await callWebSearchProvider(providerRecord('searxng', { baseUrl: 'https://searx.internal.example' }), {}, { query: 'q' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(safeFetch).toHaveBeenCalledTimes(1);
+    expect((safeFetch as ReturnType<typeof vi.fn>).mock.calls[0]).toHaveLength(2);
+  });
+
+  it('a driver that used plain fetch keeps that path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'q' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(safeFetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('parseDuckDuckGoHtml', () => {
   const SAMPLE = `
     <div class="result results_links">

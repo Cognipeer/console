@@ -81,13 +81,16 @@ export async function callWebSearchProvider(
 /**
  * Every search call goes through the outbound guard: the target (including a configured endpoint) is validated and
  * pinned for the connection, and a redirect is handed back instead of followed, so credential headers stay with the
- * host they were configured for. `PROVIDER_RUNTIME_GUARD=warn` keeps the plain `fetch` path and only logs a target
- * the guard would refuse.
+ * host they were configured for. `PROVIDER_RUNTIME_GUARD=warn` keeps the path each call took before the setting
+ * existed: plain `fetch` with a log line for a target the guard would refuse, or, for a call that was already made
+ * through the outbound guard (`guardedBefore`: the SearxNG search with its configured base URL), that guard with its
+ * default options, so the default mode is not weaker than the release before it.
  */
-async function searchFetch(url: string | URL, init: RequestInit): Promise<Response> {
+async function searchFetch(url: string | URL, init: RequestInit, opts?: { guardedBefore?: boolean }): Promise<Response> {
   const target = String(url);
   const tenantId = getRequestContext()?.tenantId;
   if (providerRuntimeGuardObserves()) {
+    if (opts?.guardedBefore) return safeFetch(target, init);
     observeProviderTarget(target, tenantId);
     return fetch(url, init);
   }
@@ -291,7 +294,7 @@ async function callSearxng(input: DriverCallInput): Promise<AdapterCallResult> {
   }
 
   const response = await withResilience(
-    () => searchFetch(url, { headers, signal: input.signal }),
+    () => searchFetch(url, { headers, signal: input.signal }, { guardedBefore: true }),
     { key: 'websearch:searxng' },
   );
   if (!response.ok) {

@@ -5,7 +5,8 @@
  * `enforce`: the deployment's guard options apply and a redirect is handed back instead of followed.
  * `warn`: the request takes the same path it took before this setting existed (plain `fetch`), and the policy is
  * evaluated beside it: a target it would refuse is logged (once per host every ten minutes). Evaluating the policy
- * never fails or delays the call in this mode.
+ * never fails or delays the call in this mode. A call that already went through the outbound guard before the setting
+ * existed (the SearxNG search) keeps that guard in this mode too; see `searchFetch` in the web search adapter.
  *
  * The organization is read from the request context by the callers; a call without one (a background job) is judged
  * with no private networks opened.
