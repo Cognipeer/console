@@ -19,6 +19,7 @@
  * on the memory queue driver.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -46,10 +47,7 @@ export interface RagIngestJobPayload extends QueuePayload {
  * turn every startup into a full re-publish storm competing with the readiness
  * probe. What the cap skips stays `pending` and is picked up by the next sweep.
  */
-const BOOT_RESUME_MAX = Math.max(
-  1,
-  Number(process.env.RAG_INGEST_BOOT_RESUME_MAX ?? 500) || 500,
-);
+const bootResumeMax = () => getConfig().queues.ragIngestBootResumeMax;
 
 /**
  * A deferred extraction whose document was touched this recently is being read by a node that is still alive (it
@@ -119,7 +117,7 @@ export async function resumePendingRagIngests(): Promise<number> {
 
   for (const tenant of tenants) {
     if (!tenant.dbName) continue;
-    if (resumed >= BOOT_RESUME_MAX) break;
+    if (resumed >= bootResumeMax()) break;
     // Its documents stay pending until the service is back on.
     if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'rag'))) continue;
 
@@ -146,7 +144,7 @@ export async function resumePendingRagIngests(): Promise<number> {
       });
 
       for (const doc of pending) {
-        if (resumed >= BOOT_RESUME_MAX) break;
+        if (resumed >= bootResumeMax()) break;
         await publishRagIngestJob({ tenantDbName: tenant.dbName, ...doc });
         resumed += 1;
       }

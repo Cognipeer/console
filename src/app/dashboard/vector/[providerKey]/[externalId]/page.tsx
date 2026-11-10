@@ -49,7 +49,7 @@ import {
   IconTargetArrow,
   IconTrash,
 } from '@tabler/icons-react';
-import type { VectorIndexRecord, VectorQueryResponse, VectorProviderView } from '@/lib/services/vector';
+import type { VectorIndexView, VectorQueryResponse, VectorProviderView } from '@/lib/services/vector';
 import EditVectorIndexModal from '@/components/vector/EditVectorIndexModal';
 import UpsertVectorItemModal from '@/components/vector/UpsertVectorItemModal';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
@@ -195,6 +195,7 @@ export default function VectorIndexDetailPage() {
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
+  const tPlatform = useTranslations('platformStorage');
   const { openDocs } = useDocsDrawer();
   const providerKeyParam = params.providerKey;
   const indexKeyParam = params.externalId;
@@ -202,7 +203,7 @@ export default function VectorIndexDetailPage() {
   const indexKey = Array.isArray(indexKeyParam) ? indexKeyParam[0] : indexKeyParam;
 
   const [provider, setProvider] = useState<VectorProviderView | null>(null);
-  const [index, setIndex] = useState<VectorIndexRecord | null>(null);
+  const [index, setIndex] = useState<VectorIndexView | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [queryResult, setQueryResult] = useState<VectorQueryResponse | null>(null);
@@ -512,7 +513,10 @@ export default function VectorIndexDetailPage() {
   const vectorCount = typeof stats?.vectorCount === 'number'
     ? stats.vectorCount
     : (typeof index.metadata?.vectorCount === 'number' ? index.metadata.vectorCount : undefined);
-  const indexSize = typeof index.metadata?.indexSize === 'number' ? index.metadata.indexSize : undefined;
+  // A platform index carries the size the platform meters; any other reads what its provider reported.
+  const indexSize = provider.platform
+    ? (index.storedBytes ?? 0)
+    : (typeof index.metadata?.indexSize === 'number' ? index.metadata.indexSize : undefined);
   const lastIndexed = index.metadata?.lastIndexed as string | undefined;
 
   /* ── Usage code snippets ── */
@@ -617,7 +621,7 @@ export default function VectorIndexDetailPage() {
       <PageHeader
         eyebrow="Build · Vector index"
         title={index.name}
-        subtitle={`Provider ${provider.label} • Driver ${provider.driver}`}
+        subtitle={provider.platform ? `Provider ${provider.label} • ${tPlatform('badge')}` : `Provider ${provider.label} • Driver ${provider.driver}`}
         actions={
           <>
             <Badge>{index.metric}</Badge>
@@ -744,10 +748,12 @@ export default function VectorIndexDetailPage() {
                       <Text size="sm" c="dimmed">Provider</Text>
                       <Text size="sm" fw={500}>{provider.label}</Text>
                     </Group>
-                    <Group justify="space-between">
-                      <Text size="sm" c="dimmed">Driver</Text>
-                      <Text size="sm" fw={500}>{provider.driver}</Text>
-                    </Group>
+                    {provider.platform ? null : (
+                      <Group justify="space-between">
+                        <Text size="sm" c="dimmed">Driver</Text>
+                        <Text size="sm" fw={500}>{provider.driver}</Text>
+                      </Group>
+                    )}
                     <Group justify="space-between">
                       <Text size="sm" c="dimmed">Index Key</Text>
                       <Text size="sm" fw={500} style={{ fontFamily: 'var(--mantine-font-family-monospace)' }}>{index.key}</Text>
@@ -965,6 +971,7 @@ export default function VectorIndexDetailPage() {
                     </CopyButton>
                   </Group>
                 </Group>
+                {index.externalId ? (
                 <Group justify="space-between">
                   <Text size="sm" c="dimmed">External ID</Text>
                   <Group gap="xs">
@@ -986,6 +993,7 @@ export default function VectorIndexDetailPage() {
                     </CopyButton>
                   </Group>
                 </Group>
+                ) : null}
                 {providerHandle ? (
                   <Group justify="space-between">
                     <Text size="sm" c="dimmed">Provider Handle</Text>
@@ -1008,7 +1016,7 @@ export default function VectorIndexDetailPage() {
                 </Group>
                 <Group justify="space-between">
                   <Text size="sm" c="dimmed">Provider</Text>
-                  <Text size="sm" fw={500}>{provider.label} ({provider.driver})</Text>
+                  <Text size="sm" fw={500}>{provider.platform ? provider.label : `${provider.label} (${provider.driver})`}</Text>
                 </Group>
                 <Group justify="space-between">
                   <Text size="sm" c="dimmed">Created</Text>

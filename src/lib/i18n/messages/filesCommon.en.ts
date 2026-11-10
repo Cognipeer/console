@@ -65,6 +65,7 @@ export const filesCommonEn = {
     notFound: 'This item no longer exists.',
     providerAccess: 'You need provider access to test this connection.',
     fileTooLarge: 'The file is larger than the upload limit.',
+    storageQuotaExceeded: 'Storage is full. Delete files you no longer need to upload more.',
     archiveTooLarge: 'The selected files are too large to download together. Select fewer files.',
     previewUnsupported: 'No preview is available for this file type.',
     previewTooLarge: 'This file is too large to preview. Download it instead.',

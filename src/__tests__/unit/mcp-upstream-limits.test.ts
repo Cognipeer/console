@@ -5,11 +5,13 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-process.env.OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK = 'false';
-process.env.MCP_UPSTREAM_MAX_RESPONSE_BYTES = String(64 * 1024);
-process.env.MCP_UPSTREAM_TIMEOUT_MS = '1000';
+vi.hoisted(() => {
+  process.env.OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK = 'false';
+  process.env.MCP_UPSTREAM_MAX_RESPONSE_BYTES = String(64 * 1024);
+  process.env.MCP_UPSTREAM_TIMEOUT_MS = '1000';
+});
 
 import { readResponseText, ResponseTooLargeError } from '@/lib/security/outboundFetch';
 import { remoteCallTool } from '@/lib/services/mcp/remoteMcpClient';

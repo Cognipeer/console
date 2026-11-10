@@ -508,6 +508,9 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
   const nextLimit = async (error: OutputTokenLimitError, notes: RouteNotes, burned?: SdkUsage): Promise<number | undefined> => {
     // A full context window is not cured by a larger output limit.
     if (error.rawFinishReason === CONTEXT_WINDOW_EXCEEDED_REASON) return undefined;
+    // A hard ceiling (a managed provider's credit cap) clamps a raised retry to the same number: the retry would be
+    // charged again for the same cut-off answer.
+    if (error.hardCap) return undefined;
     const budgetLeft = input.maxTotalOutputTokens !== undefined
       ? Math.max(0, input.maxTotalOutputTokens - spentOutputTokens)
       : undefined;
@@ -735,7 +738,10 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         if (event.type === 'output_limit') {
           // The limit the call ran with and the provider's own stop reason ride on the event.
           limit = Object.assign(
-            new OutputTokenLimitError(event.limit, event.rawFinishReason ? { rawFinishReason: event.rawFinishReason } : undefined),
+            new OutputTokenLimitError(event.limit, {
+              ...(event.rawFinishReason ? { rawFinishReason: event.rawFinishReason } : {}),
+              ...(event.hardCap ? { hardCap: true } : {}),
+            }),
             { message: event.error.message },
           );
           continue;

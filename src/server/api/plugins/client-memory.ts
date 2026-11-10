@@ -30,6 +30,7 @@ import {
   readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 
 const logger = createLogger('api:client-memory');
 
@@ -179,6 +180,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });
@@ -245,6 +249,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send(result);
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });
       }
@@ -304,6 +311,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(updated);
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       logger.error('Update client memory item error', { error });
       return reply.code(500).send({

@@ -48,7 +48,9 @@ import {
 } from '../fastify-utils';
 import { sendRouteError } from '../routeErrors';
 import { canAdministerRagAccess, ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAccessRequest';
+import { readRagTopK } from '@/lib/services/rag/topK';
 import { kbIndexShareRefusal } from '../ragOwnedResources';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import type { RagDocumentPlacementInput } from '@/lib/services/rag/ragAccessService';
 import type { RagAccessScope } from '@/lib/services/rag/access';
 import { VectorFilterError } from '@/lib/providers';
@@ -773,6 +775,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ document: withoutSourceText(document) });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
       if (error instanceof RagModuleInactiveError) {
@@ -1051,6 +1056,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
       if (
@@ -1077,6 +1085,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.query !== 'string' || body.query === '') {
         return reply.code(400).send({ error: 'query is required' });
       }
+      const topKRead = readRagTopK(body.topK);
+      if (!topKRead.ok) return reply.code(400).send({ error: topKRead.error });
 
       const { module: ragModule, scope, caller } = await ragAccessForRequest(request, {
         tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
@@ -1086,7 +1096,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
         ragModuleKey: key,
-        topK: body.topK as number | undefined,
+        topK: topKRead.topK,
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       }, { caller, ...(scope ? { access: scope } : {}) });
 
@@ -1118,6 +1128,8 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.answerModelKey !== 'string' || body.answerModelKey === '') {
         return reply.code(400).send({ error: 'answerModelKey is required' });
       }
+      const topKRead = readRagTopK(body.topK);
+      if (!topKRead.ok) return reply.code(400).send({ error: topKRead.error });
 
       const { module: ragModule, scope, caller } = await ragAccessForRequest(request, {
         tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, ragModuleKey: key,
@@ -1128,7 +1140,7 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         question: body.question,
         answerModelKey: body.answerModelKey,
         history: body.history as RagAnswerRequest['history'],
-        topK: body.topK as number | undefined,
+        topK: topKRead.topK,
         retrieval: body.retrieval as RagAnswerRequest['retrieval'],
         generation: body.generation as RagAnswerRequest['generation'],
       }, { caller, ...(scope ? { access: scope } : {}) });

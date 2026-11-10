@@ -137,6 +137,15 @@ describe('which levels the control offers', () => {
     expect(playgroundReasoningControl(undefined)).toBeNull();
   });
 
+  it('the generic levels are for the platform driver only, not any model whose capability says reasoning', () => {
+    expect(playgroundReasoningControl({ driver: 'cognipeer', modelId: 'm', capabilities: { supportsReasoning: true } })?.efforts)
+      .toEqual(['low', 'medium', 'high']);
+    expect(playgroundReasoningControl({ driver: 'cognipeer', modelId: 'm', capabilities: { supportsReasoning: false } })).toBeNull();
+    expect(playgroundReasoningControl({ driver: 'mystery', modelId: 'm', capabilities: { supportsReasoning: true } })).toBeNull();
+    // A driver that has a rule keeps it: the capability flag changes nothing there.
+    expect(playgroundReasoningControl({ driver: 'openai', modelId: 'gpt-4o', capabilities: { supportsReasoning: true } })).toBeNull();
+  });
+
   it('a Model Hub default is shown as the value, and wins: no levels to choose', () => {
     const control = playgroundReasoningControl({
       driver: 'openai', modelId: 'gpt-4o', settings: { reasoning: { effort: 'low' } },

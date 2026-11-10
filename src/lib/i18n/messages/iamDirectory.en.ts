@@ -793,6 +793,7 @@ export const iamDirectoryEn = {
       not_a_member: 'not a member',
       directory_managed: 'managed by the directory',
       group_directory_managed: 'directory group',
+      seat_limit_reached: 'no seat left on the plan',
       failed: 'failed',
     },
   },

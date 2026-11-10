@@ -4,10 +4,15 @@ import {
   IProviderRecord,
   ProviderDomain,
 } from '@/lib/database';
+import { getManagedCreditsHost, isManagedProviderRecord } from '@/enterprise/managed-credits';
+import { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadOnlyError } from './managedProviderErrors';
+
+export { ManagedProviderError, ManagedProviderReadOnlyError, PlatformRecordReadOnlyError };
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
-import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
+import { ProviderInUseError, ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
 import { isSafePathSegment } from '@/lib/providers/pathSegments';
+import { providerRegistry } from '@/lib/providers/registry';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
 import { settingsValidatorOf, validateProviderSettings } from './providerSettingsValidation';
 
@@ -110,7 +115,7 @@ export interface UpdateProviderConfigInput {
  * Loaded lazily: it reaches the vector and model services, which themselves
  * depend on this module.
  */
-async function validateWebSearchSettings(
+export async function validateWebSearchSettings(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
@@ -144,9 +149,30 @@ function sanitize(record: IProviderRecord, options?: ProviderViewOptions): Provi
   const { credentialsEnc, ...rest } = record;
   return {
     ...rest,
+    platform: Boolean(rest.platform),
     hasCredentials: Boolean(credentialsEnc),
     ...(options?.credentialFields ? { credentialFields: storedCredentialNames(record) } : {}),
   };
+}
+
+/**
+ * What a tenant user may see of a platform-provided record: identity and capability fields only. Settings, metadata,
+ * description and credential field names belong to the deployment. Applied to API replies; server-side readers keep
+ * the full view because they need `settings` to route and meter the record.
+ * The tenant's own assignment (`projectId`, `projectIds`) stays: it is the tenant's to manage.
+ */
+export function redactPlatformProvider<T extends ProviderConfigView>(view: T): T {
+  if (!view.platform) return view;
+  const {
+    _id, tenantId, projectId, projectIds, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
+  } = view;
+  return {
+    _id, tenantId, projectId, projectIds, key, type, driver, label, status, capabilitiesOverride, createdAt, updatedAt,
+    platform: true,
+    hasCredentials: true,
+    settings: {},
+    createdBy: '',
+  } as unknown as T;
 }
 
 async function withTenantDb(tenantDbName: string) {
@@ -209,11 +235,70 @@ function assertKeyIsAFolderName(key: unknown): void {
   );
 }
 
+/** Refuses a driver whose contract is internal (operator-side): a tenant cannot create a record with it. */
+function assertDriverIsCreatable(driver: string): void {
+  if (providerRegistry.isInternal(driver)) {
+    throw new ProviderSettingsError('driver', 'This provider type cannot be created.');
+  }
+}
+
+/** Refuses a change to a managed record. Without a registered host nothing is managed and nothing is read. */
+/** Refuses a change to a platform or managed record; returns the record it read (null when there is none). */
+async function assertNotManagedById(
+  db: Awaited<ReturnType<typeof withTenantDb>>,
+  providerId: string,
+): Promise<IProviderRecord | null> {
+  const record = await db.findProviderById(providerId);
+  assertNotPlatformRecord(record);
+  if (record && getManagedCreditsHost() && isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
+  return record;
+}
+
+/** Refuses a change to a platform-provided record. */
+function assertNotPlatformRecord(record: Pick<IProviderRecord, 'platform'> | null | undefined): void {
+  if (record?.platform) throw new PlatformRecordReadOnlyError();
+}
+
+/** True when the payload changes the project assignment and nothing else (`updatedBy` / `allowHostPaths` aside). */
+function isAssignmentOnlyPayload(payload: UpdateProviderConfigInput): boolean {
+  if (payload.projectIds === undefined) return false;
+  return Object.entries(payload).every(
+    ([field, value]) => value === undefined || field === 'projectIds' || field === 'updatedBy' || field === 'allowHostPaths',
+  );
+}
+
+/** The projects a record is assigned to: `projectIds` plus a legacy single `projectId`. */
+function assignedProjectIds(record: Pick<IProviderRecord, 'projectId' | 'projectIds'> | null | undefined): string[] {
+  return [...new Set([...(record?.projectId ? [record.projectId] : []), ...(record?.projectIds ?? [])].map(String))];
+}
+
+/** Provider metadata flag: the behavior of this web search provider lives on instances, never on the row. */
+const BEHAVIOR_ON_INSTANCES = 'behaviorOnInstances';
+
+/**
+ * The marker is owned by the server: a request's metadata never sets or clears it. `keep` says whether the
+ * stored row (or a new web search row) carries it.
+ */
+function withServerOwnedMarker(
+  metadata: Record<string, unknown> | undefined,
+  keep: boolean,
+): Record<string, unknown> | undefined {
+  const rest = { ...(metadata ?? {}) };
+  delete rest[BEHAVIOR_ON_INSTANCES];
+  if (keep) return { ...rest, [BEHAVIOR_ON_INSTANCES]: true };
+  return metadata === undefined ? undefined : rest;
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
+  // A driver the host reports as managed cannot be created by a tenant.
+  if (isManagedProviderRecord({ key: payload.key, driver: payload.driver, type: payload.type, settings: payload.settings })) {
+    throw new ManagedProviderReadOnlyError();
+  }
+  assertDriverIsCreatable(payload.driver);
   assertKeyIsAFolderName(payload.key);
   // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
   // would say about the same value.
@@ -247,7 +332,7 @@ export async function createProviderConfig(
       credentialsEnc: encryptObject(payload.credentials),
       settings: settings ?? {},
       capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
-      metadata: payload.metadata ?? undefined,
+      metadata: withServerOwnedMarker(payload.metadata, payload.type === 'websearch'),
       createdBy: payload.createdBy,
       updatedBy: payload.createdBy,
     });
@@ -391,9 +476,21 @@ export async function updateProviderConfig(
   tenantDbName: string,
   providerId: string,
   payload: UpdateProviderConfigInput,
-  options?: { projectId?: string },
+  options?: {
+    projectId?: string;
+    /** Tenant admins only: a platform record may then change its project assignment (and nothing else). */
+    allowPlatformAssignment?: boolean;
+  },
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
+  const before = await db.findProviderById(providerId);
+  if (before?.platform) {
+    if (!(options?.allowPlatformAssignment === true && isAssignmentOnlyPayload(payload))) {
+      throw new PlatformRecordReadOnlyError();
+    }
+  } else if (before && getManagedCreditsHost() && isManagedProviderRecord(before)) {
+    throw new ManagedProviderReadOnlyError();
+  }
   const updates: Partial<IProviderRecord> = {};
 
   // The stored "last test" describes the connection as it was tested: once the connection settings or
@@ -458,7 +555,7 @@ export async function updateProviderConfig(
   }
 
   if (payload.metadata !== undefined) {
-    updates.metadata = payload.metadata;
+    updates.metadata = withServerOwnedMarker(payload.metadata, before?.metadata?.[BEHAVIOR_ON_INSTANCES] === true);
   }
 
   if (credentialMerge) {
@@ -477,6 +574,15 @@ export async function updateProviderConfig(
   }
 
   const updated = await db.updateProvider(providerId, updates);
+  if (updated && before?.platform) {
+    // The models of a platform provider follow its assignment: drop their cached lookups for every project that
+    // gained or lost them.
+    const { invalidatePlatformProviderModelCaches } = await import('@/lib/services/models/modelService');
+    await invalidatePlatformProviderModelCaches(tenantDbName, before.key, [
+      ...assignedProjectIds(before),
+      ...assignedProjectIds(updated),
+    ]);
+  }
   return updated ? sanitize(updated) : null;
 }
 
@@ -528,6 +634,7 @@ export async function resolveProviderTestTarget(
     if (record.tenantId !== provider.tenantId) {
       throw new Error(`Provider configuration "${provider.id}" not found.`);
     }
+    assertNotPlatformRecord(record);
     return { record, credentials, settings: overrides.settings ?? record.settings ?? {} };
   }
 
@@ -536,6 +643,8 @@ export async function resolveProviderTestTarget(
   if (!record || record.tenantId !== provider.tenantId) {
     throw new Error(`Provider configuration "${provider.id}" not found.`);
   }
+  assertNotPlatformRecord(record);
+  if (isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
   const { merged } = mergeCredentials(record, overrides.credentials ?? {});
   return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
 }
@@ -547,6 +656,7 @@ export async function recordProviderTest(
   lastTest: IProviderLastTest,
 ): Promise<void> {
   const db = await withTenantDb(tenantDbName);
+  assertNotPlatformRecord(await db.findProviderById(providerId));
   await db.updateProvider(providerId, { lastTest });
 }
 
@@ -593,12 +703,21 @@ export async function deleteProviderConfig(
   providerId: string,
 ): Promise<boolean> {
   const db = await withTenantDb(tenantDbName);
+  // One read serves the platform check and the in-use check.
+  const record = await assertNotManagedById(db, providerId);
+  if (record?.type === 'websearch') {
+    // Instances keep their behavior on top of this connection: they must not be left pointing at nothing.
+    const instances = await db.listWebSearchInstances(record.tenantId, { providerKey: record.key });
+    if (instances.length > 0) throw new ProviderInUseError(record.key, instances.map((i) => i.key).sort());
+  }
   return db.deleteProvider(providerId);
 }
 
 export interface ProviderRuntimeData<TCredentials = Record<string, unknown>> {
   record: IProviderRecord;
   credentials: TCredentials;
+  /** Managed call only: the route connection the runtime is built from (no secrets; those are in `credentials`). */
+  managedConnection?: { id: string; driver: string; settings: Record<string, unknown> };
 }
 
 export async function loadProviderRuntimeData<TCredentials = Record<string, unknown>>(
@@ -609,6 +728,7 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     tenantId: string;
     projectId?: string;
   },
+  options?: { allowManaged?: boolean; managedMessage?: string; managedConnectionId?: string },
 ): Promise<ProviderRuntimeData<TCredentials>> {
   const db = await withTenantDb(tenantDbName);
   let record: IProviderRecord | null = null;
@@ -645,6 +765,47 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     );
   }
 
+  // Fail closed before any decryption: every credential-reading door refuses a managed record unless its caller
+  // meters the call itself. No host registered: never managed.
+  if (options?.allowManaged !== true && isManagedProviderRecord(record)) {
+    throw new ManagedProviderError(options?.managedMessage);
+  }
+
+  // A managed record never opens its stored credentials: the operator supplies the connection of the chosen route.
+  // No connection id, a missing method, null, a throw or a malformed result refuses the call with a generic message.
+  if (options?.allowManaged === true && isManagedProviderRecord(record)) {
+    const connectionId = options.managedConnectionId;
+    if (!connectionId) throw new ManagedProviderError('This provider is not available right now.');
+    let connection: unknown = null;
+    try {
+      connection = getManagedCreditsHost()?.resolveConnection?.(record, connectionId) ?? null;
+    } catch (error) {
+      logger.error('Managed connection could not be resolved', {
+        providerKey: record.key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const resolved = connection as { driver?: unknown; settings?: unknown; credentials?: unknown } | null;
+    if (
+      !resolved
+      || typeof resolved.driver !== 'string'
+      || !resolved.driver
+      || !isPlainRecord(resolved.credentials)
+      || (resolved.settings !== undefined && !isPlainRecord(resolved.settings))
+    ) {
+      throw new ManagedProviderError('This provider is not available right now.');
+    }
+    return {
+      record,
+      credentials: resolved.credentials as TCredentials,
+      managedConnection: {
+        id: connectionId,
+        driver: resolved.driver,
+        settings: (resolved.settings as Record<string, unknown> | undefined) ?? {},
+      },
+    };
+  }
+
   let credentials: TCredentials;
   try {
     credentials = decryptObject<TCredentials>(record.credentialsEnc);
@@ -671,6 +832,10 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     record,
     credentials,
   };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function tryRecoverLegacyPlaintextCredentials<T>(value: string): T | null {

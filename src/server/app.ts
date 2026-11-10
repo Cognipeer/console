@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getConfig } from '@/lib/core/config';
+import { getConfig, type AppConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import { drainAgentRunsBeforeHttpClose } from './httpShutdown';
 import { createLogger } from '@/lib/core/logger';
@@ -47,6 +47,36 @@ export function resolveTrustProxyOption(trustedProxies: string[]): boolean | str
     return false;
   }
   return trustedProxies;
+}
+
+/**
+ * Settings that keep a legacy or permissive behaviour for compatibility, one message each. Logged once at
+ * startup (`createServer`) so an operator sees what to set.
+ */
+export function startupSettingWarnings(config: AppConfig): string[] {
+  const warnings: string[] = [];
+  if (config.nodeEnv === 'production' && config.network.trustedProxies.length === 0) {
+    warnings.push(
+      'TRUSTED_PROXIES is not set: every hop is trusted, so the client address used for rate limits and audit '
+      + 'logs is read from X-Forwarded-For as received. Set TRUSTED_PROXIES to the address of the reverse proxy '
+      + 'or load balancer in front of the console.',
+    );
+  }
+  if (config.auth.passwordChangeEndsSessions === false) {
+    warnings.push(
+      'AUTH_PASSWORD_CHANGE_ENDS_SESSIONS is false: sessions issued before a password change or reset stay valid '
+      + 'until they expire.',
+    );
+  }
+  if (config.auth.loginTenantScan) {
+    warnings.push(
+      'Legacy sign-in lookup is on (AUTH_LOGIN_TENANT_SCAN): a sign-in for an address the user directory does '
+      + 'not know is also looked up in every tenant database, and found accounts are added to the directory. '
+      + 'It will default to off in a later release once the directory is complete; set '
+      + 'AUTH_LOGIN_TENANT_SCAN=false to turn it off now.',
+    );
+  }
+  return warnings;
 }
 
 function parseBodySize(input: string): number {
@@ -199,6 +229,10 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
   });
 
   await nextApp.prepare();
+
+  for (const warning of startupSettingWarnings(getConfig())) {
+    logger.warn(warning);
+  }
 
   const app = createFastifyInstance();
 

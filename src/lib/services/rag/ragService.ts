@@ -51,6 +51,7 @@ import {
   vectorFilterOperatorsOf,
 } from '@/lib/services/vector/vectorService';
 import type { VectorQueryMatch } from '@/lib/providers';
+import { storageCapabilityDriverOf } from '@/lib/services/storage/managedStorage';
 import {
   anonymousKbCaller,
   isAclPushdownBroken,
@@ -83,6 +84,7 @@ import { fireAndForget } from '@/lib/core/asyncTask';
 import { getRagModuleChangeListener, type RagModuleChange } from '@/enterprise/rag-module-changes';
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
 import { publishRagIngestJob } from './ragIngestJob';
+import { normalizeRagTopK } from './topK';
 import { metadataWithCrawlerMark, type RagSentByCrawler } from './crawlerMark';
 import {
   documentExtractionOf,
@@ -1815,7 +1817,7 @@ async function vectorDriverOf(
 ): Promise<string | undefined> {
   try {
     const record = await db.findProviderByKey(tenantId, providerKey, projectId || undefined);
-    return record?.driver;
+    return record ? storageCapabilityDriverOf('vector', record) : undefined;
   } catch {
     return undefined;
   }
@@ -2020,7 +2022,7 @@ async function runRagQuery(
 
   // 3. Query vector store. If reranker is configured, oversample candidates
   //    so the reranker has more to work with.
-  const topK = request.topK ?? ragModule.defaultTopK ?? 5;
+  const topK = normalizeRagTopK(request.topK, normalizeRagTopK(ragModule.defaultTopK, 5));
   const minScore = request.minScore ?? ragModule.defaultMinScore;
   const useReranker = Boolean(ragModule.rerankerKey);
   const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
