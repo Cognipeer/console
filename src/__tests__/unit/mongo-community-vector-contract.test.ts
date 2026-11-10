@@ -32,7 +32,7 @@ describe.runIf(MONGO_AVAILABLE)('MongoCommunityVectorProviderContract', () => {
 
   beforeAll(async () => {
     const { MongoMemoryServer } = await import('mongodb-memory-server');
-    server = await MongoMemoryServer.create();
+    server = await MongoMemoryServer.create({ instance: { launchTimeout: 60_000 } });
 
     runtime = await MongoCommunityVectorProviderContract.createRuntime({
       tenantId: TENANT_ID,

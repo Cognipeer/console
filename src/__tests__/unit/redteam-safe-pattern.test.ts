@@ -31,15 +31,19 @@ function ctx(output: string, forbiddenPatterns: string[], canary?: string): Dete
   } as unknown as DetectorContext;
 }
 
+/** Budget for the cases that must not time out: well above anything a loaded runner needs for a trivial regex. */
+const GENEROUS_MS = 5000;
+
 describe('matchPattern', () => {
   it('matches a regex without regard to case', () => {
-    expect(matchPattern('Your API_KEY = abc', 'api[_-]?key\\s*=')).toBe('hit');
-    expect(matchPattern('nothing here', 'api[_-]?key')).toBe('miss');
+    // A generous budget: a busy CI runner can take longer than the 50 ms default to run even a trivial regex.
+    expect(matchPattern('Your API_KEY = abc', 'api[_-]?key\\s*=', GENEROUS_MS)).toBe('hit');
+    expect(matchPattern('nothing here', 'api[_-]?key', GENEROUS_MS)).toBe('miss');
   });
 
   it('matches a pattern that is not a valid regex as a literal, without regard to case', () => {
-    expect(matchPattern('Leaked: FOO(BAR', 'foo(bar')).toBe('hit');
-    expect(matchPattern('Leaked: foo bar', 'foo(bar')).toBe('miss');
+    expect(matchPattern('Leaked: FOO(BAR', 'foo(bar', GENEROUS_MS)).toBe('hit');
+    expect(matchPattern('Leaked: foo bar', 'foo(bar', GENEROUS_MS)).toBe('miss');
   });
 
   it('stops a regex that runs past its time budget', () => {
@@ -51,11 +55,12 @@ describe('matchPattern', () => {
 
 describe('scanPatterns', () => {
   it('returns the first match', () => {
-    expect(scanPatterns('alpha beta', ['gamma', 'BETA', 'alpha'])).toEqual({ matched: 'BETA', undecided: [] });
+    expect(scanPatterns('alpha beta', ['gamma', 'BETA', 'alpha'], { perPatternMs: GENEROUS_MS, totalMs: GENEROUS_MS })).toEqual({ matched: 'BETA', undecided: [] });
   });
 
   it('reports slow patterns as undecided and still finds a later match', () => {
-    const scan = scanPatterns(SLOW_INPUT, [SLOW, 'a!'], { perPatternMs: 20, totalMs: 200 });
+    // The slow pattern is cut at 20 ms; the total budget is wide so the second pattern is still tried on a slow runner.
+    const scan = scanPatterns(SLOW_INPUT, [SLOW, 'a!'], { perPatternMs: 20, totalMs: GENEROUS_MS });
     expect(scan.matched).toBe('a!');
     expect(scan.undecided).toEqual([SLOW]);
   });
