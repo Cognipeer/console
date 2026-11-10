@@ -66,6 +66,7 @@ import type {
   RagDocumentStatus,
   ToolSourceType,
   ToolStatus,
+  OwnedResourceListFilter,
 } from './provider/types';
 
 export interface DatabaseProvider {
@@ -833,11 +834,12 @@ export interface DatabaseProvider {
   findMcpServerById(id: string): Promise<IMcpServer | null>;
   findMcpServerByKey(key: string, projectId?: string): Promise<IMcpServer | null>;
   findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null>;
+  /** Shared servers only, unless `owned` / `ownerAgentId` ask for agent-owned ones (`OwnedResourceListFilter`). */
   listMcpServers(filters?: {
     projectId?: string;
     status?: McpServerStatus;
     search?: string;
-  }): Promise<IMcpServer[]>;
+  } & OwnedResourceListFilter): Promise<IMcpServer[]>;
   countMcpServers(projectId?: string): Promise<number>;
 
   // ── MCP Request Log operations (tenant-specific) ──

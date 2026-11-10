@@ -1,14 +1,14 @@
 'use client';
 
 /**
- * Skills an agent can discover and open — built from the project's skill
- * library (Settings → the top-level Skills page), not defined inline here.
- * A skill is a reusable asset shared across agents, same relationship an
- * agent has to a Prompt or a Tool.
+ * Skills an agent can discover and open: picked from the project's skill library (the top-level Skills page), or
+ * created here. A skill created here belongs to this agent only (`owner`): it is not in the library, no other agent
+ * can use it, it is edited and deleted from this panel, and it goes when the agent is deleted.
  */
 
 import { useMemo, useState } from 'react';
 import {
+    ActionIcon,
     Alert,
     Badge,
     Button,
@@ -21,10 +21,11 @@ import {
     Text,
     Tooltip,
 } from '@mantine/core';
-import { IconBulb, IconInfoCircle, IconLock, IconPlus } from '@tabler/icons-react';
-import SkillEditorModal from '@/components/skills/SkillEditorModal';
-import { isRestrictedAccess } from '@/components/access/AccessListFields';
+import { notifications } from '@mantine/notifications';
+import { IconBulb, IconInfoCircle, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
+import { useDeleteResource } from '@/components/common/confirm/useDeleteResource';
 import { useTranslations } from '@/lib/i18n';
+import SkillEditorModal from '@/components/skills/SkillEditorModal';
 import type { IAgentSkillPolicy } from '@/lib/database/provider/types.domain';
 import type { SkillView } from '@/components/skills/types';
 
@@ -33,19 +34,33 @@ export interface AgentSkillsPanelProps {
     policy: IAgentSkillPolicy | undefined;
     library: SkillView[];
     onChange: (skills: string[], policy: IAgentSkillPolicy | undefined) => void;
-    /** A skill created from this panel — the page adds it to its library copy. */
+    /** A skill created or edited from this panel — the page adds it to (or replaces it in) its library copy. */
     onLibraryAdd?: (skill: SkillView) => void;
+    /** This agent's own skill was deleted from this panel — the page drops it from its library copy. */
+    onLibraryRemove?: (key: string) => void;
+    /** The agent being edited: a skill created here belongs to it. Without it, "New skill" adds to the library. */
+    agentId?: string;
 }
 
-export default function AgentSkillsPanel({ skills, policy, library, onChange, onLibraryAdd }: AgentSkillsPanelProps) {
+export default function AgentSkillsPanel({
+    skills,
+    policy,
+    library,
+    onChange,
+    onLibraryAdd,
+    onLibraryRemove,
+    agentId,
+}: AgentSkillsPanelProps) {
+    const deleteResource = useDeleteResource();
+    const tNouns = useTranslations('common.confirm.nouns');
     const [creating, setCreating] = useState(false);
-    const tAccess = useTranslations('resourceAccess');
+    const [editing, setEditing] = useState<SkillView | null>(null);
     const options = useMemo(
         () => library
             .filter((s) => s.status === 'active' || skills.includes(s.key))
             .map((s) => ({
                 value: s.key,
-                label: s.status === 'inactive' ? `${s.title} (inactive)` : s.title,
+                label: `${s.title}${s.owner ? ' (this agent)' : ''}${s.status === 'inactive' ? ' (inactive)' : ''}`,
             })),
         [library, skills],
     );
@@ -53,6 +68,24 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
     const selected = useMemo(() => library.filter((s) => skills.includes(s.key)), [library, skills]);
 
     const patchPolicy = (patch: Partial<IAgentSkillPolicy>) => onChange(skills, { ...(policy ?? {}), ...patch });
+
+    /** Deletes one of this agent's own skills, and takes it off the agent. */
+    const deleteOwnSkill = async (skill: SkillView) => {
+        const deleted = await deleteResource({
+            noun: tNouns('skill'),
+            name: skill.title,
+            extraWarning: 'It belongs to this agent only, so it is also taken off the agent.',
+            action: async () => {
+                const res = await fetch(`/api/skills/${encodeURIComponent(skill._id)}`, { method: 'DELETE' });
+                if (!res.ok) throw new Error('The skill could not be deleted.');
+            },
+        });
+        if (!deleted) return;
+        notifications.show({ title: 'Deleted', message: `"${skill.title}" was deleted`, color: 'red' });
+        onLibraryRemove?.(skill.key);
+        const next = skills.filter((key) => key !== skill.key);
+        onChange(next, next.length === 0 ? undefined : policy);
+    };
 
     return (
         <Stack gap="md">
@@ -74,16 +107,25 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                 </Button>
             </Group>
 
-            {/* Created here, saved to the project's skill library (so other agents
-                can use it too) and attached to this agent in one step. */}
+            {/* Created here: the skill belongs to this agent (not the library) and is attached in one step. */}
             <SkillEditorModal
                 opened={creating}
                 onClose={() => setCreating(false)}
                 skill={null}
+                ownerAgentId={agentId}
                 onSaved={(created) => {
                     setCreating(false);
                     onLibraryAdd?.(created);
                     if (!skills.includes(created.key)) onChange([...skills, created.key], policy);
+                }}
+            />
+            <SkillEditorModal
+                opened={editing !== null}
+                onClose={() => setEditing(null)}
+                skill={editing}
+                onSaved={(saved) => {
+                    setEditing(null);
+                    onLibraryAdd?.(saved);
                 }}
             />
 
@@ -99,8 +141,8 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
             {library.length === 0 ? (
                 <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>
                     <Text size="sm">
-                        No skills exist yet. Create one with <strong>New skill</strong> — it is saved to the
-                        project&apos;s skill library and attached to this agent.
+                        No skills exist yet. Create one with <strong>New skill</strong>: it belongs to this agent
+                        and is attached to it. Skills for several agents are made on the Skills page.
                     </Text>
                 </Alert>
             ) : null}
@@ -118,12 +160,22 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                                 {skill.minModelTier ? (
                                     <Badge size="xs" variant="outline">{skill.minModelTier} models only</Badge>
                                 ) : null}
-                                {isRestrictedAccess(skill.access) ? (
-                                    <Tooltip label={tAccess('selectedHint', { resource: tAccess('resourceSkill') })} multiline w={280} withArrow>
-                                        <Badge size="xs" color="orange" variant="light" leftSection={<IconLock size={10} />}>
-                                            {tAccess('badgeRestricted')}
-                                        </Badge>
-                                    </Tooltip>
+                                {skill.owner ? (
+                                    <>
+                                        <Badge size="xs" variant="light" color="indigo">This agent</Badge>
+                                        <Group gap={2} ml="auto">
+                                            <Tooltip label="Edit skill" withArrow>
+                                                <ActionIcon size="sm" variant="subtle" aria-label="Edit skill" onClick={() => setEditing(skill)}>
+                                                    <IconPencil size={14} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                            <Tooltip label="Delete skill" withArrow>
+                                                <ActionIcon size="sm" variant="subtle" color="red" aria-label="Delete skill" onClick={() => void deleteOwnSkill(skill)}>
+                                                    <IconTrash size={14} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        </Group>
+                                    </>
                                 ) : null}
                             </Group>
                             <Text size="xs" c="dimmed" lineClamp={2}>{skill.header}</Text>

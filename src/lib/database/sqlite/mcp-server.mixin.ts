@@ -15,6 +15,7 @@ import type {
   IMcpRequestAggregate,
   McpLogServerScope,
   McpServerStatus,
+  OwnedResourceListFilter,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
@@ -60,12 +61,12 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         INSERT INTO ${TABLES.mcpServers}
         (id, tenantId, projectId, key, name, description, sourceType, openApiSpec, remoteConfig,
          stdioConfig, tools, toolsDiscoveredAt, upstreamBaseUrl, upstreamAuth, exposure, aegis,
-         guardrail, access, status, endpointSlug, totalRequests, lastError, metadata, createdBy, updatedBy,
-         createdAt, updatedAt)
+         guardrail, access, owner, ownerAgentId, status, endpointSlug, totalRequests, lastError, metadata,
+         createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @sourceType, @openApiSpec,
          @remoteConfig, @stdioConfig, @tools, @toolsDiscoveredAt, @upstreamBaseUrl, @upstreamAuth,
-         @exposure, @aegis, @guardrail, @access, @status, @endpointSlug, @totalRequests, @lastError, @metadata,
-         @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @exposure, @aegis, @guardrail, @access, @owner, @ownerAgentId, @status, @endpointSlug, @totalRequests,
+         @lastError, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: server.tenantId,
@@ -87,6 +88,8 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         aegis: server.aegis ? this.toJson(server.aegis) : null,
         guardrail: server.guardrail ? this.toJson(server.guardrail) : null,
         access: server.access ? this.toJson(server.access) : null,
+        owner: server.owner ? this.toJson(server.owner) : null,
+        ownerAgentId: server.owner?.agentId ?? null,
         status: server.status,
         endpointSlug: server.endpointSlug,
         totalRequests: server.totalRequests ?? 0,
@@ -125,6 +128,11 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.aegis !== undefined) { sets.push('aegis = @aegis'); params.aegis = data.aegis ? this.toJson(data.aegis) : null; }
       if (data.guardrail !== undefined) { sets.push('guardrail = @guardrail'); params.guardrail = data.guardrail ? this.toJson(data.guardrail) : null; }
       if (data.access !== undefined) { sets.push('access = @access'); params.access = data.access ? this.toJson(data.access) : null; }
+      if (data.owner !== undefined) {
+        sets.push('owner = @owner', 'ownerAgentId = @ownerAgentId');
+        params.owner = data.owner ? this.toJson(data.owner) : null;
+        params.ownerAgentId = data.owner?.agentId ?? null;
+      }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.endpointSlug !== undefined) { sets.push('endpointSlug = @endpointSlug'); params.endpointSlug = data.endpointSlug; }
       if (data.totalRequests !== undefined) { sets.push('totalRequests = @totalRequests'); params.totalRequests = data.totalRequests; }
@@ -174,10 +182,12 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       projectId?: string;
       status?: McpServerStatus;
       search?: string;
-    }): Promise<IMcpServer[]> {
+    } & OwnedResourceListFilter): Promise<IMcpServer[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
+      const owned = this.ownedResourceClause(filters, params);
+      if (owned) clauses.push(owned);
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status !== undefined) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
@@ -470,6 +480,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         guardrail: r.guardrail ? this.parseJson(r.guardrail, undefined) : undefined,
         // A list that no longer parses admits nobody rather than everybody.
         access: r.access ? this.parseJson(r.access, { mode: 'selected', userIds: [], groupIds: [] }) : undefined,
+        ...this.ownerOfRow(r),
         status: r.status as IMcpServer['status'],
         endpointSlug: r.endpointSlug as string,
         totalRequests: (r.totalRequests as number) ?? 0,

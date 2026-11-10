@@ -3035,11 +3035,39 @@ export interface IAgentSkill {
   minModelTier?: 'small' | 'large';
   /** Who may use this skill in an agent run. Absent = everyone who can run the agent (see `IResourceAccessList`). */
   access?: IResourceAccessList;
+  /** Present for a skill created inside an agent: only that agent lists, uses and manages it (`IAgentResourceOwner`). */
+  owner?: IAgentResourceOwner;
   status: 'active' | 'inactive';
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * The agent an MCP server or a skill belongs to, when it was created inside that agent.
+ *
+ * An owned record is part of its agent: only that agent lists it, binds it, runs it and manages it. It is not in
+ * the MCP hub or the skill library, other agents' pickers cannot see or run it, the client API and the public MCP
+ * endpoint do not serve it, and it is deleted together with the agent. Records without an owner are the project's
+ * shared ones and behave as before.
+ */
+export interface IAgentResourceOwner {
+  kind: 'agent';
+  agentId: string;
+}
+
+/**
+ * Which agent-owned records a list returns (`IAgentResourceOwner`). Without it a list has the project's shared
+ * records only, so a list that does not ask never shows an agent's own records.
+ *
+ *   ownerAgentId            that agent's own records only
+ *   owned 'include'         shared records and owned ones: with `ownerAgentId` only that agent's, otherwise every agent's
+ *   owned 'only'            owned records only (with `ownerAgentId`, that agent's)
+ */
+export interface OwnedResourceListFilter {
+  owned?: 'include' | 'only';
+  ownerAgentId?: string;
 }
 
 /**

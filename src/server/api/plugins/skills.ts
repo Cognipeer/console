@@ -9,6 +9,7 @@ import {
   listSkills,
   updateSkill,
 } from '@/lib/services/agents/skillService';
+import { ownedListFilterOf, readAgentIdInput, resolveOwningAgent } from '@/lib/services/agents/agentOwnedResources';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -25,10 +26,14 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/skills', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const query = (request.query ?? {}) as { search?: string; status?: string };
+      const query = (request.query ?? {}) as { search?: string; status?: string; agentId?: string; owned?: string };
+      // The library by default; `agentId` adds that agent's own skills (`owned=only`: just those).
+      const owned = ownedListFilterOf(query);
+      if (!owned.ok) return reply.code(400).send({ error: owned.error });
       const skills = await listSkills(session.tenantDbName, projectId, {
         search: query.search,
         status: query.status === 'inactive' ? 'inactive' : query.status === 'active' ? 'active' : undefined,
+        ...owned.filter,
       });
       return reply.code(200).send({ skills: skills.map(skillView) });
     } catch (error) {
@@ -51,6 +56,11 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
       if (access && !access.ok) return reply.code(400).send({ error: access.error });
+      // Created inside an agent: the skill belongs to that agent of this project, and to nothing else.
+      const ownerInput = readAgentIdInput(body.ownerAgentId, 'ownerAgentId');
+      if (!ownerInput.ok) return reply.code(400).send({ error: ownerInput.error });
+      const owner = ownerInput.agentId ? await resolveOwningAgent(session.tenantDbName, projectId, ownerInput.agentId) : undefined;
+      if (owner === null) return reply.code(400).send({ error: 'ownerAgentId must be an agent of this project' });
 
       const skill = await createSkill(session.tenantDbName, session.tenantId, projectId, session.userId, {
         key: typeof body.key === 'string' ? body.key : undefined,
@@ -59,6 +69,7 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
         body: typeof body.body === 'string' ? body.body : '',
         minModelTier: body.minModelTier === 'small' || body.minModelTier === 'large' ? body.minModelTier : undefined,
         ...(access?.ok ? { access: access.access } : {}),
+        ...(owner ? { owner } : {}),
         status: body.status === 'inactive' ? 'inactive' : 'active',
       });
       return reply.code(201).send({ skill: skillView(skill) });

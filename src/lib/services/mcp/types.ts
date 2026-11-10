@@ -10,6 +10,7 @@ import type {
   McpAuthType,
   McpSourceType,
   IResourceAccessList,
+  IAgentResourceOwner,
 } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import type { IMcpCompositeMemberSummary } from './composite';
@@ -49,6 +50,8 @@ export interface McpServerView {
   exposure: IMcpExposureConfig;
   /** Who may use the server's tools in an agent run (always present: a record without a list reads as `all`). */
   access: IResourceAccessList;
+  /** The agent the server belongs to, when it was created inside that agent (`IAgentResourceOwner`). */
+  owner?: IAgentResourceOwner;
   /** @deprecated Legacy shield binding; still returned so an un-deployed UI keeps rendering. */
   aegis?: IMcpAegisConfig;
   /** Guardrail binding evaluated at `tool.pre` / `tool.post`. */
@@ -121,6 +124,11 @@ export interface CreateMcpServerInput {
   guardrail?: IMcpGuardrailConfig;
   /** Who may use the server's tools in an agent run (omit = everyone who can run the agent). */
   access?: IResourceAccessList;
+  /**
+   * The agent the new server belongs to (`IAgentResourceOwner`). Set by the route once it has checked the agent;
+   * fixed for the server's life (an update never changes it).
+   */
+  owner?: IAgentResourceOwner;
 }
 
 /** Which internal capability backs the server, and its instance + settings. */

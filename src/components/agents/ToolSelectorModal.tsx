@@ -21,7 +21,6 @@ import {
   Select,
   Divider,
   ThemeIcon,
-  Tooltip,
 } from '@mantine/core';
 import {
   IconChevronDown,
@@ -34,10 +33,8 @@ import {
   IconBrowser,
   IconWorldSearch,
   IconWorldDownload,
-  IconLock,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import { isRestrictedAccess } from '@/components/access/AccessListFields';
 import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
 import { useFlowToolSource } from '@/components/enterprise/EnterpriseFlowAgentUi';
 import { useChannelToolGroup } from '@/components/enterprise/EnterpriseChannelToolsUi';
@@ -58,8 +55,8 @@ interface ToolSourceGroup {
   typeLabel: string;
   /** A connector's tool (managed by another module): listed with a Connector badge. */
   managed?: boolean;
-  /** An MCP server only some people may use (its access list): only their runs get its tools. */
-  restricted?: boolean;
+  /** An MCP server that belongs to this agent (created inside it): listed with a "This agent" badge. */
+  ownedByAgent?: boolean;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
@@ -131,6 +128,11 @@ export interface ToolSelectorModalProps {
   value: ToolBinding[];
   /** Called with the updated bindings when user confirms selection */
   onChange: (bindings: ToolBinding[]) => void;
+  /**
+   * The agent being edited: its own MCP servers are listed with the hub's, and "New MCP server" creates one that
+   * belongs to it (not to the hub). Without it the picker lists hub servers and creates hub servers.
+   */
+  agentId?: string;
 }
 
 // ── Component ────────────────────────────────────────────────────────────
@@ -140,10 +142,10 @@ export function ToolSelectorModal({
   onClose,
   value,
   onChange,
+  agentId,
 }: ToolSelectorModalProps) {
   const t = useTranslations('agents');
   const tm = useTranslations('managedTools');
-  const tAccess = useTranslations('resourceAccess');
   // Flows as a tool source, where Flows are available (Enterprise): null otherwise.
   const flowTools = useFlowToolSource();
   // Tools that write to Slack / Teams as the agent's own bot, where Channels are available (Enterprise): null otherwise.
@@ -239,18 +241,21 @@ export function ToolSelectorModal({
         allGroups.push(...toolGroups);
       }
 
-      // MCP servers of the project's MCP hub
-      const mcpRes = await fetch('/api/mcp?status=active', { cache: 'no-store' });
+      // MCP servers of the project's MCP hub, and this agent's own ones
+      const mcpRes = await fetch(
+        `/api/mcp?status=active${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''}`,
+        { cache: 'no-store' },
+      );
       if (mcpRes.ok) {
         const mcpData = await mcpRes.json();
         const mcpGroups: ToolSourceGroup[] = (mcpData.servers ?? []).map(
-          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[]; disabledTools?: string[]; access?: unknown }) => ({
+          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[]; disabledTools?: string[]; owner?: unknown }) => ({
             source: 'mcp' as const,
             sourceKey: s.key,
             name: s.name,
             description: s.description,
             typeLabel: 'MCP server',
-            restricted: isRestrictedAccess(s.access),
+            ownedByAgent: Boolean(s.owner),
             tools: (s.tools ?? []).filter(
               (t) => !(s.disabledTools ?? []).includes(t.name),
             ),
@@ -329,7 +334,7 @@ export function ToolSelectorModal({
     } finally {
       setLoading(false);
     }
-  }, [value, flowTools, channelToolGroup]);
+  }, [value, flowTools, channelToolGroup, agentId]);
 
   useEffect(() => {
     if (opened) loadSources();
@@ -492,6 +497,7 @@ export function ToolSelectorModal({
           <CreateMcpModal
             opened={createMcpOpen}
             onClose={() => setCreateMcpOpen(false)}
+            ownerAgentId={agentId}
             onCreated={(server) => {
               setCreateMcpOpen(false);
               setPendingCreated({ source: 'mcp', key: server.key });
@@ -573,12 +579,10 @@ export function ToolSelectorModal({
                             {tm('badge')}
                           </Badge>
                         )}
-                        {group.restricted && (
-                          <Tooltip label={tAccess('selectedHint', { resource: tAccess('resourceMcp') })} multiline w={280} withArrow>
-                            <Badge size="xs" variant="light" color="orange" leftSection={<IconLock size={10} />}>
-                              {tAccess('badgeRestricted')}
-                            </Badge>
-                          </Tooltip>
+                        {group.ownedByAgent && (
+                          <Badge size="xs" variant="light" color="indigo">
+                            This agent
+                          </Badge>
                         )}
                         <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>
                           {group.typeLabel}

@@ -1,4 +1,3 @@
-import { resourceAccessEn } from './resourceAccess.en';
 import { accountPageEn } from './accountPage.en';
 import { agentChannelsEn } from './agentChannels.en';
 import { agentChannelsDeployEn } from './agentChannelsDeploy.en';
@@ -1483,8 +1482,6 @@ export const en = {
   projectTabs: projectTabsEn,
   accountPage: accountPageEn,
   // Agents in Slack and Microsoft Teams (Enterprise): one file per screen, spread together (agentChannels*.en.ts).
-  // Who may use a shared MCP server or skill in agent runs (resourceAccess.*.ts).
-  resourceAccess: resourceAccessEn,
   agentChannels: {
     ...agentChannelsEn,
     ...agentChannelsListEn,

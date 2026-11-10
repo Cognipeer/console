@@ -19,13 +19,6 @@ import FormShell, {
     SummaryGroup,
     SummaryKV,
 } from '@/components/common/ui/FormShell';
-import {
-    AccessListFields,
-    accessValueOf,
-    useAccessSummary,
-    type AccessListValue,
-} from '@/components/access/AccessListFields';
-import { useTranslations } from '@/lib/i18n';
 import type { SkillView } from './types';
 
 interface SkillEditorModalProps {
@@ -33,6 +26,8 @@ interface SkillEditorModalProps {
     onClose: () => void;
     skill: SkillView | null;
     onSaved: (skill: SkillView) => void;
+    /** Create the skill inside this agent: only that agent uses and manages it, it is not in the skill library. */
+    ownerAgentId?: string;
 }
 
 interface FormValues {
@@ -44,9 +39,10 @@ interface FormValues {
     status: 'active' | 'inactive';
 }
 
-export default function SkillEditorModal({ opened, onClose, skill, onSaved }: SkillEditorModalProps) {
+export default function SkillEditorModal({ opened, onClose, skill, onSaved, ownerAgentId }: SkillEditorModalProps) {
     const [saving, setSaving] = useState(false);
     const isEdit = Boolean(skill);
+    const ownedByAgent = isEdit ? Boolean(skill?.owner) : Boolean(ownerAgentId);
 
     const initialValues = useMemo<FormValues>(() => ({
         key: skill?.key ?? '',
@@ -58,17 +54,10 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
     }), [skill]);
 
     const [values, setValues] = useState<FormValues>(initialValues);
-    // Who may use the skill in agent runs; its own editor, so kept beside the form values.
-    const initialAccess = useMemo<AccessListValue>(() => accessValueOf(skill?.access), [skill]);
-    const [access, setAccess] = useState<AccessListValue>(initialAccess);
-    const tAccess = useTranslations('resourceAccess');
-    const accessSummary = useAccessSummary(access);
 
     useEffect(() => {
-        if (!opened) return;
-        setValues(initialValues);
-        setAccess(initialAccess);
-    }, [opened, initialValues, initialAccess]);
+        if (opened) setValues(initialValues);
+    }, [opened, initialValues]);
 
     const set = <K extends keyof FormValues>(field: K, value: FormValues[K]) => setValues((v) => ({ ...v, [field]: value }));
 
@@ -94,8 +83,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                 body: values.body,
                 minModelTier: values.minModelTier === 'any' ? null : values.minModelTier,
                 status: values.status,
-                // A new skill is open unless restricted; an edit always sends the list, so opening it back up is saved too.
-                ...(isEdit || access.mode === 'selected' ? { access } : {}),
+                ...(!skill && ownerAgentId ? { ownerAgentId } : {}),
             };
             const res = await fetch(skill ? `/api/skills/${skill._id}` : '/api/skills', {
                 method: skill ? 'PATCH' : 'POST',
@@ -109,7 +97,9 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
             const data = await res.json();
             notifications.show({
                 title: isEdit ? 'Skill saved' : 'Skill created',
-                message: `"${data.skill.title}" is ready to attach to an agent`,
+                message: ownedByAgent
+                    ? `"${data.skill.title}" is saved in this agent`
+                    : `"${data.skill.title}" is ready to attach to an agent`,
                 color: 'teal',
             });
             onSaved(data.skill as SkillView);
@@ -138,7 +128,6 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                 <SummaryKV label="Header" value={values.header || <span className="ds-faint">—</span>} />
                 <SummaryKV label="Instructions" value={<span className="ds-faint">{validBody ? `${values.body.length} chars` : '—'}</span>} />
                 <SummaryKV label="Model tier" value={values.minModelTier === 'any' ? 'Any' : values.minModelTier} />
-                <SummaryKV label={tAccess('title')} value={accessSummary} />
             </SummaryGroup>
             <SummaryGroup title="Pre-flight">
                 <Checklist items={checklist} />
@@ -151,8 +140,10 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
             open={opened}
             onClose={onClose}
             icon={<IconBulb size={16} />}
-            title={isEdit ? 'Edit skill' : 'New skill'}
-            subtitle="A capability an agent can discover and open on demand — the header is always visible to the model, the body only once it opens the skill."
+            title={isEdit ? 'Edit skill' : ownedByAgent ? 'New skill for this agent' : 'New skill'}
+            subtitle={ownedByAgent
+                ? 'Only this agent uses it and it is managed from the agent; it is not added to the skill library. The header is always visible to the model, the body only once it opens the skill.'
+                : 'A capability an agent can discover and open on demand — the header is always visible to the model, the body only once it opens the skill.'}
             summary={summary}
             footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
             primaryAction={{
@@ -250,10 +241,6 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                         />
                     </FormField>
                 </FormRow>
-            </FormSection>
-
-            <FormSection number={3} title={tAccess('title')} done>
-                <AccessListFields value={access} onChange={setAccess} resource="skill" disabled={saving} />
             </FormSection>
         </FormShell>
     );

@@ -6,7 +6,6 @@
  * incrementally translated by overriding their keys here.
  */
 
-import { resourceAccessTr } from './resourceAccess.tr';
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
 import { agentChannelsTr } from './agentChannels.tr';
@@ -1389,8 +1388,6 @@ export const tr: typeof en = {
   projectTabs: projectTabsTr,
   accountPage: accountPageTr,
   // Slack ve Microsoft Teams'teki ajanlar (Enterprise): ekran başına bir dosya (agentChannels*.tr.ts).
-  // Who may use a shared MCP server or skill in agent runs (resourceAccess.*.ts).
-  resourceAccess: resourceAccessTr,
   agentChannels: {
     ...agentChannelsTr,
     ...agentChannelsListTr,

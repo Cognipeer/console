@@ -10,7 +10,13 @@
  */
 
 import slugify from 'slugify';
-import { getDatabase, type IAgentSkill, type IResourceAccessList } from '@/lib/database';
+import {
+    getDatabase,
+    type IAgentResourceOwner,
+    type IAgentSkill,
+    type IResourceAccessList,
+    type OwnedResourceListFilter,
+} from '@/lib/database';
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 20;
@@ -39,6 +45,8 @@ export interface CreateSkillInput {
     minModelTier?: IAgentSkill['minModelTier'];
     /** Who may use the skill in an agent run (omit = everyone who can run the agent). */
     access?: IResourceAccessList;
+    /** The agent the new skill belongs to (`IAgentResourceOwner`), checked by the route; never changed afterwards. */
+    owner?: IAgentResourceOwner;
     status?: IAgentSkill['status'];
 }
 
@@ -52,10 +60,11 @@ export interface UpdateSkillInput {
     status?: IAgentSkill['status'];
 }
 
+/** The project's skill library; an agent's own skills only when `owned` / `ownerAgentId` ask for them. */
 export async function listSkills(
     tenantDbName: string,
     projectId: string,
-    options?: { status?: IAgentSkill['status']; search?: string },
+    options?: { status?: IAgentSkill['status']; search?: string } & OwnedResourceListFilter,
 ): Promise<IAgentSkill[]> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -94,6 +103,7 @@ export async function createSkill(
         minModelTier: payload.minModelTier,
         // Omitted when not given (a skill without a list is open), never `undefined` (BSON null on Mongo).
         ...(payload.access ? { access: payload.access } : {}),
+        ...(payload.owner ? { owner: { kind: 'agent' as const, agentId: payload.owner.agentId } } : {}),
         status: payload.status ?? 'active',
         createdBy: userId,
         updatedBy: userId,

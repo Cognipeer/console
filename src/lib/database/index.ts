@@ -517,6 +517,8 @@ export type {
   IAgentSkill,
   IAgentSkillPolicy,
   IResourceAccessList,
+  IAgentResourceOwner,
+  OwnedResourceListFilter,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentSandboxSeedFile,

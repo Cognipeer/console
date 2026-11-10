@@ -5,7 +5,7 @@
  * same CRUD shape as a prompt rather than a new pattern.
  */
 
-import type { IAgentSkill } from '../provider.interface';
+import type { IAgentSkill, OwnedResourceListFilter } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -20,8 +20,10 @@ export function SkillMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       db.prepare(`
         INSERT INTO ${TABLES.agentSkills}
-        (id, tenantId, projectId, key, title, header, body, minModelTier, access, status, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @title, @header, @body, @minModelTier, @access, @status, @createdBy, @updatedBy, @createdAt, @updatedAt)
+        (id, tenantId, projectId, key, title, header, body, minModelTier, access, owner, ownerAgentId, status, createdBy, updatedBy,
+         createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @key, @title, @header, @body, @minModelTier, @access, @owner, @ownerAgentId, @status,
+         @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: skill.tenantId,
@@ -32,6 +34,8 @@ export function SkillMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         body: skill.body,
         minModelTier: skill.minModelTier ?? null,
         access: skill.access ? this.toJson(skill.access) : null,
+        owner: skill.owner ? this.toJson(skill.owner) : null,
+        ownerAgentId: skill.owner?.agentId ?? null,
         status: skill.status,
         createdBy: skill.createdBy,
         updatedBy: skill.updatedBy ?? null,
@@ -53,6 +57,11 @@ export function SkillMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.body !== undefined) { sets.push('body = @body'); params.body = data.body; }
       if (data.minModelTier !== undefined) { sets.push('minModelTier = @minModelTier'); params.minModelTier = data.minModelTier; }
       if (data.access !== undefined) { sets.push('access = @access'); params.access = data.access ? this.toJson(data.access) : null; }
+      if (data.owner !== undefined) {
+        sets.push('owner = @owner', 'ownerAgentId = @ownerAgentId');
+        params.owner = data.owner ? this.toJson(data.owner) : null;
+        params.ownerAgentId = data.owner?.agentId ?? null;
+      }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
@@ -88,10 +97,12 @@ export function SkillMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       projectId?: string;
       status?: IAgentSkill['status'];
       search?: string;
-    }): Promise<IAgentSkill[]> {
+    } & OwnedResourceListFilter): Promise<IAgentSkill[]> {
       const db = this.getTenantDb();
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
+      const owned = this.ownedResourceClause(filters, params);
+      if (owned) clauses.push(owned);
 
       if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
@@ -119,6 +130,7 @@ export function SkillMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         minModelTier: (r.minModelTier as IAgentSkill['minModelTier']) ?? undefined,
         // A list that no longer parses admits nobody rather than everybody (the service reads it as 'selected', empty).
         access: r.access ? this.parseJson(r.access, CLOSED_ACCESS_LIST) : undefined,
+        ...this.ownerOfRow(r),
         status: r.status as IAgentSkill['status'],
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,

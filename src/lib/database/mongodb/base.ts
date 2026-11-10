@@ -10,6 +10,7 @@ import { Db, MongoClient, type MongoClientOptions } from 'mongodb';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { ensureMainDbIndexes, ensureTenantDbIndexes } from './indexManifest';
+import type { OwnedResourceListFilter } from '../provider/types.domain';
 
 export const logger = createLogger('mongodb');
 
@@ -154,6 +155,22 @@ export const COLLECTIONS = {
  */
 export function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The condition that picks which agent-owned records a list returns (`OwnedResourceListFilter`, the same rules as the
+ * SQLite `ownedResourceClause`); null when the list returns every record. `owner: null` also matches a record stored
+ * without the field. Goes into an `$and`, so it never clashes with a search `$or`.
+ */
+export function ownedResourceCondition(filter?: OwnedResourceListFilter): Record<string, unknown> | null {
+  const agentId = filter?.ownerAgentId;
+  if (agentId) {
+    return filter?.owned === 'include'
+      ? { $or: [{ owner: null }, { 'owner.agentId': agentId }] }
+      : { 'owner.agentId': agentId };
+  }
+  if (filter?.owned === 'include') return null;
+  return filter?.owned === 'only' ? { owner: { $ne: null } } : { owner: null };
 }
 
 export class MongoDBProviderBase {

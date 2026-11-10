@@ -12,9 +12,10 @@ import type {
   IMcpRequestAggregate,
   McpLogServerScope,
   McpServerStatus,
+  OwnedResourceListFilter,
 } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, escapeRegex } from './base';
+import { MongoDBProviderBase, COLLECTIONS, escapeRegex, ownedResourceCondition } from './base';
 
 /**
  * Match a server's request logs by durable `serverId` primarily. The second
@@ -129,9 +130,11 @@ export function McpServerMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       projectId?: string;
       status?: McpServerStatus;
       search?: string;
-    }): Promise<IMcpServer[]> {
+    } & OwnedResourceListFilter): Promise<IMcpServer[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = {};
+      const owned = ownedResourceCondition(filters);
+      if (owned) filter.$and = [owned];
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.status !== undefined) filter.status = filters.status;
       if (filters?.search) {

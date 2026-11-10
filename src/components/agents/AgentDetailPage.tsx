@@ -115,6 +115,7 @@ import BuildSectionIndex, { type BuildIndexGroup } from './studio/BuildSectionIn
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
+import AgentOwnedMcpServers from './studio/AgentOwnedMcpServers';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
@@ -391,6 +392,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
   // The records behind the bound tools: the approvals table reads what each tool does (reads / writes…) from them.
   const [toolRecords, setToolRecords] = useState<{ tools: KindSourceRecord[]; mcp: KindSourceRecord[] }>({ tools: [], mcp: [] });
+  // Bumped when one of the agent's own MCP servers was created, changed or deleted: the tool records are read again.
+  const [ownedMcpVersion, setOwnedMcpVersion] = useState(0);
   const [remindersConfig, setRemindersConfig] = useState<IAgentRemindersConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
   const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
@@ -694,7 +697,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           setProjectAgents,
           'project agents',
         ),
-        loadList('/api/skills', (d) => d.skills, setSkillLibrary, 'skill library'),
+        // The project's skill library and this agent's own skills.
+        loadList(`/api/skills?agentId=${encodeURIComponent(agentId)}`, (d) => d.skills, setSkillLibrary, 'skill library'),
         loadList('/api/memory/stores', (d) => d.stores, setMemoryStores, 'memory stores'),
       ]);
       setLoading(false);
@@ -789,7 +793,8 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
       try {
         const [toolsRes, mcpRes] = await Promise.all([
           fetch('/api/tools', { cache: 'no-store' }),
-          fetch('/api/mcp', { cache: 'no-store' }),
+          // The hub's servers and this agent's own ones.
+          fetch(`/api/mcp?agentId=${encodeURIComponent(agentId)}`, { cache: 'no-store' }),
         ]);
         const toolsData = toolsRes.ok ? await toolsRes.json() : {};
         const mcpData = mcpRes.ok ? await mcpRes.json() : {};
@@ -799,7 +804,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
       }
     })();
     return () => { cancelled = true; };
-  }, [boundSourceKeys]);
+  }, [boundSourceKeys, agentId, ownedMcpVersion]);
   const toolKinds = useMemo(
     () => boundToolKinds(toolBindings, toolRecords.tools, toolRecords.mcp),
     [toolBindings, toolRecords],
@@ -1387,6 +1392,14 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             >
               {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
             </Button>
+
+            <AgentOwnedMcpServers
+              agentId={agentId}
+              bindings={toolBindings}
+              onBindingsChange={handleToolBindingsChange}
+              onServersChanged={() => setOwnedMcpVersion((version) => version + 1)}
+              readOnly={readOnly}
+            />
           </Stack>
 
           <ToolSelectorModal
@@ -1394,6 +1407,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
             onClose={() => setToolSelectorOpen(false)}
             value={toolBindings}
             onChange={handleToolBindingsChange}
+            agentId={agentId}
           />
         </ConfigBlock>
 
@@ -1517,7 +1531,9 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         skills={skills}
         policy={skillPolicy}
         library={skillLibrary}
+        agentId={agentId}
         onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
+        onLibraryRemove={(key) => setSkillLibrary((prev) => prev.filter((s) => s.key !== key))}
         onChange={(nextSkills, nextPolicy) => {
           setSkills(nextSkills);
           setSkillPolicy(nextPolicy);
@@ -1606,6 +1622,7 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
       <AgentHumanInTheLoopPanel
         value={hitlConfig}
         onChange={setHitlConfig}
+        agentId={agentId}
         clientTools={clientToolsConfig}
         toolKinds={toolKinds}
         toolConfig={{

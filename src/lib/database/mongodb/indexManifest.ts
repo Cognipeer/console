@@ -326,6 +326,9 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   ],
   // Hidden agents owned by a flow node are found by their flow (flow delete, lifecycle, the flow's agent summary).
   agents: [{ key: { 'owner.flowId': 1 }, options: { name: 'idx_agents_owner_flow' } }],
+  // MCP servers and skills created inside an agent are listed by their agent (its own list, and deleted with it).
+  mcp_servers: [{ key: { 'owner.agentId': 1 }, options: { name: 'idx_mcp_servers_owner_agent' } }],
+  agent_skills: [{ key: { 'owner.agentId': 1 }, options: { name: 'idx_agent_skills_owner_agent' } }],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },
