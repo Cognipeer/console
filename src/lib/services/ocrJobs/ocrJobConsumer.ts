@@ -6,6 +6,7 @@
  * multi-node BullMQ deployments this executes jobs forwarded to this node.
  */
 
+import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -31,7 +32,9 @@ export async function startOcrJobQueueConsumer(): Promise<void> {
     async (ctx: JobContext<QueuePayload>) => {
       if (ctx.name === 'ocr.item') {
         const payload = ctx.data as unknown as ItemPayload;
-        await processOcrItem(payload.ctx, payload.itemId);
+        await runWithTenantScope(payload.ctx.tenantDbName, () =>
+          processOcrItem(payload.ctx, payload.itemId),
+        );
         return { ok: true };
       }
       throw new Error(`Unknown OCR job: ${ctx.name}`);

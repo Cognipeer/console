@@ -43,6 +43,7 @@
  * case) and from the finish reason of the response (the second).
  */
 
+import { getConfig } from '@/lib/core/config';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   invokeChatViaSdk,
@@ -53,7 +54,7 @@ import {
   type SdkChatResult,
   type SdkSamplingParams,
 } from './sdkInvoker';
-import { callWithPolicy, envMs, DEFAULT_RETRY_BACKOFF_MS } from './retry';
+import { callWithPolicy, DEFAULT_RETRY_BACKOFF_MS } from './retry';
 import { calculateCost } from '@/lib/services/models/usageLogger';
 import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
@@ -518,7 +519,7 @@ function buildInvocationPathResolver(
 ): () => Promise<ModelInvocationPath> {
   let cached: Promise<ModelInvocationPath> | undefined;
   const resolve = async (): Promise<ModelInvocationPath> => {
-    if (process.env.EVALUATION_INVOKER === 'gateway') return { mode: 'gateway' };
+    if (getConfig().evaluation.invoker === 'gateway') return { mode: 'gateway' };
     try {
       const prepared = await prepareSdkInvocation(
         { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },
@@ -587,9 +588,9 @@ function withSystemPrompt(input: DatasetItem['input'], systemPrompt: string): Da
   return [{ role: 'system' as const, content: systemPrompt }, ...input.filter((m) => m.role !== 'system')];
 }
 
-/** Retry (x2) + timeout for model / rag targets and the judge; both limits are env-tunable. */
-function modelCallPolicy(label: string, timeoutEnv = 'EVALUATION_TARGET_TIMEOUT_MS', fallbackMs = 180_000) {
-  return { timeoutMs: envMs(timeoutEnv, fallbackMs), retries: 2, backoffMs: DEFAULT_RETRY_BACKOFF_MS, label };
+/** Retry (x2) + timeout for model / rag targets and the judge; the limits come from the evaluation config. */
+function modelCallPolicy(label: string, timeoutMs = getConfig().evaluation.targetTimeoutMs) {
+  return { timeoutMs, retries: 2, backoffMs: DEFAULT_RETRY_BACKOFF_MS, label };
 }
 
 /**
@@ -776,7 +777,7 @@ export function buildTargetInvoker(
           ...(options.agentRun ?? selectorForStoredDefault(target.agentVersion)),
           // Its knowledge tools read as the person who started the suite (or the token it was started with).
           ...(evaluationRuntime ? { runtimeContext: evaluationRuntime } : {}),
-        }), { timeoutMs: envMs('EVALUATION_AGENT_TIMEOUT_MS', 600_000), retries: 0, label: 'Agent target call' });
+        }), { timeoutMs: getConfig().evaluation.agentTimeoutMs, retries: 0, label: 'Agent target call' });
         const latencyMs = Date.now() - started;
         // The Responses-shaped result holds messages only (no function_call items), so the agent's own tool
         // calls and its priced usage are read back from the turn the runtime just persisted (`steps` = this
@@ -885,7 +886,7 @@ export function buildJudgeInvoker(judgeModelKey: string | undefined, ctx: Evalua
     // No `temperature: 0`: whether a judge model accepts one (reasoning models reject it) is not known
     // reliably here, and a rejected parameter would fail every judge call. Revisit if the model record
     // ever exposes "accepts temperature".
-    const policy = modelCallPolicy('Judge call', 'EVALUATION_JUDGE_TIMEOUT_MS', 120_000);
+    const policy = modelCallPolicy('Judge call', getConfig().evaluation.judgeTimeoutMs);
     if (path.mode === 'sdk') {
       const result = await callWithPolicy((signal) => invokeChatViaSdk(
         { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },

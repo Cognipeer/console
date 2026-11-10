@@ -33,6 +33,7 @@ import { KnowledgeExposure, runWithKnowledgeExposure } from '@/lib/services/rag/
 import { EMBEDDING_SCORERS, JUDGE_SCORERS } from './scorers';
 import { compareEvaluationRuns, type EvalComparison } from './compare';
 import type { DatasetItem, RunItemResult, ScorerConfig } from './types';
+import { getConfig } from '@/lib/core/config';
 import { buildEmbedInvoker, buildJudgeInvoker, buildTargetInvoker, type EvaluationModelContext } from './adapters';
 import { sameAgentRevision, agentRevisionLabel, storedAgentRevision } from '@/lib/shared/agentRevision';
 import {
@@ -151,12 +152,6 @@ const EVAL_RUN_RUNNING_GUARD_MS = 60 * 60 * 1000;
 /** Progress counts are flushed at most this often; the items array less often still. */
 const EVAL_RUN_PROGRESS_FLUSH_MS = 1_500;
 const EVAL_RUN_ITEMS_FLUSH_MS = 5_000;
-
-/** `EVALUATION_RUN_CANCEL_POLL_MS` (default 5 s) is how often a running executor looks for a cancel request. */
-function envMs(name: string, fallback: number): number {
-  const parsed = Number(process.env[name]);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 /** A copy of `value` without its `undefined` members (a store would persist them as null). */
 function withoutUndefined(value: Record<string, unknown>): Record<string, unknown> {
@@ -1185,7 +1180,7 @@ export async function executeRun(
     return toView(stored);
   }
 
-  const heartbeatMs = envMs('EVALUATION_RUN_HEARTBEAT_MS', 30_000);
+  const heartbeatMs = getConfig().evaluation.runHeartbeatMs;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let cancelTimer: ReturnType<typeof setInterval> | undefined;
   let stopRequested = false;
@@ -1252,7 +1247,7 @@ export async function executeRun(
           if (rows.some((row) => String(row._id) === runId && row.cancelRequestedAt)) stopRequested = true;
         })
         .catch(() => {});
-    }, envMs('EVALUATION_RUN_CANCEL_POLL_MS', 5_000));
+    }, getConfig().evaluation.runCancelPollMs);
     cancelTimer.unref?.();
 
     const ctx: EvaluationModelContext = {

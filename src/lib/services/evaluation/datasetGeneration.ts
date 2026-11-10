@@ -18,6 +18,8 @@ import type { IEvaluationDatasetItem, IModel } from '@/lib/database';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { computeOutputTokenLimit, modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { hasExplicitThinking } from '@/lib/services/models/reasoning';
+import { isManagedModel } from '@/enterprise/managed-credits';
+import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
@@ -186,7 +188,9 @@ function positiveNumber(...values: unknown[]): number | undefined {
  * cap, which a thinking model (Claude 5.x thinks by default) would share with its answer. A configured limit that
  * already covers the need is left alone too. Never above the model maximum (when it is known).
  */
-export function blockOutputLimit(perBlock: number, model: IModel | undefined): number | undefined {
+export function blockOutputLimit(perBlock: number, poolModel: IModel | undefined): number | undefined {
+  // A managed model: the driver and model id of its first live route. Any other model is read as it is.
+  const model = poolModel && isManagedModel(poolModel) ? primaryReplicaModel(poolModel) : poolModel;
   const needed = Math.max(MIN_BLOCK_OUTPUT_TOKENS, perBlock * TOKENS_PER_PAIR);
   const settings = (model?.settings ?? {}) as Record<string, unknown>;
   const configured = positiveNumber(settings.maxCompletionTokens, settings.maxTokens);

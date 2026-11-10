@@ -65,6 +65,8 @@ describe('edge kind registry', () => {
       'guardrail.piiPolicy',
       // resolveTemplateIdByKey throws "Sandbox template not found" on the first sandbox call
       'agent.sandboxTemplate', 'mcp.sandboxTemplate',
+      // An instance searches through its provider: without it every search fails.
+      'websearchInstance.provider',
     ];
     const warnings = [
       'agent.tool', 'agent.mcp', 'agent.knowledge', 'agent.subagent', 'agent.subagentModel', 'agent.subagentKnowledge',
@@ -237,6 +239,12 @@ describe('resolution per scope rule', () => {
     });
     it('models have no status, so they are never inactive', () => {
       expect(resolve(agentIn('p1'), e, [model('m', 'p1')]).status).toBe('ok');
+    });
+    it('a platform model added to several projects resolves in each of them, and nowhere else', () => {
+      const shared = rec({ type: 'model', id: 'pm', key: 'gpt', projectId: 'p2', projectIds: ['p2', 'p1'] });
+      expect(resolve(agentIn('p1'), e, [shared]).status).toBe('ok');
+      expect(resolve(agentIn('p3'), e, [shared]).status).toBe('cross-project');
+      expect(resolve(agentIn(null), e, [shared]).status).toBe('cross-project');
     });
   });
 

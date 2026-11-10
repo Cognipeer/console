@@ -24,6 +24,8 @@ import {
 import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { browserManager } from './browserManager';
 import { readBrowserStorageState } from './browserProfileService';
+import type { PlanLease } from '@/lib/limits';
+import { concurrencyRefusal, releaseQuietly, tryPoolLease } from '@/lib/services/planLeases';
 import { browserEntityId } from './entityId';
 import { matchesProjectScope, redactTypedText, sanitizePersistedUrl } from './internals';
 import type {
@@ -114,6 +116,15 @@ function canAccessSession(
   );
 }
 
+/** Plan-limit slots of the sessions this process opened, by session key (released on close / failure). */
+const sessionLeases = new Map<string, PlanLease>();
+
+async function releaseSessionLease(sessionKey: string): Promise<void> {
+  const lease = sessionLeases.get(sessionKey);
+  sessionLeases.delete(sessionKey);
+  await releaseQuietly(lease);
+}
+
 interface SessionContext {
   tenantDbName: string;
   tenantId: string;
@@ -174,6 +185,19 @@ export async function createBrowserSession(
     { domain: 'browser', resourceKey: browser.key, cost: { requests: 1 }, concurrency: { active } },
   );
 
+  // Plan limit (browser sessions): a lease per open session, held until it closes (onClose covers manual,
+  // idle, lifetime, shutdown and delete) or fails to open. Refused when the plan's browser pool is full
+  // ('on' only; shadow measures). The pod-memory semaphore in browserManager stays as a platform guard.
+  const leaseAttempt = await tryPoolLease({
+    tenantId: ctx.tenantId,
+    pool: 'browser',
+    holderId: sessionKey,
+    source: { type: 'user', id: caller.userId ?? caller.apiTokenId },
+  });
+  if (leaseAttempt.refused) throw concurrencyRefusal('browser', leaseAttempt.decision, 'browser sessions');
+  if (leaseAttempt.lease) sessionLeases.set(sessionKey, leaseAttempt.lease);
+  const releaseOwnSessionLease = () => releaseSessionLease(sessionKey);
+
   // What the session ROW stores is not what the context gets. `storageState`
   // is a live login and `proxy`/`httpCredentials` carry passwords; the row is
   // read by the sessions list, the API and the UI, so the secrets stay in the
@@ -210,6 +234,9 @@ export async function createBrowserSession(
     // is what boot reconciliation checks before treating an unknown session
     // as orphaned.
     ownerNode: getThisNodeName(),
+  }).catch(async (error: unknown) => {
+    await releaseOwnSessionLease();
+    throw error;
   });
 
   const sessionId = created._id ? String(created._id) : '';
@@ -264,6 +291,8 @@ export async function createBrowserSession(
             sessionId,
             error: err instanceof Error ? err.message : err,
           });
+        } finally {
+          await releaseOwnSessionLease();
         }
       },
     });
@@ -286,6 +315,8 @@ export async function createBrowserSession(
     // logs -- diagnosing a live incident meant querying Mongo to find out a
     // session failed to open at all, with nothing in `oc logs` naming why.
     logger.error('Browser session failed to open', { error: err, sessionKey, tenantId: ctx.tenantId });
+    // The manager session never opened, so onClose will not fire: the slot is given back here.
+    await releaseOwnSessionLease();
     await db.updateBrowserSession(sessionId, {
       status: 'errored',
       errorMessage: err instanceof Error ? err.message : String(err),
@@ -784,6 +815,8 @@ export async function closeBrowserSession(
   }
 
   const closed = await browserManager.closeSession(sessionKey, 'manual');
+  // Normally onClose gave the plan-limit slot back already; this covers a session the manager no longer holds.
+  await releaseSessionLease(sessionKey);
 
   if (id) {
     const db = await withTenantDb(ctx.tenantDbName);
@@ -818,6 +851,7 @@ export async function deleteBrowserSession(
   if (!canAccessSession(ctx, session)) return false;
   // Best-effort: ensure manager-side session is closed first
   await browserManager.closeSession(session.sessionKey, 'deleted').catch(() => undefined);
+  await releaseSessionLease(session.sessionKey);
   return db.deleteBrowserSession(sessionId);
 }
 

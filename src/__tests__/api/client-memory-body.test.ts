@@ -64,6 +64,7 @@ import { createMemoryStore, updateMemoryStore, addMemory, addMemoryBatch, search
 import { clientMemoryApiPlugin } from '@/server/api/plugins/client-memory';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
+import { PlanLimitError } from '@/lib/limits/errors';
 
 const AUTH_CTX = {
   token: 'tok_abc',
@@ -114,5 +115,29 @@ describe('client memory API — a body that is not a JSON object', () => {
         }
       });
     }
+  }
+});
+
+describe('client memory API — a plan storage refusal', () => {
+  const WRITES: Array<[string, string, string, unknown, unknown]> = [
+    ['POST', '/api/client/v1/memory/stores/mem-a/memories', 'add memory', addMemory, { content: 'x' }],
+    ['POST', '/api/client/v1/memory/stores/mem-a/memories/batch', 'batch add', addMemoryBatch, { memories: [{ content: 'x' }] }],
+    ['PATCH', '/api/client/v1/memory/stores/mem-a/memories/m-1', 'update memory', updateMemoryItem, { content: 'x' }],
+  ];
+  for (const [method, url, label, fn, body] of WRITES) {
+    it(`${label} answers 413 with the refusal's envelope when the store's index is past the plan storage`, async () => {
+      mockFn(fn).mockRejectedValue(new PlanLimitError({
+        code: 'storage_quota_exceeded', message: 'Storage is full.', kind: 'storage', dimension: 'storage', limit: 10, used: 10,
+      }));
+      const app = await createFastifyApiTestApp(clientMemoryApiPlugin);
+      const res = await app.inject({
+        method: method as 'POST' | 'PATCH',
+        url,
+        headers: { authorization: 'Bearer tok', 'content-type': 'application/json' },
+        payload: JSON.stringify(body),
+      });
+      expect(res.statusCode).toBe(413);
+      expect(res.json()).toMatchObject({ code: 'storage_quota_exceeded' });
+    });
   }
 });

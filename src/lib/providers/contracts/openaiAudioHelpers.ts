@@ -1,3 +1,4 @@
+import { guardedFetch } from './guardedFetch';
 import { upstreamError } from './upstreamError';
 import { alignPcm16Chunks, iterateResponseBody, ttsMimeType } from './audioStream';
 import { createOpenAiRealtimeTranscriptionStream } from './openaiRealtimeTranscription';
@@ -189,7 +190,7 @@ export function createOpenAiSttRuntime(opts: OpenAiAudioClientOptions): SttRunti
     }
 
     const url = resolveUrl(opts, '/audio/transcriptions');
-    const response = await fetch(url, {
+    const response = await guardedFetch(url, {
       method: 'POST',
       headers: buildHeaders(opts, false),
       body: form,
@@ -225,7 +226,7 @@ export function createOpenAiSttRuntime(opts: OpenAiAudioClientOptions): SttRunti
     }
 
     const url = resolveUrl(opts, '/audio/translations');
-    const response = await fetch(url, {
+    const response = await guardedFetch(url, {
       method: 'POST',
       headers: buildHeaders(opts, false),
       body: form,
@@ -274,7 +275,7 @@ function buildSpeechBody(
 
 export function createOpenAiTtsRuntime(opts: OpenAiAudioClientOptions): TtsRuntime {
   const requestSpeech = async (input: TtsSynthesizeInput, format: TtsOutputFormat) => {
-    const response = await fetch(resolveUrl(opts, '/audio/speech'), {
+    const response = await guardedFetch(resolveUrl(opts, '/audio/speech'), {
       method: 'POST',
       headers: buildHeaders(opts, true),
       body: JSON.stringify(buildSpeechBody(opts, input, format)),

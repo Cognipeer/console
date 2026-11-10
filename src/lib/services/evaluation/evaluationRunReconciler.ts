@@ -31,6 +31,7 @@ import {
   type EvaluationRunJobPayload,
 } from './evaluationRunJob';
 import { EVAL_RUN_PENDING_MAX_AGE_MS } from './service';
+import { getConfig } from '@/lib/core/config';
 
 const logger = createLogger('evaluation:reconcile');
 
@@ -58,8 +59,7 @@ const EMPTY_SWEEP: EvaluationSweepResult = { tenantsScanned: 0, failedRunning: 0
 
 /** How long a running run may go without a heartbeat before it is declared lost. */
 export function evaluationRunStaleMs(): number {
-  const parsed = Number(process.env.EVALUATION_RUN_STALE_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 600_000;
+  return getConfig().evaluation.runStaleMs;
 }
 
 function staleMessage(staleMs: number): string {

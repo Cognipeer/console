@@ -222,6 +222,25 @@ export function checkRateLimit(
   };
 }
 
+/**
+ * The state of the limit for a key without counting an attempt: refused once the
+ * count in the current window has reached `maxAttempts`.
+ */
+export function peekRateLimit(key: string, config: RateLimitConfig): RateLimitResult {
+  const now = Date.now();
+  const entry = store.get(boundedKey(key));
+  if (!entry || entry.resetAt <= now) {
+    return { allowed: true, remaining: config.maxAttempts, resetAt: new Date(now), retryAfterSeconds: 0 };
+  }
+  const allowed = entry.count < config.maxAttempts;
+  return {
+    allowed,
+    remaining: Math.max(0, config.maxAttempts - entry.count),
+    resetAt: new Date(entry.resetAt),
+    retryAfterSeconds: allowed ? 0 : Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+  };
+}
+
 /** Login rate limit: 10 attempts per 15 minutes per IP */
 export const LOGIN_RATE_LIMIT: RateLimitConfig = {
   maxAttempts: 10,

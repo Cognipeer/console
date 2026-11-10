@@ -99,15 +99,6 @@ export function BatchJobMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IBatchJob);
     }
 
-    async deleteBatchJob(id: string): Promise<boolean> {
-      const db = this.getTenantDb();
-      await db.collection<IBatchJobItem>(COLLECTIONS.batchJobItems).deleteMany({ batchId: id });
-      const result = await db
-        .collection<IBatchJob>(COLLECTIONS.batchJobs)
-        .deleteOne({ _id: objectId(id) });
-      return result.deletedCount > 0;
-    }
-
     // ── Batch job items ──────────────────────────────────────────────
     async createBatchJobItems(
       records: Array<Omit<IBatchJobItem, '_id' | 'createdAt' | 'updatedAt'>>,

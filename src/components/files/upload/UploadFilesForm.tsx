@@ -85,14 +85,18 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
   const [convert, setConvert] = useState(true);
   const [ocr, setOcr] = useState<OcrSettings | undefined>(undefined);
   const [notices, setNotices] = useState<Notices>(NO_NOTICES);
+  // Full storage refuses every retry the same way until files are deleted, so Retry is not offered meanwhile.
+  const [storageFull, setStorageFull] = useState(false);
 
   const queue = useUploadQueue({
     bucketKey: bucket.key,
     describeError: (error) => {
       // The limit is known on this screen: say it, instead of the generic "larger than the limit".
-      if (limits && isFilesApiError(error) && (error.code === 'file_too_large' || error.status === 413)) {
+      // Only for that code: a full storage is a 413 too, and says so in its own words.
+      if (limits && isFilesApiError(error) && error.code === 'file_too_large') {
         return t('status.tooLarge', { limit: formatBytes(limits.maxFileBytes) });
       }
+      if (isFilesApiError(error) && error.code === 'storage_quota_exceeded') setStorageFull(true);
       return filesErrorMessage(error, tc);
     },
     onSettled: ({ records, aborted }) => {
@@ -310,7 +314,7 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
             items={queue.items}
             limits={limits}
             folder={parsed.folder}
-            canRetry={mayUpload && !parsed.problem}
+            canRetry={mayUpload && !parsed.problem && !storageFull}
             onRename={queue.rename}
             onRemove={queue.remove}
             onRetry={(id) => queue.start([id], settings)}

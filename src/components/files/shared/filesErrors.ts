@@ -34,6 +34,7 @@ export const FILES_ERROR_CODE_KEYS: Readonly<Record<string, string>> = {
   object_too_large: 'errors.objectTooLarge',
   queue_unavailable: 'errors.queueUnavailable',
   file_too_large: 'errors.fileTooLarge',
+  storage_quota_exceeded: 'errors.storageQuotaExceeded',
   invalid_content_type: 'errors.invalidContentType',
   preview_unsupported: 'errors.previewUnsupported',
   storage_unavailable: 'errors.storageUnavailable',

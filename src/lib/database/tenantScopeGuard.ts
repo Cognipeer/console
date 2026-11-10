@@ -13,6 +13,7 @@
  * `TENANT_SCOPE_STRICT=1` (recommended for dev/CI).
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('database:tenant-scope');
@@ -22,7 +23,7 @@ let lastWarnAt = 0;
 let suppressedSinceLastWarn = 0;
 
 export function warnGlobalTenantFallback(fallbackDbName: string): void {
-  if (process.env.TENANT_SCOPE_STRICT === '1') {
+  if (getConfig().database.tenantScopeStrict) {
     throw new Error(
       `Tenant query without a runWithTenant scope (would fall back to global handle "${fallbackDbName}"). `
       + 'Wrap the calling entry point in runWithTenantScope().',
@@ -40,6 +41,43 @@ export function warnGlobalTenantFallback(fallbackDbName: string): void {
   const stack = new Error().stack?.split('\n').slice(2, 8).join('\n');
   logger.warn('Tenant query outside a runWithTenant scope — using process-global fallback', {
     fallbackDbName,
+    suppressedSinceLastWarn: suppressed,
+    stack,
+  });
+}
+
+let lastMismatchWarnAt = 0;
+let suppressedMismatchesSinceLastWarn = 0;
+
+/**
+ * Called by `switchToTenant(requested)` when the caller already runs inside a
+ * `runWithTenant` scope for a different tenant (`active`). The scope wins every
+ * query of that caller, so the switch cannot take effect: the caller has to
+ * open its own scope with `runWithTenantScope(requested, ...)`.
+ *
+ * `DB_TENANT_SCOPE_MISMATCH=warn` (default) keeps the earlier behavior (the
+ * switch only moves the process-global handle) and logs a rate-limited warning;
+ * `DB_TENANT_SCOPE_MISMATCH=error` refuses the switch.
+ */
+export function handleTenantScopeMismatch(active: string, requested: string): void {
+  if (getConfig().database?.tenantScopeMismatch === 'error') {
+    throw new Error(
+      `switchToTenant("${requested}") inside an active tenant scope for "${active}". `
+      + `Use runWithTenantScope("${requested}", ...) to work on another tenant.`,
+    );
+  }
+  const now = Date.now();
+  if (now - lastMismatchWarnAt < WARN_INTERVAL_MS) {
+    suppressedMismatchesSinceLastWarn += 1;
+    return;
+  }
+  lastMismatchWarnAt = now;
+  const suppressed = suppressedMismatchesSinceLastWarn;
+  suppressedMismatchesSinceLastWarn = 0;
+  const stack = new Error().stack?.split('\n').slice(2, 8).join('\n');
+  logger.warn('switchToTenant inside a scope for another tenant; queries keep using the scope tenant', {
+    active,
+    requested,
     suppressedSinceLastWarn: suppressed,
     stack,
   });

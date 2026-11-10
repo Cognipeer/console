@@ -219,8 +219,11 @@ describe('the model forms', () => {
   });
 
   it('the update APIs read null as "remove the key" (what the edit form relies on)', () => {
+    // Both the dashboard and the client plugin merge through the shared helper.
+    const shared = 'src/server/api/plugins/models-shared.ts';
+    expect(read(shared), shared).toMatch(/if \(value === null\) \{\s*delete merged\[key\];/);
     for (const file of ['src/server/api/plugins/models.ts', 'src/server/api/plugins/client-models.ts']) {
-      expect(read(file), file).toMatch(/if \(value === null\) \{\s*delete merged\[key\];/);
+      expect(read(file), file).toContain("from './models-shared'");
     }
   });
 

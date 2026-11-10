@@ -30,6 +30,8 @@ export interface PlaygroundModelInfo {
   modelId?: string;
   /** The Model Hub record's settings (reasoning default, upstream API, ...). */
   settings?: Record<string, unknown>;
+  /** Resolved capabilities: `supportsReasoning` offers the generic effort control where no driver rule applies. */
+  capabilities?: { supportsReasoning?: boolean } | null;
 }
 
 export interface PlaygroundReasoningControl {
@@ -55,7 +57,14 @@ export function playgroundReasoningControl(
   if (pinned && model.driver && sdkProviderForDriver(model.driver)) {
     return { kind: control.kind === 'none' ? 'effort' : control.kind, efforts: [], pinned };
   }
-  if (control.kind === 'none') return null;
+  if (control.kind === 'none') {
+    // No driver rule: a platform model (driver 'cognipeer') whose capability says reasoning gets the generic levels.
+    // Every other driver with no rule offers nothing, as the gateway drops the effort there.
+    if (model.driver === 'cognipeer' && model.capabilities?.supportsReasoning) {
+      return { kind: 'effort', efforts: ['low', 'medium', 'high'] };
+    }
+    return null;
+  }
 
   const efforts = control.efforts.filter((effort) =>
     requestReasoningEffortAccepted(model.driver, model.modelId, effort),

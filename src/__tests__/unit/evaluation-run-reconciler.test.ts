@@ -4,6 +4,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { reloadConfig } from '@/lib/core/config';
 
 const state = vi.hoisted(() => ({
   queueName: 'memory' as 'memory' | 'bullmq',
@@ -48,6 +49,7 @@ beforeEach(() => {
   state.cache.acquireLock.mockResolvedValue('token');
   state.cache.releaseLock.mockClear();
   delete process.env.EVALUATION_RUN_STALE_MS;
+  reloadConfig();
   state.db = {
     failStaleEvaluationRuns: vi.fn(async () => 2),
     listEvaluationRunsByStatus: vi.fn(async (_statuses: unknown, opts?: { createdBefore?: Date }) =>
@@ -99,8 +101,10 @@ describe('periodic pass', () => {
 
   it('honours EVALUATION_RUN_STALE_MS', () => {
     process.env.EVALUATION_RUN_STALE_MS = '120000';
+    reloadConfig();
     expect(evaluationRunStaleMs()).toBe(120_000);
     process.env.EVALUATION_RUN_STALE_MS = 'nonsense';
+    reloadConfig();
     expect(evaluationRunStaleMs()).toBe(600_000);
   });
 

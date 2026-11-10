@@ -23,8 +23,16 @@ vi.mock('@/lib/services/webSearch', () => ({
   runWebSearch: vi.fn(),
 }));
 
+vi.mock('@/lib/services/webSearch/webSearchInstanceService', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/services/webSearch/webSearchInstanceService')>(
+    '@/lib/services/webSearch/webSearchInstanceService',
+  );
+  return { ...actual, getWebSearchInstance: vi.fn(), listWebSearchInstances: vi.fn() };
+});
+
 vi.mock('@/lib/services/providers/providerService', () => ({
   getProviderConfigByKey: vi.fn(),
+  redactPlatformProvider: (view: unknown) => view,
 }));
 
 vi.mock('@/lib/services/projects/projectContext', () => {
@@ -68,8 +76,13 @@ import {
   runWebSearch,
 } from '@/lib/services/webSearch';
 import { getProviderConfigByKey } from '@/lib/services/providers/providerService';
+import {
+  getWebSearchInstance,
+  listWebSearchInstances,
+} from '@/lib/services/webSearch/webSearchInstanceService';
 import { requireApiTokenFromHeader, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
+import { PlanLimitError } from '@/lib/limits/errors';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -147,6 +160,8 @@ beforeEach(() => {
   (listWebSearchRunLogs as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_LOGS);
   (runWebSearch as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_RESULT);
   (getProviderConfigByKey as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_PROVIDER);
+  (listWebSearchInstances as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  (getWebSearchInstance as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
 });
 
@@ -295,6 +310,21 @@ describe('POST /api/websearch/search (dashboard)', () => {
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/no active web search provider/i);
   });
+
+  it('answers a plan-limit refusal with its own status and envelope (402 when out of credits)', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PlanLimitError({ code: 'insufficient_credits', message: 'Not enough credits for this request.', kind: 'credits', dimension: 'credits' }),
+    );
+    const app = await createFastifyApiTestApp(websearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/websearch/search',
+      headers: { ...HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello' }),
+    });
+    expect(res.statusCode).toBe(402);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('insufficient_credits');
+  });
 });
 
 // ── Client v1 plugin ─────────────────────────────────────────────────────────
@@ -310,7 +340,7 @@ describe('GET /api/client/v1/websearch/providers', () => {
     expect(res.statusCode).toBe(200);
     const body = parseJsonBody<{ providers: Array<Record<string, unknown>> }>(res.body);
     expect(body.providers).toEqual([
-      { key: 'brave-main', driver: 'brave-search', label: 'Brave', status: 'active', aiAnswer: true },
+      { key: 'brave-main', driver: 'brave-search', label: 'Brave', status: 'active', aiAnswer: true, kind: 'provider' },
     ]);
   });
 
@@ -321,7 +351,7 @@ describe('GET /api/client/v1/websearch/providers', () => {
       url: '/api/client/v1/websearch/providers',
       headers: { authorization: 'Bearer tok_abc' },
     });
-    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1');
+    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', undefined);
   });
 
   it('returns 401 for an invalid token', async () => {
@@ -475,5 +505,20 @@ describe('POST /api/client/v1/websearch/search', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/not a web search provider/i);
+  });
+
+  it('answers a plan-limit refusal with its own status and envelope (402 when out of credits)', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PlanLimitError({ code: 'insufficient_credits', message: 'Not enough credits for this request.', kind: 'credits', dimension: 'credits' }),
+    );
+    const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/websearch/search',
+      headers: { authorization: 'Bearer tok_abc', 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello', provider: 'cognipeer-search' }),
+    });
+    expect(res.statusCode).toBe(402);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('insufficient_credits');
   });
 });

@@ -29,6 +29,7 @@ vi.mock('@/lib/services/providers/providerService', () => ({
 vi.mock('@/lib/services/models/modelService', () => ({ listModels: mocks.listModels }));
 
 import {
+  getProviderCatalog,
   getProviderModelCatalog,
   ProviderCatalogDisabledError,
   ProviderCatalogNotFoundError,
@@ -192,5 +193,77 @@ describe('getProviderModelCatalog', () => {
     const catalog = await getProviderModelCatalog({ ...PARAMS, providerKey: 'textract' }, deps());
     expect(catalog).toMatchObject({ source: 'static', provider: { driver: 'aws-textract' } });
     expect(catalog.models.map((m) => [m.id, m.category])).toEqual([['analyze-document', 'ocr'], ['detect-document-text', 'ocr']]);
+  });
+});
+
+describe('getProviderCatalog for a platform provider', () => {
+  const platformRecord = (overrides: Record<string, unknown> = {}) => record({
+    key: 'plat', platform: true, projectIds: ['p2'], settings: {}, ...overrides,
+  });
+  const lookupTenantWide = (provider: Record<string, unknown>) => {
+    // Tenant-wide lookup (no project) finds it; the project-scoped one only when assigned.
+    mocks.getProviderConfigByKey.mockImplementation(async (_db: string, _t: string, key: string, projectId?: string) => {
+      if (key !== provider.key) return null;
+      if (projectId && !(provider.projectIds as string[]).includes(projectId)) return null;
+      return { ...provider, hasCredentials: true };
+    });
+  };
+  const rows = [
+    {
+      key: 'pm-1', name: 'PM 1', category: 'llm', description: 'd', providerKey: 'plat', platform: true, projectIds: ['p2'],
+      isMultimodal: true,
+      metadata: {
+        secretNote: 'must not be exposed',
+        capabilities: { contextWindow: 128000, maxOutputTokens: 4096, supportsToolCalls: true, supportsReasoning: false, hidden: 1 },
+        credits: { perCall: 1, perMillionTokens: 2, internal: 'x' },
+      },
+    },
+    { key: 'pm-2', name: 'PM 2', category: 'embedding', providerKey: 'plat', platform: true, metadata: { inactive: true } },
+    { key: 'other', name: 'O', category: 'llm', providerKey: 'plat', metadata: {} },
+  ];
+
+  it('answers from the platform model rows with no discovery and no credentials opened, assigned or not', async () => {
+    lookupTenantWide(platformRecord());
+    mocks.listModels.mockResolvedValue(rows);
+    const fetchImpl = vi.fn();
+    const notAssigned = await getProviderCatalog(
+      { ...PARAMS, providerKey: 'plat', projectId: 'p1' }, { fetch: fetchImpl } as unknown as DiscoveryDeps,
+    );
+    expect(notAssigned).toEqual({
+      platform: true,
+      assigned: false,
+      models: [
+        {
+          key: 'pm-1', name: 'PM 1', category: 'llm', description: 'd', unavailable: false, added: false, isMultimodal: true,
+          capabilities: { contextWindow: 128000, maxOutputTokens: 4096, supportsToolCalls: true, supportsReasoning: false },
+          credits: { perCall: 1, perMillionTokens: 2 },
+        },
+        { key: 'pm-2', name: 'PM 2', category: 'embedding', description: undefined, unavailable: true, added: false },
+      ],
+    });
+    expect(JSON.stringify(notAssigned)).not.toContain('must not be exposed');
+    const assigned = await getProviderCatalog({ ...PARAMS, providerKey: 'plat', projectId: 'p2' });
+    expect(assigned).toMatchObject({ platform: true, assigned: true });
+    // `added` follows the model's own project list, not the provider's assignment.
+    expect((assigned as { models: Array<{ key: string; added: boolean }> }).models.map((m) => [m.key, m.added])).toEqual([
+      ['pm-1', true],
+      ['pm-2', false],
+    ]);
+    expect(mocks.loadProviderRuntimeData).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(mocks.listModels).toHaveBeenCalledWith('tenant_acme', '', { providerKey: 'plat' });
+  });
+
+  it('getProviderModelCatalog itself never opens a platform provider', async () => {
+    lookupTenantWide(platformRecord({ projectIds: ['p1'] }));
+    await expect(getProviderModelCatalog({ ...PARAMS, providerKey: 'plat' })).rejects.toBeInstanceOf(ProviderCatalogNotFoundError);
+    expect(mocks.loadProviderRuntimeData).not.toHaveBeenCalled();
+  });
+
+  it('an ordinary provider still takes the discovery path', async () => {
+    storeHolds(record());
+    const out = await getProviderCatalog(PARAMS, { fetch: vi.fn(async () => json(200, { data: [] })) } as unknown as DiscoveryDeps);
+    expect(out).not.toHaveProperty('platform');
+    expect(mocks.loadProviderRuntimeData).toHaveBeenCalled();
   });
 });

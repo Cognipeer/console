@@ -304,6 +304,8 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // and an unmapped path is "not a gated surface".
   { prefix: '/api/resource-usage', service: 'resources' },
   { prefix: '/api/license', service: 'license' },
+  // Plan usage (hosted only; the routes answer 404 when plan limits are off).
+  { prefix: '/api/usage', service: 'license' },
   { prefix: '/api/providers', service: 'providers' },
   { prefix: '/api/config', service: 'config' },
   { prefix: '/api/quota', service: 'projects' },

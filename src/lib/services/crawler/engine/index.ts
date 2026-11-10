@@ -409,6 +409,7 @@ export async function* crawl(
       return null;
     }
     try {
+      // Cheap literal/name pre-check; the fetchers resolve DNS per request.
       assertSafeUrl(item.url, plan.http.allowPrivateNetwork);
     } catch (err) {
       return errorPage(item, (err as Error).message);

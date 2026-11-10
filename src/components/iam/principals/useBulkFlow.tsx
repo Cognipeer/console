@@ -264,6 +264,7 @@ export const BULK_CODE_LIST = [
   'not_a_member',
   'directory_managed',
   'group_directory_managed',
+  'seat_limit_reached',
   'failed',
 ] as const;
 

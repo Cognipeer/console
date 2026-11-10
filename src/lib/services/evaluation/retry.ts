@@ -25,14 +25,6 @@ export class EvaluationTimeoutError extends Error {
   }
 }
 
-/** A positive millisecond value from an environment variable, else the default. */
-export function envMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
 }

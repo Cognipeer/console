@@ -31,4 +31,15 @@ describe('blockOutputLimit', () => {
       blockOutputLimit(3, model({ providerDriver: 'openai', modelId: 'gpt-4o', settings: { maxTokens: 4096 } })),
     ).toBeUndefined();
   });
+
+  it('reads a tenant model as its own row, not its first stored replica', () => {
+    const m = model({
+      providerKey: 'azure-main',
+      providerDriver: 'openai',
+      modelId: 'gpt-4o',
+      settings: { maxTokens: 1000 },
+      replicas: [{ providerKey: 'other', providerDriver: 'openai', modelId: 'gpt-4o', settings: { maxTokens: 9000 } }],
+    });
+    expect(blockOutputLimit(3, m)).toBe(2048);
+  });
 });

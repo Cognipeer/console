@@ -24,6 +24,12 @@ import {
 import { http, HttpResponse } from 'msw';
 import { mswServer } from '../helpers/msw.server';
 
+// Network guard is covered in provider-outbound-guard.test.ts; here calls go to the stubbed/intercepted fetch.
+vi.mock('@/lib/providers/contracts/guardedFetch', () => {
+  const delegate = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
+  return { guardedFetch: delegate, createGuardedFetch: () => delegate };
+});
+
 // ── AWS SDK mock (Bedrock) ───────────────────────────────────────────────────
 vi.mock('@aws-sdk/client-bedrock-runtime', () => ({
   BedrockRuntimeClient: vi.fn().mockImplementation(() => ({

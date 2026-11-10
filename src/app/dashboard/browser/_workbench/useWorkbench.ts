@@ -18,6 +18,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { notifications } from '@mantine/notifications';
+import { useLocale, useTranslations } from '@/lib/i18n';
+import { limitMessageKey, limitMessageValues, limitTitleKey, parseLimitError } from '@/lib/limits/describeLimitError';
 import type { BrowserSessionView } from '@/lib/services/browser';
 import { INTERACTIVE_ROLES, parseSnapshot, type SnapshotNode } from './snapshot';
 
@@ -258,6 +260,8 @@ export function useDriveSession(config: {
   const [session, setSession] = useState<BrowserSessionView | null>(null);
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState(false);
+  const tl = useTranslations('usageLimits');
+  const locale = useLocale();
   // `end` fires on unmount, where reading `session` from state would close
   // over whatever it was when the effect was set up.
   const current = useRef<BrowserSessionView | null>(null);
@@ -273,7 +277,19 @@ export function useDriveSession(config: {
         body: JSON.stringify({ browserId, name }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not start a session');
+      if (!res.ok) {
+        // A plan limit (no free browser session, ...) is said in its own words.
+        const limit = parseLimitError(res.status, data, res.headers.get('Retry-After'));
+        if (limit) {
+          notifications.show({
+            color: 'orange',
+            title: tl(limitTitleKey(limit)),
+            message: tl(limitMessageKey(limit), limitMessageValues(limit, { dimensionLabel: (key) => tl(key), locale })),
+          });
+          return null;
+        }
+        throw new Error(data.error || 'Could not start a session');
+      }
       setSession(data.session);
       stage.reset();
       onStarted?.();
@@ -289,7 +305,7 @@ export function useDriveSession(config: {
     } finally {
       setStarting(false);
     }
-  }, [browserId, name, stage, onStarted]);
+  }, [browserId, name, stage, onStarted, tl, locale]);
 
   const end = useCallback(async () => {
     const open = current.current;

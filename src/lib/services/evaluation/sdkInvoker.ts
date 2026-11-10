@@ -63,6 +63,7 @@ import { openAiResponseFormatToNative } from '@/lib/services/models/openaiAdapte
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
+import { ManagedProviderError } from '@/lib/services/providers/managedProviderErrors';
 import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
@@ -176,11 +177,21 @@ export async function resolveSdkProviderConfig(
     );
   }
 
-  const { record, credentials } = await loadProviderRuntimeData(tenantDbName, {
-    tenantId: model.tenantId,
-    key: primaryReplicaModel(model).providerKey,
-    projectId: projectId ?? model.projectId,
-  });
+  let loaded: Awaited<ReturnType<typeof loadProviderRuntimeData>>;
+  try {
+    loaded = await loadProviderRuntimeData(tenantDbName, {
+      tenantId: model.tenantId,
+      key: primaryReplicaModel(model).providerKey,
+      projectId: projectId ?? model.projectId,
+    });
+  } catch (error) {
+    // A managed provider has no credentials to hand to an SDK: the gateway meters it.
+    if (error instanceof ManagedProviderError) {
+      throw new SdkProviderMappingError(model.providerDriver ?? 'unknown', 'managed providers resolve through the gateway');
+    }
+    throw error;
+  }
+  const { record, credentials } = loaded;
   assertProviderEnabled(record);
   const creds = asRecord(credentials);
   const settings = asRecord(record.settings);

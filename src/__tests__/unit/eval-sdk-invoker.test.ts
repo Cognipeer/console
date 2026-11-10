@@ -10,6 +10,7 @@
  * NO fallback on runtime provider errors.
  */
 
+import { reloadConfig } from '@/lib/core/config';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // TRAP: factories must be synchronous — async vi.mock factories silently
@@ -115,6 +116,7 @@ function sdkResponse(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   delete process.env.EVALUATION_INVOKER;
+  reloadConfig();
   h.getDynamicRoutingConfig.mockReturnValue(null);
   h.createProvider.mockReturnValue({ complete: h.complete });
   h.complete.mockResolvedValue(sdkResponse());
@@ -130,6 +132,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.EVALUATION_INVOKER;
+  reloadConfig();
 });
 
 describe('toUnifiedMessages', () => {
@@ -450,6 +453,7 @@ describe('adapter wiring — buildTargetInvoker (model targets)', () => {
 
   it('falls back to the gateway when EVALUATION_INVOKER=gateway', async () => {
     process.env.EVALUATION_INVOKER = 'gateway';
+    reloadConfig();
     h.handleChatCompletion.mockResolvedValue({
       response: { choices: [{ message: { content: 'from-gateway' } }] },
       latencyMs: 12,
@@ -514,6 +518,7 @@ describe('adapter wiring — buildJudgeInvoker', () => {
 
   it('falls back to the gateway when EVALUATION_INVOKER=gateway', async () => {
     process.env.EVALUATION_INVOKER = 'gateway';
+    reloadConfig();
     h.handleChatCompletion.mockResolvedValue({
       response: { choices: [{ message: { content: 'gateway-verdict' } }] },
     });

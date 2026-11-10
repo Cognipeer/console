@@ -21,6 +21,8 @@ import {
   type ProviderConfigView,
   type ProviderStatus,
 } from '@/lib/services/providers/providerService';
+import { PlatformModelSelectionError, PlatformRecordReadOnlyError } from '@/lib/services/providers/managedProviderErrors';
+import { isManagedProviderRecord } from '@/enterprise/managed-credits';
 import {
   getUsageBreakdown,
   type UsageBreakdown,
@@ -51,6 +53,8 @@ const SLUG_OPTIONS = {
 };
 
 const MAX_KEY_ATTEMPTS = 50;
+/** The key prefix of platform models (the hosting layer seeds them through the database, not through this service). */
+const PLATFORM_MODEL_KEY_PREFIX = 'cognipeer.';
 const MODEL_CATEGORY_CAPABILITY_KEY = 'model.categories';
 
 function attachDriverCapabilities(provider: ProviderConfigView): ModelProviderView {
@@ -187,6 +191,10 @@ async function generateUniqueKey(
   await db.switchToTenant(tenantDbName);
 
   const base = normalizeKeyCandidate(desiredKey);
+  // Reserved: a tenant model under it would shadow a platform model of that name and re-run platform seeding.
+  if (base.startsWith(PLATFORM_MODEL_KEY_PREFIX)) {
+    throw new ModelCapabilityValidationError(`Model keys starting with "${PLATFORM_MODEL_KEY_PREFIX}" are reserved for platform models.`);
+  }
   let attempt = 0;
   let candidate = base;
 
@@ -228,6 +236,10 @@ export async function createModel(
     payload.providerKey,
     projectId,
   );
+
+  if (provider.platform || isManagedProviderRecord(provider)) {
+    throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+  }
 
   ensureProviderSupportsCategory(provider, payload.category);
   assertUpstreamApi(payload.settings, provider.driver);
@@ -624,9 +636,12 @@ export async function updateModel(
   if (!existing) {
     return null;
   }
+  if (existing.platform) throw new PlatformRecordReadOnlyError();
 
   const { capabilities, ...modelUpdates } = updates;
   const updatePayload: UpdateModelInput & { updatedBy?: string } = { ...modelUpdates };
+  // Tenant-wide is set by the deployment only: never taken from a caller's payload.
+  delete (updatePayload as { platform?: unknown }).platform;
   if (capabilities !== undefined) {
     updatePayload.metadata = applyModelCapabilityOverrides(
       updates.metadata ?? existing.metadata,
@@ -649,6 +664,9 @@ export async function updateModel(
       projectId,
     );
 
+    if (provider.platform || isManagedProviderRecord(provider)) {
+      throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+    }
     ensureProviderSupportsCategory(provider, updates.category ?? existing.category);
 
     updatePayload.providerKey = provider.key;
@@ -656,6 +674,22 @@ export async function updateModel(
     updatePayload.supportsToolCalls =
       updates.supportsToolCalls ??
       Boolean(provider.driverCapabilities?.['model.supports.tool_calls']);
+  }
+
+  // A replica names a provider by key; it must not route a tenant model onto a platform provider.
+  if (Array.isArray(updatePayload.replicas)) {
+    for (const replica of updatePayload.replicas) {
+      if (!replica?.providerKey || replica.providerKey === existing.providerKey) continue;
+      const target = await getProviderConfigByKey(
+        tenantDbName,
+        existing.tenantId,
+        replica.providerKey,
+        projectId,
+      );
+      if (target && (target.platform || isManagedProviderRecord(target))) {
+        throw new PlatformRecordReadOnlyError('Replicas cannot use a platform provider.');
+      }
+    }
   }
 
   if (userId) {
@@ -707,9 +741,92 @@ export async function deleteModel(
   if (!existing) {
     return false;
   }
+  if (existing.platform) throw new PlatformRecordReadOnlyError();
   const deleted = await db.deleteModel(modelId);
   await invalidateModelMetaCache(tenantDbName, projectId, [existing.key]);
   return deleted;
+}
+
+function providerAssignedTo(config: { projectId?: unknown; projectIds?: unknown }, projectId: string): boolean {
+  return String(config.projectId) === String(projectId)
+    || (Array.isArray(config.projectIds) && config.projectIds.map(String).includes(String(projectId)));
+}
+
+/**
+ * Adds platform models to a project, by key. A platform model is visible in a project only when its platform provider is
+ * assigned to the project and the model was added to it here. Every key is checked before any is written; adding a model
+ * that is already added is a no-op. Returns the keys that are added to the project afterwards.
+ */
+export async function addPlatformModelsToProject(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  keys: readonly string[],
+  actor?: string,
+): Promise<string[]> {
+  const wanted = [...new Set(keys.map((k) => String(k).trim()).filter(Boolean))];
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const platformModels = (await db.listModels({})).filter((m) => m.platform && m.tenantId === tenantId);
+
+  const targets: IModel[] = [];
+  const assignment = new Map<string, boolean>();
+  for (const key of wanted) {
+    const model = platformModels.find((m) => m.key === key);
+    if (!model) {
+      throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+    }
+    if (!assignment.has(model.providerKey)) {
+      const provider = await getProviderConfigByKey(tenantDbName, tenantId, model.providerKey);
+      assignment.set(
+        model.providerKey,
+        Boolean(provider?.platform && provider.tenantId === tenantId && providerAssignedTo(provider, projectId)),
+      );
+    }
+    if (!assignment.get(model.providerKey)) {
+      throw new PlatformModelSelectionError(
+        'provider_not_in_project',
+        'Make the provider available in this project first.',
+        409,
+        key,
+      );
+    }
+    if (model.metadata?.inactive === true) {
+      throw new PlatformModelSelectionError('model_unavailable', 'This model is not available.', 409, key);
+    }
+    targets.push(model);
+  }
+
+  for (const model of targets) {
+    const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
+    if (current.includes(projectId)) continue;
+    await db.updateModel(String(model._id), { projectIds: [...current, projectId] });
+  }
+  await invalidateModelMetaCache(tenantDbName, projectId, wanted);
+  logger.info('Platform models added to a project', { projectId, count: wanted.length, actor });
+  return wanted;
+}
+
+/** Takes a platform model out of a project. The record stays, so it can be added again. Idempotent. */
+export async function removePlatformModelFromProject(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string,
+  key: string,
+  actor?: string,
+): Promise<void> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const model = (await db.listModels({})).find((m) => m.platform && m.tenantId === tenantId && m.key === key);
+  if (!model) {
+    throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+  }
+  const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
+  if (current.includes(projectId)) {
+    await db.updateModel(String(model._id), { projectIds: current.filter((id) => id !== projectId) });
+  }
+  await invalidateModelMetaCache(tenantDbName, projectId, [key]);
+  logger.info('Platform model removed from a project', { projectId, key, actor });
 }
 
 function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string): string {
@@ -739,6 +856,27 @@ export async function invalidateModelMetaCache(
         cache.del(`appgw:price:${tenantDbName}::${key}`),
       ]),
     );
+  } catch { /* best effort — the 120s TTL bounds staleness */ }
+}
+
+/**
+ * Drops the cached lookups of a platform provider's models for each given project and the tenant-wide entry. Called
+ * when the provider's project assignment changes, since a platform model is visible exactly where its provider is
+ * assigned.
+ */
+export async function invalidatePlatformProviderModelCaches(
+  tenantDbName: string,
+  providerKey: string,
+  projectIds: readonly string[],
+): Promise<void> {
+  try {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    const keys = (await db.listModels({ providerKey })).filter((m) => m.platform).map((m) => m.key);
+    if (keys.length === 0) return;
+    for (const projectId of new Set(['', ...projectIds.map(String)])) {
+      await invalidateModelMetaCache(tenantDbName, projectId, keys);
+    }
   } catch { /* best effort — the 120s TTL bounds staleness */ }
 }
 
@@ -865,6 +1003,17 @@ export async function listModelProviders(
   return merged.map((provider) => attachDriverCapabilities(provider));
 }
 
+/** The tenant's platform providers that can back a model, whichever projects they are assigned to. */
+export async function listPlatformModelProviders(
+  tenantDbName: string,
+  tenantId: string,
+): Promise<ModelProviderView[]> {
+  const results = await Promise.all(
+    MODEL_PROVIDER_TYPES.map((type) => listProviderConfigs(tenantDbName, tenantId, { type })),
+  );
+  return results.flat().filter((p) => p.platform).map((provider) => attachDriverCapabilities(provider));
+}
+
 export async function createModelProvider(
   tenantDbName: string,
   tenantId: string,
@@ -881,5 +1030,5 @@ export async function createModelProvider(
 }
 
 export function listModelDriverDescriptors() {
-  return providerRegistry.listDescriptors('model');
+  return providerRegistry.listTenantDescriptors('model');
 }

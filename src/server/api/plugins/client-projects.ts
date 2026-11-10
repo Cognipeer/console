@@ -24,11 +24,12 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import type { ProjectRole } from '@/lib/database/provider/types.base';
 import { DEFAULT_PROJECT_KEY, generateUniqueProjectKey } from '@/lib/services/projects/projectService';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { removeProjectMember } from '@/lib/services/projects/projectMembership';
 import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
 import { seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
-import { normalizeServicePermissions } from '@/lib/security/rbac';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { clampRequestedPermissions } from '../clientGrantPolicy';
 import { readJsonBody, readJsonObjectBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-projects');
@@ -42,7 +43,15 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/projects', withClientApiRequestContext(async (_request, reply, auth) => {
     try {
       const db = await getDatabase();
-      const projects = await db.listProjects(auth.tenantId);
+      const all = await db.listProjects(auth.tenantId);
+      // Owners/admins see every project; anyone else only those they can open.
+      let projects = all;
+      if (!isTenantAdmin(auth)) {
+        const accessible = new Set(
+          auth.user ? await collectAccessibleProjectIds(db, String(auth.user._id), auth.user.projectIds) : [],
+        );
+        projects = all.filter((project) => accessible.has(String(project._id)));
+      }
       return reply.code(200).send({ projects });
     } catch (error) {
       logger.error('Client list projects error', { error });
@@ -277,7 +286,13 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!target || String(target.tenantId) !== String(auth.tenantId)) {
         return reply.code(404).send({ error: 'User not found' });
       }
-      const servicePermissions = normalizeServicePermissions(body.servicePermissions);
+      if (String(target._id) === String(auth.tokenRecord.userId) || String(target._id) === String(auth.user?._id)) {
+        return reply.code(403).send({ error: 'Own permissions cannot be changed here' });
+      }
+      if (target.role === 'owner' || (target.role === 'admin' && auth.user?.role !== 'owner')) {
+        return reply.code(403).send({ error: 'You cannot change the permissions of an account with more privileges than yours' });
+      }
+      const servicePermissions = clampRequestedPermissions(auth, body.servicePermissions);
       const existing = await db.findUserProject(body.userId, projectId);
       const updated = await db.upsertUserProject({
         tenantId: auth.tenantId, userId: body.userId, projectId,

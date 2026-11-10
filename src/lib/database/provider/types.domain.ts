@@ -2399,6 +2399,32 @@ export interface IWebSearchRunLog extends IUsageAttributionFields {
   createdAt?: Date;
 }
 
+/**
+ * A web search instance: the BEHAVIOR of a search (depth, answer, locale, cache, ...) on top of a websearch
+ * provider record that holds the connection. `projectId` empty = tenant-wide (visible wherever its provider is).
+ */
+export interface IWebSearchInstance {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string | null;
+  /** Unique per tenant. */
+  key: string;
+  name: string;
+  description?: string;
+  /** Key of the websearch provider record this instance searches through. */
+  providerKey: string;
+  status: 'active' | 'disabled';
+  /** Behavior settings (everything that is not connection or credentials). */
+  settings: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  /** Platform-provided: written only by the hosting layer, read-only for tenants. */
+  platform?: boolean;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 // ── Alert types ─────────────────────────────────────────────────────────
 
 export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis' | 'ai-app-gateway' | 'agents' | 'tools';

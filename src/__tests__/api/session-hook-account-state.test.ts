@@ -37,6 +37,7 @@ vi.mock('@/lib/services/users/userAuthState', async (importOriginal) => {
   return { ...actual, getUserAuthState: h.getUserAuthState, getUserIdentity: h.getUserIdentity };
 });
 
+import { reloadConfig } from '@/lib/core/config';
 import { fastifyApiPlugin } from '@/server/api/plugin';
 
 const payload = {
@@ -159,5 +160,54 @@ describe('cookie session hook: account state', () => {
     expect(health.statusCode).not.toBe(401);
     expect(h.getUserAuthState).not.toHaveBeenCalled();
     expect(h.getUserIdentity).not.toHaveBeenCalled();
+  });
+});
+
+describe('cookie session hook: sessions issued before the last password change', () => {
+  const changedAt = 1_800_000_000;
+
+  it.each(ROUTES)('401 session_expired + cookies cleared on %s %s', async (method, url) => {
+    h.getUserAuthState.mockResolvedValue('active');
+    h.verifyToken.mockResolvedValue({ ...payload, iat: changedAt - 60 });
+    h.getUserIdentity.mockResolvedValue({ state: 'active', role: 'admin', sessionsValidFrom: changedAt });
+    const res = await call(url, method);
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ error: 'Unauthorized', code: 'session_expired' });
+    expect(clearedCookies(res)).toEqual(expect.arrayContaining(['token', 'active_project_id']));
+  });
+
+  it('keeps a session issued in the same second as the change or later', async () => {
+    h.getUserAuthState.mockResolvedValue('active');
+    h.getUserIdentity.mockResolvedValue({ state: 'active', role: 'admin', sessionsValidFrom: changedAt });
+    for (const iat of [changedAt, changedAt + 1]) {
+      h.verifyToken.mockResolvedValue({ ...payload, iat });
+      const res = await call('/api/auth/session');
+      expect(res.json()).not.toHaveProperty('code', 'session_expired');
+      expect(clearedCookies(res)).toEqual([]);
+    }
+  });
+
+  it('keeps earlier sessions while AUTH_PASSWORD_CHANGE_ENDS_SESSIONS is false', async () => {
+    process.env.AUTH_PASSWORD_CHANGE_ENDS_SESSIONS = 'false';
+    reloadConfig();
+    try {
+      h.getUserAuthState.mockResolvedValue('active');
+      h.verifyToken.mockResolvedValue({ ...payload, iat: changedAt - 60 });
+      h.getUserIdentity.mockResolvedValue({ state: 'active', role: 'admin', sessionsValidFrom: changedAt });
+      const res = await call('/api/auth/session');
+      expect(res.json()).not.toHaveProperty('code', 'session_expired');
+      expect(clearedCookies(res)).toEqual([]);
+    } finally {
+      delete process.env.AUTH_PASSWORD_CHANGE_ENDS_SESSIONS;
+      reloadConfig();
+    }
+  });
+
+  it('keeps a session of an account with no recorded password change', async () => {
+    h.getUserAuthState.mockResolvedValue('active');
+    h.verifyToken.mockResolvedValue({ ...payload, iat: 1 });
+    h.getUserIdentity.mockResolvedValue({ state: 'active', role: 'admin' });
+    const res = await call('/api/auth/session');
+    expect(res.json()).not.toHaveProperty('code', 'session_expired');
   });
 });

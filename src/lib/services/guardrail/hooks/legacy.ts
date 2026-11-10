@@ -439,7 +439,7 @@ export function liftLegacyPolicies(
         enabled: true,
         hooks: both(),
         schedule: syncBlock(),
-        action: pii.action ?? 'block', // piiDetector.ts:232
+        action: pii.action ?? 'block',
         failMode: record.failMode,
         // Never undefined: falling back to the deterministic key keeps the
         // policy in the list when provisioning failed, so the engine degrades
@@ -455,10 +455,9 @@ export function liftLegacyPolicies(
         legacyCategories,
       } satisfies PiiPolicyConfig);
 
-      // KNOWN_SECRET_PATTERNS (piiDetector.ts:56-64) used to ride INSIDE
-      // runPiiDetection and fired only for the `apiKey` category
-      // (`findMatches`, :100-104). Split out into its own family so it can run
-      // without a database, gated on exactly what selected it before.
+      // KNOWN_SECRET_PATTERNS fire only for the `apiKey` category. They run in
+      // their own family so they work without a database, gated on exactly
+      // what selected them before.
       out.push({
         id: 'legacy:secrets',
         family: 'secrets',
@@ -806,8 +805,8 @@ export function projectHooksToLegacy(
         (context.piiPolicy ? invertPiiCategories(context.piiPolicy.categories) : preservedPiiCategories)
       : secretPolicies.length > 0
         ? // A standalone `secrets` policy has an honest legacy spelling — the
-          // `apiKey` category IS the secret scan (piiDetector.ts:100-104 runs
-          // KNOWN_SECRET_PATTERNS for it and nothing else) — so projecting it
+          // `apiKey` category IS the secret scan (it runs KNOWN_SECRET_PATTERNS
+          // and nothing else) — so projecting it
           // keeps the gateway's PII-dimension filter seeing credentials on an
           // older build. Only that one category: carrying the rest over would
           // make an old build scan for PII this config no longer asks for.

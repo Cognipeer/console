@@ -48,13 +48,15 @@ import { ModelUsageSkeleton } from '@/components/models/ModelSkeletons';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
-import { useDeleteResource } from '@/components/common/confirm';
+import { useConfirm, useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelCatalogModal from '@/components/models/catalog/ModelCatalogModal';
+import type { PlatformProviderView } from '@/components/models/catalog/platformProviders';
 import type { CreateModelPrefill } from '@/components/models/catalog/catalogPrefill';
 import { invalidateProviderModelCatalog, noteCatalogModelsCreated } from '@/components/models/catalog/useProviderModelCatalog';
 import EditModelModal from '@/components/models/EditModelModal';
+import { fetchCreditSpend } from '@/components/usage/creditsApi';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { modelTakesImages } from '@/components/models/inputModalities';
 import CreateDynamicModelModal, {
@@ -166,6 +168,12 @@ interface ModelDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** Set on a platform model an operator switched off: listed, but it cannot be called. */
+  unavailable?: boolean;
+  /** A platform model: deleting it takes it out of this project. */
+  platform?: boolean;
+  /** A platform model's credit price (it has no per-token price). */
+  credits?: { perCall?: number; perMillionTokens?: number };
   /** What the model resolves to (an explicit choice, else detected from its id). */
   capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
@@ -199,8 +207,11 @@ export default function ModelsPage() {
   const [models, setModels] = useState<ModelDto[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [providers, setProviders] = useState<ModelProviderView[]>([]);
+  const [platformProviders, setPlatformProviders] = useState<PlatformProviderView[]>([]);
   const [loading, setLoading] = useState(true);
   const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
+  /** Credits spent per platform model in the selected period; null where credits do not apply. */
+  const [creditSpend, setCreditSpend] = useState<{ total: number; byModel: Map<string, number> } | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   // "Add model" opens the provider catalog first; a pick (or "Enter custom model") opens the create form.
@@ -223,8 +234,10 @@ export default function ModelsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const t = useTranslations('models');
+  const tCatalog = useTranslations('modelCatalog');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
   const tNav = useTranslations('navigation');
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
@@ -260,7 +273,7 @@ export default function ModelsPage() {
     const requestId = ++modelsRequestRef.current;
     setLoading(true);
     try {
-      const response = await fetch('/api/models?includeProviders=true', {
+      const response = await fetch('/api/models?includeProviders=true&includePlatform=true&includeUnavailable=true', {
         cache: 'no-store',
       });
       if (!response.ok) throw new Error('Failed to load models');
@@ -268,6 +281,7 @@ export default function ModelsPage() {
       if (requestId !== modelsRequestRef.current) return;
       setModels((data.models ?? []) as ModelDto[]);
       setProviders((data.providers ?? []) as ModelProviderView[]);
+      setPlatformProviders((data.platformProviders ?? []) as PlatformProviderView[]);
     } catch (error) {
       if (requestId !== modelsRequestRef.current) return;
       console.error('Failed to load models', error);
@@ -286,6 +300,18 @@ export default function ModelsPage() {
     setDashboardLoading(true);
     try {
       const params = buildDashboardDateSearchParams(dateFilter);
+      // Platform models are paid with credits: their spend comes from the credit ledger (hosted plans only;
+      // elsewhere, or without access to it, the request fails and the column falls back to cost).
+      void fetchCreditSpend(new URLSearchParams(params))
+        .then((spend) => {
+          if (controller.signal.aborted) return;
+          const byModel = new Map<string, number>();
+          for (const row of spend.models) if (row.model) byModel.set(row.model, row.credits);
+          setCreditSpend({ total: spend.total, byModel });
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setCreditSpend(null);
+        });
       const res = await fetch(`/api/models/dashboard?${params.toString()}`, {
         cache: 'no-store',
         signal: controller.signal,
@@ -465,20 +491,30 @@ export default function ModelsPage() {
 
   const handleDeleteModel = async (model: ModelDto) => {
     try {
-      const deleted = await deleteResource({
-        noun: tConfirm('nouns.model'),
-        name: model.name,
-        type: 'model',
-        id: model._id,
-        action: async () => {
-          setDeletingModelId(model._id);
-          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-          if (!response.ok) {
-            const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
-            throw new Error(error.error ?? 'Failed to delete model');
-          }
-        },
-      });
+      const action = async () => {
+        setDeletingModelId(model._id);
+        const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
+          throw new Error(error.error ?? 'Failed to delete model');
+        }
+      };
+      // A platform model is never deleted: it leaves this project and can be added again from the catalog.
+      const deleted = model.platform
+        ? await confirmAction({
+            title: t('actions.removeTitle'),
+            message: t('actions.removeConfirm'),
+            confirmLabel: t('actions.removeFromProject'),
+            tone: 'danger',
+            action,
+          })
+        : await deleteResource({
+            noun: tConfirm('nouns.model'),
+            name: model.name,
+            type: 'model',
+            id: model._id,
+            action,
+          });
       if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
       // The catalog's remembered listing still marks the model "Added": it is listed again on its next opening.
@@ -486,8 +522,8 @@ export default function ModelsPage() {
       void loadDashboard();
       notifications.show({
         color: 'green',
-        title: t('actions.delete'),
-        message: t('actions.deleteSuccess'),
+        title: model.platform ? t('actions.removeFromProject') : t('actions.delete'),
+        message: model.platform ? t('actions.removeSuccess') : t('actions.deleteSuccess'),
       });
     } catch (error) {
       notifications.show({
@@ -690,7 +726,13 @@ export default function ModelsPage() {
             },
           }}
           footerLeft={`Showing ${modelsCtl.records.length} of ${filtered.length} models`}
-          columns={modelColumns(t, providerLookup, usageByKey, dashboardData)}
+          columns={modelColumns(t, providerLookup, usageByKey, dashboardData, {
+            unavailable: tCatalog('platform.unavailable'),
+            unavailableHint: tCatalog('platform.unavailableHint'),
+            creditPrice: (credits) => platformCreditPrice(credits, tCatalog),
+            creditsSpent: (count) =>
+              tCatalog(count === 1 ? 'platform.creditsSpentOne' : 'platform.creditsSpent', { count: fmtNum(count) }),
+          }, creditSpend?.byModel ?? null)}
           rowActions={(m) => [
             {
               id: 'view',
@@ -698,25 +740,29 @@ export default function ModelsPage() {
               icon: <IconEye size={14} />,
               onClick: () => navigate(modelDetailHref(m)),
             },
-            {
-              id: 'edit',
-              label: t('actions.edit'),
-              icon: <IconEdit size={14} />,
-              onClick: () =>
-                dynamicConfigOf(m)
-                  ? openDynamicEdit(m)
-                  : setEditModelId(m._id),
-            },
-            { divider: true },
-            {
-              id: 'guardrail',
-              label: 'Guardrail settings',
-              icon: <IconShield size={14} />,
-              onClick: () => setGuardrailModel(m),
-            },
+            ...(m.platform
+              ? []
+              : [
+                  {
+                    id: 'edit',
+                    label: t('actions.edit'),
+                    icon: <IconEdit size={14} />,
+                    onClick: () =>
+                      dynamicConfigOf(m)
+                        ? openDynamicEdit(m)
+                        : setEditModelId(m._id),
+                  },
+                  { divider: true as const },
+                  {
+                    id: 'guardrail',
+                    label: 'Guardrail settings',
+                    icon: <IconShield size={14} />,
+                    onClick: () => setGuardrailModel(m),
+                  },
+                ]),
             {
               id: 'delete',
-              label: t('actions.delete'),
+              label: m.platform ? t('actions.removeFromProject') : t('actions.delete'),
               icon: <IconTrash size={14} />,
               color: 'red',
               disabled: deletingModelId === m._id,
@@ -792,7 +838,14 @@ export default function ModelsPage() {
                   dashboardData?.overview.totalCost ?? 0,
                   dashboardData?.overview.currency,
                 )}
-                delta={`${fmtNum(dashboardData?.overview.totalToolCalls ?? 0)} tool calls`}
+                delta={[
+                  creditSpend && creditSpend.total > 0
+                    ? tCatalog(creditSpend.total === 1 ? 'platform.creditsSpentOne' : 'platform.creditsSpentTotal', {
+                        count: fmtNum(creditSpend.total),
+                      })
+                    : null,
+                  `${fmtNum(dashboardData?.overview.totalToolCalls ?? 0)} tool calls`,
+                ].filter(Boolean).join(' · ')}
               />
             </div>
 
@@ -986,6 +1039,10 @@ export default function ModelsPage() {
         opened={catalogOpen}
         onClose={() => setCatalogOpen(false)}
         providers={providers}
+        platformProviders={platformProviders}
+        onProviderAssigned={() => {
+          void loadModels();
+        }}
         defaultProviderKey={catalogProviderKey}
         defaultCategory={activeType === 'all' ? undefined : activeType}
         onSelectModel={(prefill) => {
@@ -1116,6 +1173,13 @@ function modelColumns(
   providerLookup: Map<string, ModelProviderView>,
   usageByKey: Map<string, ModelTopEntry>,
   dashboardData: ModelsDashboardData | null,
+  labels: {
+    unavailable: string;
+    unavailableHint: string;
+    creditPrice: (credits: NonNullable<ModelDto['credits']>) => string | undefined;
+    creditsSpent: (count: number) => string;
+  },
+  creditSpend: Map<string, number> | null,
 ): DataGridColumn<ModelDto>[] {
   return [
     {
@@ -1137,6 +1201,11 @@ function modelColumns(
           <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
             {m.key}
           </span>
+          {m.unavailable ? (
+            <span className="ds-badge ds-badge-warn" title={labels.unavailableHint} style={{ alignSelf: 'flex-start' }}>
+              {labels.unavailable}
+            </span>
+          ) : null}
         </div>
       ),
     },
@@ -1243,6 +1312,15 @@ function modelColumns(
       label: 'Spend',
       align: 'right',
       render: (m) => {
+        if (m.platform) {
+          // Paid with credits: the credits this model was charged in the period.
+          const spent = creditSpend?.get(m.key);
+          return (
+            <span className="ds-mono" style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}>
+              {spent ? labels.creditsSpent(spent) : '—'}
+            </span>
+          );
+        }
         const usage = usageByKey.get(m.key);
         return (
           <span
@@ -1259,7 +1337,16 @@ function modelColumns(
     {
       key: 'pricing',
       label: 'Pricing',
-      render: (m) => (
+      render: (m) => {
+        const creditPrice = m.platform && m.credits ? labels.creditPrice(m.credits) : undefined;
+        if (creditPrice) {
+          return (
+            <span className="ds-muted ds-mono" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+              {creditPrice}
+            </span>
+          );
+        }
+        return (
         <div className="ds-col" style={{ gap: 2, fontSize: 11.5 }}>
           <span className="ds-muted ds-mono">
             in: {fmtNumPricing(m.pricing.inputTokenPer1M)}/1M
@@ -1268,9 +1355,29 @@ function modelColumns(
             out: {fmtNumPricing(m.pricing.outputTokenPer1M)}/1M
           </span>
         </div>
-      ),
+        );
+      },
     },
   ];
+}
+
+/** A platform model's credit price ("2 credits / call"), or undefined when it has none. */
+function platformCreditPrice(
+  credits: NonNullable<ModelDto['credits']>,
+  tCatalog: ReturnType<typeof useTranslations>,
+): string | undefined {
+  const parts: string[] = [];
+  if (credits.perCall) {
+    parts.push(tCatalog(credits.perCall === 1 ? 'platform.creditsPerCallOne' : 'platform.creditsPerCall', { count: fmtNum(credits.perCall) }));
+  }
+  if (credits.perMillionTokens) {
+    parts.push(
+      tCatalog(credits.perMillionTokens === 1 ? 'platform.creditsPerMillionOne' : 'platform.creditsPerMillion', {
+        count: fmtNum(credits.perMillionTokens),
+      }),
+    );
+  }
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 function periodLabel(period: string): string {

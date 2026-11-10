@@ -27,7 +27,7 @@ vi.mock('@/lib/database', () => {
 });
 
 // Mock LLM evaluators so evaluateGuardrail tests don't need real LLM calls
-// Note: piiDetector is a pure regex-based function — no mock needed
+// Note: the PII detector is a pure regex-based function — no mock needed
 vi.mock('@/lib/services/guardrail/llmEvaluator', () => ({
   runModerationPolicy: vi.fn().mockResolvedValue([]),
   runPromptShieldPolicy: vi.fn().mockResolvedValue([]),

@@ -8,7 +8,7 @@
 import { createLogger } from '@/lib/core/logger';
 import { Db, MongoClient, type MongoClientOptions } from 'mongodb';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { warnGlobalTenantFallback } from '../tenantScopeGuard';
+import { handleTenantScopeMismatch, warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { ensureMainDbIndexes, ensureTenantDbIndexes } from './indexManifest';
 
 export const logger = createLogger('mongodb');
@@ -77,6 +77,7 @@ export const COLLECTIONS = {
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
+  websearchInstances: 'websearch_instances',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -132,6 +133,10 @@ export const COLLECTIONS = {
   instanceAssignments: 'instance_assignments',
   // ── Signup gating (main database) ──────────────────────────────────
   betaAccessCodes: 'beta_access_codes',
+  // ── Plan limits usage (main database) ──────────────────────────────
+  planUsageMonthly: 'plan_usage_monthly',
+  planLimitEvents: 'plan_limit_events',
+  planUsagePeaks: 'plan_usage_peaks',
   // ── GPU fleet (tenant database) ───────────────────────────────────
   gpuHosts: 'gpu_hosts',
   gpuSlices: 'gpu_slices',
@@ -162,6 +167,8 @@ export class MongoDBProviderBase {
   protected tenantDb: Db | null = null;
   private readonly tenantContext = new AsyncLocalStorage<Db>();
   private readonly tenantNameContext = new AsyncLocalStorage<string>();
+  /** Tenant of the enclosing `runWithTenant` scope; never set by `switchToTenant`'s `enterWith`. */
+  private readonly tenantRunScope = new AsyncLocalStorage<string>();
   protected readonly uri: string;
   protected readonly mainDbName: string;
   protected readonly clientOptions?: MongoClientOptions;
@@ -226,6 +233,12 @@ export class MongoDBProviderBase {
     if (!this.client) {
       throw new Error('Database client not connected. Call connect() first.');
     }
+    // Inside a runWithTenant scope the scope's handle serves every query, so a
+    // switch to another tenant would not take effect for this caller.
+    const scopeTenant = this.tenantRunScope.getStore();
+    if (scopeTenant !== undefined && scopeTenant !== tenantDbName) {
+      handleTenantScopeMismatch(scopeTenant, tenantDbName);
+    }
     // Single-database mode: the tenant handle IS the main DB. `tenantDbName`
     // is kept only as the logical label (assertTenantContext, audit/logging) —
     // it no longer names a distinct physical database.
@@ -259,7 +272,9 @@ export class MongoDBProviderBase {
     const tenantDb = this.singleDatabase ? this.getMainDb() : this.client.db(tenantDbName);
     void ensureTenantDbIndexes(tenantDb, tenantDbName);
     return this.tenantContext.run(tenantDb, () =>
-      this.tenantNameContext.run(tenantDbName, () => fn()),
+      this.tenantNameContext.run(tenantDbName, () =>
+        this.tenantRunScope.run(tenantDbName, () => fn()),
+      ),
     );
   }
 

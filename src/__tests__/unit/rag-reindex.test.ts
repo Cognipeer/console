@@ -42,11 +42,15 @@ const boot = vi.hoisted(() => ({
   logged: [] as string[],
 }));
 
-vi.mock('@/lib/core/config', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/core/config')>()),
-  getConfig: () => boot.config,
-  validateConfig: () => boot.configErrors,
-}));
+vi.mock('@/lib/core/config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/core/config')>();
+  return {
+    ...actual,
+    // Consumers read their queue settings at import time; keep the real values.
+    getConfig: () => ({ ...actual.getConfig(), ...boot.config }),
+    validateConfig: () => boot.configErrors,
+  };
+});
 
 vi.mock('@/lib/core/logger', () => ({
   createLogger: () => ({

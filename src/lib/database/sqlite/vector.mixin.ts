@@ -60,6 +60,28 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       return this.findVectorIndexById(id);
     }
 
+    async adjustVectorIndexStorage(
+      id: string,
+      bytesDelta: number,
+      vectorsDelta: number,
+    ): Promise<IVectorIndexRecord | null> {
+      const db = this.getTenantDb();
+      // One statement: the read-modify-write cannot interleave with another, and neither number goes below 0.
+      db.prepare(`
+        UPDATE ${TABLES.vectorIndexes}
+        SET storedBytes = MAX(0, COALESCE(storedBytes, 0) + @bytes),
+            storedVectors = MAX(0, COALESCE(storedVectors, 0) + @vectors)
+        WHERE id = @id
+      `).run({ id, bytes: Math.round(bytesDelta), vectors: Math.round(vectorsDelta) });
+      return this.findVectorIndexById(id);
+    }
+
+    async sumVectorIndexStoredBytes(): Promise<number> {
+      const db = this.getTenantDb();
+      const row = db.prepare(`SELECT COALESCE(SUM(storedBytes), 0) as total FROM ${TABLES.vectorIndexes}`).get() as SqliteRow;
+      return (row?.total as number) ?? 0;
+    }
+
     async deleteVectorIndex(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       return db.prepare(`DELETE FROM ${TABLES.vectorIndexes} WHERE id = @id`).run({ id }).changes > 0;
@@ -222,6 +244,8 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         dimension: r.dimension as number,
         metric: r.metric as 'cosine' | 'dot' | 'euclidean',
         metadata: this.parseJson(r.metadata, {}),
+        ...(typeof r.storedBytes === 'number' ? { storedBytes: r.storedBytes } : {}),
+        ...(typeof r.storedVectors === 'number' ? { storedVectors: r.storedVectors } : {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),

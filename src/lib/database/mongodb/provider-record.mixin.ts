@@ -169,7 +169,10 @@ export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBas
       const query: Record<string, unknown> = { tenantId };
 
       if (filters?.projectId) {
-        query.$or = [{ projectId: filters.projectId }, { projectIds: filters.projectId }];
+        query.$or = [
+          { projectId: filters.projectId },
+          { projectIds: filters.projectId },
+        ];
       }
 
       if (filters?.type) {

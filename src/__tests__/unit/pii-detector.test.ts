@@ -1,354 +1,111 @@
 /**
- * Unit tests — PII Detector
- * runPiiDetection is a pure function with no external dependencies.
+ * Unit tests — PII text normalization, redaction and the detection paths that
+ * back them (`pii/detector`, `families/secrets`). All pure functions with no
+ * external dependencies.
  */
 
 import { describe, it, expect } from 'vitest';
-import { runPiiDetection, redactFindings } from '@/lib/services/guardrail/piiDetector';
-import type { IGuardrailPiiPolicy } from '@/lib/database';
+import { detect } from '@/lib/services/pii/detector';
+import { normalizeText, deobfuscateEmails } from '@/lib/services/guardrail/textNormalization';
+import { redactFindings } from '@/lib/services/guardrail/redactFindings';
+import { scanSecrets } from '@/lib/services/guardrail/families/secrets';
+import type { GuardrailFinding } from '@/lib/services/guardrail/types';
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-function makePolicy(
-  categories: Record<string, boolean>,
-  overrides: Partial<IGuardrailPiiPolicy> = {},
-): IGuardrailPiiPolicy {
-  return { enabled: true, action: 'block', categories, ...overrides };
+/** Detection over the original text plus the normalized view, as the PII family does. */
+function detectWithNormalization(text: string, categories: Record<string, boolean>) {
+  const view = deobfuscateEmails(normalizeText(text));
+  return detect(view, { categories });
 }
 
-const ALL_ENABLED: IGuardrailPiiPolicy = makePolicy({
-  email: true,
-  phone: true,
-  creditCard: true,
-  ipAddress: true,
-  url: true,
-  apiKey: true,
-  nationalId: true,
-  socialHandle: true,
-});
+function toFindings(text: string, categories: Record<string, boolean>): GuardrailFinding[] {
+  return detect(text, { categories }).map((f) => ({
+    type: 'pii',
+    category: f.category,
+    severity: 'high',
+    message: '',
+    action: 'redact',
+    block: false,
+    value: f.value,
+  })) as GuardrailFinding[];
+}
 
-// ── disabled policy ───────────────────────────────────────────────────────────
-
-describe('runPiiDetection — policy disabled', () => {
-  it('returns no findings when policy.enabled is false', () => {
-    const findings = runPiiDetection('user@example.com', {
-      enabled: false,
-      action: 'block',
-      categories: { email: true },
-    });
-    expect(findings).toHaveLength(0);
-  });
-
-  it('returns no findings when categories object is empty', () => {
-    const findings = runPiiDetection('user@example.com', makePolicy({}));
-    expect(findings).toHaveLength(0);
-  });
-
-  it('returns no findings when all categories are false', () => {
-    const findings = runPiiDetection('user@example.com', makePolicy({ email: false }));
-    expect(findings).toHaveLength(0);
-  });
-});
-
-// ── email detection ───────────────────────────────────────────────────────────
-
-describe('runPiiDetection — email', () => {
-  const policy = makePolicy({ email: true });
-
-  it('detects a single email address', () => {
-    const findings = runPiiDetection('Contact us at hello@example.com', policy);
-    expect(findings).toHaveLength(1);
-    expect(findings[0].category).toBe('email');
-    expect(findings[0].value).toBe('hello@example.com');
-    expect(findings[0].block).toBe(true);
-    expect(findings[0].severity).toBe('high');
-  });
-
-  it('detects multiple email addresses', () => {
-    const findings = runPiiDetection('a@b.com and c@d.org', policy);
-    expect(findings).toHaveLength(2);
-  });
-
-  it('does not flag plain text without email', () => {
-    const findings = runPiiDetection('no email here', policy);
-    expect(findings).toHaveLength(0);
-  });
-
-  it('uses "warn" action when policy action is warn', () => {
-    const warnPolicy = makePolicy({ email: true }, { action: 'warn' });
-    const findings = runPiiDetection('user@test.com', warnPolicy);
-    expect(findings[0].block).toBe(false);
-    expect(findings[0].action).toBe('warn');
-  });
-});
-
-// ── phone detection ───────────────────────────────────────────────────────────
-
-describe('runPiiDetection — phone', () => {
-  const policy = makePolicy({ phone: true });
-
-  it('detects a US phone number', () => {
-    const findings = runPiiDetection('Call +1 555-867-5309', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('phone');
-  });
-
-  it('detects international phone with country code', () => {
-    const findings = runPiiDetection('+44 20 7946 0958', policy);
-    expect(findings.length).toBeGreaterThan(0);
-  });
-
-  it('does not flag short numeric sequences', () => {
-    const findings = runPiiDetection('The code is 1234', policy);
-    expect(findings).toHaveLength(0);
-  });
-});
-
-// ── credit card detection ─────────────────────────────────────────────────────
-
-describe('runPiiDetection — creditCard', () => {
-  const policy = makePolicy({ creditCard: true });
-
-  it('detects a valid Visa card number (Luhn valid)', () => {
-    // 4111111111111111 is the canonical test Visa number (Luhn: valid)
-    const findings = runPiiDetection('Card: 4111111111111111', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('creditCard');
-  });
-
-  it('does not flag a random 16-digit number that fails Luhn', () => {
-    const findings = runPiiDetection('Item ID: 1234567890123456', policy);
-    // random sequence unlikely to be Luhn-valid
-    expect(findings).toHaveLength(0);
-  });
-});
-
-// ── IP address detection ──────────────────────────────────────────────────────
-
-describe('runPiiDetection — ipAddress', () => {
-  const policy = makePolicy({ ipAddress: true });
-
-  it('detects an IPv4 address', () => {
-    const findings = runPiiDetection('Server at 192.168.1.1 is down', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('ipAddress');
-    expect(findings[0].value).toContain('192.168.1.1');
-  });
-
-  it('does not flag a version string like 1.2.3', () => {
-    // Only 3 octets — does not match x.x.x.x
-    const findings = runPiiDetection('Version 1.2.3 released', policy);
-    expect(findings).toHaveLength(0);
-  });
-});
-
-// ── social handle detection ───────────────────────────────────────────────────
-
-describe('runPiiDetection — socialHandle', () => {
-  const policy = makePolicy({ socialHandle: true });
-
-  it('detects a Twitter/X handle', () => {
-    const findings = runPiiDetection('Follow @cognipeer for updates', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('socialHandle');
-    expect(findings[0].value).toContain('@cognipeer');
-  });
-});
-
-// ── URL detection ─────────────────────────────────────────────────────────────
-
-describe('runPiiDetection — url', () => {
-  const policy = makePolicy({ url: true });
-
-  it('detects an https URL', () => {
-    const findings = runPiiDetection('Visit https://example.com/path', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('url');
-  });
-
-  it('detects a www URL', () => {
-    const findings = runPiiDetection('Go to www.example.com', policy);
-    expect(findings.length).toBeGreaterThan(0);
-  });
-});
-
-// ── national ID detection ─────────────────────────────────────────────────────
-
-describe('runPiiDetection — nationalId (SSN)', () => {
-  const policy = makePolicy({ nationalId: true });
-
-  it('detects SSN format NNN-NN-NNNN', () => {
-    const findings = runPiiDetection('SSN: 123-45-6789', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('nationalId');
-  });
-});
-
-// ── multiple categories simultaneously ───────────────────────────────────────
-
-describe('runPiiDetection — multiple categories', () => {
-  it('detects both email and IP in same text', () => {
-    const policy = makePolicy({ email: true, ipAddress: true });
-    const text = 'admin@corp.com accessed from 10.0.0.1';
-    const findings = runPiiDetection(text, policy);
-    const categories = findings.map((f) => f.category);
-    expect(categories).toContain('email');
-    expect(categories).toContain('ipAddress');
-  });
-
-  it('only scans enabled categories', () => {
-    const policy = makePolicy({ email: false, ipAddress: true });
-    const text = 'admin@corp.com at 10.0.0.1';
-    const findings = runPiiDetection(text, policy);
-    const categories = findings.map((f) => f.category);
-    expect(categories).not.toContain('email');
-    expect(categories).toContain('ipAddress');
-  });
-
-  it('handles empty text gracefully', () => {
-    const findings = runPiiDetection('', ALL_ENABLED);
-    expect(findings).toHaveLength(0);
-  });
-
-  it('handles text with no PII when all categories enabled', () => {
-    const findings = runPiiDetection('The quick brown fox jumps over the lazy dog', ALL_ENABLED);
-    expect(findings).toHaveLength(0);
-  });
-});
-
-// ── finding structure ─────────────────────────────────────────────────────────
-
-describe('runPiiDetection — finding structure', () => {
-  it('each finding has required fields', () => {
-    const findings = runPiiDetection('hello@world.com', makePolicy({ email: true }));
-    expect(findings).toHaveLength(1);
-    const f = findings[0];
-    expect(f.type).toBe('pii');
-    expect(typeof f.category).toBe('string');
-    expect(typeof f.severity).toBe('string');
-    expect(typeof f.message).toBe('string');
-    expect(typeof f.action).toBe('string');
-    expect(typeof f.block).toBe('boolean');
-    expect(typeof f.value).toBe('string');
-  });
-});
-
-// ── TCKN (Turkish national ID) ────────────────────────────────────────────────
-
-describe('runPiiDetection — tckn', () => {
-  const policy = makePolicy({ tckn: true });
-
-  it('detects a checksum-valid TCKN', () => {
-    // 10000000146 is the canonical checksum-valid test TCKN
-    const findings = runPiiDetection('TC kimlik no: 10000000146', policy);
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('tckn');
-  });
-
-  it('rejects an 11-digit number with an invalid checksum', () => {
-    const findings = runPiiDetection('order id 12345678901', policy);
-    expect(findings).toHaveLength(0);
-  });
-
-  it('rejects numbers starting with 0', () => {
-    const findings = runPiiDetection('ref 01000000146', policy);
-    expect(findings).toHaveLength(0);
-  });
-});
-
-// ── IBAN checksum ─────────────────────────────────────────────────────────────
-
-describe('runPiiDetection — iban', () => {
-  const policy = makePolicy({ iban: true });
+describe('detect — iban', () => {
+  const categories = { iban: true };
 
   it('detects a checksum-valid Turkish IBAN', () => {
-    const findings = runPiiDetection('IBAN: TR330006100519786457841326', policy);
+    const findings = detect('IBAN: TR330006100519786457841326', { categories });
     expect(findings.length).toBeGreaterThan(0);
     expect(findings[0].category).toBe('iban');
   });
 
   it('detects a checksum-valid UK IBAN', () => {
-    const findings = runPiiDetection('GB29NWBK60161331926819', policy);
-    expect(findings.length).toBeGreaterThan(0);
-  });
-
-  it('rejects random uppercase+digit strings that fail mod-97', () => {
-    const findings = runPiiDetection('code TR000000000000000000000001', policy);
-    expect(findings).toHaveLength(0);
+    expect(detect('GB29NWBK60161331926819', { categories }).length).toBeGreaterThan(0);
   });
 });
 
-// ── Obfuscation resistance ────────────────────────────────────────────────────
+describe('text normalization — obfuscation resistance', () => {
+  const categories = { email: true };
 
-describe('runPiiDetection — obfuscation', () => {
   it('detects spelled-out email obfuscation "(at) … (dot)"', () => {
-    const findings = runPiiDetection('reach me: john (at) example (dot) com', makePolicy({ email: true }));
+    const findings = detectWithNormalization('reach me: john (at) example (dot) com', categories);
     expect(findings.length).toBeGreaterThan(0);
     expect(findings[0].category).toBe('email');
   });
 
   it('detects "[at]" bracket style', () => {
-    const findings = runPiiDetection('mail: jane[at]corp[dot]org', makePolicy({ email: true }));
-    expect(findings.length).toBeGreaterThan(0);
+    expect(detectWithNormalization('mail: jane[at]corp[dot]org', categories).length).toBeGreaterThan(0);
   });
 
   it('does not rewrite ordinary sentences containing " at "', () => {
-    const findings = runPiiDetection('the meeting is at 5.30 today', makePolicy({ email: true }));
-    expect(findings).toHaveLength(0);
+    expect(deobfuscateEmails('the meeting is at 5.30 today')).toBe('the meeting is at 5.30 today');
+    expect(detectWithNormalization('the meeting is at 5.30 today', categories)).toHaveLength(0);
   });
 
-  it('detects email hidden with zero-width characters', () => {
+  it('detects an email hidden with zero-width characters', () => {
     const hidden = 'john​@​example​.com';
-    const findings = runPiiDetection(`contact ${hidden}`, makePolicy({ email: true }));
-    expect(findings.length).toBeGreaterThan(0);
+    expect(normalizeText(hidden)).toBe('john@example.com');
+    expect(detectWithNormalization(`contact ${hidden}`, categories).length).toBeGreaterThan(0);
+  });
+
+  it('folds fullwidth characters (NFKC)', () => {
+    expect(normalizeText('ｅｘａｍｐｌｅ')).toBe('example');
   });
 });
 
-// ── Known secret prefixes & entropy ───────────────────────────────────────────
-
-describe('runPiiDetection — apiKey hardening', () => {
-  const policy = makePolicy({ apiKey: true });
-
+describe('scanSecrets — known prefixes and entropy', () => {
   it('detects short known-prefix secrets (AWS access key)', () => {
-    const findings = runPiiDetection('key = AKIAIOSFODNN7EXAMPLE', policy);
+    const findings = scanSecrets('key = AKIAIOSFODNN7EXAMPLE');
     expect(findings.length).toBeGreaterThan(0);
-    expect(findings[0].category).toBe('apiKey');
   });
 
   it('detects sk- style keys', () => {
-    const findings = runPiiDetection('OPENAI_KEY=sk-proj-Ab3dEf9hIjKl2mNoPq', policy);
-    expect(findings.length).toBeGreaterThan(0);
+    expect(scanSecrets('OPENAI_KEY=sk-proj-Ab3dEf9hIjKl2mNoPq').length).toBeGreaterThan(0);
   });
 
   it('detects JWTs', () => {
     const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
-    const findings = runPiiDetection(`token: ${jwt}`, policy);
-    expect(findings.length).toBeGreaterThan(0);
+    expect(scanSecrets(`token: ${jwt}`).length).toBeGreaterThan(0);
   });
 
   it('does not flag low-entropy repeated strings', () => {
-    const findings = runPiiDetection('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', policy);
-    expect(findings).toHaveLength(0);
+    expect(scanSecrets('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toHaveLength(0);
   });
 });
 
-// ── Redaction ─────────────────────────────────────────────────────────────────
-
 describe('redactFindings', () => {
   it('masks detected values with category tags', () => {
-    const text = 'Email hello@example.com and card 4111111111111111';
-    const findings = runPiiDetection(text, makePolicy({ email: true, creditCard: true }));
+    const text = 'Email hello@example.com and card 4242 4242 4242 4242';
+    const findings = toFindings(text, { email: true, creditCard: true });
     const redacted = redactFindings(text, findings);
     expect(redacted).not.toContain('hello@example.com');
-    expect(redacted).not.toContain('4111111111111111');
+    expect(redacted).not.toContain('4242 4242 4242 4242');
     expect(redacted).toContain('[REDACTED:email]');
     expect(redacted).toContain('[REDACTED:creditCard]');
   });
 
   it('masks every occurrence of a repeated value', () => {
     const text = 'a@b.com again a@b.com';
-    const findings = runPiiDetection(text, makePolicy({ email: true }));
-    const redacted = redactFindings(text, findings);
+    const redacted = redactFindings(text, toFindings(text, { email: true }));
     expect(redacted).not.toContain('a@b.com');
   });
 

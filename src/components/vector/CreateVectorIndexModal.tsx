@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { NumberInput, Select, Switch, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useTranslations } from '@/lib/i18n';
 import { IconDatabase, IconPlus } from '@tabler/icons-react';
 import FormShell, {
 	Checklist,
@@ -14,7 +15,7 @@ import FormShell, {
 	SummaryGroup,
 	SummaryKV,
 } from '@/components/common/ui/FormShell';
-import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
+import type { VectorIndexView, VectorProviderView } from '@/lib/services/vector';
 
 const DEFAULT_METRIC_OPTIONS = [
 	{ value: 'cosine', label: 'Cosine' },
@@ -36,7 +37,7 @@ interface CreateVectorIndexModalProps {
 	opened: boolean;
 	onClose: () => void;
 	providers: VectorProviderView[];
-	onCreated: (options: { index: VectorIndexRecord; provider: VectorProviderView }) => void;
+	onCreated: (options: { index: VectorIndexView; provider: VectorProviderView }) => void;
 }
 
 interface FormValues {
@@ -55,6 +56,7 @@ export default function CreateVectorIndexModal({
 	providers,
 	onCreated,
 }: CreateVectorIndexModalProps) {
+	const tPlatform = useTranslations('platformStorage');
 	const [availableProviders, setAvailableProviders] = useState<VectorProviderView[]>(providers);
 	const [submitting, setSubmitting] = useState(false);
 	const [needsManualDetails, setNeedsManualDetails] = useState(false);
@@ -115,9 +117,10 @@ export default function CreateVectorIndexModal({
 		() =>
 			availableProviders.map((provider) => ({
 				value: provider.key,
-				label: provider.label,
+				label: provider.platform ? `${provider.label} · ${tPlatform('badge')}` : provider.label,
 				disabled: provider.status === 'disabled',
 			})),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[availableProviders],
 	);
 
@@ -126,6 +129,16 @@ export default function CreateVectorIndexModal({
 			availableProviders.find((provider) => provider.key === formValues.providerKey) ?? null,
 		[availableProviders, formValues.providerKey],
 	);
+
+	// A platform provider only ever creates: attaching an existing index is not offered on it.
+	const platformProvider = selectedProvider?.platform === true;
+	useEffect(() => {
+		if (platformProvider && !formValues.createInProvider) {
+			setFieldValue('createInProvider', true);
+			setNeedsManualDetails(false);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [platformProvider, formValues.createInProvider]);
 
 	const allowedMetrics = useMemo(() => resolveAllowedMetrics(selectedProvider), [selectedProvider]);
 
@@ -400,6 +413,13 @@ export default function CreateVectorIndexModal({
 				}
 				done={validConfig}
 			>
+				{platformProvider ? (
+					<FormRow cols={1}>
+						<FormField label="Create index in provider" hint={tPlatform('vector.alwaysCreate')}>
+							<Switch checked disabled label="Create new index" />
+						</FormField>
+					</FormRow>
+				) : (
 				<FormRow cols={1}>
 					<FormField
 						label="Create index in provider"
@@ -419,6 +439,7 @@ export default function CreateVectorIndexModal({
 						/>
 					</FormField>
 				</FormRow>
+				)}
 				<FormRow cols={2}>
 					<FormField
 						label="Dimension"
