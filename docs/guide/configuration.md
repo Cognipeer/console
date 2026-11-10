@@ -29,6 +29,7 @@ Both secrets are checked at startup; see [Validation](#validation).
 | `MONGODB_SOCKET_TIMEOUT_MS` | Socket timeout | `45000` |
 | `MONGODB_SERVER_SELECTION_TIMEOUT_MS` | Server selection timeout | `30000` |
 | `MONGODB_SINGLE_DATABASE` | Keep tenant collections in `MAIN_DB_NAME` instead of a separate `tenant_<slug>` database per tenant. A second tenant is refused in this mode. | `true` when [`DEPLOYMENT_MODE`](#deployment-mode) is `onprem` and `DB_PROVIDER=mongodb`, otherwise `false` |
+| `DB_TENANT_SCOPE_MISMATCH` | What a switch to another tenant does inside code that already runs in a tenant scope (the scope's tenant keeps serving its queries): `warn` allows it and logs a rate-limited warning (the earlier behavior), `error` refuses the switch. `error` becomes the default in a later release. | `warn` |
 
 ### Deployment mode
 

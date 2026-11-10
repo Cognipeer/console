@@ -11,8 +11,10 @@
  *
  * Applied from `base.ts`:
  *   - `ensureMainDbIndexes`   once per process in `connect()`
- *   - `ensureTenantDbIndexes` once per tenant DB per process, on first tenant
- *     bind (`switchToTenant` / `runWithTenant`), fire-and-forget.
+ *   - `ensureTenantDbIndexes` on tenant bind (`switchToTenant` /
+ *     `runWithTenant`), fire-and-forget: a full pass on first bind, then at
+ *     most every TENANT_INDEX_RECHECK_MS a pass over the manifest collections
+ *     created since (a collection's first write creates it).
  * Both memoize per process, so this is NOT re-run on every request. Tenant
  * indexes are existence-guarded (only created for collections that already
  * exist) so community deployments never get empty enterprise collections and
@@ -63,6 +65,16 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
  * intentionally omitted to avoid duplicate/conflicting index names.
  */
 export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
+  // Sign-in, SSO and invitations resolve a member by email (emailLower, or email
+  // for accounts written before emailLower existed); external-auth providers by
+  // (authProvider, externalId) or by an issuer key under externalIds.
+  users: [
+    { key: { emailLower: 1 }, options: { name: 'idx_emailLower' } },
+    { key: { email: 1 }, options: { name: 'idx_email' } },
+    { key: { authProvider: 1, externalId: 1 }, options: { name: 'idx_authProvider_externalId' } },
+    { key: { 'externalIds.$**': 1 }, options: { name: 'idx_externalIds' } },
+    { key: { kind: 1 }, options: { name: 'idx_kind' } },
+  ],
   audit_logs: [
     { key: { createdAt: -1 }, options: { name: 'idx_createdAt' } },
     // IAM center audit feed (src/lib/iam/auditFeed.ts), newest-first: the refusals read
@@ -428,6 +440,16 @@ const ensured = new Set<string>();
 const inFlight = new Map<string, Promise<void>>();
 
 /**
+ * How long a tenant DB's index pass stands before the next bind looks for
+ * manifest collections created since (one listCollections per tenant DB per
+ * interval, and only while some manifest collection is still missing).
+ */
+export const TENANT_INDEX_RECHECK_MS = 15 * 60_000;
+
+/** Per tenant DB: the manifest collections already indexed, and when the last pass ran. */
+const tenantPasses = new Map<string, { indexed: Set<string>; checkedAt: number }>();
+
+/**
  * The retention engine (src/lib/retention) selects expired rows by their age
  * field alone, in batches; without an index leading on that field every batch
  * (and every preview count) is a collection scan. One ascending index per
@@ -489,14 +511,8 @@ function isNotConnected(error: unknown): boolean {
   return error instanceof Error && /not connected|MongoNotConnected/i.test(error.message);
 }
 
-async function applyIndexes(db: Db, manifest: Record<string, IndexDef[]>, onlyExisting: boolean): Promise<void> {
-  let existing: Set<string> | null = null;
-  if (onlyExisting) {
-    const names = await db.listCollections({}, { nameOnly: true }).toArray();
-    existing = new Set(names.map((c) => c.name));
-  }
+async function applyIndexes(db: Db, manifest: Record<string, IndexDef[]>): Promise<void> {
   for (const [coll, defs] of Object.entries(manifest)) {
-    if (existing && !existing.has(coll)) continue; // never create empty collections
     for (const def of defs) {
       // createIndex is idempotent for an identical key+name; a pre-existing
       // index with the same name but different key throws — we swallow it so a
@@ -510,12 +526,16 @@ async function applyIndexes(db: Db, manifest: Record<string, IndexDef[]>, onlyEx
 
 function ensureOnce(memoKey: string, run: () => Promise<void>): Promise<void> {
   if (ensured.has(memoKey)) return Promise.resolve();
+  return runDeduped(memoKey, run, () => {
+    ensured.add(memoKey); // memoize only on success, so failures retry later
+  });
+}
+
+function runDeduped(memoKey: string, run: () => Promise<void>, onSuccess: () => void): Promise<void> {
   let pending = inFlight.get(memoKey);
   if (!pending) {
     pending = run()
-      .then(() => {
-        ensured.add(memoKey); // memoize only on success, so failures retry later
-      })
+      .then(onSuccess)
       .catch((error) => {
         // A connection race (first touch before connect completes) is benign:
         // leave the key unmemoized so the next touch retries. Anything else is
@@ -532,20 +552,49 @@ function ensureOnce(memoKey: string, run: () => Promise<void>): Promise<void> {
 
 /** Ensure control-plane indexes once per process. Call from connect(). */
 export function ensureMainDbIndexes(db: Db, dbName: string): Promise<void> {
-  return ensureOnce(`main:${dbName}`, () => applyIndexes(db, MAIN_DB_INDEXES, false));
+  return ensureOnce(`main:${dbName}`, () => applyIndexes(db, MAIN_DB_INDEXES));
 }
 
-/** Ensure tenant indexes once per tenant DB per process. Fire-and-forget from the tenant-bind path. */
+/**
+ * Ensure tenant indexes. Fire-and-forget from the tenant-bind path: the first
+ * bind of a tenant DB in this process indexes every manifest collection that
+ * exists; later binds re-check at most every TENANT_INDEX_RECHECK_MS and index
+ * only the manifest collections that appeared since, so a collection created by
+ * its first write (or a tenant created while the process runs) gets its indexes
+ * without a restart. Once every manifest collection is indexed, nothing re-runs.
+ */
 export function ensureTenantDbIndexes(db: Db, dbName: string): Promise<void> {
-  return ensureOnce(`tenant:${dbName}`, () => applyIndexes(db, TENANT_DB_INDEXES, true));
+  const memoKey = `tenant:${dbName}`;
+  const pass = tenantPasses.get(memoKey);
+  if (pass) {
+    if (Date.now() - pass.checkedAt < TENANT_INDEX_RECHECK_MS) return Promise.resolve();
+    if (Object.keys(TENANT_DB_INDEXES).every((coll) => pass.indexed.has(coll))) return Promise.resolve();
+  }
+  return runDeduped(
+    memoKey,
+    async () => {
+      const names = await db.listCollections({}, { nameOnly: true }).toArray();
+      const existing = new Set(names.map((c) => c.name));
+      const indexed = tenantPasses.get(memoKey)?.indexed ?? new Set<string>();
+      // Existing collections only: never create empty collections.
+      const pending = Object.fromEntries(
+        Object.entries(TENANT_DB_INDEXES).filter(([coll]) => existing.has(coll) && !indexed.has(coll)),
+      );
+      await applyIndexes(db, pending);
+      for (const coll of Object.keys(pending)) indexed.add(coll);
+      tenantPasses.set(memoKey, { indexed, checkedAt: Date.now() });
+    },
+    () => {},
+  );
 }
 
 /**
  * Ensure the manifest's indexes of ONE tenant collection, once per tenant DB per
  * process, for a collection that its first write creates. The tenant pass above
- * skips a collection that does not exist yet and is then memoised, so without
- * this the first write would leave the collection bare (its unique indexes
- * included) until a restart. Call it before that write: the indexes come from
+ * skips a collection that does not exist yet and only looks again after
+ * TENANT_INDEX_RECHECK_MS, so without this the first writes would land in a
+ * bare collection (its unique indexes included) until that re-check. Call it
+ * before that write: the indexes come from
  * the manifest itself, so the two paths can never disagree.
  *
  * Best-effort like the tenant pass: the returned promise never rejects, a

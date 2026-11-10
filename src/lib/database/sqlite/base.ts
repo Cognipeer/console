@@ -9,7 +9,7 @@ import { createLogger } from '@/lib/core/logger';
 import { foldSearchText } from '@/lib/shared/searchFold';
 import Database from 'better-sqlite3';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { warnGlobalTenantFallback } from '../tenantScopeGuard';
+import { handleTenantScopeMismatch, warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -182,6 +182,8 @@ export class SQLiteProviderBase {
   protected readonly mainDbName: string;
   private readonly tenantContext = new AsyncLocalStorage<Database.Database>();
   private readonly tenantNameContext = new AsyncLocalStorage<string>();
+  /** Tenant of the enclosing `runWithTenant` scope; never set by `switchToTenant`'s `enterWith`. */
+  private readonly tenantRunScope = new AsyncLocalStorage<string>();
   /** Cache of already-opened tenant DB file handles */
   private tenantDbCache: Map<string, Database.Database> = new Map();
 
@@ -223,18 +225,27 @@ export class SQLiteProviderBase {
   }
 
   async switchToTenant(tenantDbName: string): Promise<void> {
+    // Inside a runWithTenant scope the scope's handle serves every query, so a
+    // switch to another tenant would not take effect for this caller.
+    const scopeTenant = this.tenantRunScope.getStore();
+    if (scopeTenant !== undefined && scopeTenant !== tenantDbName) {
+      handleTenantScopeMismatch(scopeTenant, tenantDbName);
+    }
+    const db = this.openTenantDb(tenantDbName);
+    this.tenantDb = db;
+    this.tenantContext.enterWith(db);
+    this.tenantNameContext.enterWith(tenantDbName);
+  }
+
+  /** Open (or reuse) the tenant DB file handle, applying schema and migrations on first open. */
+  private openTenantDb(tenantDbName: string): Database.Database {
     if (!this.mainDb) {
       throw new Error('Database not connected. Call connect() first.');
     }
 
     // Reuse cached connection
     const cached = this.tenantDbCache.get(tenantDbName);
-    if (cached) {
-      this.tenantDb = cached;
-      this.tenantContext.enterWith(cached);
-      this.tenantNameContext.enterWith(tenantDbName);
-      return;
-    }
+    if (cached) return cached;
 
     const tenantPath = path.join(this.dataDir, `${tenantDbName}.db`);
     const db = new Database(tenantPath);
@@ -246,9 +257,7 @@ export class SQLiteProviderBase {
     this.applyTenantIndexes(db);
 
     this.tenantDbCache.set(tenantDbName, db);
-    this.tenantDb = db;
-    this.tenantContext.enterWith(db);
-    this.tenantNameContext.enterWith(tenantDbName);
+    return db;
   }
 
   /**
@@ -262,13 +271,14 @@ export class SQLiteProviderBase {
     fn: () => T | Promise<T>,
   ): Promise<T> {
     // Ensure the tenant DB is opened/cached and the global fallback is warm.
-    await this.switchToTenant(tenantDbName);
-    const db = this.tenantDbCache.get(tenantDbName);
-    if (!db) {
-      throw new Error(`Tenant database not available: ${tenantDbName}`);
-    }
+    // The binding itself comes only from the scope below: no `enterWith` here,
+    // so the caller's own binding is unchanged once `fn` returns.
+    const db = this.openTenantDb(tenantDbName);
+    this.tenantDb = db;
     return this.tenantContext.run(db, () =>
-      this.tenantNameContext.run(tenantDbName, () => fn()),
+      this.tenantNameContext.run(tenantDbName, () =>
+        this.tenantRunScope.run(tenantDbName, () => fn()),
+      ),
     );
   }
 

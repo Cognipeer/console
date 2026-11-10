@@ -45,3 +45,40 @@ export function warnGlobalTenantFallback(fallbackDbName: string): void {
     stack,
   });
 }
+
+let lastMismatchWarnAt = 0;
+let suppressedMismatchesSinceLastWarn = 0;
+
+/**
+ * Called by `switchToTenant(requested)` when the caller already runs inside a
+ * `runWithTenant` scope for a different tenant (`active`). The scope wins every
+ * query of that caller, so the switch cannot take effect: the caller has to
+ * open its own scope with `runWithTenantScope(requested, ...)`.
+ *
+ * `DB_TENANT_SCOPE_MISMATCH=warn` (default) keeps the earlier behavior (the
+ * switch only moves the process-global handle) and logs a rate-limited warning;
+ * `DB_TENANT_SCOPE_MISMATCH=error` refuses the switch.
+ */
+export function handleTenantScopeMismatch(active: string, requested: string): void {
+  if (getConfig().database?.tenantScopeMismatch === 'error') {
+    throw new Error(
+      `switchToTenant("${requested}") inside an active tenant scope for "${active}". `
+      + `Use runWithTenantScope("${requested}", ...) to work on another tenant.`,
+    );
+  }
+  const now = Date.now();
+  if (now - lastMismatchWarnAt < WARN_INTERVAL_MS) {
+    suppressedMismatchesSinceLastWarn += 1;
+    return;
+  }
+  lastMismatchWarnAt = now;
+  const suppressed = suppressedMismatchesSinceLastWarn;
+  suppressedMismatchesSinceLastWarn = 0;
+  const stack = new Error().stack?.split('\n').slice(2, 8).join('\n');
+  logger.warn('switchToTenant inside a scope for another tenant; queries keep using the scope tenant', {
+    active,
+    requested,
+    suppressedSinceLastWarn: suppressed,
+    stack,
+  });
+}
