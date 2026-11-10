@@ -32,6 +32,7 @@ vi.mock('@/lib/services/providers/providerService', () => ({
   deleteProviderConfig: vi.fn().mockResolvedValue(true),
   getProviderConfigById: vi.fn(),
   listProviderConfigs: vi.fn().mockResolvedValue([]),
+  redactPlatformProvider: (view: unknown) => view,
   updateProviderConfig: vi.fn().mockResolvedValue({ _id: 'prov-1' }),
 }));
 vi.mock('bcryptjs', () => ({
