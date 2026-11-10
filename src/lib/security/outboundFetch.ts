@@ -212,9 +212,9 @@ function isRefusedName(host: string, options: OutboundGuardOptions | undefined):
  * Whether the block refuses `address` (an IP literal) for this caller: a private address is refused unless the
  * networks the caller has opened permit it. A public address is not this guard's concern.
  */
-export function guardRefusesAddress(address: string, options?: OutboundGuardOptions): boolean {
+export function guardRefusesAddress(address: string, options?: OutboundGuardOptions, host?: string): boolean {
   if (!isPrivateIpAddress(address)) return false;
-  return options?.privateNetworks?.permits(address) !== true;
+  return options?.privateNetworks?.permits(address, host) !== true;
 }
 
 /**
@@ -250,7 +250,7 @@ async function resolveForGuard(
   const literalFamily = isIP(bare);
   if (literalFamily) {
     return {
-      refused: guardRefusesAddress(bare, options),
+      refused: guardRefusesAddress(bare, options, bare),
       addresses: [{ address: bare, family: literalFamily as 4 | 6 }],
     };
   }
@@ -271,7 +271,7 @@ async function resolveForGuard(
     hostAddressCache.set(bare, { addresses, expiresAt: Date.now() + HOST_CACHE_TTL_MS });
   }
   return {
-    refused: addresses.length === 0 || addresses.some((record) => guardRefusesAddress(record.address, options)),
+    refused: addresses.length === 0 || addresses.some((record) => guardRefusesAddress(record.address, options, bare)),
     addresses,
   };
 }
@@ -399,8 +399,11 @@ export interface OutboundGuardOptions {
 export interface PrivateNetworkAllowance {
   /** At least one range is open. Names under `.local` and `.internal` are then resolved instead of refused. */
   readonly hasRanges: boolean;
-  /** Whether the private address `address` (an IP literal) lies inside an opened network and is not one that is never opened. */
-  permits(address: string): boolean;
+  /**
+   * Whether the private address `address` (an IP literal) lies inside an opened network and is not one that is never
+   * opened. `host` is the name the address was resolved from, or the literal itself when the target is an address.
+   */
+  permits(address: string, host?: string): boolean;
 }
 
 /**
@@ -461,7 +464,7 @@ async function checkPublicUrl(
   // the first was checked would let a second, private record be the one it
   // actually connects to.
   const pinned = await resolvePinnedAddresses(url.hostname);
-  if (pinned.some((record) => guardRefusesAddress(record.address, options))) {
+  if (pinned.some((record) => guardRefusesAddress(record.address, options, url.hostname))) {
     throw new OutboundPrivateTargetError(url.hostname);
   }
   return { url, pinned };
@@ -501,7 +504,7 @@ export function createGuardedLookup(options?: OutboundGuardOptions): LookupFunct
             Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: 'ENOTFOUND', syscall: 'getaddrinfo', hostname }),
             [],
           );
-        } else if (blocking && records.some((record) => guardRefusesAddress(record.address, options))) {
+        } else if (blocking && records.some((record) => guardRefusesAddress(record.address, options, hostname))) {
           refuse();
         } else if (lookupOptions.all) {
           callback(null, records);

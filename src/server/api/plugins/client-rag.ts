@@ -28,6 +28,7 @@ import {
   readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendRouteError } from '../routeErrors';
 // The module write payloads are read by the same code as the dashboard's, so
 // the two surfaces cannot drift apart again the way responseDetail did.
 import {
@@ -43,6 +44,7 @@ import {
   withoutSourceText,
 } from './rag';
 import { ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAccessRequest';
+import { readRagTopK } from '@/lib/services/rag/topK';
 import { kbIndexShareRefusal } from '../ragOwnedResources';
 import { ocrModelProblem, readDocumentExtraction } from '../ragExtraction';
 import { sendPlanLimitRefusal } from '../planLimitReply';
@@ -71,10 +73,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         modules: await Promise.all(modules.map((ragModule) => moduleAsCallerSees(request, where, ragModule))),
       });
     } catch (error) {
-      logger.error('List client RAG modules error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'List client RAG modules error' });
     }
   }));
 
@@ -112,10 +111,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
       }
-      logger.error('Create client RAG module error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Create client RAG module error' });
     }
   }));
 
@@ -137,10 +133,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         ),
       });
     } catch (error) {
-      logger.error('Get client RAG module error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Get client RAG module error' });
     }
   }));
 
@@ -196,10 +189,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
       }
-      logger.error('Update client RAG module error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Update client RAG module error' });
     }
   }));
 
@@ -225,10 +215,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ success: true });
     } catch (error) {
-      logger.error('Delete client RAG module error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Delete client RAG module error' });
     }
   }));
 
@@ -247,10 +234,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(200).send({ documents });
     } catch (error) {
-      logger.error('List client RAG documents error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'List client RAG documents error' });
     }
   }));
 
@@ -347,10 +331,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const accessRefusal = sendRagAccessError(reply, error);
       if (accessRefusal) return accessRefusal;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
-      logger.error('Ingest client RAG document error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Ingest client RAG document error' });
     }
   }));
 
@@ -376,10 +357,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
-      logger.error('Get client RAG document error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Get client RAG document error' });
     }
   }));
 
@@ -405,10 +383,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
-      logger.error('Get client RAG document full text error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Get client RAG document full text error' });
     }
   }));
 
@@ -438,10 +413,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(result);
     } catch (error) {
-      logger.error('Get client RAG document lines error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Get client RAG document lines error' });
     }
   }));
 
@@ -474,10 +446,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(200).send({ success: true });
     } catch (error) {
-      logger.error('Delete client RAG document error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Delete client RAG document error' });
     }
   }));
 
@@ -552,10 +521,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const accessRefusal = sendRagAccessError(reply, error);
       if (accessRefusal) return accessRefusal;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
-      logger.error('Reingest client RAG document error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Reingest client RAG document error' });
     }
   }));
 
@@ -565,9 +531,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const { key } = request.params as { key: string };
       const body = readJsonObjectBody<Record<string, unknown>>(request);
 
-      if (typeof body.query !== 'string') {
+      if (typeof body.query !== 'string' || body.query === '') {
         return reply.code(400).send({ error: 'query is required' });
       }
+      const topKRead = readRagTopK(body.topK);
+      if (!topKRead.ok) return reply.code(400).send({ error: topKRead.error });
 
       const { module: ragModule, scope, caller } = await ragAccessForRequest(request, {
         tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
@@ -577,7 +545,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
         ragModuleKey: key,
-        topK: body.topK as number | undefined,
+        topK: topKRead.topK,
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       }, { caller, ...(scope ? { access: scope } : {}) });
 
@@ -592,10 +560,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
-      logger.error('Query client RAG module error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return sendRouteError(reply, error, { logger, log: 'Query client RAG module error' });
     }
   }));
 };

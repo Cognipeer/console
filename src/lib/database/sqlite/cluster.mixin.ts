@@ -103,12 +103,6 @@ export function ClusterMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return result.changes;
     }
 
-    async deleteNode(name: string): Promise<boolean> {
-      const db = this.getMainDb();
-      const result = db.prepare(`DELETE FROM ${TABLES.nodes} WHERE name = ?`).run(name);
-      return result.changes > 0;
-    }
-
     // ── Instance assignments ─────────────────────────────────────────
 
     async setInstanceAssignment(

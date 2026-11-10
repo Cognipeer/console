@@ -13,6 +13,11 @@
  */
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
+
+vi.mock('@/lib/providers/contracts/guardedFetch', () => {
+  const delegate = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
+  return { guardedFetch: delegate, createGuardedFetch: () => delegate };
+});
 import { bedrockRuntime, chunk, completion, json, sse, stubUpstream } from '../helpers/nativeGateway';
 
 afterEach(() => vi.unstubAllGlobals());

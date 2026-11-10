@@ -4,6 +4,11 @@ import { createOpenAiSttRuntime } from '@/lib/providers/contracts/openaiAudioHel
 import type { SttResult, SttTranscribeInput } from '@/lib/providers';
 
 // ---- mocks ----
+vi.mock('@/lib/providers/contracts/guardedFetch', () => {
+  const delegate = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
+  return { guardedFetch: delegate, createGuardedFetch: () => delegate };
+});
+
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: vi.fn(),
 }));

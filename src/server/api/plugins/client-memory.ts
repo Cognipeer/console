@@ -23,6 +23,7 @@ import {
   updateMemoryItem,
   updateMemoryStore,
 } from '@/lib/services/memory/memoryService';
+import { parseCreateMemoryStoreBody, parseUpdateMemoryStoreBody } from '@/lib/services/memory/memoryRequest';
 import {
   getApiTokenContextForRequest,
   parseCsvQuery,
@@ -56,23 +57,14 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonObjectBody<Record<string, unknown>>(request);
 
-      if (typeof body.name !== 'string') {
-        return reply.code(400).send({ error: 'name is required' });
-      }
-      if (typeof body.vectorProviderKey !== 'string') {
-        return reply.code(400).send({ error: 'vectorProviderKey is required' });
-      }
-      if (typeof body.embeddingModelKey !== 'string') {
-        return reply.code(400).send({ error: 'embeddingModelKey is required' });
+      const parsed = parseCreateMemoryStoreBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send({ error: parsed.error });
       }
 
       const store = await createMemoryStore(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        config: body.config as Record<string, unknown> | undefined,
+        ...parsed.value,
         createdBy: ctx.user?.email ?? ctx.tokenRecord.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        name: body.name,
-        vectorProviderKey: body.vectorProviderKey,
       });
 
       return reply.code(201).send({ store });
@@ -104,10 +96,7 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
       const { storeKey } = request.params as { storeKey: string };
       const body = readJsonObjectBody<Record<string, unknown>>(request);
       const store = await updateMemoryStore(ctx.tenantDbName, ctx.tenantId, ctx.projectId, storeKey, {
-        config: body.config as Record<string, unknown> | undefined,
-        description: body.description as string | undefined,
-        name: body.name as string | undefined,
-        status: body.status as 'active' | 'inactive' | 'error' | undefined,
+        ...parseUpdateMemoryStoreBody(body),
         updatedBy: ctx.user?.email ?? ctx.tokenRecord.userId,
       });
       return reply.code(200).send({ store });

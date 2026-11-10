@@ -1,23 +1,19 @@
 import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import type { GuardrailAction, GuardrailType, IGuardrail, IUser } from '@/lib/database';
+import type { GuardrailType, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
-  createGuardrail,
   deleteGuardrail,
   evaluateGuardrail,
   getGuardrailByKey,
   listGuardrails,
-  updateGuardrail,
 } from '@/lib/services/guardrail';
 import type { GuardrailView } from '@/lib/services/guardrail';
 import { ensureHooks } from '@/lib/services/guardrail/hooks/legacy';
 import {
   POLICY_VALID_HOOKS,
   HOOK_IDS,
-  isPlainRecord,
-  readPolicyList,
   STREAM_ELIGIBLE_FAMILIES,
   toGuardrailMode,
 } from '@/lib/services/guardrail/hooks/contract';
@@ -30,32 +26,31 @@ import type {
   HookId,
   SafetyAction,
 } from '@/lib/services/guardrail/hooks/contract';
-// Reached at its own path, like the hook-plane modules above: this is the
-// family's own account of why a pattern will not run, and a configuration
-// surface that rejects a rule owes its author that account rather than a
-// second, drifting opinion of what JavaScript accepts.
-import { explainRegexRuleError } from '@/lib/services/guardrail/families/regex';
 // The dashboard plugin owns the shared half of this surface. These two files
 // are the TWO DOORS onto one hook plane, and a remote enforcement point is
 // expected to work against either: if the request shapes, the verdict keys or
 // the response headers drifted apart, a point written against one would
-// silently mis-parse the other. `buildUserMessage` below stays duplicated as it
-// always has been; everything load-bearing on the wire is shared by import.
+// silently mis-parse the other. Everything load-bearing on the wire is shared by
+// import.
 import {
   applyVerdictHeaders,
   buildHookSubject,
-  findLlmModelConfigError,
   guardrailByKeyInScope,
   parseHookId,
-  projectLegacyColumns,
   readHookEvaluationOptions,
-  readHooksField,
-  readHooksVersionField,
-  readModeField,
   resolveVerdictVisibility,
   respondWithHookVerdict,
   toGuardrailRecord,
 } from './guardrails';
+import {
+  VALID_TYPES,
+  buildUserMessage,
+  createGuardrailFromRequest,
+  guardrailWriteErrorBody,
+  parseGuardrailCreateBody,
+  parseGuardrailPatchBody,
+  updateGuardrailFromRequest,
+} from './guardrail-write';
 import {
   getApiTokenContextForRequest,
   parseBooleanQuery,
@@ -66,31 +61,6 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:client-guardrails');
-
-/** Mirrors the dashboard plugin: 'redact' has always been a valid
- *  `GuardrailAction` and the hook projection can now write one onto the column,
- *  so refusing it here would break the read-modify-write round trip. */
-const VALID_ACTIONS: GuardrailAction[] = ['block', 'warn', 'flag', 'redact'];
-const VALID_TYPES: GuardrailType[] = ['preset', 'custom'];
-const VALID_FAIL_MODES = ['open', 'closed'];
-
-function buildUserMessage(findings: Array<{ block: boolean; category: string; message: string }>) {
-  const blocking = findings.filter((finding) => finding.block);
-  if (blocking.length === 0) {
-    return 'Content flagged by guardrail.';
-  }
-
-  return `Content blocked by guardrail:\n${blocking
-    .map((finding) => `• ${formatCategory(finding.category)}: ${finding.message}`)
-    .join('\n')}`;
-}
-
-function formatCategory(category: string): string {
-  return category
-    .replace(/[_/-]+/g, ' ')
-    .replace(/(^|\s)\w/g, (segment) => segment.toUpperCase())
-    .trim();
-}
 
 type GuardrailsListQuery = {
   enabled?: string;
@@ -246,50 +216,6 @@ function toClientGuardrailListItem(view: GuardrailView): ClientGuardrailListItem
 function reachableFromToken(guardrail: GuardrailView, projectId: string): boolean {
   if (!guardrail.projectId) return true;
   return String(guardrail.projectId) === String(projectId);
-}
-
-/**
- * The first regex rule in a write body that cannot run, explained.
- *
- * `validateGuardrailHooks` refuses it too, with `Regex rule "x" is not a valid
- * pattern` — true, and useless to the author of `(?i)secret`, who is told
- * nothing about which part is invalid or what JavaScript wants instead. This
- * runs first so the actionable message is the one that reaches them.
- *
- * ENABLED policies only, exactly like the shared validator's family rules: a rule
- * inside a disabled policy runs nowhere, and refusing to save one would block an
- * operator from parking a work-in-progress policy — a stricter gate than the
- * dashboard's for no enforcement gain.
- *
- * Structural guards throughout: the body is unvalidated at this point, and a
- * diagnostic that throws on `policies: [null]` would turn a 400 into a 500.
- */
-function findRegexRuleError(body: Record<string, unknown>): string | null {
-  const hooks = body.hooks;
-  if (!isPlainRecord(hooks)) return null;
-  // Runs BEFORE `readHooksField` re-spells the body, so it reads the list
-  // through the shared accessor and sees a pre-rename `hooks.checks` too.
-  const policies = readPolicyList(hooks);
-  if (policies === undefined) return null;
-
-  for (const policy of policies) {
-    if (!isPlainRecord(policy) || policy.enabled !== true) continue;
-    if (policy.family !== 'regex' || !Array.isArray(policy.rules)) continue;
-    for (const rule of policy.rules) {
-      if (!isPlainRecord(rule) || typeof rule.pattern !== 'string') continue;
-      const reason = explainRegexRuleError({
-        pattern: rule.pattern,
-        flags: typeof rule.flags === 'string' ? rule.flags : undefined,
-      });
-      if (!reason) continue;
-      const label =
-        (typeof rule.id === 'string' && rule.id !== '' && rule.id)
-        || (typeof rule.label === 'string' && rule.label !== '' && rule.label)
-        || '(unnamed)';
-      return `Regex rule "${label}": ${reason}`;
-    }
-  }
-  return null;
 }
 
 /**
@@ -590,96 +516,20 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (typeof body.name !== 'string' || body.name.trim() === '') {
-        return reply.code(400).send({ error: 'name is required' });
-      }
-      if (!VALID_TYPES.includes(body.type as GuardrailType)) {
-        return reply.code(400).send({ error: 'type must be "preset" or "custom"' });
-      }
-      if (body.action !== undefined && !VALID_ACTIONS.includes(body.action as GuardrailAction)) {
-        return reply.code(400).send({ error: 'action must be "block", "warn", "flag", or "redact"' });
-      }
-      if (body.type === 'custom' && (typeof body.customPrompt !== 'string' || body.customPrompt.trim() === '')) {
-        return reply.code(400).send({ error: 'customPrompt is required for custom guardrails' });
-      }
-      if (body.failMode !== undefined && !VALID_FAIL_MODES.includes(body.failMode as string)) {
-        return reply.code(400).send({ error: 'failMode must be "open" or "closed"' });
+      const parsed = parseGuardrailCreateBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send(guardrailWriteErrorBody(parsed));
       }
 
-      const modeField = readModeField(body);
-      if (modeField.error) {
-        return reply.code(400).send({ error: modeField.error });
-      }
-      const hooksVersionField = readHooksVersionField(body);
-      if (hooksVersionField.error) {
-        return reply.code(400).send({ error: hooksVersionField.error });
-      }
-      // Ahead of the shared validator, which rejects the same rule with a
-      // message that does not say why. See findRegexRuleError.
-      const regexRuleError = findRegexRuleError(body);
-      if (regexRuleError) {
-        return reply.code(400).send({ error: regexRuleError });
-      }
-      const hooksField = readHooksField(body);
-      if (hooksField.errors) {
-        return reply.code(400).send({ error: hooksField.errors[0], errors: hooksField.errors });
-      }
-
-      const modelConfigError = findLlmModelConfigError(body);
-      if (modelConfigError) {
-        return reply.code(400).send({ error: modelConfigError });
-      }
-
-      const action = (body.action as GuardrailAction | undefined) ?? 'block';
-      const enabled = typeof body.enabled === 'boolean' ? body.enabled : true;
-
-      // With `hooks` in the body the legacy columns are DERIVED from it rather
-      // than taken from the request, so the two descriptions of one policy can
-      // never be saved disagreeing. The draft is the row this create would have
-      // produced without hooks — the projection reads it for what it cannot
-      // derive (a preserved category selection, the operator's `type` when
-      // nothing is enabled).
-      const legacy = hooksField.hooks
-        ? await projectLegacyColumns(
-            ctx.tenantDbName,
-            hooksField.hooks,
-            {
-              tenantId: ctx.tenantId,
-              projectId: ctx.projectId,
-              // Assigned by createGuardrail from the name; never read by the
-              // projection.
-              key: '',
-              name: body.name.trim(),
-              type: body.type as GuardrailType,
-              target: 'input',
-              action,
-              enabled,
-              failMode: body.failMode as 'open' | 'closed' | undefined,
-              modelKey: body.modelKey as string | undefined,
-              policy: body.policy as IGuardrail['policy'],
-              customPrompt: body.customPrompt as string | undefined,
-              createdBy: ctx.tokenRecord.userId,
-            },
-            ctx.projectId,
-          )
-        : undefined;
-
-      const guardrail = await createGuardrail(ctx.tenantDbName, ctx.tenantId, ctx.tokenRecord.userId, {
-        action: legacy?.action ?? action,
-        customPrompt: legacy?.customPrompt ?? (body.customPrompt as string | undefined),
-        description: typeof body.description === 'string' ? body.description.trim() : undefined,
-        enabled,
-        failMode: legacy?.failMode ?? (body.failMode as 'open' | 'closed' | undefined),
-        hooks: hooksField.hooks,
-        hooksVersion: hooksVersionField.hooksVersion,
-        modelKey: legacy?.modelKey ?? (body.modelKey as string | undefined),
-        mode: modeField.mode,
-        name: body.name.trim(),
-        policy: (legacy?.policy ?? body.policy) as Record<string, unknown> | undefined,
-        projectId: ctx.projectId,
-        target: legacy?.target,
-        type: legacy?.type ?? (body.type as GuardrailType),
-      });
+      const guardrail = await createGuardrailFromRequest(
+        {
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          actorId: ctx.tokenRecord.userId,
+        },
+        parsed.value,
+      );
 
       return reply.code(201).send({ guardrail });
     } catch (error) {
@@ -696,28 +546,9 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
       const { key } = request.params as { key: string };
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (body.action !== undefined && !VALID_ACTIONS.includes(body.action as GuardrailAction)) {
-        return reply.code(400).send({ error: 'action must be "block", "warn", "flag", or "redact"' });
-      }
-      if (body.failMode !== undefined && !VALID_FAIL_MODES.includes(body.failMode as string)) {
-        return reply.code(400).send({ error: 'failMode must be "open" or "closed"' });
-      }
-
-      const modeField = readModeField(body);
-      if (modeField.error) {
-        return reply.code(400).send({ error: modeField.error });
-      }
-      const hooksVersionField = readHooksVersionField(body);
-      if (hooksVersionField.error) {
-        return reply.code(400).send({ error: hooksVersionField.error });
-      }
-      const regexRuleError = findRegexRuleError(body);
-      if (regexRuleError) {
-        return reply.code(400).send({ error: regexRuleError });
-      }
-      const hooksField = readHooksField(body);
-      if (hooksField.errors) {
-        return reply.code(400).send({ error: hooksField.errors[0], errors: hooksField.errors });
+      const parsed = parseGuardrailPatchBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send(guardrailWriteErrorBody(parsed));
       }
 
       const existing = await getGuardrailByKey(ctx.tenantDbName, key, ctx.projectId);
@@ -725,53 +556,20 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }
 
-      // Without the record's own modelKey a PATCH that only edits `hooks` would
-      // be rejected for a model the guardrail already has.
-      const modelConfigError = findLlmModelConfigError({
-        ...body,
-        modelKey: body.modelKey ?? existing.modelKey,
-      });
-      if (modelConfigError) {
-        return reply.code(400).send({ error: modelConfigError });
+      const updated = await updateGuardrailFromRequest(
+        {
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          actorId: ctx.tokenRecord.userId,
+        },
+        existing,
+        parsed.value,
+      );
+      if (!updated.ok) {
+        return reply.code(updated.status).send(guardrailWriteErrorBody(updated));
       }
-
-      // Projected against the record AS IT WILL BE: the fields this PATCH also
-      // changes are the ones the projection falls back to for anything it
-      // cannot derive, so folding them in first is what stops a combined edit
-      // from projecting the old values.
-      const legacy = hooksField.hooks
-        ? await projectLegacyColumns(
-            ctx.tenantDbName,
-            hooksField.hooks,
-            {
-              ...toGuardrailRecord(existing),
-              action: (body.action as GuardrailAction | undefined) ?? existing.action,
-              enabled: typeof body.enabled === 'boolean' ? body.enabled : existing.enabled,
-              failMode: (body.failMode as 'open' | 'closed' | undefined) ?? existing.failMode,
-              modelKey: (body.modelKey as string | undefined) ?? existing.modelKey,
-              policy: (body.policy as IGuardrail['policy']) ?? existing.policy,
-              customPrompt: (body.customPrompt as string | undefined) ?? existing.customPrompt,
-            },
-            ctx.projectId,
-          )
-        : undefined;
-
-      // `type`, `target` and `metadata` come out of the projection with nowhere
-      // to go: UpdateGuardrailInput has no slot for them. Same gap as the
-      // dashboard plugin's update — see the report.
-      const guardrail = await updateGuardrail(ctx.tenantDbName, existing.id, ctx.tokenRecord.userId, {
-        action: legacy?.action ?? (body.action as GuardrailAction | undefined),
-        customPrompt: legacy?.customPrompt ?? (body.customPrompt as string | undefined),
-        description: body.description as string | undefined,
-        enabled: body.enabled as boolean | undefined,
-        failMode: legacy?.failMode ?? (body.failMode as 'open' | 'closed' | undefined),
-        hooks: hooksField.hooks,
-        hooksVersion: hooksVersionField.hooksVersion,
-        modelKey: legacy?.modelKey ?? (body.modelKey as string | undefined),
-        mode: modeField.mode,
-        name: body.name as string | undefined,
-        policy: (legacy?.policy ?? body.policy) as Record<string, unknown> | undefined,
-      });
+      const guardrail = updated.guardrail;
 
       if (!guardrail) {
         return reply.code(404).send({ error: 'Guardrail not found' });

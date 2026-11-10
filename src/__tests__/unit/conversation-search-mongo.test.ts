@@ -41,7 +41,7 @@ describe.runIf(MONGO_AVAILABLE)('condition against a real server', () => {
   beforeAll(async () => {
     const { MongoMemoryServer } = await import('mongodb-memory-server');
     const { MongoClient } = await import('mongodb');
-    server = await MongoMemoryServer.create();
+    server = await MongoMemoryServer.create({ instance: { launchTimeout: 60_000 } });
     client = await MongoClient.connect(server.getUri());
     coll = client.db('t').collection('agent_conversations');
     await coll.insertMany([

@@ -1,3 +1,4 @@
+import { guardedFetch } from './guardedFetch';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 import type {
@@ -70,7 +71,7 @@ function createMistralOcrRuntime(opts: {
         Object.assign(body, input.extra);
       }
 
-      const response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/ocr`, {
+      const response = await guardedFetch(`${opts.baseUrl.replace(/\/$/, '')}/ocr`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${opts.apiKey}`,

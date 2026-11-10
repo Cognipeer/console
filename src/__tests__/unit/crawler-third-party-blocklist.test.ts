@@ -17,6 +17,10 @@ import { snapshotToPlan } from '@/lib/services/crawler/crawlerJobService';
 import type { ICrawlPlanSnapshot } from '@/lib/database/provider/types.domain';
 
 vi.mock('playwright', () => ({ chromium: { launch: vi.fn() } }));
+// Host blocking is under test here, not DNS resolution.
+vi.mock('@/lib/services/crawler/engine/ssrf', () => ({
+  assertResolvedUrl: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe('normalizeBlockedHost', () => {
   it.each([

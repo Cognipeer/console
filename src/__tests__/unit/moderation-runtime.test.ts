@@ -2,6 +2,11 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { createOpenAiModerationRuntime } from '@/lib/providers/contracts/openaiModerationHelpers';
 import { UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
 
+vi.mock('@/lib/providers/contracts/guardedFetch', () => {
+  const delegate = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
+  return { guardedFetch: delegate, createGuardedFetch: () => delegate };
+});
+
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;

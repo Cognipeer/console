@@ -579,10 +579,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     promptId: string,
     options?: { versionId?: string; projectId?: string },
   ): Promise<IPromptComment[]>;
-  updatePromptComment(
-    id: string,
-    data: Partial<Pick<IPromptComment, 'content'>>,
-  ): Promise<IPromptComment | null>;
   deletePromptComment(id: string): Promise<boolean>;
   deletePromptCommentsByPromptId(promptId: string): Promise<number>;
 
@@ -1804,7 +1800,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     status?: MemoryStoreStatus;
     search?: string;
   }): Promise<IMemoryStore[]>;
-  countMemoryStores(projectId?: string): Promise<number>;
 
   // ── Memory Item operations (tenant-specific) ──
   createMemoryItem(
@@ -2271,7 +2266,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     status?: McpServerStatus;
     search?: string;
   }): Promise<IMcpServer[]>;
-  countMcpServers(projectId?: string): Promise<number>;
 
   // ── MCP Request Log operations (tenant-specific) ──
   createMcpRequestLog(
@@ -2826,7 +2820,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       limit?: number;
     },
   ): Promise<IBatchJob[]>;
-  deleteBatchJob(id: string): Promise<boolean>;
   /**
    * Atomically apply per-item deltas to the batch aggregates so concurrent
    * item completions never lose updates. The runner finalizes the batch when
@@ -2860,7 +2853,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   findNode(name: string): Promise<INodeRecord | null>;
   listNodes(filters?: { status?: NodeStatus }): Promise<INodeRecord[]>;
   markStaleNodesOffline(olderThan: Date): Promise<number>;
-  deleteNode(name: string): Promise<boolean>;
 
   // ── Cluster: instance assignments (main database) ──
   setInstanceAssignment(

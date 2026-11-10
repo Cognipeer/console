@@ -15,6 +15,11 @@ vi.mock('@/lib/security/outboundFetch', () => ({
   safeFetch: vi.fn(),
 }));
 
+vi.mock('@/lib/services/providers/providerEndpointGuard', () => ({
+  endpointGuardOptions: vi.fn(() => ({ forceBlock: true })),
+}));
+
+import { reloadConfig } from '@/lib/core/config';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { callWebSearchProvider, parseDuckDuckGoHtml } from '@/lib/services/webSearch/webSearchAdapter';
 import { withResilience } from '@/lib/core/resilience';
@@ -47,10 +52,14 @@ const realFetch = global.fetch;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  process.env.PROVIDER_RUNTIME_GUARD = 'enforce';
+  reloadConfig();
 });
 
 afterEach(() => {
   global.fetch = realFetch;
+  delete process.env.PROVIDER_RUNTIME_GUARD;
+  reloadConfig();
 });
 
 describe('driver dispatch and credential validation', () => {
@@ -78,7 +87,8 @@ describe('driver dispatch and credential validation', () => {
 
 describe('Bing normalization', () => {
   it('maps webPages.value to normalized results and applies params', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.mocked(safeFetch);
+    fetchMock.mockResolvedValue(
       jsonResponse({
         webPages: {
           value: [
@@ -88,7 +98,6 @@ describe('Bing normalization', () => {
         },
       }),
     );
-    global.fetch = fetchMock as typeof fetch;
 
     const record = providerRecord('bing', { country: 'en-US', safeSearch: 'strict' });
     const out = await callWebSearchProvider(record, { apiKey: 'k' }, { query: 'hello', count: 5 });
@@ -104,27 +113,34 @@ describe('Bing normalization', () => {
     expect(calledUrl.searchParams.get('count')).toBe('5');
     expect(calledUrl.searchParams.get('mkt')).toBe('en-US');
     expect(calledUrl.searchParams.get('safeSearch')).toBe('Strict');
-    expect(fetchMock.mock.calls[0][1].headers['Ocp-Apim-Subscription-Key']).toBe('k');
+    expect((fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers['Ocp-Apim-Subscription-Key']).toBe('k');
+    // Guarded call: redirects are handed back and the deployment's guard options apply.
+    expect(fetchMock.mock.calls[0][2]).toMatchObject({ followRedirects: false, forceBlock: true });
   });
 
-  it('surfaces provider HTTP errors with status and body excerpt', async () => {
-    global.fetch = vi
-      .fn()
-      .mockResolvedValue(new Response('quota exceeded', { status: 429 })) as typeof fetch;
+  it('refuses a configured endpoint that the outbound guard rejects', async () => {
+    vi.mocked(safeFetch).mockRejectedValue(new Error('blocked target'));
     await expect(
-      callWebSearchProvider(providerRecord('bing'), { apiKey: 'k' }, { query: 'x' }),
-    ).rejects.toThrow(/Bing search failed \(429\): quota exceeded/);
+      callWebSearchProvider(providerRecord('bing', { endpoint: 'http://10.0.0.5/search' }), { apiKey: 'k' }, { query: 'x' }),
+    ).rejects.toThrow(/blocked target/);
+    expect(vi.mocked(safeFetch).mock.calls[0][0]).toContain('http://10.0.0.5/search');
+  });
+
+  it('surfaces provider HTTP errors with the status only', async () => {
+    vi.mocked(safeFetch).mockResolvedValue(new Response('quota exceeded', { status: 429 }));
+    const error = await callWebSearchProvider(providerRecord('bing'), { apiKey: 'k' }, { query: 'x' }).catch((e) => e as Error);
+    expect((error as Error).message).toBe('Bing search failed (429)');
   });
 });
 
 describe('Tavily normalization', () => {
   it('returns answer and scored results', async () => {
-    global.fetch = vi.fn().mockResolvedValue(
+    vi.mocked(safeFetch).mockResolvedValue(
       jsonResponse({
         answer: 'The answer.',
         results: [{ title: 'T', url: 'https://t.example', content: 'C', score: 0.9 }],
       }),
-    ) as typeof fetch;
+    );
 
     const out = await callWebSearchProvider(
       providerRecord('tavily', { includeAnswer: true }),
@@ -138,20 +154,20 @@ describe('Tavily normalization', () => {
 
 describe('failure shape and breaker scope', () => {
   it('a failed search carries its HTTP status, so a capacity fault is recognised for failover', async () => {
-    global.fetch = vi.fn().mockResolvedValue(new Response('slow down', { status: 429 })) as typeof fetch;
+    (safeFetch as ReturnType<typeof vi.fn>).mockResolvedValue(new Response('slow down', { status: 429 }));
     const failure = await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' })
       .catch((e: Error) => e);
     expect((failure as { status?: number }).status).toBe(429);
     expect(shouldTryNextReplica(failure)).toBe(true);
 
-    global.fetch = vi.fn().mockResolvedValue(new Response('bad key', { status: 401 })) as typeof fetch;
+    (safeFetch as ReturnType<typeof vi.fn>).mockResolvedValue(new Response('bad key', { status: 401 }));
     const caller = await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' })
       .catch((e: Error) => e);
     expect(shouldTryNextReplica(caller)).toBe(false);
   });
 
   it('the circuit breaker is keyed per scope, so two backends of one driver do not share it', async () => {
-    global.fetch = vi.fn().mockImplementation(async () => jsonResponse({ results: [] })) as typeof fetch;
+    (safeFetch as ReturnType<typeof vi.fn>).mockImplementation(async () => jsonResponse({ results: [] }));
     const keyOfLastCall = () => {
       const calls = (withResilience as ReturnType<typeof vi.fn>).mock.calls;
       return (calls[calls.length - 1][1] as { key: string }).key;
@@ -199,6 +215,35 @@ describe('SearxNG', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe(
       `Basic ${Buffer.from('user:pass').toString('base64')}`,
     );
+  });
+});
+
+describe('PROVIDER_RUNTIME_GUARD=warn keeps the path each call took before the setting existed', () => {
+  beforeEach(() => {
+    process.env.PROVIDER_RUNTIME_GUARD = 'warn';
+    reloadConfig();
+  });
+
+  it('SearxNG still goes through the outbound guard, with its default options', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    (safeFetch as ReturnType<typeof vi.fn>).mockResolvedValue(jsonResponse({ results: [] }));
+
+    await callWebSearchProvider(providerRecord('searxng', { baseUrl: 'https://searx.internal.example' }), {}, { query: 'q' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(safeFetch).toHaveBeenCalledTimes(1);
+    expect((safeFetch as ReturnType<typeof vi.fn>).mock.calls[0]).toHaveLength(2);
+  });
+
+  it('a driver that used plain fetch keeps that path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'q' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(safeFetch).not.toHaveBeenCalled();
   });
 });
 

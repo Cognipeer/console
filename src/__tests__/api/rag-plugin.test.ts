@@ -1149,3 +1149,27 @@ describe('export and import routes move a module as zipped JSONL parts', () => {
     expect(parseJsonBody<{ error: string }>(capRes.body).error).toContain('at most');
   });
 });
+
+describe('Knowledge Engine query and answer routes validate topK', () => {
+  const post = (url: string, payload: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url, headers: JSON_HEADERS, payload });
+
+  it('answers 400 for a topK that is not a whole number from 1 to 200', async () => {
+    for (const topK of [-1, 0, 2.5, 201, 100000, '3', true]) {
+      const queryRes = await post('/api/rag/modules/no-such-module/query', { query: 'q', topK });
+      expect(queryRes.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(queryRes.body).error).toContain('topK');
+
+      const answerRes = await post('/api/rag/modules/no-such-module/answer', { question: 'q', answerModelKey: 'm', topK });
+      expect(answerRes.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(answerRes.body).error).toContain('topK');
+    }
+  });
+
+  it('lets a valid or absent topK through to the module lookup', async () => {
+    for (const topK of [1, 200, undefined]) {
+      const res = await post('/api/rag/modules/no-such-module/query', { query: 'q', ...(topK === undefined ? {} : { topK }) });
+      expect(res.statusCode).toBe(404);
+    }
+  });
+});

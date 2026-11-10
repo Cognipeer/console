@@ -110,7 +110,8 @@ owned by the given user on first boot and public signup stays off.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis` | `memory` |
+| `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis`. With `none`, values are not cached; counters and locks stay process-local. | `memory` |
+| `GUARDRAIL_DEFAULT_FAIL_MODE` | Fail mode for new guardrails created without one: `auto` (`closed` for presets running PII or prompt-shield checks, `open` otherwise) or `open` (every new guardrail). | `auto` |
 | `CACHE_TTL_SECONDS` | Default cache TTL | `300` |
 | `REDIS_URL` | Redis connection URL (required when provider=redis) | — |
 | `REDIS_KEY_PREFIX` | Key prefix for Redis cache | `console:` |
@@ -198,9 +199,12 @@ redirect hop.
 |----------|-------------|---------|
 | `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` | Block outbound requests to private/loopback address space from tenant-configured integrations. | `true` |
 | `OUTBOUND_HTTP_ALLOWED_HOSTS` | Comma-separated hostnames exempt from the block. Use a leading dot to match subdomains (e.g. `.svc.cluster.local`). | *(empty)* |
+| `CRAWLER_ALLOW_PRIVATE_NETWORK_OPT_IN` | Whether a crawler's `allowPrivateNetwork` setting takes effect. When off, the setting is ignored and crawler fetches and webhooks follow the private-network block. Setting it on for a SaaS deployment logs a startup warning. | `true` for `onprem`, `false` for `saas` |
+| `CRAWLER_RESOLVED_PRIVATE_POLICY` | What crawler fetches and webhooks do with a host name that resolves to a private, loopback, link-local, CGNAT or metadata address (and with internal-only names such as `.svc`, `.cluster.local`, `.internal`, `.local` or single-label names). `refuse` blocks the request; `warn` allows it and logs a warning per host at most every 10 minutes. Literal IP addresses and `localhost` are always refused. | `warn` for `onprem`, `refuse` for `saas` |
 | `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS` | Default timeout for guarded outbound requests. | `30000` |
 | `PROVIDER_PRIVATE_NETWORKS` | Private ranges that provider endpoints may reach, per organization. Entries are separated by `;`; each is `<tenantId>=<cidr>[,<cidr>...]`, and `*` in place of a tenant ID opens the ranges for every organization. IPv4 and IPv6 CIDRs are accepted (a bare address means one host); host names are not. Whitespace is ignored and two entries for one organization merge. An entry or range that cannot be read opens nothing and is logged as an error at startup. Example: `"64f0c0ffee1234567890abcd=10.50.0.0/16,fd12:3456::/48;*=100.64.10.0/24"`. See [Provider private networks](#provider-private-networks). | *(empty: nothing is opened)* |
 | `PROVIDER_PRIVATE_NETWORKS_DENY` | Comma-separated CIDRs that stay refused even inside an opened range. Set it to the cluster's pod and service ranges and to any other internal range. An entry that cannot be read closes every opened network until it is fixed. | *(empty)* |
+| `PROVIDER_RUNTIME_GUARD` | `enforce` or `warn`. What happens when a provider call made at request time (model, embedding, image, speech, moderation, OCR and web search) targets an address the rules above refuse. `warn` keeps the path the call took before this setting existed (plain `fetch`, or the outbound guard where the call was already made through it, as the SearxNG search is) and logs a warning beside it (once per host every 10 minutes, with the organization and the reason); `enforce` sends the call through the guard, refuses such a target and does not follow redirects. Endpoints are checked when a provider is saved in both modes. The default becomes `enforce` in a later release: set `warn` explicitly to keep the current behavior, or `enforce` to switch now. | `warn` |
 
 Self-hosted deployments that legitimately call in-network services (e.g. a
 vLLM server on a private IP) should list those hosts in
@@ -289,6 +293,7 @@ credential, stdio environment values, runtime headers) are masked as
 | `MCP_UPSTREAM_MAX_RESPONSE_BYTES` | Largest response body read from the upstream of an OpenAPI or remote MCP server; a bigger one fails the call (minimum `65536`). | `8388608` |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Longest a call to that upstream may take, headers and body together (minimum `1000`). | `90000` |
 | `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
+| `MCP_STDIO_ENABLED` | Allow stdio (npx/uvx) MCP servers to run as subprocesses of the gateway. Sandbox execution is unaffected. Set `false`, `0`, `no` or `off` to disable. A `saas` deployment logs a one-time notice that this default becomes `false` in a later release. | `true` |
 | `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
 | `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |
 
@@ -335,7 +340,7 @@ agent, and with smaller payloads than token calls.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | Requests per client address and endpoint per minute (and ten times that per address across all public endpoints). `0` turns these limits off. | `300` |
+| `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | Requests per client address and endpoint per minute (and ten times that per address across all public endpoints). Also applies to the public A2A endpoints. `0` turns these limits off. | `300` |
 | `MCP_PUBLIC_ENDPOINT_RATE_LIMIT_PER_MINUTE` | Requests per endpoint per minute from all callers together, whatever address they appear to come from. Unset, it is twenty times `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE`. `0` turns it off. | `6000` |
 | `MCP_PUBLIC_BODY_LIMIT_BYTES` | Largest request body a public POST may carry (minimum `1024`). | `1048576` |
 | `MCP_PUBLIC_MAX_INFLIGHT_PER_TENANT` | Tool calls one tenant may have running at once through its public endpoints; a call over it gets `503`. `0` turns the cap off. | `100` |
@@ -414,6 +419,7 @@ Health views, alert rules and reports for agents, models, knowledge bases, MCP s
 | `ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT` | Cap on distinct rollup rows one tenant may hold in the buffer (minimum `100`), so a single tenant cannot use up the share of the others; the effective cap is the lower of this and `ENTITY_METRICS_MAX_BUFFERED_ROWS`. Excess new rows are dropped and counted per tenant | `10000` |
 | `TRACING_STALE_SESSION_MINUTES` | A traced session still `in_progress` this many minutes after its last activity is marked `abandoned` (minimum `5`). An abandoned session is not an error | `360` |
 | `TRACING_FINALIZER_INTERVAL_MS` | How often stale traced sessions are swept (minimum `10000`) | `300000` |
+| `TRACING_RETENTION_SWEEP_INTERVAL_MS` | Minimum gap between plan-retention sweeps triggered by tracing ingest, per tenant and project (`0` sweeps on every request) | `3600000` |
 | `ALERT_CHANNEL_TIMEOUT_MS` | Per-channel timeout when delivering an alert notification: webhook, Slack, Teams and PagerDuty (minimum `1000`) | `10000` |
 | `ALERT_DEFAULT_RULES_ON_CREATE` | New projects and the Default Project of a new workspace get the five default [alert rules](../api/alerts.md#the-default-set) (the default set of the rule templates). `false` turns that default off; a project can still add them from **Alerts → Templates**, and a create request that sends `defaultAlertRules: true` still gets them | `true` |
 

@@ -18,6 +18,8 @@
 
 import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { randomUUID } from 'node:crypto';
+import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { IGuardrail, GuardrailType } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
@@ -172,6 +174,31 @@ function normalizeAuthoredHooks(
   };
 }
 
+const logger = createLogger('guardrail-service');
+let warnedLegacyFailMode = false;
+
+/**
+ * Fail mode for a guardrail created without one. Presets that run PII or
+ * prompt-shield checks default to `closed`; `GUARDRAIL_DEFAULT_FAIL_MODE=open`
+ * restores `open` for everything.
+ */
+export function resolveDefaultFailMode(
+  type: GuardrailType,
+  policy: IGuardrail['policy'],
+): 'open' | 'closed' {
+  if (getConfig().guardrail.defaultFailMode === 'open') {
+    if (!warnedLegacyFailMode) {
+      warnedLegacyFailMode = true;
+      logger.warn('GUARDRAIL_DEFAULT_FAIL_MODE=open: new guardrails default to fail-open.');
+    }
+    return 'open';
+  }
+  if (type === 'preset' && (policy?.pii?.enabled || policy?.promptShield?.enabled)) {
+    return 'closed';
+  }
+  return 'open';
+}
+
 // ── CRUD operations ───────────────────────────────────────────────────────
 
 export async function createGuardrail(
@@ -208,7 +235,7 @@ export async function createGuardrail(
     target: input.target ?? 'input',
     action: input.action,
     enabled: input.enabled ?? true,
-    failMode: input.failMode ?? 'open',
+    failMode: input.failMode ?? resolveDefaultFailMode(input.type, policy),
     modelKey: input.modelKey,
     policy: input.type === 'preset' ? policy : undefined,
     customPrompt: input.type === 'custom' ? input.customPrompt : undefined,
