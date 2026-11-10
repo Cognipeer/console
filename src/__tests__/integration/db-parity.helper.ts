@@ -129,8 +129,10 @@ async function makeMongoHandle(): Promise<ProviderHandle | null> {
       db = new MongoDBProvider(server.getUri(), 'parity_main', {
         minPoolSize: 1,
         maxPoolSize: 5,
-        connectTimeoutMS: 5000,
-        socketTimeoutMS: 10000,
+        // Generous: on a busy runner the in-memory mongod answers slowly, and a 10 s socket timeout
+        // turned into MongoNetworkTimeoutError failures unrelated to the code under test.
+        connectTimeoutMS: 30_000,
+        socketTimeoutMS: 60_000,
         serverSelectionTimeoutMS: 5000,
       });
       await db.connect();
