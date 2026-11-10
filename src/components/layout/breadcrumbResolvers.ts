@@ -211,6 +211,12 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     excludeValues: ['new'],
   }),
   createStandardResolver({
+    path: ['websearch'],
+    // The compatible read answers for an instance and for a provider that has no instance yet.
+    buildUrl: (key) => `/api/websearch/providers/${encodeURIComponent(key)}`,
+    pickLabel: (b) => wrappedName(b, 'instance', 'name') ?? wrappedName(b, 'provider', 'label', 'key'),
+  }),
+  createStandardResolver({
     path: ['rag'],
     buildUrl: (key) => `/api/rag/modules/${encodeURIComponent(key)}`,
     pickLabel: (b) => wrappedName(b, 'module'),

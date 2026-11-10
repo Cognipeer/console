@@ -77,6 +77,7 @@ export const COLLECTIONS = {
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
+  websearchInstances: 'websearch_instances',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -132,6 +133,10 @@ export const COLLECTIONS = {
   instanceAssignments: 'instance_assignments',
   // ── Signup gating (main database) ──────────────────────────────────
   betaAccessCodes: 'beta_access_codes',
+  // ── Plan limits usage (main database) ──────────────────────────────
+  planUsageMonthly: 'plan_usage_monthly',
+  planLimitEvents: 'plan_limit_events',
+  planUsagePeaks: 'plan_usage_peaks',
   // ── GPU fleet (tenant database) ───────────────────────────────────
   gpuHosts: 'gpu_hosts',
   gpuSlices: 'gpu_slices',

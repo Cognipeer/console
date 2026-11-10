@@ -33,7 +33,7 @@ import {
   type ModelCategory,
 } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
-import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   createDynamicModel,
   createModel,
@@ -116,7 +116,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
         driver: query.driver,
         status: query.status,
       });
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       logger.error('Client list model providers error', { error });
       return sendApiTokenError(reply, error)
@@ -219,7 +219,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.includeProviders === 'true' && readsModels) {
-        payload.providers = await listModelProviders(auth.tenantDbName, auth.tenantId, projectId, {});
+        payload.providers = (await listModelProviders(auth.tenantDbName, auth.tenantId, projectId, {})).map(redactPlatformProvider);
       }
 
       return reply.code(200).send(payload);
@@ -263,6 +263,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Client create model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelKeyConflictError) {
         return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
       }
@@ -391,6 +392,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Client update model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -418,6 +420,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Client delete model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
     }

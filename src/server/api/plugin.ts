@@ -92,6 +92,7 @@ import { piiApiPlugin } from './plugins/pii';
 import { healthApiPlugin } from './plugins/health';
 import { inferenceMonitoringApiPlugin } from './plugins/inference-monitoring';
 import { licenseApiPlugin } from './plugins/license';
+import { usageApiPlugin } from './plugins/usage';
 import { mcpApiPlugin } from './plugins/mcp';
 import { memoryApiPlugin } from './plugins/memory';
 import { metricsApiPlugin } from './plugins/metrics';
@@ -617,6 +618,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(healthApiPlugin);
   await app.register(inferenceMonitoringApiPlugin);
   await app.register(licenseApiPlugin);
+  await app.register(usageApiPlugin);
   await app.register(mcpApiPlugin);
   await app.register(memoryApiPlugin);
   await app.register(metricsApiPlugin);

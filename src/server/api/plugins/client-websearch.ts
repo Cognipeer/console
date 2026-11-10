@@ -2,12 +2,14 @@
  * Client v1 Web Search plugin.
  *
  * Surfaces:
- *   - GET  /api/client/v1/websearch/providers   → web search instances visible to token
- *   - POST /api/client/v1/websearch/search      → search (default or `provider` in body)
- *   - POST /api/client/v1/websearch/:key/search → search on a named instance
+ *   - GET  /api/client/v1/websearch/instances   → web search instances visible to token
+ *   - GET  /api/client/v1/websearch/providers   → the same list (older name); rows with `kind: 'provider'` are
+ *                                                 provider records that have no instance yet
+ *   - POST /api/client/v1/websearch/search      → search (default, or `instance` / `provider` in body)
+ *   - POST /api/client/v1/websearch/:key/search → search on a named instance (a provider key still works)
  *
  * Request shape:
- *   { query, provider?, count?, offset?, language?, country?, safe_search?,
+ *   { query, instance?, provider?, count?, offset?, language?, country?, safe_search?,
  *     include_answer? } — include_answer is best-effort: without AI answers
  *   enabled on the instance (settings.aiAnswer) the results come back with no
  *   `answer` and a `warnings` entry saying why.
@@ -20,9 +22,11 @@
  */
 
 import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { listWebSearchProviders, runWebSearch } from '@/lib/services/webSearch';
+import { runWebSearch } from '@/lib/services/webSearch';
+import { listWebSearchCompatRows } from '@/lib/services/webSearch/webSearchInstanceView';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -32,35 +36,36 @@ import {
 const logger = createLogger('api:client-websearch');
 
 export const clientWebSearchApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get(
-    '/client/v1/websearch/providers',
+  // One list behind both paths: the visible instances, then provider rows that have no instance yet (`kind`
+  // tells them apart). `providers` is the older name of the same list.
+  const listHandler = (logLabel: string, field: 'providers' | 'instances') =>
     withClientApiRequestContext(async (request, reply) => {
       try {
         const ctx = await getApiTokenContextForRequest(request);
-        const providers = await listWebSearchProviders(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-        );
+        const rows = await listWebSearchCompatRows(ctx.tenantDbName, ctx.tenantId, ctx.projectId);
         return reply.code(200).send({
-          providers: providers.map((p) => ({
-            key: p.key,
-            driver: p.driver,
-            label: p.label,
-            status: p.status,
+          [field]: rows.map((row) => ({
+            key: row.key,
+            driver: row.driver,
+            label: row.label,
+            status: row.status,
             aiAnswer:
-              ((p.settings as Record<string, unknown>)?.aiAnswer as { enabled?: boolean } | undefined)
+              ((row.settings as Record<string, unknown> | undefined)?.aiAnswer as { enabled?: boolean } | undefined)
                 ?.enabled === true,
+            kind: row.kind,
+            ...(row.kind === 'instance' ? { providerKey: row.providerKey } : {}),
           })),
         });
       } catch (error) {
-        logger.error('List client websearch providers error', { error });
+        logger.error(logLabel, { error });
         return reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
         });
       }
-    }),
-  );
+    });
+
+  app.get('/client/v1/websearch/providers', listHandler('List client websearch providers error', 'providers'));
+  app.get('/client/v1/websearch/instances', listHandler('List client websearch instances error', 'instances'));
 
   const handleSearch = async (
     request: Parameters<Parameters<typeof withClientApiRequestContext>[0]>[0],
@@ -79,8 +84,11 @@ export const clientWebSearchApiPlugin: FastifyPluginAsync = async (app) => {
       const includeAnswerRaw = body.include_answer ?? body.includeAnswer ?? body.answer;
       const result = await runWebSearch(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         query: body.query,
+        // The resolver takes an instance key first, then a provider key; `instance` is the name, `provider` the alias.
         providerKey:
-          explicitKey ?? (typeof body.provider === 'string' ? body.provider : undefined),
+          explicitKey
+          ?? (typeof body.instance === 'string' && body.instance ? body.instance : undefined)
+          ?? (typeof body.provider === 'string' ? body.provider : undefined),
         count: typeof body.count === 'number' ? body.count : undefined,
         offset: typeof body.offset === 'number' ? body.offset : undefined,
         language: typeof body.language === 'string' ? body.language : undefined,
@@ -122,6 +130,8 @@ export const clientWebSearchApiPlugin: FastifyPluginAsync = async (app) => {
         latency_ms: result.latencyMs,
       });
     } catch (error) {
+      const refusal = sendPlanLimitRefusal(reply, error);
+      if (refusal) return refusal;
       if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
       logger.error('Run client web search error', { error });
       return reply.code(400).send({

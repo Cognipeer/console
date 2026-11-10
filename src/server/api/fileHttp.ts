@@ -35,6 +35,7 @@ import {
   isRequestTimeoutError,
   type FileServiceErrorCode,
 } from '@/lib/services/files/errors';
+import { isPlanLimitError, planLimitErrorBody, planLimitHeaders } from '@/lib/limits/errors';
 import { contentDisposition, type ContentDispositionType } from '@/lib/utils/contentDisposition';
 import { isProviderConfigError } from './providerConfigErrors';
 
@@ -42,6 +43,7 @@ type Logger = ReturnType<typeof createLogger>;
 
 export interface FileErrorAnswer {
   status: number;
+  headers?: Record<string, string>;
   body: { error: string; code: string; [extra: string]: unknown };
   /** Nothing in this module recognised the error: log it in full. */
   unexpected: boolean;
@@ -90,6 +92,11 @@ export interface FileErrorOptions {
 export function describeFileError(error: unknown, options: FileErrorOptions = {}): FileErrorAnswer {
   if (isFileServiceError(error)) {
     return typed(error.code, error.status, error.message, error.details);
+  }
+
+  // The plan's storage is full (hosted deployments only): 413 'storage_quota_exceeded'.
+  if (isPlanLimitError(error)) {
+    return { status: error.status, headers: planLimitHeaders(error), body: planLimitErrorBody(error) as FileErrorAnswer['body'], unexpected: false };
   }
 
   const legacy = LEGACY_REFUSALS.find(([message]) => messageOf(error) === message);
@@ -147,6 +154,7 @@ export function sendFileError(
   } else if (answer.status >= 500) {
     options.logger.warn(`File ${options.action} failed`, { code: answer.body.code, error: messageOf(error) });
   }
+  if (answer.headers) reply.headers(answer.headers);
   return reply.code(answer.status).send(answer.body);
 }
 

@@ -282,13 +282,18 @@ export function mapTool(t: Record<string, any>): ResourceRecord {
 
 export function mapModel(m: Record<string, any>): ResourceRecord {
   const settings = (m.settings ?? {}) as Record<string, unknown>;
+  // A platform model has no project of its own: it belongs to every project that added it (`projectIds`).
+  const projectIds: string[] = m.platform === true && Array.isArray(m.projectIds)
+    ? [...new Set(m.projectIds.map(normalizeProjectId).filter((id): id is string => typeof id === 'string'))]
+    : [];
   return {
     type: 'model',
     id: String(m._id),
     key: str(m.key),
     name: str(m.name) ?? String(m._id),
     description: str(m.description),
-    projectId: normalizeProjectId(m.projectId),
+    projectId: normalizeProjectId(m.projectId) ?? projectIds[0] ?? null,
+    ...(projectIds.length > 0 ? { projectIds } : {}),
     // Models have no lifecycle status.
     status: null,
     statusTone: 'neutral',

@@ -48,6 +48,13 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
   nodes: [{ key: { lastHeartbeatAt: 1 }, options: { name: 'idx_heartbeat' } }],
   // Signup gating: codes are claimed atomically by exact value.
   beta_access_codes: [{ key: { code: 1 }, options: { name: 'idx_code', unique: true } }],
+  // Plan limits: monthly meters are listed per period; events per tenant newest-first and swept by age.
+  plan_usage_monthly: [{ key: { period: 1, tenantId: 1 }, options: { name: 'idx_period_tenant' } }],
+  plan_limit_events: [
+    { key: { tenantId: 1, at: -1 }, options: { name: 'idx_tenant_at' } },
+    { key: { at: 1 }, options: { name: 'idx_at' } },
+  ],
+  plan_usage_peaks: [{ key: { tenantId: 1, day: 1 }, options: { name: 'idx_tenant_day' } }],
 };
 
 /**
@@ -266,6 +273,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { createdAt: 1 }, options: { name: 'idx_createdAt' } },
   ],
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
+  websearch_instances: [
+    { key: { tenantId: 1, key: 1 }, options: { name: 'idx_tenant_key', unique: true } },
+    { key: { tenantId: 1, projectId: 1 }, options: { name: 'idx_tenant_project' } },
+  ],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [
     { key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } },

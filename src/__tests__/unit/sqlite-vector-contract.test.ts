@@ -340,6 +340,17 @@ describe('Edge cases', () => {
     await expect(runtime.upsertVectors(h, [])).resolves.toBeUndefined();
   });
 
+  it('reports which of the given ids exist, in chunks, without touching other indexes', async () => {
+    const h = await runtime.createIndex({ name: 'existing-ids', dimension: 2 });
+    const other = await runtime.createIndex({ name: 'existing-ids-other', dimension: 2 });
+    await runtime.upsertVectors(h, [{ id: 'a', values: [1, 0] }, { id: 'b', values: [0, 1] }]);
+    await runtime.upsertVectors(other, [{ id: 'c', values: [1, 1] }]);
+    expect((await runtime.existingVectorIds!(h, ['a', 'ghost', 'c', 'b'])).sort()).toEqual(['a', 'b']);
+    expect(await runtime.existingVectorIds!(h, [])).toEqual([]);
+    const many = Array.from({ length: 1200 }, (_, i) => `x${i}`);
+    expect((await runtime.existingVectorIds!(h, [...many, 'a'])).sort()).toEqual(['a']);
+  });
+
   it('handles empty deleteVectors gracefully', async () => {
     const h = await runtime.createIndex({ name: 'empty-delete', dimension: 2 });
     await expect(runtime.deleteVectors(h, [])).resolves.toBeUndefined();

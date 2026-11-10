@@ -49,7 +49,13 @@ class ProviderRegistry {
         domains: contract.domains,
         display: contract.display,
         capabilities: contract.capabilities,
+        ...(contract.internal ? { internal: true } : {}),
       }));
+  }
+
+  /** The drivers a tenant may see and pick: `listDescriptors` without the internal (operator-side) ones. */
+  listTenantDescriptors(domain?: ProviderDomain): ProviderDescriptor[] {
+    return this.listDescriptors(domain).filter((descriptor) => !descriptor.internal);
   }
 
   getContract<TContract extends ProviderContract>(id: string): TContract {
@@ -69,7 +75,17 @@ class ProviderRegistry {
     return contract.createRuntime(context);
   }
 
+  /** True when a contract is registered for the id and it is internal (operator-side, never offered to a tenant). */
+  isInternal(id: string): boolean {
+    this.ensureInitialised();
+    return this.contracts.get(id)?.internal === true;
+  }
+
   getFormSchema(id: string) {
+    // An internal driver answers like an unknown one.
+    if (this.isInternal(id)) {
+      throw new Error(`Provider contract with id "${id}" not found.`);
+    }
     const contract = this.getContract(id);
     return contract.form;
   }

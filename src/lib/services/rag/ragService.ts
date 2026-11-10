@@ -51,6 +51,7 @@ import {
   vectorFilterOperatorsOf,
 } from '@/lib/services/vector/vectorService';
 import type { VectorQueryMatch } from '@/lib/providers';
+import { storageCapabilityDriverOf } from '@/lib/services/storage/managedStorage';
 import {
   anonymousKbCaller,
   isAclPushdownBroken,
@@ -1816,7 +1817,7 @@ async function vectorDriverOf(
 ): Promise<string | undefined> {
   try {
     const record = await db.findProviderByKey(tenantId, providerKey, projectId || undefined);
-    return record?.driver;
+    return record ? storageCapabilityDriverOf('vector', record) : undefined;
   } catch {
     return undefined;
   }

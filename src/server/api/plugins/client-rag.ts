@@ -47,6 +47,7 @@ import { ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAcce
 import { readRagTopK } from '@/lib/services/rag/topK';
 import { kbIndexShareRefusal } from '../ragOwnedResources';
 import { ocrModelProblem, readDocumentExtraction } from '../ragExtraction';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-rag');
@@ -316,6 +317,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(statusCode).send({ document: withoutSourceText(document) });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
       if (error instanceof RagModuleInactiveError) {
@@ -500,6 +504,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       const badBody = sendBadBody(reply, error);
       if (badBody) return badBody;
       if (

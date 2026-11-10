@@ -22,7 +22,8 @@ import {
   queryVectorIndex,
   updateVectorIndex,
   upsertVectors,
-  type VectorIndexRecord,
+  VectorAttachNotAvailableError,
+  type VectorIndexView,
   type VectorMetric,
 } from '@/lib/services/vector';
 import {
@@ -32,12 +33,13 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import { kbIndexRefusal } from '../ragOwnedResources';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-vector');
 
-function serializeIndex(index: VectorIndexRecord) {
+function serializeIndex(index: VectorIndexView) {
   return {
     ...index,
     indexId: index.key,
@@ -62,7 +64,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/vector/providers/drivers', withClientApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'vector');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'vector');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List client vector provider drivers error', { error });
@@ -74,7 +76,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
-      const descriptor = providerRegistry.listDescriptors('vector').find((item) => item.id === driverId);
+      const descriptor = providerRegistry.listTenantDescriptors('vector').find((item) => item.id === driverId);
       return reply.code(200).send({ descriptor, driverId, schema });
     } catch (error) {
       logger.error('Get client vector provider driver form error', { error });
@@ -213,6 +215,9 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ index: serializeIndex(index) });
     } catch (error) {
+      if (error instanceof VectorAttachNotAvailableError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code });
+      }
       logger.error('Create client vector index error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -456,6 +461,9 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Upsert client vector entries error', { error });
+      // A storage limit refusal (a platform provider's upsert) answers with its own status and envelope.
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });
       }

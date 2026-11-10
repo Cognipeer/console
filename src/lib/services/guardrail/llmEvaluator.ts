@@ -14,8 +14,11 @@ import { logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogge
 
 const logger = createLogger('guardrail-evaluator');
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
+import { isManagedModel } from '@/enterprise/managed-credits';
+import type { GatewayChatRequest } from '@/lib/services/models/gatewayTypes';
 import type { GuardrailFinding } from './types';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
+import { isContentFilterError } from '@/lib/services/models/contentFilter';
 import {
   MODERATION_CATEGORIES,
   PROMPT_SHIELD_ISSUES,
@@ -40,6 +43,37 @@ interface LlmCallResult {
   usage: TokenUsage;
 }
 
+/**
+ * The judge model's provider refused to read the content under evaluation: its
+ * own safety filter answered instead of the judge. That is a verdict about the
+ * content, not an outage of the judge.
+ */
+export class JudgeContentFilteredError extends Error {
+  readonly code = 'judge_content_filtered';
+  readonly retryable = false;
+
+  constructor() {
+    super("The model provider's safety filter refused to evaluate this content.");
+    this.name = 'JudgeContentFilteredError';
+  }
+}
+
+/** A completed reply the provider ended with its safety filter and left without usable content. */
+function isFilteredEmptyReply(
+  finishReason: unknown,
+  rawFinishReason: unknown,
+  content: unknown,
+  toolCalls?: unknown,
+): boolean {
+  const filtered = [finishReason, rawFinishReason].some(
+    (value) => typeof value === 'string' && value.trim().toLowerCase() === 'content_filter',
+  );
+  if (!filtered) return false;
+  const hasText = typeof content === 'string' && content.trim().length > 0;
+  const hasTools = Array.isArray(toolCalls) && toolCalls.length > 0;
+  return !hasText && !hasTools;
+}
+
 async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: string): Promise<LlmCallResult> {
   const db = await getDatabase();
   await db.switchToTenant(ctx.tenantDbName);
@@ -49,6 +83,54 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
   }
   if (model.category !== 'llm') {
     throw new Error(`Model "${ctx.modelKey}" is not an LLM model`);
+  }
+
+  // A managed model may only run through the model gateway: it picks the route,
+  // fails over and reserves/settles credits, and writes the usage row. The judge
+  // asks for no guardrails of the model's own (that would recurse).
+  if (isManagedModel(model)) {
+    const { executeModelCall } = await import('@/lib/services/models/gatewayCore');
+    let outcome: Awaited<ReturnType<typeof executeModelCall>>;
+    try {
+      outcome = await withResilience(
+      () => executeModelCall({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: model.tenantId,
+        projectId: ctx.projectId ?? model.projectId ?? '',
+        modelKey: ctx.modelKey,
+        request: {
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+        } as GatewayChatRequest,
+        context: {
+          route: 'guardrail',
+          skipModelGuardrails: true,
+          requestTags: { purpose: 'guardrail-judge' },
+          logPrompt: false,
+          logFailures: true,
+        },
+      }),
+      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
+      );
+    } catch (error) {
+      if (isContentFilterError(error)) throw new JudgeContentFilteredError();
+      throw error;
+    }
+    const managedResponse = outcome.result?.response;
+    if (isFilteredEmptyReply(
+      managedResponse?.finishReason,
+      outcome.result?.wireFinishReason,
+      managedResponse?.content,
+      managedResponse?.toolCalls,
+    )) {
+      throw new JudgeContentFilteredError();
+    }
+    return {
+      content: outcome.result?.response.content ?? '',
+      usage: outcome.usage ?? {},
+    };
   }
 
   const { runtime } = await buildModelRuntime(
@@ -72,15 +154,21 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
   });
 
   const startedAt = Date.now();
-  const response = await withResilience(
-    () => client.complete({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-    { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
-  );
+  let response: Awaited<ReturnType<typeof client.complete>>;
+  try {
+    response = await withResilience(
+      () => client.complete({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
+    );
+  } catch (error) {
+    if (isContentFilterError(error)) throw new JudgeContentFilteredError();
+    throw error;
+  }
 
   const usage = toGatewayUsage(client.driver, response.usage);
 
@@ -99,6 +187,14 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
     }),
   );
 
+  if (isFilteredEmptyReply(
+    response.finishReason,
+    (response as { rawFinishReason?: unknown }).rawFinishReason,
+    response.content,
+    (response as { toolCalls?: unknown }).toolCalls,
+  )) {
+    throw new JudgeContentFilteredError();
+  }
   return { content: response.content ?? '', usage };
 }
 
@@ -159,6 +255,17 @@ function failModeFindings(
   label: string,
   effectiveModelKey?: string,
 ): GuardrailFinding[] {
+  if (err instanceof JudgeContentFilteredError) {
+    logger.warn(`${label} content refused by the model provider safety filter`, {
+      modelKey: effectiveModelKey ?? ctx.modelKey,
+      failMode: ctx.failMode,
+    });
+    const refusal =
+      ctx.failMode === 'closed'
+        ? `${label}: the model provider's safety filter refused to evaluate this content, and this guardrail is configured to fail closed.`
+        : `${label}: the model provider's safety filter refused to evaluate this content (fail-open, content passed unchecked).`;
+    return [buildEvaluationErrorFinding({ type, failMode: ctx.failMode, action: globalAction, message: refusal })];
+  }
   const errorMessage = err instanceof Error ? err.message : String(err);
   logger.error(`${label} failed`, {
     error: errorMessage,
@@ -170,6 +277,30 @@ function failModeFindings(
       ? `${label} could not run and this guardrail is configured to fail closed: ${errorMessage}`
       : `${label} could not run (fail-open — content passed unchecked): ${errorMessage}`;
   return [buildEvaluationErrorFinding({ type, failMode: ctx.failMode, action: globalAction, message })];
+}
+
+/**
+ * A safety policy treats content the provider's own safety layer would not read
+ * as a violation, whatever the fail mode: it must not let through what even the
+ * judge's provider refused.
+ */
+function providerRefusalFinding(
+  type: 'moderation' | 'prompt_shield',
+  label: string,
+  globalAction: GuardrailAction,
+  effectiveModelKey: string,
+): GuardrailFinding[] {
+  logger.warn(`${label} content refused by the model provider safety filter`, { modelKey: effectiveModelKey });
+  return [
+    {
+      type,
+      category: 'provider_content_filter',
+      severity: 'high',
+      message: "The model provider's safety filter refused this content, so it was treated as a violation.",
+      action: globalAction,
+      block: globalAction === 'block',
+    },
+  ];
 }
 
 // ── Moderation policy ──────────────────────────────────────────────────────
@@ -294,12 +425,13 @@ export async function runModerationPolicy(
     .join('\n');
 
   const { block, hardening } = wrapUntrustedContent(text, 'MSG');
-  const userPrompt = `Active moderation categories:\n${catLabels}\n\n${hardening}\n\nMessage to evaluate:\n${block}`;
+  const systemPrompt = `${MODERATION_SYSTEM_PROMPT}\n\nActive moderation categories:\n${catLabels}\n\n${hardening}`;
+  const userPrompt = `Message to evaluate:\n${block}`;
 
   const validCategories = new Set(enabledCats);
 
   try {
-    const { content: raw } = await callLlm({ ...ctx, modelKey: effectiveModelKey }, MODERATION_SYSTEM_PROMPT, userPrompt);
+    const { content: raw } = await callLlm({ ...ctx, modelKey: effectiveModelKey }, systemPrompt, userPrompt);
     const parsed = safeParseJson<{ allowed: boolean; violations: Array<{ category: string; severity: string; explanation: string; guidance?: string }> }>(raw);
 
     if (!parsed) {
@@ -318,6 +450,9 @@ export async function runModerationPolicy(
         block: globalAction === 'block',
       }));
   } catch (err) {
+    if (err instanceof JudgeContentFilteredError) {
+      return providerRefusalFinding('moderation', 'Moderation policy', globalAction, effectiveModelKey);
+    }
     return failModeFindings('moderation', ctx, globalAction, err, 'Moderation policy', effectiveModelKey);
   }
 }
@@ -387,12 +522,13 @@ export async function runPromptShieldPolicy(
 
   const categoryList = PROMPT_SHIELD_ISSUES.map((i) => `- ${i.id}: ${i.label}`).join('\n');
   const { block, hardening } = wrapUntrustedContent(text, 'MSG');
-  const userPrompt = `${sensitivityNote}\n\nUse only these category ids:\n${categoryList}\n\n${hardening}\n\nMessage to evaluate:\n${block}`;
+  const systemPrompt = `${PROMPT_SHIELD_SYSTEM_PROMPT}\n\n${sensitivityNote}\n\nUse only these category ids:\n${categoryList}\n\n${hardening}`;
+  const userPrompt = `Message to evaluate:\n${block}`;
 
   const validCategories = PROMPT_SHIELD_ISSUES.map((i) => i.id);
 
   try {
-    const { content: raw } = await callLlm({ ...ctx, modelKey: effectiveModelKey }, PROMPT_SHIELD_SYSTEM_PROMPT, userPrompt);
+    const { content: raw } = await callLlm({ ...ctx, modelKey: effectiveModelKey }, systemPrompt, userPrompt);
     const parsed = safeParseJson<{ safe: boolean; issues: Array<{ category: string; severity: string; explanation: string }> }>(raw);
 
     if (!parsed) {
@@ -411,6 +547,9 @@ export async function runPromptShieldPolicy(
         block: globalAction === 'block',
       }));
   } catch (err) {
+    if (err instanceof JudgeContentFilteredError) {
+      return providerRefusalFinding('prompt_shield', 'Prompt shield policy', globalAction, effectiveModelKey);
+    }
     return failModeFindings('prompt_shield', ctx, globalAction, err, 'Prompt shield policy', effectiveModelKey);
   }
 }
@@ -450,10 +589,10 @@ export async function runCustomPromptPolicy(
   if (!customPrompt?.trim() || !text.trim()) return [];
 
   const { block, hardening } = wrapUntrustedContent(text, 'MSG');
-  const userPrompt = `${hardening}\n\nMessage to evaluate:\n${block}`;
+  const userPrompt = `Message to evaluate:\n${block}`;
 
   try {
-    const { content: raw } = await callLlm(ctx, CUSTOM_SYSTEM_PROMPT_WRAPPER(customPrompt), userPrompt);
+    const { content: raw } = await callLlm(ctx, `${CUSTOM_SYSTEM_PROMPT_WRAPPER(customPrompt)}\n\n${hardening}`, userPrompt);
     const parsed = safeParseJson<{ passed: boolean; reason: string }>(raw);
 
     if (!parsed) {

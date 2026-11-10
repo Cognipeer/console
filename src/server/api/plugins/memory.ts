@@ -25,6 +25,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 
 const logger = createLogger('api:memory');
 
@@ -218,6 +219,9 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });

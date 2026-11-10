@@ -302,12 +302,17 @@ describe('who passes countFailure', () => {
     });
   }
 
-  it('only the file service opts in: the gateway, model, vector and search callers keep counting every failure', () => {
+  it('only the file service, the gateway and the guardrail judge opt in (for a safety refusal): every other caller keeps counting every failure', () => {
     const users = sourceFiles(SRC)
       .filter((file) => /\bcountFailure\s*\??:/.test(readFileSync(file, 'utf8')))
       .map((file) => path.relative(SRC, file).split(path.sep).join('/'))
       .sort();
 
-    expect(users).toEqual(['lib/core/resilience.ts', 'lib/services/files/fileService.ts']);
+    expect(users).toEqual([
+      'lib/core/resilience.ts',
+      'lib/services/files/fileService.ts',
+      'lib/services/guardrail/llmEvaluator.ts',
+      'lib/services/models/gatewayCore.ts',
+    ]);
   });
 });

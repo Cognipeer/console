@@ -7,33 +7,59 @@ answers.
 All client endpoints require a Bearer API token and are gated by the
 `websearch` RBAC service.
 
+## Instances and providers
+
+Web search has two layers. A **provider** record holds the connection
+(credentials, endpoint or base URL). An **instance** holds the search behavior
+(depth, language, country, safe search, engines, AI answers, semantic cache) and
+points at a provider by key. Searches, quotas, logs and usage are keyed by the
+instance.
+
+Existing keys keep working: a provider that had no instance yet is still
+accepted wherever an instance key is, and providers that existed before
+instances were introduced get an instance with the same key.
+
 ## List instances
 
 ```
-GET /api/client/v1/websearch/providers
+GET /api/client/v1/websearch/instances
+GET /api/client/v1/websearch/providers     # same content (older name)
 ```
 
 ```json
 {
-  "providers": [
+  "instances": [
     {
       "key": "brave-main",
       "driver": "brave-search",
       "label": "Brave Web",
       "status": "active",
-      "aiAnswer": true
+      "aiAnswer": true,
+      "kind": "instance",
+      "providerKey": "brave-connection"
+    },
+    {
+      "key": "legacy-tavily",
+      "driver": "tavily",
+      "label": "Tavily",
+      "status": "active",
+      "aiAnswer": false,
+      "kind": "provider"
     }
   ]
 }
 ```
 
-`aiAnswer` reports whether AI answers are enabled on the instance.
+`/providers` answers the same rows under the `providers` field. `aiAnswer`
+reports whether AI answers are enabled. `kind` is `instance` for an instance
+and `provider` for a provider record that has no instance with its key yet;
+both kinds can be used as the search key. Keys never repeat in the list.
 
 ## Search
 
 ```
-POST /api/client/v1/websearch/:key/search   # named instance
-POST /api/client/v1/websearch/search        # single active instance, or `provider` in body
+POST /api/client/v1/websearch/:key/search   # named instance (a provider key also works)
+POST /api/client/v1/websearch/search        # single active instance, or `instance` in body
 ```
 
 Request body:
@@ -53,7 +79,8 @@ Request body:
 | Field | Type | Notes |
 |---|---|---|
 | `query` | string, required | Search query |
-| `provider` | string | Instance key (generic endpoint only). Optional when the project has exactly one active instance; with multiple instances the request must name one |
+| `instance` | string | Instance key (generic endpoint only). Optional when the project has exactly one active instance; with multiple instances the request must name one |
+| `provider` | string | Alias of `instance`; `instance` wins when both are sent |
 | `count` | number | Max results, default 10, max 50 |
 | `offset` | number | Paging hint where the engine supports it |
 | `language` | string | ISO language override |
@@ -108,13 +135,38 @@ Session-authenticated equivalents used by the UI:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/websearch/providers/drivers` | Available engine drivers + form schemas |
-| `GET` | `/api/websearch/providers` | Instances in the active project |
-| `GET` | `/api/websearch/providers/:key` | One instance |
-| `GET` | `/api/websearch/providers/:key/logs?limit&skip&from&to` | Run logs (results + answer included) |
-| `POST` | `/api/websearch/search` | Run a search (playground) |
+| `GET` | `/api/websearch/instances` | Instances visible in the active project, each with a provider summary (key, label, driver, status, platform flag; never credentials or connection settings) |
+| `POST` | `/api/websearch/instances` | Create an instance |
+| `GET` | `/api/websearch/instances/:key` | One instance |
+| `PATCH` | `/api/websearch/instances/:key` | Update an instance (the key does not change) |
+| `DELETE` | `/api/websearch/instances/:key` | Delete an instance |
+| `GET` | `/api/websearch/instances/:key/logs?limit&skip&from&to` | Run logs (results + answer included) |
+| `POST` | `/api/websearch/search` | Run a search (playground); `instance`, or `provider` as an alias |
 
-Instance CRUD goes through the generic `/api/providers` routes with
-`type=websearch`.
+Create body: `{ key, name, description?, providerKey, settings?, status?, tenantWide? }`.
+An instance belongs to the active project unless `tenantWide: true`, which
+needs an owner or admin. `settings` holds behavior only; endpoint and base URL
+belong to the provider. A platform-provided instance is read-only.
+
+| Status | Meaning |
+|---|---|
+| 400 | Invalid settings or cache configuration, or a missing field |
+| 403 | Not an owner or admin, or a platform or managed record |
+| 404 | No such instance in the project |
+| 409 | The key already exists |
+
+Provider records (connections) are managed through the generic
+`/api/providers` routes with `type=websearch`.
+
+### Compatibility routes
+
+Kept for one release so existing callers keep working:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/websearch/providers` | Visible instances in the older row shape (`key`, `label`, `driver`, `status`, `settings`, `platform`, `hasCredentials`, plus `kind: "instance"`, `providerKey`, `provider`), then every visible provider that has no instance with its key, marked `kind: "provider"` and `legacy: true` |
+| `GET` | `/api/websearch/providers/:key` | Resolves an instance by key first, then a provider |
+| `GET` | `/api/websearch/providers/:key/logs` | Same resolution |
 
 ## SDK
 

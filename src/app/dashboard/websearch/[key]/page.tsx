@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
+  Alert,
   Badge,
   Button,
+  Fieldset,
   Group,
   Modal,
   NumberInput,
@@ -19,6 +21,7 @@ import {
   IconDeviceFloppy,
   IconEdit,
   IconExternalLink,
+  IconPlus,
   IconRefresh,
   IconSearch,
   IconSparkles,
@@ -34,10 +37,17 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
-import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
-import { providerRequestError } from '@/components/providers/providerFormModel';
-import type { ProviderDescriptor } from '@/lib/providers/types';
-import type { ProviderConfigView } from '@/lib/services/providers/providerService';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
+import WebSearchInstanceCreate from '@/components/websearch/WebSearchInstanceCreate';
+import WebSearchInstanceFormModal from '@/components/websearch/WebSearchInstanceFormModal';
+import { ConnectionCard, SearchOptionsCard } from '@/components/websearch/WebSearchInstanceCards';
+import {
+  canManageWebSearch,
+  isUnavailable,
+  providerOfRow,
+  type WebSearchListRow,
+} from '@/components/websearch/webSearchModel';
+import type { WebSearchInstanceView } from '@/lib/services/webSearch/webSearchInstanceView';
 import type {
   WebSearchAiAnswerSettings,
   WebSearchCacheSettings,
@@ -50,14 +60,35 @@ const LOGS_FETCH_LIMIT = 200;
 
 type TabId = 'playground' | 'usage' | 'logs' | 'config';
 
-function aiAnswerOf(p: ProviderConfigView | null): WebSearchAiAnswerSettings {
+type WithSettings = { settings?: Record<string, unknown> } | null;
+
+function aiAnswerOf(p: WithSettings): WebSearchAiAnswerSettings {
   const raw = p?.settings?.aiAnswer;
   return raw && typeof raw === 'object' ? (raw as WebSearchAiAnswerSettings) : {};
 }
 
-function cacheOf(p: ProviderConfigView | null): WebSearchCacheSettings {
+function cacheOf(p: WithSettings): WebSearchCacheSettings {
   const raw = p?.settings?.cache;
   return raw && typeof raw === 'object' ? (raw as WebSearchCacheSettings) : { enabled: false };
+}
+
+/**
+ * What the page is about: an instance, or a provider that has no instance yet (the compatible read answers for it;
+ * searches through its key use the provider's own settings).
+ */
+type Loaded =
+  | { kind: 'instance'; instance: WebSearchInstanceView }
+  | { kind: 'provider'; provider: WebSearchListRow };
+
+async function fetchLoaded(key: string): Promise<Loaded | null> {
+  const res = await fetch(`/api/websearch/instances/${encodeURIComponent(key)}`, { cache: 'no-store' });
+  if (res.ok) return { kind: 'instance', instance: ((await res.json()) as { instance: WebSearchInstanceView }).instance };
+  if (res.status !== 404) throw new Error(`HTTP ${res.status}`);
+  const compat = await fetch(`/api/websearch/providers/${encodeURIComponent(key)}`, { cache: 'no-store' });
+  if (compat.status === 404) return null;
+  if (!compat.ok) throw new Error(`HTTP ${compat.status}`);
+  const body = (await compat.json()) as { provider: WebSearchListRow; instance?: WebSearchInstanceView };
+  return body.instance ? { kind: 'instance', instance: body.instance } : { kind: 'provider', provider: body.provider };
 }
 
 /** Cache outcome recorded on a run log (metadata.cache). */
@@ -71,19 +102,6 @@ const CACHE_BADGE: Record<'hit' | 'miss' | 'error', { className: string; label: 
   miss: { className: 'ds-badge', label: 'cache miss' },
   error: { className: 'ds-badge ds-badge-warn', label: 'cache error' },
 };
-
-function settingString(p: ProviderConfigView, name: string): string | undefined {
-  const value = p.settings?.[name];
-  return typeof value === 'string' && value !== '' ? value : undefined;
-}
-
-/** Optional settings rows on the Configuration card, shown only when set. */
-const SETTING_ROWS: Array<[name: string, label: string]> = [
-  ['baseUrl', 'Base URL'],
-  ['language', 'Language'],
-  ['country', 'Country / market'],
-  ['safeSearch', 'Safe search'],
-];
 
 /** One search's result rows — the playground and the log detail show the same list. */
 function ResultLinks({
@@ -116,14 +134,22 @@ function ResultLinks({
 
 export default function WebSearchInstancePage() {
   const router = useRouter();
+  const t = useTranslations('webSearch.detail');
+  const tScope = useTranslations('webSearch.scope');
+  const tNoInstance = useTranslations('webSearch.noInstance');
+  const tPlatform = useTranslations('webSearch.platform');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
+  const canManage = canManageWebSearch(useDashboardUser()?.role);
   const params = useParams<{ key: string }>()!;
   const key = params.key;
 
   const [tab, setTab] = useState<TabId>('playground');
-  const [instance, setInstance] = useState<ProviderConfigView | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loading, setLoading] = useState(true);
+  const instance = loaded?.kind === 'instance' ? loaded.instance : null;
+  // A platform instance is the deployment's: it is searched and inspected here, never changed.
+  const canEdit = canManage && instance !== null && !instance.platform;
 
   // Logs
   const [logs, setLogs] = useState<IWebSearchRunLog[]>([]);
@@ -134,10 +160,10 @@ export default function WebSearchInstancePage() {
   const [logStatus, setLogStatus] = useState<string>('all');
   const [logDetail, setLogDetail] = useState<IWebSearchRunLog | null>(null);
 
-  // Edit modal
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
+  // The instance form: edit this instance, or create one on a provider that has none yet.
   const [editOpen, setEditOpen] = useState(false);
+  const [editResetKey, setEditResetKey] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
 
   // Playground
   const [searchQuery, setSearchQuery] = useState('');
@@ -167,23 +193,19 @@ export default function WebSearchInstancePage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`/api/websearch/providers/${encodeURIComponent(key)}`, {
-        cache: 'no-store',
-      });
-      if (res.status === 404) {
-        notifications.show({ color: 'red', title: 'Web Search', message: 'Instance not found' });
+      const next = await fetchLoaded(key);
+      if (!next) {
+        notifications.show({ color: 'red', title: t('notFound'), message: key });
         router.push('/dashboard/websearch');
         return;
       }
-      if (!res.ok) throw new Error('Failed to load instance');
-      const data = await res.json();
-      const provider = (data.provider ?? null) as ProviderConfigView | null;
-      setInstance(provider);
-      const ai = aiAnswerOf(provider);
+      setLoaded(next);
+      const own = next.kind === 'instance' ? next.instance : null;
+      const ai = aiAnswerOf(own);
       setAiEnabled(ai.enabled === true);
       setAiModelKey(ai.modelKey ?? null);
       setAiInstructions(ai.instructions ?? '');
-      const cache = cacheOf(provider);
+      const cache = cacheOf(own);
       setCacheEnabled(cache.enabled === true);
       setCacheVectorProvider(cache.vectorProviderKey ?? null);
       setCacheVectorIndex(cache.vectorIndexKey ?? null);
@@ -192,22 +214,26 @@ export default function WebSearchInstancePage() {
     } catch (err) {
       notifications.show({
         color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        title: t('loadFailed'),
+        message: err instanceof Error ? err.message : String(err),
       });
     } finally {
       setLoading(false);
     }
-  }, [key, router]);
+  }, [key, router, t]);
 
+  // An instance's runs are read through its own route; a provider without an instance through the compatible one.
+  const loadedKind = loaded?.kind ?? null;
   const loadLogs = useCallback(async () => {
+    if (!loadedKind) return;
     setLogsLoading(true);
     try {
       const searchParams = new URLSearchParams({ limit: String(LOGS_FETCH_LIMIT) });
       if (logFrom) searchParams.set('from', new Date(`${logFrom}T00:00:00`).toISOString());
       if (logTo) searchParams.set('to', new Date(`${logTo}T23:59:59.999`).toISOString());
+      const base = loadedKind === 'instance' ? '/api/websearch/instances' : '/api/websearch/providers';
       const res = await fetch(
-        `/api/websearch/providers/${encodeURIComponent(key)}/logs?${searchParams.toString()}`,
+        `${base}/${encodeURIComponent(key)}/logs?${searchParams.toString()}`,
         { cache: 'no-store' },
       );
       if (res.ok) {
@@ -219,7 +245,7 @@ export default function WebSearchInstancePage() {
     } finally {
       setLogsLoading(false);
     }
-  }, [key, logFrom, logTo]);
+  }, [key, logFrom, logTo, loadedKind]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -383,7 +409,8 @@ export default function WebSearchInstancePage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           query: searchQuery.trim(),
-          provider: key,
+          // A provider without an instance is searched through its own key.
+          ...(instance ? { instance: key } : { provider: key }),
           count: typeof searchCount === 'number' ? searchCount : undefined,
           includeAnswer: withAnswer,
         }),
@@ -401,19 +428,24 @@ export default function WebSearchInstancePage() {
     }
   }
 
-  const openEdit = async () => {
+  const openEdit = () => {
+    setEditResetKey((current) => current + 1);
     setEditOpen(true);
-    setDriversLoading(true);
-    try {
-      const res = await fetch('/api/websearch/providers/drivers', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setDrivers(data.drivers ?? []);
-      }
-    } finally {
-      setDriversLoading(false);
-    }
   };
+
+  /** The settings replace the stored ones: every setting the change leaves alone is sent as it is. */
+  async function patchInstanceSettings(change: Record<string, unknown>, fallback: string) {
+    if (!instance) return;
+    const res = await fetch(`/api/websearch/instances/${encodeURIComponent(instance.key)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ settings: { ...instance.settings, ...change } }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || fallback);
+    }
+  }
 
   async function saveCacheSettings() {
     if (!instance) return;
@@ -443,15 +475,7 @@ export default function WebSearchInstancePage() {
         embeddingModelKey: cacheEmbeddingModel ?? undefined,
         similarityThreshold: threshold,
       };
-      const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ settings: { ...instance.settings, cache } }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to save cache settings');
-      }
+      await patchInstanceSettings({ cache }, 'Failed to save cache settings');
       notifications.show({ color: 'teal', title: 'Cache', message: 'Settings saved' });
       await load();
     } catch (err) {
@@ -482,15 +506,7 @@ export default function WebSearchInstancePage() {
         modelKey: aiModelKey ?? undefined,
         instructions: aiInstructions.trim() || undefined,
       };
-      const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ settings: { ...instance.settings, aiAnswer } }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to save AI settings');
-      }
+      await patchInstanceSettings({ aiAnswer }, 'Failed to save AI settings');
       notifications.show({ color: 'teal', title: 'AI Answer', message: 'Settings saved' });
       await load();
     } catch (err) {
@@ -504,30 +520,34 @@ export default function WebSearchInstancePage() {
     }
   }
 
+  // Deletes the instance only: the provider it searches through stays.
   async function confirmDelete() {
     if (!instance) return;
     try {
       const deleted = await deleteResource({
         noun: tConfirm('nouns.websearchInstance'),
-        name: instance.label,
-        type: 'provider',
+        name: instance.name,
+        type: 'websearch-instance',
         id: String(instance._id),
         extraWarning: tConfirm('extras.websearchKeyFails'),
         action: async () => {
-          const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
+          const res = await fetch(`/api/websearch/instances/${encodeURIComponent(instance.key)}`, {
             method: 'DELETE',
           });
-          if (!res.ok) throw new Error('Failed to delete');
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.error || t('deleteFailed'));
+          }
         },
       });
       if (!deleted) return;
-      notifications.show({ color: 'teal', title: 'Deleted', message: 'Instance removed' });
+      notifications.show({ color: 'teal', title: t('deleted'), message: instance.name });
       router.push('/dashboard/websearch');
     } catch (err) {
       notifications.show({
         color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        title: t('deleteFailed'),
+        message: err instanceof Error ? err.message : String(err),
       });
     }
   }
@@ -609,29 +629,52 @@ export default function WebSearchInstancePage() {
     },
   ];
 
-  if (loading || !instance) {
+  if (loading || !loaded) {
     return (
       <DetailShell
         backHref="/dashboard/websearch"
-        title={loading ? 'Loading…' : 'Instance not found'}
+        title={loading ? t('loading') : t('notFound')}
       >
         <div />
       </DetailShell>
     );
   }
 
+  // The header reads the same for an instance and for a provider that has no instance yet.
+  const view = loaded.kind === 'instance'
+    ? {
+      name: loaded.instance.name,
+      status: loaded.instance.status,
+      platform: loaded.instance.platform,
+      providerKey: loaded.instance.providerKey,
+      provider: loaded.instance.provider,
+    }
+    : {
+      name: loaded.provider.label,
+      status: loaded.provider.status,
+      platform: loaded.provider.platform === true,
+      providerKey: loaded.provider.key,
+      provider: providerOfRow(loaded.provider),
+    };
   const aiConfigured = aiAnswerOf(instance).enabled === true;
 
   return (
     <DetailShell
       backHref="/dashboard/websearch"
       icon={<IconWorldSearch size={16} />}
-      title={instance.label}
+      title={view.name}
       meta={
         <>
-          <Badge size="xs" variant="light">{instance.driver}</Badge>
-          <span className="ds-mono ds-faint" style={{ fontSize: 12 }}>{instance.key}</span>
-          <StatusBadge status={instance.status === 'active' ? 'active' : 'paused'} />
+          {view.provider ? <Badge size="xs" variant="light">{view.provider.driver}</Badge> : null}
+          <span className="ds-mono ds-faint" style={{ fontSize: 12 }}>{key}</span>
+          <StatusBadge status={view.status === 'active' ? 'active' : 'paused'} />
+          {view.platform ? <span className="ds-badge ds-badge-info">{tPlatform('badge')}</span> : null}
+          {loaded.kind === 'provider' ? (
+            <span className="ds-badge ds-badge-warn" title={tNoInstance('hint')}>{tNoInstance('badge')}</span>
+          ) : null}
+          {isUnavailable(view) ? (
+            <span className="ds-badge ds-badge-warn" title={tPlatform('unavailableHint')}>{tPlatform('unavailable')}</span>
+          ) : null}
           {aiConfigured && (
             <Badge size="xs" variant="light" color="grape">
               <IconSparkles size={10} style={{ verticalAlign: -1, marginRight: 2 }} />
@@ -640,16 +683,16 @@ export default function WebSearchInstancePage() {
           )}
         </>
       }
-      actions={
+      actions={canEdit ? (
         <Button
           variant="default"
           size="xs"
           leftSection={<IconEdit size={13} stroke={1.7} />}
-          onClick={() => void openEdit()}
+          onClick={openEdit}
         >
-          Edit
+          {t('edit')}
         </Button>
-      }
+      ) : undefined}
       tabs={[
         { id: 'playground', label: 'Playground' },
         { id: 'usage', label: 'Usage' },
@@ -659,6 +702,30 @@ export default function WebSearchInstancePage() {
       activeTab={tab}
       onTabChange={(id) => setTab(id as TabId)}
     >
+      {instance?.platform ? (
+        <Alert variant="light" color="blue" title={tPlatform('badge')} mb="md">
+          {tPlatform('readOnly')}
+        </Alert>
+      ) : null}
+      {loaded.kind === 'provider' ? (
+        <Alert variant="light" color="yellow" title={tNoInstance('title')} mb="md">
+          <div className="ds-col" style={{ gap: 8 }}>
+            <span>{tNoInstance('text')}</span>
+            {canManage ? (
+              <Button
+                size="xs"
+                color="teal"
+                leftSection={<IconPlus size={13} stroke={1.7} />}
+                onClick={() => setCreateOpen(true)}
+                style={{ alignSelf: 'flex-start' }}
+              >
+                {tNoInstance('action')}
+              </Button>
+            ) : null}
+          </div>
+        </Alert>
+      ) : null}
+
       {tab === 'playground' ? (
         <DetailCard
           title="Ask this instance"
@@ -699,7 +766,8 @@ export default function WebSearchInstancePage() {
               Search
             </Button>
           </Group>
-          {withAnswer && !aiConfigured && (
+          {/* Only an own instance shows its settings: a platform one's are not known here. */}
+          {withAnswer && !aiConfigured && instance && !instance.platform && (
             <div className="ds-faint" style={{ fontSize: 12, marginTop: 6 }}>
               AI answers are not enabled on this instance — results will come back without
               an AI answer. Enable them under Configuration → AI Answer.
@@ -876,237 +944,197 @@ export default function WebSearchInstancePage() {
       {tab === 'config' ? (
         <DetailTwoCol narrowAside>
           <div className="ds-col" style={{ gap: 16 }}>
-            <DetailCard
-              title="AI Answer"
-              description="Interpret search results with a model and return a synthesized answer (like Tavily). Requests asking for an answer fail while this is disabled."
-              actions={
-                <Button
-                  size="xs"
-                  color="teal"
-                  leftSection={<IconDeviceFloppy size={13} stroke={1.7} />}
-                  loading={aiSaving}
-                  onClick={() => void saveAiSettings()}
+            {instance ? (
+              <SearchOptionsCard
+                provider={instance.provider}
+                settings={instance.settings}
+                setByPlatform={instance.platform}
+                onEdit={canEdit ? openEdit : undefined}
+              />
+            ) : null}
+            {/* A platform instance's settings belong to the deployment (the reply leaves them out); a provider without
+                an instance has none. */}
+            {instance && !instance.platform ? (
+              <>
+                <DetailCard
+                  title="AI Answer"
+                  description="Interpret search results with a model and return a synthesized answer (like Tavily). Requests asking for an answer fail while this is disabled."
+                  actions={canEdit ? (
+                    <Button
+                      size="xs"
+                      color="teal"
+                      leftSection={<IconDeviceFloppy size={13} stroke={1.7} />}
+                      loading={aiSaving}
+                      onClick={() => void saveAiSettings()}
+                    >
+                      Save
+                    </Button>
+                  ) : undefined}
                 >
-                  Save
-                </Button>
-              }
-            >
-              <div className="ds-col" style={{ gap: 12 }}>
-                <Switch
-                  label="Enable AI answers"
-                  description="Allows requests with include_answer to interpret results with the model below."
-                  checked={aiEnabled}
-                  onChange={(e) => setAiEnabled(e.currentTarget.checked)}
-                />
-                <Select
-                  label="Model"
-                  placeholder="Select an LLM"
-                  data={models}
-                  value={aiModelKey}
-                  onChange={setAiModelKey}
-                  searchable
-                  clearable
-                  nothingFoundMessage="No LLM models in this project"
-                  disabled={!aiEnabled}
-                />
-                <Textarea
-                  label="Extra instructions (optional)"
-                  description="Prepended to the interpretation prompt, e.g. tone or output format."
-                  autosize
-                  minRows={2}
-                  value={aiInstructions}
-                  onChange={(e) => setAiInstructions(e.currentTarget.value)}
-                  disabled={!aiEnabled}
-                />
-              </div>
-            </DetailCard>
+                  <Fieldset variant="unstyled" disabled={!canEdit} className="ds-col" style={{ gap: 12 }}>
+                    <Switch
+                      label="Enable AI answers"
+                      description="Allows requests with include_answer to interpret results with the model below."
+                      checked={aiEnabled}
+                      onChange={(e) => setAiEnabled(e.currentTarget.checked)}
+                    />
+                    <Select
+                      label="Model"
+                      placeholder="Select an LLM"
+                      data={models}
+                      value={aiModelKey}
+                      onChange={setAiModelKey}
+                      searchable
+                      clearable
+                      nothingFoundMessage="No LLM models in this project"
+                      disabled={!aiEnabled}
+                    />
+                    <Textarea
+                      label="Extra instructions (optional)"
+                      description="Prepended to the interpretation prompt, e.g. tone or output format."
+                      autosize
+                      minRows={2}
+                      value={aiInstructions}
+                      onChange={(e) => setAiInstructions(e.currentTarget.value)}
+                      disabled={!aiEnabled}
+                    />
+                  </Fieldset>
+                </DetailCard>
 
-            <DetailCard
-              title="Semantic cache"
-              description="Reuse results of similar earlier queries instead of calling the search engine. Entries are isolated per project and instance and depend on the result options (count, offset, language, country, safe search)."
-              actions={
-                <Button
-                  size="xs"
-                  color="teal"
-                  leftSection={<IconDeviceFloppy size={13} stroke={1.7} />}
-                  loading={cacheSaving}
-                  onClick={() => void saveCacheSettings()}
+                <DetailCard
+                  title="Semantic cache"
+                  description="Reuse results of similar earlier queries instead of calling the search engine. Entries are isolated per project and instance and depend on the result options (count, offset, language, country, safe search)."
+                  actions={canEdit ? (
+                    <Button
+                      size="xs"
+                      color="teal"
+                      leftSection={<IconDeviceFloppy size={13} stroke={1.7} />}
+                      loading={cacheSaving}
+                      onClick={() => void saveCacheSettings()}
+                    >
+                      Save
+                    </Button>
+                  ) : undefined}
                 >
-                  Save
-                </Button>
-              }
-            >
-              <div className="ds-col" style={{ gap: 12 }}>
-                <Switch
-                  label="Cache enabled"
-                  description="Embeds each query and searches the selected vector index before calling the search engine."
-                  checked={cacheEnabled}
-                  onChange={(e) => setCacheEnabled(e.currentTarget.checked)}
-                />
-                <Select
-                  label="Vector provider"
-                  placeholder="Select a vector provider"
-                  data={vectorProviders}
-                  value={cacheVectorProvider}
-                  onChange={(value) => {
-                    setCacheVectorProvider(value);
-                    setCacheVectorIndex(null);
-                  }}
-                  searchable
-                  clearable
-                  nothingFoundMessage="No vector providers in this project"
-                  disabled={!cacheEnabled}
-                />
-                <Select
-                  label="Vector index"
-                  placeholder="Select an index"
-                  description="Use an index whose dimension matches the embedding model."
-                  data={vectorIndexes}
-                  value={cacheVectorIndex}
-                  onChange={setCacheVectorIndex}
-                  searchable
-                  clearable
-                  nothingFoundMessage="No indexes for this provider"
-                  disabled={!cacheEnabled || !cacheVectorProvider}
-                />
-                <Select
-                  label="Embedding model"
-                  placeholder="Select an embedding model"
-                  data={embeddingModels}
-                  value={cacheEmbeddingModel}
-                  onChange={setCacheEmbeddingModel}
-                  searchable
-                  clearable
-                  nothingFoundMessage="No embedding models in this project"
-                  disabled={!cacheEnabled}
-                />
-                <NumberInput
-                  label="Similarity threshold"
-                  description="0 to 1. A cached query is reused when its similarity is at least this value."
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  decimalScale={2}
-                  value={cacheThreshold}
-                  onChange={setCacheThreshold}
-                  disabled={!cacheEnabled}
-                />
-              </div>
-            </DetailCard>
+                  <Fieldset variant="unstyled" disabled={!canEdit} className="ds-col" style={{ gap: 12 }}>
+                    <Switch
+                      label="Cache enabled"
+                      description="Embeds each query and searches the selected vector index before calling the search engine."
+                      checked={cacheEnabled}
+                      onChange={(e) => setCacheEnabled(e.currentTarget.checked)}
+                    />
+                    <Select
+                      label="Vector provider"
+                      placeholder="Select a vector provider"
+                      data={vectorProviders}
+                      value={cacheVectorProvider}
+                      onChange={(value) => {
+                        setCacheVectorProvider(value);
+                        setCacheVectorIndex(null);
+                      }}
+                      searchable
+                      clearable
+                      nothingFoundMessage="No vector providers in this project"
+                      disabled={!cacheEnabled}
+                    />
+                    <Select
+                      label="Vector index"
+                      placeholder="Select an index"
+                      description="Use an index whose dimension matches the embedding model."
+                      data={vectorIndexes}
+                      value={cacheVectorIndex}
+                      onChange={setCacheVectorIndex}
+                      searchable
+                      clearable
+                      nothingFoundMessage="No indexes for this provider"
+                      disabled={!cacheEnabled || !cacheVectorProvider}
+                    />
+                    <Select
+                      label="Embedding model"
+                      placeholder="Select an embedding model"
+                      data={embeddingModels}
+                      value={cacheEmbeddingModel}
+                      onChange={setCacheEmbeddingModel}
+                      searchable
+                      clearable
+                      nothingFoundMessage="No embedding models in this project"
+                      disabled={!cacheEnabled}
+                    />
+                    <NumberInput
+                      label="Similarity threshold"
+                      description="0 to 1. A cached query is reused when its similarity is at least this value."
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      decimalScale={2}
+                      value={cacheThreshold}
+                      onChange={setCacheThreshold}
+                      disabled={!cacheEnabled}
+                    />
+                  </Fieldset>
+                </DetailCard>
+              </>
+            ) : null}
 
-            <DetailCard
-              title="Configuration"
-              description="Engine and search settings for this instance."
-              actions={
-                <Button
-                  variant="default"
-                  size="xs"
-                  leftSection={<IconEdit size={13} stroke={1.7} />}
-                  onClick={() => void openEdit()}
-                >
-                  Edit configuration
-                </Button>
-              }
-            >
-              <div className="ds-col" style={{ gap: 8, fontSize: 13 }}>
-                <div className="ds-row-between">
-                  <span className="ds-muted">Engine</span>
-                  <span className="ds-badge">{instance.driver}</span>
-                </div>
-                <div className="ds-row-between">
-                  <span className="ds-muted">Key</span>
-                  <span className="ds-mono">{instance.key}</span>
-                </div>
-                <div className="ds-row-between">
-                  <span className="ds-muted">Status</span>
-                  <StatusBadge status={instance.status === 'active' ? 'active' : 'paused'} />
-                </div>
-                <div className="ds-row-between">
-                  <span className="ds-muted">Credentials</span>
-                  {instance.hasCredentials ? (
-                    <span className="ds-badge ds-badge-ok">configured</span>
-                  ) : (
-                    <span className="ds-faint">none</span>
-                  )}
-                </div>
-                {SETTING_ROWS.map(([name, label]) => {
-                  const value = settingString(instance, name);
-                  return value ? (
-                    <div key={name} className="ds-row-between">
-                      <span className="ds-muted">{label}</span>
-                      <span className="ds-mono">{value}</span>
-                    </div>
-                  ) : null;
-                })}
-                {instance.description && (
-                  <div className="ds-row-between">
-                    <span className="ds-muted">Description</span>
-                    <span>{instance.description}</span>
-                  </div>
-                )}
-              </div>
-            </DetailCard>
+            <ConnectionCard
+              providerKey={view.providerKey}
+              provider={view.provider}
+              canOpenProvider={canManage}
+              scope={instance ? tScope(instance.tenantWide ? 'tenant' : 'project') : undefined}
+            />
           </div>
-          <DetailCard>
-            <ResourceUsageSection type="provider" id={String(instance._id)} />
-          </DetailCard>
-          <DetailCard
-            title="Danger zone"
-            description="Deleting an instance breaks API calls that use its key."
-            danger
-          >
-            <Button
-              color="red"
-              variant="light"
-              size="xs"
-              leftSection={<IconTrash size={13} stroke={1.7} />}
-              onClick={() => void confirmDelete()}
-            >
-              Delete instance
-            </Button>
-          </DetailCard>
+          <div className="ds-col" style={{ gap: 16 }}>
+            <DetailCard>
+              {loaded.kind === 'instance' ? (
+                <ResourceUsageSection type="websearch-instance" id={String(loaded.instance._id)} />
+              ) : (
+                <ResourceUsageSection type="provider" id={String(loaded.provider._id)} />
+              )}
+            </DetailCard>
+            {canEdit ? (
+              <DetailCard title={t('dangerTitle')} description={t('dangerDescription')} danger>
+                <Button
+                  color="red"
+                  variant="light"
+                  size="xs"
+                  leftSection={<IconTrash size={13} stroke={1.7} />}
+                  onClick={() => void confirmDelete()}
+                >
+                  {t('deleteInstance')}
+                </Button>
+              </DetailCard>
+            ) : null}
+          </div>
         </DetailTwoCol>
       ) : null}
 
-      <ProviderConfigModal
-        hideProjects
-        skipAssignStep
-        opened={editOpen}
-        onClose={() => setEditOpen(false)}
-        mode="edit"
-        provider={instance}
-        drivers={drivers}
-        driversLoading={driversLoading}
-        domain="websearch"
-        onSubmit={async (options) => {
-          const updatePayload: Record<string, unknown> = {
-            label: options.values.base.label,
-            description: options.values.base.description,
-            status: options.values.base.status,
-            // The generic form only edits driver settings — preserve aiAnswer and cache.
-            settings: {
-              ...options.values.settings,
-              aiAnswer: aiAnswerOf(instance),
-              ...(instance.settings?.cache ? { cache: instance.settings.cache } : {}),
-            },
-            metadata: options.values.metadata,
-          };
-          if (Object.keys(options.values.credentials).length > 0) {
-            updatePayload.credentials = options.values.credentials;
-          }
-          const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
-            method: 'PATCH',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(updatePayload),
-          });
-          const body = await res.json().catch(() => null);
-          // The refusal names the form field it is about: the edit form marks it.
-          if (!res.ok) throw providerRequestError(body, 'Failed to update instance');
-          notifications.show({ color: 'teal', title: 'Web Search', message: 'Instance updated' });
-          setEditOpen(false);
-          await load();
-        }}
-      />
+      {instance && canEdit ? (
+        <WebSearchInstanceFormModal
+          opened={editOpen}
+          onClose={() => setEditOpen(false)}
+          mode="edit"
+          instance={instance}
+          resetKey={editResetKey}
+          onSaved={() => {
+            setEditOpen(false);
+            void load();
+          }}
+        />
+      ) : null}
+
+      {loaded.kind === 'provider' && canManage ? (
+        <WebSearchInstanceCreate
+          opened={createOpen}
+          onClose={() => setCreateOpen(false)}
+          initialProviderKey={loaded.provider.key}
+          onCreated={(created) => {
+            setCreateOpen(false);
+            // An instance that took this provider's key is now what this page shows.
+            if (created.key === key) void load();
+            else router.push(`/dashboard/websearch/${encodeURIComponent(created.key)}`);
+          }}
+        />
+      ) : null}
 
       <Modal
         opened={logDetail !== null}

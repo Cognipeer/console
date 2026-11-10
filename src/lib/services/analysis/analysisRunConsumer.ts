@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { ANALYSIS_RUN_JOB, ANALYSIS_RUN_QUEUE, runDefinitionJob, type AnalysisRunJobPayload } from './analysisRunJob';
 
@@ -24,8 +25,17 @@ export async function startAnalysisRunQueueConsumer(): Promise<void> {
     ANALYSIS_RUN_QUEUE,
     async (ctx: JobContext<QueuePayload>) => {
       if (ctx.name === ANALYSIS_RUN_JOB) {
-        await runDefinitionJob(ctx.data as unknown as AnalysisRunJobPayload);
-        return { ok: true };
+        const payload = ctx.data as unknown as AnalysisRunJobPayload;
+        // Plan limit (background jobs): one 'job' lease per run; a full pool requeues the run with a delay.
+        const leased = await runJobUnderLease({
+          tenantId: payload.tenantId,
+          holderId: payload.runId,
+          queueName: ANALYSIS_RUN_QUEUE,
+          jobName: ANALYSIS_RUN_JOB,
+          payload,
+          run: () => runDefinitionJob(payload),
+        });
+        return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
       }
       throw new Error(`Unknown analysis job: ${ctx.name}`);
     },

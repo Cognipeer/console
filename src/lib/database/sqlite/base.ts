@@ -89,6 +89,7 @@ export const TABLES = {
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
+  websearchInstances: 'websearch_instances',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -138,6 +139,10 @@ export const TABLES = {
   instanceAssignments: 'instance_assignments',
   // ── Signup gating (main database) ──────────────────────────────────
   betaAccessCodes: 'beta_access_codes',
+  // ── Plan limits usage (main database) ──────────────────────────────
+  planUsageMonthly: 'plan_usage_monthly',
+  planLimitEvents: 'plan_limit_events',
+  planUsagePeaks: 'plan_usage_peaks',
   // ── GPU fleet (tenant database) ───────────────────────────────────
   gpuHosts: 'gpu_hosts',
   gpuSlices: 'gpu_slices',
@@ -366,6 +371,11 @@ export class SQLiteProviderBase {
 
     // Result of the last "Test connection" of a provider (JSON). Nullable, no backfill.
     this.ensureTableColumn(db, TABLES.providers, 'lastTest', 'lastTest TEXT');
+
+    // Platform-provided records visible in every project of the tenant (0/1). Existing rows read as 0.
+    this.ensureTableColumn(db, TABLES.providers, 'platform', 'platform INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.models, 'platform', 'platform INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.models, 'projectIds', 'projectIds TEXT');
 
     // Project membership origin ('manual' | 'directory'). Legacy rows read as
     // NULL, which the mapper treats as 'manual' — no data migration needed.
@@ -1294,6 +1304,9 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'decisionModelKey', 'decisionModelKey TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'source', 'source TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'review', 'review TEXT');
+    // The metered size of an index on a platform vector provider (server-owned).
+    this.ensureTableColumn(db, TABLES.vectorIndexes, 'storedBytes', 'storedBytes INTEGER');
+    this.ensureTableColumn(db, TABLES.vectorIndexes, 'storedVectors', 'storedVectors INTEGER');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);

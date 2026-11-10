@@ -90,7 +90,8 @@ const MODEL_SERVICES: ReadonlySet<QuotaDomain> = new Set<QuotaDomain>([
  * the registry type and, when the type is shared, the attribute that narrows it.
  */
 const REGISTRY_TARGETS: Partial<Record<QuotaDomain, { types: readonly string[]; attributes?: Readonly<Record<string, readonly string[]>> }>> = {
-  websearch: { types: ['provider'], attributes: { type: ['websearch'] } },
+  // The run's search key: an instance key (a migrated instance keeps its provider's key, so stored policies still match).
+  websearch: { types: ['websearch-instance'] },
   rag: { types: ['rag-module'] },
   mcp: { types: ['mcp-server'] },
   rerank: { types: ['reranker'] },

@@ -5624,3 +5624,74 @@ describeForEachProvider('Restricted knowledge marks on stored copies', (getDb) =
     expect(p2.map((l) => l.query)).toEqual(['in p2']);
   });
 });
+
+describeForEachProvider('Web search instances', (getDb) => {
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `wsi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const db = getDb();
+    const tenant = await db.createTenant({ companyName: 'Search Co', slug, dbName: `tenant_${slug}`, licenseType: 'FREE', ownerId: 'pending' });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(`tenant_${slug}`);
+  });
+
+  const base = () => ({
+    tenantId, projectId: 'p1', key: 'docs', name: 'Docs', providerKey: 'conn', status: 'active' as const,
+    settings: { searchDepth: 'advanced', aiAnswer: { enabled: true, modelKey: 'm' } }, createdBy: 'u1',
+  });
+
+  it('creates, finds by key and keeps the behavior JSON', async () => {
+    const db = getDb();
+    const created = await db.createWebSearchInstance({ ...base(), description: 'd', metadata: { a: 1 } });
+    expect(created._id).toBeTruthy();
+    const found = await db.findWebSearchInstanceByKey(tenantId, 'docs');
+    expect(found).toMatchObject({
+      key: 'docs', name: 'Docs', description: 'd', providerKey: 'conn', projectId: 'p1', status: 'active',
+      settings: { searchDepth: 'advanced', aiAnswer: { enabled: true, modelKey: 'm' } }, metadata: { a: 1 },
+    });
+    expect(found?.platform).toBeFalsy();
+    expect(await db.findWebSearchInstanceByKey(tenantId, 'missing')).toBeNull();
+    expect(await db.findWebSearchInstanceByKey('other-tenant', 'docs')).toBeNull();
+  });
+
+  it('refuses a duplicate key within a tenant', async () => {
+    const db = getDb();
+    await db.createWebSearchInstance(base());
+    // MongoDB builds its manifest indexes when a tenant database is first bound; the collection only exists now.
+    const raw = db as unknown as { getTenantDb(): { collection?: unknown } };
+    if (typeof raw.getTenantDb().collection === 'function') {
+      await ensureTenantDbIndexes(raw.getTenantDb() as never, `tenant_${tenantId}-wsi-${Date.now()}`);
+    }
+    await expect(db.createWebSearchInstance({ ...base(), projectId: null })).rejects.toBeTruthy();
+  });
+
+  it('keeps a tenant-wide instance without a project and a platform flag', async () => {
+    const db = getDb();
+    await db.createWebSearchInstance({ ...base(), key: 'wide', projectId: null, platform: true });
+    const found = await db.findWebSearchInstanceByKey(tenantId, 'wide');
+    expect(found?.projectId ?? null).toBeNull();
+    expect(found?.platform).toBe(true);
+  });
+
+  it('updates fields by id and lists by key, optionally by provider', async () => {
+    const db = getDb();
+    const a = await db.createWebSearchInstance(base());
+    await db.createWebSearchInstance({ ...base(), key: 'aaa', providerKey: 'other' });
+    const updated = await db.updateWebSearchInstance(String(a._id), {
+      name: 'Renamed', providerKey: 'other', status: 'disabled', settings: { language: 'en' }, updatedBy: 'u2',
+    });
+    expect(updated).toMatchObject({ key: 'docs', name: 'Renamed', providerKey: 'other', status: 'disabled', settings: { language: 'en' }, updatedBy: 'u2' });
+    expect((await db.listWebSearchInstances(tenantId)).map((i) => i.key)).toEqual(['aaa', 'docs']);
+    expect(await db.listWebSearchInstances(tenantId, { providerKey: 'conn' })).toEqual([]);
+    expect((await db.listWebSearchInstances(tenantId, { providerKey: 'other' })).map((i) => i.key)).toEqual(['aaa', 'docs']);
+  });
+
+  it('deletes by id', async () => {
+    const db = getDb();
+    const a = await db.createWebSearchInstance(base());
+    expect(await db.deleteWebSearchInstance(String(a._id))).toBe(true);
+    expect(await db.deleteWebSearchInstance(String(a._id))).toBe(false);
+    expect(await db.findWebSearchInstanceByKey(tenantId, 'docs')).toBeNull();
+  });
+});

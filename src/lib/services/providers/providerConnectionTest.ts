@@ -1,4 +1,6 @@
 import type { ProviderDomain } from '@/lib/database';
+import { isManagedProviderRecord } from '@/enterprise/managed-credits';
+import { ManagedProviderReadOnlyError } from './managedProviderErrors';
 import { providerRegistry } from '@/lib/providers';
 import type { FileConnectionCheck, FileProviderRuntime } from '@/lib/providers/domains/file';
 import type { VectorProviderRuntime } from '@/lib/providers/domains/vector';
@@ -370,6 +372,10 @@ export async function testProviderConnection(
   input: ProviderTestInput,
   deps: ProviderTestDeps = {},
 ): Promise<ProviderTestResult> {
+  // A managed provider has no tenant-held connection to test.
+  if (isManagedProviderRecord({ key: input.providerKey, driver: input.driver, type: input.type, settings: input.settings })) {
+    throw new ManagedProviderReadOnlyError();
+  }
   const settings = input.settings ?? {};
   const timeoutMs = deps.timeoutMs ?? PROVIDER_TEST_TIMEOUT_MS;
   const secrets = secretsOf(input.credentials);
