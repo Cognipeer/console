@@ -458,7 +458,8 @@ function applyScope(
     case 'strict-project':
     default:
       if (def.callerScoped && project === null) return candidates;
-      return candidates.filter((c) => c.projectId === project);
+      // A row in several projects (a platform model added to some) counts in each of them.
+      return candidates.filter((c) => c.projectId === project || (project !== null && (c.projectIds?.includes(project) ?? false)));
   }
 }
 

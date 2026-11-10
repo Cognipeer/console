@@ -10,6 +10,7 @@ import { getDatabase } from '@/lib/database';
 import { getDefaultPlanClaim, getRestrictedPlanClaim } from '@/enterprise/plan-limits';
 import { LicenseManager } from '@/lib/license/license-manager';
 import type { LicensePlanClaim, LicensePlanMonthlyLimits } from '@/lib/license/planClaim';
+import { planStateVersion } from './invalidate';
 import { effectivePlanLimitsMode, planLimitsActive } from './mode';
 import type { PlanLimitsMode, ResolvedTenantPlan, TenantLimits } from './types';
 
@@ -29,7 +30,7 @@ const CACHE_TTL_MS = 30_000;
 const CACHE_MAX_ENTRIES = 10_000;
 const LOG_EVERY_MS = 60_000;
 
-const cache = new Map<string, { at: number; value: ResolvedTenantPlan }>();
+const cache = new Map<string, { at: number; value: ResolvedTenantPlan; version?: string }>();
 let lastLoadFailureLogAt = 0;
 
 /**
@@ -78,9 +79,9 @@ export function limitsFromPlanClaim(
   };
 }
 
-function remember(tenantId: string, value: ResolvedTenantPlan): void {
+function remember(tenantId: string, value: ResolvedTenantPlan, version?: string): void {
   if (cache.has(tenantId)) cache.delete(tenantId);
-  cache.set(tenantId, { at: Date.now(), value });
+  cache.set(tenantId, { at: Date.now(), value, version });
   while (cache.size > CACHE_MAX_ENTRIES) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
@@ -91,8 +92,10 @@ function remember(tenantId: string, value: ResolvedTenantPlan): void {
 export async function resolveTenantPlan(tenantId: string): Promise<ResolvedTenantPlan> {
   if (!planLimitsActive()) return { tenantId, mode: 'off', limits: null };
 
+  const version = await planStateVersion(tenantId);
   const hit = cache.get(tenantId);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+  // Another replica changed the license: its bump of the shared version drops this replica's entry too.
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS && (version === undefined || hit.version === version)) return hit.value;
 
   try {
     const db = await getDatabase();
@@ -107,7 +110,7 @@ export async function resolveTenantPlan(tenantId: string): Promise<ResolvedTenan
       mode,
       limits: claim ? limitsFromPlanClaim(claim, license.plan ? 'license' : 'default', license.expiresAt) : null,
     };
-    remember(tenantId, value);
+    remember(tenantId, value, version);
     return value;
   } catch (error) {
     const now = Date.now();

@@ -132,6 +132,11 @@ export interface VectorProviderRuntime {
    */
   existingVectorIds?(handle: VectorIndexHandle, ids: string[]): Promise<string[]>;
   /**
+   * Which of `ids` exist, each with its stored metadata (no values). Optional: the metering of a platform provider
+   * takes a replaced or deleted vector off by its real size when the driver can give it.
+   */
+  existingVectors?(handle: VectorIndexHandle, ids: string[]): Promise<Array<{ id: string; metadata?: Record<string, unknown> }>>;
+  /**
    * Paginate through all vectors stored in an index.
    * Providers that cannot support this operation should throw an Error with
    * message containing "not supported".

@@ -116,7 +116,9 @@ export function computeBanners(input: BannerInput): UsageBanner[] {
   if (credits) {
     const granted = credits.included.granted;
     // Banner numbers for credits: used = what is left, limit = what the month granted.
-    if (credits.balance <= 0) {
+    // A plan without included credits that never had a lot or spend is not "out of credits".
+    const everHad = granted > 0 || credits.prepaid.lots > 0 || credits.runwayDays !== undefined;
+    if (credits.balance <= 0 && everHad) {
       banners.push({ id: 'credits', severity: 'critical', dimension: 'credits', used: credits.balance, limit: granted });
     } else if (granted > 0 && credits.balance <= granted * 0.05) {
       banners.push({ id: 'credits', severity: 'warning', dimension: 'credits', used: credits.balance, limit: granted });

@@ -12,7 +12,7 @@ export type PlanLimitErrorCode =
   | 'tenant_rate_limited'
   /** No free slot (agent session, flow, job, browser, realtime, sandbox). 429 + Retry-After. */
   | 'tenant_concurrency_limited'
-  /** Calendar-month allowance used up. 429 + Retry-After (seconds to the next month) + X-Allowance-Name. */
+  /** Calendar-month allowance used up. 402 + X-Allowance-Name; no Retry-After (not transient: SDKs must not retry). */
   | 'monthly_allowance_exhausted'
   /** Not enough credits for a managed model or service. 402. */
   | 'insufficient_credits'
@@ -22,7 +22,7 @@ export type PlanLimitErrorCode =
   | 'context_over_credit_cap'
   /** Stored bytes would pass the plan's storage. 413. */
   | 'storage_quota_exceeded'
-  /** Seat count reached. 429. */
+  /** Seat count reached. 402 (not transient: SDKs must not retry). */
   | 'seat_limit_reached'
   /** The plan does not include this feature. 402. */
   | 'plan_feature_unavailable';
@@ -30,12 +30,12 @@ export type PlanLimitErrorCode =
 export const PLAN_LIMIT_STATUS: Readonly<Record<PlanLimitErrorCode, number>> = {
   tenant_rate_limited: 429,
   tenant_concurrency_limited: 429,
-  monthly_allowance_exhausted: 429,
+  monthly_allowance_exhausted: 402,
   insufficient_credits: 402,
   credits_unavailable: 503,
   context_over_credit_cap: 413,
   storage_quota_exceeded: 413,
-  seat_limit_reached: 429,
+  seat_limit_reached: 402,
   plan_feature_unavailable: 402,
 };
 
@@ -50,12 +50,12 @@ export type PlanLimitErrorType =
 export const PLAN_LIMIT_ERROR_TYPE: Readonly<Record<PlanLimitErrorCode, PlanLimitErrorType>> = {
   tenant_rate_limited: 'rate_limit_error',
   tenant_concurrency_limited: 'rate_limit_error',
-  monthly_allowance_exhausted: 'rate_limit_error',
+  monthly_allowance_exhausted: 'insufficient_quota',
   insufficient_credits: 'insufficient_quota',
   credits_unavailable: 'api_error',
   context_over_credit_cap: 'invalid_request_error',
   storage_quota_exceeded: 'invalid_request_error',
-  seat_limit_reached: 'rate_limit_error',
+  seat_limit_reached: 'insufficient_quota',
   plan_feature_unavailable: 'permission_error',
 };
 
@@ -102,10 +102,13 @@ export function isPlanLimitError(error: unknown): error is PlanLimitError {
       && typeof (error as { code?: unknown }).code === 'string' && (error as { code: string }).code in PLAN_LIMIT_STATUS);
 }
 
+const TRANSIENT_CODES: ReadonlySet<PlanLimitErrorCode> = new Set(['tenant_rate_limited', 'tenant_concurrency_limited', 'credits_unavailable']);
+
 /** Response headers for a refusal. */
 export function planLimitHeaders(error: PlanLimitError): Record<string, string> {
   const headers: Record<string, string> = { 'x-cognipeer-error-code': error.code };
-  if (error.retryAfterMs !== undefined && error.retryAfterMs >= 0) {
+  // Retry-After only where waiting helps: the OpenAI and Anthropic SDKs retry on it, and they must not retry a used-up allowance.
+  if (TRANSIENT_CODES.has(error.code) && error.retryAfterMs !== undefined && error.retryAfterMs >= 0) {
     headers['Retry-After'] = String(Math.max(1, Math.ceil(error.retryAfterMs / 1000)));
   }
   if (error.code === 'tenant_rate_limited' && error.limit !== undefined) {

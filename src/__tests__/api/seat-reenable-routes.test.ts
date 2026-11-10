@@ -1,7 +1,7 @@
 /**
  * Re-enabling a disabled account takes a seat again:
  * POST /users/:id/enable (session) and POST /client/v1/members/:id/enable (token).
- * on: refused with 429 seat_limit_reached and nothing is written; shadow: enabled and the
+ * on: refused with 402 seat_limit_reached and nothing is written; shadow: enabled and the
  * would-be refusal recorded; off: no seat is even counted. Accounts that take no seat are not checked.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -140,7 +140,7 @@ describe('seats when a disabled account is re-enabled', () => {
     it('is refused when every seat is in use (on), and nothing is written', async () => {
       setPlan('on', { console: 3, portal: 3 });
       const res = await enable('off-console');
-      expect(res.statusCode).toBe(429);
+      expect(res.statusCode).toBe(402);
       expect(res.headers['x-cognipeer-error-code']).toBe('seat_limit_reached');
       expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ code: 'seat_limit_reached', dimension: 'console' });
       expect(db.updateUser).not.toHaveBeenCalled();
@@ -149,7 +149,7 @@ describe('seats when a disabled account is re-enabled', () => {
     it('takes a portal seat for a portal user, counted against portal roles', async () => {
       setPlan('on', { console: 1, portal: 3 });
       const res = await enable('off-portal');
-      expect(res.statusCode).toBe(429);
+      expect(res.statusCode).toBe(402);
       expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ dimension: 'portal' });
       expect(db.iamCountUsers).toHaveBeenCalledWith(expect.objectContaining({ roles: ['portal_user'] }));
     });
@@ -180,6 +180,53 @@ describe('seats when a disabled account is re-enabled', () => {
       setPlan('on', { console: 3 });
       expect((await enable('off-nologin')).statusCode).toBe(200);
       expect((await enable('on-console')).statusCode).toBe(200);
+      expect(db.iamCountUsers).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /users/bulk enable', () => {
+    const OFF = ['off-console', 'off-console-2', 'off-console-3'];
+    let used: number;
+    beforeEach(() => {
+      used = 3;
+      db.findUserById.mockImplementation(async (id: string) =>
+        (USERS[id] ? { ...USERS[id] } : OFF.includes(id) ? { ...USERS['off-console'], _id: id } : null) as never);
+      // The live count follows the enables already written.
+      db.iamCountUsers.mockImplementation(async () => used as never);
+      db.updateUser.mockImplementation(async (id: string, patch: { status?: string }) => {
+        if (patch.status === 'active') used += 1;
+        return { ...USERS['off-console'], _id: id, ...patch } as never;
+      });
+    });
+    const bulk = (dryRun: boolean) =>
+      usersApp.inject({ method: 'POST', url: '/api/users/bulk', headers: SESSION_HEADERS, payload: JSON.stringify({ action: 'enable', ids: OFF, dryRun }) });
+
+    it.each([false, true])('enables only as many as there are free seats (dryRun %s)', async (dryRun) => {
+      setPlan('on', { console: 5 });
+      const res = await bulk(dryRun);
+      expect(res.statusCode).toBe(200);
+      const results = parseJsonBody<{ results: Array<{ id: string; outcome: string; code?: string }> }>(res.body).results;
+      expect(results.map((r) => r.outcome)).toEqual(['ok', 'ok', 'skipped']);
+      expect(results[2]).toMatchObject({ code: 'seat_limit_reached' });
+      expect(db.updateUser.mock.calls.filter((call) => (call[1] as { status?: string }).status === 'active')).toHaveLength(dryRun ? 0 : 2);
+    });
+  });
+
+  describe('PATCH /users/:id role', () => {
+    const patchRole = (id: string, role: string) =>
+      usersApp.inject({ method: 'PATCH', url: `/api/users/${id}`, headers: SESSION_HEADERS, payload: JSON.stringify({ role }) });
+
+    it('takes a portal seat when a console user becomes a portal user', async () => {
+      setPlan('on', { console: 10, portal: 3 });
+      const res = await patchRole('on-console', 'portal_user');
+      expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ code: 'seat_limit_reached', dimension: 'portal' });
+      expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it('takes no seat for a role of the same kind', async () => {
+      setPlan('on', { console: 3, portal: 3 });
+      const res = await patchRole('on-console', 'project_admin');
+      expect(res.statusCode).toBe(200);
       expect(db.iamCountUsers).not.toHaveBeenCalled();
     });
   });

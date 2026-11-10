@@ -53,6 +53,8 @@ const SLUG_OPTIONS = {
 };
 
 const MAX_KEY_ATTEMPTS = 50;
+/** The key prefix of platform models (the hosting layer seeds them through the database, not through this service). */
+const PLATFORM_MODEL_KEY_PREFIX = 'cognipeer.';
 const MODEL_CATEGORY_CAPABILITY_KEY = 'model.categories';
 
 function attachDriverCapabilities(provider: ProviderConfigView): ModelProviderView {
@@ -189,6 +191,10 @@ async function generateUniqueKey(
   await db.switchToTenant(tenantDbName);
 
   const base = normalizeKeyCandidate(desiredKey);
+  // Reserved: a tenant model under it would shadow a platform model of that name and re-run platform seeding.
+  if (base.startsWith(PLATFORM_MODEL_KEY_PREFIX)) {
+    throw new ModelCapabilityValidationError(`Model keys starting with "${PLATFORM_MODEL_KEY_PREFIX}" are reserved for platform models.`);
+  }
   let attempt = 0;
   let candidate = base;
 

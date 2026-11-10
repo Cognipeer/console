@@ -3878,6 +3878,7 @@ export const en = {
     },
     pricing: {
       title: 'Pricing per 1M tokens',
+      credits: 'Credits',
     },
     sections: {
       overview: 'Model overview',

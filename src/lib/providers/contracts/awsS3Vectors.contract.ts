@@ -759,6 +759,24 @@ export const AwsS3VectorsProviderContract: ProviderContract<
                 }
                 return found;
             },
+            async existingVectors(handle: VectorIndexHandle, ids: string[]) {
+                const source = extractIndexSource(handle);
+                const found: Array<{ id: string; metadata?: Record<string, unknown> }> = [];
+                for (let start = 0; start < ids.length; start += GET_VECTORS_MAX_KEYS) {
+                    const response = await client.send(
+                        new GetVectorsCommand({
+                            indexArn: source.indexArn,
+                            keys: ids.slice(start, start + GET_VECTORS_MAX_KEYS),
+                            returnData: false,
+                            returnMetadata: true,
+                        }),
+                    );
+                    for (const vector of response.vectors ?? []) {
+                        if (vector.key) found.push({ id: vector.key, metadata: vector.metadata as Record<string, unknown> | undefined });
+                    }
+                }
+                return found;
+            },
             async queryVectors(handle: VectorIndexHandle, query: VectorQueryInput): Promise<VectorQueryResult> {
                 const source = extractIndexSource(handle);
                 const response = await client.send(

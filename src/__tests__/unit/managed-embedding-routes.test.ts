@@ -26,6 +26,7 @@ vi.mock('@/lib/services/models/usageLogger', () => ({
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
+import { resetAllCircuits } from '@/lib/core/resilience';
 
 const poolModel = () => ({
   _id: 'm1',
@@ -157,6 +158,15 @@ describe('managed embeddings through routes', () => {
     expect(JSON.stringify({ message: (failure as Error).message, ...(failure as object) })).not.toMatch(/upstream|acct_123|host-a/);
     expect(lease.release).toHaveBeenCalledTimes(1);
     expect(lease.settle).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 404])('an upstream %i (operator setup) reaches the caller as model unavailable', async (status) => {
+    installHost();
+    resetAllCircuits(); // earlier failures of the same route must not open its breaker
+    routes = [ROUTE_A];
+    wireEmbedders({ 'conn-a': fail(status, 'invalid api key for deployment upstream-a') });
+    const failure = await call().catch((error: Error) => error);
+    expect(failure).toMatchObject({ message: 'This model is not available right now.', status: 503 });
   });
 
   it('a runtime that cannot be built for a managed route is generic too', async () => {

@@ -85,6 +85,14 @@ describe('createWebSearchInstance', () => {
     await expect(make('docs', { projectId: null })).rejects.toBeInstanceOf(WebSearchInstanceKeyExistsError);
   });
 
+  it('refuses the key of a web search provider, platform ones included, as a taken key', async () => {
+    await provider('hosted', { driver: 'hosted-search', platform: true });
+    for (const key of ['conn-a', 'hosted']) {
+      await expect(make(key)).rejects.toMatchObject({ name: 'ProviderKeyExistsError', code: 'duplicate_key' });
+    }
+    expect(await db.findWebSearchInstanceByKey(T, 'conn-a')).toBeNull();
+  });
+
   it('refuses a key the managed host reserves', async () => {
     registerManagedCreditsHost({
       isManagedProvider: (ref: { key: string }) => ref.key === 'reserved',
@@ -124,12 +132,25 @@ describe('createWebSearchInstance', () => {
 
   it('validates the key, the name, the cache shape and connection fields', async () => {
     await expect(make('a/b')).rejects.toBeInstanceOf(ProviderSettingsError);
+    for (const key of ['has space', 'Upper', 'under_score', 'a'.repeat(65)]) {
+      await expect(make(key)).rejects.toMatchObject({ field: 'key' });
+    }
+    await expect(make('a'.repeat(64))).resolves.toBeTruthy();
     await expect(make('ok', { name: ' ' })).rejects.toBeInstanceOf(ProviderSettingsError);
     await expect(make('ok', { settings: { cache: { enabled: 'yes' } } })).rejects.toBeInstanceOf(WebSearchCacheConfigError);
     await provider('searx', { driver: 'searxng' });
     await expect(make('ok', { providerKey: 'searx', settings: { baseUrl: 'https://x.example' } }))
       .rejects.toThrow(/belongs to the provider connection/);
     await expect(make('ok', { providerKey: 'searx', settings: { engines: 'a,b' } })).resolves.toBeTruthy();
+  });
+
+  it('refuses search options a search does not understand, on create and update', async () => {
+    for (const [field, value] of [['safeSearch', 'banana'], ['searchDepth', { deep: true }], ['count', 'lots'], ['count', 0]]) {
+      await expect(make('bad', { settings: { [field as string]: value } })).rejects.toMatchObject({ field });
+    }
+    await make('good', { settings: { safeSearch: 'off', searchDepth: 'basic', count: 5 } });
+    await expect(updateWebSearchInstance(TENANT_DB, T, 'good', { settings: { safeSearch: 'banana' } }))
+      .rejects.toMatchObject({ field: 'safeSearch' });
   });
 
   it('accepts the search options of the hosted form on a platform provider', async () => {

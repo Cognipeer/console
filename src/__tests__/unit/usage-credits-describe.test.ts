@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { describeCreditEntry, utcMonth, type CreditLedgerEntry } from '@/components/usage/creditsApi';
+import { redeemErrorCode } from '@/components/usage/UsageCreditsTab';
+import { ApiError } from '@/lib/api/client';
 
 /** Echoes the key and its values, so the assertions read the structure, not a language. */
 const t = (key: string, values?: Record<string, string | number>) =>
@@ -57,5 +59,12 @@ describe('utcMonth', () => {
     const date = new Date('2026-01-15T12:00:00Z');
     expect(utcMonth(date)).toBe('2026-01');
     expect(utcMonth(date, 1)).toBe('2025-12');
+  });
+});
+
+describe('redeemErrorCode', () => {
+  it('names a voided code instead of the generic failure', () => {
+    expect(redeemErrorCode(new ApiError('void', 409, { code: 'code_void' }))).toBe('code_void');
+    expect(redeemErrorCode(new ApiError('odd', 409, { code: 'something_else' }))).toBe('unknown');
   });
 });

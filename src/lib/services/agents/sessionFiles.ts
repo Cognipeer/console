@@ -59,7 +59,7 @@ import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
-import { assertStorageStock, isPlanLimitError, noteStoredBytes } from '@/lib/limits';
+import { assertStorageStock, isPlanLimitError } from '@/lib/limits';
 import { AgentAttachmentError } from './agentErrors';
 import {
     FILE_OUTPUT_TYPES,
@@ -432,7 +432,6 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
             uploadedBy: actor.userId,
         },
     });
-    noteStoredBytes(scope.tenantId, buffer.length);
     return toSessionFileView(result.record);
 }
 
@@ -508,7 +507,6 @@ export async function saveAgentOutputFile(input: {
             origin: 'agent_output',
         },
     });
-    noteStoredBytes(input.scope.tenantId, input.data.length);
     if (input.turn) input.turn.saved += 1;
     return { ...toMessageAttachment(result.record), origin: 'agent_output' };
 }
@@ -556,7 +554,6 @@ export async function appendAgentOutputFile(input: {
         updatedBy: input.actorId,
         convertToMarkdown: false,
     });
-    noteStoredBytes(input.scope.tenantId, input.data.length);
     return { ...toMessageAttachment(updated), origin: 'agent_output' };
 }
 

@@ -119,12 +119,12 @@ describe('crawl job runner and the monthly crawler-page allowance', () => {
 });
 
 describe('starting a crawl against the allowance', () => {
-  it('refuses with monthly_allowance_exhausted (429) when used up in on mode', async () => {
+  it('refuses with monthly_allowance_exhausted (402) when used up in on mode', async () => {
     setPlan('on', 10);
     h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 10 });
     await expect(assertMonthlyAllowance({ tenantId: 'tenant-1', meter: 'crawlerPages' })).rejects.toMatchObject({
       code: 'monthly_allowance_exhausted',
-      status: 429,
+      status: 402,
     });
   });
 

@@ -83,7 +83,7 @@ import {
   WebSearchInstanceKeyExistsError,
   WebSearchInstanceNotFoundError,
 } from '@/lib/services/webSearch/webSearchInstanceService';
-import { ProviderSettingsError } from '@/lib/providers/errors';
+import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
 import {
   ManagedProviderReadOnlyError,
   PlatformRecordReadOnlyError,
@@ -247,6 +247,7 @@ describe('instance routes (dashboard)', () => {
 
   it.each([
     ['key exists', () => new WebSearchInstanceKeyExistsError('k'), 409],
+    ['key of a provider', () => new ProviderKeyExistsError('k'), 409],
     ['not found', () => new WebSearchInstanceNotFoundError('k'), 404],
     ['platform read-only', () => new PlatformRecordReadOnlyError(), 403],
     ['managed read-only', () => new ManagedProviderReadOnlyError(), 403],
@@ -262,6 +263,23 @@ describe('instance routes (dashboard)', () => {
       payload: JSON.stringify({ key: 'k', name: 'N', providerKey: 'brave-conn' }),
     });
     expect(res.statusCode).toBe(status);
+  });
+
+  it('refuses an unknown status on create and update instead of making it active', async () => {
+    const app = await createFastifyApiTestApp(websearchApiPlugin);
+    const created = await app.inject({
+      method: 'POST', url: '/api/websearch/instances', headers: JSON_HEADERS,
+      payload: JSON.stringify({ key: 'k', name: 'N', providerKey: 'brave-conn', status: 'paused' }),
+    });
+    expect(created.statusCode).toBe(400);
+    expect(parseJsonBody<{ field: string }>(created.body).field).toBe('status');
+    const updated = await app.inject({
+      method: 'PATCH', url: '/api/websearch/instances/brave-main', headers: JSON_HEADERS,
+      payload: JSON.stringify({ status: 42 }),
+    });
+    expect(updated.statusCode).toBe(400);
+    expect(createWebSearchInstance).not.toHaveBeenCalled();
+    expect(updateWebSearchInstance).not.toHaveBeenCalled();
   });
 
   it('gets one instance and 404s for an unknown one', async () => {

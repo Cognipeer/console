@@ -56,7 +56,7 @@ import {
   isManagedModel,
   type ManagedCreditLease,
 } from '@/enterprise/managed-credits';
-import { executeModelCall } from './gatewayCore';
+import { executeModelCall, MANAGED_CONFIG_STATUSES } from './gatewayCore';
 import { sanitizeForLogging } from './gatewayRequest';
 import type { ModelCallInput, ModelCallOutcome } from './gatewayTypes';
 
@@ -378,6 +378,8 @@ const MANAGED_MODEL_UNAVAILABLE = 'This model is not available right now.';
 function managedEmbeddingError(error: unknown, signal?: AbortSignal): unknown {
   if (isPlanLimitError(error) || error instanceof InvalidRequestError || signal?.aborted) return error;
   const status = normalizeInferenceError(error).status;
+  // The tenant owns no credentials: an upstream auth, permission or not-found answer is the operator's configuration.
+  if (MANAGED_CONFIG_STATUSES.has(status)) return new UpstreamRequestError(MANAGED_MODEL_UNAVAILABLE, 503);
   return new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
 }
 

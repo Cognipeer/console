@@ -58,7 +58,7 @@ import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import { assertAgentsEnabled } from './agentServiceAvailability';
 import { ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { abortLocalTurns, watchTurnCancellation } from './turnWatch';
-import { agentRunOrigin, tryAcquireAgentSessionSlot, type AgentSessionSlot } from './agentSessionLease';
+import { acquireAgentSessionSlot, agentRunOrigin, tryAcquireAgentSessionSlot, type AgentSessionSlot } from './agentSessionLease';
 
 export { agentDefaultCallback } from './agentCallbackConfig';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
@@ -921,13 +921,27 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
         await db.deleteAgentRun(String(inserted._id)).catch(() => undefined);
         return { kind: 'concurrency_limit', ...cap, runClass };
       }
+      // Plan limit (agent sessions): a messaging turn is a sync turn and waits for a slot like one; client API
+      // runs take none. The dashboard and portal call the engine directly with their own slot, never through here.
+      let slot: AgentSessionSlot;
+      try {
+        slot = await acquireAgentSessionSlot({
+          tenantId: input.tenantId,
+          holderId: String(inserted._id),
+          origin: agentRunOrigin(inserted),
+          ...(execution.signal ? { signal: execution.signal } : {}),
+        });
+      } catch (error) {
+        await db.deleteAgentRun(String(inserted._id)).catch(() => undefined);
+        throw error;
+      }
 
       try {
         execution.onStarted?.(inserted);
       } catch (error) {
         logger.warn('Inline run start hook failed', { runId: inserted._id, error: error instanceof Error ? error.message : String(error) });
       }
-      const handle = executeInlineRun(db, inserted, input, execution, limits.maxDurationMs);
+      const handle = executeInlineRun(db, inserted, input, execution, limits.maxDurationMs, slot);
       if (execution.stream) return inlineOutcome(await handle.settled);
       const window = delaySentinel(execution.waitMs, WINDOW_SENTINEL);
       try {
@@ -1052,6 +1066,7 @@ function executeInlineRun(
   input: StartAgentRunInput,
   execution: Extract<StartAgentRunExecution, { kind: 'inline' }>,
   maxDurationMs: number,
+  slot: AgentSessionSlot,
 ): { settled: Promise<InlineSettlement>; detach: () => Promise<IAgentRun | null> } {
   const cfg = getConfig();
   const runId = String(run._id);
@@ -1238,6 +1253,7 @@ function executeInlineRun(
       watch.stop();
       execution.signal?.removeEventListener('abort', onDisconnect);
       activeLocalRuns.delete(runId);
+      await slot.release();
     }
   })();
 

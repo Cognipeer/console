@@ -1,5 +1,5 @@
 /**
- * Seat limits at the places a seat is taken: the refusal is 429 `seat_limit_reached` with the plan-limit envelope,
+ * Seat limits at the places a seat is taken: the refusal is 402 `seat_limit_reached` with the plan-limit envelope,
  * shadow mode allows and records, off mode counts nothing.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -53,7 +53,7 @@ describe('seats at invitation, user creation and role change', () => {
   it('refuses a console seat when all are in use (on), counting console roles only', async () => {
     setPlan('on', { console: 3, portal: 10 });
     h.db.iamCountUsers.mockResolvedValue(3);
-    await expect(assertSeats({ tenantId: 't1', kind: 'console' })).rejects.toMatchObject({ code: 'seat_limit_reached', status: 429 });
+    await expect(assertSeats({ tenantId: 't1', kind: 'console' })).rejects.toMatchObject({ code: 'seat_limit_reached', status: 402 });
     expect(h.db.iamCountUsers).toHaveBeenCalledWith(
       expect.objectContaining({ tenantId: 't1', canLogin: true, roles: ['owner', 'admin', 'project_admin', 'user'] }),
     );
@@ -92,7 +92,7 @@ describe('sendPlanLimitRefusal', () => {
     const error = await assertSeats({ tenantId: 't1', kind: 'console' }).catch((e) => e);
     const { reply, sent } = fakeReply();
     expect(sendPlanLimitRefusal(reply, error)).toBe(reply);
-    expect(sent.status).toBe(429);
+    expect(sent.status).toBe(402);
     expect(sent.headers['x-cognipeer-error-code']).toBe('seat_limit_reached');
     expect(sent.body).toMatchObject({ code: 'seat_limit_reached', kind: 'seats', dimension: 'console', limit: 1, used: 1 });
     expect(sendPlanLimitRefusal(fakeReply().reply, new Error('x'))).toBeNull();

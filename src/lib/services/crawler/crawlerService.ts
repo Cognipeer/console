@@ -8,6 +8,7 @@
 
 import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
 import { assertMonthlyAllowance } from '@/lib/limits';
+import { concurrencyRefusal, releaseQuietly, tryPoolLease } from '@/lib/services/planLeases';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
@@ -544,16 +545,38 @@ async function dispatchRun(
         jobName: 'crawler.run',
       },
       payload,
-      async () => {
-        // Local fast path – import lazily to avoid a service ↔ consumer
-        // import cycle at module load.
-        const { runCrawlJobLocal } = await import('./crawlerJobService');
-        await runCrawlJobLocal(ctx, jobId);
-      },
+      () => runSyncCrawlLocal(ctx, jobId),
     );
   } else {
+    await runSyncCrawlLocal(ctx, jobId);
+  }
+}
+
+/**
+ * A sync run in this request holds a 'crawler' lease like the queue consumer does, but a full pool refuses it
+ * (`tenant_concurrency_limited`) instead of requeueing: the caller is waiting. The refused job is failed so the
+ * startup reconciler does not run it later behind the caller's back.
+ */
+async function runSyncCrawlLocal(ctx: CrawlerContext, jobId: string): Promise<void> {
+  const attempt = await tryPoolLease({
+    tenantId: ctx.tenantId,
+    pool: 'crawler',
+    holderId: jobId,
+    source: { type: 'job', id: jobId },
+  });
+  if (attempt.refused) {
+    const refusal = concurrencyRefusal('crawler', attempt.decision, 'crawler jobs');
+    const db = await withTenantDb(ctx.tenantDbName);
+    await db.updateCrawlJob(jobId, { status: 'failed', endedAt: new Date(), errorMessage: refusal.message }).catch(() => undefined);
+    throw refusal;
+  }
+  try {
+    // Local fast path – import lazily to avoid a service ↔ consumer
+    // import cycle at module load.
     const { runCrawlJobLocal } = await import('./crawlerJobService');
     await runCrawlJobLocal(ctx, jobId);
+  } finally {
+    await releaseQuietly(attempt.lease);
   }
 }
 

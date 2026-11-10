@@ -12,7 +12,7 @@ import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { listManagedRoutes } from '@/enterprise/managed-credits';
-import { assertStorageStock, noteStoredBytes } from '@/lib/limits/storage';
+import { noteStoredBytes, withStorageReservation } from '@/lib/limits/storage';
 import type { PlanLimitSource } from '@/lib/limits/types';
 import { getManagedStorageRuntime, loadStorageProvider } from '@/lib/services/storage/managedStorage';
 import {
@@ -124,12 +124,13 @@ function toIndexView(index: VectorIndexRecord, platform: boolean): VectorIndexVi
   return rest;
 }
 
-function ensureVectorProvider(record: IProviderRecord): void {
+function ensureVectorProvider(record: IProviderRecord, platform = false): void {
   if (record.type !== 'vector') {
     throw new Error('Provider configuration is not a vector provider.');
   }
 
-  if (record.status !== 'active') {
+  // A switched-off platform provider still reads and deletes: its runtime refuses the writes (managedStorage).
+  if (record.status !== 'active' && !platform) {
     throw new Error('Vector provider is not active.');
   }
 }
@@ -163,7 +164,7 @@ async function buildRuntimeContext(
     const loaded = await loadStorageProvider('vector', { tenantDbName, tenantId, providerKey, projectId });
     const { record, credentials } = loaded;
 
-    ensureVectorProvider(record);
+    ensureVectorProvider(record, Boolean(loaded.managed));
 
     if (loaded.managed) {
       const runtime = await getManagedStorageRuntime<VectorProviderRuntime>('vector', { ...loaded, managed: loaded.managed }, { tenantId, projectId });
@@ -771,39 +772,35 @@ export async function upsertVectors(
   const items = platform ? dedupeUpsertItems(request.vectors) : request.vectors;
   validateVectors(index, items);
 
-  // What a platform provider stores counts against the plan storage: checked before the write, counted after it.
-  // The check uses the full estimate (a replaced id is counted as new there: erring high is fine).
-  const estimate = platform ? estimateUpsertBytes(index.dimension, items) : 0;
-  let replaced = new Set<string>();
-  if (platform) {
-    const source: PlanLimitSource = request.updatedBy ? { type: 'user', id: request.updatedBy } : { type: 'system' };
-    await assertStorageStock({ tenantId, incomingBytes: estimate, source });
-    // Which ids the write replaces is asked before it. Unknown: every id counts as new (the high side).
-    replaced = new Set(await findExistingIds(runtime, index, items.map((item) => String(item.id))) ?? []);
-  }
-
-  await withResilience(
+  const write = () => withResilience(
     () => runtime.upsertVectors(toRuntimeHandle(index), items),
     { key: `vector-upsert:${request.providerKey}` },
   );
+  if (!platform) {
+    await write();
+    return;
+  }
 
-  if (platform) {
-    // A new id adds its estimate and one vector. A replaced id changes the size by the difference to the average
-    // (it may shrink the index) and adds no vector.
-    const average = index.storedVectors ? (index.storedBytes ?? 0) / index.storedVectors : 0;
+  // What a platform provider stores counts against the plan storage: what the write adds is checked and held for it,
+  // then counted on the index. A new id adds its estimate and one vector; a replaced id adds the difference to what it
+  // was counted at (it may shrink the index) and no vector. Which ids the write replaces is asked first (unknown:
+  // every id counts as new, the high side). One index meters one write at a time: two that replace the same id
+  // would each take its old size off.
+  await meteredInTurn(`${tenantId}:${request.providerKey}:${index.key}`, async () => {
+    const existing = await findExistingSizes(runtime, index, items.map((item) => String(item.id))) ?? new Map<string, number>();
     let bytes = 0;
     let vectors = 0;
     for (const item of items) {
-      const itemBytes = estimateUpsertBytes(index.dimension, [item]);
-      if (replaced.has(String(item.id))) {
-        bytes += itemBytes - Math.round(average);
-      } else {
-        bytes += itemBytes;
-        vectors += 1;
-      }
+      const before = existing.get(String(item.id));
+      bytes += estimateUpsertBytes(index.dimension, [item]) - (before ?? 0);
+      if (before === undefined) vectors += 1;
     }
-    await adjustStoredSize(db, tenantId, index, bytes, vectors);
-  }
+    const source: PlanLimitSource = request.updatedBy ? { type: 'user', id: request.updatedBy } : { type: 'system' };
+    await withStorageReservation({ tenantId, incomingBytes: bytes, source }, async () => {
+      await write();
+      await adjustStoredSize(db, tenantId, index, bytes, vectors);
+    });
+  });
 }
 
 export async function deleteVectors(
@@ -833,23 +830,42 @@ export async function deleteVectors(
   );
 
   const ids = platform ? [...new Set(request.ids.map(String))] : request.ids;
-  // Only vectors that exist are metered out: made-up or repeated ids must not shrink the meter. Asked before the delete.
-  const existing = platform ? await findExistingIds(runtime, index, ids) : null;
-
-  await withResilience(
+  const remove = () => withResilience(
     () => runtime.deleteVectors(toRuntimeHandle(index), ids),
     { key: `vector-delete-vectors:${request.providerKey}` },
   );
+  if (!platform) {
+    await remove();
+    return;
+  }
 
-  if (platform) {
+  await meteredInTurn(`${tenantId}:${request.providerKey}:${index.key}`, async () => {
+    // Only vectors that exist are metered out, each by its own size: made-up or repeated ids must not shrink the
+    // meter. Asked before the delete.
+    const existing = await findExistingSizes(runtime, index, ids);
+    await remove();
     if (!existing) {
       logger.debug('Vector delete not metered: the provider cannot confirm which ids exist', { indexKey: index.key });
       return;
     }
-    // The size of a deleted vector is not known: the index's average stands in for it.
-    const vectors = Math.min(existing.length, index.storedVectors ?? 0);
-    const average = index.storedVectors ? (index.storedBytes ?? 0) / index.storedVectors : 0;
-    await adjustStoredSize(db, tenantId, index, -Math.round(average * vectors), -vectors);
+    const vectors = Math.min(existing.size, index.storedVectors ?? 0);
+    let bytes = 0;
+    for (const size of existing.values()) bytes += size;
+    await adjustStoredSize(db, tenantId, index, -bytes, -vectors);
+  });
+}
+
+const meterLanes = new Map<string, Promise<void>>();
+
+/** Runs `work` once the earlier metered write of the same index (in this process) has finished. */
+async function meteredInTurn<T>(lane: string, work: () => Promise<T>): Promise<T> {
+  const turn = (meterLanes.get(lane) ?? Promise.resolve()).then(work);
+  const done = turn.then(() => undefined, () => undefined);
+  meterLanes.set(lane, done);
+  try {
+    return await turn;
+  } finally {
+    if (meterLanes.get(lane) === done) meterLanes.delete(lane);
   }
 }
 
@@ -861,17 +877,25 @@ function dedupeUpsertItems(items: VectorUpsertItem[]): VectorUpsertItem[] {
 }
 
 /**
- * The ids (of `ids`) the provider holds right now, or null when it cannot say (no such runtime method, or the lookup
- * failed): the caller then stays on the safe side of its metering.
+ * The ids (of `ids`) the provider holds right now, each with the size it was counted at (`estimateUpsertBytes` of the
+ * stored record), or null when it cannot say (no such runtime method, or the lookup failed): the caller then stays on
+ * the safe side of its metering. A provider that only confirms which ids exist gives each the least any vector of the
+ * index is counted at (its values, its id, no metadata), so a replace or a delete is never credited more than it paid.
  */
-async function findExistingIds(
+async function findExistingSizes(
   runtime: VectorProviderRuntime,
   index: VectorIndexRecord,
   ids: string[],
-): Promise<string[] | null> {
-  if (!runtime.existingVectorIds) return null;
+): Promise<Map<string, number> | null> {
+  const sizeOf = (id: string, metadata?: Record<string, unknown>) => estimateUpsertBytes(index.dimension, [{ id, values: [], metadata }]);
   try {
-    return await runtime.existingVectorIds(toRuntimeHandle(index), ids);
+    if (runtime.existingVectors) {
+      const found = await runtime.existingVectors(toRuntimeHandle(index), ids);
+      return new Map(found.map((vector) => [String(vector.id), sizeOf(String(vector.id), vector.metadata)]));
+    }
+    if (!runtime.existingVectorIds) return null;
+    const found = await runtime.existingVectorIds(toRuntimeHandle(index), ids);
+    return new Map(found.map((id) => [String(id), sizeOf(String(id))]));
   } catch (error) {
     logger.warn('Could not look up which vector ids exist', {
       indexKey: index.key,

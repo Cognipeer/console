@@ -155,6 +155,8 @@ interface ModelDetailDto {
   outputGuardrailKey?: string;
   metadata?: Record<string, unknown>;
   platform?: boolean;
+  /** A platform model's credit price (the API reads it from the record); it has no USD pricing. */
+  credits?: { perCall?: number; perMillionTokens?: number };
   createdAt?: string;
   updatedAt?: string;
 }
@@ -300,6 +302,25 @@ function fmtCurrency(amount: number, currency = 'USD') {
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
   });
+}
+
+/** "1 credit / call", "2 credits / 1M tokens": the same wording as the Model Hub list. */
+function platformCreditPrice(
+  credits: ModelDetailDto['credits'],
+  tCatalog: ReturnType<typeof useTranslations>,
+): string | undefined {
+  const parts: string[] = [];
+  if (credits?.perCall) {
+    parts.push(tCatalog(credits.perCall === 1 ? 'platform.creditsPerCallOne' : 'platform.creditsPerCall', { count: credits.perCall }));
+  }
+  if (credits?.perMillionTokens) {
+    parts.push(
+      tCatalog(credits.perMillionTokens === 1 ? 'platform.creditsPerMillionOne' : 'platform.creditsPerMillion', {
+        count: credits.perMillionTokens,
+      }),
+    );
+  }
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 function fmtNumber(n: number) {
@@ -1418,6 +1439,8 @@ function OverviewTab({
   onEditPromptCaching,
   onOpenLog,
 }: OverviewTabProps) {
+  const t = useTranslations('modelDetail');
+  const tCatalog = useTranslations('modelCatalog');
   const periods: Array<{ id: 'last_day' | 'last_7_days' | 'last_30_days' | 'total'; label: string }> = [
     { id: 'last_day', label: '24h' },
     { id: 'last_7_days', label: '7d' },
@@ -1694,6 +1717,12 @@ function OverviewTab({
           <div className="ds-h4" style={{ marginBottom: 12 }}>
             Pricing
           </div>
+          {model.platform === true ? (
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">{t('pricing.credits')}</span>
+              <span className="ds-mono">{platformCreditPrice(model.credits, tCatalog) ?? '—'}</span>
+            </div>
+          ) : (
           <Stack gap="xs">
             <div className="ds-row-between" style={{ fontSize: 12.5 }}>
               <span className="ds-muted">Input</span>
@@ -1721,6 +1750,7 @@ function OverviewTab({
               </div>
             ))}
           </Stack>
+          )}
         </div>
 
         {model.category === 'llm' && !(model.platform === true) ? (

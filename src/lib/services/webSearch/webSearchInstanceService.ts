@@ -9,9 +9,9 @@
 import { getDatabase, type IProviderRecord, type IWebSearchInstance } from '@/lib/database';
 import { isManagedProviderRecord } from '@/enterprise/managed-credits';
 import { createLogger } from '@/lib/core/logger';
-import { PROVIDER_KEY_EXISTS, ProviderSettingsError } from '@/lib/providers/errors';
-import { isSafePathSegment } from '@/lib/providers/pathSegments';
+import { PROVIDER_KEY_EXISTS, ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
 import { splitWebSearchSettings } from '@/lib/providers/contracts/webSearchContracts';
+import { asSafeSearch } from '@/lib/services/webSearch/searchOptions';
 import {
   ManagedProviderReadOnlyError,
   PlatformRecordReadOnlyError,
@@ -132,6 +132,7 @@ async function validateBehavior(
   settings: Record<string, unknown> | undefined,
 ): Promise<Record<string, unknown>> {
   const given = settings ?? {};
+  assertSearchOptions(given);
   const { connection } = splitWebSearchSettings(provider.driver, given);
   const misplaced = Object.keys(connection);
   if (misplaced.length > 0) {
@@ -143,11 +144,29 @@ async function validateBehavior(
   return (await validateWebSearchSettings(tenantDbName, tenantId, projectId ?? undefined, given)) ?? {};
 }
 
+/** The search options a search reads from the instance, when given, have to be ones it understands. */
+function assertSearchOptions(settings: Record<string, unknown>): void {
+  if (settings.safeSearch !== undefined && !asSafeSearch(settings.safeSearch)) {
+    throw new ProviderSettingsError('safeSearch', 'Safe search must be "off", "moderate" or "strict".');
+  }
+  if (settings.searchDepth !== undefined && settings.searchDepth !== 'basic' && settings.searchDepth !== 'advanced') {
+    throw new ProviderSettingsError('searchDepth', 'Search depth must be "basic" or "advanced".');
+  }
+  const count = settings.count;
+  // Exactly the values `clampCount` would silently replace with the default.
+  if (count !== undefined && (typeof count !== 'number' || !Number.isFinite(count) || count <= 0)) {
+    throw new ProviderSettingsError('count', 'The result count must be a positive number.');
+  }
+}
+
+/** The rule the instance form suggests keys by (`instanceKeyFromName`): lower case letters, digits and "-". */
+const INSTANCE_KEY = /^[a-z0-9-]{1,64}$/;
+
 function assertKeyFormat(key: unknown): asserts key is string {
-  if (typeof key === 'string' && isSafePathSegment(key)) return;
+  if (typeof key === 'string' && INSTANCE_KEY.test(key)) return;
   throw new ProviderSettingsError(
     'key',
-    'The instance key cannot be empty, "." or "..", and it cannot hold "/", "\\" or a control character.',
+    'The instance key can only hold lower case letters, digits and "-", at most 64 characters.',
   );
 }
 
@@ -169,6 +188,10 @@ export async function createWebSearchInstance(
   const db = await withTenantDb(tenantDbName);
   if (await db.findWebSearchInstanceByKey(tenantId, input.key)) {
     throw new WebSearchInstanceKeyExistsError(input.key);
+  }
+  // A search key resolves to an instance before a provider: an instance under a provider's key would hide it.
+  if ((await db.findProviderByKey(tenantId, input.key))?.type === 'websearch') {
+    throw new ProviderKeyExistsError(input.key);
   }
   const provider = await assertProviderUsable(db, tenantId, input.providerKey, projectId);
   const settings = await validateBehavior(tenantDbName, tenantId, provider, projectId, input.settings);

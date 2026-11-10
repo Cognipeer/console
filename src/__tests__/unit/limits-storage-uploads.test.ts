@@ -17,7 +17,7 @@ vi.mock('@/lib/limits/events', () => ({
   recordLimitEvent: vi.fn(),
 }));
 
-import { assertStorageStock, clearStorageCacheForTests, noteStoredBytes } from '@/lib/limits/storage';
+import { assertStorageStock, clearStorageCacheForTests, forgetStoredBytes, noteStoredBytes, withStorageReservation } from '@/lib/limits/storage';
 import { describeFileError } from '@/server/api/fileHttp';
 import { FILES_ERROR_CODE_KEYS, filesErrorMessage } from '@/components/files/shared/filesErrors';
 import { FilesApiError } from '@/components/files/filesApi';
@@ -82,6 +82,29 @@ describe('storage refusal at an upload', () => {
     noteStoredBytes('t1', 100);
     expect(await refusal(100)).toMatchObject({ code: 'storage_quota_exceeded' });
     expect(h.db.sumFileRecordBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds what a write reserves until it settles, and gives it back when the write fails', async () => {
+    setPlan('on', 1000);
+    let finish!: () => void;
+    const running = withStorageReservation({ tenantId: 't1', incomingBytes: 60 }, () => new Promise<void>((resolve) => { finish = resolve; }));
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    // 900 stored + 60 held: a second 60 does not fit while the first runs.
+    await expect(withStorageReservation({ tenantId: 't1', incomingBytes: 60 }, async () => undefined)).rejects.toMatchObject({ code: 'storage_quota_exceeded', status: 413 });
+    finish();
+    await running;
+
+    h.db.sumFileRecordBytes.mockResolvedValue(900);
+    await expect(withStorageReservation({ tenantId: 't1', incomingBytes: 60 }, async () => { throw new Error('write failed'); })).rejects.toThrow('write failed');
+    expect(await refusal(60)).toBeUndefined();
+  });
+
+  it('reads the sum again after a delete (forgetStoredBytes)', async () => {
+    setPlan('on', 1000);
+    expect(await refusal(200)).toMatchObject({ code: 'storage_quota_exceeded' });
+    h.db.sumFileRecordBytes.mockResolvedValue(100);
+    forgetStoredBytes('t1');
+    expect(await refusal(200)).toBeUndefined();
   });
 
   it('leaves other file errors alone', () => {

@@ -10,6 +10,10 @@ const h = vi.hoisted(() => ({
   clearMemo: vi.fn(),
 }));
 
+// The plan-state version lives in the shared cache; none here means every replica agrees.
+vi.mock('@/lib/core/cache', () => ({
+  getCache: async () => ({ get: async () => undefined, set: async () => undefined, del: async () => undefined }),
+}));
 vi.mock('@/lib/database', () => ({
   getDatabase: async () => ({ findTenantById: h.findTenantById }),
 }));

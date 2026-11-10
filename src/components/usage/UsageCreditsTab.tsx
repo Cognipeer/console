@@ -22,7 +22,7 @@ import { formatDate, formatNumber, formatPeriod, runwayText } from './format';
 
 export type { CreditLedgerEntry, CreditLedgerKind } from './creditsApi';
 
-const REDEEM_ERRORS = ['invalid_code', 'code_expired', 'wrong_tenant', 'already_redeemed', 'credits_unavailable'] as const;
+const REDEEM_ERRORS = ['invalid_code', 'code_expired', 'wrong_tenant', 'already_redeemed', 'code_void', 'credits_unavailable'] as const;
 const PAGE_SIZES = [25, 50, 100];
 const KIND_COLORS: Record<CreditLedgerKind, string> = {
   charge: 'gray',

@@ -82,6 +82,7 @@ import {
 } from '../fastify-utils';
 import { sendPlanLimitRefusal } from '../planLimitReply';
 import { assertSeatForReEnable, assertSeats, planLimitsActive } from '@/lib/limits';
+import { seatKindOfRole } from '@/lib/limits/seats';
 import { resolveRequestedTokenScope } from './tokens';
 
 const logger = createLogger('api:users');
@@ -322,9 +323,10 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       if (patch.role !== undefined) {
         const verdict = checkRoleChange(actor, person, patch.role);
         if (!verdict.ok) return refuse(reply, verdict);
-        // A portal user who becomes a console role takes a console seat (hosted deployments only).
-        if (target.role === 'portal_user' && patch.role !== 'portal_user' && target.canLogin !== false && target.kind !== 'external' && target.status !== 'disabled') {
-          await assertSeats({ tenantId: session.tenantId, kind: 'console', source: { type: 'user', id: session.userId } });
+        // A role of the other seat kind takes a seat of that kind (hosted deployments only).
+        const seatKind = seatKindOfRole(patch.role);
+        if (seatKind !== seatKindOfRole(target.role) && target.canLogin !== false && target.kind !== 'external' && target.status !== 'disabled') {
+          await assertSeats({ tenantId: session.tenantId, kind: seatKind, source: { type: 'user', id: session.userId } });
         }
       }
 

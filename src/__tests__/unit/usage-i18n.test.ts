@@ -60,7 +60,7 @@ describe('usage messages', () => {
   });
 
   it('names every credit redeem error, ledger kind, event outcome and row the page can show', () => {
-    for (const code of ['invalid_code', 'code_expired', 'wrong_tenant', 'already_redeemed', 'credits_unavailable', 'unknown']) {
+    for (const code of ['invalid_code', 'code_expired', 'wrong_tenant', 'already_redeemed', 'code_void', 'credits_unavailable', 'unknown']) {
       expect(en.has(`credits.errors.${code}`), code).toBe(true);
     }
     for (const kind of ['monthly_grant', 'redeem', 'charge', 'refund', 'adjust', 'expire']) {

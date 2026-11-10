@@ -3,7 +3,6 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { assertStorageStock, noteStoredBytes } from '@/lib/limits';
 import { getDatabase } from '@/lib/database';
 import { isFileTypeFilter } from '@/lib/database/fileTypeFilter';
 import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
@@ -768,13 +767,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
-      // The plan's tenant-wide storage (hosted deployments only; a no-op elsewhere): 413 'storage_quota_exceeded'.
-      await assertStorageStock({
-        tenantId: session.tenantId,
-        incomingBytes: estimatedFileBytes,
-        source: { type: 'user', id: session.userId },
-      });
-
+      // The plan's tenant-wide storage is checked by `uploadFile` (413 'storage_quota_exceeded').
       const result = await uploadFile(session.tenantDbName, session.tenantId, projectId, {
         bucketKey,
         contentType: body.contentType as string | undefined,
@@ -790,7 +783,6 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         providerKey: (body.providerKey as string | undefined) ?? undefined,
       });
 
-      noteStoredBytes(session.tenantId, result.record.size ?? estimatedFileBytes);
       return reply.code(201).send({ record: result.record });
     } catch (error) {
       return fail(reply, error, 'upload', { storage: true, body: true });

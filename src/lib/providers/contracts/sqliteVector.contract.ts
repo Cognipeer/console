@@ -364,6 +364,20 @@ export const SqliteVectorProviderContract: ProviderContract<
         return found;
       },
 
+      /* ---- existingVectors ---- */
+      async existingVectors(handle: VectorIndexHandle, ids: string[]) {
+        const found: Array<{ id: string; metadata?: Record<string, unknown> }> = [];
+        for (let start = 0; start < ids.length; start += 500) {
+          const chunk = ids.slice(start, start + 500);
+          const placeholders = chunk.map(() => '?').join(',');
+          const rows = db.prepare(
+            `SELECT id, metadata FROM vector_entries WHERE index_id = ? AND id IN (${placeholders})`,
+          ).all(handle.externalId, ...chunk) as Array<{ id: string; metadata: string | null }>;
+          for (const row of rows) found.push({ id: row.id, metadata: row.metadata ? JSON.parse(row.metadata) : undefined });
+        }
+        return found;
+      },
+
       /* ---- queryVectors ---- */
       async queryVectors(
         handle: VectorIndexHandle,

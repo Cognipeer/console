@@ -375,12 +375,15 @@ export default function ProviderDetailPage() {
       ) : (
       <DetailTwoCol narrowAside>
         <Stack gap="md">
-          <ProviderConnectionCard
-            providerId={String(provider._id)}
-            lastTest={provider.lastTest}
-            canTest={canEditProvider}
-            onTested={reloadAll}
-          />
+          {/* A platform provider cannot be tested here, so its "never tested" card would only mislead. */}
+          {isPlatform ? null : (
+            <ProviderConnectionCard
+              providerId={String(provider._id)}
+              lastTest={provider.lastTest}
+              canTest={canEditProvider}
+              onTested={reloadAll}
+            />
+          )}
           <DetailCard>
             <ResourceUsageSection type="provider" id={String(provider._id)} />
           </DetailCard>

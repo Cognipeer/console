@@ -5058,6 +5058,10 @@ export const tr: typeof en = {
   },
   modelDetail: {
     ...en.modelDetail,
+    pricing: {
+      ...en.modelDetail.pricing,
+      credits: 'Kredi',
+    },
     actions: {
       ...en.modelDetail.actions,
       removeFromProject: 'Projeden çıkar',

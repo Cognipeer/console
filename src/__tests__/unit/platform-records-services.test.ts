@@ -295,6 +295,21 @@ describe('createModel on a platform provider', () => {
   });
 });
 
+describe('the platform model key prefix is reserved', () => {
+  it('refuses creating a tenant model under it, by key or by a name it derives the key from', async () => {
+    await expect(createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, key: 'cognipeer.gpt-x' } as never)).rejects.toThrow(/reserved/);
+    await expect(createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, name: 'Cognipeer.GPT' } as never)).rejects.toThrow(/reserved/);
+    expect(hoisted.db.createModel).not.toHaveBeenCalled();
+  });
+
+  it('refuses renaming a tenant model into it, and keeps other dotted keys', async () => {
+    await expect(updateModel('db', 'p1', 'model-1', { key: 'cognipeer.gpt-x' } as never)).rejects.toThrow(/reserved/);
+    expect(hoisted.db.updateModel).not.toHaveBeenCalled();
+    const created = await createModel('db', 'tenant-1', 'p1', 'u1', { ...modelInput, key: 'gpt-5.1' } as never);
+    expect(created.key).toBe('gpt-5.1');
+  });
+});
+
 describe('operator connections for managed records', () => {
   const managed = () => provider({ key: 'platform', settings: { managed: true }, credentialsEnc: 'not-decryptable' });
   const load = (withConnectionId = true) =>

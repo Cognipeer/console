@@ -144,6 +144,6 @@ describe('checkSeats', () => {
     setPlan('on', { seats: { console: 1 } });
     const err = await assertSeats({ tenantId: 't1', kind: 'console' }).catch((e) => e);
     expect(err.code).toBe('seat_limit_reached');
-    expect(err.status).toBe(429);
+    expect(err.status).toBe(402);
   });
 });

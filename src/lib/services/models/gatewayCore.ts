@@ -562,6 +562,9 @@ function releaseLease(state: CallState, reason: 'error' | 'cancelled' | 'no_usag
   fireAndForget('managed-credit-release', () => lease.release(reason));
 }
 
+/** Upstream answers about the operator's own setup (credentials, access, deployment name): never the tenant's to fix. */
+export const MANAGED_CONFIG_STATUSES: ReadonlySet<number> = new Set([401, 403, 404]);
+
 /**
  * An upstream failure of a MANAGED provider reaches the tenant as a generic message that keeps only the status: the
  * raw text can quote the operator's endpoint, deployment, org id or vendor. Our own refusals (plan limits, bad
@@ -580,6 +583,8 @@ function managedSafeError(state: CallState, error: unknown): unknown {
   ) return error;
   const normalized = normalizeInferenceError(error);
   const status = normalized.status;
+  // The tenant owns no credentials: an upstream auth, permission or not-found answer is the operator's configuration.
+  if (MANAGED_CONFIG_STATUSES.has(status)) return new ModelUnavailableError();
   const sanitized = new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
   // The one thing kept besides the status: a safety-filter refusal is a verdict on the content, not an outage,
   // and a caller (the guardrail judge) must be able to tell the two apart. A bare code, nothing of the upstream's text.

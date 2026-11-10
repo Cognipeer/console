@@ -140,6 +140,6 @@ describe('checkMonthlyAllowance', () => {
     const err = await assertMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' }).catch((e) => e);
     expect(err.code).toBe('monthly_allowance_exhausted');
     expect(err.dimension).toBe('crawlerPages');
-    expect(err.status).toBe(429);
+    expect(err.status).toBe(402);
   });
 });

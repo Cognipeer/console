@@ -110,6 +110,7 @@ export const usageTr: typeof usageEn = {
       code_expired: 'Bu kodun süresi dolmuş.',
       wrong_tenant: 'Bu kod başka bir çalışma alanı için düzenlenmiş.',
       already_redeemed: 'Bu kod daha önce kullanılmış.',
+      code_void: 'Bu kod iptal edilmiş.',
       credits_unavailable: 'Bu çalışma alanı için krediler kullanılamıyor.',
       unknown: 'Kod kullanılamadı. Yeniden deneyin.',
     },

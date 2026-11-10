@@ -121,6 +121,12 @@ describe('computeBanners', () => {
     ]);
   });
 
+  it('does not flag a zero summary as out of credits when the tenant never had any', () => {
+    const zero = credits({ balance: 0, included: { period: '2026-11', granted: 0, used: 0, endsAt: '2026-12-01T00:00:00.000Z' } });
+    expect(computeBanners(emptyInput({ credits: zero }))).toEqual([]);
+    expect(computeBanners(emptyInput({ credits: { ...zero, runwayDays: 0 } }))).toMatchObject([{ id: 'credits', severity: 'critical' }]);
+  });
+
   it('does not warn about credits when nothing was granted and some balance is left', () => {
     const none = credits({ balance: 10, included: { period: '2026-11', granted: 0, used: 0, endsAt: '2026-12-01T00:00:00.000Z' } });
     expect(computeBanners(emptyInput({ credits: none }))).toEqual([]);

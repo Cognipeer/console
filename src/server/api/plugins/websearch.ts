@@ -22,6 +22,7 @@ import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuot
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
+import { PROVIDER_SETTINGS_INVALID } from '@/lib/providers/errors';
 import {
   getProviderConfigByKey,
   redactPlatformProvider,
@@ -146,6 +147,11 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.settings !== undefined && !isPlainObject(body.settings)) {
         return reply.code(400).send({ error: '`settings` must be an object.' });
       }
+      if (body.status !== undefined && !readStatus(body.status)) {
+        return reply.code(400).send({
+          error: '`status` must be "active" or "disabled".', code: PROVIDER_SETTINGS_INVALID, field: 'status',
+        });
+      }
 
       // `platform` is never read from the body: only the hosting layer marks a record as platform-provided.
       const instance = await createWebSearchInstance(session.tenantDbName, session.tenantId, {
@@ -196,6 +202,11 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (body.settings !== undefined && !isPlainObject(body.settings)) {
         return reply.code(400).send({ error: '`settings` must be an object.' });
+      }
+      if (body.status !== undefined && !readStatus(body.status)) {
+        return reply.code(400).send({
+          error: '`status` must be "active" or "disabled".', code: PROVIDER_SETTINGS_INVALID, field: 'status',
+        });
       }
       const existing = await getWebSearchInstance(session.tenantDbName, session.tenantId, key, projectId);
       if (!existing) return reply.code(404).send({ error: 'Web search instance not found' });

@@ -24,6 +24,10 @@ vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: () => ({}
 vi.mock('@/lib/limits/storage', () => ({
   assertStorageStock: (input: unknown) => h.storage.assertStorageStock(input),
   noteStoredBytes: (...args: unknown[]) => h.storage.noteStoredBytes(...args),
+  withStorageReservation: async (input: unknown, write: () => Promise<unknown>) => {
+    await h.storage.assertStorageStock(input);
+    return write();
+  },
 }));
 vi.mock('@/lib/services/providers/providerService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/providers/providerService')>();
@@ -315,7 +319,7 @@ describe('metering what a platform provider stores', () => {
     expect(result.matches).toEqual([]);
   });
 
-  it('takes the average of the index off when vectors are deleted, and the rest off when the index goes', async () => {
+  it('takes a deleted vector\'s own size off, and the rest off when the index goes', async () => {
     await create(a, 'shrink');
     const items = [vec('s1', [1, 0, 0], { pad: 'aaaa' }), vec('s2', [0, 1, 0], { pad: 'aaaa' }), vec('s3', [0, 0, 1], { pad: 'aaaa' }), vec('s4', [1, 1, 0], { pad: 'aaaa' })];
     const estimate = estimateUpsertBytes(3, items);
@@ -411,11 +415,14 @@ describe('metering deletes and re-upserts against what exists', () => {
     await upsert(a, 'del-blind', items);
     const runtime = await pooledRuntime(a);
     const lookup = runtime.existingVectorIds;
+    const sizes = runtime.existingVectors;
     runtime.existingVectorIds = undefined;
+    runtime.existingVectors = undefined;
     try {
       await deleteVectors(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'del-blind', ids: ['b1'] });
     } finally {
       runtime.existingVectorIds = lookup;
+      runtime.existingVectors = sizes;
     }
     expect(await stored(a, 'del-blind')).toMatchObject({ storedVectors: 2, storedBytes: estimate });
     const left = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'del-blind', query: { vector: [1, 0, 0], topK: 10 } });
@@ -435,8 +442,8 @@ describe('metering deletes and re-upserts against what exists', () => {
     const grown = estimateUpsertBytes(3, [bigger]) - average;
     expect(await stored(a, 're-up')).toMatchObject({ storedVectors: 2, storedBytes: estimate + grown });
     expect(h.storage.noteStoredBytes).toHaveBeenCalledWith(a.id, grown);
-    // The plan is asked for the full estimate, as for a new id.
-    expect(h.storage.assertStorageStock).toHaveBeenLastCalledWith(expect.objectContaining({ incomingBytes: estimateUpsertBytes(3, [bigger]) }));
+    // The plan is asked for what the replacement adds only.
+    expect(h.storage.assertStorageStock).toHaveBeenLastCalledWith(expect.objectContaining({ incomingBytes: grown }));
 
     // A smaller replacement shrinks the meter, which never goes below 0.
     for (let i = 0; i < 4; i += 1) await upsert(a, 're-up', [vec('u2', [0, 1, 0])]);
@@ -459,6 +466,38 @@ describe('metering deletes and re-upserts against what exists', () => {
     const result = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 're-mix', query: { vector: [0, 0, 1], topK: 5 } });
     expect(result.matches[0].id).toBe('x2');
     expect(result.matches).toHaveLength(2);
+  });
+
+  it('keeps the meter at the real total when one small vector is re-upserted many times, and deletes by real size', async () => {
+    await create(a, 're-small');
+    const big = vec('big', [1, 0, 0], { pad: 'a'.repeat(500) });
+    const small = vec('s', [0, 1, 0]);
+    await upsert(a, 're-small', [big, small]);
+    for (let i = 0; i < 20; i += 1) await upsert(a, 're-small', [small]);
+    const real = estimateUpsertBytes(3, [big, small]);
+    expect(await stored(a, 're-small')).toMatchObject({ storedVectors: 2, storedBytes: real });
+
+    await deleteVectors(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 're-small', ids: ['s'] });
+    expect(await stored(a, 're-small')).toMatchObject({ storedVectors: 1, storedBytes: estimateUpsertBytes(3, [big]) });
+  });
+
+  it('never credits more than was charged when the provider only confirms which ids exist', async () => {
+    await create(a, 're-ids');
+    const big = vec('big', [1, 0, 0], { pad: 'a'.repeat(500) });
+    const small = vec('s', [0, 1, 0], { n: 1 });
+    await upsert(a, 're-ids', [big, small]);
+    const runtime = await pooledRuntime(a);
+    const sizes = runtime.existingVectors;
+    runtime.existingVectors = undefined;
+    try {
+      for (let i = 0; i < 20; i += 1) await upsert(a, 're-ids', [small]);
+      const real = estimateUpsertBytes(3, [big, small]);
+      expect((await stored(a, 're-ids'))?.storedBytes).toBeGreaterThanOrEqual(real);
+      await deleteVectors(a.dbName, a.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 're-ids', ids: ['s'] });
+      expect((await stored(a, 're-ids'))?.storedBytes).toBeGreaterThanOrEqual(estimateUpsertBytes(3, [big]));
+    } finally {
+      runtime.existingVectors = sizes;
+    }
   });
 });
 
@@ -485,6 +524,35 @@ describe('what a query on a platform provider returns besides matches', () => {
     }
     const own = await queryVectorIndex(a.dbName, a.id, PROJECT, { providerKey: OWN_KEY, indexKey: 'usage-own', query: { vector: [1, 0, 0], topK: 1 } });
     expect(own.matches).toEqual([]);
+  });
+});
+
+describe('a platform vector provider the catalog no longer offers', () => {
+  it('still queries and deletes through a cleanup-only route and a switched-off record, and refuses new writes', async () => {
+    const c = await newTenant('gamma');
+    await create(c, 'old');
+    await upsert(c, 'old', [vec('o1'), vec('o2', [0, 1, 0])]);
+    await sqlite.runWithTenant(c.dbName, async () => {
+      const record = await sqlite.findProviderByKey(c.id, PLATFORM_KEY);
+      await sqlite.updateProvider(String(record!._id), { status: 'disabled' });
+    });
+    registerManagedCreditsHost({
+      isManagedProvider: (ref) => ref?.key === PLATFORM_KEY || ref?.platform === true,
+      reserve: async () => { throw new Error('storage is never reserved'); },
+      listRoutes: (query) => (query.providerKey === PLATFORM_KEY && query.kind === 'vector'
+        ? [{ id: 'route-1', connectionId: 'conn-1', driver: 'sqlite-vector', settings: { cleanupOnly: true } }]
+        : []),
+      resolveConnection: () => null,
+    });
+
+    const query = () => queryVectorIndex(c.dbName, c.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'old', query: { vector: [1, 0, 0], topK: 5 } });
+    expect((await query()).matches.map((match) => match.id).sort()).toEqual(['o1', 'o2']);
+    await expect(upsert(c, 'old', [vec('o3')])).rejects.toThrow('This provider is not available right now.');
+    await expect(create(c, 'new')).rejects.toThrow('This provider is not available right now.');
+    await deleteVectors(c.dbName, c.id, PROJECT, { providerKey: PLATFORM_KEY, indexKey: 'old', ids: ['o1'] });
+    expect((await query()).matches.map((match) => match.id)).toEqual(['o2']);
+    await deleteVectorIndex(c.dbName, c.id, PROJECT, PLATFORM_KEY, 'old');
+    expect(await listVectorIndexes(c.dbName, c.id, PROJECT, PLATFORM_KEY)).toEqual([]);
   });
 });
 

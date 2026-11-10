@@ -180,6 +180,9 @@ export function wrapNameScopedVectorRuntime(
     ...(inner.existingVectorIds
       ? { existingVectorIds: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectorIds!(checked(handle), ids) }
       : {}),
+    ...(inner.existingVectors
+      ? { existingVectors: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectors!(checked(handle), ids) }
+      : {}),
     listVectors: async (handle, input) => inner.listVectors(checked(handle), input),
   };
   if (inner.close) runtime.close = () => inner.close?.();
@@ -214,6 +217,11 @@ export interface ManagedStorageConnection {
   settings: Record<string, unknown>;
   /** The tenant's token on the backend. */
   token: string;
+  /**
+   * Reads and deletes only: the catalog no longer offers the storage (the route says `settings.cleanupOnly`) or the
+   * record is switched off. The tenant can still get at and remove what it stored; a write is refused.
+   */
+  cleanupOnly?: boolean;
 }
 
 export interface LoadedStorageProvider {
@@ -276,11 +284,29 @@ export async function loadStorageProvider(
     });
     throw new ManagedProviderError(MANAGED_STORAGE_UNAVAILABLE);
   }
+  const cleanupOnly = route.settings?.cleanupOnly === true || loaded.record.status !== 'active';
   return {
     record: loaded.record,
     credentials: loaded.credentials,
-    managed: { connectionId: route.connectionId, driver, settings, token },
+    managed: { connectionId: route.connectionId, driver, settings, token, ...(cleanupOnly ? { cleanupOnly } : {}) },
   };
+}
+
+/** The runtime methods that store something new; refused on a cleanup-only route. */
+const STORAGE_WRITE_METHODS: Readonly<Record<ManagedStorageKind, readonly string[]>> = {
+  file: ['uploadFile'],
+  vector: ['createIndex', 'upsertVectors'],
+};
+
+function withoutWrites<T extends object>(runtime: T, kind: ManagedStorageKind): T {
+  return new Proxy(runtime, {
+    get(target, prop) {
+      if (typeof prop === 'string' && STORAGE_WRITE_METHODS[kind].includes(prop)) {
+        return async () => { throw new ManagedProviderError(MANAGED_STORAGE_UNAVAILABLE); };
+      }
+      return Reflect.get(target, prop, target);
+    },
+  });
 }
 
 /**
@@ -296,7 +322,7 @@ export async function getManagedStorageRuntime<TRuntime>(
   const { record, credentials, managed } = loaded;
   const poolKey = `managed-storage:${kind}:${context.tenantId}:${record.key}:${managed.connectionId}`;
   const configHash = hashRuntimeConfig({ driver: managed.driver, settings: managed.settings, credentials });
-  return runtimePool.getOrCreate<TRuntime>(poolKey, configHash, async () => {
+  const runtime = await runtimePool.getOrCreate<TRuntime>(poolKey, configHash, async () => {
     const runtime = await providerRegistry.createRuntime<TRuntime>(managed.driver, {
       tenantId: context.tenantId,
       ...(context.projectId ? { projectId: context.projectId } : {}),
@@ -315,6 +341,7 @@ export async function getManagedStorageRuntime<TRuntime>(
       : runtime;
     return withoutBackendIdentifiers(confined as unknown as object, backendIdentifiers(managed), kind) as TRuntime;
   });
+  return managed.cleanupOnly ? withoutWrites(runtime as unknown as object, kind) as TRuntime : runtime;
 }
 
 /** Values shorter than this are not matched: they would turn almost every message into the generic one. */

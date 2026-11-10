@@ -109,6 +109,7 @@ export const usageEn = {
       code_expired: 'This code has expired.',
       wrong_tenant: 'This code was issued for a different workspace.',
       already_redeemed: 'This code has already been redeemed.',
+      code_void: 'This code was cancelled.',
       credits_unavailable: 'Credits are not available for this workspace.',
       unknown: 'The code could not be redeemed. Try again.',
     },

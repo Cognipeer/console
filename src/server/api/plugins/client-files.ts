@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { assertStorageStock, noteStoredBytes } from '@/lib/limits';
+import { assertStorageStock } from '@/lib/limits';
 import { getDatabase } from '@/lib/database';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
@@ -301,7 +301,6 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
       });
 
-      noteStoredBytes(ctx.tenantId, result.record.size ?? estimatedFileBytes);
       return reply.code(201).send({
         file: result.record,
         message: 'File uploaded successfully',

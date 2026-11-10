@@ -167,6 +167,25 @@ describe('client API requests per minute', () => {
     expect(body.error).toMatchObject({ type: 'rate_limit_error', code: 'tenant_rate_limited' });
   });
 
+  it('refuses a used-up monthly allowance with 402 and no Retry-After in every dialect, so SDKs do not retry it', async () => {
+    assertRate.mockRejectedValue(new PlanLimitError({
+      code: 'monthly_allowance_exhausted', message: 'Allowance used up.', kind: 'monthly', dimension: 'flowRuns', retryAfterMs: 86_400_000,
+    }));
+    const app = await buildApp();
+    for (const [url, type] of [
+      ['/client/v1/probe', 'insufficient_quota'],
+      ['/client/v1/chat/probe', 'insufficient_quota'],
+      ['/client/v1/messages/probe', 'invalid_request_error'],
+    ] as const) {
+      const res = await get(app, url);
+      expect(res.statusCode).toBe(402);
+      expect(res.headers['retry-after']).toBeUndefined();
+      expect(res.headers['x-allowance-name']).toBe('flowRuns');
+      const body = parseJsonBody<Record<string, unknown> & { error: unknown }>(res.body);
+      expect(typeof body.error === 'object' ? body.error : body).toMatchObject({ type, code: 'monthly_allowance_exhausted' });
+    }
+  });
+
   it('leaves the request untouched when plan limits are off (default deployment)', async () => {
     const app = await buildApp();
     const res = await get(app, '/client/v1/probe');

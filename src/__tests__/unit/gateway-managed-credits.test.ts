@@ -50,6 +50,7 @@ vi.mock('@/lib/services/guardrail', () => ({
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
+import { resetAllCircuits } from '@/lib/core/resilience';
 
 const model = (overrides: object = {}) => ({
   _id: 'm1',
@@ -647,6 +648,21 @@ describe('managed upstream error text', () => {
     const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true });
     const events = await collect(outcome.stream!);
     expect(JSON.stringify(events)).not.toMatch(/ops-secret|example\.test/i);
+  });
+
+  it.each([401, 403, 404])('an upstream %i (operator setup) reaches the tenant as model unavailable, naming no credentials', async (status) => {
+    installHost();
+    resetAllCircuits(); // earlier failures of the same route must not open its breaker
+    wire({ complete: [Object.assign(new Error('Incorrect API key provided'), { status })] });
+    const body = normalizeInferenceError(await executeModelCall({ ...BASE, request: ASK }).catch((error) => error));
+    expect(body).toMatchObject({ status: 503, error: { message: 'This model is not available right now.', type: 'server_error' } });
+    expect(JSON.stringify(body)).not.toMatch(/credential|api.?key|authentication|permission|not_found/i);
+  });
+
+  it('keeps an upstream 401 as the provider authentication error for a model that is not managed', async () => {
+    wire({ complete: [Object.assign(new Error('Incorrect API key provided'), { status: 401 })] });
+    const body = normalizeInferenceError(await executeModelCall({ ...BASE, request: ASK }).catch((error) => error));
+    expect(body).toMatchObject({ status: 401, error: { code: 'invalid_api_key' } });
   });
 
   it('is unchanged for a call that is not managed', async () => {

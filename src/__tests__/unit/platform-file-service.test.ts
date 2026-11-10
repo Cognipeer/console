@@ -11,12 +11,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 const h = vi.hoisted(() => ({
   db: null as any,
   connection: null as any,
+  plan: { mode: 'off', limits: null } as any,
 }));
 
 vi.mock('@/lib/core/logger', () => ({ createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }));
 vi.mock('@/lib/database', () => ({ getDatabase: async () => h.db }));
 vi.mock('@/lib/services/availability/serviceAvailability', () => ({ assertServiceEnabled: async () => undefined }));
 vi.mock('@cognipeer/to-markdown', () => ({ convertToMarkdown: vi.fn() }));
+vi.mock('@/lib/limits/tenantLimits', () => ({ resolveTenantPlan: async () => h.plan }));
 vi.mock('@/lib/services/providers/providerService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/providers/providerService')>();
   const { ManagedProviderError } = await import('@/lib/services/providers/managedProviderErrors');
@@ -130,6 +132,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   h.connection = { driver: 'local-filesystem', settings: { basePath: backendDir } };
+  h.plan = { mode: 'off', limits: null };
   registerManagedCreditsHost({
     isManagedProvider: (ref) => ref?.key === PLATFORM_KEY || ref?.platform === true,
     reserve: async () => { throw new Error('storage is never reserved'); },
@@ -234,6 +237,63 @@ describe('where files live', () => {
     const detail = await inTenant(a, () => getFileBucketDetail(a.dbName, a.id, PROJECT, 'where'));
     expect(detail.storageLocation).toBeNull();
     expect(detail.provider?.platform).toBe(true);
+  });
+});
+
+describe('the plan storage on every upload', () => {
+  const limitTo = (storageBytes: number) => {
+    h.plan = { mode: 'on', limits: { concurrency: {}, monthly: {}, seats: {}, credits: {}, storageBytes } };
+  };
+
+  it('counts an overwrite by what it adds, and a delete frees the room at once', async () => {
+    const t = await newTenant('quota');
+    await bucket(t);
+    limitTo(10);
+    const first = await upload(t, 'f.txt', '12345678', { keyHint: 'f.txt' });
+    // 8 stored: an overwrite of the same key with 9 bytes adds 1.
+    await upload(t, 'f.txt', '123456789', { keyHint: 'f.txt' });
+    await expect(upload(t, 'g.txt', '12345')).rejects.toMatchObject({ code: 'storage_quota_exceeded', status: 413 });
+    await inTenant(t, () => deleteFile(t.dbName, t.id, PROJECT, 'docs', first.record.key, 'u1'));
+    await expect(upload(t, 'g.txt', '12345')).resolves.toBeTruthy();
+  });
+
+  it('lets only as many parallel uploads pass as fit', async () => {
+    const t = await newTenant('parallel');
+    await bucket(t);
+    limitTo(10);
+    const outcomes = await Promise.allSettled([upload(t, 'a.txt', '123456'), upload(t, 'b.txt', '123456'), upload(t, 'c.txt', '123456')]);
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    for (const outcome of outcomes.filter((o): o is PromiseRejectedResult => o.status === 'rejected')) {
+      expect(outcome.reason).toMatchObject({ code: 'storage_quota_exceeded' });
+    }
+  });
+});
+
+describe('a platform provider the catalog no longer offers', () => {
+  it('still reads and deletes through a cleanup-only route and a switched-off record, and refuses new writes', async () => {
+    const c = await newTenant('gamma');
+    await bucket(c);
+    const kept = await upload(c, 'kept.txt', 'still here');
+    const gone = await upload(c, 'gone.txt', 'remove me');
+    await inTenant(c, async () => {
+      const record = await sqlite.findProviderByKey(c.id, PLATFORM_KEY);
+      await sqlite.updateProvider(String(record!._id), { status: 'disabled' });
+    });
+    registerManagedCreditsHost({
+      isManagedProvider: (ref) => ref?.key === PLATFORM_KEY || ref?.platform === true,
+      reserve: async () => { throw new Error('storage is never reserved'); },
+      listRoutes: (query) => (query.providerKey === PLATFORM_KEY && query.kind === 'file'
+        ? [{ id: 'route-1', connectionId: 'conn-1', driver: 'local-filesystem', settings: { cleanupOnly: true } }]
+        : []),
+      resolveConnection: () => null,
+    });
+
+    const downloaded = await inTenant(c, () => downloadFile(c.dbName, c.id, PROJECT, 'docs', kept.record.key));
+    expect(Buffer.from(downloaded.data).toString()).toBe('still here');
+    expect(await inTenant(c, () => deleteFile(c.dbName, c.id, PROJECT, 'docs', gone.record.key, 'u1'))).toBe(true);
+    expect((await inTenant(c, () => listFiles(c.dbName, c.id, PROJECT, { bucketKey: 'docs' }))).items.map((item) => item.name)).toEqual(['kept.txt']);
+    await expect(upload(c, 'new.txt', 'x')).rejects.toThrow('This provider is not available right now.');
+    expect((await inTenant(c, () => listFiles(c.dbName, c.id, PROJECT, { bucketKey: 'docs' }))).items).toHaveLength(1);
   });
 });
 
