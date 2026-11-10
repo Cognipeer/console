@@ -107,6 +107,6 @@ export { compileToSdkGuardrail } from './sdkAdapter';
 
 /** Pure, synchronous, DB-free credential detection — no tenant scope, no
  *  policy lookup. This is what the AI App Gateway's hot path calls instead of
- *  borrowing `runPiiDetection` with a synthetic `{ apiKey: true }` policy. */
+ *  running a PII policy with a synthetic `{ apiKey: true }` category set. */
 export { scanSecrets } from './families/secrets';
 export type { SecretMatch, ScanSecretsOptions } from './families/secrets';

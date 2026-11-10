@@ -40,7 +40,7 @@ import { toSubscriptionWire } from '@/lib/services/agents/agentTriggerConnectorH
 import type { AgentConfigIssue } from '@/lib/services/agents/agentConfigValidation';
 import { createSkill, deleteSkill } from '@/lib/services/agents/skillService';
 import { listRagModules } from '@/lib/services/rag/ragService';
-import { listWebSearchProviders } from '@/lib/services/webSearch/webSearchService';
+import { hasActiveWebSearch } from '@/lib/services/webSearch/webSearchService';
 import { AGENT_TEMPLATE_CATALOG_VERSION, AGENT_TEMPLATES, findAgentTemplate } from './catalog';
 import { computeTemplateAvailability, type TemplateFacts } from './templateAvailability';
 import {
@@ -125,15 +125,15 @@ async function readSandboxFacts(scope: AgentTemplateScope): Promise<TemplateFact
 }
 
 async function readTemplateFacts(scope: AgentTemplateScope): Promise<TemplateFacts> {
-  const [chatModels, webSearchProviders, knowledgeBases, sandbox] = await Promise.all([
+  const [chatModels, webSearchActive, knowledgeBases, sandbox] = await Promise.all([
     runWithTenantScope(scope.tenantDbName, (db) => db.listModels({ projectId: scope.projectId, category: 'llm' })),
-    listWebSearchProviders(scope.tenantDbName, scope.tenantId, scope.projectId).catch(softly('the web search providers', [])),
+    hasActiveWebSearch(scope.tenantDbName, scope.tenantId, scope.projectId).catch(softly('the web search instances', false)),
     listRagModules(scope.tenantDbName, { projectId: scope.projectId, status: 'active' }).catch(softly('the knowledge bases', [])),
     readSandboxFacts(scope),
   ]);
   return {
     hasLlmModel: chatModels.length > 0,
-    hasWebSearchProvider: webSearchProviders.some((provider) => provider.status === 'active'),
+    hasWebSearchProvider: webSearchActive,
     hasKnowledgeEngine: knowledgeBases.length > 0,
     sandbox,
   };
@@ -605,8 +605,7 @@ async function createFromTemplate(
     }
 
     const webSearchAvailable = template.requires.webSearch
-      ? (await listWebSearchProviders(scope.tenantDbName, scope.tenantId, scope.projectId).catch(softly('the web search providers', [])))
-        .some((provider) => provider.status === 'active')
+      ? await hasActiveWebSearch(scope.tenantDbName, scope.tenantId, scope.projectId).catch(softly('the web search instances', false))
       : true;
     const result: InstantiateTemplateResult = {
       agent: (await getAgentById(scope.tenantDbName, created.agentId)) ?? agent,

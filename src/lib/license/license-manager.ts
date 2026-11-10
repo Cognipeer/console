@@ -4,6 +4,7 @@ import { getConfig } from '@/lib/core/config';
 import type { ITenant } from '@/lib/database';
 import type { QuotaLimits, QuotaResourceCaps } from '@/lib/quota/types';
 import policies from '@/config/policies.json';
+import { normalizePlanClaim, readStoredPlanClaim, type LicensePlanClaim } from './planClaim';
 
 export interface FeaturePolicy {
   name: string;
@@ -54,6 +55,8 @@ export interface OfflineLicensePayload extends JWTPayload {
   features?: string[];
   limits?: OfflineLicenseLimits;
   services?: LicenseServiceClaim;
+  /** Hosted plan and its limits (see planClaim.ts); absent on every license issued before the claim existed. */
+  plan?: LicensePlanClaim;
 }
 
 export interface EffectiveLicense {
@@ -65,6 +68,8 @@ export interface EffectiveLicense {
   limits: OfflineLicenseLimits;
   /** The license's `services` claim; absent = no service is switched off by the license. */
   services?: LicenseServiceClaim;
+  /** The license's `plan` claim; absent = the deployment's default plan applies. */
+  plan?: LicensePlanClaim;
   payload?: OfflineLicensePayload;
   expiresAt?: Date;
   error?: string;
@@ -306,6 +311,7 @@ export class LicenseManager {
       licenseType,
       limits,
       services: storedServiceClaim(payload),
+      plan: readStoredPlanClaim(payload.plan),
       payload,
       source: 'offline',
       status: 'active',
@@ -365,6 +371,7 @@ export class LicenseManager {
     }
 
     const services = normalizeLicenseServiceClaim(payload.services);
+    const plan = normalizePlanClaim(payload.plan);
     const normalizedPayload: OfflineLicensePayload = {
       ...payload,
       features: normalizeFeatureList(payload.features),
@@ -372,6 +379,7 @@ export class LicenseManager {
       licenseType: payload.licenseType,
       limits: normalizeLimits(payload.limits),
       services,
+      plan,
     };
 
     return {
@@ -381,10 +389,48 @@ export class LicenseManager {
       licenseType: normalizedPayload.licenseType,
       limits: mergeLicenseLimits(this.getFreeLimits(), normalizedPayload.limits),
       services,
+      plan,
       payload: normalizedPayload,
       source: 'offline',
       status: 'active',
     };
+  }
+
+  /**
+   * Verifies a token that the license issuer signed for another purpose, with
+   * the same key, algorithms and issuer as licenses. The audience is required
+   * and must differ from the license audience, so a license is never accepted
+   * as another kind of token and the other way round. `exp` is required.
+   * Callers check the token's own claims (type, tenant binding, amounts).
+   */
+  static async verifyIssuerSignedToken(token: string, audience: string): Promise<JWTPayload> {
+    const value = token.trim();
+    if (!value) {
+      throw new Error('Token is required');
+    }
+    const cfg = getConfig().license;
+    if (!audience || audience === cfg.audience) {
+      throw new Error('A token audience other than the license audience is required');
+    }
+
+    const publicKeyPem = this.getPublicKeyPem();
+    if (!publicKeyPem) {
+      throw new Error('Offline license public key is not configured');
+    }
+
+    const header = decodeProtectedHeader(value);
+    if (!header.alg || !ALLOWED_LICENSE_ALGORITHMS.has(header.alg)) {
+      throw new Error('Unsupported token signature algorithm');
+    }
+
+    const publicKey = await importSPKI(publicKeyPem, header.alg);
+    const { payload } = await jwtVerify(value, publicKey, {
+      algorithms: [header.alg],
+      audience,
+      issuer: cfg.issuer || undefined,
+      requiredClaims: ['exp'],
+    });
+    return payload;
   }
 
   static hasFeature(licenseType: LicenseType, featureKey: string): boolean {

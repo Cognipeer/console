@@ -128,16 +128,6 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       return rows.map((r) => this.mapStoreRow(r));
     }
 
-    async countMemoryStores(projectId?: string): Promise<number> {
-      const db = this.getTenantDb();
-      const clauses: string[] = [];
-      const params: Record<string, unknown> = {};
-      if (projectId) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
-      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-      const row = db.prepare(`SELECT COUNT(*) as cnt FROM ${TABLES.memoryStores} ${where}`).get(params) as SqliteRow;
-      return (row.cnt as number) || 0;
-    }
-
     // ── Memory Item operations ───────────────────────────────────────
 
     async createMemoryItem(

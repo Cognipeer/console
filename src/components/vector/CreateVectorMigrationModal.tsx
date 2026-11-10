@@ -45,7 +45,8 @@ export default function CreateVectorMigrationModal({
   const wasOpenedRef = useRef(false);
 
   const activeProviders = useMemo(
-    () => providers.filter((p) => p.status !== 'disabled'),
+    // Nothing is moved to or from a platform provider.
+    () => providers.filter((p) => p.status !== 'disabled' && !p.platform),
     [providers],
   );
 

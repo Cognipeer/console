@@ -6,6 +6,7 @@
  * deployment-scoped URL and its own auth header, so both are injectable exactly
  * as they are for audio (`openaiAudioHelpers`).
  */
+import { guardedFetch } from './guardedFetch';
 import { upstreamError } from './upstreamError';
 import type {
   GeneratedImage,
@@ -67,7 +68,7 @@ export function createOpenAiImageRuntime(opts: OpenAiImageClientOptions): ImageR
     if (input.user) body.user = input.user;
     if (input.extra) Object.assign(body, input.extra);
 
-    const response = await fetch(resolveUrl(opts), {
+    const response = await guardedFetch(resolveUrl(opts), {
       method: 'POST',
       headers: buildHeaders(opts),
       body: JSON.stringify(body),

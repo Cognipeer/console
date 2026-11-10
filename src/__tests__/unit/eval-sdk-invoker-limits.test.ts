@@ -8,6 +8,7 @@
  * flag otherwise) for model targets and the llm-judge, on both paths, plus the `evaluation` route.
  */
 
+import { reloadConfig } from '@/lib/core/config';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // TRAP: factories must be synchronous — async vi.mock factories silently
@@ -117,6 +118,7 @@ function sentRequest(): Record<string, unknown> {
 beforeEach(() => {
   vi.clearAllMocks();
   delete process.env.EVALUATION_INVOKER;
+  reloadConfig();
   h.getDynamicRoutingConfig.mockReturnValue(null);
   h.createProvider.mockReturnValue({ complete: h.complete });
   h.complete.mockResolvedValue(sdkResponse());
@@ -131,6 +133,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.EVALUATION_INVOKER;
+  reloadConfig();
 });
 
 describe('invokeChatViaSdk — result', () => {
@@ -461,6 +464,7 @@ describe('llm-judge — output limit', () => {
 describe('gateway fallback — route and truncation', () => {
   beforeEach(() => {
     process.env.EVALUATION_INVOKER = 'gateway';
+    reloadConfig();
   });
 
   const target = { key: 'tgt', kind: 'model', modelKey: 'gpt-4o', maxTokens: 256 } as IEvaluationTarget;

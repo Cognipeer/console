@@ -91,6 +91,45 @@ export const MAIN_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_beta_access_codes_status ON beta_access_codes(status);
+
+  -- Plan limits usage (monthly meters, limit events, capacity peaks)
+  CREATE TABLE IF NOT EXISTS plan_usage_monthly (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    period TEXT NOT NULL,
+    searches INTEGER NOT NULL DEFAULT 0,
+    flowRuns INTEGER NOT NULL DEFAULT 0,
+    crawlerPages INTEGER NOT NULL DEFAULT 0,
+    sandboxSeconds INTEGER NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_plan_usage_monthly_period ON plan_usage_monthly(period, tenantId);
+
+  CREATE TABLE IF NOT EXISTS plan_limit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenantId TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    dimension TEXT,
+    outcome TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    "limit" REAL,
+    used REAL,
+    waitMs INTEGER,
+    source TEXT,
+    count INTEGER NOT NULL DEFAULT 1,
+    at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_plan_limit_events_tenant_at ON plan_limit_events(tenantId, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_plan_limit_events_at ON plan_limit_events(at);
+
+  CREATE TABLE IF NOT EXISTS plan_usage_peaks (
+    tenantId TEXT NOT NULL,
+    day TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    value REAL NOT NULL,
+    PRIMARY KEY (tenantId, day, dimension, hour)
+  );
 `;
 
 /**
@@ -1832,6 +1871,27 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_reranker_run_logs_key_createdAt ON reranker_run_logs(rerankerKey, createdAt DESC);
+
+  -- Web search instances (behavior on top of a websearch provider record)
+  CREATE TABLE IF NOT EXISTS websearch_instances (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    providerKey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    settings TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    platform INTEGER NOT NULL DEFAULT 0,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_websearch_instances_tenant_key ON websearch_instances(tenantId, key);
+  CREATE INDEX IF NOT EXISTS idx_websearch_instances_tenant_project ON websearch_instances(tenantId, projectId);
 
   -- Web search run logs (per Web Search instance = websearch provider record)
   CREATE TABLE IF NOT EXISTS websearch_run_logs (

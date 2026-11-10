@@ -32,7 +32,7 @@ describe.runIf(MONGO_AVAILABLE)('MongoGridFsFileProviderContract', () => {
 
   beforeAll(async () => {
     const { MongoMemoryServer } = await import('mongodb-memory-server');
-    server = await MongoMemoryServer.create();
+    server = await MongoMemoryServer.create({ instance: { launchTimeout: 60_000 } });
     // The test server is on loopback: a self-hosted install, where an in-network database is what this driver is for.
     deployment({ DEPLOYMENT_MODE: 'onprem' });
     const base = { credentials: { uri: server.getUri() }, settings: { database: 'test_files' } };

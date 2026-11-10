@@ -38,6 +38,7 @@ vi.mock('@/lib/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/providers')>()),
   providerRegistry: {
     listDescriptors: vi.fn(),
+    listTenantDescriptors: vi.fn(),
     getContract: vi.fn(),
     createRuntime: vi.fn(),
   },
@@ -120,16 +121,16 @@ const MOCK_INDEX_RECORD = {
 describe('listVectorDrivers', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('delegates to providerRegistry.listDescriptors with domain "vector"', async () => {
+  it('delegates to providerRegistry.listTenantDescriptors with domain "vector"', async () => {
     const DESCRIPTORS = [
       { id: 'dummy-vector', name: 'Dummy Vector', domains: ['vector'] },
       { id: 'aws-s3-vectors', name: 'AWS S3 Vectors', domains: ['vector'] },
     ];
-    (providerRegistry.listDescriptors as ReturnType<typeof vi.fn>).mockReturnValue(DESCRIPTORS);
+    (providerRegistry.listTenantDescriptors as ReturnType<typeof vi.fn>).mockReturnValue(DESCRIPTORS);
 
     const result = await listVectorDrivers();
 
-    expect(providerRegistry.listDescriptors).toHaveBeenCalledWith('vector');
+    expect(providerRegistry.listTenantDescriptors).toHaveBeenCalledWith('vector');
     expect(result).toEqual(DESCRIPTORS);
   });
 });
@@ -239,6 +240,7 @@ describe('createVectorIndex', () => {
     expect(loadProviderRuntimeData).toHaveBeenCalledWith(
       TENANT_DB,
       expect.objectContaining({ key: PROVIDER_KEY }),
+      expect.objectContaining({ allowManaged: true }),
     );
     expect(MOCK_RUNTIME.createIndex).toHaveBeenCalledTimes(1);
     expect(db.createVectorIndex).toHaveBeenCalledTimes(1);

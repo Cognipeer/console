@@ -35,6 +35,11 @@ export interface ProviderFormField {
   defaultValue?: unknown;
   scope?: 'credentials' | 'settings' | 'metadata';
   /**
+   * For a `settings` field of a driver that splits its record in two layers (web search): `connection` fields live
+   * on the provider record, `behavior` fields on the instance that points at it. Unset = `behavior`.
+   */
+  settingsTarget?: 'connection' | 'behavior';
+  /**
    * Show this field only while another field of the same form holds one of the given values (an Azure Blob
    * credential belongs to one authentication method, for example). Presentation only: the runtime ignores the values
    * of fields that do not apply, and the server does not evaluate this.
@@ -81,6 +86,8 @@ export interface ProviderContract<TRuntime = unknown, TCredentials = Record<stri
   display: ProviderDisplayConfig;
   form: ProviderFormSchema;
   capabilities?: ProviderCapabilityFlags;
+  /** An operator-side driver (e.g. a managed provider): never listed to tenants, never creatable by them. */
+  internal?: boolean;
   createRuntime: (
     context: ProviderContext<TCredentials, TSettings>,
   ) => Promise<TRuntime> | TRuntime;
@@ -124,6 +131,8 @@ export interface ProviderDescriptor {
   domains: ProviderDomain[];
   display: ProviderDisplayConfig;
   capabilities?: ProviderCapabilityFlags;
+  /** Set on operator-side drivers; tenant-facing listings filter these out (see `listTenantDescriptors`). */
+  internal?: boolean;
 }
 
 export type LooseProviderContract = ProviderContract<unknown, unknown, unknown>;

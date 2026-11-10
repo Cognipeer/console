@@ -10,6 +10,7 @@ import type {
     IAgentSessionBudget,
     IAgentTurnCompaction,
 } from '@/lib/database/provider/types.domain';
+import type { LimitErrorInfo } from '@/lib/limits/describeLimitError';
 
 /** `deniedByUser` on a step: the call was stopped because a person said no to its approval request, not by a guardrail or a failure. */
 export type PlaygroundStep = IAgentConversationStep;
@@ -22,7 +23,14 @@ export type TurnCompaction = IAgentTurnCompaction;
  * `error` (with `errorType`, the classified failure) is a client-only turn that
  * failed, shown in place until reload.
  */
-export type ChatMessage = Omit<IAgentConversationMessage, 'timestamp'> & { timestamp?: string; errorType?: string };
+export type ChatMessage = Omit<IAgentConversationMessage, 'timestamp'> & {
+    timestamp?: string;
+    errorType?: string;
+    /** The failure's machine-readable code (`code` of the error body), when the server sent one. */
+    errorCode?: string;
+    /** The failure read as a plan-limit refusal (see `parseLimitError`), when it is one. */
+    limitError?: LimitErrorInfo;
+};
 
 /** What turns stored before `rejected` existed say for a call that was stopped before it ran. */
 export const BLOCKED_BEFORE_RUN_ERROR = 'Blocked before the tool ran.';

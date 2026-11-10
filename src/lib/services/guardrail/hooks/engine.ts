@@ -97,7 +97,7 @@ import { runSecretsPolicy } from '../families/secrets';
 import { runToolAccessPolicy } from '../families/toolAccess';
 import { runWebhookPolicy } from '../families/webhook';
 import { runWordFilterPolicy } from '../families/wordFilter';
-import { redactFindings } from '../piiDetector';
+import { redactFindings } from '../redactFindings';
 import { buildEvaluationErrorFinding } from '../types';
 import type { GuardrailFinding } from '../types';
 

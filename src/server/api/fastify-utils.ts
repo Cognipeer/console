@@ -39,13 +39,26 @@ import type { IamResource } from '@/lib/iam/entities';
 import { canonicalRoute } from '@/lib/iam/routePattern';
 import { getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
 import { ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
-import { getUserAuthState, getUserIdentity, isUserDisabled } from '@/lib/services/users/userAuthState';
+import {
+  getUserAuthState,
+  getUserIdentity,
+  isSessionIssuedBeforeCredentialChange,
+  isUserDisabled,
+} from '@/lib/services/users/userAuthState';
 import { isTenantRole } from '@/lib/iam/identity';
 import {
   ApiTokenAuthError,
   requireApiTokenFromHeader,
   type ApiTokenContext,
 } from '@/lib/services/apiTokenAuth';
+import {
+  assertApiRequestRate,
+  isPlanLimitError,
+  planLimitAnthropicBody,
+  planLimitErrorBody,
+  planLimitHeaders,
+  planLimitOpenAiBody,
+} from '@/lib/limits';
 import { DelegationError, resolveDelegatedCaller, USER_TOKEN_HEADER } from '@/lib/iam/delegationGate';
 import {
   ProjectContextError,
@@ -338,10 +351,14 @@ async function loadSessionAuthz(
  * standing the context is therefore corrected to the role the account has now
  * (the same briefly cached read, dropped when the account is written). When that
  * cannot be read the request is refused (503) like an unreadable account state.
+ *
+ * A session issued before the account's password was last set (`issuedAt`, the
+ * JWT `iat`, against the same cached identity) is refused with 401 and its
+ * cookies are cleared: changing or resetting a password ends the other sessions.
  */
 export async function rejectInactiveSessionAccount(
   reply: FastifyReply,
-  session: { tenantDbName: string; tenantId: string; userId: string },
+  session: { tenantDbName: string; tenantId: string; userId: string; issuedAt?: number },
 ): Promise<boolean> {
   let state: Awaited<ReturnType<typeof getUserAuthState>>;
   try {
@@ -371,15 +388,30 @@ export async function rejectInactiveSessionAccount(
   return true;
 }
 
-/** Sets the role of the request's session context to the one the account has now; true when it refused the request. */
+/**
+ * Sets the role of the request's session context to the one the account has now, and refuses a session
+ * issued before the last password change; true when it refused the request.
+ */
 async function applyCurrentRole(
   reply: FastifyReply,
-  session: { tenantDbName: string; tenantId: string; userId: string },
+  session: { tenantDbName: string; tenantId: string; userId: string; issuedAt?: number },
 ): Promise<boolean> {
   const headers = reply.request?.apiContextHeaders;
   if (!headers) return false;
   try {
     const identity = await getUserIdentity(session.tenantDbName, session.tenantId, session.userId);
+    if (
+      getConfig().auth?.passwordChangeEndsSessions !== false
+      && isSessionIssuedBeforeCredentialChange(session.issuedAt, identity.sessionsValidFrom)
+    ) {
+      clearSessionCookies(reply);
+      reply.code(401).send({
+        error: 'Unauthorized',
+        message: 'Session is no longer valid. Please sign in again.',
+        code: 'session_expired',
+      });
+      return true;
+    }
     // A role this version does not know leaves the session's role as it is.
     if (identity.role && headers['x-user-role'] !== identity.role) headers['x-user-role'] = identity.role;
     return false;
@@ -1163,6 +1195,10 @@ export function withApiRequestContext<
       // A handler-level authorization check (authorizeServiceForRequest) refuses
       // by throwing, exactly as the gate does; anything else is the handler's own
       // error and goes to the framework's error handler, as it always did.
+      if (isPlanLimitError(error)) {
+        reply.headers(planLimitHeaders(error));
+        return reply.code(error.status).send(planLimitErrorBody(error));
+      }
       const refused = sendRbacError(reply, error);
       if (refused) return refused;
       throw error;
@@ -1258,8 +1294,27 @@ async function applyDelegation(request: FastifyRequest, apiToken: ApiTokenContex
   }
 }
 
+/** Requests already counted against the plan's requests per minute (one count per request, however many wrappers it passes). */
+const rpmCountedRequests = new WeakSet<FastifyRequest>();
+
+/**
+ * Counts this request once against the tenant's plan requests per minute and sets the rate headers on the reply.
+ * Throws PlanLimitError when over the limit. No-op when plan limits are off, and for a route configured `countRpm: false`.
+ * Not called from `requireApiTokenContext`: a long stream re-runs that to refresh the principal.
+ */
+async function countApiRequestRate(request: FastifyRequest, reply: FastifyReply | undefined, apiToken: ApiTokenContext): Promise<void> {
+  if (rpmCountedRequests.has(request)) return;
+  rpmCountedRequests.add(request);
+  const config = request.routeOptions?.config as { countRpm?: boolean } | undefined;
+  if (config?.countRpm === false) return;
+  const tokenId = apiToken.tokenRecord._id ? String(apiToken.tokenRecord._id) : undefined;
+  const headers = await assertApiRequestRate({ tenantId: apiToken.tenantId, source: { type: 'api_token', id: tokenId } });
+  if (reply) for (const [name, value] of Object.entries(headers)) reply.header(name, value);
+}
+
 export async function getApiTokenContextForRequest(
   request: FastifyRequest,
+  reply?: FastifyReply,
 ): Promise<ApiTokenContext> {
   if (request.apiTokenContext) {
     return request.apiTokenContext;
@@ -1276,6 +1331,7 @@ export async function getApiTokenContextForRequest(
   if (context.tokenRecord.requireUserToken === true) {
     throw new ApiTokenAuthError('This API token only acts for users and this endpoint does not support that', 403, 'user_token_required');
   }
+  await countApiRequestRate(request, reply, context);
   request.apiTokenContext = context;
   return context;
 }
@@ -1335,6 +1391,14 @@ function sendClientApiError(
   error: unknown,
   style: ClientApiErrorStyle,
 ) {
+  if (isPlanLimitError(error)) {
+    // A plan limit (requests per minute, allowance, storage, ...): the code is the contract, in every dialect.
+    for (const [name, value] of Object.entries(planLimitHeaders(error))) reply.header(name, value);
+    if (style === 'anthropic') return reply.code(error.status).send(planLimitAnthropicBody(error));
+    if (style === 'openai') return reply.code(error.status).send(planLimitOpenAiBody(error));
+    return reply.code(error.status).send(planLimitErrorBody(error));
+  }
+
   if (error instanceof ApiTokenAuthError) {
     // A refusal that carries a code (`ip_not_allowed`) is "authenticated but not
     // permitted from here": a 403 permission error in every dialect, with the
@@ -1464,6 +1528,7 @@ export function withClientApiRequestContext<
       // A call that carries a user token acts for that person: from here on they are the principal (capped by this
       // token's scope and project), and this token stays the actor.
       apiToken = await applyDelegation(request, apiToken);
+      await countApiRequestRate(request, reply, apiToken);
       await enforceServiceAvailability(request, apiToken.tenantId);
       if (enforceRbac) {
         await enforceApiTokenRbac(request, apiToken);

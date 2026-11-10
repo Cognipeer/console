@@ -14,14 +14,21 @@
  * (public-mcp.ts); protocol handling is shared with client-a2a.ts.
  */
 
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { DatabaseProvider, IAgent, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
 import { resolveA2aExposure } from '@/lib/services/agents/a2aExposure';
+import {
+  checkPublicAddressRate,
+  checkPublicEndpointRate,
+  type PublicLimitDecision,
+} from '@/lib/services/mcp/publicGuard';
+import { getClientIp } from '../fastify-utils';
 import { buildAgentCard, externalBaseUrl, handleA2aRpc } from './client-a2a';
+import { gatePublicRequestRate } from '../publicRpmGate';
 
 const logger = createLogger('api:public-a2a');
 
@@ -31,6 +38,16 @@ const PUBLIC_SLUG_AUTHZ = authz.self(
 
 /** Attribution identity stamped on conversations/usage from public A2A calls. */
 const PUBLIC_A2A_USER_ID = 'a2a-public';
+
+/** Slugs are short URL-safe tokens; anything else is answered like an unknown endpoint without a lookup. */
+const ENDPOINT_SLUG_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+
+function sendRateLimited(reply: FastifyReply, decision: PublicLimitDecision) {
+  return reply
+    .code(429)
+    .header('Retry-After', String(decision.retryAfterSeconds))
+    .send({ error: 'Rate limit exceeded' });
+}
 
 function jsonRpcError(id: string | number | null, code: number, message: string) {
   return { error: { code, message }, id, jsonrpc: '2.0' };
@@ -55,7 +72,7 @@ async function resolvePublicAgent(
   tenantId: string,
   endpointSlug: string,
 ): Promise<{ tenant: ITenant; agent: IAgent } | null> {
-  if (!tenantId || !endpointSlug || endpointSlug.length < 8) return null;
+  if (!tenantId || !endpointSlug || !ENDPOINT_SLUG_PATTERN.test(endpointSlug)) return null;
   const db = await getDatabase();
   const tenant = await db.findTenantById(tenantId).catch(() => null);
   if (!tenant?.dbName) return null;
@@ -77,6 +94,13 @@ async function resolvePublicAgent(
 }
 
 export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
+  // Per client address, across the public endpoints; runs before any lookup.
+  app.addHook('onRequest', async (request, reply) => {
+    const rate = checkPublicAddressRate(getClientIp(request));
+    if (!rate.allowed) return sendRateLimited(reply, rate);
+    return undefined;
+  });
+
   app.get('/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
@@ -84,6 +108,11 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
       if (!resolved) {
         return reply.code(404).send({ error: 'Not found' });
       }
+      const rate = await checkPublicEndpointRate({
+        server: { tenantId: String(resolved.agent.tenantId), _id: resolved.agent._id as string | undefined, key: endpointSlug },
+        clientAddress: getClientIp(request),
+      });
+      if (!rate.allowed) return sendRateLimited(reply, rate);
       const endpoint = `${externalBaseUrl(request)}/api/public/a2a/${tenantId}/${endpointSlug}`;
       return reply.code(200).send(buildAgentCard(resolved.agent, endpoint, { publicAccess: true }));
     } catch (error) {
@@ -100,6 +129,14 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
       const { tenant, agent } = resolved;
+      const rate = await checkPublicEndpointRate({
+        server: { tenantId: String(resolved.agent.tenantId), _id: resolved.agent._id as string | undefined, key: endpointSlug },
+        clientAddress: getClientIp(request),
+      });
+      if (!rate.allowed) return sendRateLimited(reply, rate);
+
+      const refused = await gatePublicRequestRate(request, reply, { tenantId: agent.tenantId, sourceType: 'a2a', sourceId: agent.key });
+      if (refused) return refused;
 
       const db = await getDatabase();
       return await withTenantDb(db, tenant.dbName, () => handleA2aRpc(

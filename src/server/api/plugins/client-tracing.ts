@@ -12,6 +12,7 @@ import {
 } from '@/lib/services/tracing/traceUsage';
 import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import { createLogger } from '@/lib/core/logger';
+import { shouldRunTracingRetentionSweep } from '@/lib/services/tracingRetentionSweep';
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import {
@@ -767,7 +768,10 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         await backgroundDb.switchToTenant(ctx.tenantDbName);
 
         const retentionDays = quotaResult.effectiveLimits.quotas?.maxTracingRetentionDays;
-        if (retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0) {
+        if (
+          retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0
+          && shouldRunTracingRetentionSweep(ctx.tenantDbName, ctx.projectId)
+        ) {
           const cutoff = new Date(Date.now() - retentionDays * 86_400 * 1000);
           await backgroundDb.cleanupAgentTracingRetention({
             olderThan: cutoff,
@@ -1149,7 +1153,10 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         await backgroundDb.switchToTenant(ctx.tenantDbName);
 
         const retentionDays = quotaResult.effectiveLimits.quotas?.maxTracingRetentionDays;
-        if (retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0) {
+        if (
+          retentionDays !== undefined && retentionDays !== -1 && retentionDays >= 0
+          && shouldRunTracingRetentionSweep(ctx.tenantDbName, ctx.projectId)
+        ) {
           const cutoff = new Date(Date.now() - retentionDays * 86_400 * 1000);
           await backgroundDb.cleanupAgentTracingRetention({
             olderThan: cutoff,

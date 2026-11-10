@@ -8,6 +8,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { ZodError } from 'zod';
 import { createLogger } from '@/lib/core/logger';
 import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
+import { isPlanLimitError, planLimitErrorBody, planLimitHeaders } from '@/lib/limits';
 import {
   addCrawlerUrls,
   cancelCrawlJob,
@@ -50,7 +51,7 @@ function projectOf(ctx: { projectId?: string }): string | undefined {
 }
 
 function sendError(
-  reply: { code: (statusCode: number) => { send: (body: Record<string, unknown>) => unknown } },
+  reply: { code: (statusCode: number) => { send: (body: Record<string, unknown>) => unknown }; header?: (name: string, value: string) => unknown },
   error: unknown,
   fallback: string,
 ) {
@@ -60,6 +61,11 @@ function sendError(
     return reply.code(400).send({ error: formatCrawlerValidationError(error) });
   }
   if (isQuotaExceededError(error)) return reply.code(429).send(quotaExceededBody(error));
+  // The plan's monthly crawler-page allowance is used up (hosted deployments only).
+  if (isPlanLimitError(error)) {
+    for (const [name, value] of Object.entries(planLimitHeaders(error))) reply.header?.(name, value);
+    return reply.code(error.status).send(planLimitErrorBody(error));
+  }
   const message = error instanceof Error ? error.message : fallback;
   // An error that says it is a bad input is a 400 whatever its wording ("model not found" included).
   const badInput = (error as { statusCode?: unknown } | null)?.statusCode === 400;

@@ -18,6 +18,7 @@ import {
   loadProviderRuntimeData,
   ProviderCredentialDecryptError,
   recordProviderTest,
+  redactPlatformProvider,
   resolveProviderTestTarget,
   resolveTenantProjectIds,
   updateProviderConfig,
@@ -170,7 +171,7 @@ function readTestPayload(body: unknown): {
   if (typeof body.driver !== 'string' || body.driver === '') throw new Error('driver is required');
   if (body.credentials !== undefined && !isRecord(body.credentials)) throw new Error('credentials must be an object');
   if (body.settings !== undefined && !isRecord(body.settings)) throw new Error('settings must be an object');
-  if (!providerRegistry.listDescriptors().some((descriptor) => descriptor.id === body.driver)) {
+  if (!providerRegistry.listTenantDescriptors().some((descriptor) => descriptor.id === body.driver)) {
     throw new Error(`Unknown driver "${body.driver}"`);
   }
   return {
@@ -209,7 +210,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain);
+      const drivers = providerRegistry.listTenantDescriptors(query.domain);
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List provider drivers error', { error });
@@ -222,7 +223,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
       const descriptor = providerRegistry
-        .listDescriptors()
+        .listTenantDescriptors()
         .find((item) => item.id === driverId);
 
       return reply.code(200).send({ descriptor, driverId, schema });
@@ -255,7 +256,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           type: query.type || undefined,
         });
 
-        return reply.code(200).send({ providers });
+        return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
@@ -266,7 +267,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         type: query.type || undefined,
       });
 
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? sendProviderError(reply, error);
@@ -459,7 +460,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Not found' });
         }
 
-        return reply.code(200).send({ provider });
+        return reply.code(200).send({ provider: redactPlatformProvider(provider) });
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
@@ -476,7 +477,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
 
-      return reply.code(200).send({ provider });
+      return reply.code(200).send({ provider: redactPlatformProvider(provider) });
     } catch (error) {
       return sendProjectContextError(reply, error)
         ?? sendProviderError(reply, error);
@@ -517,7 +518,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Not found' });
         }
 
-        const updated = await updateProviderConfig(session.tenantDbName, id, payload);
+        const updated = await updateProviderConfig(session.tenantDbName, id, payload, { allowPlatformAssignment: true });
         if (!updated) {
           return reply.code(404).send({ error: 'Not found' });
         }

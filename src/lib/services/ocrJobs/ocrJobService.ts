@@ -10,7 +10,7 @@
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IOcrJob, IOcrJobItem, OcrOutputKind } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -167,7 +167,9 @@ export async function addFilesToJob(
 
   // Sync: single file, process inline and return the result.
   if (mode === 'sync' && created.length === 1) {
-    const processed = await processOcrItem(ctx, String(created[0]._id));
+    const processed = await runWithTenantScope(ctx.tenantDbName, () =>
+      processOcrItem(ctx, String(created[0]._id)),
+    );
     return { items: processed ? [processed] : created, sync: true };
   }
 

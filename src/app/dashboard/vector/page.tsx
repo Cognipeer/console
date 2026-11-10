@@ -22,9 +22,10 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import type {
-  VectorIndexRecord,
+  VectorIndexView,
   VectorProviderView,
 } from '@/lib/services/vector';
+import { formatBytes } from '@/components/files/shared/format';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
 import VectorProviderModal from '@/components/vector/VectorProviderModal';
 import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
@@ -49,7 +50,7 @@ interface VectorDashboardData {
 
 interface VectorIndexRow {
   provider: VectorProviderView;
-  index: VectorIndexRecord;
+  index: VectorIndexView;
 }
 
 function formatDate(value?: string | Date) {
@@ -62,10 +63,11 @@ function formatDate(value?: string | Date) {
 export default function VectorIndexPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
+  const tPlatform = useTranslations('platformStorage');
   const router = useRouter();
   const [providers, setProviders] = useState<VectorProviderView[]>([]);
   const [indexesByProvider, setIndexesByProvider] = useState<
-    Record<string, VectorIndexRecord[]>
+    Record<string, VectorIndexView[]>
   >({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -109,9 +111,9 @@ export default function VectorIndexPage() {
       const fetchedProviders: VectorProviderView[] = providerData.providers ?? [];
       setProviders(fetchedProviders);
 
-      const nextIndexes: Record<string, VectorIndexRecord[]> = {};
+      const nextIndexes: Record<string, VectorIndexView[]> = {};
       Object.entries(
-        (providerData.indexesByProvider ?? {}) as Record<string, VectorIndexRecord[]>,
+        (providerData.indexesByProvider ?? {}) as Record<string, VectorIndexView[]>,
       ).forEach(([key, value]) => {
         nextIndexes[key] = [...value];
       });
@@ -193,7 +195,7 @@ export default function VectorIndexPage() {
     index,
     provider,
   }: {
-    index: VectorIndexRecord;
+    index: VectorIndexView;
     provider: VectorProviderView;
   }) => {
     setIndexesByProvider((current) => ({
@@ -238,6 +240,7 @@ export default function VectorIndexPage() {
             status={provider.status === 'active' ? 'active' : 'paused'}
             label={provider.label}
           />
+          {provider.platform ? <span className="ds-badge ds-badge-info">{tPlatform('badge')}</span> : null}
         </div>
       ),
     },
@@ -256,6 +259,16 @@ export default function VectorIndexPage() {
       label: 'Metric',
       render: ({ index }) => (
         <span className="ds-badge">{index.metric}</span>
+      ),
+    },
+    {
+      key: 'storedSize',
+      label: tPlatform('vector.storedSize'),
+      align: 'right',
+      render: ({ provider, index }) => (
+        <span className="ds-mono" style={{ fontSize: 12.5 }}>
+          {provider.platform ? formatBytes(index.storedBytes ?? 0) : '—'}
+        </span>
       ),
     },
     {

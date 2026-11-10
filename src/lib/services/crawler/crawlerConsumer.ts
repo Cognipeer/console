@@ -13,7 +13,9 @@
  * directly, so this consumer isn't involved.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
 import { runCrawlJobLocal } from './crawlerJobService';
@@ -34,7 +36,7 @@ interface RunPayload {
  * to as many as 16 concurrent fetches and may drive a Chromium instance, so the
  * real footprint is this number multiplied by that fan-out.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.CRAWLER_RUN_CONCURRENCY ?? 2) || 2);
+const concurrency = () => getConfig().queues.crawlerRunConcurrency;
 
 export async function startCrawlerQueueConsumer(): Promise<void> {
   if (started) return;
@@ -42,11 +44,20 @@ export async function startCrawlerQueueConsumer(): Promise<void> {
   queue.consume(queueNameFor('crawler'), async (ctx: JobContext<QueuePayload>) => {
     if (ctx.name === 'crawler.run') {
       const payload = ctx.data as unknown as RunPayload;
-      await runCrawlJobLocal(payload.ctx, payload.jobId);
-      return { ok: true };
+      // Plan limit (crawler jobs): one 'crawler' lease per crawl job; a full pool requeues it with a delay.
+      const leased = await runJobUnderLease({
+        tenantId: payload.ctx.tenantId,
+        holderId: payload.jobId,
+        queueName: queueNameFor('crawler'),
+        jobName: 'crawler.run',
+        pool: 'crawler',
+        payload: payload as unknown as QueuePayload,
+        run: () => runCrawlJobLocal(payload.ctx, payload.jobId),
+      });
+      return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
     }
     throw new Error(`Unknown crawler job: ${ctx.name}`);
-  }, { concurrency: CONCURRENCY });
+  }, { concurrency: concurrency() });
   started = true;
-  log.info('Crawler queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Crawler queue consumer registered', { concurrency: concurrency() });
 }

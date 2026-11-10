@@ -17,6 +17,7 @@ import { MODEL_PARAMETER_UNSUPPORTED_CODE, normalizeInferenceError } from '@/lib
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 import { ServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 import { formatUsd } from '@/lib/utils/formatUsd';
+import { isPlanLimitError } from '@/lib/limits/errors';
 
 export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
 
@@ -259,6 +260,14 @@ export function classifyAgentRunError(
         return {
             status: 429,
             error: { message: error.message, type: 'rate_limit_error', code: error.code },
+        };
+    }
+
+    // A plan limit (no free agent session after the wait): the code is the contract.
+    if (isPlanLimitError(error)) {
+        return {
+            status: error.status,
+            error: { message: error.message, type: error.type, code: error.code },
         };
     }
 

@@ -384,7 +384,7 @@ describe('FilesApiError', () => {
       'markdown_unavailable', 'object_too_large', 'prefix_locked', 'preview_unsupported',
       'provider_endpoint_not_allowed', 'provider_inactive', 'provider_invalid', 'provider_mismatch', 'provider_missing',
       'provider_settings_invalid', 'provider_unassigned', 'queue_unavailable', 'quota_exceeded', 'storage_failure',
-      'storage_location_shared', 'storage_timeout', 'storage_unavailable',
+      'storage_location_shared', 'storage_quota_exceeded', 'storage_timeout', 'storage_unavailable',
     ]);
     expect(new Set(FILES_ERROR_CODES).size).toBe(FILES_ERROR_CODES.length);
   });

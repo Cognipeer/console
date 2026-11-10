@@ -52,6 +52,7 @@ import {
     settlePausedAgentRuns,
 } from './agentRunService';
 import { watchTurnCancellation } from './turnWatch';
+import { acquireAgentSessionSlot, actorChannelOrigin, type AgentSessionSlot } from './agentSessionLease';
 import { resolveHitlConfig, type ResolvedHitlConfig } from './agentHumanInTheLoop';
 import {
     CLIENT_TOOL_UNANSWERED_MESSAGE,
@@ -161,6 +162,10 @@ export interface ResolveAgentActionInput {
         onCompaction?: (compaction: AgentCompactionEvent) => void;
         onPlan?: (plan: AgentPlanEvent) => void;
         onSubagent?: (event: AgentSubagentEvent) => void;
+        /** The continuation is waiting for a free agent session (plan limit): `run.queued`. */
+        onRunQueued?: (info: { limit: number; active: number; retryInMs: number }) => void;
+        /** The wait is over and the continuation starts: `run.started`. */
+        onRunStarted?: () => void;
         signal?: AbortSignal;
     };
     /** Deadline / cancel reference for a continuation that runs under a ceiling. */
@@ -628,7 +633,21 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             : undefined;
         if (reservation === null) return { kind: 'busy' };
 
+        // Plan limit (agent sessions): an inline continuation is a new turn, so it takes a slot of its own
+        // (the paused turn released its slot when it stopped). Asked before the answer is recorded, so a
+        // refusal leaves the request open. Answers through the API do not count (see agentSessionLease).
+        let slot: AgentSessionSlot | undefined;
         try {
+            if (reservation) {
+                slot = await acquireAgentSessionSlot({
+                    tenantId,
+                    holderId: String(reservation.run._id),
+                    origin: actorChannelOrigin(actor.channel),
+                    ...(input.stream?.signal ? { signal: input.stream.signal } : {}),
+                    ...(input.stream?.onRunQueued ? { onQueued: input.stream.onRunQueued } : {}),
+                    ...(input.stream?.onRunStarted ? { onStarted: input.stream.onRunStarted } : {}),
+                });
+            }
             // 5. Record the answer (compare-and-set: two reviewers cannot both win).
             const recorded = await db.updateAgentPendingAction(String(action._id), {
                 status: 'resolved',
@@ -773,6 +792,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                 ...(pausedRunId ? { runId: pausedRunId } : {}),
             };
         } finally {
+            await slot?.release();
             await reservation?.release();
         }
     });

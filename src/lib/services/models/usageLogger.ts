@@ -10,6 +10,7 @@ import { currentRestrictedKnowledgeTags } from '@/lib/services/rag/access/exposu
 import type { RoutingRunAttribution } from './routingCallerContext';
 import {
   recordUsageEvent,
+  resolveUsageAttribution,
   type UsageAttribution,
 } from '@/lib/services/usage/usageEvents';
 import {
@@ -227,10 +228,14 @@ export async function logModelUsage(
   if (usage.pages) units.pages = usage.pages;
   if (usage.images) units.images = usage.images;
 
+  // A platform model has no project of its own: its usage belongs to the project that made the call (the explicit
+  // attribution, else the request context), so project views (a model's Logs tab, project usage) show it.
+  const usageProjectId = model.projectId ?? resolveUsageAttribution(payload.attribution).projectId;
+
   const attribution = recordUsageEvent({
     tenantDbName,
     tenantId: model.tenantId,
-    projectId: model.projectId,
+    projectId: usageProjectId,
     service: 'models',
     refKey: model.key,
     status: payload.status,
@@ -252,7 +257,7 @@ export async function logModelUsage(
   recordEntityMetric({
     tenantDbName,
     tenantId: model.tenantId,
-    projectId: model.projectId,
+    projectId: usageProjectId,
     entityType: 'model',
     entityKey: model.key,
     source: 'gateway',
@@ -282,7 +287,7 @@ export async function logModelUsage(
     apiTokenId: attribution.apiTokenId,
     actorType: attribution.actorType,
     tenantId: model.tenantId,
-    projectId: model.projectId,
+    projectId: usageProjectId,
     modelKey: model.key,
     modelId: model._id
       ? typeof model._id === 'string'

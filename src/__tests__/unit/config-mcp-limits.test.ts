@@ -19,7 +19,7 @@ const DEFAULT_SSE = {
   keepaliveMs: 25_000,
 };
 
-const DEFAULT_STDIO = { maxConcurrent: 8, maxConcurrentPerTenant: 4 };
+const DEFAULT_STDIO = { enabled: true, maxConcurrent: 8, maxConcurrentPerTenant: 4 };
 
 const DEFAULT_PUBLIC = {
   rateLimitPerMinute: 300,
@@ -248,24 +248,24 @@ describe('MCP gateway limits', () => {
     it('shares the pool with each tenant by halves, but never less than one slot', () => {
       for (const [pool, share] of [['8', 4], ['10', 5], ['3', 1], ['1', 1], ['2', 1]] as const) {
         setConfigSource(sourceWith({ MCP_STDIO_MAX_CONCURRENT: pool }));
-        expect(getConfig().mcp.stdio, pool).toEqual({ maxConcurrent: Number(pool), maxConcurrentPerTenant: share });
+        expect(getConfig().mcp.stdio, pool).toMatchObject({ maxConcurrent: Number(pool), maxConcurrentPerTenant: share });
       }
     });
 
     it('takes a tenant share from MCP_STDIO_MAX_CONCURRENT_PER_TENANT, and 0 turns the share off', () => {
       setConfigSource(sourceWith({ MCP_STDIO_MAX_CONCURRENT: '8', MCP_STDIO_MAX_CONCURRENT_PER_TENANT: '6' }));
-      expect(getConfig().mcp.stdio).toEqual({ maxConcurrent: 8, maxConcurrentPerTenant: 6 });
+      expect(getConfig().mcp.stdio).toMatchObject({ maxConcurrent: 8, maxConcurrentPerTenant: 6 });
       setConfigSource(sourceWith({ MCP_STDIO_MAX_CONCURRENT_PER_TENANT: '0' }));
-      expect(getConfig().mcp.stdio).toEqual({ maxConcurrent: 8, maxConcurrentPerTenant: 0 });
+      expect(getConfig().mcp.stdio).toMatchObject({ maxConcurrent: 8, maxConcurrentPerTenant: 0 });
     });
 
     it('falls back to the defaults for a value that is empty, negative or not a number', () => {
       for (const value of ['', '-3', 'abc']) {
         setConfigSource(sourceWith({ MCP_STDIO_MAX_CONCURRENT_PER_TENANT: value }));
-        expect(getConfig().mcp.stdio, JSON.stringify(value)).toEqual({ maxConcurrent: 8, maxConcurrentPerTenant: 4 });
+        expect(getConfig().mcp.stdio, JSON.stringify(value)).toMatchObject({ maxConcurrent: 8, maxConcurrentPerTenant: 4 });
       }
       setConfigSource(sourceWith({ MCP_STDIO_MAX_CONCURRENT: 'abc' }));
-      expect(getConfig().mcp.stdio).toEqual({ maxConcurrent: 8, maxConcurrentPerTenant: 4 });
+      expect(getConfig().mcp.stdio).toMatchObject({ maxConcurrent: 8, maxConcurrentPerTenant: 4 });
     });
   });
 

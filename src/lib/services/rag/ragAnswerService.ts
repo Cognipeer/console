@@ -20,6 +20,7 @@ import { queryRag } from './ragService';
 import { anonymousKbCaller, resolveRagAccess, withKnowledgeExposure, type KbCaller, type RagAccessScope } from './access';
 import { RagModuleInactiveError } from './errors';
 import type { RagQueryMatch } from './types';
+import { normalizeRagTopK } from './topK';
 import {
   DEFAULT_RAG_SYSTEM_PROMPT,
   buildMapMessages,
@@ -395,7 +396,7 @@ async function answer(
 ): Promise<RagAnswerResult> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const startTime = Date.now();
-  const topK = request.topK ?? 5;
+  const topK = normalizeRagTopK(request.topK, 5);
   const retrieval = request.retrieval ?? {};
   const gen = request.generation ?? {};
   const history = request.history ?? [];
