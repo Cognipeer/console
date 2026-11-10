@@ -44,6 +44,7 @@ import {
   withoutSourceText,
 } from './rag';
 import { ragAccessForRequest, sendBadBody, sendRagAccessError } from '../ragAccessRequest';
+import { readRagTopK } from '@/lib/services/rag/topK';
 import { kbIndexShareRefusal } from '../ragOwnedResources';
 import { ocrModelProblem, readDocumentExtraction } from '../ragExtraction';
 import { VectorFilterError } from '@/lib/providers';
@@ -523,9 +524,11 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
       const { key } = request.params as { key: string };
       const body = readJsonObjectBody<Record<string, unknown>>(request);
 
-      if (typeof body.query !== 'string') {
+      if (typeof body.query !== 'string' || body.query === '') {
         return reply.code(400).send({ error: 'query is required' });
       }
+      const topKRead = readRagTopK(body.topK);
+      if (!topKRead.ok) return reply.code(400).send({ error: topKRead.error });
 
       const { module: ragModule, scope, caller } = await ragAccessForRequest(request, {
         tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, ragModuleKey: key,
@@ -535,7 +538,7 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
         filter: body.filter as Record<string, unknown> | undefined,
         query: body.query,
         ragModuleKey: key,
-        topK: body.topK as number | undefined,
+        topK: topKRead.topK,
         minScore: typeof body.minScore === 'number' ? body.minScore : undefined,
       }, { caller, ...(scope ? { access: scope } : {}) });
 

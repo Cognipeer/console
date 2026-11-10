@@ -1145,6 +1145,26 @@ describe('RAG Service', () => {
       expect(result.latencyMs).toBeGreaterThanOrEqual(0);
     });
 
+    it('a topK that is not a positive number is defaulted, never sent to the vector store', async () => {
+      for (const topK of [-1, 0, Number.NaN, '3' as unknown as number]) {
+        (queryVectorIndex as ReturnType<typeof vi.fn>).mockClear();
+        const result = await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ragModuleKey: 'my-rag', query: 'q', topK });
+        expect(queryVectorIndex).toHaveBeenCalledWith(
+          DB_NAME, TENANT_ID, PROJECT_ID,
+          expect.objectContaining({ query: expect.objectContaining({ topK: 5 }) }),
+        );
+        expect(result.matches).toHaveLength(1);
+      }
+    });
+
+    it('a huge topK is clamped before it reaches the vector store', async () => {
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ragModuleKey: 'my-rag', query: 'q', topK: 100000 });
+      expect(queryVectorIndex).toHaveBeenCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID,
+        expect.objectContaining({ query: expect.objectContaining({ topK: 200 }) }),
+      );
+    });
+
     it('uses topK=5 by default', async () => {
       await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, { ragModuleKey: 'my-rag', query: 'test' });
       expect(queryVectorIndex).toHaveBeenCalledWith(
