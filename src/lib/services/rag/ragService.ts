@@ -2393,8 +2393,12 @@ export async function deleteRagDocument(
   // The stored source outlives the row unless it is deleted here.
   await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
-  // Update module stats
-  await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
+  // Update module stats. Only an indexed document was ever counted in them
+  // (ingest raises the totals once it reached `indexed`), so a failed, pending
+  // or processing one must not lower the counters of the documents that are.
+  if (doc.status === 'indexed') {
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
+  }
 
   const deleted = await db.deleteRagDocument(request.documentId);
   await deleteRagDocumentAcl(db, ragModule, request.documentId);
@@ -2715,6 +2719,14 @@ export async function reingestDocument(
     throw new RagDocumentGoneError();
   }
 
+  // The module totals count indexed documents only. One that was indexed stops
+  // being counted the moment it leaves that state, so a re-ingest that fails
+  // or a delete that lands mid-way leaves the totals right; it is counted
+  // again below once it has indexed.
+  if (doc.status === 'indexed') {
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -oldChunkCount });
+  }
+
   try {
     const chunkCount = await indexDocumentContent({
       db,
@@ -2765,7 +2777,7 @@ export async function reingestDocument(
       throw new RagDocumentGoneError();
     }
 
-    await db.incrementRagModuleTotals(String(ragModule._id), { chunks: chunkCount - oldChunkCount });
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
 
     logger.debug('Re-indexed document', {
       documentId: request.documentId,

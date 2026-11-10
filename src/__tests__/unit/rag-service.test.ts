@@ -1592,6 +1592,16 @@ describe('RAG Service', () => {
       expect(db.incrementRagModuleTotals).toHaveBeenCalledWith('ragmod-1', { documents: -1, chunks: -3 });
     });
 
+    it.each(['failed', 'pending', 'processing'] as const)(
+      'leaves the module totals alone when the deleted document was %s (never counted)',
+      async (status) => {
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument, status, chunkCount: 0 });
+        await deleteRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, deleteReq);
+        expect(db.incrementRagModuleTotals).not.toHaveBeenCalled();
+        expect(db.deleteRagDocument).toHaveBeenCalledWith('ragdoc-1');
+      },
+    );
+
     it('deletes the document record and returns true', async () => {
       const result = await deleteRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, deleteReq);
       expect(result).toBe(true);
@@ -1640,6 +1650,33 @@ describe('RAG Service', () => {
       const [rows] = (db.bulkInsertRagChunks as ReturnType<typeof vi.fn>).mock.calls[0];
       return (rows as Array<{ content: string }>).map((r) => r.content).join('');
     };
+
+    describe('module totals', () => {
+      const bumps = () => (db.incrementRagModuleTotals as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]);
+      const sum = () => bumps().reduce(
+        (acc, d) => ({ documents: acc.documents + (d.documents ?? 0), chunks: acc.chunks + (d.chunks ?? 0) }),
+        { documents: 0, chunks: 0 },
+      );
+
+      it('counts a failed document once it indexes', async () => {
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument, status: 'failed', chunkCount: 0, sourceText: 'Some text to index.' });
+        await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+        expect(sum()).toEqual({ documents: 1, chunks: 1 });
+      });
+
+      it('keeps an indexed document counted once, with its new chunk count', async () => {
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument, status: 'indexed', chunkCount: 5, sourceText: 'Some text to index.' });
+        await reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq);
+        expect(sum()).toEqual({ documents: 0, chunks: 1 - 5 });
+      });
+
+      it('stops counting an indexed document whose re-ingest fails', async () => {
+        db.findRagDocumentById.mockResolvedValue({ ...mockDocument, status: 'indexed', chunkCount: 5, sourceText: 'Some text to index.' });
+        (handleEmbeddingRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Embed fail'));
+        await expect(reingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, reingestReq)).rejects.toThrow('Embed fail');
+        expect(sum()).toEqual({ documents: -1, chunks: -5 });
+      });
+    });
 
     it('re-runs the converter over the stored original bytes', async () => {
       db.findRagDocumentById.mockResolvedValue({
