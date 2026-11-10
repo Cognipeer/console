@@ -21,6 +21,7 @@ import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
+import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
 import type {
   CreateProviderConfigInput,
@@ -35,6 +36,7 @@ import {
   redactPlatformProvider,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
+import { canUseTenantProviderScope } from '../clientGrantPolicy';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 
@@ -90,6 +92,57 @@ function isAssignedToProject(
   );
 }
 
+/** Tenant-wide scope is for owner/admin callers; everyone else stays inside the token's project. */
+function tenantScopeRefused(query: { scope?: string }, auth: ApiTokenContext): boolean {
+  return query.scope === 'tenant' && !canUseTenantProviderScope(auth);
+}
+
+/** Setting/credential names that point a provider at a server (the fields the save-time endpoint check reads, and their siblings). */
+const TARGET_KEY = /url|uri|endpoint|host|address|server|authority|apibase|instancename|connectionstring|brokers|nodes/i;
+const URL_VALUE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/** The connection-target entries of a settings/credentials object, as `path -> value` (nested objects included). */
+function collectTargets(value: unknown, path: string, out: Map<string, string>, depth = 0): void {
+  if (depth > 6 || !isRecord(value)) return;
+  for (const [key, entry] of Object.entries(value)) {
+    const where = path ? `${path}.${key}` : key;
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim();
+      if (trimmed && (TARGET_KEY.test(key) || URL_VALUE.test(trimmed))) out.set(where, trimmed);
+      // A JSON document held in a string (a service-account file) is read for its own target fields.
+      if (trimmed.startsWith('{')) {
+        try { collectTargets(JSON.parse(trimmed), where, out, depth + 1); } catch { /* not JSON */ }
+      }
+    } else if (isRecord(entry)) {
+      collectTargets(entry, where, out, depth + 1);
+    }
+  }
+}
+
+/**
+ * True when an update changes where a provider connects: any target field of the new settings differs from the stored
+ * ones (set, changed or removed), or the new credentials carry a target field (stored credentials are not compared).
+ */
+function changesConnectionTarget(
+  existing: { settings?: unknown },
+  payload: { settings?: unknown; credentials?: unknown },
+): boolean {
+  if (payload.settings !== undefined) {
+    const before = new Map<string, string>();
+    const after = new Map<string, string>();
+    collectTargets(existing.settings, '', before);
+    collectTargets(payload.settings, '', after);
+    if (before.size !== after.size) return true;
+    for (const [key, value] of after) if (before.get(key) !== value) return true;
+  }
+  if (payload.credentials !== undefined) {
+    const incoming = new Map<string, string>();
+    collectTargets(payload.credentials, '', incoming);
+    if (incoming.size > 0) return true;
+  }
+  return false;
+}
+
 export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/providers/drivers', withClientApiRequestContext(async (request, reply) => {
     const query = (request.query ?? {}) as { domain?: ProviderDomain };
@@ -110,6 +163,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/providers', withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const query = (request.query ?? {}) as { driver?: string; scope?: string; status?: string; type?: ProviderDomain };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const filters = {
         driver: query.driver || undefined,
         status: parseStatus(query.status),
@@ -128,6 +182,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/providers', withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const body = readJsonBody<Record<string, unknown>>(request);
       body.createdBy = auth.tokenRecord.userId;
       validateCreatePayload(body);
@@ -168,6 +223,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const provider = await getProviderConfigById(auth.tenantDbName, id);
       const ok = provider
         && provider.tenantId === auth.tenantId
@@ -184,7 +240,11 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const payload = sanitizeUpdatePayload(readJsonBody<Record<string, unknown>>(request));
+      const isAdminCaller = canUseTenantProviderScope(auth);
+      // Re-assigning a provider to other projects is for owner/admin callers.
+      if (!isAdminCaller) delete payload.projectIds;
       payload.updatedBy = String(auth.tokenRecord.userId);
       payload.allowHostPaths = isOwnerOrAdmin(auth.user?.role);
       const existing = await getProviderConfigById(auth.tenantDbName, id);
@@ -192,6 +252,13 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
         && existing.tenantId === auth.tenantId
         && (query.scope === 'tenant' || (auth.projectId && isAssignedToProject(existing, auth.projectId)));
       if (!ok) return reply.code(404).send({ error: 'Not found' });
+      // Pointing a provider at another server is for owner/admin callers.
+      if (!isAdminCaller && changesConnectionTarget(existing ?? {}, payload)) {
+        return reply.code(403).send({
+          code: 'provider_target_change_requires_admin',
+          error: 'Changing a provider connection target requires an owner or admin',
+        });
+      }
       const updated = await updateProviderConfig(
         auth.tenantDbName,
         id,
@@ -214,6 +281,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as { scope?: string };
+      if (tenantScopeRefused(query, auth)) return reply.code(403).send({ error: 'Forbidden' });
       const existing = await getProviderConfigById(auth.tenantDbName, id);
       const ok = existing
         && existing.tenantId === auth.tenantId
