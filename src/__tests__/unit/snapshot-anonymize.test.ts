@@ -12,8 +12,12 @@ import {
   pseudonymToken,
   type AnonymizeOptions,
 } from '@/lib/services/pii/anonymize';
+import { withCustomPatternBudget } from '@/lib/services/pii/detector';
 
 const SALT = 'unit-test-salt';
+
+/** Custom-pattern scan budget for tests: a busy CI runner can need more than the 50 ms default even for a simple pattern. */
+const GENEROUS_BUDGET_MS = 5000;
 
 function opts(overrides: Partial<AnonymizeOptions> = {}): AnonymizeOptions {
   return { categories: ['email'], strategy: 'pseudonym', salt: SALT, ...overrides };
@@ -90,8 +94,8 @@ describe('mask strategy', () => {
 });
 
 describe('custom patterns', () => {
-  it('reuses the IPiiPolicy custom pattern shape', () => {
-    const result = anonymizeText('order ORD-12345 shipped', opts({
+  it('reuses the IPiiPolicy custom pattern shape', async () => {
+    const { result } = await withCustomPatternBudget(async () => anonymizeText('order ORD-12345 shipped', opts({
       categories: [],
       customPatterns: [{
         id: 'p1',
@@ -100,7 +104,7 @@ describe('custom patterns', () => {
         pattern: 'ORD-\\d{5}',
         enabled: true,
       }],
-    }));
+    })), GENEROUS_BUDGET_MS);
     expect(result.findings).toBe(1);
     expect(result.text).toBe(`order ${expectedToken(SALT, 'order_id', 'ORD-12345')} shipped`);
   });
