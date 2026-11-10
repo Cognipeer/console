@@ -63,6 +63,22 @@ describeForEachProvider('Tenant CRUD', (getDb) => {
     expect(await db.findTenantBySlug('nonexistent-slug-xyz')).toBeNull();
   });
 
+  it('matches a slug only as a plain string value', async () => {
+    const db = getDb();
+    await db.createTenant({
+      companyName: 'Acme',
+      slug,
+      dbName: `tenant_${slug}`,
+      licenseType: 'FREE',
+      ownerId: 'owner-pending',
+    });
+
+    for (const value of [{ $ne: null }, { $regex: '^acme' }, ['acme'], 42, null, undefined, '']) {
+      expect(await db.findTenantBySlug(value as unknown as string)).toBeNull();
+    }
+    expect((await db.findTenantBySlug(slug))?.slug).toBe(slug);
+  });
+
   it('updateTenant patches fields and returns the updated row', async () => {
     const db = getDb();
     const tenant = await db.createTenant({

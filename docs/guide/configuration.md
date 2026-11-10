@@ -64,6 +64,9 @@ On an installation you run yourself, set `DEPLOYMENT_MODE=onprem` to use storage
 |----------|-------------|---------|
 | `JWT_EXPIRES_IN` | JWT token expiry | `7d` |
 | `PROVIDER_ENCRYPTION_SECRET` | Key that encrypts provider credentials at rest. Required: min 32 chars, must differ from `JWT_SECRET`. | — |
+| `AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS` | Failed sign-ins one account (by email) may have from one client address in 15 minutes; successful sign-ins do not count; counted across replicas when `RATE_LIMIT_PROVIDER=redis`. `0` turns the per-account limit off. | `20` |
+| `AUTH_PASSWORD_CHANGE_ENDS_SESSIONS` | Changing or resetting a password ends the sessions issued before it (`401`, `session_expired`). `false` keeps them valid until they expire; a startup warning is logged. | `true` |
+| `AUTH_LOGIN_TENANT_SCAN` | Legacy: a sign-in without a workspace for an address the user directory does not know also searches every tenant database (and registers the account in the directory when found). A startup note is logged while it is on. Defaults to `true` for this release; it will default to `false` in a later release. | `true` |
 
 Production refuses to start unless `PROVIDER_ENCRYPTION_SECRET` is valid, and in production credentials are never encrypted with `JWT_SECRET`. Outside production, an unset `PROVIDER_ENCRYPTION_SECRET` is reported as a configuration error and new credentials are encrypted with `JWT_SECRET` instead. Decryption also tries `JWT_SECRET`, so credentials that an earlier version saved under it stay readable and are encrypted under `PROVIDER_ENCRYPTION_SECRET` the next time they are saved.
 
@@ -71,7 +74,7 @@ Production refuses to start unless `PROVIDER_ENCRYPTION_SECRET` is valid, and in
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TRUSTED_PROXIES` | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Token IP allowlists and the IP condition of access policies use the address resolved through them; unset, they use the direct connection address and ignore forwarded headers. | — |
+| `TRUSTED_PROXIES` | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Token IP allowlists and the IP condition of access policies use the address resolved through them; unset, they use the direct connection address and ignore forwarded headers, while rate limits and audit logs take the address from `X-Forwarded-For` as received (in production a startup warning says so). | — |
 | `IAM_VALIDATE_REQUESTS` | Set to `1` to validate every authorization request against the engine's schema (diagnostics; adds about 0.1 ms per decision). | off |
 
 There is no switch for the authorization engine itself: it decides every request. See [Authorization](/guide/authorization).

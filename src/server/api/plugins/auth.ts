@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import { SignJWT, jwtVerify } from 'jose';
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -17,6 +18,7 @@ import {
   SESSION_ISSUANCE_RATE_LIMIT,
   type RateLimitConfig,
 } from '@/lib/services/auth/rateLimiter';
+import { checkSharedRateLimit, peekSharedRateLimit } from '@/lib/services/auth/sharedRateCounter';
 import { DIRECTORY_READ_ONLY_FIELDS, isDirectoryManaged, providerOf } from '@/lib/iam/identity';
 import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
 import {
@@ -53,6 +55,68 @@ const PASSWORD_CHANGE_RATE_LIMIT: RateLimitConfig = { maxAttempts: 10, windowSec
 const PROFILE_EDIT_RATE_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSeconds: 60 };
 const MIN_PROFILE_NAME_LENGTH = 2;
 const MAX_PROFILE_NAME_LENGTH = 120;
+/**
+ * Window of the per-account sign-in limit (AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS failed attempts per account
+ * and client address, counted across replicas when RATE_LIMIT_PROVIDER=redis). Successful sign-ins do
+ * not count. Sits next to the per-address login limit.
+ */
+export const LOGIN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
+
+/** Longest value each field of the sign-in, sign-up and password-reset bodies takes. */
+const MAX_EMAIL_LENGTH = 320;
+const MAX_PASSWORD_LENGTH = 4096;
+const MAX_SLUG_LENGTH = 128;
+const MAX_NAME_LENGTH = 200;
+const MAX_TOKEN_LENGTH = 8192;
+
+/**
+ * The named fields of a JSON body, each a string or absent. A field that is missing or null reads as
+ * undefined; a field of any other type, or one longer than its limit, makes the body invalid (null).
+ * A body that is not an object has none of the fields.
+ */
+function readStringFields<K extends string>(
+  body: unknown,
+  limits: Record<K, number>,
+): Partial<Record<K, string>> | null {
+  const input = body !== null && typeof body === 'object' && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : {};
+  const fields: Partial<Record<K, string>> = {};
+  for (const key of Object.keys(limits) as K[]) {
+    const value = input[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string' || value.length > limits[key]) return null;
+    fields[key] = value;
+  }
+  return fields;
+}
+
+function invalidBody(reply: FastifyReply): FastifyReply {
+  return reply.code(400).send({ error: 'Invalid request body', code: 'invalid_body' });
+}
+
+/**
+ * Rate-limit key for the failed sign-ins of one account from one client address; the account
+ * is stored as a digest.
+ */
+function loginAccountRateLimitKey(normalizedEmail: string, clientAddress: string | null | undefined): string {
+  const digest = createHash('sha256').update(normalizedEmail).digest('base64url');
+  return clientRateLimitKey(`login-account:${digest}`, clientAddress);
+}
+
+/**
+ * A hash no password matches, compared when no account was found, so that a sign-in for an unknown
+ * address takes about as long as one for a known address with a wrong password.
+ */
+let unmatchedPasswordHash: Promise<string> | null = null;
+async function compareWithUnmatchedHash(password: string): Promise<void> {
+  try {
+    unmatchedPasswordHash ??= Promise.resolve(bcrypt.hash(randomBytes(32).toString('hex'), BCRYPT_ROUNDS));
+    await bcrypt.compare(password, await unmatchedPasswordHash);
+  } catch {
+    unmatchedPasswordHash = null;
+  }
+}
 
 /** What `GET /auth/me` answers (and `PATCH /auth/profile` repeats): the person and what of it they can change themselves. */
 function describeAccount(user: IUser, userId: string) {
@@ -274,6 +338,25 @@ export async function issueSessionForAuthenticatedUser(
   });
 }
 
+/**
+ * Replaces the request's session cookie with one issued now (same claims). Used after the password
+ * changed, which ends every session issued before it. Best effort: on failure the person signs in again.
+ */
+async function reissueSessionCookie(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const current = request.cookies?.token;
+  if (!current) return;
+  try {
+    const token = await TokenManager.refreshToken(current);
+    if (token) {
+      setSessionCookies(reply, { token, activeProjectId: request.cookies.active_project_id });
+    }
+  } catch (error) {
+    logger.warn('Could not reissue the session after a password change', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export const authApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/auth/login', { config: authz.public() }, async (request, reply) => {
     try {
@@ -293,7 +376,16 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           .send({ error: 'Too many login attempts. Please try again later.' });
       }
 
-      const { email, password, slug, workspace } = readJsonBody<LoginBody>(request);
+      const loginFields = readStringFields<keyof LoginBody>(readJsonBody<unknown>(request), {
+        email: MAX_EMAIL_LENGTH,
+        password: MAX_PASSWORD_LENGTH,
+        slug: MAX_SLUG_LENGTH,
+        workspace: MAX_SLUG_LENGTH,
+      });
+      if (!loginFields) {
+        return invalidBody(reply);
+      }
+      const { email, password, slug, workspace } = loginFields;
       if (!email || !password) {
         return reply
           .code(400)
@@ -301,6 +393,34 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const normalizedEmail = email.trim().toLowerCase();
+
+      const accountMaxAttempts = getConfig().auth.loginAccountMaxAttempts;
+      const accountRateConfig: RateLimitConfig = {
+        maxAttempts: accountMaxAttempts,
+        windowSeconds: LOGIN_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS,
+      };
+      const accountRateKey = loginAccountRateLimitKey(normalizedEmail, clientIp);
+      const accountLimit = accountMaxAttempts > 0
+        ? await peekSharedRateLimit(accountRateKey, accountRateConfig)
+        : null;
+      if (accountLimit && !accountLimit.allowed) {
+        sendRateLimitHeaders(
+          {
+            'Retry-After': String(accountLimit.retryAfterSeconds),
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': accountLimit.resetAt.toISOString(),
+          },
+          reply,
+        );
+        return reply
+          .code(429)
+          .send({ error: 'Too many login attempts. Please try again later.' });
+      }
+
+      const recordFailedAccountAttempt = async (): Promise<void> => {
+        if (accountMaxAttempts > 0) await checkSharedRateLimit(accountRateKey, accountRateConfig);
+      };
+
       const db = await getDatabase();
 
       let tenant: ITenant | null = null;
@@ -365,6 +485,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
 
         if (!slugAuthResult) {
+          await recordFailedAccountAttempt();
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
@@ -374,6 +495,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       } else {
         const tenantEntries = await preferWorkspace(db, await db.listTenantsForUser(normalizedEmail), workspace);
         const checkedTenantIds = new Set<string>();
+        let accountFound = false;
 
         for (const entry of tenantEntries) {
           checkedTenantIds.add(entry.tenantId);
@@ -394,6 +516,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
                 const foundUser =
                   (await db.findUserByEmail(normalizedEmail))
                   || (await db.findUserByEmail(email));
+                if (foundUser) accountFound = true;
 
                 // Login-disabled ("Programmatic User") accounts never
                 // authenticate via password — same generic failure as
@@ -423,7 +546,16 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           }
         }
 
-        if (!tenant || !user) {
+        // Accounts are found through the cross-tenant directory, which every
+        // account write keeps current. Searching every tenant for an address the
+        // directory does not know is a legacy option (AUTH_LOGIN_TENANT_SCAN);
+        // without it an unknown address costs one password comparison, as a
+        // wrong password does.
+        if ((!tenant || !user) && !getConfig().auth.loginTenantScan && !accountFound) {
+          await compareWithUnmatchedHash(password);
+        }
+
+        if ((!tenant || !user) && getConfig().auth.loginTenantScan) {
           const allTenants = await db.listTenants();
 
           for (const candidateTenant of allTenants) {
@@ -487,6 +619,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         }
 
         if (!tenant || !user) {
+          await recordFailedAccountAttempt();
           return reply
             .code(401)
             .send({ error: 'Invalid email or password' });
@@ -548,8 +681,17 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const { email, password, name, companyName, accessCode } =
-        readJsonBody<RegisterBody>(request);
+      const registerFields = readStringFields<keyof RegisterBody>(readJsonBody<unknown>(request), {
+        accessCode: MAX_TOKEN_LENGTH,
+        companyName: MAX_NAME_LENGTH,
+        email: MAX_EMAIL_LENGTH,
+        name: MAX_NAME_LENGTH,
+        password: MAX_PASSWORD_LENGTH,
+      });
+      if (!registerFields) {
+        return invalidBody(reply);
+      }
+      const { email, password, name, companyName, accessCode } = registerFields;
 
       if (!email || !password || !name || !companyName) {
         return reply.code(400).send({
@@ -842,16 +984,21 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const hashed = await bcrypt.hash(body.newPassword, BCRYPT_ROUNDS);
+      const changedAt = new Date();
       const updated = await db.updateUser(session.userId, {
         mustChangePassword: false,
         password: hashed,
-        passwordChangedAt: new Date(),
-        updatedAt: new Date(),
+        passwordChangedAt: changedAt,
+        updatedAt: changedAt,
       });
 
       if (!updated) {
         return reply.code(500).send({ error: 'Failed to update password' });
       }
+
+      // Sessions issued before the change no longer count; this one carries on
+      // with a session issued now.
+      await reissueSessionCookie(request, reply);
 
       return reply.code(200).send({ success: true });
     } catch (error) {
@@ -985,7 +1132,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     };
 
     try {
-      const { email } = readJsonBody<{ email?: string }>(request);
+      const forgotFields = readStringFields(readJsonBody<unknown>(request), { email: MAX_EMAIL_LENGTH });
+      if (!forgotFields) {
+        return invalidBody(reply);
+      }
+      const { email } = forgotFields;
 
       if (!email) {
         return reply.code(400).send({ error: 'Email is required' });
@@ -1094,10 +1245,14 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const { token, newPassword } = readJsonBody<{
-        token?: string;
-        newPassword?: string;
-      }>(request);
+      const resetFields = readStringFields(readJsonBody<unknown>(request), {
+        token: MAX_TOKEN_LENGTH,
+        newPassword: MAX_PASSWORD_LENGTH,
+      });
+      if (!resetFields) {
+        return invalidBody(reply);
+      }
+      const { token, newPassword } = resetFields;
 
       if (!token || !newPassword) {
         return reply.code(400).send({

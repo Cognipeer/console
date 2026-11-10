@@ -39,7 +39,12 @@ import type { IamResource } from '@/lib/iam/entities';
 import { canonicalRoute } from '@/lib/iam/routePattern';
 import { getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
 import { ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
-import { getUserAuthState, getUserIdentity, isUserDisabled } from '@/lib/services/users/userAuthState';
+import {
+  getUserAuthState,
+  getUserIdentity,
+  isSessionIssuedBeforeCredentialChange,
+  isUserDisabled,
+} from '@/lib/services/users/userAuthState';
 import { isTenantRole } from '@/lib/iam/identity';
 import {
   ApiTokenAuthError,
@@ -346,10 +351,14 @@ async function loadSessionAuthz(
  * standing the context is therefore corrected to the role the account has now
  * (the same briefly cached read, dropped when the account is written). When that
  * cannot be read the request is refused (503) like an unreadable account state.
+ *
+ * A session issued before the account's password was last set (`issuedAt`, the
+ * JWT `iat`, against the same cached identity) is refused with 401 and its
+ * cookies are cleared: changing or resetting a password ends the other sessions.
  */
 export async function rejectInactiveSessionAccount(
   reply: FastifyReply,
-  session: { tenantDbName: string; tenantId: string; userId: string },
+  session: { tenantDbName: string; tenantId: string; userId: string; issuedAt?: number },
 ): Promise<boolean> {
   let state: Awaited<ReturnType<typeof getUserAuthState>>;
   try {
@@ -379,15 +388,30 @@ export async function rejectInactiveSessionAccount(
   return true;
 }
 
-/** Sets the role of the request's session context to the one the account has now; true when it refused the request. */
+/**
+ * Sets the role of the request's session context to the one the account has now, and refuses a session
+ * issued before the last password change; true when it refused the request.
+ */
 async function applyCurrentRole(
   reply: FastifyReply,
-  session: { tenantDbName: string; tenantId: string; userId: string },
+  session: { tenantDbName: string; tenantId: string; userId: string; issuedAt?: number },
 ): Promise<boolean> {
   const headers = reply.request?.apiContextHeaders;
   if (!headers) return false;
   try {
     const identity = await getUserIdentity(session.tenantDbName, session.tenantId, session.userId);
+    if (
+      getConfig().auth?.passwordChangeEndsSessions !== false
+      && isSessionIssuedBeforeCredentialChange(session.issuedAt, identity.sessionsValidFrom)
+    ) {
+      clearSessionCookies(reply);
+      reply.code(401).send({
+        error: 'Unauthorized',
+        message: 'Session is no longer valid. Please sign in again.',
+        code: 'session_expired',
+      });
+      return true;
+    }
     // A role this version does not know leaves the session's role as it is.
     if (identity.role && headers['x-user-role'] !== identity.role) headers['x-user-role'] = identity.role;
     return false;

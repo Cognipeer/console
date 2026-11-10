@@ -173,6 +173,29 @@ export interface AppConfig {
     jwtSecret: string;
     jwtExpiresIn: string;
     providerEncryptionSecret: string;
+    /**
+     * Sign-in without a workspace finds the account through the cross-tenant
+     * user directory. When true (legacy), an address the directory does not
+     * know is also looked up in every tenant, one tenant database after the
+     * other, and registered in the directory when found
+     * (AUTH_LOGIN_TENANT_SCAN). Default true for this release, because the
+     * directory can be incomplete for older accounts; it will default to false
+     * in a later release. A note is logged at startup while it is on.
+     */
+    loginTenantScan: boolean;
+    /**
+     * Sign-in attempts one account (by normalized email) may make in 15
+     * minutes, from any address, counted across replicas when
+     * RATE_LIMIT_PROVIDER=redis. 0 turns the per-account limit off
+     * (AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS, default 20).
+     */
+    loginAccountMaxAttempts: number;
+    /**
+     * Changing or resetting a password ends the sessions issued before it.
+     * false keeps them valid until they expire (legacy); a startup warning is
+     * logged then (AUTH_PASSWORD_CHANGE_ENDS_SESSIONS, default true).
+     */
+    passwordChangeEndsSessions: boolean;
   };
 
   registration: {
@@ -1113,6 +1136,9 @@ function buildConfig(source: ConfigSource): AppConfig {
       jwtSecret: str(source, 'JWT_SECRET', 'jwt-key-change-me'),
       jwtExpiresIn: str(source, 'JWT_EXPIRES_IN', '7d'),
       providerEncryptionSecret: str(source, 'PROVIDER_ENCRYPTION_SECRET', ''),
+      loginTenantScan: bool(source, 'AUTH_LOGIN_TENANT_SCAN', true),
+      loginAccountMaxAttempts: Math.max(0, int(source, 'AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS', 20)),
+      passwordChangeEndsSessions: bool(source, 'AUTH_PASSWORD_CHANGE_ENDS_SESSIONS', true),
     },
 
     registration: {
