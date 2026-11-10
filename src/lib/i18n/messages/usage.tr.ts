@@ -119,13 +119,13 @@ export const usageTr: typeof usageEn = {
     ledgerEmptyFiltered: 'Bu filtrelere uyan hareket yok.',
     filters: {
       kind: 'Tür',
-      model: 'Model',
+      model: 'Model filtresi',
       allKinds: 'Tüm türler',
       allModels: 'Tüm modeller',
     },
     services: {
       chat: 'Sohbet',
-      embedding: 'Embedding',
+      embedding: 'Vektör gömme',
       search: 'Web araması',
     },
     describe: {
@@ -134,7 +134,7 @@ export const usageTr: typeof usageEn = {
       tokens: '{input} giriş · {output} çıkış token',
       embeddingTokens: '{input} token',
       estimated: 'tahmini',
-      agent: 'agent {agent}',
+      agent: 'ajan {agent}',
       source: 'kaynak: {source}',
       monthlyGrant: 'Ayın dahil kredisi',
       redeem: 'Koddan ön ödemeli kredi',
@@ -160,7 +160,7 @@ export const usageTr: typeof usageEn = {
       embeddingUsage: '{input} token',
       searchUsage: '{count} arama · {units} birim',
       columns: {
-        model: 'Model',
+        model: 'Model adı',
         usage: 'Kullanım',
         calls: 'Çağrı',
         credits: 'Kredi',
