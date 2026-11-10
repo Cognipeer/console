@@ -115,3 +115,42 @@ describe('who is offered the IAM center', () => {
     expect(offered({ role: 'admin', isTenantAdmin: true, effectivePermissions: { iam: 'none' } })).not.toContain('iam');
   });
 });
+
+describe('the usage entry (requiresPlanUsage)', () => {
+  const offered = (options: Parameters<typeof getDashboardServices>[0]) => ids(getDashboardServices(options));
+
+  it('is a Settings entry gated by the license permission, listed after License', () => {
+    const usage = findDashboardService('usage')!;
+    expect(usage.isSettings).toBe(true);
+    expect(usage.requiresPlanUsage).toBe(true);
+    expect(usage.permission).toBe('license');
+    expect(usage.tenantAdminOnly).toBe(true);
+    expect(SETTINGS_NAV_ORDER.indexOf('usage')).toBe(SETTINGS_NAV_ORDER.indexOf('license') + 1);
+  });
+
+  it('is hidden unless plan limits are active', () => {
+    expect(offered({ role: 'owner', isTenantAdmin: true })).not.toContain('usage');
+    expect(offered({ role: 'owner', isTenantAdmin: true, planUsageEnabled: false })).not.toContain('usage');
+    expect(offered({ role: 'owner', isTenantAdmin: true, planUsageEnabled: true })).toContain('usage');
+  });
+
+  it('is offered to tenant admins and not to an end user', () => {
+    expect(offered({ role: 'admin', isTenantAdmin: true, planUsageEnabled: true })).toContain('usage');
+    expect(offered({ role: 'user', servicePermissions: {}, planUsageEnabled: true })).not.toContain('usage');
+  });
+
+  it('follows the license permission, not a permission named usage', () => {
+    expect(offered({ role: 'user', servicePermissions: { license: 'admin' }, planUsageEnabled: true })).toContain('usage');
+    expect(
+      offered({ role: 'owner', isTenantAdmin: true, planUsageEnabled: true, effectivePermissions: { license: 'none' } }),
+    ).not.toContain('usage');
+  });
+
+  it('is named in both languages', () => {
+    for (const messages of [en, tr]) {
+      const nav = messages.navigation as Record<string, string>;
+      expect(nav.usage).toBeTruthy();
+      expect(nav.usageDescription).toBeTruthy();
+    }
+  });
+});

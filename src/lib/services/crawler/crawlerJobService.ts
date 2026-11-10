@@ -11,6 +11,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { ICrawlJob, ICrawlPlanSnapshot } from '@/lib/database';
+import { addMonthlyUsage, checkMonthlyAllowance, resolveTenantPlan } from '@/lib/limits';
 import { crawl } from './engine';
 import type { CrawlPlan, PageResult } from './engine';
 import { openHttpConfig } from './httpConfigSecrets';
@@ -172,10 +173,33 @@ async function runCrawlJobInner(
       });
   };
 
+  // Plan limit (monthly crawler pages): count each processed page, and in enforcing mode stop the crawl once the
+  // allowance is used up. Never throws; a no-op when limits are off for the tenant.
+  let allowanceStopped = false;
+  const meterCrawledPage = async (): Promise<void> => {
+    try {
+      await addMonthlyUsage(ctx.tenantId, 'crawlerPages', 1);
+      if (allowanceStopped) return;
+      const plan = await resolveTenantPlan(ctx.tenantId);
+      if (plan.mode !== 'on') return;
+      const decision = await checkMonthlyAllowance({ tenantId: ctx.tenantId, meter: 'crawlerPages', source: { type: 'job', id: jobId } });
+      if (!decision.allowed) {
+        allowanceStopped = true;
+        limitReached = true;
+        logger.info('Monthly crawler page allowance used up; stopping crawl', { jobId });
+        abort.abort();
+      }
+    } catch (err) {
+      logger.warn('Crawler page allowance check failed', { jobId, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
   const handlePage = async (page: PageResult): Promise<void> => {
     const written = await persistPage(db, ctx, job, page);
-    if (page.type === 'html') pagesProcessed += 1;
-    else if (page.type === 'file') filesProcessed += 1;
+    if (page.type === 'html') {
+      pagesProcessed += 1;
+      await meterCrawledPage();
+    } else if (page.type === 'file') filesProcessed += 1;
     else if (page.type === 'error') {
       errorsCount += 1;
       // Page-level errors were previously only ever persisted to

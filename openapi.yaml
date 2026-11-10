@@ -15969,6 +15969,27 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
+  /websearch/instances:
+    get:
+      tags:
+        - Web Search
+      summary: List web search instances
+      description: Returns the web search instances visible to the token's project, followed by provider records that have no instance yet (`kind` tells them apart). Same list as `/websearch/providers`, under the `instances` field. `aiAnswer` reports whether AI answers are enabled. Gated by the `websearch` RBAC service.
+      operationId: listWebSearchInstances
+      parameters: []
+      responses:
+        "200":
+          description: Web search instances visible to the token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebSearchInstancesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /websearch/search:
     post:
       tags:
@@ -28880,6 +28901,23 @@ components:
         aiAnswer:
           type: boolean
           description: Whether AI answers are enabled on the instance.
+        kind:
+          type: string
+          enum:
+            - instance
+            - provider
+          description: "`instance` for a web search instance; `provider` for a provider record that has no instance yet."
+        providerKey:
+          type: string
+          description: Key of the provider the instance searches through. Present only when `kind` is `instance`.
+    WebSearchInstancesResponse:
+      type: object
+      properties:
+        instances:
+          type: array
+          description: Web search instances visible to the token.
+          items:
+            $ref: "#/components/schemas/WebSearchProvider"
     WebSearchProvidersResponse:
       type: object
       properties:

@@ -14,12 +14,15 @@ import {
     type FileObjectHandle,
     type ProviderCapabilityFlags,
 } from '@/lib/providers';
+import { listManagedRoutes } from '@/enterprise/managed-credits';
+import { getManagedStorageRuntime, loadStorageProvider } from '@/lib/services/storage/managedStorage';
+import { forgetStoredBytes, withStorageReservation } from '@/lib/limits/storage';
 import { hasLoneSurrogate, maxStorageDownloadBytes } from '@/lib/providers/contracts/storageLimits';
 import {
     createProviderConfig,
     getProviderConfigByKey,
     listProviderConfigs,
-    loadProviderRuntimeData,
+    redactPlatformProvider,
     type CreateProviderConfigInput,
     type ProviderConfigView,
 } from '@/lib/services/providers/providerService';
@@ -97,7 +100,27 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
     return db;
 }
 
+/** The capability keys a view of a platform provider may carry: what the store can do, never what serves it. */
+const PLATFORM_FILE_CAPABILITY_KEYS = ['supportsMarkdownConversion', 'supportsBulkListing'] as const;
+
 export function attachDriverCapabilities(provider: ProviderConfigView): FileProviderView {
+    if (provider.platform) {
+        // The record's own driver is a placeholder; the route's contract says what the store can do.
+        const view: FileProviderView = { ...redactPlatformProvider(provider) };
+        const driver = listManagedRoutes({ providerKey: provider.key, kind: 'file' })[0]?.driver;
+        if (!driver) return view;
+        try {
+            const capabilities = providerRegistry.getContract(driver).capabilities ?? {};
+            const shown: ProviderCapabilityFlags = {};
+            for (const key of PLATFORM_FILE_CAPABILITY_KEYS) {
+                if (capabilities[key] !== undefined) shown[key] = capabilities[key];
+            }
+            return { ...view, driverCapabilities: shown };
+        } catch {
+            return view;
+        }
+    }
+
     try {
         const contract = providerRegistry.getContract(provider.driver);
         return {
@@ -303,12 +326,13 @@ export async function requireBucketContext(
     };
 }
 
-function ensureFileProvider(record: IProviderRecord): void {
+function ensureFileProvider(record: IProviderRecord, platform = false): void {
     if (record.type !== 'file') {
         throw new FileServiceError('provider_invalid', 409, 'Provider configuration is not a file provider.');
     }
 
-    if (record.status !== 'active') {
+    // A switched-off platform provider still reads and deletes: its runtime refuses the writes (managedStorage).
+    if (record.status !== 'active' && !platform) {
         throw new FileServiceError('provider_inactive', 409, 'File provider is not active.');
     }
 }
@@ -400,18 +424,23 @@ async function buildRuntimeContext(
     // files and removed knowledge sources are still cleaned up.
     if (!options.cleanup) await assertServiceEnabled({ tenantDbName, tenantId }, 'files');
 
-    const { record, credentials } = await loadProviderRuntimeData(
+    const loaded = await loadStorageProvider('file', {
         tenantDbName,
-        {
-            tenantId,
-            key: providerKey,
-            projectId,
-        },
-    ).catch((error: unknown) => {
+        tenantId,
+        providerKey,
+        projectId,
+    }).catch((error: unknown) => {
         throw explainProviderLookupFailure(error, providerKey);
     });
+    const { record, credentials } = loaded;
 
-    ensureFileProvider(record);
+    ensureFileProvider(record, Boolean(loaded.managed));
+
+    // A platform provider: the operator's backend, confined to the tenant's own root. Its connection is never read here.
+    if (loaded.managed) {
+        const runtime = await getManagedStorageRuntime<FileProviderRuntime>('file', { ...loaded, managed: loaded.managed }, { tenantId, projectId });
+        return { runtime, record };
+    }
 
     // The file service's own pool namespace: another caller that pools a runtime of the same provider (the sandbox
     // volumes do, under `file:<tenant>:<key>`) hashes it differently, and two callers that share a pool key but not
@@ -691,7 +720,7 @@ function truncateError(error: unknown): string {
 }
 
 export async function listFileDrivers() {
-    return providerRegistry.listDescriptors('file');
+    return providerRegistry.listTenantDescriptors('file');
 }
 
 type ProviderFilters = NonNullable<Parameters<typeof listProviderConfigs>[2]>;
@@ -1486,9 +1515,20 @@ export async function uploadFile(
             throw error;
         }
     };
+    // The plan storage: checked and held for the write; an upload over a file counts only what it adds to it.
+    const storeWithinStorage = async () => {
+        const before = wholeKey
+            ? await db.findFileRecordByKey(bucket.providerKey, bucket.key, chosenRelativeKey, projectId)
+            : null;
+        return withStorageReservation({
+            tenantId,
+            incomingBytes: fileBuffer.length - storedBytesOf(before),
+            source: { type: 'user', id: request.createdBy },
+        }, store);
+    };
     const { record, replaced, storedRelativeKey } = wholeKey
-        ? await oneAtATime(`upload:${tenantId}:${bucket.providerKey}:${bucket.key}:${chosenRelativeKey}`, store)
-        : await store();
+        ? await oneAtATime(`upload:${tenantId}:${bucket.providerKey}:${bucket.key}:${chosenRelativeKey}`, storeWithinStorage)
+        : await storeWithinStorage();
 
     await withdrawIfBucketClosed(db, runtime, bucket, projectId, record, replaced);
 
@@ -1581,46 +1621,57 @@ export async function replaceFileContent(
     };
     assertUploadAllowed(request, input.data);
 
-    const upload = await withResilience(
-        () => runtime.uploadFile({
-            key: composeProviderObjectKey(bucket, record.key),
-            name: record.name,
-            contentType: record.contentType,
-            data: input.data,
-            metadata: record.metadata,
-        }),
-        fileResilience('upload', tenantId, bucket.providerKey),
-    );
+    return withStorageReservation({
+        tenantId,
+        incomingBytes: input.data.length - storedBytesOf(record),
+        source: { type: 'user', id: input.updatedBy },
+    }, async () => {
+        const upload = await withResilience(
+            () => runtime.uploadFile({
+                key: composeProviderObjectKey(bucket, record.key),
+                name: record.name,
+                contentType: record.contentType,
+                data: input.data,
+                metadata: record.metadata,
+            }),
+            fileResilience('upload', tenantId, bucket.providerKey),
+        );
 
-    const db = await withTenantDb(tenantDbName);
-    const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
-        ? { markdownStatus: 'skipped' }
-        : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, {
-            tenantDbName,
-            projectId,
-            userId: input.updatedBy,
-            budget: 'inline',
-            ...(input.signal ? { signal: input.signal } : {}),
+        const db = await withTenantDb(tenantDbName);
+        const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
+            ? { markdownStatus: 'skipped' }
+            : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, {
+                tenantDbName,
+                projectId,
+                userId: input.updatedBy,
+                budget: 'inline',
+                ...(input.signal ? { signal: input.signal } : {}),
+            });
+        // What the last run found belongs to the old bytes: a run that did not produce a new result leaves none behind.
+        const clearedExtraction = !conversion.markdownExtraction && record.markdownExtraction
+            ? { markdownExtraction: compactExtraction(record.markdownExtraction) ?? null }
+            : {};
+        const updated = await db.updateFileRecord(record.id, {
+            size: upload.handle.size ?? input.data.length,
+            checksum: upload.handle.checksum,
+            etag: upload.handle.etag,
+            ...conversion,
+            ...clearedExtraction,
+            updatedBy: input.updatedBy,
         });
-    // What the last run found belongs to the old bytes: a run that did not produce a new result leaves none behind.
-    const clearedExtraction = !conversion.markdownExtraction && record.markdownExtraction
-        ? { markdownExtraction: compactExtraction(record.markdownExtraction) ?? null }
-        : {};
-    const updated = await db.updateFileRecord(record.id, {
-        size: upload.handle.size ?? input.data.length,
-        checksum: upload.handle.checksum,
-        etag: upload.handle.etag,
-        ...conversion,
-        ...clearedExtraction,
-        updatedBy: input.updatedBy,
+        if (!updated) {
+            // The file was deleted (its bucket with it) while the new content was written: the object and the copy have no record.
+            await discardUploadedObject(db, runtime, bucket, projectId, record.key);
+            await discardOrphanedCopy(runtime, bucket, conversion);
+            throw new FileServiceError('file_not_found', 404, 'File record not found.');
+        }
+        return serializeFileRecord(updated);
     });
-    if (!updated) {
-        // The file was deleted (its bucket with it) while the new content was written: the object and the copy have no record.
-        await discardUploadedObject(db, runtime, bucket, projectId, record.key);
-        await discardOrphanedCopy(runtime, bucket, conversion);
-        throw new FileServiceError('file_not_found', 404, 'File record not found.');
-    }
-    return serializeFileRecord(updated);
+}
+
+/** What a file counts against the plan storage: its bytes and its Markdown copy (as `sumFileRecordBytes` counts them). */
+function storedBytesOf(record: Pick<IFileRecord, 'size' | 'markdownSize'> | null): number {
+    return record ? (record.size ?? 0) + (record.markdownSize ?? 0) : 0;
 }
 
 async function requireFileRecord(
@@ -1781,6 +1832,8 @@ export async function removeStoredObjects(
             logger.warn('Failed to delete markdown file', { key: record.markdownKey, error });
         }
     }
+    // A tenant at its plan storage may write again as soon as the file is gone (its caller removes the record next).
+    forgetStoredBytes(bucket.tenantId);
 }
 
 export async function deleteFile(
@@ -1805,7 +1858,9 @@ export async function deleteFile(
 
     const db = await withTenantDb(tenantDbName);
     logger.debug('Deleting file record', { bucketKey: bucket.key, key: record.key, deletedBy });
-    return db.deleteFileRecord(record.id);
+    const deleted = await db.deleteFileRecord(record.id);
+    forgetStoredBytes(tenantId);
+    return deleted;
 }
 
 export async function getFileRecord(

@@ -86,6 +86,45 @@ const eslintConfig = [
       'no-alert': 'error',
     },
   },
+  {
+    // Application code reads configuration through getConfig() (src/lib/core/config.ts).
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-properties': [
+        'error',
+        {
+          object: 'process',
+          property: 'env',
+          message: 'Read configuration through getConfig() from @/lib/core/config.',
+        },
+      ],
+    },
+  },
+  {
+    // Files that legitimately read the environment: the config source itself,
+    // bootstrap code that runs before config is loaded, the proxy env helper,
+    // browser-bundled code and generated code-snippet strings, and tests.
+    files: [
+      'src/lib/core/config.ts',
+      'src/lib/core/proxyEnv.ts',
+      'src/server/index.ts',
+      'src/server/env.ts',
+      'src/instrumentation.ts',
+      'src/lib/support/openSupport.ts',
+      'src/lib/services/agents/agentCodegen.ts',
+      'src/app/**/*.{ts,tsx}',
+      'src/components/**/*.{ts,tsx}',
+      'src/**/*.{test,spec}.{ts,tsx}',
+      'src/**/__tests__/**/*.{ts,tsx}',
+      // Pending migration to getConfig().
+      'src/lib/services/ocrJobs/ocrJobConsumer.ts',
+      'src/lib/services/mcp/stdioRunner.ts',
+      'src/lib/services/usage/usageRollup.ts',
+    ],
+    rules: {
+      'no-restricted-properties': 'off',
+    },
+  },
 ];
 
 export default eslintConfig;

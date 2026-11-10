@@ -29,6 +29,7 @@ Both secrets are checked at startup; see [Validation](#validation).
 | `MONGODB_SOCKET_TIMEOUT_MS` | Socket timeout | `45000` |
 | `MONGODB_SERVER_SELECTION_TIMEOUT_MS` | Server selection timeout | `30000` |
 | `MONGODB_SINGLE_DATABASE` | Keep tenant collections in `MAIN_DB_NAME` instead of a separate `tenant_<slug>` database per tenant. A second tenant is refused in this mode. | `true` when [`DEPLOYMENT_MODE`](#deployment-mode) is `onprem` and `DB_PROVIDER=mongodb`, otherwise `false` |
+| `DB_TENANT_SCOPE_MISMATCH` | What a switch to another tenant does inside code that already runs in a tenant scope (the scope's tenant keeps serving its queries): `warn` allows it and logs a rate-limited warning (the earlier behavior), `error` refuses the switch. `error` becomes the default in a later release. | `warn` |
 
 ### Deployment mode
 
@@ -63,6 +64,9 @@ On an installation you run yourself, set `DEPLOYMENT_MODE=onprem` to use storage
 |----------|-------------|---------|
 | `JWT_EXPIRES_IN` | JWT token expiry | `7d` |
 | `PROVIDER_ENCRYPTION_SECRET` | Key that encrypts provider credentials at rest. Required: min 32 chars, must differ from `JWT_SECRET`. | — |
+| `AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS` | Failed sign-ins one account (by email) may have from one client address in 15 minutes; successful sign-ins do not count; counted across replicas when `RATE_LIMIT_PROVIDER=redis`. `0` turns the per-account limit off. | `20` |
+| `AUTH_PASSWORD_CHANGE_ENDS_SESSIONS` | Changing or resetting a password ends the sessions issued before it (`401`, `session_expired`). `false` keeps them valid until they expire; a startup warning is logged. | `true` |
+| `AUTH_LOGIN_TENANT_SCAN` | Legacy: a sign-in without a workspace for an address the user directory does not know also searches every tenant database (and registers the account in the directory when found). A startup note is logged while it is on. Defaults to `true` for this release; it will default to `false` in a later release. | `true` |
 
 Production refuses to start unless `PROVIDER_ENCRYPTION_SECRET` is valid, and in production credentials are never encrypted with `JWT_SECRET`. Outside production, an unset `PROVIDER_ENCRYPTION_SECRET` is reported as a configuration error and new credentials are encrypted with `JWT_SECRET` instead. Decryption also tries `JWT_SECRET`, so credentials that an earlier version saved under it stay readable and are encrypted under `PROVIDER_ENCRYPTION_SECRET` the next time they are saved.
 
@@ -70,7 +74,7 @@ Production refuses to start unless `PROVIDER_ENCRYPTION_SECRET` is valid, and in
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TRUSTED_PROXIES` | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Token IP allowlists and the IP condition of access policies use the address resolved through them; unset, they use the direct connection address and ignore forwarded headers. | — |
+| `TRUSTED_PROXIES` | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Token IP allowlists and the IP condition of access policies use the address resolved through them; unset, they use the direct connection address and ignore forwarded headers, while rate limits and audit logs take the address from `X-Forwarded-For` as received (in production a startup warning says so). | — |
 | `IAM_VALIDATE_REQUESTS` | Set to `1` to validate every authorization request against the engine's schema (diagnostics; adds about 0.1 ms per decision). | off |
 
 There is no switch for the authorization engine itself: it decides every request. See [Authorization](/guide/authorization).
@@ -110,7 +114,8 @@ owned by the given user on first boot and public signup stays off.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis` | `memory` |
+| `CACHE_PROVIDER` | Cache backend: `none`, `memory`, `redis`. With `none`, values are not cached; counters and locks stay process-local. | `memory` |
+| `GUARDRAIL_DEFAULT_FAIL_MODE` | Fail mode for new guardrails created without one: `auto` (`closed` for presets running PII or prompt-shield checks, `open` otherwise) or `open` (every new guardrail). | `auto` |
 | `CACHE_TTL_SECONDS` | Default cache TTL | `300` |
 | `REDIS_URL` | Redis connection URL (required when provider=redis) | — |
 | `REDIS_KEY_PREFIX` | Key prefix for Redis cache | `console:` |
@@ -198,9 +203,12 @@ redirect hop.
 |----------|-------------|---------|
 | `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` | Block outbound requests to private/loopback address space from tenant-configured integrations. | `true` |
 | `OUTBOUND_HTTP_ALLOWED_HOSTS` | Comma-separated hostnames exempt from the block. Use a leading dot to match subdomains (e.g. `.svc.cluster.local`). | *(empty)* |
+| `CRAWLER_ALLOW_PRIVATE_NETWORK_OPT_IN` | Whether a crawler's `allowPrivateNetwork` setting takes effect. When off, the setting is ignored and crawler fetches and webhooks follow the private-network block. Setting it on for a SaaS deployment logs a startup warning. | `true` for `onprem`, `false` for `saas` |
+| `CRAWLER_RESOLVED_PRIVATE_POLICY` | What crawler fetches and webhooks do with a host name that resolves to a private, loopback, link-local, CGNAT or metadata address (and with internal-only names such as `.svc`, `.cluster.local`, `.internal`, `.local` or single-label names). `refuse` blocks the request; `warn` allows it and logs a warning per host at most every 10 minutes. Literal IP addresses and `localhost` are always refused. | `warn` for `onprem`, `refuse` for `saas` |
 | `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS` | Default timeout for guarded outbound requests. | `30000` |
 | `PROVIDER_PRIVATE_NETWORKS` | Private ranges that provider endpoints may reach, per organization. Entries are separated by `;`; each is `<tenantId>=<cidr>[,<cidr>...]`, and `*` in place of a tenant ID opens the ranges for every organization. IPv4 and IPv6 CIDRs are accepted (a bare address means one host); host names are not. Whitespace is ignored and two entries for one organization merge. An entry or range that cannot be read opens nothing and is logged as an error at startup. Example: `"64f0c0ffee1234567890abcd=10.50.0.0/16,fd12:3456::/48;*=100.64.10.0/24"`. See [Provider private networks](#provider-private-networks). | *(empty: nothing is opened)* |
 | `PROVIDER_PRIVATE_NETWORKS_DENY` | Comma-separated CIDRs that stay refused even inside an opened range. Set it to the cluster's pod and service ranges and to any other internal range. An entry that cannot be read closes every opened network until it is fixed. | *(empty)* |
+| `PROVIDER_RUNTIME_GUARD` | `enforce` or `warn`. What happens when a provider call made at request time (model, embedding, image, speech, moderation, OCR and web search) targets an address the rules above refuse. `warn` keeps the path the call took before this setting existed (plain `fetch`, or the outbound guard where the call was already made through it, as the SearxNG search is) and logs a warning beside it (once per host every 10 minutes, with the organization and the reason); `enforce` sends the call through the guard, refuses such a target and does not follow redirects. Endpoints are checked when a provider is saved in both modes. The default becomes `enforce` in a later release: set `warn` explicitly to keep the current behavior, or `enforce` to switch now. | `warn` |
 
 Self-hosted deployments that legitimately call in-network services (e.g. a
 vLLM server on a private IP) should list those hosts in
@@ -289,6 +297,7 @@ credential, stdio environment values, runtime headers) are masked as
 | `MCP_UPSTREAM_MAX_RESPONSE_BYTES` | Largest response body read from the upstream of an OpenAPI or remote MCP server; a bigger one fails the call (minimum `65536`). | `8388608` |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Longest a call to that upstream may take, headers and body together (minimum `1000`). | `90000` |
 | `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
+| `MCP_STDIO_ENABLED` | Allow stdio (npx/uvx) MCP servers to run as subprocesses of the gateway. Sandbox execution is unaffected. Set `false`, `0`, `no` or `off` to disable. A `saas` deployment logs a one-time notice that this default becomes `false` in a later release. | `true` |
 | `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
 | `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |
 
@@ -335,7 +344,7 @@ agent, and with smaller payloads than token calls.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | Requests per client address and endpoint per minute (and ten times that per address across all public endpoints). `0` turns these limits off. | `300` |
+| `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | Requests per client address and endpoint per minute (and ten times that per address across all public endpoints). Also applies to the public A2A endpoints. `0` turns these limits off. | `300` |
 | `MCP_PUBLIC_ENDPOINT_RATE_LIMIT_PER_MINUTE` | Requests per endpoint per minute from all callers together, whatever address they appear to come from. Unset, it is twenty times `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE`. `0` turns it off. | `6000` |
 | `MCP_PUBLIC_BODY_LIMIT_BYTES` | Largest request body a public POST may carry (minimum `1024`). | `1048576` |
 | `MCP_PUBLIC_MAX_INFLIGHT_PER_TENANT` | Tool calls one tenant may have running at once through its public endpoints; a call over it gets `503`. `0` turns the cap off. | `100` |
@@ -364,6 +373,26 @@ shared by all replicas.
 | `QUEUE_PREFIX` | BullMQ key prefix | `console:q:` |
 | `QUEUE_DEFAULT_ATTEMPTS` | Default retry attempts per job | `3` |
 | `QUEUE_DEFAULT_BACKOFF_MS` | Default backoff between retries | `1000` |
+| `REDTEAM_SCAN_CONCURRENCY` | Red-team scans run at once per node | `2` |
+| `DATASET_GEN_CONCURRENCY` | Dataset generation jobs run at once per node | `2` |
+| `EVALUATION_RUN_CONCURRENCY` | Evaluation runs executed at once per node | `2` |
+| `ANALYSIS_RUN_CONCURRENCY` | Analysis runs executed at once per node | `2` |
+| `ANALYSIS_MAX_RUN_CONVERSATIONS` | Upper bound of conversations one analysis run reads | `5000` |
+| `RAG_INGEST_CONCURRENCY` | Documents indexed at once per node | `2` |
+| `RAG_INGEST_BOOT_RESUME_MAX` | Interrupted ingest jobs resumed at startup | `500` |
+| `RAG_REINDEX_CONCURRENCY` | Reindex jobs run at once per node | `1` |
+| `VECTOR_MIGRATION_CONCURRENCY` | Vector migration jobs run at once per node | `2` |
+| `CRAWLER_RUN_CONCURRENCY` | Crawl runs executed at once per node | `2` |
+| `CRAWLER_RESTART_ORPHANED_RUNS` | Re-queue crawl runs that were in flight when the process stopped; `false` disables | `true` |
+| `BROWSER_ACTION_CONCURRENCY` | Browser actions executed at once per node | `4` |
+| `BATCH_ITEM_CONCURRENCY` | Batch items processed at once per node | `4` |
+| `BATCH_MAX_REQUESTS` | Maximum requests accepted in one batch | `10000` |
+| `SNAPSHOT_JOB_CONCURRENCY` | Snapshot jobs run at once per node | `2` |
+| `MCP_INVOKE_CONCURRENCY` | MCP tool invocations at once per node | `4` |
+| `EVALUATION_INVOKER` | `gateway` routes evaluation model calls through the gateway; any other value invokes in-process | in-process |
+| `TENANT_SCOPE_STRICT` | Set to `1` to make a tenant query outside a `runWithTenantScope()` scope throw instead of warn (recommended for dev/CI) | off |
+
+The concurrency and limit values are positive integers; an unset, zero or non-numeric value uses the default.
 
 See [Cluster](/guide/cluster) for the full topology / assignment model.
 
@@ -414,6 +443,7 @@ Health views, alert rules and reports for agents, models, knowledge bases, MCP s
 | `ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT` | Cap on distinct rollup rows one tenant may hold in the buffer (minimum `100`), so a single tenant cannot use up the share of the others; the effective cap is the lower of this and `ENTITY_METRICS_MAX_BUFFERED_ROWS`. Excess new rows are dropped and counted per tenant | `10000` |
 | `TRACING_STALE_SESSION_MINUTES` | A traced session still `in_progress` this many minutes after its last activity is marked `abandoned` (minimum `5`). An abandoned session is not an error | `360` |
 | `TRACING_FINALIZER_INTERVAL_MS` | How often stale traced sessions are swept (minimum `10000`) | `300000` |
+| `TRACING_RETENTION_SWEEP_INTERVAL_MS` | Minimum gap between plan-retention sweeps triggered by tracing ingest, per tenant and project (`0` sweeps on every request) | `3600000` |
 | `ALERT_CHANNEL_TIMEOUT_MS` | Per-channel timeout when delivering an alert notification: webhook, Slack, Teams and PagerDuty (minimum `1000`) | `10000` |
 | `ALERT_DEFAULT_RULES_ON_CREATE` | New projects and the Default Project of a new workspace get the five default [alert rules](../api/alerts.md#the-default-set) (the default set of the rule templates). `false` turns that default off; a project can still add them from **Alerts → Templates**, and a create request that sends `defaultAlertRules: true` still gets them | `true` |
 

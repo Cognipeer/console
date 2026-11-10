@@ -31,15 +31,16 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
 
       db.prepare(`
         INSERT INTO ${TABLES.providers}
-        (id, tenantId, projectId, projectIds, key, type, driver, label, description, status,
+        (id, tenantId, projectId, projectIds, platform, key, type, driver, label, description, status,
          credentialsEnc, settings, capabilitiesOverride, metadata, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @projectIds, @key, @type, @driver, @label, @description, @status,
+        VALUES (@id, @tenantId, @projectId, @projectIds, @platform, @key, @type, @driver, @label, @description, @status,
          @credentialsEnc, @settings, @capabilitiesOverride, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: provider.tenantId,
         projectId: provider.projectId ?? null,
         projectIds: this.toJson(provider.projectIds ?? []),
+        platform: provider.platform ? 1 : 0,
         key: provider.key,
         type: provider.type,
         driver: provider.driver,
@@ -80,6 +81,7 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
       if (data.type !== undefined) { sets.push('type = @type'); params.type = data.type; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       if (data.projectIds !== undefined) { sets.push('projectIds = @projectIds'); params.projectIds = this.toJson(data.projectIds); }
+      if (data.platform !== undefined) { sets.push('platform = @platform'); params.platform = data.platform ? 1 : 0; }
       if (data.lastTest !== undefined) { sets.push('lastTest = @lastTest'); params.lastTest = this.toJson(data.lastTest); }
 
       db.prepare(`UPDATE ${TABLES.providers} SET ${sets.join(', ')} WHERE id = @id`).run(params);
@@ -184,6 +186,7 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
         tenantId: r.tenantId as string,
         projectId: r.projectId as string | undefined,
         projectIds: this.parseJson<string[]>(r.projectIds, []),
+        platform: r.platform === 1 || r.platform === true ? true : undefined,
         key: r.key as string,
         type: r.type as ProviderDomain,
         driver: r.driver as string,

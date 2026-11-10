@@ -285,6 +285,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           members,
           projectId: String(project._id),
           providerIds,
+          tenantDbName: session.tenantDbName,
           tenantId: session.tenantId,
         }));
       } catch (extrasError) {

@@ -7,10 +7,10 @@
  */
 
 import crypto from 'node:crypto';
-import axios from 'axios';
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawlerWebhookConfig, CrawlerWebhookEvent } from '@/lib/database';
-import { assertSafeUrl } from './engine/ssrf';
+import { OutboundNetworkError, safeFetch } from '@/lib/security/outboundFetch';
+import { crawlerGuardOptions } from './engine/ssrf';
 
 const log = createLogger('crawler:webhook');
 
@@ -51,22 +51,6 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
   const events = input.webhook?.events ?? ['page', 'completed', 'failed'];
   if (!events.includes(input.event)) return;
 
-  // Webhooks should target external systems the tenant owns — block
-  // delivery to private/loopback/link-local/metadata hosts (SSRF hardening)
-  // unless the tenant has explicitly opted in via `allowPrivateNetwork`
-  // (same flag that gates crawling private hosts).
-  try {
-    assertSafeUrl(url, input.allowPrivateNetwork);
-  } catch (err) {
-    log.warn('Refusing to deliver webhook to private/loopback host', {
-      url,
-      event: input.event,
-      jobId: input.payload.jobId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return;
-  }
-
   const secret = input.overrideSecret ?? input.webhook?.secret;
 
   const body: WebhookPayload<T> = {
@@ -93,21 +77,27 @@ export async function sendCrawlerWebhook<T>(input: SendWebhookInput<T>): Promise
   let lastErr: unknown;
   for (let attempt = 0; attempt < DEFAULT_ATTEMPTS; attempt++) {
     try {
-      await axios.post(url, body, {
-        headers,
-        timeout: DEFAULT_TIMEOUT_MS,
-        validateStatus: (s) => s >= 200 && s < 300,
-        // Do not follow redirects: a public URL could 3xx to a private/
-        // metadata host, bypassing the assertSafeUrl check above (SSRF via
-        // redirect). Webhook receivers should respond directly.
-        maxRedirects: 0,
-      });
-      return;
+      // safeFetch resolves the host, pins the connection to the validated
+      // address and does not follow redirects here: receivers respond directly.
+      const response = await safeFetch(
+        url,
+        { method: 'POST', headers, body: JSON.stringify(body) },
+        {
+          ...crawlerGuardOptions(input.allowPrivateNetwork),
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+          followRedirects: false,
+        },
+      );
+      if (response.status >= 200 && response.status < 300) return;
+      lastErr = new Error(`Webhook responded with status ${response.status}`);
     } catch (err) {
       lastErr = err;
-      if (attempt < DEFAULT_ATTEMPTS - 1) {
-        await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
-      }
+      // A refused target will not change between attempts; transient
+      // failures (for example a resolver error) are retried.
+      if (err instanceof OutboundNetworkError && !err.retryable) break;
+    }
+    if (attempt < DEFAULT_ATTEMPTS - 1) {
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
     }
   }
   log.warn('Webhook delivery failed after retries', {

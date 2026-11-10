@@ -28,6 +28,7 @@ import {
   type RouteHandler,
 } from '../helpers/iamCenterUi';
 import CreateProjectShell from '@/components/projects/CreateProjectShell';
+import { DashboardUserProvider } from '@/components/layout/DashboardUserContext';
 import TenantProviders from '@/components/settings/TenantProviders';
 import WebSearchListPage from '@/app/dashboard/websearch/page';
 import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
@@ -246,14 +247,20 @@ describe('adding a provider', () => {
       ['GET', '/api/websearch/providers', () => ({ providers: [] })],
       ['GET', '/api/websearch/providers/drivers', () => ({ drivers: [DESCRIPTOR] })],
     ]);
-    mounted = await mount(createElement(WebSearchListPage));
+    // An instance is created by an owner or an admin; "New provider" in its form opens the provider form.
+    const owner = { name: 'Owner', email: 'owner@example.com', licenseType: 'test', role: 'owner' as const };
+    mounted = await mount(createElement(DashboardUserProvider as never, { value: owner } as never, createElement(WebSearchListPage)));
     await settle(120);
     await click(buttonByText('Create instance'));
+    await settle(120);
+    await click(buttonByText('New provider'));
     await settle(120);
     await pickService('SearxNG');
 
     await createWithEndpoint();
-    expect(api.to('POST', '/api/providers')[0]!.body).toMatchObject({ type: 'websearch', driver: 'searxng', settings: { endpoint: 'storage' } });
+    const call = api.to('POST', '/api/providers')[0]!;
+    expect(call.query).toEqual({ scope: 'tenant' });
+    expect(call.body).toMatchObject({ type: 'websearch', driver: 'searxng', settings: { endpoint: 'storage' } });
   });
 
   it('marks the field the server refused in the new-project form, and keeps the provider form open', async () => {
@@ -294,8 +301,6 @@ describe('the pages that edit a provider', () => {
   const PAGES = [
     'src/app/dashboard/providers/[providerId]/page.tsx',
     'src/components/settings/TenantProviders.tsx',
-    'src/app/dashboard/websearch/page.tsx',
-    'src/app/dashboard/websearch/[key]/page.tsx',
   ];
 
   it.each(PAGES)('%s hands the refusal of a save, with its field, to the form', (file) => {

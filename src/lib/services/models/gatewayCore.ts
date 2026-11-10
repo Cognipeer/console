@@ -29,12 +29,14 @@ import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning, withReasoningVisibilit
 import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
+import { isContentFilterError } from './contentFilter';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import type { IModel } from '@/lib/database';
-import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
+import { sourceForActor, type UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { createInlineReasoningSplitter, splitInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
-import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
+import { InvalidRequestError, UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
+import { isPlanLimitError } from '@/lib/limits/errors';
 import { OPENAI_SCHEMA_DRIVERS, hasUnreplayableToolTurn, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import type { NativeChatClient, NativeChatRequest } from '@/lib/providers/domains/model';
 import { createStreamGate } from '@/lib/services/guardrail';
@@ -44,7 +46,14 @@ import { evaluateGuardrail } from '@/lib/services/guardrail';
 import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
-import { replicaOrder, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
+import {
+  getManagedCreditsHost,
+  isManagedModel,
+  isManagedProviderRecord,
+  type ManagedCreditLease,
+  type ManagedUsage,
+} from '@/enterprise/managed-credits';
+import { replicaOrder, replicaBreakerKey, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
 import { MAX_ROUTING_DEPTH, getDynamicRoutingConfig } from './dynamicRouting';
 import {
   UpstreamFinishError,
@@ -148,6 +157,35 @@ function runsToolCalls(route: string): boolean {
   return route.startsWith('agent.');
 }
 
+/**
+ * The error of a call the provider ended in its own error finish. A managed call names no raw upstream reason: the
+ * message and the code stay neutral.
+ */
+function buildFinishError(
+  state: CallState,
+  rawFinishReason: string | undefined,
+  billing?: ConstructorParameters<typeof UpstreamFinishError>[1],
+): UpstreamFinishError {
+  if (!state.managedCall) return new UpstreamFinishError(rawFinishReason, billing);
+  const error = new UpstreamFinishError(undefined, billing);
+  error.message = MANAGED_FINISH_MESSAGE;
+  return error;
+}
+
+const MANAGED_FINISH_MESSAGE = 'The model stopped before completing the response.';
+
+/**
+ * A managed answer carries no upstream-only response fields: the fingerprint and tier name the operator's backend, so
+ * the wire falls back to the gateway's own fingerprint. Everything else on the wire is rebuilt from known fields.
+ */
+function withoutUpstreamFields(response: ChatCompletionResponse): ChatCompletionResponse {
+  if (!response.providerFields) return response;
+  const { system_fingerprint: _fingerprint, service_tier: _tier, ...rest } = response.providerFields;
+  void _fingerprint;
+  void _tier;
+  return { ...response, providerFields: rest };
+}
+
 /** The error of a call that hit its output limit, carrying the limit it sent and the provider's own stop reason. */
 function buildLimitError(
   state: CallState,
@@ -158,12 +196,22 @@ function buildLimitError(
   const dialect = limitDialect(state.route);
   return new OutputTokenLimitError(limit, {
     ...billing,
-    ...(rawFinishReason ? { rawFinishReason } : {}),
+    ...(state.hardCap ? { hardCap: true } : {}),
+    // A managed upstream's own stop reason is the operator's: it never reaches the tenant.
+    ...(rawFinishReason && !state.managedCall ? { rawFinishReason } : {}),
     ...(dialect ? { dialect } : {}),
   });
 }
 
 // ── Replica pool ──────────────────────────────────────────────────────────
+
+/** A model with nothing to serve it right now (a managed model with no live route). Our own wording: safe to show. */
+class ModelUnavailableError extends UpstreamRequestError {
+  constructor() {
+    super('This model is not available right now.', 503);
+    this.name = 'ModelUnavailableError';
+  }
+}
 
 /**
  * The replica detail carried on a usage row. Absent for an unpooled model, so
@@ -174,6 +222,8 @@ function replicaTrace(
   replica: ResolvedReplica,
   failed: readonly ResolvedReplica[] = [],
 ): Record<string, unknown> | undefined {
+  // A managed model's routes are operator-side: stored replicas never apply and nothing about a route is recorded here.
+  if (isManagedModel(model)) return undefined;
   const pooled = Array.isArray(model.replicas) && model.replicas.length > 0;
   if (!pooled) return undefined;
   return {
@@ -202,12 +252,21 @@ function replicaTrace(
  * merged `settings` already swapped - so nothing downstream has to know a pool
  * exists.
  */
+/**
+ * A safety-filter refusal is a verdict on the content, not on the provider's health: it does not count against a
+ * replica's circuit, and the next replica would refuse the same content (one more paid call), so it is not retried elsewhere.
+ */
+const notContentFilter = (error: unknown): boolean => !isContentFilterError(error);
+
 async function runAcrossReplicas<T>(
   model: IModel,
   prefix: 'chat' | 'chat-stream',
+  tenantDbName: string,
   attempt: (activeModel: IModel, replica: ResolvedReplica) => Promise<T>,
 ): Promise<{ value: T; replica: ResolvedReplica; failed: ResolvedReplica[] }> {
-  const order = replicaOrder(model, prefix);
+  const order = replicaOrder(model, prefix, Math.random, tenantDbName);
+  // A managed model with no live route: nothing is dialled and nothing is reserved.
+  if (order.length === 0) throw new ModelUnavailableError();
   const failed: ResolvedReplica[] = [];
   let lastError: unknown;
 
@@ -218,19 +277,19 @@ async function runAcrossReplicas<T>(
       if (failed.length > 0) {
         logger.info('Replica failover succeeded', {
           modelKey: model.key,
-          served: `${replica.providerKey}:${replica.modelId}`,
-          skipped: failed.map((entry) => `${entry.providerKey}:${entry.modelId}`),
+          served: replicaLabel(replica),
+          skipped: failed.map(replicaLabel),
         });
       }
       return { value, replica, failed };
     } catch (error) {
       lastError = error;
       const isLast = i === order.length - 1;
-      if (isLast || !shouldTryNextReplica(error)) throw error;
+      if (isLast || isContentFilterError(error) || !shouldTryNextReplica(error)) throw error;
       failed.push(replica);
       logger.warn('Replica failed, trying the next one', {
         modelKey: model.key,
-        replica: `${replica.providerKey}:${replica.modelId}`,
+        replica: replicaLabel(replica),
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -239,19 +298,9 @@ async function runAcrossReplicas<T>(
   throw lastError;
 }
 
-/**
- * Circuit-breaker key for a chat call.
- *
- * Scoped to the MODEL, not just the provider. One Model Hub entry can be broken
- * on its own - a model id the upstream rejects, a response shape that fails to
- * parse - and a provider-wide key let that one model trip the breaker for every
- * other model behind the same credentials, which then answered `503 Circuit
- * breaker is open` for requests that would have succeeded. A genuine provider
- * outage still trips, once per model in use, which is what the breaker is for.
- */
-function chatResilienceKey(prefix: 'chat' | 'chat-stream', tenantDbName: string, model: IModel): string {
-  // Tenant-scoped: the breaker map is process-global and provider keys are tenant-chosen names.
-  return `${prefix}:${tenantDbName}:${model.providerKey}:${model.modelId}`;
+/** Server-log name of a replica: a managed route is named by its route id. */
+function replicaLabel(replica: ResolvedReplica): string {
+  return replica.routeId ?? `${replica.providerKey}:${replica.modelId}`;
 }
 
 // ── Input guardrails: once per turn ───────────────────────────────────────
@@ -434,6 +483,12 @@ interface CallState {
   includeReasoning: boolean;
   /** What a usage row records of the prompt: the messages, or just their count when the caller opted out (`logPrompt: false`). */
   loggedMessages: unknown;
+  /** Managed providers only: the credit hold of the CURRENT attempt (attempts are sequential). Cleared once settled or released. */
+  creditLease?: ManagedCreditLease;
+  /** The output limit the current attempt was sent with is the managed credit cap: a raised retry would be clamped to it. */
+  hardCap?: boolean;
+  /** The call runs on a managed provider (set before the credit reservation): upstream error text is the operator's, not the tenant's. */
+  managedCall?: boolean;
 }
 
 /** The caller's tags ride along on every usage row's request. */
@@ -474,21 +529,123 @@ function settleUsage(
   label: string,
   usage: TokenUsage,
   row: Omit<Parameters<typeof logModelUsage>[2], 'usage'>,
+  /** The counts are the gateway's own estimate (a cancelled stream, an upstream that sent no usage), not the provider's. */
+  estimated?: boolean,
 ): UsageCostResult {
   const cost = calculateCost(state.model.pricing, usage, state.model);
+  if (state.creditLease) settleLease(state, usage, estimated);
   state.context.onUsageSettled?.(cost, usage);
   usageRow(state, label, { ...row, usage } as Parameters<typeof logModelUsage>[2]);
   return cost;
 }
 
+/** A managed provider's credit hold takes the call's real usage. Fire-and-forget: never on the response path, never throws. */
+function settleLease(state: CallState, usage: TokenUsage, estimated?: boolean): void {
+  const lease = state.creditLease;
+  if (!lease) return;
+  state.creditLease = undefined;
+  const booked: ManagedUsage = {
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+    ...(usage.cachedInputTokens ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(estimated ? { estimated: true } : {}),
+  };
+  fireAndForget('managed-credit-settle', () => lease.settle(booked));
+}
+
+/** Returns a managed provider's credit hold (the attempt failed, or the call produced nothing billable). Idempotent. */
+function releaseLease(state: CallState, reason: 'error' | 'cancelled' | 'no_usage'): void {
+  const lease = state.creditLease;
+  if (!lease) return;
+  state.creditLease = undefined;
+  state.hardCap = undefined;
+  fireAndForget('managed-credit-release', () => lease.release(reason));
+}
+
+/** Upstream answers about the operator's own setup (credentials, access, deployment name): never the tenant's to fix. */
+export const MANAGED_CONFIG_STATUSES: ReadonlySet<number> = new Set([401, 403, 404]);
+
+/**
+ * An upstream failure of a MANAGED provider reaches the tenant as a generic message that keeps only the status: the
+ * raw text can quote the operator's endpoint, deployment, org id or vendor. Our own refusals (plan limits, bad
+ * requests, output-limit and finish errors, a caller's abort) are untouched.
+ */
+function managedSafeError(state: CallState, error: unknown): unknown {
+  if (!state.managedCall) return error;
+  if (
+    isPlanLimitError(error)
+    || error instanceof InvalidRequestError
+    || error instanceof OutputTokenLimitError
+    || error instanceof UpstreamFinishError
+    || error instanceof ModelUnavailableError
+    || error instanceof GuardrailBlockError
+    || state.context.signal?.aborted
+  ) return error;
+  const normalized = normalizeInferenceError(error);
+  const status = normalized.status;
+  // The tenant owns no credentials: an upstream auth, permission or not-found answer is the operator's configuration.
+  if (MANAGED_CONFIG_STATUSES.has(status)) return new ModelUnavailableError();
+  const sanitized = new UpstreamRequestError('Managed model provider request failed.', status >= 400 && status < 600 ? status : 502);
+  // The one thing kept besides the status: a safety-filter refusal is a verdict on the content, not an outage,
+  // and a caller (the guardrail judge) must be able to tell the two apart. A bare code, nothing of the upstream's text.
+  if (status === 400 && (normalized.error.code === 'content_filter' || normalized.error.code === 'content_policy_violation')) {
+    (sanitized as UpstreamRequestError & { code?: string }).code = 'content_filter';
+  }
+  return sanitized;
+}
+
+/** Why an attempt ended without usage: the caller walked away, or it failed. */
+function failureReason(state: CallState): 'error' | 'cancelled' {
+  return state.context.signal?.aborted ? 'cancelled' : 'error';
+}
+
+/** The tag names a managed provider's PASSTHROUGH can carry an output or thinking budget under: a tenant must not raise the cap with them. */
+const MANAGED_LIMIT_KEYS = [
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'maxTokens',
+  'maxOutputTokens',
+  'thinking',
+  'thinking_budget',
+  'thinkingBudget',
+  'thinkingConfig',
+  'thinking_config',
+  'budget_tokens',
+  'max_thinking_tokens',
+  'max_new_tokens',
+  'num_predict',
+  'generationConfig',
+  'generation_config',
+  'n',
+  'best_of',
+];
+
+function withoutLimitKeys(extraBody: unknown): unknown {
+  if (!extraBody || typeof extraBody !== 'object' || Array.isArray(extraBody)) return extraBody;
+  const out: AnyRecord = { ...(extraBody as AnyRecord) };
+  for (const key of MANAGED_LIMIT_KEYS) delete out[key];
+  const reasoning = out.reasoning;
+  if (reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)) {
+    const { max_tokens: _maxTokens, budget_tokens: _budgetTokens, ...rest } = reasoning as AnyRecord;
+    void _maxTokens;
+    void _budgetTokens;
+    out.reasoning = rest;
+  }
+  return out;
+}
+
 /** Everything needed to place ONE call, resolved for the replica that will serve it. */
-async function prepareCall(state: CallState, activeModel: IModel) {
-  const { runtime } = await buildModelRuntime(
+async function prepareCall(state: CallState, activeModel: IModel, replica?: ResolvedReplica) {
+  const { runtime, record } = await buildModelRuntime(
     state.tenantDbName,
     activeModel.tenantId,
     activeModel.providerKey,
     state.projectId,
+    { allowManaged: true, managedConnectionId: replica?.connectionId },
   );
+  // A managed provider (a host is registered and says so) is paid with credits. Without a host this is one null check.
+  const managed = isManagedProviderRecord(record);
 
   if (!runtime.createNativeChatClient) {
     throw new InvalidRequestError('Model provider does not support chat completions');
@@ -500,12 +657,24 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // replica's own provider credentials. The cache variant key and the quota
   // context are resolved once from the pool model - a pool must not fork the
   // cache or split a budget.
-  const call = resolveModelInvocationConfig(activeModel, state.invocationBody);
+  // A managed call takes no caller passthrough at all: vendor-specific limit keys (num_predict, max_new_tokens,
+  // generationConfig ...) are an open set, so only the operator's own defaults and explicit extraBody remain.
+  const invocationModel = managed
+    ? {
+        settings: { ...asRecord(activeModel.settings), allowUnknownPassthrough: false },
+        modelId: activeModel.modelId,
+        providerDriver: activeModel.providerDriver,
+        metadata: activeModel.metadata,
+      }
+    : activeModel;
+  const call = resolveModelInvocationConfig(invocationModel, state.invocationBody);
   const { overrides } = call;
   // `extraBody` is the sanitized merge of the operator's request defaults and the
   // caller's passthrough (reserved keys removed). The raw `requestDefaults` stays
   // out of the client's settings: the client would fall back to it, unsanitized.
   const modelSettings: Record<string, unknown> = { ...call.modelSettings, requestDefaults: undefined };
+  // A tenant's passthrough must not raise a managed call's output or thinking budget past the credit cap.
+  if (managed && modelSettings.extraBody !== undefined) modelSettings.extraBody = withoutLimitKeys(modelSettings.extraBody);
   // Thought text is requested from the provider only when someone will see it.
   const visibleReasoning = withReasoningVisibility(
     normalizeNativeReasoning(modelSettings.reasoning),
@@ -542,12 +711,55 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // the thinking headroom on top, capped by the model maximum): the one number the error, the stream
   // event and the agent's raised retry all work from. `reasoning` is what the client derives thinking
   // from; `stream` is the transport actually used (a non-streamed request has a lower default cap).
-  const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings, {
+  const limitContext = {
     driver,
     model: activeModel,
     stream: Boolean(state.input.stream) && !disableProviderStreaming,
     reasoning: runsWithoutThinking ? undefined : modelSettings.reasoning,
-  });
+  };
+  let outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings, limitContext);
+
+  state.managedCall = managed || undefined;
+  if (managed) {
+    const host = getManagedCreditsHost();
+    if (host) {
+      // BEFORE the provider call and outside `withResilience`: a refusal (402 / 413 / 503) surfaces as it is, with
+      // no upstream request made. The retries inside `withResilience` are one reservation, one booking.
+      const lease = await host.reserve({
+        tenantId: activeModel.tenantId,
+        tenantDbName: state.tenantDbName,
+        projectId: state.projectId,
+        // The pool model's PUBLIC identity; the route that serves the call is attributed separately.
+        providerKey: state.model.providerKey,
+        driver: record.driver,
+        modelKey: state.modelKey,
+        modelId: state.model.modelId,
+        ...(replica?.routeId ? { routeId: replica.routeId } : {}),
+        kind: 'chat',
+        requestId: state.requestId,
+        estimate: {
+          inputTokens: estimateInputTokens(state.wire.messages, state.wire.tools),
+          ...(outputTokenLimit !== undefined ? { maxOutputTokens: outputTokenLimit } : {}),
+        },
+        attribution: {
+          ...(callerAgentKey(state) ? { agentKey: callerAgentKey(state) } : {}),
+          ...(state.context.callerContext?.run?.runId ? { runId: state.context.callerContext.run.runId } : {}),
+          route: state.route,
+          ...(sourceForActor(state.attribution?.actorType) ? { source: sourceForActor(state.attribution?.actorType) } : {}),
+        },
+      });
+      state.creditLease = lease;
+      state.hardCap = undefined;
+      const cap = lease.maxOutputTokens;
+      if (cap !== undefined && cap > 0 && (outputTokenLimit === undefined || outputTokenLimit > cap)) {
+        // Sent exactly as the client reads it: the call-level `maxTokens` beats every setting and is a hard cap (no
+        // thinking headroom on top, the thinking budget is fitted under it). The reported limit is what it resolves to.
+        request.maxTokens = cap;
+        outputTokenLimit = resolveOutputTokenLimit({}, { ...modelSettings, requestMaxTokens: cap }, limitContext);
+        state.hardCap = outputTokenLimit === cap;
+      }
+    }
+  }
 
   return {
     client,
@@ -662,7 +874,7 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
   // findings rewrite the user message before it reaches the provider, and chain
   // through the rest of the bound guardrails.
   const guardrailAnnotations: Record<string, GuardrailAnnotation> = {};
-  const inputGuardrailKeys = resolveBindings(model, 'input.pre');
+  const inputGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'input.pre');
   if (inputGuardrailKeys.length > 0) {
     const latest = latestUserTextNative(request.messages);
     // A caller that calls the model repeatedly inside one turn (an agent's tool
@@ -715,7 +927,7 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
   // guardrail's `policyVersion` (`key@updatedAt`) when the record is cheaply
   // available, so an edit to a policy also retires the entries produced under
   // the old one.
-  const outputGuardrailKeys = resolveBindings(model, 'output.pre');
+  const outputGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'output.pre');
   const includeReasoning = shouldReturnReasoning(model.settings, wire) && context.showReasoning !== false;
   const cacheEnabled = Boolean(
     !stream && tenantId && isSemanticCacheEnabled(model) && isCacheableConversation(request, wire, route)
@@ -831,6 +1043,8 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
  * has its own record already.
  */
 function logFailedCall(state: CallState, error: unknown): void {
+  // Whatever hold is still open (an error after the provider answered, before usage was booked) goes back.
+  if (state.creditLease) releaseLease(state, failureReason(state));
   if (error instanceof GuardrailBlockError) return;
   // Booked already, with the tokens the provider billed for it (an output-limit hit,
   // a call the provider ended in an error finish): a second, empty row would double
@@ -856,17 +1070,26 @@ function logFailedCall(state: CallState, error: unknown): void {
 async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
   const { model, context, wire, requestId, modelKey, tenantDbName, projectId, tenantId } = state;
 
-  const completed = await runAcrossReplicas(model, 'chat', async (candidate) => {
-    const prepared = await prepareCall(state, candidate);
-    const response = await withResilience(
-      (signal) => prepared.client.complete({ ...prepared.request, signal }),
-      {
-        key: chatResilienceKey('chat', tenantDbName, candidate),
-        ...(context.signal ? { signal: context.signal } : {}),
-      },
-    );
-    return { prepared, response };
-  });
+  // Set before the pool runs: a runtime that cannot be built for a route, or an empty pool, must not show its cause.
+  if (isManagedModel(model)) state.managedCall = true;
+  const completed = await runAcrossReplicas(model, 'chat', tenantDbName, async (candidate, replica) => {
+    try {
+      const prepared = await prepareCall(state, candidate, replica);
+      const response = await withResilience(
+        (signal) => prepared.client.complete({ ...prepared.request, signal }),
+        {
+          key: replicaBreakerKey('chat', tenantDbName, replica),
+          countFailure: notContentFilter,
+          ...(context.signal ? { signal: context.signal } : {}),
+        },
+      );
+      return { prepared, response };
+    } catch (error) {
+      // This attempt's hold goes back before the next replica reserves its own.
+      releaseLease(state, failureReason(state));
+      throw error;
+    }
+  }).catch((error) => { throw managedSafeError(state, error); });
 
   const servingReplica = completed.replica;
   const { prepared, response: native } = completed.value;
@@ -910,7 +1133,18 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     }
   }
 
-  const usage = toGatewayUsage(client.driver, native.usage);
+  let usage = toGatewayUsage(client.driver, native.usage);
+  // A managed upstream that sent no usage (or all zeros) still billed the operator: the call is booked at the
+  // gateway's own estimate, flagged as such, never as free.
+  let usageEstimated: boolean | undefined;
+  if (state.creditLease && !(usage.inputTokens ?? 0) && !(usage.outputTokens ?? 0)) {
+    const inputTokens = estimateInputTokens(wire.messages, wire.tools);
+    const outputTokens = estimateTokensFromText(
+      (native.content ?? '') + (native.reasoning ? String(native.reasoning) : '') + native.toolCalls.map((call) => call.arguments).join(''),
+    );
+    usage = { ...usage, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+    usageEstimated = true;
+  }
 
   // The provider ended the call in its OWN error finish (Gemini MALFORMED_FUNCTION_CALL, Bedrock
   // malformed_tool_use ...): what it produced is unusable, and a `stop` on the wire would hand the caller
@@ -918,7 +1152,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
   // billed what it burned, so the call is settled once (budget and row, whatever `logFailures` says)
   // before the error leaves, the way a limit hit is.
   if (isProviderErrorFinish(native.rawFinishReason, native.finishReason)) {
-    const failure = new UpstreamFinishError(native.rawFinishReason);
+    const failure = buildFinishError(state, native.rawFinishReason);
     const cost = settleUsage(state, 'log-chat-usage', usage, {
       requestId,
       route: state.route,
@@ -940,8 +1174,8 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
       latencyMs,
       cacheHit: false,
       finishReason: failure.rawFinishReason ?? 'error',
-    });
-    throw new UpstreamFinishError(native.rawFinishReason, { usage, cost, usageBooked: true });
+    }, usageEstimated);
+    throw buildFinishError(state, native.rawFinishReason, { usage, cost, usageBooked: true });
   }
 
   // A `length` finish is a limit hit when there is no ANSWER: no visible text (judged on the content
@@ -973,13 +1207,13 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
       providerResponse: sanitizeForLogging({
         finish_reason: 'length',
         output_token_limit: true,
-        ...(native.rawFinishReason ? { raw_finish_reason: native.rawFinishReason } : {}),
+        ...(limitError.rawFinishReason ? { raw_finish_reason: limitError.rawFinishReason } : {}),
       }),
       errorMessage: limitError.message,
       latencyMs,
       cacheHit: false,
       finishReason: 'length',
-    });
+    }, usageEstimated);
     throw buildLimitError(state, outputTokenLimit, native.rawFinishReason, { usage, cost, usageBooked: true });
   }
 
@@ -990,7 +1224,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     native.toolCalls.length > 0,
   );
 
-  const wireResponse = toOpenAIChatResponse(finalResponse, {
+  const wireResponse = toOpenAIChatResponse(state.managedCall ? withoutUpstreamFields(finalResponse) : finalResponse, {
     // The MODEL's id, never the replica's: the caller asked for this model and
     // must not be able to tell which deployment answered.
     model: model.modelId,
@@ -1015,7 +1249,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     latencyMs,
     cacheHit: false,
     finishReason: wireFinish,
-  });
+  }, usageEstimated);
 
   // Output guardrails: check the assistant response before returning it
   // (streamed responses are gated in real time and audited post-hoc after the
@@ -1105,14 +1339,26 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
   // completions together. So the pool covers connection and handshake
   // failures (the first provider event is awaited inside the attempt), and a
   // mid-stream fault stays a mid-stream fault.
-  const opened = await runAcrossReplicas(model, 'chat-stream', async (activeModel) => {
-    const prepared = await prepareCall(state, activeModel);
+  if (isManagedModel(model)) state.managedCall = true;
+  const opened = await runAcrossReplicas(model, 'chat-stream', tenantDbName, async (activeModel, replica) => {
+    try {
+      return await openAttempt(activeModel, replica);
+    } catch (error) {
+      // This attempt's hold goes back before the next replica reserves its own.
+      releaseLease(state, failureReason(state));
+      throw error;
+    }
+  }).catch((error) => { throw managedSafeError(state, error); });
+
+  async function openAttempt(activeModel: IModel, replica: ResolvedReplica) {
+    const prepared = await prepareCall(state, activeModel, replica);
 
     if (prepared.disableProviderStreaming) {
       const response = await withResilience(
         (signal) => prepared.client.complete({ ...prepared.request, signal }),
         {
-          key: chatResilienceKey('chat', state.tenantDbName, activeModel),
+          key: replicaBreakerKey('chat', state.tenantDbName, replica),
+          countFailure: notContentFilter,
           ...(context.signal ? { signal: context.signal } : {}),
         },
       );
@@ -1129,12 +1375,13 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
         return { gen: generator, first: await generator.next() };
       },
       {
-        key: chatResilienceKey('chat-stream', state.tenantDbName, activeModel),
+        key: replicaBreakerKey('chat-stream', state.tenantDbName, replica),
+        countFailure: notContentFilter,
         ...(context.signal ? { signal: context.signal } : {}),
       },
     );
     return { activeModel, prepared, gen, first };
-  });
+  }
 
   const completionId = newCompletionId();
   const created = Math.floor(Date.now() / 1000);
@@ -1155,8 +1402,8 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
   // The two hooks are resolved SEPARATELY because a multi-binding model can
   // scope a guardrail to the real-time gate and not to the terminal audit, or
   // the other way round.
-  const streamGuardrailKeys = resolveBindings(model, 'output.stream.delta');
-  const auditGuardrailKeys = resolveBindings(model, 'output.pre');
+  const streamGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'output.stream.delta');
+  const auditGuardrailKeys = context.skipModelGuardrails ? [] : resolveBindings(model, 'output.pre');
 
   const streamHeaders: Record<string, string> = {};
   const gate = streamGuardrailKeys.length > 0
@@ -1197,9 +1444,32 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
     created,
   });
 
+  // The generator's try/finally only runs once it is started: a consumer that drops the outcome before the first
+  // next() would leave the credit hold frozen and the upstream open (return() on an unstarted generator skips the
+  // body). This wrapper releases and aborts in that case.
+  let started = false;
+  const dropUnstarted = () => {
+    if (started) return;
+    started = true;
+    blockCtl.abort();
+    releaseLease(state, failureReason(state));
+  };
+  const guarded: AsyncGenerator<ModelStreamEvent, void, void> = {
+    next: (...a: [] | [void]) => { started = true; return generator.next(...a); },
+    return: (value?: void | PromiseLike<void>) => {
+      dropUnstarted();
+      return generator.return(value as void);
+    },
+    throw: (err?: unknown) => {
+      dropUnstarted();
+      return generator.throw(err);
+    },
+    [Symbol.asyncIterator]() { return guarded; },
+  } as AsyncGenerator<ModelStreamEvent, void, void>;
+
   return {
     requestId,
-    stream: generator,
+    stream: guarded,
     streamHeaders,
     wireModel: model.modelId,
     includeReasoning: state.includeReasoning,
@@ -1428,6 +1698,10 @@ async function* streamEvents(args: {
     settled = true;
     const latencyMs = Date.now() - startedAt;
     const booking = partialBooking();
+    // Nothing was generated and the provider reported nothing: no estimate of an input it may never have billed.
+    if (state.creditLease && !assembler.usage && !assembler.content && !assembler.reasoningSummary && assembler.toolCallCount === 0) {
+      releaseLease(state, 'no_usage');
+    }
     settleUsage(state, 'log-stream-cancelled', booking.usage, {
       requestId,
       route: state.route,
@@ -1444,7 +1718,7 @@ async function* streamEvents(args: {
         ...(booking.estimated ? { output_tokens_estimated: true, usage_estimated: true } : {}),
       }),
       latencyMs,
-    });
+    }, booking.estimated);
     auditStreamedOutput(`${state.route}:stream:cancelled`);
   };
 
@@ -1491,7 +1765,7 @@ async function* streamEvents(args: {
     if (!settled) {
       settled = true;
       // The same estimator the cancel path uses, for the same reason.
-      settleUsage(state, 'log-stream-guardrail-block', blocked.usage, blockRow);
+      settleUsage(state, 'log-stream-guardrail-block', blocked.usage, blockRow, blocked.estimated);
     } else {
       // Whatever settled first already wrote the tokens on its own row.
       usageRow(state, 'log-stream-guardrail-block', { ...blockRow, usage: {} });
@@ -1542,7 +1816,7 @@ async function* streamEvents(args: {
       errorMessage: outputLimitError?.message,
       latencyMs,
       finishReason: finish,
-    });
+    }, estimated);
 
     auditStreamedOutput(`${state.route}:stream`);
   };
@@ -1557,7 +1831,7 @@ async function* streamEvents(args: {
       // The provider's own error finish (a malformed tool call ...): the call fails, so nothing more of
       // it is delivered. The stream is still read to its end, for the usage that trails the terminal chunk.
       if (!finishFailure && isProviderErrorFinish(chunk.rawFinishReason, chunk.finishReason)) {
-        finishFailure = new UpstreamFinishError(chunk.rawFinishReason);
+        finishFailure = buildFinishError(state, chunk.rawFinishReason);
       }
       if (finishFailure) continue;
       const delta = chunk.delta ?? {};
@@ -1708,6 +1982,7 @@ async function* streamEvents(args: {
         error: normalizeInferenceError(outputLimitError).error,
         ...(outputLimitError.limit !== undefined ? { limit: outputLimitError.limit } : {}),
         ...(outputLimitError.rawFinishReason ? { rawFinishReason: outputLimitError.rawFinishReason } : {}),
+        ...(outputLimitError.hardCap ? { hardCap: true } : {}),
       };
     }
 
@@ -1774,7 +2049,7 @@ async function* streamEvents(args: {
       return;
     }
 
-    const normalized = normalizeInferenceError(error);
+    const normalized = normalizeInferenceError(managedSafeError(state, error));
     // The provider bills what it generated before it failed, so a stream that had
     // already produced output (or reported usage) is booked. One that failed
     // before its first chunk generated nothing: no estimate of an input it never
@@ -1801,8 +2076,10 @@ async function* streamEvents(args: {
     } satisfies Omit<Parameters<typeof logModelUsage>[2], 'usage'>;
     if (booking && !settled && !donePending) {
       settled = true;
-      settleUsage(state, 'log-stream-error', booking.usage, errorRow);
+      settleUsage(state, 'log-stream-error', booking.usage, errorRow, booking.estimated);
     } else {
+      // Nothing was produced: the hold goes back (a stream that already settled has no hold left).
+      if (!booking && !settled && !donePending) releaseLease(state, 'error');
       usageRow(state, 'log-stream-error', { ...errorRow, usage: {} });
     }
     yield {

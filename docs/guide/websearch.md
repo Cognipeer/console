@@ -13,6 +13,25 @@ production traffic.
 The landing page tracks instance counts, active status and how many instances
 have AI answers enabled. Rows link to the instance detail page.
 
+## Providers and instances
+
+Web search has two layers:
+
+- A **provider** holds the connection to an engine: credentials and, where the
+  engine needs one, the endpoint or base URL. Providers are managed like any
+  other provider and can be assigned to several projects.
+- An **instance** holds the search behavior: depth, language and country, safe
+  search, engines, AI answers and the semantic cache. It points at a provider
+  by key, so several instances can share one connection with different
+  behavior.
+
+Searches, quotas, logs and usage follow the instance. An instance belongs to
+one project or, when an owner or admin makes it tenant-wide, to every project
+that can see its provider. Existing keys keep working: providers that existed
+before instances were introduced have an instance with the same key, and an
+API call that names a provider key without an instance still resolves to that
+provider.
+
 ## Engines
 
 | Driver | Type | Credentials | Notes |
@@ -36,8 +55,8 @@ dynamically. Credentials are encrypted at rest and never returned to the UI.
 
 ![Create instance](/screenshots/websearch/02-create-instance.png)
 
-Instances are strictly project-scoped: they are created in the active project
-and are not visible from other projects.
+Instances are created in the active project and are not visible from other
+projects, unless an owner or admin makes one tenant-wide.
 
 ## Instance detail
 
@@ -142,7 +161,8 @@ curl -X POST https://console.example.com/api/client/v1/websearch/brave-main/sear
 
 When the project has exactly one active instance the generic endpoint may omit
 the instance key; with multiple instances the request must name one (via the
-`provider` field or the `/:key/search` path).
+`instance` field, `provider` as its alias, or the `/:key/search` path).
+`GET /api/client/v1/websearch/instances` lists what the token can use.
 
 See the [Web Search API reference](/api/websearch) and the
 [Console SDK](https://docs.cognipeer.com/console-sdk/api/web-search)
@@ -151,6 +171,7 @@ See the [Web Search API reference](/api/websearch) and the
 ## Access control
 
 Web Search is a first-class RBAC service (`websearch`): grant `read` for
-listing/logs and `write` for creating instances and running searches. Instance
+listing/logs and `write` for running searches. Creating, changing and deleting
+instances is for owners and admins, like managing a provider. Instance
 credentials are stored on the shared provider record infrastructure
 (AES-256-GCM, tenant-scoped).

@@ -110,6 +110,7 @@ describe('scope of every community type (checked against how the runtime resolve
     'rag-module': 'project-or-tenant',
     reranker: 'project-or-tenant',
     crawler: 'project-or-tenant',
+    'websearch-instance': 'project-or-tenant',
     browser: 'project-or-tenant',
     'browser-flow': 'project-or-tenant',
     'config-group': 'project-or-tenant',

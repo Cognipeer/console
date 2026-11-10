@@ -22,6 +22,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
 
 import bcrypt from 'bcryptjs';
 import { getDatabase } from '@/lib/database';
+import { getConfig, reloadConfig } from '@/lib/core/config';
 import { TokenManager } from '@/lib/license/token-manager';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import { authApiPlugin } from '@/server/api/plugins/auth';
@@ -87,6 +88,7 @@ describe('POST /api/auth/login', () => {
   async function login(
     body: Record<string, unknown>,
     cookies: Record<string, string> = {},
+    remoteAddress?: string,
   ) {
     const cookieHeader = buildCookieHeader(cookies);
     return app.inject({
@@ -96,8 +98,21 @@ describe('POST /api/auth/login', () => {
         'content-type': 'application/json',
         ...(cookieHeader ? { cookie: cookieHeader } : {}),
       },
+      ...(remoteAddress ? { remoteAddress } : {}),
       payload: JSON.stringify(body),
     });
+  }
+
+  /** Runs `fn` with AUTH_LOGIN_TENANT_SCAN set to `value` (default 'true'), then restores the default. */
+  async function withTenantScan(fn: () => Promise<void>, value = 'true') {
+    process.env.AUTH_LOGIN_TENANT_SCAN = value;
+    reloadConfig();
+    try {
+      await fn();
+    } finally {
+      delete process.env.AUTH_LOGIN_TENANT_SCAN;
+      reloadConfig();
+    }
   }
 
   describe('validation', () => {
@@ -113,6 +128,98 @@ describe('POST /api/auth/login', () => {
       expect(res.statusCode).toBe(400);
       const body = parseJsonBody<{ error: string }>(res.body);
       expect(body.error).toMatch(/required/i);
+    });
+
+    it('accepts only string values for the slug and workspace, and looks nothing up otherwise', async () => {
+      for (const field of ['slug', 'workspace'] as const) {
+        for (const value of [{ $ne: null }, { $regex: '^a' }, ['acme-corp'], 42, true]) {
+          const res = await login({ email: 'admin@acme.com', password: 'password123', [field]: value });
+          expect(res.statusCode).toBe(400);
+          expect(parseJsonBody<{ code: string }>(res.body).code).toBe('invalid_body');
+        }
+      }
+      expect(db.findTenantBySlug).not.toHaveBeenCalled();
+      expect(db.listTenantsForUser).not.toHaveBeenCalled();
+    });
+
+    it('accepts only string values for the email and password', async () => {
+      for (const body of [
+        { email: { $ne: null }, password: 'password123', slug: 'acme-corp' },
+        { email: 'admin@acme.com', password: { $gt: '' }, slug: 'acme-corp' },
+        { email: ['admin@acme.com'], password: 'password123' },
+        { email: 'admin@acme.com', password: 'x'.repeat(5000), slug: 'acme-corp' },
+      ]) {
+        const res = await login(body);
+        expect(res.statusCode).toBe(400);
+        expect(parseJsonBody<{ code: string }>(res.body).code).toBe('invalid_body');
+      }
+      expect(db.findUserByEmail).not.toHaveBeenCalled();
+      expect(bcrypt.compare).not.toHaveBeenCalled();
+    });
+
+    async function withAccountLimit(max: string, fn: () => Promise<void>) {
+      process.env.AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS = max;
+      reloadConfig();
+      try {
+        await fn();
+      } finally {
+        delete process.env.AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS;
+        reloadConfig();
+      }
+    }
+
+    it('limits failed sign-ins per account and client address', async () => {
+      await withAccountLimit('3', async () => {
+        const credentials = { email: 'admin@acme.com', slug: 'acme-corp' };
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        for (let i = 0; i < 3; i++) {
+          const res = await login({ ...credentials, password: `guess-${i}` }, {}, '198.51.100.7');
+          expect(res.statusCode, `attempt ${i + 1}`).toBe(401);
+        }
+        const refused = await login({ ...credentials, email: ' ADMIN@acme.com ', password: 'guess-last' }, {}, '198.51.100.7');
+        expect(refused.statusCode).toBe(429);
+        expect(Number(refused.headers['retry-after'])).toBeGreaterThan(0);
+
+        // The same account from another address, and another account from this one, are not affected.
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+        const elsewhere = await login({ ...credentials, password: 'password123' }, {}, '198.51.100.8');
+        expect(elsewhere.statusCode).toBe(200);
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        const other = await login({ email: 'someone@acme.com', slug: 'acme-corp', password: 'guess' }, {}, '198.51.100.7');
+        expect(other.statusCode).toBe(401);
+      });
+    });
+
+    it('does not count successful sign-ins against the per-account limit', async () => {
+      await withAccountLimit('3', async () => {
+        const credentials = { email: 'admin@acme.com', slug: 'acme-corp' };
+        for (let i = 0; i < 6; i++) {
+          const res = await login({ ...credentials, password: 'password123' }, {}, '198.51.100.20');
+          expect(res.statusCode, `sign-in ${i + 1}`).toBe(200);
+        }
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        const failed = await login({ ...credentials, password: 'guess' }, {}, '198.51.100.20');
+        expect(failed.statusCode).toBe(401);
+      });
+    });
+
+    it('does not limit per account when AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS is 0', async () => {
+      process.env.AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS = '0';
+      reloadConfig();
+      try {
+        (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+        for (let i = 0; i < 25; i++) {
+          const res = await login(
+            { email: 'admin@acme.com', password: `guess-${i}`, slug: 'acme-corp' },
+            {},
+            `198.51.100.${i + 1}`,
+          );
+          expect(res.statusCode, `attempt ${i + 1}`).toBe(401);
+        }
+      } finally {
+        delete process.env.AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS;
+        reloadConfig();
+      }
     });
   });
 
@@ -315,6 +422,38 @@ describe('POST /api/auth/login', () => {
       expect(res.statusCode).toBe(401);
     });
 
+    it('defaults AUTH_LOGIN_TENANT_SCAN to on for this release', () => {
+      delete process.env.AUTH_LOGIN_TENANT_SCAN;
+      reloadConfig();
+      expect(getConfig().auth.loginTenantScan).toBe(true);
+    });
+
+    it('with AUTH_LOGIN_TENANT_SCAN=false, answers an address the directory does not know without reading other tenants, after one password comparison', async () => {
+      await withTenantScan(async () => {
+        db.listTenantsForUser.mockResolvedValue([]);
+        db.listTenants.mockResolvedValue([mockTenant]);
+        const res = await login({ email: 'nobody@nowhere.com', password: 'password123' });
+        expect(res.statusCode).toBe(401);
+        expect(parseJsonBody<{ error: string }>(res.body).error).toMatch(/invalid email or password/i);
+        expect(db.listTenants).not.toHaveBeenCalled();
+        expect(db.findUserByEmail).not.toHaveBeenCalled();
+        expect(db.registerUserInDirectory).not.toHaveBeenCalled();
+        expect(bcrypt.compare).toHaveBeenCalledTimes(1);
+        expect(TokenManager.generateToken).not.toHaveBeenCalled();
+      }, 'false');
+    });
+
+    it('by default, finds the account in another tenant and registers it in the directory', async () => {
+      delete process.env.AUTH_LOGIN_TENANT_SCAN;
+      reloadConfig();
+      db.listTenantsForUser.mockResolvedValue([]);
+      db.listTenants.mockResolvedValue([mockTenant]);
+      const res = await login({ email: 'admin@acme.com', password: 'password123' });
+      expect(res.statusCode).toBe(200);
+      expect(db.listTenants).toHaveBeenCalled();
+      expect(db.registerUserInDirectory).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-1' }));
+    });
+
     it('continues to next tenant when password is invalid', async () => {
       (bcrypt.compare as ReturnType<typeof vi.fn>).mockResolvedValue(false);
       db.listTenants.mockResolvedValue([]);
@@ -335,16 +474,18 @@ describe('POST /api/auth/login', () => {
     it('returns 401 without checking the password when a fallback (all-tenants) candidate has canLogin=false', async () => {
       // No directory entry for this email at all, so the first (known-tenant)
       // loop finds nothing and control falls through to the all-tenants
-      // fallback loop, which is the branch under test here.
-      db.listTenantsForUser.mockResolvedValue([]);
-      db.listTenants.mockResolvedValue([mockTenant]);
-      db.findUserByEmail.mockResolvedValue({ ...mockUser, canLogin: false });
-      const res = await login({ email: 'admin@acme.com', password: 'password123' });
-      expect(res.statusCode).toBe(401);
-      const body = parseJsonBody<{ error: string }>(res.body);
-      expect(body.error).toMatch(/invalid email or password/i);
-      expect(bcrypt.compare).not.toHaveBeenCalled();
-      expect(db.registerUserInDirectory).not.toHaveBeenCalled();
+      // fallback loop (AUTH_LOGIN_TENANT_SCAN), which is the branch under test here.
+      await withTenantScan(async () => {
+        db.listTenantsForUser.mockResolvedValue([]);
+        db.listTenants.mockResolvedValue([mockTenant]);
+        db.findUserByEmail.mockResolvedValue({ ...mockUser, canLogin: false });
+        const res = await login({ email: 'admin@acme.com', password: 'password123' });
+        expect(res.statusCode).toBe(401);
+        const body = parseJsonBody<{ error: string }>(res.body);
+        expect(body.error).toMatch(/invalid email or password/i);
+        expect(bcrypt.compare).not.toHaveBeenCalled();
+        expect(db.registerUserInDirectory).not.toHaveBeenCalled();
+      });
     });
   });
 

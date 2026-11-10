@@ -118,6 +118,16 @@ describe('core providers never expose secret fields', () => {
       { key: 'category', value: 'llm' }, { key: 'providerKey', value: 'prov' }, { key: 'dynamic', value: true }, { key: 'replicaCount', value: 2 },
     ]));
   });
+
+  it('model: a platform model is in the projects that added it, and in none when none did', () => {
+    const doc = { _id: 'pm', key: 'fast', name: 'Fast', platform: true, projectId: null };
+    expect(mapModel({ ...doc, projectIds: ['p1', 'p2', 'p1', ''] })).toMatchObject({ projectId: 'p1', projectIds: ['p1', 'p2'] });
+    const nowhere = mapModel({ ...doc, projectIds: [] });
+    expect(nowhere.projectId).toBeNull();
+    expect(nowhere.projectIds).toBeUndefined();
+    // Only a platform record is shared this way.
+    expect(mapModel({ _id: 'm', key: 'k', name: 'K', projectIds: ['p1'] }).projectIds).toBeUndefined();
+  });
 });
 
 describe('core type definitions', () => {

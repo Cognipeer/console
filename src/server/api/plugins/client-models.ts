@@ -30,11 +30,10 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
   type IDynamicRoutingConfig,
-  type IModel,
   type ModelCategory,
 } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
-import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   createDynamicModel,
   createModel,
@@ -51,11 +50,9 @@ import {
   ModelCapabilityValidationError,
   ModelKeyConflictError,
   parseModelCapabilityOverrides,
-  resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
-import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
   authorizationRefusalOf,
   authorizeServiceForRequest,
@@ -66,6 +63,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { mergeSettings, sanitizeModel, type ModelQuery } from './models-shared';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -94,59 +92,6 @@ async function mayRead(request: FastifyRequest, service: 'models' | 'agents'): P
   return (await readAccess(request, service)) === null;
 }
 
-const PLACEHOLDER = '••••••••';
-const SENSITIVE_FIELDS = new Set([
-  'apiKey',
-  'secretAccessKey',
-  'serviceAccountKey',
-  'sessionToken',
-]);
-
-function sanitizeSettings(settings: Record<string, unknown>) {
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(settings || {})) {
-    sanitized[key] = SENSITIVE_FIELDS.has(key) && value ? PLACEHOLDER : value;
-  }
-  return sanitized;
-}
-
-function sanitizeModel(model: IModel) {
-  return {
-    ...model,
-    capabilities: resolveModelCapabilities(model),
-    settings: sanitizeSettings(model.settings || {}),
-  };
-}
-
-function mergeSettings(
-  existing: Record<string, unknown>,
-  incoming: Record<string, unknown>,
-) {
-  const merged: Record<string, unknown> = { ...existing };
-
-  for (const [key, value] of Object.entries(incoming)) {
-    if (value === PLACEHOLDER || value === undefined) {
-      continue;
-    }
-
-    if (value === null) {
-      delete merged[key];
-      continue;
-    }
-
-    merged[key] = value;
-  }
-
-  return normalizeModelSettings(merged);
-}
-
-type ModelQuery = {
-  category?: ModelCategory;
-  includeProviders?: string;
-  providerDriver?: string;
-  providerKey?: string;
-};
-
 /**
  * Every model service fn is project-scoped. The token carries its project in
  * `auth.projectId`; if it is somehow absent the request cannot be scoped, so we
@@ -171,7 +116,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
         driver: query.driver,
         status: query.status,
       });
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       logger.error('Client list model providers error', { error });
       return sendApiTokenError(reply, error)
@@ -274,7 +219,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.includeProviders === 'true' && readsModels) {
-        payload.providers = await listModelProviders(auth.tenantDbName, auth.tenantId, projectId, {});
+        payload.providers = (await listModelProviders(auth.tenantDbName, auth.tenantId, projectId, {})).map(redactPlatformProvider);
       }
 
       return reply.code(200).send(payload);
@@ -318,6 +263,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Client create model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelKeyConflictError) {
         return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
       }
@@ -446,6 +392,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Client update model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -473,6 +420,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Client delete model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
     }

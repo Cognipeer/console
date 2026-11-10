@@ -60,7 +60,7 @@ function isoOrUndefined(value: Date | string | null | undefined): string | undef
  * longer exists or was never given to this project: it cannot take a file either way.
  */
 export function describeProviderHealth(
-    provider: Pick<FileProviderView, 'status' | 'lastTest' | 'driverCapabilities'> | undefined,
+    provider: Pick<FileProviderView, 'status' | 'lastTest' | 'driverCapabilities' | 'platform'> | undefined,
 ): ProviderHealth {
     if (!provider) {
         return { state: 'inactive', message: 'The storage provider no longer exists or is not available to this project.' };
@@ -71,8 +71,8 @@ export function describeProviderHealth(
             message: provider.status === 'errored' ? 'The storage provider is in an error state.' : 'The storage provider is switched off.',
         };
     }
-    // Storage that needs no connection test: the server's own disk.
-    if (provider.driverCapabilities?.builtin === true) {
+    // Storage that needs no connection test: the server's own disk, and what the platform provides.
+    if (provider.driverCapabilities?.builtin === true || provider.platform === true) {
         return { state: 'builtin' };
     }
 
@@ -101,9 +101,11 @@ interface ProviderLocation {
 const DECORATED_LOCATION = /^(.*\/) \u00b7 ([^/\s]+)$/;
 
 function locationOf(
-    provider: Pick<FileProviderView, 'driver' | 'key' | 'settings'>,
+    provider: Pick<FileProviderView, 'driver' | 'key' | 'settings' | 'platform'>,
     tenantId: string,
 ): ProviderLocation | null {
+    // Where a platform provider keeps files is the operator's: never described.
+    if (provider.platform) return null;
     try {
         const contract = providerRegistry.getContract(provider.driver);
         const location = contract.describeStorageLocation?.({
@@ -130,7 +132,7 @@ function locationOf(
  * own disk) or the driver does not say.
  */
 export function storageLocationBaseOf(
-    provider: Pick<FileProviderView, 'driver' | 'key' | 'settings'>,
+    provider: Pick<FileProviderView, 'driver' | 'key' | 'settings' | 'platform'>,
     tenantId: string,
 ): string | null {
     return locationOf(provider, tenantId)?.base ?? null;

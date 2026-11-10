@@ -28,6 +28,7 @@ import { isServiceEnabled } from '@/lib/services/availability/serviceAvailabilit
 import type { AgentTriggerOfType, AgentTriggerWebhookAuth, IAgentTrigger, ITenant } from '@/lib/database';
 import { authz } from '@/lib/iam/routeAuthz';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
+import { gatePublicRequestRate } from '../publicRpmGate';
 import { isHeaderAuth, isRetiredWebhook, verifyHeaderAuth } from '@/lib/services/agents/agentTriggerWebhookAuth';
 import { processWebhookDelivery, recordDelivery, retiredWebhookAnswer, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/agentTriggerWebhookDelivery';
 import { openWebhookSecrets } from '@/lib/services/agents/agentTriggerWebhookIntake';
@@ -246,6 +247,13 @@ export const publicHooksApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/public/hooks/:tenantId/:hookId', { config: PUBLIC_HOOK_AUTHZ, bodyLimit, onRequest: resolveHook }, async (request, reply) => {
     const hook = request.hookDelivery;
     if (!hook) return notFound(reply);
+    // The plan's requests per minute: counted for deliveries that passed the trigger lookup and header auth.
+    const refused = await gatePublicRequestRate(request, reply, {
+      tenantId: String(hook.tenant._id),
+      sourceType: 'webhook',
+      sourceId: String(hook.trigger._id),
+    });
+    if (refused) return refused;
     const body = Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0);
     try {
       // Everything from the body check on — de-duplication, the delivery rows, the fire — in one tenant scope.

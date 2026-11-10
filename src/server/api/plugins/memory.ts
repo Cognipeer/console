@@ -17,6 +17,7 @@ import {
   searchMemories,
   updateMemoryStore,
 } from '@/lib/services/memory/memoryService';
+import { parseCreateMemoryStoreBody, parseUpdateMemoryStoreBody } from '@/lib/services/memory/memoryRequest';
 import {
   parseCsvQuery,
   readJsonObjectBody,
@@ -24,6 +25,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 
 const logger = createLogger('api:memory');
 
@@ -52,23 +54,14 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonObjectBody<Record<string, unknown>>(request);
 
-      if (
-        typeof body.name !== 'string'
-        || typeof body.vectorProviderKey !== 'string'
-        || typeof body.embeddingModelKey !== 'string'
-      ) {
-        return reply.code(400).send({
-          error: 'name, vectorProviderKey, and embeddingModelKey are required',
-        });
+      const parsed = parseCreateMemoryStoreBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send({ error: parsed.error });
       }
 
       const store = await createMemoryStore(session.tenantDbName, session.tenantId, projectId, {
-        config: body.config as Record<string, unknown> | undefined,
+        ...parsed.value,
         createdBy: session.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        name: body.name,
-        vectorProviderKey: body.vectorProviderKey,
       });
 
       return reply.code(201).send(store);
@@ -108,7 +101,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         storeKey,
         {
-          ...body,
+          ...parseUpdateMemoryStoreBody(body),
           updatedBy: session.userId,
         },
       );
@@ -226,6 +219,9 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });

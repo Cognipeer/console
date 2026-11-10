@@ -4,11 +4,18 @@
  */
 
 import axios from 'axios';
+import http1 from 'node:http';
 import https from 'node:https';
 import iconv from 'iconv-lite';
 import mime from 'mime-types';
 import { parseContentTypeBase } from './normalize';
-import { assertSafeUrl } from './ssrf';
+import { createGuardedLookup, privateNetworkBlockApplies } from '@/lib/security/outboundFetch';
+import {
+  assertResolvedUrl,
+  crawlerGuardOptions,
+  crawlerResolvedPrivateAllowance,
+  isProxiedByEgress,
+} from './ssrf';
 import type { CrawlHttpConfig, CrawlerEngineMode } from './types';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
 
@@ -16,12 +23,31 @@ import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from './types';
 // fresh TLS agent (and losing keep-alive) per fetch.
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
-// The initial frontier URL is SSRF-checked by the caller (engine/index.ts),
-// but axios happily follows a 3xx `Location` chain on its own — a public
-// seed can redirect straight to `http://169.254.169.254/` (or any other
-// private target) and axios would fetch it transparently, bypassing the
-// guard entirely. To prevent that, redirects are followed manually here:
-// each hop is re-validated with `assertSafeUrl()` before being requested.
+// Agents whose socket lookup applies the outbound network policy to the
+// address actually dialled (so a name that resolves differently at connect
+// time is still checked). Built on first use and shared across requests to
+// keep keep-alive.
+interface GuardedAgents {
+  http: http1.Agent;
+  https: https.Agent;
+  insecureHttps: https.Agent;
+}
+let guardedAgents: GuardedAgents | undefined;
+function getGuardedAgents(): GuardedAgents {
+  if (!guardedAgents) {
+    const lookup = createGuardedLookup({ privateNetworks: crawlerResolvedPrivateAllowance });
+    guardedAgents = {
+      http: new http1.Agent({ lookup }),
+      https: new https.Agent({ lookup }),
+      insecureHttps: new https.Agent({ rejectUnauthorized: false, lookup }),
+    };
+  }
+  return guardedAgents;
+}
+
+// The initial frontier URL is checked by the caller (engine/index.ts).
+// Redirects are followed manually so every hop is checked against the
+// outbound network policy with `assertResolvedUrl()` before being requested.
 const MAX_MANUAL_REDIRECTS = 5;
 
 export interface FetchResult {
@@ -80,6 +106,15 @@ export async function fetchWithAxios(
     signal?.addEventListener('abort', onExternalAbort);
 
     try {
+      // Resolve and validate every hop (seed and redirects) before requesting it.
+      await assertResolvedUrl(currentUrl, http.allowPrivateNetwork);
+      const guardOptions = crawlerGuardOptions(http.allowPrivateNetwork);
+      // A request carried by the egress proxy (HTTP(S)_PROXY, which axios
+      // honours) is resolved and policed by that proxy; the in-process
+      // guarded lookup only applies to direct connections.
+      const guarded =
+        privateNetworkBlockApplies(new URL(currentUrl).hostname, guardOptions) &&
+        !isProxiedByEgress(currentUrl);
       const response = await axios.get(currentUrl, {
         responseType: 'arraybuffer',
         headers,
@@ -91,7 +126,10 @@ export async function fetchWithAxios(
         signal: controller.signal,
         auth: http.basicAuth,
         validateStatus: (status) => status < 400,
-        httpsAgent: http.allowInsecureTls ? insecureAgent : undefined,
+        httpAgent: guarded ? getGuardedAgents().http : undefined,
+        httpsAgent: guarded
+          ? http.allowInsecureTls ? getGuardedAgents().insecureHttps : getGuardedAgents().https
+          : http.allowInsecureTls ? insecureAgent : undefined,
       });
       clearTimeout(tid);
       signal?.removeEventListener('abort', onExternalAbort);
@@ -105,9 +143,7 @@ export async function fetchWithAxios(
           throw new Error(`Too many redirects (>${MAX_MANUAL_REDIRECTS}) starting from ${url}`);
         }
         const nextUrl = new URL(location, currentUrl).toString();
-        // Re-validate every redirect hop — a public seed can 302 to a
-        // private/metadata host and must not be followed silently.
-        assertSafeUrl(nextUrl, http.allowPrivateNetwork);
+        // The next loop iteration validates this hop before requesting it.
         currentUrl = nextUrl;
         continue;
       }

@@ -30,6 +30,7 @@
  *    auto-restart and fail orphaned runs outright for manual re-run.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { getDatabase, getTenantDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
@@ -59,7 +60,7 @@ export async function reconcileOrphanedCrawlJobs(): Promise<{
   const queue = await getQueue();
   // Auto-restart interrupted crawls by default (bounded per job below). Set
   // CRAWLER_RESTART_ORPHANED_RUNS=false to instead fail them for manual re-run.
-  const autoRestart = process.env.CRAWLER_RESTART_ORPHANED_RUNS !== 'false';
+  const autoRestart = getConfig().queues.crawlerRestartOrphanedRuns;
 
   let tenantsScanned = 0;
   let failedRunningJobs = 0;

@@ -19,7 +19,7 @@ vi.mock('@/lib/services/mcp/mcpService', () => ({
 vi.mock('@/lib/services/agents/skillService', () => ({ createSkill: vi.fn(), listSkills: vi.fn() }));
 vi.mock('@/lib/services/prompts/promptService', () => ({ createPrompt: vi.fn(), deletePrompt: vi.fn() }));
 vi.mock('@/lib/services/tools/toolService', () => ({ createTool: vi.fn(), deleteTool: vi.fn() }));
-vi.mock('@/lib/services/webSearch/webSearchService', () => ({ listWebSearchProviders: vi.fn() }));
+vi.mock('@/lib/services/webSearch/webSearchService', () => ({ hasActiveWebSearch: vi.fn() }));
 vi.mock('@/lib/services/agents/agentConfigValidation', () => ({ validateAgentConfig: vi.fn() }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({ resolveSandboxAvailability: vi.fn() }));
 vi.mock('@/lib/services/agents/agentManifest', async (importOriginal) => {
@@ -31,7 +31,7 @@ import { createMcpServer, deleteMcpServer, listMcpServers } from '@/lib/services
 import { createSkill, listSkills } from '@/lib/services/agents/skillService';
 import { createPrompt, deletePrompt } from '@/lib/services/prompts/promptService';
 import { createTool, deleteTool } from '@/lib/services/tools/toolService';
-import { listWebSearchProviders } from '@/lib/services/webSearch/webSearchService';
+import { hasActiveWebSearch } from '@/lib/services/webSearch/webSearchService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import { applyAgentManifest, previewAgentImport } from '@/lib/services/agents/agentManifest';
@@ -89,7 +89,7 @@ beforeEach(() => {
     fn(db.updateAgent).mockResolvedValue({});
     fn(listSkills).mockResolvedValue([{ key: 'refunds', title: 'Refunds', status: 'active' }]);
     fn(listMcpServers).mockResolvedValue([{ _id: 'm-jira', key: 'jira', name: 'Jira', remoteConfig: { url: 'https://jira.example.com/mcp' }, status: 'active', tools: [{ name: 'search' }, { name: 'create' }] }]);
-    fn(listWebSearchProviders).mockResolvedValue([{ status: 'active' }]);
+    fn(hasActiveWebSearch).mockResolvedValue(true);
     fn(resolveSandboxAvailability).mockResolvedValue({ available: false, reason: 'license' });
     fn(validateAgentConfig).mockResolvedValue({ errors: [], warnings: [] });
     fn(applyAgentManifest).mockResolvedValue({ agent: { _id: 'agent-1', key: 'support-bot', metadata: {} }, action: 'created', missing: [] });

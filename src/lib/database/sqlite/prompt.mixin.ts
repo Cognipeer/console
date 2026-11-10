@@ -202,17 +202,6 @@ export function PromptMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       return rows.map((r) => this.mapCommentRow(r));
     }
 
-    async updatePromptComment(id: string, data: Partial<Pick<IPromptComment, 'content'>>): Promise<IPromptComment | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
-      if (data.content !== undefined) {
-        db.prepare(`UPDATE ${TABLES.promptComments} SET content = @content, updatedAt = @updatedAt WHERE id = @id`)
-          .run({ id, content: data.content, updatedAt: now });
-      }
-      const row = db.prepare(`SELECT * FROM ${TABLES.promptComments} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
-      return row ? this.mapCommentRow(row) : null;
-    }
-
     async deletePromptComment(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       return db.prepare(`DELETE FROM ${TABLES.promptComments} WHERE id = @id`).run({ id }).changes > 0;

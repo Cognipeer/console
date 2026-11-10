@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import {
+  addPlatformModelsToProject,
   createDynamicModel,
   createModel,
   createModelProvider,
@@ -9,7 +10,9 @@ import {
   getUsageAggregate,
   listModelProviders,
   listModels,
+  listPlatformModelProviders,
   listUsageLogs,
+  removePlatformModelFromProject,
   updateModel,
 } from '@/lib/services/models/modelService';
 import { parseMetadataGroupByKey, type UsageBreakdownGroupBy } from '@/lib/services/usage/usageBreakdown';
@@ -21,17 +24,16 @@ import {
   ModelCapabilityValidationError,
   ModelKeyConflictError,
   parseModelCapabilityOverrides,
-  resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
 import {
-  type IModel,
   type ModelCategory,
   type ProviderDomain,
 } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota, type QuotaContext } from '@/lib/quota';
 import { providerRegistry } from '@/lib/providers';
-import type { ProviderStatus } from '@/lib/services/providers/providerService';
+import { PlatformModelSelectionError } from '@/lib/services/providers/managedProviderErrors';
+import { ManagedProviderError, redactPlatformProvider, type ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   ProjectContextError,
 } from '@/lib/services/projects/projectContext';
@@ -42,12 +44,11 @@ import {
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
 import {
-  getProviderModelCatalog,
+  getProviderCatalog,
   ProviderCatalogDisabledError,
   ProviderCatalogNotFoundError,
 } from '@/lib/services/models/catalog';
 import { calcCacheHitRate } from '@/lib/utils/tracingUtils';
-import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -55,6 +56,7 @@ import {
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import { rowsWithHiddenContent } from '../restrictedKnowledgeRequest';
+import { mergeSettings, sanitizeModel, type ModelQuery } from './models-shared';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -65,21 +67,6 @@ import { readPiiProtectionField } from '@/lib/services/pii/protectionConfig';
 
 const logger = createLogger('api:models');
 const MAX_LIMIT = 200;
-const PLACEHOLDER = '••••••••';
-const SENSITIVE_FIELDS = new Set([
-  'apiKey',
-  'secretAccessKey',
-  'serviceAccountKey',
-  'sessionToken',
-]);
-
-type ModelQuery = {
-  category?: ModelCategory;
-  includeProviders?: string;
-  providerDriver?: string;
-  providerKey?: string;
-};
-
 type ModelLogsQuery = {
   from?: string;
   limit?: string;
@@ -113,49 +100,6 @@ function sendProjectError(reply: { code: (statusCode: number) => { send: (payloa
   }
 
   return null;
-}
-
-function sanitizeSettings(settings: Record<string, unknown>) {
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(settings || {})) {
-    sanitized[key] = SENSITIVE_FIELDS.has(key) && value ? PLACEHOLDER : value;
-  }
-  return sanitized;
-}
-
-function sanitizeModel(model: IModel) {
-  return {
-    ...model,
-    capabilities: resolveModelCapabilities(model),
-    settings: sanitizeSettings(model.settings || {}),
-  };
-}
-
-/**
- * `null` deletes a key, the placeholder and `undefined` mean "unchanged".
- * Normalising on the way out heals rows whose values were persisted with the
- * wrong type — see `normalizeModelSettings`.
- */
-function mergeSettings(
-  existing: Record<string, unknown>,
-  incoming: Record<string, unknown>,
-) {
-  const merged: Record<string, unknown> = { ...existing };
-
-  for (const [key, value] of Object.entries(incoming)) {
-    if (value === PLACEHOLDER || value === undefined) {
-      continue;
-    }
-
-    if (value === null) {
-      delete merged[key];
-      continue;
-    }
-
-    merged[key] = value;
-  }
-
-  return normalizeModelSettings(merged);
 }
 
 function buildDate(value?: string): Date | undefined {
@@ -227,7 +171,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/models/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'model');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'model');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List model provider drivers error', { error });
@@ -240,7 +184,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
       const descriptor = providerRegistry
-        .listDescriptors('model')
+        .listTenantDescriptors('model')
         .find((item) => item.id === driverId);
 
       return reply.code(200).send({
@@ -275,7 +219,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      return reply.code(200).send({ providers });
+      return reply.code(200).send({ providers: providers.map(redactPlatformProvider) });
     } catch (error) {
       logger.error('List model providers error', { error });
       return sendProjectError(reply, error)
@@ -349,7 +293,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const catalog = await getProviderModelCatalog({
+      const catalog = await getProviderCatalog({
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         projectId,
@@ -363,6 +307,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (error instanceof ProviderCatalogDisabledError) {
         return reply.code(409).send({ error: error.message, code: error.code });
+      }
+      if (error instanceof ManagedProviderError) {
+        return reply.code(400).send({ error: error.message, code: error.code });
       }
       const projectReply = sendProjectError(reply, error);
       if (projectReply) return projectReply;
@@ -544,17 +491,36 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         providerKey: query.providerKey,
       });
 
+      // A platform model its operator switched off is left out unless the caller asks for it; then it is marked.
+      const includeUnavailable = query.includeUnavailable === 'true';
+      const visible = models.filter(
+        (model) => includeUnavailable || !(model.platform && model.metadata?.inactive === true),
+      );
       const payload: Record<string, unknown> = {
-        models: models.map(sanitizeModel),
+        models: visible.map((model) => ({
+          ...sanitizeModel(model),
+          ...(model.platform && model.metadata?.inactive === true ? { unavailable: true } : {}),
+        })),
       };
 
       if (query.includeProviders === 'true') {
-        payload.providers = await listModelProviders(
+        const providers = await listModelProviders(
           session.tenantDbName,
           session.tenantId,
           projectId,
           {},
         );
+        payload.providers = providers.map(redactPlatformProvider);
+
+        if (query.includePlatform === 'true') {
+          // Every platform provider of the tenant that can back a model, for the one that is not assigned here too.
+          const assignedKeys = new Set(providers.map((provider) => provider.key));
+          const all = await listPlatformModelProviders(session.tenantDbName, session.tenantId);
+          payload.platformProviders = all.map((provider) => ({
+            ...redactPlatformProvider(provider),
+            assigned: assignedKeys.has(provider.key),
+          }));
+        }
       }
 
       return reply.code(200).send(payload);
@@ -633,6 +599,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Create model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelKeyConflictError) {
         return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
       }
@@ -643,6 +610,36 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
         });
+    }
+  }));
+
+  /**
+   * Adds platform models (by key) to the active project. The permission is the one of creating a model. A model whose
+   * provider is not assigned to the project, or that is not available, is refused (409) and nothing is added.
+   */
+  app.post('/models/platform/add', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const keys = Array.isArray(body.keys) ? body.keys : null;
+      if (!keys || keys.length === 0 || keys.length > 200 || keys.some((k) => typeof k !== 'string' || !k.trim())) {
+        return reply.code(400).send({ error: 'keys must be a non-empty list of model keys' });
+      }
+      const added = await addPlatformModelsToProject(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        keys as string[],
+        session.userId,
+      );
+      return reply.code(200).send({ added });
+    } catch (error) {
+      if (error instanceof PlatformModelSelectionError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code, key: error.key });
+      }
+      logger.error('Add platform models error', { error });
+      return sendProjectError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
     }
   }));
 
@@ -991,6 +988,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ model: sanitizeModel(updated) });
     } catch (error) {
       logger.error('Update model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -1005,6 +1003,12 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
+      // A platform model is never deleted by a tenant: deleting it takes it out of this project.
+      const target = await getModelById(session.tenantDbName, id, projectId);
+      if (target?.platform) {
+        await removePlatformModelFromProject(session.tenantDbName, session.tenantId, projectId, target.key, session.userId);
+        return reply.code(200).send({ removed: true });
+      }
       const deleted = await deleteModel(session.tenantDbName, projectId, id);
 
       if (!deleted) {
@@ -1014,6 +1018,7 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Delete model error', { error });
+      if (sendProviderConfigError(reply, error)) return reply;
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

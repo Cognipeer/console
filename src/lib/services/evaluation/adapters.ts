@@ -33,6 +33,7 @@
  * case) and from the finish reason of the response (the second).
  */
 
+import { getConfig } from '@/lib/core/config';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
   invokeChatViaSdk,
@@ -400,7 +401,7 @@ function buildInvocationPathResolver(
 ): () => Promise<ModelInvocationPath> {
   let cached: Promise<ModelInvocationPath> | undefined;
   const resolve = async (): Promise<ModelInvocationPath> => {
-    if (process.env.EVALUATION_INVOKER === 'gateway') return { mode: 'gateway' };
+    if (getConfig().evaluation.invoker === 'gateway') return { mode: 'gateway' };
     try {
       const prepared = await prepareSdkInvocation(
         { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId },

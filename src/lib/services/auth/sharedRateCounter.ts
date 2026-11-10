@@ -9,7 +9,7 @@
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { checkRateLimit } from './rateLimiter';
+import { checkRateLimit, peekRateLimit, type RateLimitConfig, type RateLimitResult } from './rateLimiter';
 
 const logger = createLogger('shared-rate-counter');
 
@@ -35,14 +35,18 @@ export function rateRefused(retryAfterSeconds: number): RateDecision {
 }
 
 /** The shared (Redis) count for a key, or null when the shared counter is not in use or cannot be reached. */
-export async function incrementSharedCounter(key: string): Promise<{ count: number; resetAt: Date } | null> {
+export async function incrementSharedCounter(
+  key: string,
+  windowSeconds: number = RATE_WINDOW_SECONDS,
+  amount = 1,
+): Promise<{ count: number; resetAt: Date } | null> {
   if (getConfig().rateLimit.provider !== 'redis') return null;
   const now = Date.now();
   if (now < sharedCounterRetryAt) return null;
   try {
     const cache = await getCache();
     if (cache.name !== 'redis') return null;
-    return await cache.incrementCounter(key, RATE_WINDOW_SECONDS, 1);
+    return await cache.incrementCounter(key, windowSeconds, amount);
   } catch (error) {
     // The shared counter is unavailable: the local limit still applies.
     sharedCounterRetryAt = now + SHARED_COUNTER_RETRY_MS;
@@ -66,6 +70,48 @@ export async function countRequest(key: string, limit: number): Promise<RateDeci
     return rateRefused(Math.ceil((shared.resetAt.getTime() - Date.now()) / 1000));
   }
   return RATE_ALLOWED;
+}
+
+/**
+ * `checkRateLimit` for a limit of its own window, also counted across replicas when
+ * RATE_LIMIT_PROVIDER=redis. Without the shared counter (or while it cannot be reached)
+ * this is the local limit alone.
+ */
+export async function checkSharedRateLimit(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
+  const local = checkRateLimit(key, config);
+  if (!local.allowed) return local;
+
+  const shared = await incrementSharedCounter(key, config.windowSeconds);
+  if (shared && shared.count > config.maxAttempts) {
+    return {
+      allowed: false,
+      remaining: 0,
+      resetAt: shared.resetAt,
+      retryAfterSeconds: Math.max(1, Math.ceil((shared.resetAt.getTime() - Date.now()) / 1000)),
+    };
+  }
+  return local;
+}
+
+/**
+ * Whether `key` has already used up its limit, without counting an attempt: the local
+ * count, and with RATE_LIMIT_PROVIDER=redis the count across replicas. Pair with
+ * `checkSharedRateLimit` to count only the attempts that should use the budget.
+ */
+export async function peekSharedRateLimit(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
+  const local = peekRateLimit(key, config);
+  if (!local.allowed) return local;
+
+  const shared = await incrementSharedCounter(key, config.windowSeconds, 0);
+  if (shared && shared.count >= config.maxAttempts) {
+    return {
+      allowed: false,
+      remaining: 0,
+      resetAt: shared.resetAt,
+      retryAfterSeconds: Math.max(1, Math.ceil((shared.resetAt.getTime() - Date.now()) / 1000)),
+    };
+  }
+  return local;
 }
 
 /** For tests: forget the shared-counter timers. */

@@ -6,6 +6,7 @@
  * routed to this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import {
@@ -19,7 +20,7 @@ const log = createLogger('vector-migration:consumer');
 let started = false;
 
 /** How many index migrations may run concurrently on this node. */
-const CONCURRENCY = Math.max(1, Number(process.env.VECTOR_MIGRATION_CONCURRENCY ?? 2) || 2);
+const concurrency = () => getConfig().queues.vectorMigrationConcurrency;
 
 export async function startVectorMigrationQueueConsumer(): Promise<void> {
   if (started) return;
@@ -33,8 +34,8 @@ export async function startVectorMigrationQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown vector migration job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Vector migration queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Vector migration queue consumer registered', { concurrency: concurrency() });
 }

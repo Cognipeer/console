@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
+  Alert,
   Button,
   Center,
   CopyButton,
@@ -237,6 +238,10 @@ export default function ProviderDetailPage() {
     label: provider.label,
   });
 
+  // Platform record: supplied by the deployment, read-only for the tenant (the API redacts its metadata, so `platform` is the signal).
+  // Only its project assignment is the tenant's to change.
+  const isPlatform = provider.platform === true;
+  const canEditProvider = canManage && !isPlatform;
   const assignedIds = effectiveProjectIds(provider);
   const summary = usage.entries.length > 0
     ? usageSummary(usage.entries)
@@ -256,6 +261,7 @@ export default function ProviderDetailPage() {
       >
         Refresh
       </Button>
+      {isPlatform ? null : (
       <Button
         variant="default"
         size="sm"
@@ -264,6 +270,8 @@ export default function ProviderDetailPage() {
       >
         Edit
       </Button>
+      )}
+      {isPlatform ? null : (
       <Menu withinPortal position="bottom-end" withArrow>
         <Menu.Target>
           <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
@@ -281,6 +289,7 @@ export default function ProviderDetailPage() {
           </Menu.Item>
         </Menu.Dropdown>
       </Menu>
+      )}
     </>
   );
 
@@ -348,6 +357,11 @@ export default function ProviderDetailPage() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
     >
+      {isPlatform ? (
+        <Alert variant="light" color="blue" title="Platform-managed provider" mb="md">
+          This provider is supplied by the platform. It cannot be edited, tested or deleted here; you can choose which projects use it.
+        </Alert>
+      ) : null}
       {activeTab === 'projects' ? (
         <ProviderProjectsTab
           providerId={String(provider._id)}
@@ -361,12 +375,15 @@ export default function ProviderDetailPage() {
       ) : (
       <DetailTwoCol narrowAside>
         <Stack gap="md">
-          <ProviderConnectionCard
-            providerId={String(provider._id)}
-            lastTest={provider.lastTest}
-            canTest={canManage}
-            onTested={reloadAll}
-          />
+          {/* A platform provider cannot be tested here, so its "never tested" card would only mislead. */}
+          {isPlatform ? null : (
+            <ProviderConnectionCard
+              providerId={String(provider._id)}
+              lastTest={provider.lastTest}
+              canTest={canEditProvider}
+              onTested={reloadAll}
+            />
+          )}
           <DetailCard>
             <ResourceUsageSection type="provider" id={String(provider._id)} />
           </DetailCard>
@@ -536,10 +553,10 @@ export default function ProviderDetailPage() {
               mt="sm"
               style={{ paddingLeft: 0 }}
               onClick={() =>
-                summary.assigned === 0 && canManage ? setAssignOpen(true) : setActiveTab('projects')
+                summary.assigned === 0 && canEditProvider ? setAssignOpen(true) : setActiveTab('projects')
               }
             >
-              {summary.assigned === 0 && canManage ? tList('assign') : t('tabProjects')}
+              {summary.assigned === 0 && canEditProvider ? tList('assign') : t('tabProjects')}
             </Button>
           </DetailCard>
 

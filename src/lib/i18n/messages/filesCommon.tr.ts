@@ -67,6 +67,7 @@ export const filesCommonTr: typeof filesCommonEn = {
     notFound: 'Bu öğe artık yok.',
     providerAccess: 'Bu bağlantıyı test etmek için sağlayıcı erişimine ihtiyacınız var.',
     fileTooLarge: 'Dosya yükleme sınırından büyük.',
+    storageQuotaExceeded: 'Depolama alanı dolu. Daha fazla yüklemek için gerekmeyen dosyaları silin.',
     archiveTooLarge: 'Seçilen dosyalar birlikte indirilemeyecek kadar büyük. Daha az dosya seçin.',
     previewUnsupported: 'Bu dosya türü için önizleme yok.',
     previewTooLarge: 'Bu dosya önizlemek için çok büyük. Bunun yerine indirin.',
