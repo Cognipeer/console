@@ -7,6 +7,7 @@
  * this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
@@ -16,7 +17,7 @@ const log = createLogger('evaluation:consumer');
 let started = false;
 
 /** How many evaluation runs may execute concurrently on this node. */
-const CONCURRENCY = Math.max(1, Number(process.env.EVALUATION_RUN_CONCURRENCY ?? 2) || 2);
+const concurrency = () => getConfig().queues.evaluationRunConcurrency;
 
 export async function startEvaluationRunQueueConsumer(): Promise<void> {
   if (started) return;
@@ -39,8 +40,8 @@ export async function startEvaluationRunQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown evaluation job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Evaluation run queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Evaluation run queue consumer registered', { concurrency: concurrency() });
 }

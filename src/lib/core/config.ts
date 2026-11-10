@@ -143,6 +143,21 @@ export interface AppConfig {
      * with MONGODB_SINGLE_DATABASE for edge cases.
      */
     singleDatabase: boolean;
+    /**
+     * When true (TENANT_SCOPE_STRICT=1), a tenant query issued outside a
+     * runWithTenantScope() scope throws instead of logging a warning.
+     */
+    tenantScopeStrict: boolean;
+  };
+
+  iam: {
+    /** Validate every authorization request against the engine schema (IAM_VALIDATE_REQUESTS=1). Diagnostics only. */
+    validateRequests: boolean;
+  };
+
+  evaluation: {
+    /** How evaluation targets are invoked (EVALUATION_INVOKER). `gateway` routes through the gateway; otherwise in-process. */
+    invoker: 'gateway' | 'direct';
   };
 
   auth: {
@@ -503,6 +518,27 @@ export interface AppConfig {
     };
     defaultAttempts: number;
     defaultBackoffMs: number;
+  };
+
+  /** Per-node concurrency and limits of the background job consumers. Every value is a positive integer. */
+  queues: {
+    redteamScanConcurrency: number;
+    datasetGenConcurrency: number;
+    evaluationRunConcurrency: number;
+    analysisRunConcurrency: number;
+    analysisMaxRunConversations: number;
+    ragIngestConcurrency: number;
+    ragIngestBootResumeMax: number;
+    ragReindexConcurrency: number;
+    vectorMigrationConcurrency: number;
+    crawlerRunConcurrency: number;
+    /** Re-queue crawl runs that were in flight when the process stopped (CRAWLER_RESTART_ORPHANED_RUNS, default on). */
+    crawlerRestartOrphanedRuns: boolean;
+    browserActionConcurrency: number;
+    batchItemConcurrency: number;
+    batchMaxRequests: number;
+    snapshotJobConcurrency: number;
+    mcpInvokeConcurrency: number;
   };
 
   /**
@@ -1052,6 +1088,15 @@ function buildConfig(source: ConfigSource): AppConfig {
         'MONGODB_SINGLE_DATABASE',
         deploymentMode === 'onprem' && databaseProvider === 'mongodb',
       ),
+      tenantScopeStrict: source.get('TENANT_SCOPE_STRICT') === '1',
+    },
+
+    iam: {
+      validateRequests: source.get('IAM_VALIDATE_REQUESTS') === '1',
+    },
+
+    evaluation: {
+      invoker: source.get('EVALUATION_INVOKER') === 'gateway' ? 'gateway' : 'direct',
     },
 
     auth: {
@@ -1261,6 +1306,25 @@ function buildConfig(source: ConfigSource): AppConfig {
       },
       defaultAttempts: int(source, 'QUEUE_DEFAULT_ATTEMPTS', 3),
       defaultBackoffMs: int(source, 'QUEUE_DEFAULT_BACKOFF_MS', 1_000),
+    },
+
+    queues: {
+      redteamScanConcurrency: positiveInt(source, 'REDTEAM_SCAN_CONCURRENCY', 2),
+      datasetGenConcurrency: positiveInt(source, 'DATASET_GEN_CONCURRENCY', 2),
+      evaluationRunConcurrency: positiveInt(source, 'EVALUATION_RUN_CONCURRENCY', 2),
+      analysisRunConcurrency: positiveInt(source, 'ANALYSIS_RUN_CONCURRENCY', 2),
+      analysisMaxRunConversations: positiveInt(source, 'ANALYSIS_MAX_RUN_CONVERSATIONS', 5000),
+      ragIngestConcurrency: positiveInt(source, 'RAG_INGEST_CONCURRENCY', 2),
+      ragIngestBootResumeMax: positiveInt(source, 'RAG_INGEST_BOOT_RESUME_MAX', 500),
+      ragReindexConcurrency: positiveInt(source, 'RAG_REINDEX_CONCURRENCY', 1),
+      vectorMigrationConcurrency: positiveInt(source, 'VECTOR_MIGRATION_CONCURRENCY', 2),
+      crawlerRunConcurrency: positiveInt(source, 'CRAWLER_RUN_CONCURRENCY', 2),
+      crawlerRestartOrphanedRuns: source.get('CRAWLER_RESTART_ORPHANED_RUNS') !== 'false',
+      browserActionConcurrency: positiveInt(source, 'BROWSER_ACTION_CONCURRENCY', 4),
+      batchItemConcurrency: positiveInt(source, 'BATCH_ITEM_CONCURRENCY', 4),
+      batchMaxRequests: positiveInt(source, 'BATCH_MAX_REQUESTS', 10_000),
+      snapshotJobConcurrency: positiveInt(source, 'SNAPSHOT_JOB_CONCURRENCY', 2),
+      mcpInvokeConcurrency: positiveInt(source, 'MCP_INVOKE_CONCURRENCY', 4),
     },
 
     agent: {

@@ -13,6 +13,7 @@
  * directly, so this consumer isn't involved.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
@@ -35,7 +36,7 @@ interface RunPayload {
  * to as many as 16 concurrent fetches and may drive a Chromium instance, so the
  * real footprint is this number multiplied by that fan-out.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.CRAWLER_RUN_CONCURRENCY ?? 2) || 2);
+const concurrency = () => getConfig().queues.crawlerRunConcurrency;
 
 export async function startCrawlerQueueConsumer(): Promise<void> {
   if (started) return;
@@ -56,7 +57,7 @@ export async function startCrawlerQueueConsumer(): Promise<void> {
       return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
     }
     throw new Error(`Unknown crawler job: ${ctx.name}`);
-  }, { concurrency: CONCURRENCY });
+  }, { concurrency: concurrency() });
   started = true;
-  log.info('Crawler queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Crawler queue consumer registered', { concurrency: concurrency() });
 }

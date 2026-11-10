@@ -7,6 +7,7 @@
  * asynchronously via per-item queue fan-out (concurrent, multi-node).
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { BatchJobEndpoint, IBatchJob, IBatchJobItem } from '@/lib/database';
@@ -21,10 +22,7 @@ import type { BatchContext, BatchRequestLine, CreateBatchInput } from './types';
 const logger = createLogger('batch:service');
 
 /** Hard cap on request lines per batch (overridable via env). */
-export const BATCH_MAX_REQUESTS = Math.max(
-  1,
-  Number(process.env.BATCH_MAX_REQUESTS ?? 10_000) || 10_000,
-);
+export const getBatchMaxRequests = () => getConfig().queues.batchMaxRequests;
 
 const SUPPORTED_ENDPOINTS: BatchJobEndpoint[] = ['/v1/chat/completions', '/v1/embeddings'];
 
@@ -199,9 +197,9 @@ export async function createBatch(ctx: BatchContext, input: CreateBatchInput): P
   if (requests.length === 0) {
     throw new BatchValidationError('Batch contains no requests');
   }
-  if (requests.length > BATCH_MAX_REQUESTS) {
+  if (requests.length > getBatchMaxRequests()) {
     throw new BatchValidationError(
-      `Batch exceeds the maximum of ${BATCH_MAX_REQUESTS} requests (got ${requests.length})`,
+      `Batch exceeds the maximum of ${getBatchMaxRequests()} requests (got ${requests.length})`,
     );
   }
   requests.forEach((line, index) => validateRequestLine(input.endpoint, line, index));

@@ -1,5 +1,5 @@
 export {
-  BATCH_MAX_REQUESTS,
+  getBatchMaxRequests,
   BatchValidationError,
   buildResultsJsonl,
   cancelBatch,

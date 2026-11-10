@@ -13,6 +13,7 @@
  * `TENANT_SCOPE_STRICT=1` (recommended for dev/CI).
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('database:tenant-scope');
@@ -22,7 +23,7 @@ let lastWarnAt = 0;
 let suppressedSinceLastWarn = 0;
 
 export function warnGlobalTenantFallback(fallbackDbName: string): void {
-  if (process.env.TENANT_SCOPE_STRICT === '1') {
+  if (getConfig().database.tenantScopeStrict) {
     throw new Error(
       `Tenant query without a runWithTenant scope (would fall back to global handle "${fallbackDbName}"). `
       + 'Wrap the calling entry point in runWithTenantScope().',

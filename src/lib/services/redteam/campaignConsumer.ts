@@ -6,6 +6,7 @@
  * scan jobs routed to this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
@@ -15,7 +16,7 @@ const log = createLogger('redteam:consumer');
 let started = false;
 
 /** How many scans may run concurrently on this node. */
-const CONCURRENCY = Math.max(1, Number(process.env.REDTEAM_SCAN_CONCURRENCY ?? 2) || 2);
+const concurrency = () => getConfig().queues.redteamScanConcurrency;
 
 export async function startRedTeamQueueConsumer(): Promise<void> {
   if (started) return;
@@ -38,8 +39,8 @@ export async function startRedTeamQueueConsumer(): Promise<void> {
       }
       throw new Error(`Unknown red-team job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Red-team scan queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Red-team scan queue consumer registered', { concurrency: concurrency() });
 }

@@ -80,6 +80,8 @@ This document defines the general development rules for `cognipeer-console` (gat
    - Never read `process.env` directly in application code.
    - Import `getConfig` from `@/lib/core` and read typed values.
    - Exception: `src/instrumentation.ts` bootstrap guard (`NEXT_RUNTIME`) runs before config is ready.
+   - Exception: `src/server/index.ts` and `src/server/env.ts` (`PORT`, `HOST`, `NODE_ENV`) run before config is loaded.
+   - Enforced by the ESLint `no-restricted-properties` rule on `process.env` (see `eslint.config.mjs` for the allowed files).
 
 2. **Logging — always use `createLogger(scope)`**
    - Never use `console.log`, `console.error`, `console.warn` in server-side code (`src/lib/`, `src/server/`).
