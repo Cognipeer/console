@@ -21,6 +21,20 @@ import type {
 
 const logger = createLogger('config');
 
+/**
+ * A config request the caller can correct (a key already taken, a group or item that does not exist in
+ * their project): carries the HTTP status it maps to. The message is written for the caller.
+ */
+export class ConfigServiceError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: 404 | 409) {
+    super(message);
+    this.name = 'ConfigServiceError';
+    this.status = status;
+  }
+}
+
 // ── Encryption helpers ───────────────────────────────────────────────────
 
 const ALGORITHM = 'aes-256-gcm';
@@ -105,7 +119,7 @@ export async function createConfigGroup(
 
   const existing = await db.findConfigGroupByKey(key, projectId);
   if (existing) {
-    throw new Error(`Config group with key "${key}" already exists.`);
+    throw new ConfigServiceError(`Config group with key "${key}" already exists.`, 409);
   }
 
   const group = await db.createConfigGroup({
@@ -133,9 +147,9 @@ export async function updateConfigGroup(
   const db = await withTenantDb(tenantDbName);
 
   const existing = await db.findConfigGroupById(groupId);
-  if (!existing) throw new Error('Config group not found.');
+  if (!existing) throw new ConfigServiceError('Config group not found.', 404);
   if (existing.projectId && existing.projectId !== projectId) {
-    throw new Error('Config group does not belong to this project.');
+    throw new ConfigServiceError('Config group does not belong to this project.', 404);
   }
 
   const updateData: Record<string, unknown> = {
@@ -164,9 +178,9 @@ export async function deleteConfigGroup(
   const db = await withTenantDb(tenantDbName);
 
   const existing = await db.findConfigGroupById(groupId);
-  if (!existing) throw new Error('Config group not found.');
+  if (!existing) throw new ConfigServiceError('Config group not found.', 404);
   if (existing.projectId && existing.projectId !== projectId) {
-    throw new Error('Config group does not belong to this project.');
+    throw new ConfigServiceError('Config group does not belong to this project.', 404);
   }
 
   // Cascade delete: remove all items under this group
@@ -268,9 +282,9 @@ export async function createConfigItem(
 
   // Validate group exists
   const group = await db.findConfigGroupById(groupId);
-  if (!group) throw new Error('Config group not found.');
+  if (!group) throw new ConfigServiceError('Config group not found.', 404);
   if (group.projectId && group.projectId !== projectId) {
-    throw new Error('Config group does not belong to this project.');
+    throw new ConfigServiceError('Config group does not belong to this project.', 404);
   }
 
   const key = request.key || generateItemKey(request.name);
@@ -278,7 +292,7 @@ export async function createConfigItem(
   // Check uniqueness within group
   const existing = await db.findConfigItemByKey(key, projectId);
   if (existing && existing.groupId === groupId) {
-    throw new Error(`Config item with key "${key}" already exists in this group.`);
+    throw new ConfigServiceError(`Config item with key "${key}" already exists in this group.`, 409);
   }
 
   const storedValue = request.isSecret ? encrypt(request.value) : request.value;
@@ -323,9 +337,9 @@ export async function updateConfigItem(
   const db = await withTenantDb(tenantDbName);
 
   const existing = await db.findConfigItemById(itemId);
-  if (!existing) throw new Error('Config item not found.');
+  if (!existing) throw new ConfigServiceError('Config item not found.', 404);
   if (existing.projectId && existing.projectId !== projectId) {
-    throw new Error('Config item does not belong to this project.');
+    throw new ConfigServiceError('Config item does not belong to this project.', 404);
   }
 
   const updateData: Record<string, unknown> = {
@@ -378,9 +392,9 @@ export async function deleteConfigItem(
   const db = await withTenantDb(tenantDbName);
 
   const existing = await db.findConfigItemById(itemId);
-  if (!existing) throw new Error('Config item not found.');
+  if (!existing) throw new ConfigServiceError('Config item not found.', 404);
   if (existing.projectId && existing.projectId !== projectId) {
-    throw new Error('Config item does not belong to this project.');
+    throw new ConfigServiceError('Config item does not belong to this project.', 404);
   }
 
   const deleted = await db.deleteConfigItem(itemId);

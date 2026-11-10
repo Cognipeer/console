@@ -201,18 +201,6 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       return rows.map((r) => this.mapMcpServerRow(r));
     }
 
-    async countMcpServers(projectId?: string): Promise<number> {
-      const db = this.getTenantDb();
-      const clauses: string[] = [];
-      const params: Record<string, unknown> = {};
-      if (projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
-      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-      const row = db.prepare(
-        `SELECT COUNT(*) as cnt FROM ${TABLES.mcpServers} ${where}`,
-      ).get(params) as SqliteRow;
-      return (row?.cnt as number) || 0;
-    }
-
     // ── MCP Request Logs ─────────────────────────────────────────────
 
     async createMcpRequestLog(

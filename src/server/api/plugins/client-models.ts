@@ -30,7 +30,6 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
   type IDynamicRoutingConfig,
-  type IModel,
   type ModelCategory,
 } from '@/lib/database';
 import type { UpdateModelInput } from '@/lib/services/models/types';
@@ -51,11 +50,9 @@ import {
   ModelCapabilityValidationError,
   ModelKeyConflictError,
   parseModelCapabilityOverrides,
-  resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
-import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
   authorizationRefusalOf,
   authorizeServiceForRequest,
@@ -66,6 +63,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { mergeSettings, sanitizeModel, type ModelQuery } from './models-shared';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -93,59 +91,6 @@ async function readAccess(request: FastifyRequest, service: 'models' | 'agents')
 async function mayRead(request: FastifyRequest, service: 'models' | 'agents'): Promise<boolean> {
   return (await readAccess(request, service)) === null;
 }
-
-const PLACEHOLDER = '••••••••';
-const SENSITIVE_FIELDS = new Set([
-  'apiKey',
-  'secretAccessKey',
-  'serviceAccountKey',
-  'sessionToken',
-]);
-
-function sanitizeSettings(settings: Record<string, unknown>) {
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(settings || {})) {
-    sanitized[key] = SENSITIVE_FIELDS.has(key) && value ? PLACEHOLDER : value;
-  }
-  return sanitized;
-}
-
-function sanitizeModel(model: IModel) {
-  return {
-    ...model,
-    capabilities: resolveModelCapabilities(model),
-    settings: sanitizeSettings(model.settings || {}),
-  };
-}
-
-function mergeSettings(
-  existing: Record<string, unknown>,
-  incoming: Record<string, unknown>,
-) {
-  const merged: Record<string, unknown> = { ...existing };
-
-  for (const [key, value] of Object.entries(incoming)) {
-    if (value === PLACEHOLDER || value === undefined) {
-      continue;
-    }
-
-    if (value === null) {
-      delete merged[key];
-      continue;
-    }
-
-    merged[key] = value;
-  }
-
-  return normalizeModelSettings(merged);
-}
-
-type ModelQuery = {
-  category?: ModelCategory;
-  includeProviders?: string;
-  providerDriver?: string;
-  providerKey?: string;
-};
 
 /**
  * Every model service fn is project-scoped. The token carries its project in

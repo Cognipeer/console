@@ -176,6 +176,15 @@ export interface AppConfig {
     circuitBreakerResetMs: number;
   };
 
+  guardrail: {
+    /**
+     * Fail mode a new guardrail gets when the request names none. `auto`
+     * (default): `closed` for presets that run PII or prompt-shield checks,
+     * `open` otherwise. `open`: the previous behavior for every guardrail.
+     */
+    defaultFailMode: 'auto' | 'open';
+  };
+
   cache: {
     provider: 'none' | 'memory' | 'redis';
     ttlSeconds: number;
@@ -234,6 +243,8 @@ export interface AppConfig {
     tracingStaleSessionMinutes: number;
     /** How often the stale tracing-session finalizer runs. */
     tracingFinalizerIntervalMs: number;
+    /** Minimum gap between plan-retention sweeps triggered by tracing ingest, per tenant and project. 0 sweeps on every ingest request. */
+    tracingRetentionSweepIntervalMs: number;
     /** Per-channel timeout when delivering an alert notification. */
     alertChannelTimeoutMs: number;
     /** New projects get the default alert rules (the default set of the rule templates). */
@@ -388,6 +399,20 @@ export interface AppConfig {
      */
     allowedHosts: string[];
     /**
+     * Whether a crawler may opt in (`http.allowPrivateNetwork`) to fetching
+     * private-network targets. Default: on for self-hosted (`onprem`), off for
+     * hosted (`saas`), where the per-crawler flag is ignored.
+     */
+    crawlerAllowPrivateOptIn: boolean;
+    /**
+     * What crawler fetches and webhooks do with a host NAME that resolves to
+     * private, loopback, link-local, CGNAT or metadata address space (literal
+     * addresses and `localhost` are always refused). `refuse` blocks the
+     * request; `warn` allows it and logs a rate-limited warning per host.
+     * Default: `warn` for self-hosted (`onprem`), `refuse` for hosted (`saas`).
+     */
+    crawlerResolvedPrivatePolicy: 'refuse' | 'warn';
+    /**
      * Private networks a provider endpoint may reach even though private targets are blocked, per organization.
      * Raw `PROVIDER_PRIVATE_NETWORKS` entries (`<tenantId or *>=<cidr>[,<cidr>...]`, separated by `;`). Read and
      * checked by `lib/security/providerPrivateNetworks`; nothing is opened unless an entry is valid.
@@ -399,6 +424,14 @@ export interface AppConfig {
     providerPrivateNetworksDeny: string[];
     /** Default timeout applied to guarded outbound requests (ms). */
     defaultTimeoutMs: number;
+    /**
+     * What happens to a provider runtime call (model, embedding, image, speech, moderation, OCR and web search
+     * requests) whose target the outbound guard refuses. `enforce` refuses it. `warn` keeps the path the call took
+     * before this setting existed (plain `fetch`, or the outbound guard where the call was already made through it)
+     * and logs a rate-limited warning beside it. The endpoint checks made when a
+     * provider is saved are the same in both modes.
+     */
+    providerRuntimeGuard: 'enforce' | 'warn';
   };
 
   systemModels: {
@@ -623,6 +656,13 @@ export interface AppConfig {
 
     /** Stdio (npx/uvx) servers run as subprocesses of this process, from one pool shared by all tenants. */
     stdio: {
+      /**
+       * Whether stdio servers may run as subprocesses of this process. Default:
+       * on for every deployment mode (a `saas` deployment logs a one-time notice
+       * that the default becomes off in a later release); `MCP_STDIO_ENABLED`
+       * set to `false`, `0`, `no` or `off` (any case) turns it off.
+       */
+      enabled: boolean;
       /** Subprocesses running at once, all tenants together. */
       maxConcurrent: number;
       /** Subprocesses one tenant may run at once; 0 = only `maxConcurrent` limits. Default: half the pool, at least 1. */
@@ -700,6 +740,13 @@ function boundedAgentRunConfig(source: ConfigSource) {
   };
 }
 
+/** On unless `MCP_STDIO_ENABLED` is explicitly `false`, `0`, `no` or `off` (any case). */
+function stdioEnabled(source: ConfigSource): boolean {
+  const raw = source.get('MCP_STDIO_ENABLED');
+  if (raw === undefined) return true;
+  return !['false', '0', 'no', 'off'].includes(raw.trim().toLowerCase());
+}
+
 /**
  * The stdio subprocess pool and one tenant's share of it. The share defaults to
  * half the pool (at least 1) so that one tenant cannot hold every slot; an unset,
@@ -710,6 +757,7 @@ function stdioPoolConfig(source: ConfigSource) {
   const maxConcurrent = Math.max(int(source, 'MCP_STDIO_MAX_CONCURRENT', 8), 0);
   const share = int(source, 'MCP_STDIO_MAX_CONCURRENT_PER_TENANT', -1);
   return {
+    enabled: stdioEnabled(source),
     maxConcurrent,
     maxConcurrentPerTenant: share >= 0 ? share : Math.max(Math.floor(maxConcurrent / 2), 1),
   };
@@ -1020,6 +1068,10 @@ function buildConfig(source: ConfigSource): AppConfig {
       circuitBreakerResetMs: int(source, 'GATEWAY_CIRCUIT_BREAKER_RESET_MS', 30000),
     },
 
+    guardrail: {
+      defaultFailMode: oneOf(source, 'GUARDRAIL_DEFAULT_FAIL_MODE', ['auto', 'open'], 'auto'),
+    },
+
     cache: {
       provider: oneOf(source, 'CACHE_PROVIDER', ['none', 'memory', 'redis'], 'memory'),
       ttlSeconds: int(source, 'CACHE_TTL_SECONDS', 300),
@@ -1061,6 +1113,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       entityMetricsMaxBufferedRowsPerTenant: Math.max(int(source, 'ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT', 10_000), 100),
       tracingStaleSessionMinutes: Math.max(int(source, 'TRACING_STALE_SESSION_MINUTES', 360), 5),
       tracingFinalizerIntervalMs: Math.max(int(source, 'TRACING_FINALIZER_INTERVAL_MS', 300_000), 10_000),
+      tracingRetentionSweepIntervalMs: Math.max(int(source, 'TRACING_RETENTION_SWEEP_INTERVAL_MS', 3_600_000), 0),
       alertChannelTimeoutMs: Math.max(int(source, 'ALERT_CHANNEL_TIMEOUT_MS', 10_000), 1_000),
       defaultAlertRulesOnCreate: bool(source, 'ALERT_DEFAULT_RULES_ON_CREATE', true),
     },
@@ -1127,9 +1180,21 @@ function buildConfig(source: ConfigSource): AppConfig {
     outboundHttp: {
       blockPrivateNetwork: bool(source, 'OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK', true),
       allowedHosts: list(source, 'OUTBOUND_HTTP_ALLOWED_HOSTS', []),
+      crawlerAllowPrivateOptIn: bool(
+        source,
+        'CRAWLER_ALLOW_PRIVATE_NETWORK_OPT_IN',
+        deploymentMode === 'onprem',
+      ),
+      crawlerResolvedPrivatePolicy: oneOf(
+        source,
+        'CRAWLER_RESOLVED_PRIVATE_POLICY',
+        ['refuse', 'warn'],
+        deploymentMode === 'onprem' ? 'warn' : 'refuse',
+      ),
       providerPrivateNetworks: semicolonList(source, 'PROVIDER_PRIVATE_NETWORKS', []),
       providerPrivateNetworksDeny: list(source, 'PROVIDER_PRIVATE_NETWORKS_DENY', []),
       defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),
+      providerRuntimeGuard: oneOf(source, 'PROVIDER_RUNTIME_GUARD', ['enforce', 'warn'], 'warn'),
     },
 
     systemModels: {

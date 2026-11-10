@@ -100,16 +100,6 @@ export function MemoryMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       return docs.map((d) => ({ ...d, _id: d._id?.toString() }) as IMemoryStore);
     }
 
-    async countMemoryStores(projectId?: string): Promise<number> {
-      const db = this.getTenantDb();
-      const query: Record<string, unknown> = {};
-      if (projectId) query.projectId = projectId;
-      return db
-        .collection(COLLECTIONS.memoryStores)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .countDocuments(query as any);
-    }
-
     // ── Memory Item operations ───────────────────────────────────────
 
     async createMemoryItem(

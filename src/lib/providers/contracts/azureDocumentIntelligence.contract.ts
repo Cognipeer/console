@@ -1,3 +1,4 @@
+import { guardedFetch } from './guardedFetch';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 import type {
@@ -111,6 +112,15 @@ function mapKvPairs(payload: Record<string, unknown>): OcrKeyValuePair[] | undef
   });
 }
 
+/** True when `candidate` is an absolute URL on the same origin as `base`. */
+function isSameOrigin(candidate: string, base: string): boolean {
+  try {
+    return new URL(candidate).origin === new URL(base).origin;
+  } catch {
+    return false;
+  }
+}
+
 function createAzureDiRuntime(opts: {
   apiKey: string;
   endpoint: string;
@@ -132,7 +142,7 @@ function createAzureDiRuntime(opts: {
       }
       const url = `${base}/documentintelligence/documentModels/${encodeURIComponent(opts.modelId)}:analyze?${queryParts.join('&')}`;
 
-      const startResponse = await fetch(url, {
+      const startResponse = await guardedFetch(url, {
         method: 'POST',
         headers: {
           'Ocp-Apim-Subscription-Key': opts.apiKey,
@@ -152,6 +162,10 @@ function createAzureDiRuntime(opts: {
         throw new Error('Azure Document Intelligence: missing operation-location header.');
       }
 
+      if (!isSameOrigin(operationUrl, base)) {
+        throw new Error('Azure Document Intelligence: operation-location does not match the configured endpoint.');
+      }
+
       // Long-polling. Azure typically completes in 2-10s for small docs.
       const startedAt = Date.now();
       const maxWaitMs = 120_000;
@@ -159,7 +173,7 @@ function createAzureDiRuntime(opts: {
 
       while (Date.now() - startedAt < maxWaitMs) {
         await sleep(1000);
-        const pollResponse = await fetch(operationUrl, {
+        const pollResponse = await guardedFetch(operationUrl, {
           headers: { 'Ocp-Apim-Subscription-Key': opts.apiKey },
         });
         if (!pollResponse.ok) {

@@ -3,17 +3,13 @@ import { ownedListFilterOf, readAgentIdInput, resolveOwningAgent } from '@/lib/s
 import { parseAccessListInput } from '@/lib/iam/accessList';
 import type {
   IMcpAuthConfig,
-  IMcpExposureConfig,
-  IMcpGuardrailConfig,
-  IMcpRemoteConfig,
   IMcpServer,
-  IMcpStdioConfig,
   McpAuthType,
 } from '@/lib/database';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
-import { CONSOLE_IDENTITY_AUTH_TYPE, consoleIdentityCallerOf, consoleIdentityIssuerInfo } from '@/lib/iam/consoleIdentity';
+import { consoleIdentityCallerOf, consoleIdentityIssuerInfo } from '@/lib/iam/consoleIdentity';
 import {
   aggregateMcpRequestLogs,
   countMcpRequestLogs,
@@ -39,7 +35,6 @@ import {
   updateMcpServer,
 } from '@/lib/services/mcp';
 import type {
-  McpAuditContext,
   InternalMcpConfigInput,
   CompositeConfigInput,
   UpdateMcpServerInput,
@@ -68,9 +63,20 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 import { withoutRestrictedMcpLogContent } from '../restrictedKnowledgeRequest';
+import {
+  VALID_AUTH_TYPES,
+  auditContextFor,
+  parseAegis,
+  parseExposure,
+  parseGuardrail,
+  parseRemoteConfig,
+  parseStdioConfig,
+  readMcpCommonCreateFields,
+  readMcpCreateHead,
+  readMcpUpstreamBody,
+} from './mcp-shared';
 
 const logger = createLogger('api:mcp');
-const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio', 'internal', 'composite'] as const;
 
 /**
@@ -129,68 +135,6 @@ const STDIO_SUBPROCESS_FORBIDDEN_ERROR =
   'Creating or editing a stdio MCP server with subprocess execution requires elevated "mcp" '
   + 'admin permission. Ask a tenant owner/admin, or have one grant your account admin-level MCP permission.';
 
-function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
-  const ua = request.headers['user-agent'];
-  return {
-    performedBy: userId,
-    ipAddress: getClientIp(request),
-    userAgent: typeof ua === 'string' ? ua.slice(0, 300) : undefined,
-  };
-}
-
-function parseExposure(raw: unknown): IMcpExposureConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { protocols?: unknown; accessMode?: unknown };
-  const protocols = Array.isArray(value.protocols)
-    ? value.protocols.filter((p): p is 'streamable-http' | 'sse' => p === 'streamable-http' || p === 'sse')
-    : [];
-  return {
-    protocols: protocols.length ? protocols : ['streamable-http', 'sse'],
-    accessMode: value.accessMode === 'public' ? 'public' : 'token',
-  };
-}
-
-/** @deprecated Legacy shield binding. Still parsed so an un-deployed UI keeps
- *  saving; `guardrail` wins wherever both are sent.
- *  A legacy-only body is projected onto `guardrail` (mode only) by the service.
- *  `shieldId` is DROPPED here: its values are ids from the removed
- *  `aegis_shields` table, so persisting a fresh one would only re-arm the
- *  "bound to a removed Aegis shield" warning on the server's first tool call. */
-function parseAegis(raw: unknown): { mode: 'off' | 'monitor' | 'enforce' } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { mode?: unknown };
-  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
-  return { mode };
-}
-
-/**
- * The guardrail binding that replaces `aegis`. Same shape of parse, one real
- * difference: `guardrailKey` is a guardrail KEY (the tenant-scoped slug), not
- * an id, and omitting it is meaningful — it selects the tenant's default tool
- * guardrail rather than leaving the server unguarded.
- */
-function parseGuardrail(raw: unknown): IMcpGuardrailConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { guardrailKey?: unknown; mode?: unknown };
-  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
-  return {
-    guardrailKey: typeof value.guardrailKey === 'string' && value.guardrailKey.trim()
-      ? value.guardrailKey.trim()
-      : undefined,
-    mode,
-  };
-}
-
-function parseRemoteConfig(raw: unknown): IMcpRemoteConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { url?: unknown; transport?: unknown };
-  if (typeof value.url !== 'string' || !value.url.trim()) return undefined;
-  return {
-    url: value.url.trim(),
-    transport: value.transport === 'sse' ? 'sse' : 'streamable-http',
-  };
-}
-
 /**
  * Serving a sandbox over MCP hands its callers the right to run code in it, so a server on a sandbox provider is
  * created, or pointed at another template or sandbox, only by someone who may work in the project's sandboxes
@@ -246,51 +190,6 @@ function parseCompositeConfig(raw: unknown): CompositeConfigInput | undefined {
     });
   }
   return { members };
-}
-
-function parseStdioConfig(raw: unknown): IMcpStdioConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as {
-    runtime?: unknown;
-    packageName?: unknown;
-    args?: unknown;
-    env?: unknown;
-    executionMode?: unknown;
-    sandbox?: unknown;
-  };
-  if (typeof value.packageName !== 'string' || !value.packageName.trim()) return undefined;
-  const runtime = value.runtime === 'uvx' ? 'uvx' : 'npx';
-  const args = Array.isArray(value.args)
-    ? value.args.map((a) => String(a)).filter((a) => a.length > 0)
-    : undefined;
-  const env = value.env && typeof value.env === 'object'
-    ? Object.fromEntries(
-        Object.entries(value.env as Record<string, unknown>)
-          .filter(([k, v]) => k.trim() && typeof v === 'string')
-          .map(([k, v]) => [k.trim(), v as string]),
-      )
-    : undefined;
-  const sandboxRaw = value.sandbox && typeof value.sandbox === 'object'
-    ? value.sandbox as { templateKey?: unknown; resources?: { cpuCores?: unknown; memoryMb?: unknown }; instanceId?: unknown }
-    : undefined;
-  return {
-    runtime,
-    packageName: value.packageName.trim(),
-    args,
-    env: env && Object.keys(env).length ? env : undefined,
-    executionMode: value.executionMode === 'sandbox' ? 'sandbox' : 'subprocess',
-    sandbox: sandboxRaw
-      ? {
-          templateKey: typeof sandboxRaw.templateKey === 'string' ? sandboxRaw.templateKey : undefined,
-          resources: sandboxRaw.resources
-            ? {
-                cpuCores: Number(sandboxRaw.resources.cpuCores) || undefined,
-                memoryMb: Number(sandboxRaw.resources.memoryMb) || undefined,
-              }
-            : undefined,
-        }
-      : undefined,
-  };
 }
 
 export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
@@ -458,28 +357,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (typeof body.name !== 'string' || body.name.trim() === '') {
-        return reply.code(400).send({ error: 'name is required' });
+      const head = readMcpCreateHead(body, { allowedSourceTypes: VALID_SOURCE_TYPES });
+      if (!head.ok) {
+        return reply.code(head.status).send({ error: head.error });
       }
-
-      const sourceType = typeof body.sourceType === 'string' ? body.sourceType : 'openapi';
-      if (!VALID_SOURCE_TYPES.includes(sourceType as typeof VALID_SOURCE_TYPES[number])) {
-        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", "stdio", "internal", or "composite"' });
-      }
-
-      if (sourceType === 'openapi' && typeof body.openApiSpec !== 'string') {
-        return reply.code(400).send({ error: 'openApiSpec is required' });
-      }
-
-      const remoteConfig = parseRemoteConfig(body.remoteConfig);
-      if (sourceType === 'remote' && !remoteConfig) {
-        return reply.code(400).send({ error: 'remoteConfig.url is required' });
-      }
-
-      const stdioConfig = parseStdioConfig(body.stdioConfig);
-      if (sourceType === 'stdio' && !stdioConfig) {
-        return reply.code(400).send({ error: 'stdioConfig.packageName is required' });
-      }
+      const { sourceType, stdioConfig } = head.value;
 
       const internalConfig = parseInternalConfig(body.internalConfig);
       if (sourceType === 'internal') {
@@ -504,8 +386,6 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       // would strand the tenant. (The guardrail binding needs no gate at all:
       // it is community and enforces on every plan.)
       const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
-      const aegisConfig = parseAegis(body.aegis);
-      const guardrailConfig = parseGuardrail(body.guardrail);
       if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
           error: 'Persistent sandbox execution requires an active Enterprise license.',
@@ -518,31 +398,10 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
-      // A remote server that needs no credential does not have to spell that out.
-      if ((body.upstreamAuth === undefined || body.upstreamAuth === null) && sourceType === 'remote') {
-        body.upstreamAuth = { type: 'none' };
+      const upstream = readMcpUpstreamBody(body, sourceType);
+      if (!upstream.ok) {
+        return reply.code(upstream.status).send({ error: upstream.error });
       }
-
-      if (
-        !body.upstreamAuth
-        || typeof body.upstreamAuth !== 'object'
-        || !('type' in body.upstreamAuth)
-      ) {
-        return reply.code(400).send({ error: 'upstreamAuth with type is required' });
-      }
-
-      const authType = (body.upstreamAuth as { type?: unknown }).type;
-      if (!VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
-        return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
-        });
-      }
-      if (authType === CONSOLE_IDENTITY_AUTH_TYPE && sourceType !== 'remote' && sourceType !== 'openapi') {
-        return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
-      }
-
-      const instructionsError = mcpInstructionsInputError(body.instructions);
-      if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
       const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
       if (access && !access.ok) return reply.code(400).send({ error: access.error });
@@ -558,27 +417,13 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         session.userId,
         projectId,
         {
-          description: typeof body.description === 'string' ? body.description.trim() : undefined,
-          instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
-          name: body.name.trim(),
-          key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
-          sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite',
-          openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
-          specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
-          upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
-          upstreamBaseUrl: typeof body.upstreamBaseUrl === 'string'
-            ? body.upstreamBaseUrl.trim()
-            : undefined,
-          remoteConfig,
-          stdioConfig,
+          ...readMcpCommonCreateFields(body, head.value, upstream.upstreamAuth),
+          sourceType,
           internalConfig,
           compositeConfig,
-          exposure: parseExposure(body.exposure),
           endpointSlug: typeof body.endpointSlug === 'string' && body.endpointSlug.trim()
             ? body.endpointSlug.trim()
             : undefined,
-          aegis: aegisConfig,
-          guardrail: guardrailConfig,
           ...(access?.ok ? { access: access.access } : {}),
           ...(owner ? { owner } : {}),
         },

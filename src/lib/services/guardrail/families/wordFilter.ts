@@ -256,8 +256,8 @@ export async function runWordFilterPolicy(
         op: 'replace_value',
         path,
         value: finding.value,
-        // Byte-identical to redactFindings (piiDetector.ts:218), so a lifted
-        // guardrail's redacted output does not change spelling on upgrade.
+        // Byte-identical to redactFindings, so a lifted guardrail's redacted
+        // output does not change spelling on upgrade.
         replacement: `[REDACTED:${finding.category}]`,
         family: FAMILY,
         policyId: policy.id,

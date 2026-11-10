@@ -19,7 +19,6 @@
 
 import { isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync } from 'fastify';
-import type { IRerankerConfig, RerankerStrategy } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createReranker,
@@ -28,8 +27,12 @@ import {
   listRerankers,
   runReranker,
   updateReranker,
-  type RerankerDocumentInput,
 } from '@/lib/services/reranker';
+import {
+  normalizeDocuments,
+  readCreateBody as readRerankerCreateBody,
+  readPatchBody as readRerankerPatchBody,
+} from '@/lib/services/reranker/requestParsing';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -38,43 +41,6 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:client-reranker');
-
-const ALLOWED_STRATEGIES: RerankerStrategy[] = [
-  'dedicated-model',
-  'llm-judge',
-  'llm-listwise',
-  'heuristic',
-];
-
-function isStrategy(value: unknown): value is RerankerStrategy {
-  return typeof value === 'string' && ALLOWED_STRATEGIES.includes(value as RerankerStrategy);
-}
-
-function normalizeDocuments(raw: unknown): RerankerDocumentInput[] {
-  if (!Array.isArray(raw)) {
-    throw new Error('`documents` must be an array.');
-  }
-  return raw.map((item, idx): RerankerDocumentInput => {
-    if (typeof item === 'string') return { content: item };
-    if (item && typeof item === 'object') {
-      const d = item as Record<string, unknown>;
-      const content = typeof d.content === 'string' ? d.content
-        : typeof d.text === 'string' ? d.text
-          : undefined;
-      if (!content) throw new Error(`documents[${idx}]: missing content/text.`);
-      return {
-        id: typeof d.id === 'string' ? d.id : undefined,
-        content,
-        score: typeof d.score === 'number' ? d.score : undefined,
-        metadata:
-          d.metadata && typeof d.metadata === 'object'
-            ? (d.metadata as Record<string, unknown>)
-            : undefined,
-      };
-    }
-    throw new Error(`documents[${idx}]: must be a string or object with content/text.`);
-  });
-}
 
 export const clientRerankerApiPlugin: FastifyPluginAsync = async (app) => {
   app.get(
@@ -101,29 +67,13 @@ export const clientRerankerApiPlugin: FastifyPluginAsync = async (app) => {
         const ctx = await getApiTokenContextForRequest(request);
         const body = readJsonBody<Record<string, unknown>>(request);
 
-        if (typeof body.name !== 'string' || body.name === '') {
-          return reply.code(400).send({ error: '`name` is required.' });
-        }
-        if (!isStrategy(body.strategy)) {
-          return reply.code(400).send({
-            error: `\`strategy\` must be one of: ${ALLOWED_STRATEGIES.join(', ')}.`,
-          });
-        }
-        if (!body.config || typeof body.config !== 'object') {
-          return reply.code(400).send({ error: '`config` object is required.' });
+        const parsed = readRerankerCreateBody(body);
+        if (!parsed.ok) {
+          return reply.code(parsed.status).send({ error: parsed.error });
         }
 
         const reranker = await createReranker(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-          name: body.name,
-          key: typeof body.key === 'string' ? body.key : undefined,
-          description: typeof body.description === 'string' ? body.description : undefined,
-          strategy: body.strategy,
-          config: body.config as IRerankerConfig,
-          status: body.status === 'disabled' ? 'disabled' : 'active',
-          metadata:
-            body.metadata && typeof body.metadata === 'object'
-              ? (body.metadata as Record<string, unknown>)
-              : undefined,
+          ...parsed.value,
           createdBy: ctx.tokenRecord.userId,
         });
         return reply.code(201).send({ reranker });
@@ -226,18 +176,7 @@ export const clientRerankerApiPlugin: FastifyPluginAsync = async (app) => {
         const body = readJsonBody<Record<string, unknown>>(request);
 
         const reranker = await updateReranker(ctx.tenantDbName, String(existing._id), {
-          name: typeof body.name === 'string' ? body.name : undefined,
-          description: typeof body.description === 'string' ? body.description : undefined,
-          strategy: isStrategy(body.strategy) ? body.strategy : undefined,
-          config:
-            body.config && typeof body.config === 'object'
-              ? (body.config as IRerankerConfig)
-              : undefined,
-          status: body.status === 'disabled' || body.status === 'active' ? body.status : undefined,
-          metadata:
-            body.metadata && typeof body.metadata === 'object'
-              ? (body.metadata as Record<string, unknown>)
-              : undefined,
+          ...readRerankerPatchBody(body),
           updatedBy: ctx.tokenRecord.userId,
         });
         if (!reranker) return reply.code(404).send({ error: 'Reranker not found' });
