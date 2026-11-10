@@ -111,6 +111,8 @@ async function resolvePublicServer(
     db.findMcpServerByEndpointSlug(endpointSlug));
 
   if (!server || server.status !== 'active') return null;
+  // An agent's own server is used only inside that agent, never through a public endpoint.
+  if (server.owner) return null;
   if (resolveExposure(server).accessMode !== 'public') return null;
   // A browser or a sandbox is served with a token only, whatever the stored settings say.
   if (await withTenantDb(db, tenant.dbName, () => reachesTokenOnlyServer(db, server))) return null;

@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { parseAccessListInput } from '@/lib/iam/accessList';
 import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type {
   IMcpAuthConfig,
@@ -77,6 +78,15 @@ import {
 } from './mcp-shared';
 
 const logger = createLogger('api:client-mcp');
+
+/**
+ * A server of the project by key, as the client API serves it: an agent's own server (`owner`) is part of that agent
+ * and is never served, changed or deleted here, so it answers like an unknown key.
+ */
+async function sharedServerByKey(tenantDbName: string, serverKey: string, projectId: string | undefined) {
+  const server = await getMcpServerByKey(tenantDbName, serverKey, projectId);
+  return server && !server.owner ? server : null;
+}
 
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
 
@@ -301,7 +311,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
   const requiredProtocol = session && sessionId ? 'sse' : 'streamable-http';
 
   if (method === 'initialize') {
-    const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
     if (!server) {
       return respond(jsonRpcError(id, -32001, 'MCP server not found'));
     }
@@ -328,7 +338,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
   }
 
   if (method === 'tools/list') {
-    const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
     if (!server) {
       return respond(jsonRpcError(id, -32001, 'MCP server not found'));
     }
@@ -351,7 +361,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
       return respond(jsonRpcError(id, -32602, 'Invalid params: "name" is required'));
     }
 
-    const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
     if (!server) {
       return respond(jsonRpcError(id, -32001, 'MCP server not found'));
     }
@@ -423,7 +433,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -490,7 +500,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -536,7 +546,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const server = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -602,6 +612,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(upstream.status).send({ error: upstream.error });
       }
 
+      const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (access && !access.ok) return reply.code(400).send({ error: access.error });
+
       const server = await createMcpServer(
         ctx.tenantDbName,
         ctx.tenantId,
@@ -610,6 +623,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         {
           ...readMcpCommonCreateFields(body, head.value, upstream.upstreamAuth),
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
+          ...(access?.ok ? { access: access.access } : {}),
         },
         auditContextFor(request, ctx.tokenRecord.userId),
       );
@@ -629,7 +643,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const existing = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const existing = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
       if (!existing) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
@@ -686,6 +700,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const instructionsError = mcpInstructionsInputError(body.instructions);
       if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
+      const nextAccess = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (nextAccess && !nextAccess.ok) return reply.code(400).send({ error: nextAccess.error });
+
       const updated = await updateMcpServer(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, {
         key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
@@ -700,6 +717,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
         aegis: nextAegis,
         guardrail: nextGuardrail,
+        ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
@@ -726,7 +744,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const existing = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const existing = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
       if (!existing) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
@@ -754,7 +772,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const existing = await getMcpServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const existing = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
       if (!existing) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }

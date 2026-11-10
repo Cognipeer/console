@@ -77,9 +77,11 @@ export interface AgentHumanInTheLoopPanelProps {
     clientTools?: IAgentClientToolConfig[];
     /** What each bound tool does, by tool name (read from the tool records); a bound tool missing here counts as "no hints". */
     toolKinds?: HitlToolKinds;
+    /** The agent being edited, so its own MCP servers' tools are found too. */
+    agentId?: string;
 }
 
-export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, clientTools, toolKinds }: AgentHumanInTheLoopPanelProps) {
+export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, clientTools, toolKinds, agentId }: AgentHumanInTheLoopPanelProps) {
     const t = useTranslations('agents.hitl');
     const resolved = resolveHitlConfig(value);
     const rows = hitlToolRows(toolConfig, value, clientTools, toolKinds);
@@ -292,6 +294,7 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                                 onClose={() => setEditing(null)}
                                 row={editing}
                                 hitl={value}
+                                agentId={agentId}
                                 clientSchema={editing?.origin === 'client'
                                     ? clientTools?.find((tool) => tool.name.trim() === editing.name)?.inputSchema
                                     : undefined}

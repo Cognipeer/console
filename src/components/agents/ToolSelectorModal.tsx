@@ -1,9 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import CreateMcpModal from '@/components/mcp/CreateMcpModal';
-import CreateToolModal from '@/components/tools/CreateToolModal';
-import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
+import { useState, useEffect } from 'react';
 import {
   Modal,
   Stack,
@@ -25,89 +22,23 @@ import {
 import {
   IconChevronDown,
   IconChevronRight,
-  IconPlus,
   IconRoute,
   IconServer,
   IconSearch,
   IconTool,
-  IconBrowser,
-  IconWorldSearch,
-  IconWorldDownload,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
 import { useFlowToolSource } from '@/components/enterprise/EnterpriseFlowAgentUi';
-import { useChannelToolGroup } from '@/components/enterprise/EnterpriseChannelToolsUi';
+import {
+  SYSTEM_TOOLS,
+  sourceIdOf,
+  systemToolFor,
+  useToolSources,
+  type ToolBinding,
+  type ToolSourceGroup,
+} from './toolSources';
 
-export type ToolBinding = IAgentToolBinding;
-
-// ── Source-agnostic tool source descriptor ───────────────────────────────
-
-interface ToolSourceGroup {
-  /** Discriminator – matches ToolBinding.source */
-  source: ToolBinding['source'];
-  /** Unique key of the source (e.g. tool key, MCP server key, or system tool key) */
-  sourceKey: string;
-  /** Human-readable name */
-  name: string;
-  description?: string;
-  /** Source type label (OpenAPI / MCP / System / Flow) */
-  typeLabel: string;
-  /** A connector's tool (managed by another module): listed with a Connector badge. */
-  managed?: boolean;
-  /** Available tools within this source */
-  tools: { name: string; description: string }[];
-}
-
-/**
- * System tools whose whole binding is one config field picked from a
- * `Select` (a browser, a web search instance, a crawler) rather than a checkbox list of
- * discrete tool names. Each renders as its own group, in this order.
- */
-const SYSTEM_TOOLS = [
-  {
-    sourceKey: 'browser_use',
-    field: 'browserId',
-    icon: IconBrowser,
-    name: 'Browser Use',
-    description: 'Drive a Playwright browser session: navigate, click, type, snapshot, screenshot, extract, close.',
-    toolDescription: 'Bundle of browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_extract and more.',
-    label: 'Browser',
-    placeholder: 'Select a browser to add Browser Use',
-    emptyPlaceholder: 'No browsers available',
-    hint: 'Selecting a browser adds the Browser Use system tool to this agent.',
-    nothingFound: 'No browsers',
-  },
-  {
-    sourceKey: 'web_search',
-    field: 'providerKey',
-    icon: IconWorldSearch,
-    name: 'Web Search',
-    description: 'Search the web through a configured Web Search instance and return ranked results, optionally with a synthesized answer.',
-    toolDescription: 'Search the web and return ranked results (title, url, snippet), with an optional AI-synthesized answer.',
-    label: 'Web Search instance',
-    placeholder: 'Select an instance to add Web Search',
-    emptyPlaceholder: 'No web search instances available',
-    hint: 'Selecting an instance adds the Web Search system tool to this agent.',
-    nothingFound: 'No web search instances',
-  },
-  {
-    sourceKey: 'crawler',
-    field: 'crawlerKey',
-    icon: IconWorldDownload,
-    name: 'Web Fetch',
-    description: 'Fetch a single page in real time through a configured Crawler (its engine, headers and auth) and return it as markdown.',
-    toolDescription: 'Fetch one web page live and return its content as markdown. Limited to the hosts the crawler is configured for.',
-    label: 'Crawler',
-    placeholder: 'Select a crawler to add Web Fetch',
-    emptyPlaceholder: 'No crawlers available',
-    hint: 'Selecting a crawler adds the Web Fetch system tool to this agent. Pages are limited to the crawler\'s seed hosts and allow list.',
-    nothingFound: 'No crawlers',
-  },
-] as const;
-
-const systemToolFor = (source: string, sourceKey: string) =>
-  source === 'system' ? SYSTEM_TOOLS.find((tool) => tool.sourceKey === sourceKey) : undefined;
+export type { ToolBinding } from './toolSources';
 
 /** Adds `key` to a copy of `set`, or removes it if present. */
 const toggleIn = (set: Set<string>, key: string) => {
@@ -124,8 +55,14 @@ export interface ToolSelectorModalProps {
   onClose: () => void;
   /** Current bindings stored on the agent config */
   value: ToolBinding[];
-  /** Called with the updated bindings when user confirms selection */
+  /** Called with all the updated bindings when user confirms selection */
   onChange: (bindings: ToolBinding[]) => void;
+  /** The agent being edited: its own MCP servers are listed with the hub's. */
+  agentId?: string;
+  /** Only this source, its tools open: choosing the tools of one row of the agent's Tools list. */
+  focus?: { source: ToolBinding['source']; sourceKey: string } | null;
+  /** Leaves the agent's own MCP servers out: adding from the hub and the library. */
+  sharedOnly?: boolean;
 }
 
 // ── Component ────────────────────────────────────────────────────────────
@@ -135,17 +72,18 @@ export function ToolSelectorModal({
   onClose,
   value,
   onChange,
+  agentId,
+  focus = null,
+  sharedOnly = false,
 }: ToolSelectorModalProps) {
   const t = useTranslations('agents');
   const tm = useTranslations('managedTools');
   // Flows as a tool source, where Flows are available (Enterprise): null otherwise.
   const flowTools = useFlowToolSource();
-  // Tools that write to Slack / Teams as the agent's own bot, where Channels are available (Enterprise): null otherwise.
-  const channelToolGroup = useChannelToolGroup();
 
   // Data
-  const [sources, setSources] = useState<ToolSourceGroup[]>([]);
-  const [loading, setLoading] = useState(false);
+  const { sources, flowsByKey, loading: loadingSources, loaded } = useToolSources({ agentId, bindings: value, enabled: opened });
+  const loading = loadingSources || !loaded;
 
   // UI state
   const [search, setSearch] = useState('');
@@ -153,20 +91,9 @@ export function ToolSelectorModal({
 
   // Selection state – keyed by "source::sourceKey::toolName"
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  // A tool or an MCP server created from here: once the list reloads, all its
-  // tools are selected — the reason it was created from inside the agent.
-  // Offered only to someone who can add one (the API decides anyway).
-  const canCreateTool = useCanWriteService('tools');
-  const canCreateMcp = useCanWriteService('mcp');
-  const [createMcpOpen, setCreateMcpOpen] = useState(false);
-  const [createToolOpen, setCreateToolOpen] = useState(false);
-  const [pendingCreated, setPendingCreated] = useState<{ source: 'tool' | 'mcp'; key: string } | null>(null);
 
   // Per-binding config state for system tools (e.g. browser_use needs a browserId)
   const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
-
-  // Flow summaries by key, to bind a flow the way the Flows tab does (draft-only flows run their draft)
-  const [flowsByKey, setFlowsByKey] = useState<Record<string, unknown>>({});
 
   // Picker options per config-only system tool (sourceKey → browsers / web search instances)
   const [systemOptions, setSystemOptions] = useState<Record<string, Array<{ value: string; label: string }>>>({});
@@ -188,7 +115,7 @@ export function ToolSelectorModal({
     const initial = new Set<string>();
     const initialConfigs: Record<string, Record<string, unknown>> = {};
     for (const b of value) {
-      const bindingId = `${b.source}::${b.sourceKey}`;
+      const bindingId = sourceIdOf(b);
       if (systemToolFor(b.source, b.sourceKey)) {
         if (b.config) initialConfigs[bindingId] = b.config;
         continue;
@@ -205,141 +132,47 @@ export function ToolSelectorModal({
     setSearch('');
   }, [opened, value]);
 
-  // ── Load available tool sources ────────────────────────────────
+  // ── Options of the config-only system tools ─────────────────────
 
-  const loadSources = useCallback(async () => {
-    setLoading(true);
-    try {
-      const allGroups: ToolSourceGroup[] = [];
-
-      // Unified Tools (primary source)
-      const toolsRes = await fetch('/api/tools?status=active', { cache: 'no-store' });
-      if (toolsRes.ok) {
-        const toolsData = await toolsRes.json();
-        const toolGroups: ToolSourceGroup[] = (toolsData.tools ?? []).map(
-          (t: { key: string; name: string; description?: string; type: string; managedBy?: { id: string }; actions: { key: string; name: string; description: string }[] }) => ({
-            source: 'tool' as const,
-            sourceKey: t.key,
-            name: t.name,
-            description: t.description,
-            typeLabel: t.type === 'openapi' ? 'OpenAPI' : t.type === 'connector' ? 'Connector' : 'MCP',
-            managed: Boolean(t.managedBy),
-            tools: (t.actions ?? []).map((a) => ({
-              name: a.key,
-              description: a.description || a.name,
-            })),
-          }),
-        );
-        allGroups.push(...toolGroups);
+  useEffect(() => {
+    if (!opened) return;
+    let cancelled = false;
+    const list = async <T,>(url: string, key: string): Promise<T[]> => {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        return res.ok ? (((await res.json()) as Record<string, T[]>)[key] ?? []) : [];
+      } catch {
+        return [];
       }
-
-      // Legacy MCP servers (backward compat)
-      const mcpRes = await fetch('/api/mcp?status=active', { cache: 'no-store' });
-      if (mcpRes.ok) {
-        const mcpData = await mcpRes.json();
-        const mcpGroups: ToolSourceGroup[] = (mcpData.servers ?? []).map(
-          (s: { key: string; name: string; description?: string; tools: { name: string; description: string }[]; disabledTools?: string[] }) => ({
-            source: 'mcp' as const,
-            sourceKey: s.key,
-            name: s.name,
-            description: s.description,
-            typeLabel: 'MCP (legacy)',
-            tools: (s.tools ?? []).filter(
-              (t) => !(s.disabledTools ?? []).includes(t.name),
-            ),
-          }),
-        );
-        allGroups.push(...mcpGroups);
-      }
-
-      // System Tools (built-in, hardcoded)
-      const browsersRes = await fetch('/api/browser/browsers?status=active', { cache: 'no-store' });
-      const browsers: Array<{ id: string; name: string; key: string }> =
-        browsersRes.ok ? ((await browsersRes.json()).browsers ?? []) : [];
-      setSystemOptions((prev) => ({
-        ...prev,
+    };
+    void (async () => {
+      const [browsers, providers, crawlers] = await Promise.all([
+        list<{ id: string; name: string; key: string }>('/api/browser/browsers?status=active', 'browsers'),
+        list<{ key: string; label: string; status: string }>('/api/websearch/providers', 'providers'),
+        list<{ key: string; name: string }>('/api/crawler/crawlers?status=active', 'crawlers'),
+      ]);
+      if (cancelled) return;
+      setSystemOptions({
         browser_use: browsers.map((b) => ({ value: b.id, label: `${b.name} (${b.key})` })),
-      }));
-
-      const webSearchRes = await fetch('/api/websearch/providers', { cache: 'no-store' });
-      const providers: Array<{ key: string; label: string; status: string }> =
-        webSearchRes.ok ? ((await webSearchRes.json()).providers ?? []) : [];
-      setSystemOptions((prev) => ({
-        ...prev,
         web_search: providers
           .filter((p) => p.status === 'active')
           .map((p) => ({ value: p.key, label: `${p.label} (${p.key})` })),
-      }));
-
-      const crawlersRes = await fetch('/api/crawler/crawlers?status=active', { cache: 'no-store' });
-      const crawlers: Array<{ key: string; name: string }> =
-        crawlersRes.ok ? ((await crawlersRes.json()).crawlers ?? []) : [];
-      setSystemOptions((prev) => ({
-        ...prev,
         crawler: crawlers.map((c) => ({ value: c.key, label: `${c.name} (${c.key})` })),
-      }));
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [opened]);
 
-      // Flows (headless ones, published or draft). A person without flows access, or an edition
-      // without the service, simply gets no group.
-      try {
-        if (flowTools) {
-          const loaded = await flowTools.load(value);
-          setFlowsByKey(loaded.known);
-          allGroups.push(...loaded.groups);
-        }
-      } catch {
-        /* the flows service is optional here */
-      }
-
-      allGroups.unshift(...SYSTEM_TOOLS.map((tool) => ({
-        source: 'system' as const,
-        sourceKey: tool.sourceKey,
-        name: tool.name,
-        description: tool.description,
-        typeLabel: 'System',
-        tools: [{ name: tool.sourceKey, description: tool.toolDescription }],
-      })));
-      if (channelToolGroup) allGroups.splice(SYSTEM_TOOLS.length, 0, channelToolGroup);
-
-      setSources(allGroups);
-
-      // Auto-expand sources that have selected tools
-      const expanded = new Set<string>();
-      for (const g of allGroups) {
-        const hasSelected = g.tools.some((tool) =>
-          value.some(
-            (b) =>
-              b.source === g.source &&
-              b.sourceKey === g.sourceKey &&
-              b.toolNames.includes(tool.name),
-          ),
-        );
-        if (hasSelected) expanded.add(`${g.source}::${g.sourceKey}`);
-      }
-      setExpandedSources(expanded);
-    } catch (err) {
-      console.error('Failed to load tool sources', err);
-    } finally {
-      setLoading(false);
+  // Sources that have selected tools start open.
+  useEffect(() => {
+    if (!opened || loading) return;
+    const expanded = new Set<string>();
+    for (const g of sources) {
+      const bound = value.find((b) => b.source === g.source && b.sourceKey === g.sourceKey);
+      if (bound && g.tools.some((tool) => bound.toolNames.includes(tool.name))) expanded.add(sourceIdOf(g));
     }
-  }, [value, flowTools, channelToolGroup]);
-
-  useEffect(() => {
-    if (opened) loadSources();
-  }, [opened, loadSources]);
-
-  useEffect(() => {
-    if (!pendingCreated) return;
-    const group = sources.find((g) => g.source === pendingCreated.source && g.sourceKey === pendingCreated.key);
-    if (!group) return;
-    setSelected((prev) => {
-      const next = new Set(prev);
-      for (const tool of group.tools) next.add(toKey(group.source, group.sourceKey, tool.name));
-      return next;
-    });
-    setExpandedSources((prev) => new Set(prev).add(`${group.source}::${group.sourceKey}`));
-    setPendingCreated(null);
-  }, [pendingCreated, sources]);
+    setExpandedSources(expanded);
+  }, [opened, loading, sources, value]);
 
   // ── Toggle helpers ──────────────────────────────────────────────
 
@@ -362,6 +195,7 @@ export function ToolSelectorModal({
   };
 
   // ── Build bindings from selection ──────────────────────────────
+  // Every binding, the ones of sources not shown here included: the selection was seeded from all of them.
 
   const buildBindings = (): ToolBinding[] => {
     const map = new Map<string, ToolBinding>();
@@ -401,10 +235,18 @@ export function ToolSelectorModal({
     return Array.from(map.values());
   };
 
-  // ── Filter sources by search ───────────────────────────────────
+  // ── What is offered ────────────────────────────────────────────
+  // One source when focused (even a switched-off one: its tools may still be bound); otherwise every source that is
+  // on, without the agent's own servers when only shared ones are asked for.
+
+  const focusId = focus ? sourceIdOf(focus) : null;
+  const offered = sources.filter((g) =>
+    focusId ? sourceIdOf(g) === focusId : !g.inactive && !(sharedOnly && g.ownedByAgent),
+  );
+  const focusedGroup = focusId ? offered[0] : undefined;
 
   const lowerSearch = search.toLowerCase();
-  const filteredSources = sources
+  const filteredSources = offered
     .map((group) => {
       if (!search) return group;
       const matchesGroup = group.name.toLowerCase().includes(lowerSearch);
@@ -427,8 +269,7 @@ export function ToolSelectorModal({
     return group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
   };
 
-  const totalSelected =
-    selected.size + SYSTEM_TOOLS.filter((tool) => systemConfigs[`system::${tool.sourceKey}`]?.[tool.field]).length;
+  const totalSelected = offered.reduce((sum, group) => sum + selectedCountForSource(group), 0);
 
   // ── Confirm ────────────────────────────────────────────────────
 
@@ -443,66 +284,23 @@ export function ToolSelectorModal({
     <Modal
       opened={opened}
       onClose={onClose}
-      title={t('config.toolSelectorTitle')}
+      title={focusedGroup ? t('config.toolSelectorFocusTitle', { name: focusedGroup.name }) : t('config.toolSelectorTitle')}
       size="lg"
       centered
     >
       <Stack gap="md">
-        <Text size="sm" c="dimmed">
-          {t('config.toolSelectorDescription')}
-        </Text>
+        {focus ? null : (
+          <Text size="sm" c="dimmed">
+            {t('config.toolSelectorDescription')}
+          </Text>
+        )}
 
-        <Group gap="xs" wrap="nowrap">
-          <TextInput
-            style={{ flex: 1 }}
-            placeholder="Search tools..."
-            leftSection={<IconSearch size={14} />}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          {canCreateTool ? (
-            <Button
-              variant="light"
-              leftSection={<IconPlus size={14} />}
-              onClick={() => setCreateToolOpen(true)}
-              data-testid="tool-create-inline"
-            >
-              New tool
-            </Button>
-          ) : null}
-          {canCreateMcp ? (
-            <Button
-              variant="subtle"
-              leftSection={<IconPlus size={14} />}
-              onClick={() => setCreateMcpOpen(true)}
-              data-testid="mcp-create-inline"
-            >
-              New MCP server
-            </Button>
-          ) : null}
-        </Group>
-        {canCreateMcp ? (
-          <CreateMcpModal
-            opened={createMcpOpen}
-            onClose={() => setCreateMcpOpen(false)}
-            onCreated={(server) => {
-              setCreateMcpOpen(false);
-              setPendingCreated({ source: 'mcp', key: server.key });
-              void loadSources();
-            }}
-          />
-        ) : null}
-        {canCreateTool ? (
-          <CreateToolModal
-            opened={createToolOpen}
-            onClose={() => setCreateToolOpen(false)}
-            onCreated={(tool) => {
-              setCreateToolOpen(false);
-              setPendingCreated({ source: 'tool', key: tool.key });
-              void loadSources();
-            }}
-          />
-        ) : null}
+        <TextInput
+          placeholder="Search tools..."
+          leftSection={<IconSearch size={14} />}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
 
         {loading ? (
           <Center py="xl">
@@ -517,8 +315,8 @@ export function ToolSelectorModal({
         ) : (
           <Stack gap={0}>
             {filteredSources.map((group) => {
-              const sourceId = `${group.source}::${group.sourceKey}`;
-              const isExpanded = expandedSources.has(sourceId);
+              const sourceId = sourceIdOf(group);
+              const isExpanded = focus ? true : expandedSources.has(sourceId);
               const count = selectedCountForSource(group);
               const allSelected = count === group.tools.length && group.tools.length > 0;
               const someSelected = count > 0 && !allSelected;
@@ -533,10 +331,11 @@ export function ToolSelectorModal({
                     onClick={() => toggleSource(group.source, group.sourceKey)}
                     style={{ width: '100%' }}
                     p="xs"
+                    disabled={Boolean(focus)}
                   >
                     <Group justify="space-between">
                       <Group gap="xs">
-                        {isExpanded ? (
+                        {focus ? null : isExpanded ? (
                           <IconChevronDown size={16} />
                         ) : (
                           <IconChevronRight size={16} />
@@ -564,6 +363,16 @@ export function ToolSelectorModal({
                         {group.managed && (
                           <Badge size="xs" variant="light" color="grape">
                             {tm('badge')}
+                          </Badge>
+                        )}
+                        {group.ownedByAgent && (
+                          <Badge size="xs" variant="light" color="indigo">
+                            {t('config.toolsThisAgent')}
+                          </Badge>
+                        )}
+                        {group.inactive && (
+                          <Badge size="xs" variant="light" color="gray">
+                            {t('config.toolsDisabled')}
                           </Badge>
                         )}
                         <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>

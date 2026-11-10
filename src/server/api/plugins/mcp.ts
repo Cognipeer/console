@@ -1,4 +1,6 @@
 import { isQuotaExceededError } from '@/lib/quota/serviceQuota';
+import { ownedListFilterOf, readAgentIdInput, resolveOwningAgent } from '@/lib/services/agents/agentOwnedResources';
+import { parseAccessListInput } from '@/lib/iam/accessList';
 import type {
   IMcpAuthConfig,
   IMcpServer,
@@ -197,12 +199,18 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as {
         search?: string;
         status?: 'active' | 'disabled';
+        agentId?: string;
+        owned?: string;
       };
+      // The hub by default; `agentId` adds that agent's own servers (`owned=only`: just those).
+      const owned = ownedListFilterOf(query);
+      if (!owned.ok) return reply.code(400).send({ error: owned.error });
 
       const servers = await listMcpServers(session.tenantDbName, {
         projectId,
         search: query.search,
         status: query.status,
+        ...owned.filter,
       });
 
       return reply.code(200).send({
@@ -395,6 +403,14 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(upstream.status).send({ error: upstream.error });
       }
 
+      const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (access && !access.ok) return reply.code(400).send({ error: access.error });
+      // Created inside an agent: the server belongs to that agent of this project, and to nothing else.
+      const ownerInput = readAgentIdInput(body.ownerAgentId, 'ownerAgentId');
+      if (!ownerInput.ok) return reply.code(400).send({ error: ownerInput.error });
+      const owner = ownerInput.agentId ? await resolveOwningAgent(session.tenantDbName, projectId, ownerInput.agentId) : undefined;
+      if (owner === null) return reply.code(400).send({ error: 'ownerAgentId must be an agent of this project' });
+
       const server = await createMcpServer(
         session.tenantDbName,
         session.tenantId,
@@ -408,6 +424,8 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           endpointSlug: typeof body.endpointSlug === 'string' && body.endpointSlug.trim()
             ? body.endpointSlug.trim()
             : undefined,
+          ...(access?.ok ? { access: access.access } : {}),
+          ...(owner ? { owner } : {}),
         },
         auditContextFor(request, session.userId),
       );
@@ -554,6 +572,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       const sandboxRefusal = await sandboxMcpRefusal(request, projectId, nextInternalConfig);
       if (sandboxRefusal) return reply.code(403).send(sandboxRefusal);
 
+      const nextAccess = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (nextAccess && !nextAccess.ok) return reply.code(400).send({ error: nextAccess.error });
+
       const updated = await updateMcpServer(session.tenantDbName, id, session.userId, {
         key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
@@ -573,6 +594,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           : undefined,
         aegis: nextAegis,
         guardrail: nextGuardrail,
+        ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
