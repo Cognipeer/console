@@ -15,6 +15,7 @@ import { runWithTenantDb } from '@/lib/services/agents/agentRunService';
 import { isClientSessionEvent, toClientEventData, toClientEventFrame, toPublicRunId } from '@/lib/services/agents/clientWire';
 import { followSessionEvents, parseResumeSeq } from '@/lib/services/agents/sessionEvents';
 import { applyStreamHeaders } from '../fastify-utils';
+import { formatSseFrame } from '../sseWire';
 
 const logger = createLogger('api:agent-session-events');
 
@@ -179,21 +180,19 @@ export async function streamSessionEvents(
       signal: controller.signal,
       write: (frame) => {
         if (wire === 'client' && !isClientSessionEvent(frame.data.type, frame.data.data)) return;
-        writeRaw(
-          `${frame.id !== undefined ? `id: ${frame.id}\n` : ''}event: ${frame.event}\ndata: ${JSON.stringify(wire === 'client' ? toClientEventFrame(frame.data) : frame.data)}\n\n`,
-        );
+        writeRaw(formatSseFrame(frame.event, wire === 'client' ? toClientEventFrame(frame.data) : frame.data, frame.id));
       },
       writePing: () => writeRaw(': ping\n\n'),
       ...(recheck ? {
         recheck,
         // The client reconnects with Last-Event-ID and is answered at the door.
-        onRevoked: () => writeRaw(`event: error\ndata: ${JSON.stringify({ error: 'access to this session ended' })}\n\n`),
+        onRevoked: () => writeRaw(formatSseFrame('error', { error: 'access to this session ended' })),
       } : {}),
     }));
   } catch (error) {
     // Headers are long gone; end the stream, the client reconnects with Last-Event-ID.
     logger.warn('Session event stream failed', { conversationId, error: error instanceof Error ? error.message : String(error) });
-    writeRaw(`event: error\ndata: ${JSON.stringify({ error: 'event stream failed' })}\n\n`);
+    writeRaw(formatSseFrame('error', { error: 'event stream failed' }));
   } finally {
     openEventStreams.delete(controller);
     if (!reply.raw.writableEnded) reply.raw.end();

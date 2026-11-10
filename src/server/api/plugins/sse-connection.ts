@@ -9,10 +9,13 @@
 import type { FastifyReply } from 'fastify';
 import { RESPONSES_PING_INTERVAL_MS } from '@/lib/services/models/responsesWire';
 import { applyStreamHeaders } from '../fastify-utils';
+import { formatSseFrame } from '../sseWire';
 
 export interface SseConnection {
   /** Writes one raw frame; a no-op once the connection is closed. */
   write(chunk: string): void;
+  /** Writes one named event frame (`id:` optional); same closed-connection rules as `write`. */
+  writeEvent(event: string, data: unknown, id?: number | string): void;
   /** Aborted when the client goes away. */
   readonly signal: AbortSignal;
   end(): void;
@@ -43,6 +46,7 @@ export function openSseConnection(reply: FastifyReply): SseConnection {
 
   return {
     write,
+    writeEvent: (event, data, id) => write(formatSseFrame(event, data, id)),
     signal: controller.signal,
     end() {
       clearInterval(ping);

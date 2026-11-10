@@ -9,6 +9,7 @@ import type { Db } from 'mongodb';
 import type { IAlertRule, IAlertEvent, IAlertDelivery, AlertEventStatus } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { clampLimit, clampSkip } from '../provider/paging';
 
 const toRule = (doc: Record<string, unknown>): IAlertRule => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertRule;
 const toEvent = (doc: Record<string, unknown>): IAlertEvent => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertEvent;
@@ -19,18 +20,6 @@ function idFilter(id: string, projectId?: string): Record<string, unknown> | nul
   const filter: Record<string, unknown> = { _id: new ObjectId(id) };
   if (projectId !== undefined) filter.projectId = projectId;
   return filter;
-}
-
-function clampLimit(value: number | undefined, fallback: number): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(Math.floor(n), 1), 200);
-}
-
-function clampSkip(value: number | undefined): number {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  return Math.floor(n);
 }
 
 const toDelivery = (doc: Record<string, unknown>): IAlertDelivery => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertDelivery;

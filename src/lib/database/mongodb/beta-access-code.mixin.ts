@@ -11,6 +11,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { normalizeBetaAccessCode } from '../provider/normalize';
 
 interface BetaAccessCodeDoc {
   code: string;
@@ -19,10 +20,6 @@ interface BetaAccessCodeDoc {
   usedByEmail: string | null;
   usedAt: Date | null;
   createdAt: Date;
-}
-
-function normalizeBetaAccessCode(code: string): string {
-  return code.trim().toUpperCase();
 }
 
 export function BetaAccessCodeMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {

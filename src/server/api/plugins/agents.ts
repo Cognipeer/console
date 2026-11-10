@@ -142,6 +142,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { formatSseFrame, openLazySseStream } from '../sseWire';
 import { BucketNamingForbiddenError } from '@/lib/services/agents/attachmentsBucketAccess';
 import { guardAgentAccess, OWNED_BY_FLOW_BODY, type AgentAccessOptions } from './agent-owned-access';
 import { isOwnedAgent } from '@/lib/utils/ownedAgents';
@@ -605,51 +606,7 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
   };
 }
 
-/**
- * An SSE response that opens lazily — at the first event it is given — so a
- * refusal that comes before anything has happened can still be a normal JSON
- * response. Disabled (`enabled` false) it swallows every call.
- */
-function openLazyEventStream(reply: FastifyReply, enabled: boolean) {
-  let started = false;
-  let closed = false;
-  const pendingFrames: Array<() => void> = [];
-  const write = (event: string, data: unknown, id?: number) => {
-    if (closed) return;
-    try {
-      reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    } catch {
-      closed = true;
-    }
-  };
-  const start = () => {
-    if (started || !enabled) return;
-    started = true;
-    applyStreamHeaders(reply);
-    reply.raw.flushHeaders?.();
-    reply.raw.on('close', () => { closed = true; });
-    for (const frame of pendingFrames.splice(0)) frame();
-  };
-  const send = (event: string, data: unknown, id?: number) => {
-    if (!enabled) return;
-    if (!started) {
-      pendingFrames.push(() => write(event, data, id));
-      return;
-    }
-    write(event, data, id);
-  };
-  return {
-    start,
-    send,
-    started: () => started,
-    /** A callback that starts the stream and forwards one kind of progress event. */
-    live: <A extends unknown[]>(event: string, map: (...args: A) => unknown) => (...args: A) => {
-      start();
-      send(event, map(...args));
-    },
-    end: () => { if (!closed) reply.raw.end(); },
-  };
-}
+const openLazyEventStream = openLazySseStream;
 
 /**
  * One row of the sessions table: what it is, what it cost, how long it worked.
@@ -2311,37 +2268,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     const body = readJsonBody<Record<string, unknown>>(request);
 
     // The stream opens lazily; the continuation's first event starts it.
-    let started = false;
-    let closed = false;
-    const pendingFrames: Array<() => void> = [];
-    const write = (event: string, data: unknown, id?: number) => {
-      if (closed) return;
-      try {
-        reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-      } catch {
-        closed = true;
-      }
-    };
-    const startStream = () => {
-      if (started || !wantsStream) return;
-      started = true;
-      applyStreamHeaders(reply);
-      reply.raw.flushHeaders?.();
-      reply.raw.on('close', () => { closed = true; });
-      for (const frame of pendingFrames.splice(0)) frame();
-    };
-    const send = (event: string, data: unknown, id?: number) => {
-      if (!wantsStream) return;
-      if (!started) {
-        pendingFrames.push(() => write(event, data, id));
-        return;
-      }
-      write(event, data, id);
-    };
-    const live = <A extends unknown[]>(event: string, map: (...args: A) => unknown) => (...args: A) => {
-      startStream();
-      send(event, map(...args));
-    };
+    const stream = openLazySseStream(reply, wantsStream);
+    const { send, live } = stream;
+    const startStream = stream.start;
 
     const unsubscribe = wantsStream
       ? sessionEventBus.subscribe(conversationId, (frame) => {
@@ -2407,7 +2336,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         if (wantsStream) {
           startStream();
           send('result', outcome.result);
-          if (!closed) reply.raw.end();
+          stream.end();
           return reply;
         }
         return reply.code(200).send({ status: 'resumed', result: outcome.result });
@@ -2416,10 +2345,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       const classified = classifyAgentRunError(error, { exposeInternal: true });
       const resumeStatus = (error as { status?: unknown })?.status;
-      if (started) {
+      if (stream.started()) {
         // The status line is long gone; the error travels as an event, like `/chat/stream`.
         send('error', isPlanLimitError(error) ? planLimitErrorBody(error) : { error: classified.error.message, type: classified.error.type, code: classified.error.code });
-        if (!closed) reply.raw.end();
+        stream.end();
         return reply;
       }
       if (error instanceof AgentGuardrailBlockedError) {
@@ -2502,7 +2431,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     const send = (event: string, data: unknown, id?: number) => {
       if (closed) return;
       try {
-        reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        reply.raw.write(formatSseFrame(event, data, id));
       } catch {
         closed = true;
       }

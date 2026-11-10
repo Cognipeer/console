@@ -26,6 +26,7 @@ import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { runInTenant } from '@/lib/database/runInTenant';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getConfig } from '@/lib/core/config';
 import { gatePublicRequestRate } from '../publicRpmGate';
@@ -88,9 +89,7 @@ async function withTenantDb<T>(
   tenantDbName: string,
   fn: () => T | Promise<T>,
 ): Promise<T> {
-  if (db.runWithTenant) return db.runWithTenant(tenantDbName, fn);
-  await db.switchToTenant(tenantDbName);
-  return fn();
+  return runInTenant(db, tenantDbName, () => fn());
 }
 
 /**
