@@ -60,6 +60,7 @@ import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
 import { ClusterMixin } from './sqlite/cluster.mixin';
 import { BetaAccessCodeMixin } from './sqlite/beta-access-code.mixin';
+import { PlanLimitsMixin } from './sqlite/plan-limits.mixin';
 import { IamInvalidationMixin } from './iam-invalidation.mixin';
 import { IamDocsMixin } from './sqlite/iam-docs.mixin';
 import { IamDirectoryMixin } from './sqlite/iam-directory.mixin';
@@ -109,8 +110,8 @@ const PricingBase = AgentTriggerMixin(RetentionMixin(SchedulerClaimMixin(Webhook
 const HealthBase = EntityMetricsMixin(AlertChannelLibraryMixin(AlertStateMixin(PricingBase)));
 const ClusterBase = ClusterMixin(HealthBase);
 
-// Group 7 – Signup gating (main database; beta access codes)
-const SignupBase = BetaAccessCodeMixin(ClusterBase);
+// Group 7 – Signup gating (main database; beta access codes) + plan limits usage
+const SignupBase = PlanLimitsMixin(BetaAccessCodeMixin(ClusterBase));
 
 // Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
 const IamBase = IamDirectoryMixin(IamDocsMixin(SignupBase));

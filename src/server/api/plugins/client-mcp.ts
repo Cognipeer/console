@@ -2,18 +2,13 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type {
   IMcpAuthConfig,
-  IMcpExposureConfig,
-  IMcpGuardrailConfig,
-  IMcpRemoteConfig,
   IMcpServer,
-  IMcpStdioConfig,
   McpAuthType,
 } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
-  CONSOLE_IDENTITY_AUTH_TYPE,
   consoleIdentityCallerOf,
   isConsoleIdentityRefusal,
 } from '@/lib/iam/consoleIdentity';
@@ -38,7 +33,7 @@ import {
   serializeMcpServer,
   updateMcpServer,
 } from '@/lib/services/mcp';
-import type { McpAuditContext, UpdateMcpServerInput } from '@/lib/services/mcp';
+import type { UpdateMcpServerInput } from '@/lib/services/mcp';
 import { sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
 import {
   buildRuntimeContextFromRequest,
@@ -53,7 +48,6 @@ import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   authorizeServiceForRequest,
   getApiTokenContextForRequest,
-  getClientIp,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
@@ -65,23 +59,26 @@ import {
   sendSessionNotFound,
   startMcpSseResponse,
 } from '../mcpTransport';
+import {
+  MCP_PROTOCOL_VERSION,
+  SERVER_VERSION,
+  VALID_AUTH_TYPES,
+  auditContextFor,
+  jsonRpcError,
+  jsonRpcOk,
+  parseAegis,
+  parseExposure,
+  parseGuardrail,
+  parseRemoteConfig,
+  parseStdioConfig,
+  readMcpCommonCreateFields,
+  readMcpCreateHead,
+  readMcpUpstreamBody,
+} from './mcp-shared';
 
 const logger = createLogger('api:client-mcp');
 
-const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
-
-// Local parse helpers replicated from the dashboard `mcp.ts` plugin (they are
-// not exported). They coerce the raw request sub-objects into the typed config
-// shapes the service expects.
-function auditContextFor(request: FastifyRequest, userId: string): McpAuditContext {
-  const ua = request.headers['user-agent'];
-  return {
-    performedBy: userId,
-    ipAddress: getClientIp(request),
-    userAgent: typeof ua === 'string' ? ua.slice(0, 300) : undefined,
-  };
-}
 
 /**
  * Mirrors `requireStdioSubprocessPermission` in the dashboard `mcp.ts` plugin:
@@ -107,100 +104,6 @@ const STDIO_SUBPROCESS_FORBIDDEN_ERROR =
   + 'admin permission. Ask a tenant owner/admin, or have one grant your account (or token) '
   + 'admin-level MCP permission.';
 
-function parseExposure(raw: unknown): IMcpExposureConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { protocols?: unknown; accessMode?: unknown };
-  const protocols = Array.isArray(value.protocols)
-    ? value.protocols.filter((p): p is 'streamable-http' | 'sse' => p === 'streamable-http' || p === 'sse')
-    : [];
-  return {
-    protocols: protocols.length ? protocols : ['streamable-http', 'sse'],
-    accessMode: value.accessMode === 'public' ? 'public' : 'token',
-  };
-}
-
-/** @deprecated Legacy shield binding, still accepted so an older client keeps
- *  working. `guardrail` wins wherever both are sent.
- *  A legacy-only body is projected onto `guardrail` (mode only) by the service.
- *  `shieldId` is DROPPED here: its values are ids from the removed
- *  `aegis_shields` table, so persisting a fresh one would only re-arm the
- *  "bound to a removed Aegis shield" warning on the server's first tool call. */
-function parseAegis(raw: unknown): { mode: 'off' | 'monitor' | 'enforce' } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { mode?: unknown };
-  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
-  return { mode };
-}
-
-/** Mirror of the dashboard route's parser — `guardrailKey` is a guardrail KEY,
- *  and omitting it selects the tenant's default tool guardrail. */
-function parseGuardrail(raw: unknown): IMcpGuardrailConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { guardrailKey?: unknown; mode?: unknown };
-  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
-  return {
-    guardrailKey: typeof value.guardrailKey === 'string' && value.guardrailKey.trim()
-      ? value.guardrailKey.trim()
-      : undefined,
-    mode,
-  };
-}
-
-function parseRemoteConfig(raw: unknown): IMcpRemoteConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { url?: unknown; transport?: unknown };
-  if (typeof value.url !== 'string' || !value.url.trim()) return undefined;
-  return {
-    url: value.url.trim(),
-    transport: value.transport === 'sse' ? 'sse' : 'streamable-http',
-  };
-}
-
-function parseStdioConfig(raw: unknown): IMcpStdioConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as {
-    runtime?: unknown;
-    packageName?: unknown;
-    args?: unknown;
-    env?: unknown;
-    executionMode?: unknown;
-    sandbox?: unknown;
-  };
-  if (typeof value.packageName !== 'string' || !value.packageName.trim()) return undefined;
-  const runtime = value.runtime === 'uvx' ? 'uvx' : 'npx';
-  const args = Array.isArray(value.args)
-    ? value.args.map((a) => String(a)).filter((a) => a.length > 0)
-    : undefined;
-  const env = value.env && typeof value.env === 'object'
-    ? Object.fromEntries(
-        Object.entries(value.env as Record<string, unknown>)
-          .filter(([k, v]) => k.trim() && typeof v === 'string')
-          .map(([k, v]) => [k.trim(), v as string]),
-      )
-    : undefined;
-  const sandboxRaw = value.sandbox && typeof value.sandbox === 'object'
-    ? value.sandbox as { templateKey?: unknown; resources?: { cpuCores?: unknown; memoryMb?: unknown }; instanceId?: unknown }
-    : undefined;
-  return {
-    runtime,
-    packageName: value.packageName.trim(),
-    args,
-    env: env && Object.keys(env).length ? env : undefined,
-    executionMode: value.executionMode === 'sandbox' ? 'sandbox' : 'subprocess',
-    sandbox: sandboxRaw
-      ? {
-          templateKey: typeof sandboxRaw.templateKey === 'string' ? sandboxRaw.templateKey : undefined,
-          resources: sandboxRaw.resources
-            ? {
-                cpuCores: Number(sandboxRaw.resources.cpuCores) || undefined,
-                memoryMb: Number(sandboxRaw.resources.memoryMb) || undefined,
-              }
-            : undefined,
-        }
-      : undefined,
-  };
-}
-
 /** Resolve caller-supplied headers against the server's opt-in policy. */
 function resolveMcpRuntimeHeaders(
   server: IMcpServer,
@@ -214,23 +117,8 @@ function resolveMcpRuntimeHeaders(
   );
 }
 
-const JSONRPC_VERSION = '2.0';
-const MCP_PROTOCOL_VERSION = '2025-03-26';
-const SERVER_VERSION = '1.0.0';
 /** The MCP transport routes: browser pages may call them only from an allowed origin. */
 const TRANSPORT_ROUTE = { onRequest: mcpOriginGuard };
-
-function jsonRpcOk(id: string | number | null, result: unknown) {
-  return { id, jsonrpc: JSONRPC_VERSION, result };
-}
-
-function jsonRpcError(id: string | number | null, code: number, message: string) {
-  return {
-    error: { code, message },
-    id,
-    jsonrpc: JSONRPC_VERSION,
-  };
-}
 
 function protocolEnabled(server: IMcpServer, protocol: 'streamable-http' | 'sse'): boolean {
   return resolveExposure(server).protocols.includes(protocol);
@@ -687,35 +575,16 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      if (typeof body.name !== 'string' || body.name.trim() === '') {
-        return reply.code(400).send({ error: 'name is required' });
+      const head = readMcpCreateHead(body, { allowedSourceTypes: VALID_SOURCE_TYPES });
+      if (!head.ok) {
+        return reply.code(head.status).send({ error: head.error });
       }
-
-      const sourceType = typeof body.sourceType === 'string' ? body.sourceType : 'openapi';
-      if (!VALID_SOURCE_TYPES.includes(sourceType as typeof VALID_SOURCE_TYPES[number])) {
-        return reply.code(400).send({ error: 'sourceType must be "openapi", "remote", or "stdio"' });
-      }
-
-      if (sourceType === 'openapi' && typeof body.openApiSpec !== 'string') {
-        return reply.code(400).send({ error: 'openApiSpec is required' });
-      }
-
-      const remoteConfig = parseRemoteConfig(body.remoteConfig);
-      if (sourceType === 'remote' && !remoteConfig) {
-        return reply.code(400).send({ error: 'remoteConfig.url is required' });
-      }
-
-      const stdioConfig = parseStdioConfig(body.stdioConfig);
-      if (sourceType === 'stdio' && !stdioConfig) {
-        return reply.code(400).send({ error: 'stdioConfig.packageName is required' });
-      }
+      const { sourceType, stdioConfig } = head.value;
 
       // Enterprise sub-feature: persistent sandbox execution needs the runtime
       // seam (enterprise build) AND an active ENTERPRISE license. Reject up-front
       // with the same 402 the dashboard uses — it literally cannot run otherwise.
       const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
-      const aegisConfig = parseAegis(body.aegis);
-      const guardrailConfig = parseGuardrail(body.guardrail);
       if (stdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
           error: 'Persistent sandbox execution requires an active Enterprise license.',
@@ -728,31 +597,10 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
-      // A remote server that needs no credential does not have to spell that out.
-      if ((body.upstreamAuth === undefined || body.upstreamAuth === null) && sourceType === 'remote') {
-        body.upstreamAuth = { type: 'none' };
+      const upstream = readMcpUpstreamBody(body, sourceType);
+      if (!upstream.ok) {
+        return reply.code(upstream.status).send({ error: upstream.error });
       }
-
-      if (
-        !body.upstreamAuth
-        || typeof body.upstreamAuth !== 'object'
-        || !('type' in body.upstreamAuth)
-      ) {
-        return reply.code(400).send({ error: 'upstreamAuth with type is required' });
-      }
-
-      const authType = (body.upstreamAuth as { type?: unknown }).type;
-      if (!VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
-        return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
-        });
-      }
-      if (authType === CONSOLE_IDENTITY_AUTH_TYPE && sourceType !== 'remote' && sourceType !== 'openapi') {
-        return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
-      }
-
-      const instructionsError = mcpInstructionsInputError(body.instructions);
-      if (instructionsError) return reply.code(400).send({ error: instructionsError });
 
       const server = await createMcpServer(
         ctx.tenantDbName,
@@ -760,26 +608,15 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.tokenRecord.userId,
         ctx.projectId,
         {
-          description: typeof body.description === 'string' ? body.description.trim() : undefined,
-          instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
-          name: body.name.trim(),
-          key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
+          ...readMcpCommonCreateFields(body, head.value, upstream.upstreamAuth),
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
-          openApiSpec: typeof body.openApiSpec === 'string' ? body.openApiSpec : undefined,
-          specFormat: typeof body.specFormat === 'string' ? body.specFormat as SpecFormatHint : undefined,
-          upstreamAuth: body.upstreamAuth as IMcpAuthConfig,
-          upstreamBaseUrl: typeof body.upstreamBaseUrl === 'string' ? body.upstreamBaseUrl.trim() : undefined,
-          remoteConfig,
-          stdioConfig,
-          exposure: parseExposure(body.exposure),
-          aegis: aegisConfig,
-          guardrail: guardrailConfig,
         },
         auditContextFor(request, ctx.tokenRecord.userId),
       );
 
       return reply.code(201).send({ server: serializeMcpServer(server) });
     } catch (error) {
+      if (isMcpServerConfigError(error)) return reply.code(400).send({ error: error.message });
       logger.error('Create client MCP server error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',

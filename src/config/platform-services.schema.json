@@ -64,6 +64,7 @@
         "IconMessageChatbot",
         "IconPlug",
         "IconPlugConnected",
+        "IconReportAnalytics",
         "IconRobot",
         "IconServerBolt",
         "IconShield",
@@ -143,6 +144,14 @@
         "requiresEnterprise": {
           "type": "boolean",
           "description": "Service is gated to the ENTERPRISE license tier. In the community build it is absent (shown as an upgrade placeholder); in the enterprise build it is available only when a valid license is active."
+        },
+        "permission": {
+          "type": "string",
+          "description": "The PermissionService that gates the entry when it differs from the id (e.g. the usage page is gated by 'license')."
+        },
+        "requiresPlanUsage": {
+          "type": "boolean",
+          "description": "Shown only when plan limits are active on the deployment (hosted deployments with PLAN_LIMITS_MODE shadow or on)."
         },
         "enterpriseModule": {
           "type": "string",

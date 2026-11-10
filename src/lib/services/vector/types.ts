@@ -15,6 +15,12 @@ export type VectorMetric = IVectorIndexRecord['metric'];
 
 export type VectorIndexRecord = IVectorIndexRecord;
 
+/**
+ * An index as the API returns it. On a platform provider `externalId` is absent (the provider's own identifier of the
+ * index stays with the server), and `storedBytes` and `storedVectors` carry the metered size.
+ */
+export type VectorIndexView = Omit<IVectorIndexRecord, 'externalId'> & { externalId?: string };
+
 export interface CreateVectorIndexRequest
   extends Omit<CreateVectorIndexInput, 'metric' | 'dimension'> {
   providerKey: string;

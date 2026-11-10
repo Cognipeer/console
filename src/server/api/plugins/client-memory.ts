@@ -23,12 +23,14 @@ import {
   updateMemoryItem,
   updateMemoryStore,
 } from '@/lib/services/memory/memoryService';
+import { parseCreateMemoryStoreBody, parseUpdateMemoryStoreBody } from '@/lib/services/memory/memoryRequest';
 import {
   getApiTokenContextForRequest,
   parseCsvQuery,
   readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 
 const logger = createLogger('api:client-memory');
 
@@ -55,23 +57,14 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonObjectBody<Record<string, unknown>>(request);
 
-      if (typeof body.name !== 'string') {
-        return reply.code(400).send({ error: 'name is required' });
-      }
-      if (typeof body.vectorProviderKey !== 'string') {
-        return reply.code(400).send({ error: 'vectorProviderKey is required' });
-      }
-      if (typeof body.embeddingModelKey !== 'string') {
-        return reply.code(400).send({ error: 'embeddingModelKey is required' });
+      const parsed = parseCreateMemoryStoreBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send({ error: parsed.error });
       }
 
       const store = await createMemoryStore(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        config: body.config as Record<string, unknown> | undefined,
+        ...parsed.value,
         createdBy: ctx.user?.email ?? ctx.tokenRecord.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        name: body.name,
-        vectorProviderKey: body.vectorProviderKey,
       });
 
       return reply.code(201).send({ store });
@@ -103,10 +96,7 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
       const { storeKey } = request.params as { storeKey: string };
       const body = readJsonObjectBody<Record<string, unknown>>(request);
       const store = await updateMemoryStore(ctx.tenantDbName, ctx.tenantId, ctx.projectId, storeKey, {
-        config: body.config as Record<string, unknown> | undefined,
-        description: body.description as string | undefined,
-        name: body.name as string | undefined,
-        status: body.status as 'active' | 'inactive' | 'error' | undefined,
+        ...parseUpdateMemoryStoreBody(body),
         updatedBy: ctx.user?.email ?? ctx.tokenRecord.userId,
       });
       return reply.code(200).send({ store });
@@ -190,6 +180,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ memory });
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });
@@ -256,6 +249,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send(result);
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof MemoryStoreFullError) {
         return reply.code(409).send({ error: error.message });
       }
@@ -315,6 +311,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(updated);
     } catch (error) {
+      // A platform vector index past the plan storage answers with the refusal's own status (413).
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be a JSON object' });
       logger.error('Update client memory item error', { error });
       return reply.code(500).send({

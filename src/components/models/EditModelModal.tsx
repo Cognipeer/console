@@ -449,7 +449,9 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
 
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
-        const rawProviders = providerData.providers ?? [];
+        // Platform providers are not offered: the server refuses models and replicas on them.
+        const rawProviders = ((providerData.providers ?? []) as Array<Record<string, string> & { platform?: boolean }>)
+          .filter((p) => p.platform !== true);
         setModelProviders(
           rawProviders.map((p: Record<string, string>) => ({
             key: p.key,

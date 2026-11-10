@@ -17,6 +17,7 @@ import {
   type OcrMode,
 } from '@/components/models/catalog/catalogPrefill';
 import { useProviderModelCatalog } from '@/components/models/catalog/useProviderModelCatalog';
+import { withoutPlatformProviders } from '@/components/models/catalog/platformProviders';
 import type { ModelIdSuggestion } from '@/components/models/modelFormSections/ProviderSection';
 import {
   getDefaultModelOutputModalities,
@@ -187,7 +188,7 @@ const definedOnly = (patch: Record<string, unknown>) =>
 export default function CreateModelModal({
   opened,
   onClose,
-  providers,
+  providers: allProviders,
   defaultCategory,
   defaultProviderKey,
   onCreated,
@@ -195,6 +196,8 @@ export default function CreateModelModal({
   prefill,
   onBackToCatalog,
 }: CreateModelModalProps) {
+  // The server refuses new models on a platform provider (they exist already): never offered here.
+  const providers = useMemo(() => withoutPlatformProviders(allProviders), [allProviders]);
   const tWizard = useTranslations('modelWizard');
   const tCatalog = useTranslations('modelCatalog');
   const { confirm } = useConfirm();

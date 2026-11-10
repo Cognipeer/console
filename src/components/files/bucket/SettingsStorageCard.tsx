@@ -157,6 +157,7 @@ function PrefixRow({ bucket, editable }: SettingsStorageCardProps) {
 export default function SettingsStorageCard({ bucket, editable }: SettingsStorageCardProps) {
   const t = useTranslations('files.bucket');
   const tc = useTranslations('files.common');
+  const tPlatform = useTranslations('platformStorage');
   const user = useDashboardUser();
   const test = useTestFileProvider();
 
@@ -177,7 +178,7 @@ export default function SettingsStorageCard({ bucket, editable }: SettingsStorag
             <>
               <div style={{ fontWeight: 500 }}>{provider.label}</div>
               <div className="ds-muted" style={{ fontSize: 12.5, marginBottom: 6 }}>
-                {driverNameOf(provider)}
+                {provider.platform ? <span className="ds-badge ds-badge-info">{tPlatform('badge')}</span> : driverNameOf(provider)}
               </div>
             </>
           ) : (
@@ -212,9 +213,11 @@ export default function SettingsStorageCard({ bucket, editable }: SettingsStorag
         <Row label={t('storage.prefix')}>
           <PrefixRow bucket={bucket} editable={editable} />
         </Row>
-        <Row label={t('storage.location')}>
-          <StorageLocation location={bucket.storageLocation} localDisk={provider ? isLocalDiskProvider(provider) : false} />
-        </Row>
+        {provider?.platform ? null : (
+          <Row label={t('storage.location')}>
+            <StorageLocation location={bucket.storageLocation} localDisk={provider ? isLocalDiskProvider(provider) : false} />
+          </Row>
+        )}
         <Row label={t('storage.key')}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <span className="ds-mono">{bucket.key}</span>

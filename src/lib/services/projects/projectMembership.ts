@@ -111,6 +111,8 @@ export interface ProjectExtrasInput {
   members: Array<{ id: string; role: ProjectRole }>;
   groups: Array<{ id: string; role: ProjectRole }>;
   providerIds: string[];
+  /** When given, the model caches of a platform provider whose assignment changes are dropped. */
+  tenantDbName?: string;
 }
 
 /** Applies the people / groups / providers chosen on the create screen. Returns the warnings. */
@@ -190,6 +192,11 @@ export async function applyProjectExtras(
         });
       } catch {
         warnings.push(`Provider "${provider.label}" could not be assigned.`);
+        continue;
+      }
+      if (provider.platform && input.tenantDbName) {
+        const { invalidatePlatformProviderModelCaches } = await import('@/lib/services/models/modelService');
+        await invalidatePlatformProviderModelCaches(input.tenantDbName, provider.key, [...assigned, projectId]);
       }
     }
   }

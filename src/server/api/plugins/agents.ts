@@ -28,6 +28,8 @@ import {
 } from '@/lib/services/agents';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 import { watchTurnCancellation } from '@/lib/services/agents/turnWatch';
+import { acquireAgentSessionSlot, type AgentSessionSlot } from '@/lib/services/agents/agentSessionLease';
+import { isPlanLimitError, planLimitErrorBody, planLimitHeaders } from '@/lib/limits/errors';
 // By path: the agents barrel does not export the error class.
 import {
   AgentGuardrailBlockedError,
@@ -2021,7 +2023,17 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       })
       : undefined;
 
+    // Plan limit (agent sessions): a continued dashboard turn is console-originated and takes a slot like a new one.
+    let slot: AgentSessionSlot | undefined;
     try {
+      slot = await acquireAgentSessionSlot({
+        tenantId: scoped.session.tenantId,
+        holderId: reservation ? String(reservation.run._id) : undefined,
+        origin: 'console',
+        signal: watch?.signal,
+        onQueued: stream.live('run.queued', (info) => info),
+        onStarted: () => stream.send('run.started', {}),
+      });
       const continued = await executeAgentContinueLocal({
         ...(watch ? { signal: watch.signal } : {}),
         tenantDbName: scoped.session.tenantDbName,
@@ -2061,13 +2073,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const resumeStatus = (error as { status?: unknown })?.status;
       if (stream.started()) {
         // The status line is long gone; the error travels as an event, like `/chat/stream`.
-        stream.send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        stream.send('error', isPlanLimitError(error) ? planLimitErrorBody(error) : { error: classified.error.message, type: classified.error.type, code: classified.error.code });
         stream.end();
         return reply;
       }
       if (error instanceof AgentGuardrailBlockedError) {
         return sendAgentGuardrailBlock(reply, error);
       }
+      if (isPlanLimitError(error)) return reply.headers(planLimitHeaders(error)).code(error.status).send(planLimitErrorBody(error));
       if (classified.status >= 500) logger.error('Continue session error', { error });
       return sendProjectContextError(reply, error) ?? reply.code(
         typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
@@ -2081,6 +2094,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     } finally {
       watch?.stop();
       unsubscribe?.();
+      await slot?.release();
       await reservation?.release();
     }
   }));
@@ -2290,6 +2304,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
               onCompaction: live('summary', (compaction) => compaction),
               onPlan: live('plan', (plan) => plan),
               onSubagent: live('subagent', (event) => event),
+              onRunQueued: live('run.queued', (info) => info),
+              onRunStarted: () => send('run.started', {}),
             },
           }
           : {}),
@@ -2331,13 +2347,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const resumeStatus = (error as { status?: unknown })?.status;
       if (stream.started()) {
         // The status line is long gone; the error travels as an event, like `/chat/stream`.
-        send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        send('error', isPlanLimitError(error) ? planLimitErrorBody(error) : { error: classified.error.message, type: classified.error.type, code: classified.error.code });
         stream.end();
         return reply;
       }
       if (error instanceof AgentGuardrailBlockedError) {
         return sendAgentGuardrailBlock(reply, error);
       }
+      if (isPlanLimitError(error)) return reply.headers(planLimitHeaders(error)).code(error.status).send(planLimitErrorBody(error));
       logger.error('Resolve action error', { error });
       return sendProjectContextError(reply, error) ?? reply.code(
         typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
@@ -2435,7 +2452,18 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       : undefined;
 
     const watch = turnWatchFor(turn);
+    // Plan limit (agent sessions): a dashboard turn is console-originated, so it takes a slot,
+    // waits up to 15 s for one and tells the page (`run.queued`, `run.started`). Released in `finally`.
+    let slot: AgentSessionSlot | undefined;
     try {
+      slot = await acquireAgentSessionSlot({
+        tenantId: turn.run.tenantId,
+        holderId: turn.reservation ? String(turn.reservation.run._id) : undefined,
+        origin: 'console',
+        signal: watch?.signal ?? disconnect?.signal,
+        onQueued: (info) => send('run.queued', info),
+        onStarted: () => send('run.started', {}),
+      });
       const result = await runWithUsageSink(usage, () => executePlaygroundChatLocal({
         ...turn.run,
         ...(watch ? { signal: watch.signal } : disconnect ? { signal: disconnect.signal } : {}),
@@ -2469,11 +2497,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       } else {
         logAgentRunFailure(logger, 'Agent playground stream error', error);
         const classified = classifyAgentRunError(error, { exposeInternal: true });
-        send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        send('error', isPlanLimitError(error) ? planLimitErrorBody(error) : { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
       watch?.stop();
       unsubscribeSessionEvents?.();
+      await slot?.release();
       await turn.reservation?.release();
       if (!closed) reply.raw.end();
     }
@@ -2488,7 +2517,15 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       let result: Awaited<ReturnType<typeof executePlaygroundChat>>;
       const watch = turnWatchFor(turn);
+      let slot: AgentSessionSlot | undefined;
       try {
+        // Plan limit (agent sessions): console-originated, waits up to 15 s; a refusal is a 429 below.
+        slot = await acquireAgentSessionSlot({
+          tenantId: turn.run.tenantId,
+          holderId: turn.reservation ? String(turn.reservation.run._id) : undefined,
+          origin: 'console',
+          signal: watch?.signal,
+        });
         result = await executePlaygroundChat({
           ...turn.run,
           ...(watch ? { signal: watch.signal } : {}),
@@ -2499,6 +2536,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       } finally {
         watch?.stop();
+        await slot?.release();
         await turn.reservation?.release();
       }
 
@@ -2516,6 +2554,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         logAgentRunFailure(logger, 'Agent playground chat error', error);
       }
       const classified = classifyAgentRunError(error, { exposeInternal: true });
+      if (isPlanLimitError(error)) return reply.headers(planLimitHeaders(error)).code(error.status).send(planLimitErrorBody(error));
       return sendAgentGuardrailBlock(reply, error)
         ?? sendProjectContextError(reply, error)
         ?? reply.code(classified.status).send({

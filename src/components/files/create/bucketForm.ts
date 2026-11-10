@@ -111,11 +111,13 @@ export type StoragePreview =
 
 /** Where the files of the bucket will physically be, from the provider's location base and the folder. */
 export function storagePreview(
-  provider: Pick<FileProviderListItem, 'driver' | 'driverCapabilities' | 'storageLocationBase'> | null | undefined,
+  provider: Pick<FileProviderListItem, 'driver' | 'driverCapabilities' | 'storageLocationBase' | 'platform'> | null | undefined,
   folder: string,
   fileKeyLabel: string,
 ): StoragePreview {
   if (!provider) return { kind: 'none' };
+  // Where a platform provider keeps files is not shown.
+  if (provider.platform) return { kind: 'none' };
   if (isLocalDiskProvider(provider)) return { kind: 'localDisk' };
   const base = provider.storageLocationBase;
   if (typeof base !== 'string' || !base) return { kind: 'unknown' };

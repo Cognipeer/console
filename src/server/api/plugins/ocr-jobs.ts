@@ -20,9 +20,9 @@ import {
   OcrJobValidationError,
   type CreateOcrJobInput,
   type OcrJobContext,
-  type OcrJobItemInput,
   type UpdateOcrJobInput,
 } from '@/lib/services/ocrJobs';
+import { parseOcrJobItems } from '@/lib/services/ocrJobs/itemInput';
 import type {
   IOcrJob,
   IOcrJobItem,
@@ -111,38 +111,6 @@ function serializeItem(item: IOcrJobItem) {
     callbackStatus: item.callbackStatus,
     errorMessage: item.errorMessage,
   };
-}
-
-function parseItems(raw: unknown): OcrJobItemInput[] {
-  if (!Array.isArray(raw)) return [];
-  const items: OcrJobItemInput[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
-    const obj = entry as Record<string, unknown>;
-    const fileName = typeof obj.fileName === 'string' ? obj.fileName : undefined;
-    const src = obj.source as Record<string, unknown> | undefined;
-    if (src && typeof src.kind === 'string') {
-      if (src.kind === 'inline' && typeof src.data === 'string') {
-        const f = typeof src.fileName === 'string' ? src.fileName : fileName;
-        items.push({ source: { kind: 'inline', data: src.data, fileName: f, contentType: typeof src.contentType === 'string' ? src.contentType : undefined }, fileName: f });
-        continue;
-      }
-      if (src.kind === 'url' && typeof src.url === 'string') {
-        items.push({ source: { kind: 'url', url: src.url, contentType: typeof src.contentType === 'string' ? src.contentType : undefined }, fileName });
-        continue;
-      }
-      if (src.kind === 'bucket' && typeof src.bucketKey === 'string' && typeof src.objectKey === 'string') {
-        items.push({ source: { kind: 'bucket', bucketKey: src.bucketKey, objectKey: src.objectKey }, fileName });
-        continue;
-      }
-    }
-    if (typeof obj.url === 'string') {
-      items.push({ source: { kind: 'url', url: obj.url }, fileName });
-    } else if (typeof obj.data === 'string') {
-      items.push({ source: { kind: 'inline', data: obj.data, fileName, contentType: typeof obj.contentType === 'string' ? obj.contentType : undefined }, fileName });
-    }
-  }
-  return items;
 }
 
 function buildCreateInput(body: Record<string, unknown>): CreateOcrJobInput {
@@ -281,7 +249,7 @@ export const ocrJobsApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       if (!(await jobInProjectScope(session, id, projectId))) return reply.code(400).send({ error: 'Job not found' });
       const body = readJsonBody<Record<string, unknown>>(request);
-      const items = parseItems(body.items);
+      const items = parseOcrJobItems(body.items);
       if (!items.length) return reply.code(400).send({ error: 'At least one file is required' });
       const mode = body.mode === 'sync' ? 'sync' : 'async';
       const result = await addFilesToJob(ctxFrom(session, projectId), id, items, { mode });

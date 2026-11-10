@@ -36,6 +36,7 @@ type Provider = {
   status: string;
   projectId?: string;
   projectIds?: string[];
+  platform?: boolean;
 };
 
 const DOMAIN_LABEL: Record<string, string> = {
@@ -244,6 +245,7 @@ export default function TenantProviders() {
       render: (p) => (
         <span className="ds-row" style={{ gap: 6, flexWrap: 'wrap' }}>
           <StatusBadge status={statusVariant(p.status)} label={p.status} />
+          {p.platform ? <span className="ds-badge ds-badge-info">{t('platform')}</span> : null}
           {isProviderUnassigned(p) ? (
             <span title={t('unassignedTip')}>
               <StatusBadge status="warn" label={t('unassigned')} />

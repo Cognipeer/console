@@ -7,6 +7,7 @@
  * affect future sessions only.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -32,7 +33,7 @@ interface RunActionPayload {
  * Concurrent browser actions per node. Individual actions are short (bounded by
  * BROWSER_DEFAULT_ACTION_TIMEOUT_MS); the per-tenant session cap still applies.
  */
-const CONCURRENCY = Math.max(1, Number(process.env.BROWSER_ACTION_CONCURRENCY ?? 4) || 4);
+const concurrency = () => getConfig().queues.browserActionConcurrency;
 
 export async function startBrowserQueueConsumer(): Promise<void> {
   if (started) return;
@@ -43,7 +44,7 @@ export async function startBrowserQueueConsumer(): Promise<void> {
       return runBrowserActionLocal(payload.ctx, payload.sessionKey, payload.action);
     }
     throw new Error(`Unknown browser job: ${ctx.name}`);
-  }, { concurrency: CONCURRENCY });
+  }, { concurrency: concurrency() });
   started = true;
-  log.info('Browser queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Browser queue consumer registered', { concurrency: concurrency() });
 }

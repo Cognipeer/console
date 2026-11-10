@@ -66,6 +66,8 @@ export const FILES_ERROR_CODES = [
   'storage_location_shared',
   'object_too_large',
   'quota_exceeded',
+  // The plan's storage is full (`lib/limits`, hosted deployments only; answered by `server/api/fileHttp.ts`).
+  'storage_quota_exceeded',
   'queue_unavailable',
   'file_too_large',
   'content_type_not_allowed',

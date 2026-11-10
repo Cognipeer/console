@@ -999,6 +999,32 @@
       "settings": true
     },
     {
+      "id": "usage",
+      "href": "/dashboard/usage",
+      "icon": "IconReportAnalytics",
+      "category": "admin",
+      "navLabelKey": "usage",
+      "navDescriptionKey": "usageDescription",
+      "docsPath": "/console/guide/govern/licensing",
+      "tags": [
+        "usage",
+        "limits",
+        "plan"
+      ],
+      "searchKeywords": [
+        "usage",
+        "plan usage",
+        "limits",
+        "capacity",
+        "kullanım",
+        "limitler"
+      ],
+      "tenantAdminOnly": true,
+      "settings": true,
+      "permission": "license",
+      "requiresPlanUsage": true
+    },
+    {
       "id": "sso",
       "href": "/dashboard/sso",
       "icon": "IconShieldLock",

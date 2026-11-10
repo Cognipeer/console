@@ -150,12 +150,6 @@ export function BatchJobMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapBatchJob(r));
     }
 
-    async deleteBatchJob(id: string): Promise<boolean> {
-      const db = this.getTenantDb();
-      db.prepare(`DELETE FROM ${TABLES.batchJobItems} WHERE batchId = @id`).run({ id });
-      return db.prepare(`DELETE FROM ${TABLES.batchJobs} WHERE id = @id`).run({ id }).changes === 1;
-    }
-
     private mapBatchJob(row: SqliteRow): IBatchJob {
       return {
         _id: row.id as string,

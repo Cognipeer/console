@@ -581,6 +581,8 @@ describe('the error codes', () => {
       | 'storage_unavailable'
       | 'storage_timeout'
       | 'internal_error'
+      // The plan's storage is full (`server/api/fileHttp.ts`).
+      | 'storage_quota_exceeded'
       // A provider setting or endpoint the console refuses (`providers/errors.ts`, `providerEndpointGuard.ts`).
       | typeof PROVIDER_SETTINGS_INVALID
       | typeof PROVIDER_ENDPOINT_NOT_ALLOWED;

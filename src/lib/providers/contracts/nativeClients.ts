@@ -19,6 +19,7 @@
  * tool-call deltas, raw finish reason, usage).
  */
 
+import { guardedFetch } from './guardedFetch';
 import type {
   ModelRuleLearnedEvent,
   BaseProvider,
@@ -412,7 +413,7 @@ export function buildProviderConfig(
   transport: NativeTransport | undefined,
   maxRetries?: number,
 ): NativeProviderSpec['provider'] {
-  const baseFetch = transport?.fetch;
+  const baseFetch = transport?.fetch ?? guardedFetch;
   const kind = spec.provider.provider;
   const normalizingFetch = spec.normalizeInlineReasoning ? withInlineReasoningNormalization(baseFetch) : baseFetch;
   const fetchImpl = kind === 'openai' || kind === 'azure' || kind === 'openai-compatible'

@@ -8,7 +8,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import crypto from 'node:crypto';
 
 const hoisted = vi.hoisted(() => ({ safeFetch: vi.fn() }));
-vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: hoisted.safeFetch }));
+vi.mock('@/lib/security/outboundFetch', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/security/outboundFetch')>()),
+  safeFetch: hoisted.safeFetch,
+}));
 
 import {
   WEBHOOK_EVENT_CATALOG,

@@ -181,6 +181,31 @@ describe('client RAG API — project scope threaded to every service call', () =
     }), expect.objectContaining({ caller: expect.objectContaining({ kind: expect.any(String) }) }));
   });
 
+  it('POST .../query answers 400 for a topK that is not a whole number from 1 to 200, and for an empty query', async () => {
+    mockFn(queryRag).mockResolvedValue({ matches: [] });
+    const app = await buildApp();
+    const post = (payload: Record<string, unknown>) => app.inject({
+      method: 'POST',
+      url: '/api/client/v1/rag/modules/docs-v1/query',
+      headers: { authorization: 'Bearer tok', 'content-type': 'application/json' },
+      payload,
+    });
+
+    for (const topK of [-1, 0, 2.5, 201, 100000, '3', true, {}]) {
+      const res = await post({ query: 'q', topK });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('topK');
+    }
+    expect((await post({ query: '' })).statusCode).toBe(400);
+    expect(queryRag).not.toHaveBeenCalled();
+
+    expect((await post({ query: 'q', topK: 200 })).statusCode).toBe(200);
+    expect((await post({ query: 'q' })).statusCode).toBe(200);
+    expect(queryRag).toHaveBeenCalledTimes(2);
+    expect(queryRag).toHaveBeenNthCalledWith(1, 'tenant_acme', 'tenant-1', 'proj-a', expect.objectContaining({ topK: 200 }), expect.anything());
+    expect(queryRag).toHaveBeenNthCalledWith(2, 'tenant_acme', 'tenant-1', 'proj-a', expect.objectContaining({ topK: undefined }), expect.anything());
+  });
+
   it('DELETE .../documents/:id passes the caller project to deleteRagDocument', async () => {
     mockFn(deleteRagDocument).mockResolvedValue(true);
     const app = await buildApp();

@@ -20,6 +20,7 @@ import {
   updatePrompt,
   type PromptEnvironment,
 } from '@/lib/services/prompts';
+import { parseCreatePromptBody, parseUpdatePromptBody } from '@/lib/services/prompts/promptRequest';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -70,11 +71,9 @@ export const promptsApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
 
-      for (const field of ['name', 'template']) {
-        const value = body[field];
-        if (!value || (typeof value === 'string' && value.trim() === '')) {
-          return reply.code(400).send({ error: `${field} is required` });
-        }
+      const parsed = parseCreatePromptBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send({ error: parsed.error });
       }
 
       const prompt = await createPrompt(
@@ -82,14 +81,7 @@ export const promptsApiPlugin: FastifyPluginAsync = async (app) => {
         session.tenantId,
         projectId,
         session.userId,
-        {
-          description: body.description as string | undefined,
-          key: body.key as string | undefined,
-          metadata: body.metadata as Record<string, unknown> | undefined,
-          name: body.name as string,
-          template: body.template as string,
-          versionComment: (body.versionComment ?? body.comment) as string | undefined,
-        },
+        parsed.value,
       );
 
       return reply.code(201).send({ prompt });
@@ -189,12 +181,8 @@ export const promptsApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
 
       const prompt = await updatePrompt(session.tenantDbName, projectId, id, {
-        description: body.description as string | undefined,
-        metadata: body.metadata as Record<string, unknown> | undefined,
-        name: body.name as string | undefined,
-        template: body.template as string | undefined,
+        ...parseUpdatePromptBody(body),
         updatedBy: session.userId,
-        versionComment: (body.versionComment ?? body.comment) as string | undefined,
       });
 
       if (!prompt) {
