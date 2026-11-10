@@ -413,6 +413,18 @@ describe('sending', () => {
     expect(qa('button').some((button) => button.getAttribute('aria-label') === 'Retry uploading a.txt')).toBe(true);
   });
 
+  it('shows a full storage in its own words, not as a file that is too large, and offers no working Retry', async () => {
+    await open();
+    await pick([makeFile('a.txt')]);
+    await startUploads(1);
+    await answer(FakeXhr.instances[0]!, 413, { error: 'Storage is full (1.0 of 1.0 GB).', code: 'storage_quota_exceeded' });
+    await until(() => rowText('a.txt').includes('Failed'), 'the failure');
+    expect(rowText('a.txt')).toContain('Failed: Storage is full. Delete files you no longer need to upload more.');
+    expect(rowText('a.txt')).not.toContain('Too large');
+    const retry = qa<HTMLButtonElement>('button').find((button) => button.getAttribute('aria-label') === 'Retry uploading a.txt');
+    expect(retry === undefined || retry.disabled).toBe(true);
+  });
+
   it('keeps the other files going when one fails, and sends the failed one again on Retry', async () => {
     await open();
     await pick([makeFile('a.txt'), makeFile('b.txt', { lastModified: 2 })]);

@@ -792,6 +792,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
       not_a_member: 'üye değil',
       directory_managed: 'dizin tarafından yönetiliyor',
       group_directory_managed: 'dizin grubu',
+      seat_limit_reached: 'planda boş koltuk kalmadı',
       failed: 'başarısız',
     },
   },

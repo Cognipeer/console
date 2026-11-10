@@ -52,6 +52,7 @@
  * On a key clash the lexicographically first policy id wins.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
   getCedarVersion,
@@ -100,7 +101,7 @@ export interface IamEngineConfig {
 }
 
 const config: IamEngineConfig = {
-  validateRequests: process.env.IAM_VALIDATE_REQUESTS === '1',
+  validateRequests: getConfig().iam.validateRequests,
   versionCheckMs: VERSION_CHECK_MS,
 };
 

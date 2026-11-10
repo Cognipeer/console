@@ -109,7 +109,7 @@ export function resolveIcon(name: string): Icon {
 export type DashboardServiceCategory = 'build' | 'data' | 'operate' | 'admin';
 
 export type DashboardServiceDefinition = {
-  id: PermissionService | 'services-home';
+  id: PermissionService | 'services-home' | 'usage';
   href: string;
   navLabelKey: string;
   navDescriptionKey: string;
@@ -130,6 +130,10 @@ export type DashboardServiceDefinition = {
   requiresEnterprise?: boolean;
   /** Only usable on a self-hosted (onprem) deployment — hidden entirely on SaaS. */
   requiresOnPrem?: boolean;
+  /** The service whose permission level gates the entry, when it is not the entry's own id. */
+  permission?: PermissionService;
+  /** Shown only while plan limits are active on the deployment (`planUsageEnabled`). */
+  requiresPlanUsage?: boolean;
   /** Closed-source overlay module that provides this service. */
   enterpriseModule?: string;
   /** Settings entry — shown in the Settings section of the left nav, not the services launcher. */
@@ -159,6 +163,8 @@ interface RawPlatformServicesConfig {
     badge?: 'new';
     requiresEnterprise?: boolean;
     requiresOnPrem?: boolean;
+    permission?: string;
+    requiresPlanUsage?: boolean;
     enterpriseModule?: string;
     settings?: boolean;
   }>;
@@ -194,6 +200,8 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = RAW.services
     badge: entry.badge,
     requiresEnterprise: entry.requiresEnterprise,
     requiresOnPrem: entry.requiresOnPrem,
+    permission: entry.permission as PermissionService | undefined,
+    requiresPlanUsage: entry.requiresPlanUsage,
     enterpriseModule: entry.enterpriseModule,
     isSettings: entry.settings,
   }),
@@ -214,6 +222,8 @@ type DashboardServicesOptions = {
   effectivePermissions?: Partial<Record<string, ServicePermissionLevel>> | null;
   /** Current deployment mode. Services marked `requiresOnPrem` are hidden entirely when false. */
   isOnPrem?: boolean;
+  /** Plan limits are active on this deployment. Services marked `requiresPlanUsage` are hidden unless true. */
+  planUsageEnabled?: boolean;
 };
 
 /**
@@ -260,22 +270,27 @@ export function getDashboardServices(
     isTenantAdmin = false,
     servicesHomeOnly = false,
     isOnPrem = false,
+    planUsageEnabled = false,
   } = options;
 
   const levelOf = (id: PermissionService): ServicePermissionLevel => serviceLevelOf(options, id);
 
   return DASHBOARD_SERVICE_DEFINITIONS.filter((service) => {
     if (service.requiresOnPrem && !isOnPrem) return false;
+    if (service.requiresPlanUsage && !planUsageEnabled) return false;
+
+    // The permission service that gates the entry (its own id unless `permission` names another).
+    const gate = (service.permission ?? service.id) as PermissionService;
 
     if (service.id !== 'services-home') {
-      if (levelOf(service.id) === 'none') return false;
+      if (levelOf(gate) === 'none') return false;
     }
 
     if (
       service.tenantAdminOnly &&
       !isTenantAdmin &&
       service.id !== 'services-home' &&
-      levelOf(service.id) !== 'admin'
+      levelOf(gate) !== 'admin'
     ) {
       return false;
     }

@@ -23,6 +23,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { type EffectiveLicense, LicenseManager } from '@/lib/license/license-manager';
+import { invalidateTenantLicenseState } from '@/lib/limits/invalidate';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-license');
@@ -93,6 +94,9 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(500).send({ error: 'Failed to store license' });
       }
 
+      // The plan, service availability and enterprise access derived from the license, on every replica.
+      await invalidateTenantLicenseState(auth.tenantId);
+
       await db.switchToTenant(updatedTenant.dbName);
       const projects = await db.listProjects(auth.tenantId);
       const license = LicenseManager.getEffectiveLicenseForTenant(updatedTenant);
@@ -132,6 +136,9 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
       if (!updatedTenant) {
         return reply.code(500).send({ error: 'Failed to reset license' });
       }
+
+      // The plan, service availability and enterprise access derived from the license, on every replica.
+      await invalidateTenantLicenseState(auth.tenantId);
 
       await db.switchToTenant(updatedTenant.dbName);
       const projects = await db.listProjects(auth.tenantId);

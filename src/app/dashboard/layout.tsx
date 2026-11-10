@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { getConfig } from '@/lib/core/config';
+import { planLimitsActive } from '@/lib/limits/mode';
 import { getDatabase } from '@/lib/database';
 import { isTenantRole } from '@/lib/iam/identity';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
@@ -85,6 +86,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
     <DashboardLayout
       supportEnabled={isSupportEntryPointEnabled()}
       isOnPrem={getConfig().deployment.isOnPrem}
+      planUsageEnabled={planLimitsActive()}
       enterpriseLicensed={enterpriseLicensed}
       docsBaseUrl={getConfig().docs.baseUrl}
       user={{

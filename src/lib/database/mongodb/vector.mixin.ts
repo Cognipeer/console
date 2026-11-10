@@ -24,6 +24,10 @@ export function VectorMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
         updatedAt: now,
       };
 
+      // Server-owned: only adjustVectorIndexStorage writes them.
+      delete document.storedBytes;
+      delete document.storedVectors;
+
       const result = await db
         .collection<IVectorIndexRecord>(COLLECTIONS.vectorIndexes)
         .insertOne(document as unknown as IVectorIndexRecord);
@@ -59,6 +63,8 @@ export function VectorMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       delete payload.tenantId;
       delete payload.providerKey;
       delete payload.key;
+      delete payload.storedBytes;
+      delete payload.storedVectors;
 
       const result = await db
         .collection<IVectorIndexRecord>(COLLECTIONS.vectorIndexes)
@@ -76,6 +82,37 @@ export function VectorMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
         ...result,
         _id: result._id?.toString(),
       };
+    }
+
+    async adjustVectorIndexStorage(
+      id: string,
+      bytesDelta: number,
+      vectorsDelta: number,
+    ): Promise<IVectorIndexRecord | null> {
+      const db = this.getTenantDb();
+      // One pipeline update: atomic, and neither number goes below 0.
+      const result = await db
+        .collection<IVectorIndexRecord>(COLLECTIONS.vectorIndexes)
+        .findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          [{
+            $set: {
+              storedBytes: { $max: [0, { $add: [{ $ifNull: ['$storedBytes', 0] }, Math.round(bytesDelta)] }] },
+              storedVectors: { $max: [0, { $add: [{ $ifNull: ['$storedVectors', 0] }, Math.round(vectorsDelta)] }] },
+            },
+          }],
+          { returnDocument: 'after' },
+        );
+      return result ? { ...result, _id: result._id?.toString() } : null;
+    }
+
+    async sumVectorIndexStoredBytes(): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection<IVectorIndexRecord>(COLLECTIONS.vectorIndexes)
+        .aggregate([{ $group: { _id: null, total: { $sum: { $ifNull: ['$storedBytes', 0] } } } }])
+        .toArray();
+      return (result[0]?.total as number | undefined) ?? 0;
     }
 
     async deleteVectorIndex(id: string): Promise<boolean> {

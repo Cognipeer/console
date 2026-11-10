@@ -118,6 +118,8 @@ export function TenantMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
     }
 
     async findTenantBySlug(slug: string): Promise<ITenant | null> {
+      // A slug is matched as a plain value only.
+      if (typeof slug !== 'string' || slug.length === 0) return null;
       const db = this.getMainDb();
       const tenant = await db.collection<ITenant>(COLLECTIONS.tenants).findOne({ slug });
       if (!tenant) return null;

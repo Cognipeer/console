@@ -210,7 +210,8 @@ describe('agent-run crash-recovery reconciler (§7.1)', () => {
     expect(hoisted.publish).toHaveBeenCalledWith(
       AGENT_RUN_QUEUE,
       'run',
-      { runId: String(queuedRun._id), tenantId, tenantDbName: dbName },
+      // `channel` rides along so the worker can tell, before it claims, whether the run takes a plan-limit slot.
+      { runId: String(queuedRun._id), tenantId, tenantDbName: dbName, channel: null },
       expect.anything(),
     );
 

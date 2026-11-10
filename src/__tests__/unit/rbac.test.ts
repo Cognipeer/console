@@ -17,6 +17,12 @@ describe('RBAC service routing', () => {
     expect(getPermissionServiceForPath('/api/connectors/abc/accounts')).toBe('connectors');
   });
 
+  it('adds and removes platform models under the models permission, like creating and deleting a model', () => {
+    expect(getPermissionServiceForPath('/api/models/platform/add')).toBe('models');
+    expect(getRequiredPermissionLevel('POST', 'models')).toBe('write');
+    expect(getRequiredPermissionLevel('DELETE', 'models')).not.toBe('read');
+  });
+
   it('checks the agents permission on the runs API and the session cancel: read to look, write to act', () => {
     const paths = [
       ['POST', '/api/client/v1/agents/support/runs'],

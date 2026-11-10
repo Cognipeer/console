@@ -31,15 +31,21 @@ function ctx(output: string, forbiddenPatterns: string[], canary?: string): Dete
   } as unknown as DetectorContext;
 }
 
+/** Budget for the cases that must not time out: well above anything a loaded runner needs for a trivial regex. */
+const GENEROUS_MS = 5000;
+/** Per-pattern cut for the slow pattern in a scan: long enough that the trivial pattern beside it never times out on a busy runner. */
+const SLOW_CUTOFF_MS = 1000;
+
 describe('matchPattern', () => {
   it('matches a regex without regard to case', () => {
-    expect(matchPattern('Your API_KEY = abc', 'api[_-]?key\\s*=')).toBe('hit');
-    expect(matchPattern('nothing here', 'api[_-]?key')).toBe('miss');
+    // A generous budget: a busy CI runner can take longer than the 50 ms default to run even a trivial regex.
+    expect(matchPattern('Your API_KEY = abc', 'api[_-]?key\\s*=', GENEROUS_MS)).toBe('hit');
+    expect(matchPattern('nothing here', 'api[_-]?key', GENEROUS_MS)).toBe('miss');
   });
 
   it('matches a pattern that is not a valid regex as a literal, without regard to case', () => {
-    expect(matchPattern('Leaked: FOO(BAR', 'foo(bar')).toBe('hit');
-    expect(matchPattern('Leaked: foo bar', 'foo(bar')).toBe('miss');
+    expect(matchPattern('Leaked: FOO(BAR', 'foo(bar', GENEROUS_MS)).toBe('hit');
+    expect(matchPattern('Leaked: foo bar', 'foo(bar', GENEROUS_MS)).toBe('miss');
   });
 
   it('stops a regex that runs past its time budget', () => {
@@ -51,11 +57,13 @@ describe('matchPattern', () => {
 
 describe('scanPatterns', () => {
   it('returns the first match', () => {
-    expect(scanPatterns('alpha beta', ['gamma', 'BETA', 'alpha'])).toEqual({ matched: 'BETA', undecided: [] });
+    expect(scanPatterns('alpha beta', ['gamma', 'BETA', 'alpha'], { perPatternMs: GENEROUS_MS, totalMs: GENEROUS_MS })).toEqual({ matched: 'BETA', undecided: [] });
   });
 
   it('reports slow patterns as undecided and still finds a later match', () => {
-    const scan = scanPatterns(SLOW_INPUT, [SLOW, 'a!'], { perPatternMs: 20, totalMs: 200 });
+    // The slow pattern is cut after SLOW_CUTOFF_MS. The same per-pattern budget applies to 'a!', so it cannot time out
+    // on a busy runner (a 20 ms cut did, once, on a saturated CI runner), and the total budget leaves room for both.
+    const scan = scanPatterns(SLOW_INPUT, [SLOW, 'a!'], { perPatternMs: SLOW_CUTOFF_MS, totalMs: GENEROUS_MS });
     expect(scan.matched).toBe('a!');
     expect(scan.undecided).toEqual([SLOW]);
   });

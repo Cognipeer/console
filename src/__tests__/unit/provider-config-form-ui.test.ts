@@ -786,8 +786,43 @@ describe('editing a provider saved before a setting existed', () => {
   });
 });
 
+describe('a driver that splits its record in two layers (web search)', () => {
+  const SPLIT_SCHEMA: ProviderFormSchema = {
+    sections: [
+      {
+        title: 'Connection',
+        fields: [
+          { name: 'baseUrl', label: 'Base URL', type: 'text', scope: 'settings', settingsTarget: 'connection', required: true },
+          { name: 'apiKey', label: 'API key', type: 'password' },
+        ],
+      },
+      { title: 'Search', fields: [{ name: 'engines', label: 'Engines', type: 'text', scope: 'settings', settingsTarget: 'behavior' }] },
+    ],
+  };
+  const SPLIT_FORM: Route = ['GET', /^\/api\/providers\/drivers\/[^/]+\/form$/, () => ({ schema: SPLIT_SCHEMA })];
+  /** Saved before its behavior moved to an instance: the record still holds a search option. */
+  const SAVED_SEARCH = {
+    _id: 'prov-search', key: 'search-main', label: 'Search main', type: 'websearch', driver: 'mock-search', status: 'active',
+    hasCredentials: true, credentialFields: ['apiKey'], settings: { baseUrl: 'https://search.example', engines: 'a,b' }, metadata: {},
+  } as unknown as ProviderConfigView;
+
+  it('shows the connection only; the search options are an instance\'s', async () => {
+    await show({ mode: 'edit', provider: SAVED_SEARCH, domain: 'websearch' }, [SPLIT_FORM]);
+    expect(fieldLabels()).toEqual(expect.arrayContaining(['Base URL', 'API key']));
+    expect(fieldLabels()).not.toContain('Engines');
+  });
+
+  it('an edit keeps the settings the form does not show (the settings replace the stored ones)', async () => {
+    const { onSubmit } = await show({ mode: 'edit', provider: SAVED_SEARCH, domain: 'websearch' }, [SPLIT_FORM]);
+    await type('Base URL', 'https://search2.example');
+    await save();
+
+    expect(onSubmit.mock.calls[0]![0].values.settings).toEqual({ baseUrl: 'https://search2.example', engines: 'a,b' });
+  });
+});
+
 describe('a save the server refuses', () => {
-  const REFUSED_TOKEN = 'Enter the SAS token: the query string that starts with sv=, or the full SAS URL.';
+  const REFUSED_TOKEN ='Enter the SAS token: the query string that starts with sv=, or the full SAS URL.';
 
   // The form logs a refusal it shows; the logged error is not what these tests are about.
   beforeEach(() => {

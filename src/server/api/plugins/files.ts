@@ -293,7 +293,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/files/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'file');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'file');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List file provider drivers error', { error });
@@ -767,6 +767,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
+      // The plan's tenant-wide storage is checked by `uploadFile` (413 'storage_quota_exceeded').
       const result = await uploadFile(session.tenantDbName, session.tenantId, projectId, {
         bucketKey,
         contentType: body.contentType as string | undefined,

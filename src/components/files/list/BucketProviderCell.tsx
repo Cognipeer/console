@@ -17,6 +17,7 @@ export interface BucketProviderCellProps {
  */
 export default function BucketProviderCell({ bucket, canManageProviders }: BucketProviderCellProps) {
   const t = useTranslations('files.list');
+  const tPlatform = useTranslations('platformStorage');
   const provider = bucket.provider;
   const driver = provider ? driverInfo(provider) : null;
 
@@ -31,14 +32,16 @@ export default function BucketProviderCell({ bucket, canManageProviders }: Bucke
         </span>
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', columnGap: 8, rowGap: 2 }}>
-        {driver ? (
+        {provider?.platform ? (
+          <span className="ds-badge ds-badge-info">{tPlatform('badge')}</span>
+        ) : driver ? (
           <span className="ds-faint" style={{ fontSize: 12 }}>
             {driver.name}
           </span>
         ) : null}
         <ProviderHealthChip
           health={bucket.providerHealth}
-          href={canManageProviders ? providerHref(provider) : null}
+          href={canManageProviders && !provider?.platform ? providerHref(provider) : null}
           showReason
         />
       </div>

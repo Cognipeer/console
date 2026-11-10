@@ -4,14 +4,11 @@
  * PURITY IS A REQUIREMENT, NOT A STYLE CHOICE. `scanSecrets` is synchronous,
  * allocates nothing outside its own result and touches neither the database nor
  * the tenant ALS, because the AI App Gateway calls the credential scan directly
- * on its hot path — today it does so by importing `runPiiDetection` and handing
- * it `{ enabled: true, action: 'flag', categories: { apiKey: true } }`, which is
- * that gateway's entire secrets story. Anything that needed a tenant scope here
+ * on its hot path, with no policy or database lookup. Anything that needed a tenant scope here
  * would either break that caller or force it to fabricate one.
  *
- * The patterns below are MOVED from `piiDetector.ts`, where they rode inside the
- * PII detector and fired only when the `apiKey` category happened to be enabled.
- * They keep two things from that home, deliberately:
+ * The patterns below fire only for this family (and for the `apiKey` PII
+ * category, which is projected onto it). They keep two properties deliberately:
  *
  *   · `type: 'pii'` on every finding (via LEGACY_FINDING_TYPE), so the gateway's
  *     `if (finding.type !== 'pii') continue` filter and both providers'
@@ -56,7 +53,7 @@ export interface SecretPattern {
 }
 
 /**
- * Well-known credential shapes, verbatim from `piiDetector.ts`. They fire
+ * Well-known credential shapes, They fire
  * regardless of length and BYPASS the entropy floor, which is the whole point:
  * a short-but-unmistakable token (`AKIA…`, `xoxb-…`) has low character variety
  * and would never clear an entropy bar, yet there is no such thing as a false

@@ -321,23 +321,6 @@ export function PromptMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       }));
     }
 
-    async updatePromptComment(
-      id: string,
-      data: Partial<Pick<IPromptComment, 'content'>>,
-    ): Promise<IPromptComment | null> {
-      const db = this.getTenantDb();
-      const result = await db
-        .collection<IPromptComment>(COLLECTIONS.promptComments)
-        .findOneAndUpdate(
-          { _id: new ObjectId(id) },
-          { $set: { ...data, updatedAt: new Date() } },
-          { returnDocument: 'after' },
-        );
-
-      if (!result) return null;
-      return { ...result, _id: result._id?.toString() };
-    }
-
     async deletePromptComment(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       const result = await db

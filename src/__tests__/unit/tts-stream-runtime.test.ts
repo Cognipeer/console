@@ -8,6 +8,11 @@ import {
 } from '@/lib/providers/contracts/audioStream';
 import { UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
 
+vi.mock('@/lib/providers/contracts/guardedFetch', () => {
+  const delegate = (input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init);
+  return { guardedFetch: delegate, createGuardedFetch: () => delegate };
+});
+
 const realFetch = globalThis.fetch;
 
 afterEach(() => {

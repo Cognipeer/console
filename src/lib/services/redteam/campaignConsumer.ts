@@ -6,7 +6,9 @@
  * scan jobs routed to this node.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import { runJobUnderLease } from '@/lib/services/planLeases';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
 import { RED_TEAM_JOB, RED_TEAM_QUEUE, runCampaignJob, type RedTeamJobPayload } from './campaignJob';
 
@@ -14,7 +16,7 @@ const log = createLogger('redteam:consumer');
 let started = false;
 
 /** How many scans may run concurrently on this node. */
-const CONCURRENCY = Math.max(1, Number(process.env.REDTEAM_SCAN_CONCURRENCY ?? 2) || 2);
+const concurrency = () => getConfig().queues.redteamScanConcurrency;
 
 export async function startRedTeamQueueConsumer(): Promise<void> {
   if (started) return;
@@ -23,13 +25,22 @@ export async function startRedTeamQueueConsumer(): Promise<void> {
     RED_TEAM_QUEUE,
     async (ctx: JobContext<QueuePayload>) => {
       if (ctx.name === RED_TEAM_JOB) {
-        await runCampaignJob(ctx.data as unknown as RedTeamJobPayload);
-        return { ok: true };
+        const payload = ctx.data as unknown as RedTeamJobPayload;
+        // Plan limit (background jobs): one 'job' lease per scan; a full pool requeues the scan with a delay.
+        const leased = await runJobUnderLease({
+          tenantId: payload.tenantId,
+          holderId: payload.runId,
+          queueName: RED_TEAM_QUEUE,
+          jobName: RED_TEAM_JOB,
+          payload,
+          run: () => runCampaignJob(payload),
+        });
+        return { ok: true, ...(leased.deferred ? { deferred: true } : {}) };
       }
       throw new Error(`Unknown red-team job: ${ctx.name}`);
     },
-    { concurrency: CONCURRENCY },
+    { concurrency: concurrency() },
   );
   started = true;
-  log.info('Red-team scan queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Red-team scan queue consumer registered', { concurrency: concurrency() });
 }

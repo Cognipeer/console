@@ -342,6 +342,11 @@ const CORE_LEGACY_TARGETS: LegacyRetentionTarget[] = [
     id: 'session_files', collection: 'files', edition: 'core', label: 'Agent session files', class: 'jobs',
     managedBy: 'Agent run reconciler', setting: 'Each agent\'s attachments.retentionDays', days: () => 30,
   },
+  {
+    // Main database; pruned by the event writer (RETENTION_MS in src/lib/limits/events.ts).
+    id: 'plan_limit_events', collection: 'plan_limit_events', edition: 'core', label: 'Plan limit refusals and warnings', class: 'usage',
+    managedBy: 'Plan limit event writer', setting: 'Built in', days: () => 90,
+  },
 ];
 
 const extraTargets: RetentionTarget[] = [];

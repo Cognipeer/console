@@ -106,6 +106,12 @@ export interface GatewayCallContext {
    * and the same turn + the same message is not evaluated twice.
    */
   guardrailTurnKey?: string;
+  /**
+   * Internal: run the model without its own guardrail bindings. Only an in-process
+   * caller that IS a guardrail judge sets it (running the judge's own guardrails
+   * would recurse). No HTTP body, header or query maps to it.
+   */
+  skipModelGuardrails?: boolean;
   /** Internal: recursion depth when a Dynamic LLM resolves to another model. */
   routingDepth?: number;
   /** Internal: the Dynamic LLM decision this call serves. */
@@ -220,6 +226,8 @@ export type ModelStreamEvent =
     error: { message: string; type: string; code?: string | null; param?: string | null };
     limit?: number;
     rawFinishReason?: string;
+    /** The limit is a ceiling the caller cannot raise (a managed provider's credit cap): do not retry with a raised one. */
+    hardCap?: boolean;
   }
   /**
    * An output guardrail blocked the answer mid-stream. The consumer writes its

@@ -83,6 +83,7 @@ interface ProviderCardProps {
 function ProviderCard({ provider, groupName, selected, focused, canManageProviders, onSelect, onFocusChange }: ProviderCardProps) {
   const t = useTranslations('files.create');
   const tCommon = useTranslations('files.common');
+  const tPlatform = useTranslations('platformStorage');
   const ids = useId();
   const nameId = `${ids}-name`;
   const detailsId = `${ids}-details`;
@@ -91,7 +92,7 @@ function ProviderCard({ provider, groupName, selected, focused, canManageProvide
   const driver = driverInfo(provider);
   const state = provider.providerHealth?.state;
   const hasProblem = !usable || state === 'failed' || state === 'inactive' || state === 'untested';
-  const href = canManageProviders && hasProblem ? providerHref(provider) : null;
+  const href = canManageProviders && hasProblem && provider.platform !== true ? providerHref(provider) : null;
   // A provider that is off for a reason the health does not name (its status says it is not active).
   const unnamedReason = !usable && state !== 'inactive';
 
@@ -139,7 +140,14 @@ function ProviderCard({ provider, groupName, selected, focused, canManageProvide
           {provider.label}
         </span>
         <div id={detailsId} className="ds-col" style={{ gap: 4 }}>
-          <span className="form-source-desc">{driver.name}</span>
+          {provider.platform ? (
+            <>
+              <span><span className="ds-badge ds-badge-info">{tPlatform('badge')}</span></span>
+              <span className="form-source-desc">{tPlatform('files.providerHint')}</span>
+            </>
+          ) : (
+            <span className="form-source-desc">{driver.name}</span>
+          )}
           <ProviderHealthChip health={provider.providerHealth} showReason />
           {isLocalDiskProvider(provider) ? <span className="form-source-desc">{t('provider.localDisk')}</span> : null}
           {unnamedReason ? <span className="form-source-desc">{t('provider.notActive')}</span> : null}

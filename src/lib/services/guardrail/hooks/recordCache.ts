@@ -32,6 +32,7 @@
  * cache about it.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
@@ -252,7 +253,7 @@ class RecordCache<T> {
  * dev/test run is what catches the mistake in the first place.
  */
 function freezeInDev<T>(value: T | null): T | null {
-  if (value !== null && typeof value === 'object' && process.env.NODE_ENV !== 'production') {
+  if (value !== null && typeof value === 'object' && getConfig().nodeEnv !== 'production') {
     return Object.freeze(value);
   }
   return value;

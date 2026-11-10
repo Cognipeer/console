@@ -30,6 +30,7 @@ import {
   getUserAuthState,
   getUserIdentity,
   invalidateUserAuthState,
+  isSessionIssuedBeforeCredentialChange,
   isUserDisabled,
   isUserLoginBlocked,
   userAuthStateCacheKey,
@@ -240,5 +241,67 @@ describe('getUserIdentity (state and current role)', () => {
     invalidatePrincipal(null, 'u1');
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(h.store.has(IDENTITY_KEY)).toBe(true);
+  });
+});
+
+describe('getUserIdentity: last password change', () => {
+  const changedAt = new Date('2026-01-01T00:00:10.750Z');
+  const changedAtSeconds = Math.floor(changedAt.getTime() / 1000);
+
+  it('reports the last password change in whole seconds and caches it with the identity', async () => {
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', tenantId: 't1', role: 'admin', passwordChangedAt: changedAt });
+    await expect(getUserIdentity(DB, 't1', 'u1')).resolves.toEqual({
+      state: 'active',
+      role: 'admin',
+      sessionsValidFrom: changedAtSeconds,
+    });
+    expect(h.store.get(IDENTITY_KEY)).toBe(`active:admin:${changedAtSeconds}`);
+
+    // served from the cache with the same value
+    h.db.findUserById.mockClear();
+    await expect(getUserIdentity(DB, 't1', 'u1')).resolves.toEqual({
+      state: 'active',
+      role: 'admin',
+      sessionsValidFrom: changedAtSeconds,
+    });
+    expect(h.db.findUserById).not.toHaveBeenCalled();
+  });
+
+  it('accepts a change stored as text (SQLite rows) and leaves it out when unreadable', async () => {
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', tenantId: 't1', role: 'user', passwordChangedAt: changedAt.toISOString() });
+    await expect(getUserIdentity(DB, 't1', 'u1')).resolves.toMatchObject({ sessionsValidFrom: changedAtSeconds });
+
+    h.store.clear();
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', tenantId: 't1', role: 'user', passwordChangedAt: 'not a date' });
+    const identity = await getUserIdentity(DB, 't1', 'u1');
+    expect(identity).not.toHaveProperty('sessionsValidFrom');
+    expect(h.store.get(IDENTITY_KEY)).toBe('active:user');
+  });
+
+  it('re-reads the row for a cached value with a malformed change field', async () => {
+    for (const bad of ['active:admin:soon', 'active:admin:1:2', 'active:admin:-5']) {
+      h.store.set(IDENTITY_KEY, bad);
+      h.db.findUserById.mockResolvedValue({ _id: 'u1', tenantId: 't1', role: 'admin' });
+      await expect(getUserIdentity(DB, 't1', 'u1')).resolves.toEqual({ state: 'active', role: 'admin' });
+    }
+    expect(h.db.findUserById).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('isSessionIssuedBeforeCredentialChange', () => {
+  it('is false when no change is recorded', () => {
+    expect(isSessionIssuedBeforeCredentialChange(100, undefined)).toBe(false);
+    expect(isSessionIssuedBeforeCredentialChange(undefined, undefined)).toBe(false);
+  });
+
+  it('is true only for a session issued in an earlier second than the change', () => {
+    expect(isSessionIssuedBeforeCredentialChange(99, 100)).toBe(true);
+    expect(isSessionIssuedBeforeCredentialChange(100, 100)).toBe(false);
+    expect(isSessionIssuedBeforeCredentialChange(101, 100)).toBe(false);
+  });
+
+  it('treats a session without an issue time as older than a recorded change', () => {
+    expect(isSessionIssuedBeforeCredentialChange(undefined, 100)).toBe(true);
+    expect(isSessionIssuedBeforeCredentialChange(Number.NaN, 100)).toBe(true);
   });
 });

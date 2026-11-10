@@ -23,9 +23,12 @@ import {
   type ProviderTestResult,
 } from './providerAccessModel';
 import {
+  formForLayer,
+  isLayeredForm,
   missingRequiredFields,
   partitionProviderValues,
   ProviderRequestError,
+  settingsOutsideForm,
   storedCredentialFields,
   visibleSections,
 } from './providerFormModel';
@@ -173,7 +176,11 @@ export default function ProviderConfigModal({
   hideProjects = false,
 }: ProviderConfigModalProps) {
   const t = useTranslations('providerAccess');
-  const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
+  const [loadedSchema, setSchema] = useState<ProviderFormSchema | null>(null);
+  // A driver that splits its record in two layers (web search) shows the connection here; the behavior is edited on
+  // the instances that point at the provider.
+  const schema = useMemo(() => (loadedSchema ? formForLayer(loadedSchema, 'connection') : null), [loadedSchema]);
+  const layered = isLayeredForm(loadedSchema);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -471,7 +478,10 @@ export default function ProviderConfigModal({
             status: values.status ? 'active' : 'disabled',
           },
           credentials: buckets.credentials,
-          settings: buckets.settings,
+          // The settings replace the stored ones: an edit of a split record keeps the layer this form does not show.
+          settings: layered && !isCreate
+            ? { ...settingsOutsideForm(provider?.settings, schema), ...buckets.settings }
+            : buckets.settings,
           metadata,
         },
       });

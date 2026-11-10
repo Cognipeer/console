@@ -8,9 +8,9 @@
  * regardless of whether a real proxy sat in front of this process.
  */
 import { afterEach, describe, it, expect } from 'vitest';
-import { resolveTrustProxyOption } from '@/server/app';
+import { resolveTrustProxyOption, startupSettingWarnings } from '@/server/app';
 import { getAuthzClientIp, getClientIp, trustsEveryHop } from '@/server/api/fastify-utils';
-import { reloadConfig } from '@/lib/core/config';
+import { reloadConfig, type AppConfig } from '@/lib/core/config';
 import Fastify, { type FastifyRequest } from 'fastify';
 
 function makeRequest(overrides: {
@@ -152,5 +152,43 @@ describe('getAuthzClientIp (token IP allowlists, policy `ip` conditions)', () =>
   it('returns "unknown" rather than throwing when there is no peer at all', () => {
     withProxies(undefined);
     expect(getAuthzClientIp({ ip: '', raw: {}, headers: {} } as unknown as FastifyRequest)).toBe('unknown');
+  });
+});
+
+describe('startupSettingWarnings', () => {
+  function configWith(
+    nodeEnv: string,
+    trustedProxies: string[],
+    loginTenantScan = false,
+    passwordChangeEndsSessions = true,
+  ): AppConfig {
+    return {
+      nodeEnv,
+      network: { trustedProxies },
+      auth: { loginTenantScan, passwordChangeEndsSessions },
+    } as unknown as AppConfig;
+  }
+
+  it('warns in production while no trusted proxy is configured', () => {
+    const warnings = startupSettingWarnings(configWith('production', []));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/TRUSTED_PROXIES/);
+  });
+
+  it('says nothing about proxies once they are configured, or outside production', () => {
+    expect(startupSettingWarnings(configWith('production', ['10.0.0.0/8']))).toEqual([]);
+    expect(startupSettingWarnings(configWith('development', []))).toEqual([]);
+  });
+
+  it('warns while the legacy sign-in lookup in every tenant is on', () => {
+    const warnings = startupSettingWarnings(configWith('development', [], true));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/AUTH_LOGIN_TENANT_SCAN=false/);
+  });
+
+  it('warns while password changes keep earlier sessions valid', () => {
+    const warnings = startupSettingWarnings(configWith('development', [], false, false));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/AUTH_PASSWORD_CHANGE_ENDS_SESSIONS/);
   });
 });

@@ -37,7 +37,7 @@ vi.mock('@/lib/services/models/catalog', () => {
       this.providerKey = providerKey;
     }
   }
-  return { getProviderModelCatalog: vi.fn(), ProviderCatalogNotFoundError, ProviderCatalogDisabledError };
+  return { getProviderCatalog: vi.fn(), ProviderCatalogNotFoundError, ProviderCatalogDisabledError };
 });
 
 vi.mock('@/lib/services/models/modelService', () => ({
@@ -57,11 +57,12 @@ vi.mock('@/lib/services/projects/projectContext', () => {
 });
 
 import {
-  getProviderModelCatalog,
+  getProviderCatalog,
   ProviderCatalogDisabledError,
   ProviderCatalogNotFoundError,
   type ProviderModelCatalog,
 } from '@/lib/services/models/catalog';
+import { ManagedProviderError } from '@/lib/services/providers/managedProviderErrors';
 import { getModelById, listModelProviders } from '@/lib/services/models/modelService';
 import { resolveProjectContext, ProjectContextError } from '@/lib/services/projects/projectContext';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
@@ -118,7 +119,7 @@ const CATALOG: ProviderModelCatalog = {
 };
 
 const catalogUrl = (key: string) => `/api/models/providers/${key}/catalog`;
-const catalogMock = getProviderModelCatalog as ReturnType<typeof vi.fn>;
+const catalogMock = getProviderCatalog as ReturnType<typeof vi.fn>;
 
 describe('GET /api/models/providers/:providerKey/catalog', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
@@ -150,6 +151,25 @@ describe('GET /api/models/providers/:providerKey/catalog', () => {
       projectId: 'project-1',
       providerKey: 'openai-1',
     });
+  });
+
+  it('passes a platform provider catalog through (200, platform models, assigned flag)', async () => {
+    const platformCatalog = {
+      platform: true,
+      assigned: false,
+      models: [{ key: 'pm-1', name: 'PM 1', category: 'llm', description: 'd', unavailable: false }],
+    };
+    catalogMock.mockResolvedValue(platformCatalog);
+    const res = await app.inject({ method: 'GET', url: catalogUrl('platform-prov'), headers: HEADERS });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<unknown>(res.body)).toEqual(platformCatalog);
+  });
+
+  it('maps a managed-provider refusal to a 4xx, never a 500', async () => {
+    catalogMock.mockRejectedValue(new ManagedProviderError());
+    const res = await app.inject({ method: 'GET', url: catalogUrl('platform-prov'), headers: HEADERS });
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ code?: string }>(res.body).code).toBe('managed_provider_restricted');
   });
 
   it('is never cached: the listing is live and per caller', async () => {

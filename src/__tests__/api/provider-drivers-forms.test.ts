@@ -15,6 +15,8 @@ const mockGetFormSchema = vi.hoisted(() => vi.fn().mockReturnValue({ sections: [
 vi.mock('@/lib/providers', () => ({
   providerRegistry: {
     listDescriptors: mockListDescriptors,
+    // The routes list the drivers a tenant may pick (internal ones hidden).
+    listTenantDescriptors: mockListDescriptors,
     getFormSchema: mockGetFormSchema,
   },
 }));
