@@ -13,6 +13,7 @@ import Markdown from './AgentMarkdown';
 import CompactionDivider from './CompactionDivider';
 import LiveToolCalls from './LiveToolCalls';
 import { isGenerating, type LiveSegment } from './liveFlow';
+import { LIVE_LATEST_ANCHOR_ID } from './latestMessageUi';
 import { PlanCard, PlanUpdateRow } from './PlanCard';
 import { planChangeParts } from './planUi';
 import ReasoningBlock from './ReasoningBlock';
@@ -24,6 +25,9 @@ import classes from './AgentSessionView.module.css';
 export default function LiveTurnFlow({ segments }: { segments: LiveSegment[] }) {
     const generating = isGenerating(segments);
     const last = segments.length - 1;
+    // The newest text block: the latest-message bar above the transcript jumps here.
+    let lastText = -1;
+    segments.forEach((segment, index) => { if (segment.kind === 'text') lastText = index; });
     // The agent's own passes are numbered in the order they were made, like the stored turn numbers them.
     let passes = 0;
     let plans = 0;
@@ -40,7 +44,11 @@ export default function LiveTurnFlow({ segments }: { segments: LiveSegment[] }) 
                 return <LiveToolCalls key={`tools-${index}`} calls={segment.calls} generating={generating && index === last} />;
             case 'text':
                 return (
-                    <Box key={`text-${index}`} className={classes.chatMarkdown}>
+                    <Box
+                        key={`text-${index}`}
+                        id={index === lastText ? LIVE_LATEST_ANCHOR_ID : undefined}
+                        className={index === lastText ? `${classes.chatMarkdown} ${classes.answerAnchor}` : classes.chatMarkdown}
+                    >
                         <Markdown text={segment.text} />
                     </Box>
                 );
