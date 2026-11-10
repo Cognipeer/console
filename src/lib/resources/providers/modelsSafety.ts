@@ -81,6 +81,23 @@ export function mapProvider(p: Doc): ResourceRecord {
   });
 }
 
+/**
+ * A web search instance: key, name, status, project and the provider it searches through. Settings (behavior
+ * prompts, cache config) and metadata are never surfaced.
+ */
+export function mapWebSearchInstance(i: Doc): ResourceRecord {
+  const status = str(i.status);
+  const edges = createEdgeCollector('websearch-instance');
+  edges.add('websearchInstance.provider', i.providerKey, 'providerKey');
+  const record = baseRecord('websearch-instance', i, {
+    name: str(i.name) ?? str(i.key) ?? String(i._id ?? i.id),
+    status,
+    attributes: buildAttributes({ providerKey: str(i.providerKey), type: 'websearch' }),
+  });
+  const done = edges.done();
+  return done ? { ...record, edges: done } : record;
+}
+
 /** apiKey / apiKeySealed / baseUrl / lastError / metadata are never surfaced. */
 export function mapInferenceServer(s: Doc): ResourceRecord {
   const status = str(s.status);
@@ -215,6 +232,16 @@ export const modelsSafetyResourceTypes: ResourceTypeDefinition[] = [
     edition: 'community',
     list: async ({ db, tenantId }) => (await db.listProviders(tenantId)).map((p) => mapProvider(p as never)),
     detailUrl: (r) => `/dashboard/providers/${encodeURIComponent(r.id)}`,
+  },
+  {
+    type: 'websearch-instance',
+    service: 'websearch',
+    category: 'models',
+    // Own project or tenant-wide (no projectId), like a crawler.
+    scope: 'project-or-tenant',
+    edition: 'community',
+    list: async ({ db, tenantId }) => (await db.listWebSearchInstances(tenantId)).map((i) => mapWebSearchInstance(i as never)),
+    detailUrl: (r) => (r.key ? `/dashboard/websearch/${encodeURIComponent(r.key)}` : null),
   },
   {
     type: 'inference-server',

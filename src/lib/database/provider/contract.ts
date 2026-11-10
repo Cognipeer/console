@@ -116,6 +116,7 @@ import type {
   IReranker,
   IRerankerRunLog,
   IWebSearchRunLog,
+  IWebSearchInstance,
   RerankerStatus,
   ITenant,
   ITenantUserDirectoryEntry,
@@ -220,6 +221,7 @@ import type {
   OwnedResourceListFilter,
 } from './types';
 import type { EnterpriseDbMethods } from '@/enterprise/registry';
+import type { MonthlyMeter, PlanLimitEvent, PlanLimitKind } from '@/lib/limits/types';
 
 // `EnterpriseDbMethods` is EMPTY in the community edition and augmented by the
 // enterprise overlay (gpu-fleet + sandbox methods). See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
@@ -663,6 +665,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     >,
   ): Promise<IVectorIndexRecord | null>;
   deleteVectorIndex(id: string): Promise<boolean>;
+  /**
+   * Atomically adds to the metered size of a platform index (`storedBytes`, `storedVectors`), each clamped at 0.
+   * Returns the record after the change, or null when it does not exist.
+   */
+  adjustVectorIndexStorage(
+    id: string,
+    bytesDelta: number,
+    vectorsDelta: number,
+  ): Promise<IVectorIndexRecord | null>;
+  /** The metered bytes of every vector index of the tenant database. */
+  sumVectorIndexStoredBytes(): Promise<number>;
   /** Record one similarity query for the index analytics panel. */
   createVectorQueryLog(
     log: Omit<IVectorQueryLog, '_id'>,
@@ -1752,6 +1765,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRerankerRunLog[]>;
 
   // ── Web Search operations (tenant-specific) ──
+  // ── Web search instances (tenant-specific; behavior on top of a websearch provider) ──
+  createWebSearchInstance(
+    instance: Omit<IWebSearchInstance, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IWebSearchInstance>;
+  updateWebSearchInstance(
+    id: string,
+    data: Partial<Omit<IWebSearchInstance, '_id' | 'tenantId' | 'key' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IWebSearchInstance | null>;
+  deleteWebSearchInstance(id: string): Promise<boolean>;
+  /** Tenant-wide lookup by key (visibility is the service's concern). */
+  findWebSearchInstanceByKey(tenantId: string, key: string): Promise<IWebSearchInstance | null>;
+  listWebSearchInstances(tenantId: string, filters?: { providerKey?: string }): Promise<IWebSearchInstance[]>;
+
   createWebSearchRunLog(
     log: Omit<IWebSearchRunLog, '_id' | 'createdAt'>,
   ): Promise<IWebSearchRunLog>;
@@ -2860,6 +2886,38 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   consumeBetaAccessCode(code: string, usedBy: { email: string }): Promise<boolean>;
   /** Revert a used code back to active (rollback when registration fails after the claim). */
   releaseBetaAccessCode(code: string): Promise<boolean>;
+
+  // ── Plan limits usage (main database) ──
+  /** Atomically add to the tenant's monthly meters for a period (`YYYY-MM`, UTC). */
+  incrementPlanUsageMonthly(
+    tenantId: string,
+    period: string,
+    deltas: Partial<Record<MonthlyMeter, number>>,
+  ): Promise<void>;
+  getPlanUsageMonthly(tenantId: string, period: string): Promise<Partial<Record<MonthlyMeter, number>>>;
+  listPlanUsageMonthly(
+    period: string,
+    opts?: { tenantIds?: string[] },
+  ): Promise<Array<{ tenantId: string; period: string } & Partial<Record<MonthlyMeter, number>>>>;
+  insertPlanLimitEvents(events: PlanLimitEvent[]): Promise<void>;
+  /** Newest first. */
+  listPlanLimitEvents(
+    tenantId: string,
+    opts: { since?: Date; kind?: PlanLimitKind; limit: number },
+  ): Promise<PlanLimitEvent[]>;
+  deletePlanLimitEventsBefore(cutoff: Date): Promise<number>;
+  /** Keep the highest value seen for a tenant/day/dimension/hour. Dimension must match [a-zA-Z0-9_]+. */
+  maxPlanUsagePeak(
+    tenantId: string,
+    day: string,
+    dimension: string,
+    hour: number,
+    value: number,
+  ): Promise<void>;
+  getPlanUsagePeaks(
+    tenantId: string,
+    days: string[],
+  ): Promise<Array<{ day: string; dimension: string; hour: number; value: number }>>;
 
   // ── IAM document store (tenant-scoped; collections/tables created lazily) ──
   /** One document by id, or null. */

@@ -54,6 +54,7 @@ export interface ModelOption {
   providerDriver?: string;
   modelId?: string;
   settings?: Record<string, unknown>;
+  capabilities?: { supportsReasoning?: boolean } | null;
 }
 
 export interface PlaygroundMessage {
@@ -119,6 +120,7 @@ export function Playground({
         .map((m: {
           key: string; name: string; category: string; provider?: string;
           providerDriver?: string; modelId?: string; settings?: Record<string, unknown>;
+          capabilities?: { supportsReasoning?: boolean } | null;
         }) => ({
           key: m.key,
           name: m.name,
@@ -127,6 +129,7 @@ export function Playground({
           providerDriver: m.providerDriver,
           modelId: m.modelId,
           settings: m.settings,
+          capabilities: m.capabilities,
         }));
       setModels(llmModels);
       // Auto-select if initialModelKey matches or select first
@@ -176,7 +179,7 @@ export function Playground({
 
   const selectedInfo = models.find((m) => m.key === selectedModel);
   const reasoningControl = playgroundReasoningControl(
-    selectedInfo ? { driver: selectedInfo.providerDriver, modelId: selectedInfo.modelId, settings: selectedInfo.settings } : undefined,
+    selectedInfo ? { driver: selectedInfo.providerDriver, modelId: selectedInfo.modelId, settings: selectedInfo.settings, capabilities: selectedInfo.capabilities } : undefined,
   );
 
   const handleSystemPromptChange = (value: string) => {

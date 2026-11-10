@@ -172,6 +172,7 @@ describe('type definitions', () => {
   const rows = (extra: object = {}) => [{ _id: 'x1', key: 'k', name: 'N', projectId: 'p1', ...extra }];
   const db = {
     listProviders: vi.fn().mockResolvedValue(rows({ label: 'L', status: 'active' })),
+    listWebSearchInstances: vi.fn().mockResolvedValue(rows({ status: 'active' })),
     listInferenceServers: vi.fn().mockResolvedValue(rows({ status: 'active' })),
     listGuardrails: vi.fn().mockResolvedValue(rows()),
     listGuardrailWordLists: vi.fn().mockResolvedValue(rows()),
@@ -190,7 +191,7 @@ describe('type definitions', () => {
   const ctx = { db: db as unknown as DatabaseProvider, tenantId: 'ten', tenantDbName: 'd' } satisfies ResourceProviderContext;
 
   it('registers every expected type id', () => {
-    expect(modelsSafetyResourceTypes.map((d) => d.type)).toEqual(['provider', 'inference-server', 'guardrail', 'guardrail-word-list', 'pii-policy']);
+    expect(modelsSafetyResourceTypes.map((d) => d.type)).toEqual(['provider', 'websearch-instance', 'inference-server', 'guardrail', 'guardrail-word-list', 'pii-policy']);
     expect(qualityResourceTypes.map((d) => d.type)).toEqual(['evaluation-target', 'evaluation-dataset', 'evaluation-suite', 'redteam-campaign', 'redteam-custom-probe', 'analysis-definition']);
     expect(operationsResourceTypes.map((d) => d.type)).toEqual(['alert-rule', 'config-group', 'config-item', 'quota-policy']);
   });
@@ -209,6 +210,7 @@ describe('type definitions', () => {
     expect(db.listProviders).toHaveBeenCalledWith('ten');
     expect(db.listAlertRules).toHaveBeenCalledWith('ten');
     expect(db.listQuotaPolicies).toHaveBeenCalledWith('ten');
+    expect(db.listWebSearchInstances).toHaveBeenCalledWith('ten');
     expect(db.listInferenceServers).toHaveBeenCalledWith('ten');
   });
 

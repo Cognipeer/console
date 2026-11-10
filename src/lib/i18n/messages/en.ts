@@ -5,6 +5,8 @@ import { agentChannelsListEn } from './agentChannelsList.en';
 import { agentChannelsSetupEn } from './agentChannelsSetup.en';
 import { agentTemplatesEn } from './agentTemplates.en';
 import { alertsEn, incidentsEn } from './alerts.en';
+import { usageEn } from './usage.en';
+import { usageLimitsEn } from './usageLimits.en';
 import { analyticsDashboardsEn } from './analyticsDashboards.en';
 import { directorySyncEn } from './directorySync.en';
 import { entityHealthEn } from './entityHealth.en';
@@ -26,6 +28,8 @@ import { managedToolsEn } from './managedTools.en';
 import { tracingHealthEn } from './tracingHealth.en';
 import { projectsAccessEn } from './projectsAccess.en';
 import { modelCatalogEn } from './modelCatalog.en';
+import { webSearchEn } from './webSearch.en';
+import { platformStorageEn } from './platformStorage.en';
 
 export const en = {
   // Projects list / create / detail / limits / settings (projectsAccess.en.ts).
@@ -376,6 +380,8 @@ export const en = {
     alertChannels: 'Notification channels',
     license: 'License',
     licenseDescription: 'Apply and inspect the offline enterprise license',
+    usage: 'Usage',
+    usageDescription: 'Plan limits, capacity, monthly allowances and credits',
     sso: 'Single Sign-On',
     ssoDescription: 'OIDC connection, attribute mapping and JIT provisioning',
     ldap: 'LDAP Directory',
@@ -528,6 +534,7 @@ export const en = {
     webhooks: 'Webhooks',
     channels: 'Channels',
     license: 'License',
+    usage: 'Usage',
     sso: 'Single Sign-On',
     ldap: 'LDAP Directory',
     audit: 'Audit Log',
@@ -3516,6 +3523,10 @@ export const en = {
       deleteSuccess: 'Model deleted successfully.',
       deleteFailedTitle: 'Delete failed',
       deleteFailedMessage: 'Could not delete model. Please try again.',
+      removeFromProject: 'Remove from project',
+      removeTitle: 'Remove this model from the project?',
+      removeConfirm: 'The model stays available to add again from the catalog.',
+      removeSuccess: 'Model removed from the project.',
     },
     metrics: {
       totalModels: 'Total models',
@@ -3862,8 +3873,13 @@ export const en = {
       edit: 'Edit model',
       delete: 'Delete model',
       deleteConfirm: 'Delete this model? This action cannot be undone.',
+      removeFromProject: 'Remove from project',
+      removeTitle: 'Remove this model from the project?',
+      removeConfirm: 'The model stays available to add again from the catalog.',
     },
     notifications: {
+      removeSuccessTitle: 'Model removed',
+      removeSuccessMessage: 'The model was removed from this project.',
       refreshedTitle: 'Data refreshed',
       refreshedMessage: 'Latest usage metrics and logs are now visible.',
       errorTitle: 'Unable to load model',
@@ -3876,6 +3892,7 @@ export const en = {
     },
     pricing: {
       title: 'Pricing per 1M tokens',
+      credits: 'Credits',
     },
     sections: {
       overview: 'Model overview',
@@ -4173,6 +4190,8 @@ export const en = {
     serverDeleted: 'Server deleted successfully',
   },
   alerts: alertsEn,
+  usage: usageEn,
+  usageLimits: usageLimitsEn,
   incidents: incidentsEn,
   tracingHealth: tracingHealthEn,
   entityHealth: entityHealthEn,
@@ -6517,6 +6536,10 @@ export const en = {
   },
   // The "Add model" catalog of what a provider serves, and the Model ID autocomplete (modelCatalog.en.ts).
   modelCatalog: modelCatalogEn,
+  // The Web Search pages: instances on top of provider connections (webSearch.en.ts).
+  webSearch: webSearchEn,
+  // Platform file and vector providers (platformStorage.en.ts).
+  platformStorage: platformStorageEn,
   modelPriceCatalog: {
     confidence: {
       exact: 'Exact',
@@ -7537,7 +7560,8 @@ export const en = {
       'agent.memory': 'Memory store',
       'agent.skill': 'Skill',
       'agent.browser': 'Browser',
-      'agent.webSearchProvider': 'Web search provider',
+      'agent.webSearchProvider': 'Web search',
+      'websearchInstance.provider': 'Provider',
       'agent.crawler': 'Crawler',
       'agent.piiPolicy': 'PII protection policy',
       'model.provider': 'Provider',
@@ -7627,6 +7651,7 @@ export const en = {
       'crawler': 'Crawlers',
       'reranker': 'Rerankers',
       'provider': 'Providers',
+      'websearch-instance': 'Web search instances',
       'inference-server': 'Inference servers',
       'guardrail': 'Guardrails',
       'guardrail-word-list': 'Word lists',
@@ -7987,6 +8012,7 @@ export const en = {
     list: {
       unassigned: 'Unassigned',
       unassignedTip: 'Not usable until it is assigned to a project',
+      platform: 'Platform',
       assign: 'Assign',
     },
     detail: {

@@ -7,57 +7,40 @@
  * row. Only the deployment actually dialled differs, and that is recorded as a
  * detail of the call rather than as a routing decision.
  *
- * Health comes free from the circuit breaker. `chatResilienceKey` is already
- * scoped to `provider:modelId`, which is exactly replica granularity, so an
- * open breaker IS the "this deployment is cooling down" signal — no separate
- * health subsystem, no second source of truth about what is failing.
+ * Health comes free from the circuit breaker. `replicaBreakerKey` is scoped to
+ * `provider:modelId` (a managed route: its route id), which is exactly replica
+ * granularity, so an open breaker IS the "this deployment is cooling down"
+ * signal — no separate health subsystem, no second source of truth about what
+ * is failing.
+ *
+ * A MANAGED model (its provider is managed by the hosting operator) takes its
+ * pool from the operator's routes instead of the stored `replicas`: each route
+ * is a replica with its own driver, upstream model id and connection. The
+ * tenant-facing model stays the same; only the route that serves differs.
+ *
+ * The pool itself (listReplicas, modelForReplica, primaryReplicaModel) lives in
+ * replicaList.ts, which has no server-only imports, so code that also reaches the
+ * browser can use it; this file adds the breaker-aware ordering on top.
  */
 import type { IModel } from '@/lib/database';
 import { getCircuitState } from '@/lib/core/resilience';
+import { listReplicas, type ResolvedReplica } from './replicaList';
 
-export interface ResolvedReplica {
-  /** Position in the pool, stable across a request for logging. */
-  index: number;
-  providerKey: string;
-  modelId: string;
-  weight: number;
-  label?: string;
-  settings?: Record<string, unknown>;
-}
+export { listReplicas, modelForReplica, primaryReplicaModel, type ResolvedReplica } from './replicaList';
 
 /**
- * The pool as a list, including the single-replica case.
- *
- * A model with no `replicas` is a pool of one built from its own
- * `providerKey`/`modelId`, so every path below is the same path whether or not
- * an operator ever opened the Replicas tab.
+ * The circuit-breaker key of one replica, shared by the gateway (which trips it) and the pool order (which reads
+ * it). Tenant-scoped: the breaker map is process-global and provider keys are tenant-chosen names. A managed route is
+ * keyed by its route id, so two routes of one model never share a breaker.
  */
-export function listReplicas(model: IModel): ResolvedReplica[] {
-  const configured = Array.isArray(model.replicas) ? model.replicas : [];
-  const enabled = configured.filter((replica) => replica?.enabled !== false && replica?.providerKey);
-
-  if (enabled.length === 0) {
-    return [{
-      index: 0,
-      providerKey: model.providerKey,
-      modelId: model.modelId,
-      weight: 1,
-    }];
-  }
-
-  return enabled.map((replica, index) => ({
-    index,
-    providerKey: replica.providerKey,
-    modelId: replica.modelId || model.modelId,
-    weight: typeof replica.weight === 'number' && replica.weight > 0 ? replica.weight : 1,
-    label: replica.label,
-    settings: replica.settings,
-  }));
+export function replicaBreakerKey(prefix: string, tenantDbName: string, replica: Pick<ResolvedReplica, 'providerKey' | 'modelId' | 'routeId'>): string {
+  if (replica.routeId) return `${prefix}:${tenantDbName}:managed:${replica.routeId}`;
+  return `${prefix}:${tenantDbName}:${replica.providerKey}:${replica.modelId}`;
 }
 
 /** True when this replica's breaker is open, i.e. it is cooling down. */
-function isCooling(prefix: string, replica: ResolvedReplica): boolean {
-  return getCircuitState(`${prefix}:${replica.providerKey}:${replica.modelId}`)?.state === 'open';
+function isCooling(prefix: string, tenantDbName: string, replica: ResolvedReplica): boolean {
+  return getCircuitState(replicaBreakerKey(prefix, tenantDbName, replica))?.state === 'open';
 }
 
 /**
@@ -72,14 +55,15 @@ export function replicaOrder(
   model: IModel,
   prefix: 'chat' | 'chat-stream',
   random: () => number = Math.random,
+  tenantDbName = '',
 ): ResolvedReplica[] {
   const replicas = listReplicas(model);
-  if (replicas.length === 1) return replicas;
+  if (replicas.length <= 1) return replicas;
 
   const healthy: ResolvedReplica[] = [];
   const cooling: ResolvedReplica[] = [];
   for (const replica of replicas) {
-    (isCooling(prefix, replica) ? cooling : healthy).push(replica);
+    (isCooling(prefix, tenantDbName, replica) ? cooling : healthy).push(replica);
   }
 
   return [...weightedShuffle(healthy, random), ...weightedShuffle(cooling, random)];
@@ -112,40 +96,6 @@ function weightedShuffle(
   }
 
   return ordered;
-}
-
-/**
- * The model as it looks when this replica serves the call.
- *
- * Handed to everything downstream — parameter resolution, runtime construction,
- * the resilience key, the usage row — so none of them needs to know a pool
- * exists. `settings` is merged shallowly: a replica overrides individual knobs
- * (`azureApiVersion`) without having to restate the model's whole settings
- * object.
- */
-export function modelForReplica(model: IModel, replica: ResolvedReplica): IModel {
-  if (replica.providerKey === model.providerKey && replica.modelId === model.modelId && !replica.settings) {
-    return model;
-  }
-  return {
-    ...model,
-    providerKey: replica.providerKey,
-    modelId: replica.modelId,
-    ...(replica.settings
-      ? { settings: { ...(model.settings ?? {}), ...replica.settings } }
-      : {}),
-  };
-}
-
-/**
- * The model as served by its first enabled replica, in stored order.
- *
- * For paths that do not load-balance (embeddings, audio, image, moderation,
- * OCR, evaluation runs). A model without replicas comes back unchanged, so
- * only operators who opened the Replicas tab see any difference.
- */
-export function primaryReplicaModel(model: IModel): IModel {
-  return modelForReplica(model, listReplicas(model)[0]);
 }
 
 /**

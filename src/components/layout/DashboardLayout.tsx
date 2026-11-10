@@ -42,6 +42,7 @@ import {
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { EnterpriseUpsell } from '@/components/enterprise/EnterpriseUpsell';
+import { UsageBanner } from '@/components/usage/UsageBanner';
 import type { PermissionService, UserServicePermissions } from '@/lib/security/rbac';
 
 /**
@@ -54,7 +55,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{ sectionKey: string; ids: reado
   { sectionKey: 'settingsWorkspace', ids: ['projects', 'providers', 'config', 'tokens', 'resources'] },
   { sectionKey: 'settingsAccess', ids: ['iam', 'sso', 'ldap'] },
   { sectionKey: 'settingsGovernance', ids: ['audit', 'data-retention'] },
-  { sectionKey: 'settingsPlatform', ids: ['automations', 'cluster', 'license'] },
+  { sectionKey: 'settingsPlatform', ids: ['automations', 'cluster', 'license', 'usage'] },
 ];
 
 /** Display order of the Settings section items in the left nav. */
@@ -84,6 +85,8 @@ interface DashboardLayoutProps {
   children: ReactNode;
   supportEnabled?: boolean;
   isOnPrem?: boolean;
+  /** Plan limits are active (hosted deployment): offers the Usage page and its banner. */
+  planUsageEnabled?: boolean;
   /** Whether the tenant holds an active ENTERPRISE license; undefined when it could not be read. */
   enterpriseLicensed?: boolean;
   /** Root of the docs site the docs panel and the docs links open (DOCS_BASE_URL). */
@@ -99,7 +102,7 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, enterpriseLicensed, docsBaseUrl: configuredDocsBaseUrl, user }: DashboardLayoutProps) {
+export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, planUsageEnabled = false, enterpriseLicensed, docsBaseUrl: configuredDocsBaseUrl, user }: DashboardLayoutProps) {
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
   const pathname = usePathname() ?? '';
@@ -218,8 +221,9 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
         servicePermissions: defaultUser.servicePermissions,
         effectivePermissions,
         isOnPrem,
+        planUsageEnabled,
       }),
-    [defaultUser.role, defaultUser.servicePermissions, effectivePermissions, isTenantAdmin, isOnPrem],
+    [defaultUser.role, defaultUser.servicePermissions, effectivePermissions, isTenantAdmin, isOnPrem, planUsageEnabled],
   );
 
   const settingsServices = useMemo(
@@ -510,6 +514,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               <div className={classes.mainBreadcrumb}>
                 <DashboardBreadcrumbs />
               </div>
+              <UsageBanner enabled={planUsageEnabled && isTenantAdmin} />
               {lockedModule ? <EnterpriseUpsell module={lockedModule} /> : children}
             </main>
           </div>

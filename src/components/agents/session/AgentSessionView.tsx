@@ -19,7 +19,7 @@
  * actually happened, not just the last answer.
  */
 
-import { useTranslations } from '@/lib/i18n';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import { isPendingWake, reminderOfMessage } from '../studio/reminderUi';
 import { useSessionReminders } from '../studio/useSessionReminders';
 import { useDeleteResource } from '@/components/common/confirm';
@@ -143,6 +143,8 @@ import { useAgentModelVision } from './agentModelVision';
 import type { AgentToolConfig } from './sessionTools';
 import { type ChatMessage, type SessionRecord } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
+import { limitDimensionKey, limitMessageKey, limitMessageValues, limitTitleKey, parseLimitError, type LimitErrorInfo } from '@/lib/limits/describeLimitError';
+import { useViewer } from './useViewer';
 import classes from './AgentSessionView.module.css';
 
 interface AgentSummary {
@@ -167,9 +169,34 @@ const AUTOSCROLL_WITHIN_PX = 120;
 
 /** A failed run, with the server's classification of what failed. */
 class TurnFailure extends Error {
-    constructor(message: string, readonly type?: string) {
+    constructor(message: string, readonly type?: string, readonly code?: string, readonly limit?: LimitErrorInfo) {
         super(message);
     }
+}
+
+/** A failure from an error body (HTTP or an SSE `error` event): type, code and, for a plan limit, its details. */
+function turnFailureFrom(body: { error?: unknown; type?: string; code?: string }, fallback: string, status = 0, retryAfter?: string | null): TurnFailure {
+    const limit = parseLimitError(status, body, retryAfter) ?? undefined;
+    const code = typeof body.code === 'string' ? body.code : limit?.code;
+    return new TurnFailure(typeof body.error === 'string' && body.error ? body.error : fallback, body.type, code, limit);
+}
+
+/** Title and message of a plan-limit refusal, in the person's language. */
+function limitTexts(tl: ReturnType<typeof useTranslations>, info: LimitErrorInfo, locale: string) {
+    return {
+        title: tl(limitTitleKey(info)),
+        message: tl(limitMessageKey(info), limitMessageValues(info, { dimensionLabel: (key) => tl(key), locale })),
+    };
+}
+
+/** The fields an error turn keeps from a failure. */
+function failureFields(error: unknown): Pick<ChatMessage, 'errorType' | 'errorCode' | 'limitError'> {
+    if (!(error instanceof TurnFailure)) return {};
+    return {
+        ...(error.type ? { errorType: error.type } : {}),
+        ...(error.code ? { errorCode: error.code } : {}),
+        ...(error.limit ? { limitError: error.limit } : {}),
+    };
 }
 
 /** What an operator can do about each kind of failure. */
@@ -237,6 +264,19 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [followedUser, setFollowedUser] = useState<{ content: string; reminder?: { message: string; setAt?: string } } | null>(null);
     const [followDismissed, setFollowDismissed] = useState(false);
     const liveActive = sending || following;
+    // Plan limit: the turn waits for a free agent slot until this time (null = not waiting).
+    const [queuedUntil, setQueuedUntil] = useState<number | null>(null);
+    const [, setQueuedTick] = useState(0);
+    useEffect(() => {
+        if (!liveActive) setQueuedUntil(null);
+    }, [liveActive]);
+    useEffect(() => {
+        if (queuedUntil === null) return undefined;
+        const timer = setInterval(() => setQueuedTick((n) => n + 1), 500);
+        return () => clearInterval(timer);
+    }, [queuedUntil]);
+    const tl = useTranslations('usageLimits');
+    const locale = useLocale();
     const openActions = useMemo(() => openActionsOf(messages), [messages]);
     const status = sessionStatusKind({ live: liveActive, openActions: openActions.length, runtimeStatus: session?.runtimeStatus });
     // What the SERVER says the viewer may do with the open requests (its own rule, decided by the policy engine):
@@ -608,9 +648,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setLiveSegments((current) => applyLiveSubagent(current, data as AgentSubagentEvent));
         } else if (event === 'result') {
             onResult(data as Record<string, unknown>);
+        } else if (event === 'run.queued') {
+            // Plan limit: no free agent slot yet; the server keeps trying for a few seconds.
+            const retryInMs = Number((data as { retryInMs?: number }).retryInMs);
+            setQueuedUntil(Date.now() + (Number.isFinite(retryInMs) ? retryInMs : 0));
+        } else if (event === 'run.started') {
+            setQueuedUntil(null);
         } else if (event === 'error') {
-            const payload = data as { error?: string; type?: string };
-            throw new TurnFailure(String(payload.error || 'Chat failed'), payload.type);
+            throw turnFailureFrom(data as { error?: string; type?: string; code?: string }, 'Chat failed');
         }
     };
 
@@ -716,9 +761,18 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 notifications.show({ title: t('resolveFailed'), message: text, color: 'orange' });
                 return;
             }
+            if (error instanceof TurnFailure && error.limit?.code === 'tenant_concurrency_limited') {
+                // No free agent slot after the wait: nothing was started, so put the page back as it was.
+                const limitText = limitTexts(tl, error.limit, locale);
+                setMessages(previous);
+                setInput(message);
+                setAttached(sentFiles);
+                notifications.show({ title: limitText.title, message: limitText.message, color: 'orange' });
+                return;
+            }
             setMessages([
                 ...optimistic,
-                { role: 'error', content: text, ...(type ? { errorType: type } : {}) },
+                { role: 'error', content: text, ...failureFields(error) },
             ]);
             // The budget ran out under us (another tab, an API call): pick up its state.
             if (type === 'budget_reached') void refreshSessionMeta();
@@ -737,7 +791,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 // twice; only a missing route is worth falling back for.
                 if (res.status !== 404) {
                     const err = await res.json().catch(() => ({}));
-                    throw new TurnFailure(err.error || `Chat failed (HTTP ${res.status})`, err.type);
+                    throw turnFailureFrom(err, `Chat failed (HTTP ${res.status})`, res.status, res.headers.get('Retry-After'));
                 }
                 const plain = await fetch(`/api/agents/${agentId}/chat`, {
                     method: 'POST',
@@ -746,7 +800,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 });
                 if (!plain.ok) {
                     const err = await plain.json().catch(() => ({}));
-                    throw new TurnFailure(err.error || 'Chat failed', err.type);
+                    throw turnFailureFrom(err, 'Chat failed', plain.status, plain.headers.get('Retry-After'));
                 }
                 applyResult(await plain.json());
                 return;
@@ -805,7 +859,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     await refreshSession();
                     return;
                 }
-                throw new TurnFailure(err.error || `${t('resolveFailed')} (HTTP ${res.status})`, err.type);
+                throw turnFailureFrom(err, `${t('resolveFailed')} (HTTP ${res.status})`, res.status, res.headers.get('Retry-After'));
             }
 
             if (!isStream) {
@@ -836,8 +890,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 // The answer was recorded and the continuation then failed: the
                 // failure belongs in the transcript, after the answered card.
                 const text = err instanceof Error ? err.message : String(err);
-                const type = err instanceof TurnFailure ? err.type : undefined;
-                setMessages([...accepted, { role: 'error', content: text, ...(type ? { errorType: type } : {}) }]);
+                setMessages([...accepted, { role: 'error', content: text, ...failureFields(err) }]);
             }
         } finally {
             setResolvingId(null);
@@ -896,7 +949,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             });
             if (!res.ok || !res.body) {
                 const err = await res.json().catch(() => ({}));
-                throw new TurnFailure(err.error || `${tb('continueFailed')} (HTTP ${res.status})`, err.type);
+                throw turnFailureFrom(err, `${tb('continueFailed')} (HTTP ${res.status})`, res.status, res.headers.get('Retry-After'));
             }
             await consumeSse(res.body, handleTurnEvent((data) => {
                 const assistant = assistantFromResult(data, startedAt);
@@ -905,8 +958,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             }));
         } catch (err) {
             const text = err instanceof Error ? err.message : String(err);
-            const type = err instanceof TurnFailure ? err.type : undefined;
-            setMessages((current) => [...current, { role: 'error', content: text, ...(type ? { errorType: type } : {}) }]);
+            setMessages((current) => [...current, { role: 'error', content: text, ...failureFields(err) }]);
             void refreshSessionMeta();
         } finally {
             setSending(false);
@@ -1369,7 +1421,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                 {liveSegments.length === 0 ? (
                                                     <Group gap="xs">
                                                         <Loader size="xs" />
-                                                        <Text size="xs" c="dimmed">The agent is working…</Text>
+                                                        <Text size="xs" c="dimmed">
+                                                            {queuedUntil !== null
+                                                                ? tl('queued', { seconds: Math.max(1, Math.ceil((queuedUntil - Date.now()) / 1000)) })
+                                                                : 'The agent is working…'}
+                                                        </Text>
                                                     </Group>
                                                 ) : (
                                                     <LiveTurnFlow segments={liveSegments} />
@@ -1614,9 +1670,17 @@ function TurnPills({ message }: { message: ChatMessage }) {
 
 function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () => void }) {
     const tb = useTranslations('agents.budget');
-    const hint = message.errorType === 'budget_reached'
-        ? tb('failedHint')
-        : message.errorType ? FAILURE_HINTS[message.errorType] : undefined;
+    const tl = useTranslations('usageLimits');
+    const locale = useLocale();
+    const viewer = useViewer();
+    // A plan limit speaks first, by its code; the provider-side hint never applies to a workspace limit (`tenant_*`).
+    const limitText = message.limitError ? limitTexts(tl, message.limitError, locale) : null;
+    const isTenantAdmin = viewer.role === 'owner' || viewer.role === 'admin';
+    const hint = limitText
+        ? undefined
+        : message.errorType === 'budget_reached'
+            ? tb('failedHint')
+            : message.errorType && !message.errorCode?.startsWith('tenant_') ? FAILURE_HINTS[message.errorType] : undefined;
     return (
         <Stack gap={6}>
             <Group gap={6}>
@@ -1628,6 +1692,14 @@ function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () =
                 ) : null}
             </Group>
             <Text size="sm" className={classes.preWrap}><LinkifiedText text={message.content} /></Text>
+            {limitText ? (
+                <Text size="xs" c="dimmed">
+                    <strong>{limitText.title}.</strong> {limitText.message}{' '}
+                    {isTenantAdmin
+                        ? <Text component="a" href="/dashboard/usage" size="xs" c="blue">{tl('adminLink')}</Text>
+                        : tl('nonAdminHint')}
+                </Text>
+            ) : null}
             {hint ? <Text size="xs" c="dimmed">{hint}</Text> : null}
             {onRetry ? (
                 <Group>

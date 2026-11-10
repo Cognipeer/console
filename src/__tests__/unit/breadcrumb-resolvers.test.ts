@@ -243,3 +243,38 @@ describe('the breadcrumb of a connectors page', () => {
     expect(fetched).toEqual([]);
   });
 });
+
+describe('the web search resolver', () => {
+  const urlOf = (key: string) => `/api/websearch/providers/${key}`;
+
+  const webSearchResolver = () => {
+    const found = BREADCRUMB_RESOLVERS.find((r) => r.id === 'standard:websearch');
+    if (!found) throw new Error('no resolver for the web search pages');
+    return found;
+  };
+
+  it('names an instance by its name', async () => {
+    answers[urlOf('docs-search')] = {
+      ok: true,
+      body: {
+        provider: { key: 'docs-search', label: 'Docs search', kind: 'instance' },
+        instance: { key: 'docs-search', name: 'Docs search' },
+      },
+    };
+    expect(await webSearchResolver().resolve(contextFor('/dashboard/websearch/docs-search')))
+      .toEqual([{ index: 2, label: 'Docs search' }]);
+  });
+
+  it('names a provider that has no instance yet by its label', async () => {
+    answers[urlOf('searx-main')] = { ok: true, body: { provider: { key: 'searx-main', label: 'Searx main', kind: 'provider' } } };
+    expect(await webSearchResolver().resolve(contextFor('/dashboard/websearch/searx-main')))
+      .toEqual([{ index: 2, label: 'Searx main' }]);
+  });
+
+  it('keeps to its own pages', async () => {
+    for (const path of ['/dashboard/websearch', '/dashboard/providers/abc', '/websearch/abc']) {
+      expect(await webSearchResolver().resolve(contextFor(path)), path).toEqual([]);
+    }
+    expect(fetched).toEqual([]);
+  });
+});

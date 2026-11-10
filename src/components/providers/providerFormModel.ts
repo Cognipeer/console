@@ -35,6 +35,44 @@ export function fieldScope(field: ProviderFormField): 'credentials' | 'settings'
   return field.scope ?? 'credentials';
 }
 
+/** The two layers of a split record (web search): the provider keeps the connection, an instance the behavior. */
+export type FormLayer = 'connection' | 'behavior';
+
+/** Whether a driver splits its record in two layers: one of its fields names the layer it belongs to. */
+export function isLayeredForm(schema: ProviderFormSchema | null | undefined): boolean {
+  return allFields(schema).some((field) => field.settingsTarget !== undefined);
+}
+
+/** The layer a field of a split form belongs to: credentials and metadata are the connection's; a setting says (unset = behavior). */
+export function fieldLayer(field: ProviderFormField): FormLayer {
+  return fieldScope(field) === 'settings' ? field.settingsTarget ?? 'behavior' : 'connection';
+}
+
+/**
+ * The part of a driver form one layer edits. A form that is not split is all connection: the provider form keeps it
+ * whole and an instance gets nothing from it. A section left without a field goes.
+ */
+export function formForLayer(schema: ProviderFormSchema, layer: FormLayer): ProviderFormSchema {
+  if (!isLayeredForm(schema)) return layer === 'connection' ? schema : { sections: [] };
+  return {
+    sections: schema.sections
+      .map((section) => ({ ...section, fields: section.fields.filter((field) => fieldLayer(field) === layer) }))
+      .filter((section) => section.fields.length > 0),
+  };
+}
+
+/**
+ * The stored settings a form does not show (the other layer's, or keys no field names). A save of a split record
+ * keeps them: the settings it sends replace the stored ones wholesale.
+ */
+export function settingsOutsideForm(
+  stored: Record<string, unknown> | null | undefined,
+  schema: ProviderFormSchema | null | undefined,
+): Record<string, unknown> {
+  const shown = new Set(allFields(schema).filter((field) => fieldScope(field) === 'settings').map((field) => field.name));
+  return Object.fromEntries(Object.entries(stored ?? {}).filter(([key]) => !shown.has(key)));
+}
+
 /** Whether the conditions of a field lead back to the field itself (a contract mistake, not something a form can honour). */
 function conditionsLoop(field: ProviderFormField, fields: readonly ProviderFormField[]): boolean {
   const seen = new Set<string>();

@@ -10,6 +10,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
+import { isPlanLimitError } from '@/lib/limits/errors';
+import { assertSeats, seatKindOfRole, type SeatKind } from '@/lib/limits/seats';
 import { runWithTenantScope, type IGroup, type IUser } from '@/lib/database';
 import type { DatabaseProvider } from '@/lib/database';
 import { recordPeopleAudit, type PeopleAuditActor } from './peopleAudit';
@@ -126,6 +128,7 @@ export type BulkResultCode =
   | 'user_not_found'
   | 'already_in_state'
   | 'not_a_member'
+  | 'seat_limit_reached'
   | 'failed';
 
 export interface BulkResult {
@@ -174,7 +177,10 @@ export function newBatchId(): string {
   return randomUUID();
 }
 
-async function runOne(run: BulkRun, id: string): Promise<BulkResult> {
+/** enable: seats the dry run has handed out so far (a dry run writes nothing, so the live count misses them). */
+type DrySeats = Record<SeatKind, number>;
+
+async function runOne(run: BulkRun, id: string, drySeats: DrySeats): Promise<BulkResult> {
   const { tenantDbName, tenantId, actor, action, dryRun } = run;
   try {
     const target = await runWithTenantScope(tenantDbName, (db) => findUserByIdSafe(db, id, tenantId));
@@ -186,7 +192,20 @@ async function runOne(run: BulkRun, id: string): Promise<BulkResult> {
       if (!verdict.ok) return skipped(id, codeOf(verdict), verdict.message);
       const disabled = target.status === 'disabled';
       if ((action === 'disable') === disabled) return skipped(id, 'already_in_state');
-      if (dryRun) return { id, outcome: 'ok' };
+      // Enabling puts the account back among the seats (hosted deployments only); the same rule as assertSeatForReEnable.
+      const seatKind = action === 'enable' && target.canLogin !== false && target.kind !== 'external' ? seatKindOfRole(target.role) : undefined;
+      if (seatKind) {
+        try {
+          await assertSeats({ tenantId, kind: seatKind, adding: 1 + drySeats[seatKind], source: { type: run.audit.type, id: run.audit.apiTokenId ?? run.audit.userId } });
+        } catch (error) {
+          if (isPlanLimitError(error)) return skipped(id, 'seat_limit_reached', error.message);
+          throw error;
+        }
+      }
+      if (dryRun) {
+        if (seatKind) drySeats[seatKind] += 1;
+        return { id, outcome: 'ok' };
+      }
 
       const statusActor: UserStatusActor = {
         type: run.audit.type,
@@ -282,16 +301,19 @@ async function runOne(run: BulkRun, id: string): Promise<BulkResult> {
 /** Apply the action to each person, a few at a time, and return one result per id in the order given. */
 export async function runBulk(run: BulkRun): Promise<BulkResult[]> {
   const results: BulkResult[] = new Array(run.ids.length);
+  const drySeats: DrySeats = { console: 0, portal: 0 };
   let next = 0;
   const worker = async () => {
     for (;;) {
       const index = next;
       next += 1;
       if (index >= run.ids.length) return;
-      results[index] = await runOne(run, run.ids[index]);
+      results[index] = await runOne(run, run.ids[index], drySeats);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(BULK_CONCURRENCY, run.ids.length) }, worker));
+  // One at a time for enable: each seat check must see the seats the people before it took.
+  const concurrency = run.action === 'enable' ? 1 : BULK_CONCURRENCY;
+  await Promise.all(Array.from({ length: Math.min(concurrency, run.ids.length) }, worker));
   return results;
 }
 

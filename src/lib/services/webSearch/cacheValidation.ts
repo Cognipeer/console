@@ -10,6 +10,7 @@
 import { providerRegistry } from '@/lib/providers';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { getVectorIndex } from '@/lib/services/vector/vectorService';
+import { storageCapabilityDriverOf } from '@/lib/services/storage/managedStorage';
 import {
   WebSearchCacheConfigError,
   normalizeWebSearchProviderSettings,
@@ -69,7 +70,7 @@ export async function validateWebSearchProviderSettings(params: {
   if (provider.type !== 'vector' || provider.status !== 'active') {
     throw new WebSearchCacheConfigError('The selected vector provider is not an active vector provider.');
   }
-  assertDriverCanFilter(provider.driver);
+  assertDriverCanFilter(storageCapabilityDriverOf('vector', provider));
 
   const model = await getModelByKey(tenantDbName, cache.embeddingModelKey as string, projectId);
   if (!model) {

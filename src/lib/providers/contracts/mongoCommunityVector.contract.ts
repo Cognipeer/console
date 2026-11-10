@@ -15,6 +15,37 @@ import type {
 import { FULL_FILTER_OPERATORS } from '../domains/vectorFilter';
 import { toMongoQueryFilter } from './vectorFilterTranslators';
 
+/** Server-side evaluation operators that are not accepted inside a vector filter. */
+const DISALLOWED_FILTER_OPERATORS = new Set(['$where', '$expr', '$function', '$accumulator']);
+
+function assertSupportedFilterOperators(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertSupportedFilterOperators(item);
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (DISALLOWED_FILTER_OPERATORS.has(key)) {
+        throw new Error(`Filter operator "${key}" is not supported.`);
+      }
+      assertSupportedFilterOperators(nested);
+    }
+  }
+}
+
+/**
+ * Combine the index scope with a caller filter. The index scope is always one
+ * side of an `$and`, so a filter can only narrow results within the index.
+ */
+export function buildScopedEntriesFilter(
+  indexId: string,
+  filter?: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!filter) return { indexId };
+  assertSupportedFilterOperators(filter);
+  return { $and: [{ indexId }, filter] };
+}
+
 /**
  * MongoDB Community Vector Store — brute-force similarity, no Atlas required.
  *
@@ -401,10 +432,10 @@ export const MongoCommunityVectorProviderContract: ProviderContract<
         // Filtering happens in the scan query itself, before top-K selection,
         // so a filtered search still returns a full topK of matching vectors.
         const cursor = entries.find(
-          {
-            indexId: handle.externalId,
-            ...(query.filter ? toMongoQueryFilter(query.filter) : {}),
-          },
+          buildScopedEntriesFilter(
+            handle.externalId,
+            query.filter ? toMongoQueryFilter(query.filter) : undefined,
+          ),
           { projection: { vectorId: 1, values: 1, metadata: 1 } },
         );
 

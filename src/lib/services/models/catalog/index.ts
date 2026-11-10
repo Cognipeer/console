@@ -119,8 +119,115 @@ async function registeredKeysByModelId(
   return byModelId;
 }
 
+/** What a platform provider offers: the platform models the hosting layer registered for it. No discovery is run. */
+export interface PlatformProviderModelCatalog {
+  platform: true;
+  /** Whether the provider is assigned to the active project (its models are callable here only then). */
+  assigned: boolean;
+  models: Array<{
+    key: string;
+    name: string;
+    category: ModelCategory;
+    description?: string;
+    unavailable: boolean;
+    /** Whether the model is already added to the active project. */
+    added: boolean;
+    isMultimodal?: boolean;
+    capabilities?: {
+      contextWindow?: number;
+      maxOutputTokens?: number;
+      supportsToolCalls?: boolean;
+      supportsReasoning?: boolean;
+    };
+    /** What a call costs in credits, when the record says so. */
+    credits?: { perCall?: number; perMillionTokens?: number };
+  }>;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+/** The public facts of a platform model's metadata: capabilities and credits only, never any other key. */
+function platformModelFacts(metadata: unknown): Pick<PlatformProviderModelCatalog['models'][number], 'capabilities' | 'credits'> {
+  const meta = recordOf(metadata);
+  const caps = recordOf(meta?.capabilities);
+  const credits = recordOf(meta?.credits);
+  const capabilities = caps
+    ? {
+      contextWindow: positiveNumber(caps.contextWindow),
+      maxOutputTokens: positiveNumber(caps.maxOutputTokens),
+      supportsToolCalls: typeof caps.supportsToolCalls === 'boolean' ? caps.supportsToolCalls : undefined,
+      supportsReasoning: typeof caps.supportsReasoning === 'boolean' ? caps.supportsReasoning : undefined,
+    }
+    : undefined;
+  const creditFacts = credits
+    ? { perCall: positiveNumber(credits.perCall), perMillionTokens: positiveNumber(credits.perMillionTokens) }
+    : undefined;
+  return {
+    capabilities: capabilities && Object.values(capabilities).some((v) => v !== undefined) ? capabilities : undefined,
+    credits: creditFacts && Object.values(creditFacts).some((v) => v !== undefined) ? creditFacts : undefined,
+  };
+}
+
+/** The credit price of a platform model row (from its metadata), or undefined when it has none. */
+export function platformModelCredits(metadata: unknown): { perCall?: number; perMillionTokens?: number } | undefined {
+  return platformModelFacts(metadata).credits;
+}
+
 /**
- * The model catalog of a provider of the project. Throws `ProviderCatalogNotFoundError` (404) and
+ * The catalog of a platform provider, looked up tenant-wide. It never opens credentials or asks the upstream: the
+ * models are the platform model rows of the provider.
+ */
+async function getPlatformProviderCatalog(
+  tenantDbName: string,
+  projectId: string,
+  config: { key: string; projectId?: unknown; projectIds?: unknown },
+): Promise<PlatformProviderModelCatalog> {
+  const rows = await listModels(tenantDbName, '', { providerKey: config.key });
+  const assigned = String(config.projectId) === String(projectId)
+    || (Array.isArray(config.projectIds) && config.projectIds.map(String).includes(String(projectId)));
+  return {
+    platform: true,
+    assigned,
+    models: rows
+      .filter((model) => model.platform && model.providerKey === config.key)
+      .map((model) => ({
+        key: model.key,
+        name: model.name,
+        category: model.category,
+        description: model.description,
+        unavailable: model.metadata?.inactive === true,
+        added: Array.isArray(model.projectIds) && model.projectIds.map(String).includes(String(projectId)),
+        isMultimodal: typeof model.isMultimodal === 'boolean' ? model.isMultimodal : undefined,
+        ...platformModelFacts(model.metadata),
+      })),
+  };
+}
+
+/**
+ * The catalog the route answers: a platform provider is answered from its platform model rows (see
+ * `PlatformProviderModelCatalog`), whether or not it is assigned to the project, with no discovery and no credentials
+ * opened; any other provider through `getProviderModelCatalog`.
+ */
+export async function getProviderCatalog(
+  params: { tenantDbName: string; tenantId: string; projectId: string; providerKey: string },
+  deps?: DiscoveryDeps,
+): Promise<ProviderModelCatalog | PlatformProviderModelCatalog> {
+  const { tenantDbName, tenantId, projectId, providerKey } = params;
+  const tenantWide = await getProviderConfigByKey(tenantDbName, tenantId, providerKey);
+  if (tenantWide?.platform && tenantWide.tenantId === tenantId && MODEL_PROVIDER_TYPES.has(tenantWide.type)) {
+    return getPlatformProviderCatalog(tenantDbName, projectId, tenantWide);
+  }
+  return getProviderModelCatalog(params, deps);
+}
+
+/**
+ * The model catalog of a (non-platform) provider of the project. Throws `ProviderCatalogNotFoundError` (404) and
  * `ProviderCatalogDisabledError` (409); everything about the listing itself, including credentials that cannot be
  * opened, is answered in the catalog's `error`.
  */
@@ -131,7 +238,8 @@ export async function getProviderModelCatalog(
   const { tenantDbName, tenantId, projectId, providerKey } = params;
 
   const config = await getProviderConfigByKey(tenantDbName, tenantId, providerKey, projectId);
-  if (!config || config.tenantId !== tenantId || !MODEL_PROVIDER_TYPES.has(config.type)) {
+  // A platform provider never reaches discovery (it would open operator credentials): `getProviderCatalog` answers it.
+  if (!config || config.platform || config.tenantId !== tenantId || !MODEL_PROVIDER_TYPES.has(config.type)) {
     throw new ProviderCatalogNotFoundError(providerKey);
   }
   if (config.status === 'disabled') throw new ProviderCatalogDisabledError(providerKey);

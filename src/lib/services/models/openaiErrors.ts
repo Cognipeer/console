@@ -1,4 +1,5 @@
 import { redactDataUrls } from '@/lib/services/logRedaction';
+import { isPlanLimitError } from '@/lib/limits/errors';
 import { isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 import { UpstreamRequestError } from '@/lib/providers/contracts/upstreamError';
 import type { TokenUsage, UsageCostResult } from './usageLogger';
@@ -42,6 +43,11 @@ export type OutputTokenLimitOptions = OutputTokenLimitBilling & {
   rawFinishReason?: string;
   /** The caller's wire dialect, so the message names the parameter the caller actually sends. Default: chat completions. */
   dialect?: OutputLimitDialect;
+  /**
+   * The limit is a ceiling the caller cannot raise (a managed provider's credit cap): a retry with a raised
+   * limit would be clamped to the same number and charged again for the same cut-off answer.
+   */
+  hardCap?: boolean;
 };
 
 export class OutputTokenLimitError extends Error {
@@ -52,6 +58,8 @@ export class OutputTokenLimitError extends Error {
   readonly usageBooked?: boolean;
   readonly rawFinishReason?: string;
   readonly dialect?: OutputLimitDialect;
+  /** The limit sent is a hard ceiling: raising it and retrying cannot help (see `OutputTokenLimitOptions.hardCap`). */
+  readonly hardCap?: boolean;
 
   constructor(limit?: number, options?: OutputTokenLimitOptions) {
     const limitDescription = limit ? ` (${limit} tokens)` : '';
@@ -72,6 +80,7 @@ export class OutputTokenLimitError extends Error {
     if (options?.usageBooked) this.usageBooked = true;
     if (options?.rawFinishReason) this.rawFinishReason = options.rawFinishReason;
     if (options?.dialect) this.dialect = options.dialect;
+    if (options?.hardCap) this.hardCap = true;
   }
 }
 
@@ -288,6 +297,11 @@ export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
   // The provider's own error finish is its fault, not the caller's: a 502 with the code its raw reason names.
   if (error instanceof UpstreamFinishError) {
     return normalized(error.status, error.message, 'server_error', error.code);
+  }
+
+  // A plan-limit refusal (credits, plan feature, ...) keeps its own status and code.
+  if (isPlanLimitError(error)) {
+    return normalized(error.status, error.message, error.type, error.code);
   }
 
   // A switched-off service keeps its own status (403, or 402 when the license

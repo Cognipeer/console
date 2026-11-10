@@ -10,6 +10,7 @@
 import type { IModel, ModelCategory } from '@/lib/database';
 import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
+import { platformModelCredits } from '@/lib/services/models/catalog';
 
 export const PLACEHOLDER = '••••••••';
 
@@ -23,6 +24,8 @@ const SENSITIVE_FIELDS = new Set([
 export type ModelQuery = {
   category?: ModelCategory;
   includeProviders?: string;
+  includePlatform?: string;
+  includeUnavailable?: string;
   providerDriver?: string;
   providerKey?: string;
 };
@@ -36,10 +39,14 @@ export function sanitizeSettings(settings: Record<string, unknown>) {
 }
 
 export function sanitizeModel(model: IModel) {
+  const credits = model.platform ? platformModelCredits(model.metadata) : undefined;
   return {
     ...model,
+    platform: Boolean(model.platform),
     capabilities: resolveModelCapabilities(model),
     settings: sanitizeSettings(model.settings || {}),
+    // A platform model is paid with credits, not per-token prices: its credit price, for the model list.
+    ...(credits ? { credits } : {}),
   };
 }
 

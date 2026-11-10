@@ -54,6 +54,27 @@ export interface AppConfig {
     isOnPrem: boolean;
   };
 
+  /**
+   * Plan limits read from the tenant license (`plan` claim). Hosted (saas)
+   * deployments only: on an onprem deployment the effective mode is always
+   * `off`, whatever is set here.
+   */
+  planLimits: {
+    /**
+     * PLAN_LIMITS_MODE: off (default) = nothing is measured or refused;
+     * shadow = everything is measured and every would-be refusal is recorded,
+     * nothing is refused; on = refusals apply (a tenant may still be held in
+     * shadow by its license or by `defaultEnforcement`).
+     */
+    mode: 'off' | 'shadow' | 'on';
+    /**
+     * PLAN_LIMITS_DEFAULT_ENFORCEMENT: how tenants whose license sets no
+     * `plan.enforcement` (including tenants without a license) are treated when
+     * the mode is `on`. Default shadow.
+     */
+    defaultEnforcement: 'shadow' | 'on';
+  };
+
   docs: {
     /**
      * Root of the docs site the docs panel and every docs link open (DOCS_BASE_URL): the public
@@ -113,6 +134,15 @@ export interface AppConfig {
     socketTimeoutMs: number;
     serverSelectionTimeoutMs: number;
     /**
+     * What `switchToTenant(B)` does when the caller already runs inside a
+     * `runWithTenant` scope for tenant A (the scope keeps serving A's queries).
+     * `warn` (default) allows the switch (only the process-global handle moves)
+     * and logs a rate-limited warning; `error` refuses the switch. `error`
+     * becomes the default in a later release.
+     * Env: DB_TENANT_SCOPE_MISMATCH.
+     */
+    tenantScopeMismatch: 'error' | 'warn';
+    /**
      * When true, tenant-scoped MongoDB operations are bound to the main
      * database instead of a separate `tenant_{slug}` database. On-prem
      * deployments are single-organization by construction (REGISTRATION_MODE
@@ -122,12 +152,50 @@ export interface AppConfig {
      * with MONGODB_SINGLE_DATABASE for edge cases.
      */
     singleDatabase: boolean;
+    /**
+     * When true (TENANT_SCOPE_STRICT=1), a tenant query issued outside a
+     * runWithTenantScope() scope throws instead of logging a warning.
+     */
+    tenantScopeStrict: boolean;
+  };
+
+  iam: {
+    /** Validate every authorization request against the engine schema (IAM_VALIDATE_REQUESTS=1). Diagnostics only. */
+    validateRequests: boolean;
+  };
+
+  evaluation: {
+    /** How evaluation targets are invoked (EVALUATION_INVOKER). `gateway` routes through the gateway; otherwise in-process. */
+    invoker: 'gateway' | 'direct';
   };
 
   auth: {
     jwtSecret: string;
     jwtExpiresIn: string;
     providerEncryptionSecret: string;
+    /**
+     * Sign-in without a workspace finds the account through the cross-tenant
+     * user directory. When true (legacy), an address the directory does not
+     * know is also looked up in every tenant, one tenant database after the
+     * other, and registered in the directory when found
+     * (AUTH_LOGIN_TENANT_SCAN). Default true for this release, because the
+     * directory can be incomplete for older accounts; it will default to false
+     * in a later release. A note is logged at startup while it is on.
+     */
+    loginTenantScan: boolean;
+    /**
+     * Sign-in attempts one account (by normalized email) may make in 15
+     * minutes, from any address, counted across replicas when
+     * RATE_LIMIT_PROVIDER=redis. 0 turns the per-account limit off
+     * (AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS, default 20).
+     */
+    loginAccountMaxAttempts: number;
+    /**
+     * Changing or resetting a password ends the sessions issued before it.
+     * false keeps them valid until they expire (legacy); a startup warning is
+     * logged then (AUTH_PASSWORD_CHANGE_ENDS_SESSIONS, default true).
+     */
+    passwordChangeEndsSessions: boolean;
   };
 
   registration: {
@@ -482,6 +550,27 @@ export interface AppConfig {
     };
     defaultAttempts: number;
     defaultBackoffMs: number;
+  };
+
+  /** Per-node concurrency and limits of the background job consumers. Every value is a positive integer. */
+  queues: {
+    redteamScanConcurrency: number;
+    datasetGenConcurrency: number;
+    evaluationRunConcurrency: number;
+    analysisRunConcurrency: number;
+    analysisMaxRunConversations: number;
+    ragIngestConcurrency: number;
+    ragIngestBootResumeMax: number;
+    ragReindexConcurrency: number;
+    vectorMigrationConcurrency: number;
+    crawlerRunConcurrency: number;
+    /** Re-queue crawl runs that were in flight when the process stopped (CRAWLER_RESTART_ORPHANED_RUNS, default on). */
+    crawlerRestartOrphanedRuns: boolean;
+    browserActionConcurrency: number;
+    batchItemConcurrency: number;
+    batchMaxRequests: number;
+    snapshotJobConcurrency: number;
+    mcpInvokeConcurrency: number;
   };
 
   /**
@@ -985,6 +1074,11 @@ function buildConfig(source: ConfigSource): AppConfig {
       isOnPrem: deploymentMode === 'onprem',
     },
 
+    planLimits: {
+      mode: oneOf(source, 'PLAN_LIMITS_MODE', ['off', 'shadow', 'on'], 'off'),
+      defaultEnforcement: oneOf(source, 'PLAN_LIMITS_DEFAULT_ENFORCEMENT', ['shadow', 'on'], 'shadow'),
+    },
+
     docs: {
       baseUrl: normalizeDocsBaseUrl(source.get('DOCS_BASE_URL')),
     },
@@ -1021,17 +1115,30 @@ function buildConfig(source: ConfigSource): AppConfig {
       connectTimeoutMs: int(source, 'MONGODB_CONNECT_TIMEOUT_MS', 10000),
       socketTimeoutMs: int(source, 'MONGODB_SOCKET_TIMEOUT_MS', 45000),
       serverSelectionTimeoutMs: int(source, 'MONGODB_SERVER_SELECTION_TIMEOUT_MS', 30000),
+      tenantScopeMismatch: oneOf(source, 'DB_TENANT_SCOPE_MISMATCH', ['error', 'warn'], 'warn'),
       singleDatabase: bool(
         source,
         'MONGODB_SINGLE_DATABASE',
         deploymentMode === 'onprem' && databaseProvider === 'mongodb',
       ),
+      tenantScopeStrict: source.get('TENANT_SCOPE_STRICT') === '1',
+    },
+
+    iam: {
+      validateRequests: source.get('IAM_VALIDATE_REQUESTS') === '1',
+    },
+
+    evaluation: {
+      invoker: source.get('EVALUATION_INVOKER') === 'gateway' ? 'gateway' : 'direct',
     },
 
     auth: {
       jwtSecret: str(source, 'JWT_SECRET', 'jwt-key-change-me'),
       jwtExpiresIn: str(source, 'JWT_EXPIRES_IN', '7d'),
       providerEncryptionSecret: str(source, 'PROVIDER_ENCRYPTION_SECRET', ''),
+      loginTenantScan: bool(source, 'AUTH_LOGIN_TENANT_SCAN', true),
+      loginAccountMaxAttempts: Math.max(0, int(source, 'AUTH_LOGIN_ACCOUNT_MAX_ATTEMPTS', 20)),
+      passwordChangeEndsSessions: bool(source, 'AUTH_PASSWORD_CHANGE_ENDS_SESSIONS', true),
     },
 
     registration: {
@@ -1235,6 +1342,25 @@ function buildConfig(source: ConfigSource): AppConfig {
       },
       defaultAttempts: int(source, 'QUEUE_DEFAULT_ATTEMPTS', 3),
       defaultBackoffMs: int(source, 'QUEUE_DEFAULT_BACKOFF_MS', 1_000),
+    },
+
+    queues: {
+      redteamScanConcurrency: positiveInt(source, 'REDTEAM_SCAN_CONCURRENCY', 2),
+      datasetGenConcurrency: positiveInt(source, 'DATASET_GEN_CONCURRENCY', 2),
+      evaluationRunConcurrency: positiveInt(source, 'EVALUATION_RUN_CONCURRENCY', 2),
+      analysisRunConcurrency: positiveInt(source, 'ANALYSIS_RUN_CONCURRENCY', 2),
+      analysisMaxRunConversations: positiveInt(source, 'ANALYSIS_MAX_RUN_CONVERSATIONS', 5000),
+      ragIngestConcurrency: positiveInt(source, 'RAG_INGEST_CONCURRENCY', 2),
+      ragIngestBootResumeMax: positiveInt(source, 'RAG_INGEST_BOOT_RESUME_MAX', 500),
+      ragReindexConcurrency: positiveInt(source, 'RAG_REINDEX_CONCURRENCY', 1),
+      vectorMigrationConcurrency: positiveInt(source, 'VECTOR_MIGRATION_CONCURRENCY', 2),
+      crawlerRunConcurrency: positiveInt(source, 'CRAWLER_RUN_CONCURRENCY', 2),
+      crawlerRestartOrphanedRuns: source.get('CRAWLER_RESTART_ORPHANED_RUNS') !== 'false',
+      browserActionConcurrency: positiveInt(source, 'BROWSER_ACTION_CONCURRENCY', 4),
+      batchItemConcurrency: positiveInt(source, 'BATCH_ITEM_CONCURRENCY', 4),
+      batchMaxRequests: positiveInt(source, 'BATCH_MAX_REQUESTS', 10_000),
+      snapshotJobConcurrency: positiveInt(source, 'SNAPSHOT_JOB_CONCURRENCY', 2),
+      mcpInvokeConcurrency: positiveInt(source, 'MCP_INVOKE_CONCURRENCY', 4),
     },
 
     agent: {

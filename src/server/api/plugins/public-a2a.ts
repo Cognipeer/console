@@ -28,6 +28,7 @@ import {
 } from '@/lib/services/mcp/publicGuard';
 import { getClientIp } from '../fastify-utils';
 import { buildAgentCard, externalBaseUrl, handleA2aRpc } from './client-a2a';
+import { gatePublicRequestRate } from '../publicRpmGate';
 
 const logger = createLogger('api:public-a2a');
 
@@ -133,6 +134,9 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
         clientAddress: getClientIp(request),
       });
       if (!rate.allowed) return sendRateLimited(reply, rate);
+
+      const refused = await gatePublicRequestRate(request, reply, { tenantId: agent.tenantId, sourceType: 'a2a', sourceId: agent.key });
+      if (refused) return refused;
 
       const db = await getDatabase();
       return await withTenantDb(db, tenant.dbName, () => handleA2aRpc(

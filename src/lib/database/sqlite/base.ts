@@ -9,7 +9,7 @@ import { createLogger } from '@/lib/core/logger';
 import { foldSearchText } from '@/lib/shared/searchFold';
 import Database from 'better-sqlite3';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { warnGlobalTenantFallback } from '../tenantScopeGuard';
+import { handleTenantScopeMismatch, warnGlobalTenantFallback } from '../tenantScopeGuard';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -90,6 +90,7 @@ export const TABLES = {
   rerankers: 'rerankers',
   rerankerRunLogs: 'reranker_run_logs',
   websearchRunLogs: 'websearch_run_logs',
+  websearchInstances: 'websearch_instances',
   memoryStores: 'memory_stores',
   memoryItems: 'memory_items',
   configGroups: 'config_groups',
@@ -139,6 +140,10 @@ export const TABLES = {
   instanceAssignments: 'instance_assignments',
   // ── Signup gating (main database) ──────────────────────────────────
   betaAccessCodes: 'beta_access_codes',
+  // ── Plan limits usage (main database) ──────────────────────────────
+  planUsageMonthly: 'plan_usage_monthly',
+  planLimitEvents: 'plan_limit_events',
+  planUsagePeaks: 'plan_usage_peaks',
   // ── GPU fleet (tenant database) ───────────────────────────────────
   gpuHosts: 'gpu_hosts',
   gpuSlices: 'gpu_slices',
@@ -178,6 +183,8 @@ export class SQLiteProviderBase {
   protected readonly mainDbName: string;
   private readonly tenantContext = new AsyncLocalStorage<Database.Database>();
   private readonly tenantNameContext = new AsyncLocalStorage<string>();
+  /** Tenant of the enclosing `runWithTenant` scope; never set by `switchToTenant`'s `enterWith`. */
+  private readonly tenantRunScope = new AsyncLocalStorage<string>();
   /** Cache of already-opened tenant DB file handles */
   private tenantDbCache: Map<string, Database.Database> = new Map();
 
@@ -219,18 +226,27 @@ export class SQLiteProviderBase {
   }
 
   async switchToTenant(tenantDbName: string): Promise<void> {
+    // Inside a runWithTenant scope the scope's handle serves every query, so a
+    // switch to another tenant would not take effect for this caller.
+    const scopeTenant = this.tenantRunScope.getStore();
+    if (scopeTenant !== undefined && scopeTenant !== tenantDbName) {
+      handleTenantScopeMismatch(scopeTenant, tenantDbName);
+    }
+    const db = this.openTenantDb(tenantDbName);
+    this.tenantDb = db;
+    this.tenantContext.enterWith(db);
+    this.tenantNameContext.enterWith(tenantDbName);
+  }
+
+  /** Open (or reuse) the tenant DB file handle, applying schema and migrations on first open. */
+  private openTenantDb(tenantDbName: string): Database.Database {
     if (!this.mainDb) {
       throw new Error('Database not connected. Call connect() first.');
     }
 
     // Reuse cached connection
     const cached = this.tenantDbCache.get(tenantDbName);
-    if (cached) {
-      this.tenantDb = cached;
-      this.tenantContext.enterWith(cached);
-      this.tenantNameContext.enterWith(tenantDbName);
-      return;
-    }
+    if (cached) return cached;
 
     const tenantPath = path.join(this.dataDir, `${tenantDbName}.db`);
     const db = new Database(tenantPath);
@@ -242,9 +258,7 @@ export class SQLiteProviderBase {
     this.applyTenantIndexes(db);
 
     this.tenantDbCache.set(tenantDbName, db);
-    this.tenantDb = db;
-    this.tenantContext.enterWith(db);
-    this.tenantNameContext.enterWith(tenantDbName);
+    return db;
   }
 
   /**
@@ -258,13 +272,14 @@ export class SQLiteProviderBase {
     fn: () => T | Promise<T>,
   ): Promise<T> {
     // Ensure the tenant DB is opened/cached and the global fallback is warm.
-    await this.switchToTenant(tenantDbName);
-    const db = this.tenantDbCache.get(tenantDbName);
-    if (!db) {
-      throw new Error(`Tenant database not available: ${tenantDbName}`);
-    }
+    // The binding itself comes only from the scope below: no `enterWith` here,
+    // so the caller's own binding is unchanged once `fn` returns.
+    const db = this.openTenantDb(tenantDbName);
+    this.tenantDb = db;
     return this.tenantContext.run(db, () =>
-      this.tenantNameContext.run(tenantDbName, () => fn()),
+      this.tenantNameContext.run(tenantDbName, () =>
+        this.tenantRunScope.run(tenantDbName, () => fn()),
+      ),
     );
   }
 
@@ -367,6 +382,11 @@ export class SQLiteProviderBase {
 
     // Result of the last "Test connection" of a provider (JSON). Nullable, no backfill.
     this.ensureTableColumn(db, TABLES.providers, 'lastTest', 'lastTest TEXT');
+
+    // Platform-provided records visible in every project of the tenant (0/1). Existing rows read as 0.
+    this.ensureTableColumn(db, TABLES.providers, 'platform', 'platform INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.models, 'platform', 'platform INTEGER NOT NULL DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.models, 'projectIds', 'projectIds TEXT');
 
     // Project membership origin ('manual' | 'directory'). Legacy rows read as
     // NULL, which the mapper treats as 'manual' — no data migration needed.
@@ -1306,6 +1326,9 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'decisionModelKey', 'decisionModelKey TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'source', 'source TEXT');
     this.ensureTableColumn(db, TABLES.analysisDefinitions, 'review', 'review TEXT');
+    // The metered size of an index on a platform vector provider (server-owned).
+    this.ensureTableColumn(db, TABLES.vectorIndexes, 'storedBytes', 'storedBytes INTEGER');
+    this.ensureTableColumn(db, TABLES.vectorIndexes, 'storedVectors', 'storedVectors INTEGER');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);

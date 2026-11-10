@@ -104,6 +104,8 @@ export function TenantMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
     }
 
     async findTenantBySlug(slug: string): Promise<ITenant | null> {
+      // A slug is matched as a plain value only.
+      if (typeof slug !== 'string' || slug.length === 0) return null;
       const db = this.getMainDb();
       const row = db.prepare(`SELECT * FROM ${TABLES.tenants} WHERE slug = @slug`)
         .get({ slug }) as SqliteRow | undefined;

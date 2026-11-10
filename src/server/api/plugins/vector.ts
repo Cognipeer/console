@@ -28,6 +28,8 @@ import {
   getVectorIndexQueryStats,
   VectorAttachRequiresDetailsError,
   VectorAttachNotFoundError,
+  VectorAttachNotAvailableError,
+  VectorMigrationNotAvailableError,
 } from '@/lib/services/vector';
 import type { VectorMetric } from '@/lib/services/vector/types';
 import type { VectorMigrationStatus } from '@/lib/database/provider/types.base';
@@ -49,6 +51,7 @@ import {
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import { kbIndexRefusal } from '../ragOwnedResources';
+import { sendPlanLimitRefusal } from '../planLimitReply';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:vector');
@@ -82,7 +85,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/vector/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
       const query = (request.query ?? {}) as { domain?: ProviderDomain };
-      const drivers = providerRegistry.listDescriptors(query.domain ?? 'vector');
+      const drivers = providerRegistry.listTenantDescriptors(query.domain ?? 'vector');
       return reply.code(200).send({ drivers });
     } catch (error) {
       logger.error('List vector provider drivers error', { error });
@@ -95,7 +98,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       const { driverId } = request.params as { driverId: string };
       const schema = providerRegistry.getFormSchema(driverId);
       const descriptor = providerRegistry
-        .listDescriptors('vector')
+        .listTenantDescriptors('vector')
         .find((item) => item.id === driverId);
 
       return reply.code(200).send({ descriptor, driverId, schema });
@@ -414,6 +417,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ index });
     } catch (error) {
+      if (error instanceof VectorAttachNotAvailableError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code });
+      }
       if (error instanceof VectorAttachRequiresDetailsError) {
         return reply.code(422).send({ error: error.message, code: 'VECTOR_ATTACH_REQUIRES_DETAILS' });
       }
@@ -716,6 +722,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       await db.incrementProjectVectorCountApprox(projectId, vectorCount);
       return reply.code(200).send({ success: true });
     } catch (error) {
+      // A storage limit refusal (a platform provider's upsert) answers with its own status and envelope.
+      const refused = sendPlanLimitRefusal(reply, error);
+      if (refused) return refused;
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });
       }
@@ -851,6 +860,9 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ migration });
     } catch (error) {
+      if (error instanceof VectorMigrationNotAvailableError) {
+        return reply.code(error.status).send({ error: error.message, code: error.code });
+      }
       if (error instanceof Error && (error.message.includes('not found') || error.message.includes('cannot be the same'))) {
         return reply.code(400).send({ error: error.message });
       }

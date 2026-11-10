@@ -22,6 +22,8 @@ vi.mock('@/lib/services/providers/providerEndpointGuard', () => ({
 import { reloadConfig } from '@/lib/core/config';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { callWebSearchProvider, parseDuckDuckGoHtml } from '@/lib/services/webSearch/webSearchAdapter';
+import { withResilience } from '@/lib/core/resilience';
+import { shouldTryNextReplica } from '@/lib/services/models/replicaPool';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import type { IProviderRecord } from '@/lib/database';
 
@@ -147,6 +149,35 @@ describe('Tavily normalization', () => {
     );
     expect(out.answer).toBe('The answer.');
     expect(out.results[0]).toMatchObject({ title: 'T', url: 'https://t.example', snippet: 'C', score: 0.9 });
+  });
+});
+
+describe('failure shape and breaker scope', () => {
+  it('a failed search carries its HTTP status, so a capacity fault is recognised for failover', async () => {
+    (safeFetch as ReturnType<typeof vi.fn>).mockResolvedValue(new Response('slow down', { status: 429 }));
+    const failure = await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' })
+      .catch((e: Error) => e);
+    expect((failure as { status?: number }).status).toBe(429);
+    expect(shouldTryNextReplica(failure)).toBe(true);
+
+    (safeFetch as ReturnType<typeof vi.fn>).mockResolvedValue(new Response('bad key', { status: 401 }));
+    const caller = await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' })
+      .catch((e: Error) => e);
+    expect(shouldTryNextReplica(caller)).toBe(false);
+  });
+
+  it('the circuit breaker is keyed per scope, so two backends of one driver do not share it', async () => {
+    (safeFetch as ReturnType<typeof vi.fn>).mockImplementation(async () => jsonResponse({ results: [] }));
+    const keyOfLastCall = () => {
+      const calls = (withResilience as ReturnType<typeof vi.fn>).mock.calls;
+      return (calls[calls.length - 1][1] as { key: string }).key;
+    };
+    await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' });
+    expect(keyOfLastCall()).toBe('websearch:tavily');
+    await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' }, { breakerScope: 'a:search' });
+    expect(keyOfLastCall()).toBe('websearch:tavily:a:search');
+    await callWebSearchProvider(providerRecord('tavily'), { apiKey: 'k' }, { query: 'x' }, { breakerScope: 'b:search' });
+    expect(keyOfLastCall()).toBe('websearch:tavily:b:search');
   });
 });
 

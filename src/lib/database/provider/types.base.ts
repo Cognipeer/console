@@ -839,6 +839,11 @@ export interface IProviderRecord
   tenantId: string;
   projectId?: string;
   projectIds?: string[];
+  /**
+   * Platform-provided record: written only by the hosting layer (never by tenant
+   * APIs) and read-only through tenant APIs, except for its project assignment.
+   */
+  platform?: boolean;
   key: string;
   type: ProviderDomain;
   driver: string;
@@ -868,6 +873,12 @@ export interface IVectorIndexRecord {
   dimension: number;
   metric: 'cosine' | 'dot' | 'euclidean';
   metadata?: Record<string, unknown>;
+  /**
+   * Server-owned, never taken from a request: the estimated bytes and the vectors an index on a platform provider
+   * holds. They feed the plan storage count. Own providers are not metered and leave both unset.
+   */
+  storedBytes?: number;
+  storedVectors?: number;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
@@ -1106,6 +1117,17 @@ export interface IModel {
   _id?: ObjectId | string;
   tenantId: string;
   projectId?: string;
+  /**
+   * Platform-provided record: written only by the hosting layer (never by tenant
+   * APIs) and read-only through tenant APIs. It has no project of its own; it is
+   * visible in the projects its platform provider is assigned to.
+   */
+  platform?: boolean;
+  /**
+   * Platform models only: the projects the model was added to. A platform model is visible in a project only when its
+   * platform provider is assigned to it and the project is listed here. Absent means added nowhere.
+   */
+  projectIds?: string[];
   name: string;
   description?: string;
   key: string;

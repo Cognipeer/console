@@ -41,6 +41,18 @@ export interface VectorMigrationView extends IVectorMigration {
   logCount?: number;
 }
 
+/** A migration whose source or destination index is on a platform provider: not offered. HTTP 409. */
+export class VectorMigrationNotAvailableError extends Error {
+  readonly status = 409;
+
+  readonly code = 'migration_not_available';
+
+  constructor(message = 'Moving an index to or from this provider is not available.') {
+    super(message);
+    this.name = 'VectorMigrationNotAvailableError';
+  }
+}
+
 // ── Private helpers ──────────────────────────────────────────────────────
 
 async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
@@ -83,6 +95,12 @@ export async function createVectorMigration(
   request: CreateVectorMigrationRequest,
 ): Promise<IVectorMigration> {
   const db = await withTenantDb(tenantDbName);
+
+  // The data of a platform provider stays where it is: nothing is copied into or out of it.
+  for (const providerKey of [request.sourceProviderKey, request.destinationProviderKey]) {
+    const provider = await db.findProviderByKey(tenantId, providerKey);
+    if (provider?.platform) throw new VectorMigrationNotAvailableError();
+  }
 
   // Validate source index exists
   const sourceIndex = await db.findVectorIndexByKey(

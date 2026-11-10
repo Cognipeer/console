@@ -14,6 +14,8 @@ import { agentChannelsListTr } from './agentChannelsList.tr';
 import { agentChannelsSetupTr } from './agentChannelsSetup.tr';
 import { agentTemplatesTr } from './agentTemplates.tr';
 import { alertsTr, incidentsTr } from './alerts.tr';
+import { usageTr } from './usage.tr';
+import { usageLimitsTr } from './usageLimits.tr';
 import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
@@ -35,6 +37,8 @@ import { managedToolsTr } from './managedTools.tr';
 import { tracingHealthTr } from './tracingHealth.tr';
 import { projectsAccessTr } from './projectsAccess.tr';
 import { modelCatalogTr } from './modelCatalog.tr';
+import { webSearchTr } from './webSearch.tr';
+import { platformStorageTr } from './platformStorage.tr';
 
 export const tr: typeof en = {
   ...en,
@@ -1376,6 +1380,8 @@ export const tr: typeof en = {
   iamDirectory: iamDirectoryTr,
   directorySync: directorySyncTr,
   alerts: alertsTr,
+  usage: usageTr,
+  usageLimits: usageLimitsTr,
   incidents: incidentsTr,
   tracingHealth: tracingHealthTr,
   entityHealth: entityHealthTr,
@@ -1785,6 +1791,8 @@ export const tr: typeof en = {
   },
   navigation: {
     ...en.navigation,
+    usage: 'Kullanım',
+    usageDescription: 'Plan limitleri, kapasite, aylık haklar ve krediler',
     portalsYours: 'Portallarınız',
     settingsDescription: 'Çalışma alanı, kimlik ve erişim, yönetişim ve platform',
     settingsWorkspace: 'Çalışma alanı',
@@ -2781,6 +2789,7 @@ export const tr: typeof en = {
     resources: 'Kaynaklar',
     portals: 'Portallar',
     connectors: 'Bağlayıcılar',
+    usage: 'Kullanım',
     sso: 'Tek Oturum Açma (SSO)',
     ldap: 'LDAP Dizini',
     iamPeople: 'Kişiler',
@@ -4767,6 +4776,10 @@ export const tr: typeof en = {
   },
   // Sağlayıcının sunduğu modellerin "Model ekle" kataloğu ve Model ID otomatik tamamlama (modelCatalog.tr.ts).
   modelCatalog: modelCatalogTr,
+  // Web Arama sayfaları: sağlayıcı bağlantıları üzerindeki örnekler (webSearch.tr.ts).
+  webSearch: webSearchTr,
+  // Platform dosya ve vektör sağlayıcıları (platformStorage.tr.ts).
+  platformStorage: platformStorageTr,
   modelPriceCatalog: {
     confidence: {
       exact: 'Birebir',
@@ -5066,8 +5079,33 @@ export const tr: typeof en = {
     piiFindings: 'PII bulguları',
     openDataset: 'Veri setini aç',
   },
+  models: {
+    ...en.models,
+    actions: {
+      ...en.models.actions,
+      removeFromProject: 'Projeden çıkar',
+      removeTitle: 'Bu model projeden çıkarılsın mı?',
+      removeConfirm: 'Model, katalogdan yeniden eklenebilir olarak kalır.',
+      removeSuccess: 'Model projeden çıkarıldı.',
+    },
+  },
   modelDetail: {
     ...en.modelDetail,
+    pricing: {
+      ...en.modelDetail.pricing,
+      credits: 'Kredi',
+    },
+    actions: {
+      ...en.modelDetail.actions,
+      removeFromProject: 'Projeden çıkar',
+      removeTitle: 'Bu model projeden çıkarılsın mı?',
+      removeConfirm: 'Model, katalogdan yeniden eklenebilir olarak kalır.',
+    },
+    notifications: {
+      ...en.modelDetail.notifications,
+      removeSuccessTitle: 'Model çıkarıldı',
+      removeSuccessMessage: 'Model bu projeden çıkarıldı.',
+    },
     logs: {
       ...en.modelDetail.logs,
       finishReason: 'Bitiş',
@@ -5814,7 +5852,8 @@ export const tr: typeof en = {
       'agent.memory': 'Hafıza deposu',
       'agent.skill': 'Yetenek (skill)',
       'agent.browser': 'Browser',
-      'agent.webSearchProvider': 'Web arama sağlayıcısı',
+      'agent.webSearchProvider': 'Web arama',
+      'websearchInstance.provider': 'Sağlayıcı',
       'agent.crawler': 'Crawler',
       'agent.piiPolicy': 'PII koruma politikası',
       'model.provider': 'Sağlayıcı',
@@ -5904,6 +5943,7 @@ export const tr: typeof en = {
       'crawler': 'Crawler\'lar',
       'reranker': 'Reranker\'lar',
       'provider': 'Provider\'lar',
+      'websearch-instance': 'Web arama örnekleri',
       'inference-server': 'Inference sunucuları',
       'guardrail': 'Guardrail\'ler',
       'guardrail-word-list': 'Kelime listeleri',
@@ -6264,6 +6304,7 @@ export const tr: typeof en = {
     list: {
       unassigned: 'Atanmamış',
       unassignedTip: 'Bir projeye atanana kadar kullanılamaz',
+      platform: 'Platform',
       assign: 'Ata',
     },
     detail: {

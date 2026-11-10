@@ -22,7 +22,7 @@ import { createMcpServer, deleteMcpServer, listMcpServers } from '@/lib/services
 import { createSkill, listSkills } from '@/lib/services/agents/skillService';
 import { createPrompt, deletePrompt } from '@/lib/services/prompts/promptService';
 import { createTool, deleteTool } from '@/lib/services/tools/toolService';
-import { listWebSearchProviders } from '@/lib/services/webSearch/webSearchService';
+import { hasActiveWebSearch } from '@/lib/services/webSearch/webSearchService';
 import {
     AGENT_MANIFEST_API_VERSION,
     AgentManifestError,
@@ -319,7 +319,7 @@ export async function previewAgentDocumentImport(
     const [servers, sandbox, webSearch] = await Promise.all([
         listMcpServers(ctx.tenantDbName, { projectId: ctx.projectId }),
         plan.builtins.sandbox.length > 0 ? resolveSandboxAvailability(ctx.tenantId) : Promise.resolve(null),
-        plan.builtins.webSearch ? listWebSearchProviders(ctx.tenantDbName, ctx.tenantId, ctx.projectId).catch(() => []) : Promise.resolve([]),
+        plan.builtins.webSearch ? hasActiveWebSearch(ctx.tenantDbName, ctx.tenantId, ctx.projectId).catch(() => false) : Promise.resolve(false),
     ]);
     const warnings = [...plan.unsupported];
     const sandboxAvailable = Boolean(sandbox?.available);
@@ -329,9 +329,9 @@ export async function previewAgentDocumentImport(
             message: `The agent uses ${plan.builtins.sandbox.join(', ')}, which need the Sandbox (Enterprise). It will be imported without them.`,
         });
     }
-    const webSearchAvailable = (webSearch as Array<{ status?: string }>).some((p) => p.status === 'active');
+    const webSearchAvailable = webSearch;
     if (plan.builtins.webSearch && !webSearchAvailable) {
-        warnings.push({ code: 'websearch_unavailable', message: 'web_search is bound, but this project has no active Web Search provider yet — add one before running the agent.' });
+        warnings.push({ code: 'websearch_unavailable', message: 'web_search is bound, but this project has no active Web Search instance yet — add one before running the agent.' });
     }
     if (plan.builtins.webFetch) {
         warnings.push({ code: 'web_fetch', message: 'web_fetch maps to Browser Use, which needs a browser picked on the agent. It will be imported without it; add Browser Use on the agent afterwards.' });
