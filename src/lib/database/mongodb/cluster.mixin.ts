@@ -110,12 +110,6 @@ export function ClusterMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return result.modifiedCount;
     }
 
-    async deleteNode(name: string): Promise<boolean> {
-      const db = this.getMainDb();
-      const result = await db.collection<NodeDoc>(COLLECTIONS.nodes).deleteOne({ name });
-      return result.deletedCount > 0;
-    }
-
     // ── Instance assignments ─────────────────────────────────────────
 
     async setInstanceAssignment(

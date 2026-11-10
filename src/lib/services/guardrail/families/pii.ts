@@ -19,11 +19,9 @@
  *    place and nothing else.
  *
  * 2. THE OBFUSCATION PASS exists because the PII service performs NO text
- *    normalisation of its own — that logic lives only in `../piiDetector`
+ *    normalisation of its own — that logic lives only in `../textNormalization`
  *    (`normalizeText` = NFKC + zero-width strip, `deobfuscateEmails` =
- *    "user (at) mail (dot) com" -> "user@mail.com"). Without it the migration
- *    off the legacy detector would silently lose obfuscation resistance for
- *    the whole fleet. But that pass scans a DIFFERENT STRING: NFKC can change
+ *    "user (at) mail (dot) com" -> "user@mail.com"). Without it obfuscated values would go undetected. But that pass scans a DIFFERENT STRING: NFKC can change
  *    a character's width in code units, the zero-width strip deletes
  *    characters outright, and the email rewrite collapses runs of them. Its
  *    offsets therefore do not map back onto the original text — a span
@@ -41,8 +39,8 @@
  * `replace_value` then lands in `applyMutations`' `skipped` list with a
  * reason, which is the audit trail the contract asks for — a redaction that
  * did not happen is recorded rather than a verdict claiming one that did. This
- * is NOT a regression: the legacy `redactFindings` (piiDetector.ts:212-221)
- * had the identical limitation, since it also `split()`s on the normalised
+ * is NOT a regression: `redactFindings`
+ * has the identical limitation, since it also `split()`s on the normalised
  * value. Obfuscation detection is there to BLOCK, not to rewrite.
  *
  * ── PURITY WITH RESPECT TO POLICY ─────────────────────────────────────────
@@ -71,10 +69,9 @@ import {
   type CustomPatternSkip,
 } from '../../pii/detector';
 import type { PiiFinding } from '../../pii/types';
-// Both are re-exported from piiDetector.ts specifically for this pass; that
-// file remains the single home of the normalisation rules so the legacy
-// detector and this adapter can never disagree about what counts as evasion.
-import { deobfuscateEmails, normalizeText } from '../piiDetector';
+// `textNormalization.ts` is the single home of the normalisation rules, so
+// every caller agrees on what counts as evasion.
+import { deobfuscateEmails, normalizeText } from '../textNormalization';
 import {
   LEGACY_FINDING_TYPE,
   isBlocking,
