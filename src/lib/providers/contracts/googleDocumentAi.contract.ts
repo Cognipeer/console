@@ -1,3 +1,4 @@
+import { guardedFetch } from './guardedFetch';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime } from '../domains/model';
 import type {
@@ -64,15 +65,33 @@ function base64UrlEncode(input: string | Buffer): string {
     .replace(/\//g, '_');
 }
 
+/** The token endpoint of a service account must be an https URL on a Google API host. */
+function assertGoogleTokenUri(tokenUri: string | undefined): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(tokenUri ?? '');
+  } catch {
+    throw new Error('Service account token_uri is not a valid URL.');
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== 'https:' || !(host === 'googleapis.com' || host.endsWith('.googleapis.com'))) {
+    throw new Error('Service account token_uri must be an https URL on a Google API host.');
+  }
+  return parsed.href;
+}
+
+const GOOGLE_RESOURCE_SEGMENT = /^[A-Za-z0-9_-]+$/;
+
 async function fetchGoogleAccessToken(
   sa: ReturnType<typeof parseServiceAccountKey>,
 ): Promise<string> {
+  const tokenUri = assertGoogleTokenUri(sa.token_uri);
   const { createSign } = await import('node:crypto');
   const iat = Math.floor(Date.now() / 1000);
   const claim = {
     iss: sa.client_email,
     scope: 'https://www.googleapis.com/auth/cloud-platform',
-    aud: sa.token_uri!,
+    aud: tokenUri,
     iat,
     exp: iat + 3600,
   };
@@ -86,7 +105,7 @@ async function fetchGoogleAccessToken(
   const signature = base64UrlEncode(signer.sign(sa.private_key));
   const jwt = `${unsigned}.${signature}`;
 
-  const response = await fetch(sa.token_uri!, {
+  const response = await guardedFetch(tokenUri, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -149,6 +168,12 @@ function createDocAiRuntime(opts: {
         );
       }
 
+      for (const segment of [opts.projectId, opts.location, opts.processorId]) {
+        if (!GOOGLE_RESOURCE_SEGMENT.test(segment)) {
+          throw new Error('Google Document AI projectId, location and processorId may contain only letters, digits, "-" and "_".');
+        }
+      }
+
       const accessToken = await fetchGoogleAccessToken(opts.serviceAccountKey);
       const url = `https://${opts.location}-documentai.googleapis.com/v1/projects/${opts.projectId}/locations/${opts.location}/processors/${opts.processorId}:process`;
 
@@ -164,7 +189,7 @@ function createDocAiRuntime(opts: {
         };
       }
 
-      const response = await fetch(url, {
+      const response = await guardedFetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,

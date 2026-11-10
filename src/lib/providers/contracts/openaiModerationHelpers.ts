@@ -4,6 +4,7 @@
  * both the URL builder and the auth header are injectable, exactly as they are
  * for audio and images.
  */
+import { guardedFetch } from './guardedFetch';
 import type {
   ModerationClassification,
   ModerationResultSet,
@@ -66,7 +67,7 @@ export function createOpenAiModerationRuntime(
   opts: OpenAiModerationClientOptions,
 ): ModerationRuntime {
   const classify = async (texts: string[]): Promise<ModerationResultSet> => {
-    const response = await fetch(resolveUrl(opts), {
+    const response = await guardedFetch(resolveUrl(opts), {
       method: 'POST',
       headers: buildHeaders(opts),
       body: JSON.stringify({ model: opts.modelId, input: texts }),

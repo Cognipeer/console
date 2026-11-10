@@ -55,8 +55,8 @@ export function toProviderEndpointError(field: string, error: unknown): unknown 
   return error;
 }
 
-/** Provider domains whose endpoints are user-supplied: the inference services and the file stores (S3-compatible, Azure Blob). */
-const GUARDED_DOMAINS = new Set(['model', 'embedding', 'image', 'stt', 'tts', 'moderation', 'decision', 'file']);
+/** Provider domains whose endpoints are user-supplied: the inference services, OCR, web search and the file stores (S3-compatible, Azure Blob). */
+const GUARDED_DOMAINS = new Set(['model', 'embedding', 'image', 'stt', 'tts', 'moderation', 'decision', 'file', 'ocr', 'websearch']);
 const URL_FIELDS = new Set(['baseUrl', 'baseURL', 'endpoint', 'apiBase', 'apiUrl', 'url', 'authorityHost']);
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 const AZURE_RESOURCE_LABEL = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/i;

@@ -14,7 +14,13 @@
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { currentTurnSignal } from '@/lib/core/turnSignal';
+import { getRequestContext } from '@/lib/core/requestContext';
 import { safeFetch } from '@/lib/security/outboundFetch';
+import {
+  observeProviderTarget,
+  providerRuntimeGuardObserves,
+  providerRuntimeGuardOptions,
+} from '@/lib/services/providers/runtimeGuard';
 import type { IProviderRecord } from '@/lib/database';
 import { DEFAULT_RESULTS, asSafeSearch, asString, clampCount } from './searchOptions';
 import type { WebSearchInput, WebSearchResultItem } from './types';
@@ -72,6 +78,25 @@ export async function callWebSearchProvider(
   }
 }
 
+/**
+ * Every search call goes through the outbound guard: the target (including a configured endpoint) is validated and
+ * pinned for the connection, and a redirect is handed back instead of followed, so credential headers stay with the
+ * host they were configured for. `PROVIDER_RUNTIME_GUARD=warn` keeps the path each call took before the setting
+ * existed: plain `fetch` with a log line for a target the guard would refuse, or, for a call that was already made
+ * through the outbound guard (`guardedBefore`: the SearxNG search with its configured base URL), that guard with its
+ * default options, so the default mode is not weaker than the release before it.
+ */
+async function searchFetch(url: string | URL, init: RequestInit, opts?: { guardedBefore?: boolean }): Promise<Response> {
+  const target = String(url);
+  const tenantId = getRequestContext()?.tenantId;
+  if (providerRuntimeGuardObserves()) {
+    if (opts?.guardedBefore) return safeFetch(target, init);
+    observeProviderTarget(target, tenantId);
+    return fetch(url, init);
+  }
+  return safeFetch(target, init, await providerRuntimeGuardOptions(target, tenantId));
+}
+
 function requireApiKey(input: DriverCallInput, providerLabel: string): string {
   const apiKey = asString(input.credentials.apiKey);
   if (!apiKey) throw new Error(`${providerLabel} web search requires an apiKey credential.`);
@@ -97,11 +122,11 @@ async function callBing(input: DriverCallInput): Promise<AdapterCallResult> {
   }
 
   const response = await withResilience(
-    () => fetch(url, { headers: { 'Ocp-Apim-Subscription-Key': apiKey }, signal: input.signal }),
+    () => searchFetch(url, { headers: { 'Ocp-Apim-Subscription-Key': apiKey }, signal: input.signal }),
     { key: 'websearch:bing' },
   );
   if (!response.ok) {
-    throw new Error(`Bing search failed (${response.status}): ${await safeReadText(response)}`);
+    throw new Error(`Bing search failed (${response.status})`);
   }
   const json = (await response.json()) as {
     webPages?: { value?: Array<{ name?: string; url?: string; snippet?: string; datePublished?: string }> };
@@ -132,14 +157,14 @@ async function callBrave(input: DriverCallInput): Promise<AdapterCallResult> {
 
   const response = await withResilience(
     () =>
-      fetch(url, {
+      searchFetch(url, {
         headers: { Accept: 'application/json', 'X-Subscription-Token': apiKey },
         signal: input.signal,
       }),
     { key: 'websearch:brave' },
   );
   if (!response.ok) {
-    throw new Error(`Brave search failed (${response.status}): ${await safeReadText(response)}`);
+    throw new Error(`Brave search failed (${response.status})`);
   }
   const json = (await response.json()) as {
     web?: { results?: Array<{ title?: string; url?: string; description?: string; page_age?: string }> };
@@ -172,7 +197,7 @@ async function callSerper(input: DriverCallInput): Promise<AdapterCallResult> {
 
   const response = await withResilience(
     () =>
-      fetch('https://google.serper.dev/search', {
+      searchFetch('https://google.serper.dev/search', {
         method: 'POST',
         headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -181,7 +206,7 @@ async function callSerper(input: DriverCallInput): Promise<AdapterCallResult> {
     { key: 'websearch:serper' },
   );
   if (!response.ok) {
-    throw new Error(`Serper search failed (${response.status}): ${await safeReadText(response)}`);
+    throw new Error(`Serper search failed (${response.status})`);
   }
   const json = (await response.json()) as {
     organic?: Array<{ title?: string; link?: string; snippet?: string; date?: string; position?: number }>;
@@ -213,7 +238,7 @@ async function callTavily(input: DriverCallInput): Promise<AdapterCallResult> {
 
   const response = await withResilience(
     () =>
-      fetch('https://api.tavily.com/search', {
+      searchFetch('https://api.tavily.com/search', {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -222,7 +247,7 @@ async function callTavily(input: DriverCallInput): Promise<AdapterCallResult> {
     { key: 'websearch:tavily' },
   );
   if (!response.ok) {
-    throw new Error(`Tavily search failed (${response.status}): ${await safeReadText(response)}`);
+    throw new Error(`Tavily search failed (${response.status})`);
   }
   const json = (await response.json()) as {
     results?: Array<{ title?: string; url?: string; content?: string; score?: number; published_date?: string }>;
@@ -269,11 +294,11 @@ async function callSearxng(input: DriverCallInput): Promise<AdapterCallResult> {
   }
 
   const response = await withResilience(
-    () => safeFetch(url.toString(), { headers, signal: input.signal }),
+    () => searchFetch(url, { headers, signal: input.signal }, { guardedBefore: true }),
     { key: 'websearch:searxng' },
   );
   if (!response.ok) {
-    throw new Error(`SearxNG search failed (${response.status}): ${await safeReadText(response)}`);
+    throw new Error(`SearxNG search failed (${response.status})`);
   }
   const json = (await response.json()) as {
     results?: Array<{ title?: string; url?: string; content?: string; publishedDate?: string; engine?: string; score?: number }>;
@@ -313,7 +338,7 @@ async function callDuckDuckGo(input: DriverCallInput): Promise<AdapterCallResult
 
   const response = await withResilience(
     () =>
-      fetch(url, {
+      searchFetch(url, {
         headers: {
           // The HTML endpoint rejects requests without a browser-like UA.
           'User-Agent':
@@ -325,7 +350,7 @@ async function callDuckDuckGo(input: DriverCallInput): Promise<AdapterCallResult
     { key: 'websearch:duckduckgo' },
   );
   if (!response.ok) {
-    throw new Error(`DuckDuckGo search failed (${response.status}): ${await safeReadText(response)}`);
+    throw new Error(`DuckDuckGo search failed (${response.status})`);
   }
   const html = await response.text();
   return { results: parseDuckDuckGoHtml(html, input.count ?? DEFAULT_RESULTS) };
@@ -387,15 +412,6 @@ function stripHtml(value: string): string {
     .replace(/&#x?\d+;|&#\d+;/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-async function safeReadText(response: Response): Promise<string> {
-  try {
-    const text = await response.text();
-    return text.slice(0, 500);
-  } catch {
-    return '<unable to read response body>';
-  }
 }
 
 export const _logger = logger;
