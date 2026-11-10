@@ -399,6 +399,20 @@ export interface AppConfig {
      */
     allowedHosts: string[];
     /**
+     * Whether a crawler may opt in (`http.allowPrivateNetwork`) to fetching
+     * private-network targets. Default: on for self-hosted (`onprem`), off for
+     * hosted (`saas`), where the per-crawler flag is ignored.
+     */
+    crawlerAllowPrivateOptIn: boolean;
+    /**
+     * What crawler fetches and webhooks do with a host NAME that resolves to
+     * private, loopback, link-local, CGNAT or metadata address space (literal
+     * addresses and `localhost` are always refused). `refuse` blocks the
+     * request; `warn` allows it and logs a rate-limited warning per host.
+     * Default: `warn` for self-hosted (`onprem`), `refuse` for hosted (`saas`).
+     */
+    crawlerResolvedPrivatePolicy: 'refuse' | 'warn';
+    /**
      * Private networks a provider endpoint may reach even though private targets are blocked, per organization.
      * Raw `PROVIDER_PRIVATE_NETWORKS` entries (`<tenantId or *>=<cidr>[,<cidr>...]`, separated by `;`). Read and
      * checked by `lib/security/providerPrivateNetworks`; nothing is opened unless an entry is valid.
@@ -1158,6 +1172,17 @@ function buildConfig(source: ConfigSource): AppConfig {
     outboundHttp: {
       blockPrivateNetwork: bool(source, 'OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK', true),
       allowedHosts: list(source, 'OUTBOUND_HTTP_ALLOWED_HOSTS', []),
+      crawlerAllowPrivateOptIn: bool(
+        source,
+        'CRAWLER_ALLOW_PRIVATE_NETWORK_OPT_IN',
+        deploymentMode === 'onprem',
+      ),
+      crawlerResolvedPrivatePolicy: oneOf(
+        source,
+        'CRAWLER_RESOLVED_PRIVATE_POLICY',
+        ['refuse', 'warn'],
+        deploymentMode === 'onprem' ? 'warn' : 'refuse',
+      ),
       providerPrivateNetworks: semicolonList(source, 'PROVIDER_PRIVATE_NETWORKS', []),
       providerPrivateNetworksDeny: list(source, 'PROVIDER_PRIVATE_NETWORKS_DENY', []),
       defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),

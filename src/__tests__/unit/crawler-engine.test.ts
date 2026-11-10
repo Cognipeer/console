@@ -158,9 +158,8 @@ describe('engine/ssrf', () => {
     expect(isPrivateHost('8.8.8.8')).toBe(false);
   });
 
-  it('assertSafeUrl throws on private host unless opted in', () => {
+  it('assertSafeUrl throws on private host by default', () => {
     expect(() => assertSafeUrl('http://127.0.0.1/x')).toThrow(/private/i);
-    expect(() => assertSafeUrl('http://127.0.0.1/x', true)).not.toThrow();
   });
 });
 
