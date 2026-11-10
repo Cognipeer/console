@@ -33,6 +33,8 @@ function ctx(output: string, forbiddenPatterns: string[], canary?: string): Dete
 
 /** Budget for the cases that must not time out: well above anything a loaded runner needs for a trivial regex. */
 const GENEROUS_MS = 5000;
+/** Per-pattern cut for the slow pattern in a scan: long enough that the trivial pattern beside it never times out on a busy runner. */
+const SLOW_CUTOFF_MS = 1000;
 
 describe('matchPattern', () => {
   it('matches a regex without regard to case', () => {
@@ -59,8 +61,9 @@ describe('scanPatterns', () => {
   });
 
   it('reports slow patterns as undecided and still finds a later match', () => {
-    // The slow pattern is cut at 20 ms; the total budget is wide so the second pattern is still tried on a slow runner.
-    const scan = scanPatterns(SLOW_INPUT, [SLOW, 'a!'], { perPatternMs: 20, totalMs: GENEROUS_MS });
+    // The slow pattern is cut after SLOW_CUTOFF_MS. The same per-pattern budget applies to 'a!', so it cannot time out
+    // on a busy runner (a 20 ms cut did, once, on a saturated CI runner), and the total budget leaves room for both.
+    const scan = scanPatterns(SLOW_INPUT, [SLOW, 'a!'], { perPatternMs: SLOW_CUTOFF_MS, totalMs: GENEROUS_MS });
     expect(scan.matched).toBe('a!');
     expect(scan.undecided).toEqual([SLOW]);
   });
