@@ -68,6 +68,7 @@ import {
   sendSessionNotFound,
   startMcpSseResponse,
 } from '../mcpTransport';
+import { MCP_PROTOCOL_VERSION, SERVER_VERSION, jsonRpcOk } from './mcp-shared';
 
 const logger = createLogger('api:public-mcp');
 
@@ -75,19 +76,11 @@ const PUBLIC_SLUG_AUTHZ = authz.self(
   'unauthenticated by design: addressed by tenant id + random endpoint slug; the handler 404s unless the MCP server is active with accessMode public',
 );
 
-const JSONRPC_VERSION = '2.0';
-const MCP_PROTOCOL_VERSION = '2025-03-26';
-const SERVER_VERSION = '1.0.0';
-
 /** Caller-supplied text echoed back in an error is cut to this. */
 const ECHOED_TEXT_MAX_CHARS = 100;
 const USER_AGENT_MAX_CHARS = 256;
 /** A caller turned away for load may retry after this long. */
 const BUSY_RETRY_AFTER_SECONDS = 5;
-
-function jsonRpcOk(id: string | number | null, result: unknown) {
-  return { id, jsonrpc: JSONRPC_VERSION, result };
-}
 
 async function withTenantDb<T>(
   db: DatabaseProvider,

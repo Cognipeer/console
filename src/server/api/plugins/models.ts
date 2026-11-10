@@ -21,10 +21,8 @@ import {
   ModelCapabilityValidationError,
   ModelKeyConflictError,
   parseModelCapabilityOverrides,
-  resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
 import {
-  type IModel,
   type ModelCategory,
   type ProviderDomain,
 } from '@/lib/database';
@@ -47,7 +45,6 @@ import {
   ProviderCatalogNotFoundError,
 } from '@/lib/services/models/catalog';
 import { calcCacheHitRate } from '@/lib/utils/tracingUtils';
-import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -55,6 +52,7 @@ import {
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
 import { rowsWithHiddenContent } from '../restrictedKnowledgeRequest';
+import { mergeSettings, sanitizeModel, type ModelQuery } from './models-shared';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -65,21 +63,6 @@ import { readPiiProtectionField } from '@/lib/services/pii/protectionConfig';
 
 const logger = createLogger('api:models');
 const MAX_LIMIT = 200;
-const PLACEHOLDER = '••••••••';
-const SENSITIVE_FIELDS = new Set([
-  'apiKey',
-  'secretAccessKey',
-  'serviceAccountKey',
-  'sessionToken',
-]);
-
-type ModelQuery = {
-  category?: ModelCategory;
-  includeProviders?: string;
-  providerDriver?: string;
-  providerKey?: string;
-};
-
 type ModelLogsQuery = {
   from?: string;
   limit?: string;
@@ -113,49 +96,6 @@ function sendProjectError(reply: { code: (statusCode: number) => { send: (payloa
   }
 
   return null;
-}
-
-function sanitizeSettings(settings: Record<string, unknown>) {
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(settings || {})) {
-    sanitized[key] = SENSITIVE_FIELDS.has(key) && value ? PLACEHOLDER : value;
-  }
-  return sanitized;
-}
-
-function sanitizeModel(model: IModel) {
-  return {
-    ...model,
-    capabilities: resolveModelCapabilities(model),
-    settings: sanitizeSettings(model.settings || {}),
-  };
-}
-
-/**
- * `null` deletes a key, the placeholder and `undefined` mean "unchanged".
- * Normalising on the way out heals rows whose values were persisted with the
- * wrong type — see `normalizeModelSettings`.
- */
-function mergeSettings(
-  existing: Record<string, unknown>,
-  incoming: Record<string, unknown>,
-) {
-  const merged: Record<string, unknown> = { ...existing };
-
-  for (const [key, value] of Object.entries(incoming)) {
-    if (value === PLACEHOLDER || value === undefined) {
-      continue;
-    }
-
-    if (value === null) {
-      delete merged[key];
-      continue;
-    }
-
-    merged[key] = value;
-  }
-
-  return normalizeModelSettings(merged);
 }
 
 function buildDate(value?: string): Date | undefined {

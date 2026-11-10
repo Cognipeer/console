@@ -17,6 +17,7 @@ import {
   searchMemories,
   updateMemoryStore,
 } from '@/lib/services/memory/memoryService';
+import { parseCreateMemoryStoreBody, parseUpdateMemoryStoreBody } from '@/lib/services/memory/memoryRequest';
 import {
   parseCsvQuery,
   readJsonObjectBody,
@@ -52,23 +53,14 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonObjectBody<Record<string, unknown>>(request);
 
-      if (
-        typeof body.name !== 'string'
-        || typeof body.vectorProviderKey !== 'string'
-        || typeof body.embeddingModelKey !== 'string'
-      ) {
-        return reply.code(400).send({
-          error: 'name, vectorProviderKey, and embeddingModelKey are required',
-        });
+      const parsed = parseCreateMemoryStoreBody(body);
+      if (!parsed.ok) {
+        return reply.code(parsed.status).send({ error: parsed.error });
       }
 
       const store = await createMemoryStore(session.tenantDbName, session.tenantId, projectId, {
-        config: body.config as Record<string, unknown> | undefined,
+        ...parsed.value,
         createdBy: session.userId,
-        description: body.description as string | undefined,
-        embeddingModelKey: body.embeddingModelKey,
-        name: body.name,
-        vectorProviderKey: body.vectorProviderKey,
       });
 
       return reply.code(201).send(store);
@@ -108,7 +100,7 @@ export const memoryApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         storeKey,
         {
-          ...body,
+          ...parseUpdateMemoryStoreBody(body),
           updatedBy: session.userId,
         },
       );
