@@ -68,7 +68,7 @@ import { KnowledgeBindingsEditor } from './KnowledgeBindingsEditor';
 import AgentUsagePanel from './AgentUsagePanel';
 import { a2aSendCurl, sampleVariables, variablesOfRunVersion } from './agentUsageSnippets';
 import CopyableCode from './CopyableCode';
-import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
+import type { ToolBinding } from './toolSources';
 import ConnectAgentModal from './ConnectAgentModal';
 import {
   AgentFlowsPanel,
@@ -115,7 +115,7 @@ import BuildSectionIndex, { type BuildIndexGroup } from './studio/BuildSectionIn
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
-import AgentOwnedMcpServers from './studio/AgentOwnedMcpServers';
+import AgentToolsList from './studio/AgentToolsList';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
@@ -365,7 +365,6 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
     () => resolveSubTabFromQuery(searchParams.get('tab'), 'deploy', 'versions'),
   );
 
-  const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
 
   // Advanced runtime knobs, structured output and the delegation roster. These
@@ -1364,50 +1363,12 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
         </ConfigBlock>
 
         <ConfigBlock id="tools" icon={<IconTool size={15} />} title={t('config.tools')}>
-          <Stack gap="sm">
-            <Text size="xs" c="dimmed">{t('config.toolsDescription')}</Text>
-
-            {toolBindings.length > 0 ? (
-              <Stack gap={4}>
-                {toolBindings.map((b) => (
-                  <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
-                    <Badge size="xs" variant="light" color="gray">{b.source.toUpperCase()}</Badge>
-                    <Text size="xs" fw={500}>{b.sourceKey}</Text>
-                    <Badge size="xs" variant="light" color="blue">
-                      {b.toolNames.length} tool(s)
-                    </Badge>
-                  </Group>
-                ))}
-              </Stack>
-            ) : (
-              <Text size="xs" c="dimmed" fs="italic">{t('config.noToolsSelected')}</Text>
-            )}
-
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconTool size={14} />}
-              onClick={() => setToolSelectorOpen(true)}
-              w="fit-content"
-            >
-              {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
-            </Button>
-
-            <AgentOwnedMcpServers
-              agentId={agentId}
-              bindings={toolBindings}
-              onBindingsChange={handleToolBindingsChange}
-              onServersChanged={() => setOwnedMcpVersion((version) => version + 1)}
-              readOnly={readOnly}
-            />
-          </Stack>
-
-          <ToolSelectorModal
-            opened={toolSelectorOpen}
-            onClose={() => setToolSelectorOpen(false)}
-            value={toolBindings}
-            onChange={handleToolBindingsChange}
+          <AgentToolsList
             agentId={agentId}
+            bindings={toolBindings}
+            onBindingsChange={handleToolBindingsChange}
+            onServersChanged={() => setOwnedMcpVersion((version) => version + 1)}
+            readOnly={readOnly}
           />
         </ConfigBlock>
 
