@@ -490,9 +490,24 @@ export async function getManagedStorageRuntime<TRuntime>(
       confined as unknown as object,
       backendIdentifiers(managed, credentials),
       kind,
+      kind === 'vector' && managed.driver === POSTGRES_VECTOR_DRIVER ? isConnectionLevelFailure : undefined,
     ) as TRuntime;
   });
   return managed.cleanupOnly ? withoutWrites(runtime as unknown as object, kind) as TRuntime : runtime;
+}
+
+const CONNECTION_ERROR_CODE = /^(ECONN[A-Z]*|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE|28[0-9A-Z]{3}|08[0-9A-Z]{3}|3D000)$/;
+const ADDRESS_IN_MESSAGE = /\b\d{1,3}(?:\.\d{1,3}){3}\b|\[[0-9a-f:]{2,}\](?::\d+)?|\b(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{1,4}\b/i;
+
+/**
+ * Connection-level failures name the resolved address or the server's view of the client rather than the configured
+ * host, so they are refused generically (a ManagedProviderError is already generic and passes through).
+ */
+export function isConnectionLevelFailure(error: unknown, message: string): boolean {
+  if (error instanceof ManagedProviderError) return false;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && CONNECTION_ERROR_CODE.test(code)) return true;
+  return ADDRESS_IN_MESSAGE.test(message);
 }
 
 /** Values shorter than this are not matched: they would turn almost every message into the generic one. */
@@ -584,10 +599,16 @@ export function backendIdentifiers(
  * backend's identifiers is logged as it is and rethrown with the generic message. An error without one passes
  * unchanged ("file not found"). A 4xx status of the original is kept, anything else becomes the refusal's own.
  */
-export function withoutBackendIdentifiers<T extends object>(runtime: T, identifiers: string[], kind: ManagedStorageKind): T {
+export function withoutBackendIdentifiers<T extends object>(
+  runtime: T,
+  identifiers: string[],
+  kind: ManagedStorageKind,
+  alsoScrub?: (error: unknown, message: string) => boolean,
+): T {
   const clean = (error: unknown): unknown => {
     const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-    if (!message || !identifiers.some((needle) => message.includes(needle))) return error;
+    if (!message) return error;
+    if (!identifiers.some((needle) => message.includes(needle)) && !alsoScrub?.(error, message)) return error;
     log.error('Managed storage call failed with a message naming the backend', { kind, error: message });
     const refusal = new ManagedProviderError(MANAGED_STORAGE_UNAVAILABLE);
     const status = (error as { status?: unknown }).status;

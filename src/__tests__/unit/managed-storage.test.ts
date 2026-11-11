@@ -51,6 +51,7 @@ import {
   scopeStorageSettings,
   tenantStorageToken,
   withoutBackendIdentifiers,
+  isConnectionLevelFailure,
   wrapNameScopedVectorRuntime,
   wrapPostgresVectorRuntime,
   wrapSearchVectorRuntime,
@@ -637,6 +638,22 @@ describe('the search vector runtime', () => {
     } finally {
       create.mockRestore();
     }
+  });
+});
+
+describe('postgres connection failures', () => {
+  it('refuses messages that carry a resolved address or a connection-level code', async () => {
+    const runtime = withoutBackendIdentifiers({
+      async a() { throw new Error('connect ECONNREFUSED 10.1.2.3:5432'); },
+      async b() { throw new Error('no pg_hba.conf entry for host "10.1.2.3", user "x"'); },
+      async c() { throw Object.assign(new Error('boom'), { code: 'ETIMEDOUT' }); },
+      async d() { throw Object.assign(new Error('password authentication failed'), { code: '28P01' }); },
+      async e() { throw new Error('duplicate key'); },
+    }, ['db.internal.example'], 'vector', isConnectionLevelFailure);
+    for (const call of [runtime.a(), runtime.b(), runtime.c(), runtime.d()]) {
+      await expect(call).rejects.toMatchObject({ message: 'This provider is not available right now.' });
+    }
+    await expect(runtime.e()).rejects.toMatchObject({ message: 'duplicate key' });
   });
 });
 

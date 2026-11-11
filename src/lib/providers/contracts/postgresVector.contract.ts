@@ -258,10 +258,15 @@ function createTablePerIndexRuntime(opts: TablePerIndexOptions): VectorProviderR
 
   async function withClient<T>(fn: (client: PgClient) => Promise<T>): Promise<T> {
     const client = await pool.connect();
+    let discard = false;
     try {
       return await fn(client);
+    } catch (error) {
+      discard = (error as { __discardClient?: boolean } | null)?.__discardClient === true;
+      throw error;
     } finally {
-      client.release();
+      // A client whose ROLLBACK failed may be dead or aborted: have the pool drop it.
+      (client.release as (err?: boolean) => void)(discard ? true : undefined);
     }
   }
 
@@ -273,7 +278,13 @@ function createTablePerIndexRuntime(opts: TablePerIndexOptions): VectorProviderR
         await client.query('COMMIT');
         return result;
       } catch (error) {
-        try { await client.query('ROLLBACK'); } catch { /* the original error matters */ }
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          if (error && typeof error === 'object') {
+            try { Object.defineProperty(error, '__discardClient', { value: true, configurable: true }); } catch { /* frozen */ }
+          }
+        }
         throw error;
       }
     });
@@ -317,10 +328,14 @@ function createTablePerIndexRuntime(opts: TablePerIndexOptions): VectorProviderR
         } catch (error) {
           ignoreExisting(error, ['23505', '42710']);
         }
-        try {
-          await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-        } catch (error) {
-          ignoreExisting(error, ['42P06', '23505']);
+        // CREATE SCHEMA IF NOT EXISTS still needs CREATE on the database, so only run it for a missing schema.
+        const existing = await client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [schema]);
+        if (!existing?.rows?.length) {
+          try {
+            await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+          } catch (error) {
+            ignoreExisting(error, ['42P06', '23505']);
+          }
         }
       });
 

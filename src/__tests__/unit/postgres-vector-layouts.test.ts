@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   responder: null as null | ((sql: string, params?: unknown[]) => { rows: any[] } | Promise<{ rows: any[] }>),
   pools: [] as any[],
   released: 0,
+  discarded: 0,
 }));
 
 vi.mock('pg', () => ({
@@ -28,7 +29,7 @@ vi.mock('pg', () => ({
           h.sql.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
           return h.responder ? h.responder(sql, params) : { rows: [] };
         },
-        release: () => { h.released += 1; },
+        release: (err?: boolean) => { h.released += 1; if (err) h.discarded += 1; },
       };
     }
     async end() { this.ended += 1; }
@@ -66,6 +67,7 @@ beforeEach(() => {
   h.responder = null;
   h.pools.length = 0;
   h.released = 0;
+  h.discarded = 0;
   warn.mockClear();
   resetPostgresVectorPoolsForTests();
 });
@@ -116,18 +118,19 @@ describe('table-per-index: createIndex', () => {
     const t = out.externalId;
     const all = sqls();
     expect(all[0]).toBe('CREATE EXTENSION IF NOT EXISTS vector');
-    expect(all[1]).toBe('CREATE SCHEMA IF NOT EXISTS "tenant_a"');
-    expect(all[2]).toBe('BEGIN');
-    expect(all[3]).toContain(`CREATE TABLE "tenant_a"."${t}" (`);
-    expect(all[3]).not.toContain('IF NOT EXISTS');
-    expect(all[3]).toContain('vector vector(3)');
-    expect(all[3]).toContain("metadata JSONB NOT NULL DEFAULT '{}'");
-    expect(all[4]).toBe(`CREATE INDEX "${t}_hnsw" ON "tenant_a"."${t}" USING hnsw (vector vector_cosine_ops)`);
-    expect(all[5]).toBe(`CREATE INDEX "${t}_fts" ON "tenant_a"."${t}" USING GIN (to_tsvector('simple', coalesce(content, '')))`);
-    expect(all[6]).toContain('format(\'COMMENT ON TABLE %I.%I IS %L\'');
-    expect(h.sql[6].params).toEqual(['tenant_a', t, JSON.stringify({ name: 'Product Docs!', metric: 'cosine' })]);
-    expect(all[7]).toBe('COMMENT ON TABLE x IS y');
-    expect(all[8]).toBe('COMMIT');
+    expect(all[1]).toBe('SELECT 1 FROM pg_namespace WHERE nspname = $1');
+    expect(all[2]).toBe('CREATE SCHEMA IF NOT EXISTS "tenant_a"');
+    expect(all[3]).toBe('BEGIN');
+    expect(all[4]).toContain(`CREATE TABLE "tenant_a"."${t}" (`);
+    expect(all[4]).not.toContain('IF NOT EXISTS');
+    expect(all[4]).toContain('vector vector(3)');
+    expect(all[4]).toContain("metadata JSONB NOT NULL DEFAULT '{}'");
+    expect(all[5]).toBe(`CREATE INDEX "${t}_hnsw" ON "tenant_a"."${t}" USING hnsw (vector vector_cosine_ops)`);
+    expect(all[6]).toBe(`CREATE INDEX "${t}_fts" ON "tenant_a"."${t}" USING GIN (to_tsvector('simple', coalesce(content, '')))`);
+    expect(all[7]).toContain('format(\'COMMENT ON TABLE %I.%I IS %L\'');
+    expect(h.sql[7].params).toEqual(['tenant_a', t, JSON.stringify({ name: 'Product Docs!', metric: 'cosine' })]);
+    expect(all[8]).toBe('COMMENT ON TABLE x IS y');
+    expect(all[9]).toBe('COMMIT');
   });
 
   it.each([
@@ -270,6 +273,28 @@ describe('table-per-index: upsert', () => {
     expect(sqls()).toEqual(expect.arrayContaining(['BEGIN', 'ROLLBACK']));
     expect(sqls()).not.toContain('COMMIT');
     expect(h.released).toBe(1);
+  });
+
+  it('discards the client when ROLLBACK itself fails', async () => {
+    h.responder = (sql) => {
+      if (sql.startsWith('INSERT')) throw new Error('insert failed');
+      if (sql === 'ROLLBACK') throw new Error('connection lost');
+      return { rows: [] };
+    };
+    await expect((await perIndex()).upsertVectors(handle(), [{ id: 'a', values: [1, 2, 3] }])).rejects.toThrow('insert failed');
+    expect(h.discarded).toBe(1);
+  });
+
+  it('createIndex skips CREATE SCHEMA when the schema already exists', async () => {
+    h.responder = (sql) => (sql.includes('pg_namespace') ? { rows: [{ '?column?': 1 }] } : sql.startsWith('SELECT format') ? { rows: [{ statement: 'COMMENT ON TABLE x IS y' }] } : { rows: [] });
+    await (await perIndex()).createIndex({ name: 'a', dimension: 3 });
+    expect(sqls().some((q) => q.startsWith('CREATE SCHEMA'))).toBe(false);
+  });
+
+  it('createIndex creates a missing schema', async () => {
+    h.responder = (sql) => (sql.startsWith('SELECT format') ? { rows: [{ statement: 'COMMENT ON TABLE x IS y' }] } : { rows: [] });
+    await (await perIndex()).createIndex({ name: 'a', dimension: 3 });
+    expect(sqls().some((q) => q.startsWith('CREATE SCHEMA'))).toBe(true);
   });
 
   it('an empty list sends nothing', async () => {
