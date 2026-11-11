@@ -45,7 +45,8 @@ export interface TenantLimits {
   seats: { console?: number; portal?: number };
   sandboxMaxSize?: { cpu: number; memoryMb: number };
   realtimeMaxSessionMinutes?: number;
-  credits: { includedPerMonth?: number };
+  /** `usdPerCredit`: what one credit is worth in USD as sold (the license's rate); undefined = not known. */
+  credits: { includedPerMonth?: number; usdPerCredit?: number };
   /** License expiry, shown as the renewal date. */
   expiresAt?: Date;
 }

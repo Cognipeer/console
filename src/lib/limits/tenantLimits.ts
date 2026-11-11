@@ -74,7 +74,10 @@ export function limitsFromPlanClaim(
     seats: { ...(claim.seats ?? {}) },
     sandboxMaxSize: limits.sandboxMaxSize ? { ...limits.sandboxMaxSize } : undefined,
     realtimeMaxSessionMinutes: limits.realtimeMaxSessionMinutes,
-    credits: { includedPerMonth: claim.credits?.includedPerMonth },
+    credits: {
+      includedPerMonth: claim.credits?.includedPerMonth,
+      ...(claim.credits?.usdPerCredit !== undefined ? { usdPerCredit: claim.credits.usdPerCredit } : {}),
+    },
     expiresAt,
   };
 }

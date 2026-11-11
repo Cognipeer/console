@@ -102,10 +102,23 @@ export interface ManagedUsage {
   estimated?: boolean;
 }
 
+/** What a call's usage costs in credits, and in USD at the rate of the credits its hold took. */
+export interface ManagedCreditQuote {
+  credits: number;
+  usdPerCredit: number;
+  usd: number;
+}
+
 export interface ManagedCreditLease {
   readonly id: string;
   /** chat only: the highest output token limit this call may be sent with; undefined = no clamp. */
   readonly maxOutputTokens?: number;
+  /**
+   * What `usage` will be charged, without booking it: the call's recorded cost (usage row, budgets) is this USD, since
+   * a credit-paid model has no token price. Synchronous and pure; null when the credits' USD rate is not known.
+   * Optional: a host without it leaves the cost to the model's own pricing.
+   */
+  quote?(usage: ManagedUsage): ManagedCreditQuote | null;
   /** Books the real usage. Idempotent, never throws (the host logs and reconciles). */
   settle(usage: ManagedUsage): Promise<void>;
   /** Returns the hold. Idempotent, never throws. */

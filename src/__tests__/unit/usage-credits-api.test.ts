@@ -31,11 +31,27 @@ describe('credits client', () => {
     mockFetch({ total: { credits: 9, count: 3, fromMonthly: 6, fromOneTime: 3 }, models: [] });
     const spend = await fetchCreditSpend({ month: '2026-11' });
     expect(spend.total).toBe(9);
-    expect(spend.totals).toEqual({ credits: 9, count: 3, fromMonthly: 6, fromOneTime: 3 });
+    // A server that reports no USD priced nothing: every credit is unpriced.
+    expect(spend.totals).toEqual({ credits: 9, count: 3, fromMonthly: 6, fromOneTime: 3, usd: 0, unpricedCredits: 9 });
   });
 
   it('normalizes missing totals to zero', () => {
-    expect(normalizeTotals(undefined)).toEqual({ credits: 0, count: 0, fromMonthly: 0, fromOneTime: 0 });
+    expect(normalizeTotals(undefined)).toEqual({ credits: 0, count: 0, fromMonthly: 0, fromOneTime: 0, usd: 0, unpricedCredits: 0 });
+  });
+
+  it('reads the USD of a total and of grouped rows', async () => {
+    mockFetch({
+      total: { credits: 10, count: 2, fromMonthly: 10, fromOneTime: 0, usd: 0.05, unpricedCredits: 2 },
+      rows: [
+        { key: 'agent-a', credits: 8, count: 1, fromMonthly: 8, fromOneTime: 0, usd: 0.05, unpricedCredits: 0 },
+        { key: 'agent-b', credits: 2, count: 1, fromMonthly: 2, fromOneTime: 0 },
+      ],
+    });
+    const result = await fetchCreditSpendGrouped('2026-11', 'agent');
+    expect(result.total).toMatchObject({ usd: 0.05, unpricedCredits: 2 });
+    expect(result.rows[0]).toMatchObject({ key: 'agent-a', usd: 0.05, unpricedCredits: 0 });
+    // A row without USD fields counts as unpriced.
+    expect(result.rows[1]).toMatchObject({ key: 'agent-b', usd: 0, unpricedCredits: 2 });
   });
 
   it('asks for a grouped spend and passes rows through', async () => {
@@ -49,7 +65,7 @@ describe('credits client', () => {
     const legacy = { total: 4, models: [{ model: 'm1', label: 'M1', credits: 4, count: 2, inputTokens: 1, outputTokens: 1, units: 0 }] };
     mockFetch(legacy);
     const model = await fetchCreditSpendGrouped('2026-11', 'model');
-    expect(model.rows).toEqual([{ key: 'm1', credits: 4, count: 2, fromMonthly: 0, fromOneTime: 0, label: 'M1' }]);
+    expect(model.rows).toEqual([{ key: 'm1', credits: 4, count: 2, fromMonthly: 0, fromOneTime: 0, usd: 0, unpricedCredits: 4, label: 'M1' }]);
     mockFetch(legacy);
     expect((await fetchCreditSpendGrouped('2026-11', 'agent')).rows).toEqual([]);
     mockFetch(legacy);
@@ -77,7 +93,7 @@ describe('credits client', () => {
 
 describe('fillDailySpend', () => {
   it('lists every day of the month and zero-fills days without spend', () => {
-    const days = fillDailySpend('2026-02', [{ key: '2026-02-03', credits: 10, count: 2, fromMonthly: 6, fromOneTime: 3 }]);
+    const days = fillDailySpend('2026-02', [{ key: '2026-02-03', credits: 10, count: 2, fromMonthly: 6, fromOneTime: 3, usd: 0, unpricedCredits: 10 }]);
     expect(days).toHaveLength(28);
     expect(days[0]).toEqual({ day: '2026-02-01', fromMonthly: 0, fromOneTime: 0, other: 0 });
     expect(days[2]).toEqual({ day: '2026-02-03', fromMonthly: 6, fromOneTime: 3, other: 1 });

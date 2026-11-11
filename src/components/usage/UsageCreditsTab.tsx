@@ -23,7 +23,8 @@ import {
   type CreditSpendGrouped,
   type CreditSpendRow,
 } from './creditsApi';
-import { formatDate, formatNumber, formatPeriod, runwayText } from './format';
+import { creditUsd, formatDate, formatNumber, formatPeriod, runwayText } from './format';
+import { formatUsd } from '@/lib/utils/formatUsd';
 
 export type { CreditLedgerEntry, CreditLedgerKind } from './creditsApi';
 
@@ -65,6 +66,20 @@ function spendLabel(row: CreditSpendRow, t: Translate, group: SpendGroup): strin
   if (row.key === 'search' || row.service === 'search') return t('credits.services.search');
   return row.label ?? row.key;
 }
+
+/** A USD cell: the figure, marked `*` when some of its credits have no rate; a dash when none has one. */
+function UsdCell({ usd, credits, unpricedCredits, t }: { usd: number | undefined; credits: number; unpricedCredits: number | undefined; t: Translate }) {
+  const value = creditUsd(usd, credits, unpricedCredits);
+  if (!value) return <Text size="sm" c="dimmed">—</Text>;
+  return (
+    <Text size="sm" style={{ whiteSpace: 'nowrap' }} title={value.partial ? t('credits.spend.usdPartial') : undefined}>
+      {value.text}{value.partial ? '*' : ''}
+    </Text>
+  );
+}
+
+/** `$0.006` for a per-credit rate. */
+const rateText = (rate: number) => '$' + formatUsd(rate);
 
 function BalanceCard({
   summary,
@@ -118,6 +133,9 @@ function BalanceCard({
           ) : (
             <Text size="xs" c="dimmed">{t('credits.balanceCard.includedEnds', { date: formatDate(included.endsAt, locale) ?? '' })}</Text>
           )}
+          {renewal?.usdPerCredit !== undefined ? (
+            <Text size="xs" c="dimmed">{t('credits.balanceCard.rate', { rate: rateText(renewal.usdPerCredit) })}</Text>
+          ) : null}
         </Stack>
       </Paper>
       <Paper withBorder p="md" radius="md">
@@ -135,6 +153,7 @@ function BalanceCard({
                       ? t('credits.balanceCard.lotEnds', { date: formatDate(lot.expiresAt, locale) ?? '' })
                       : t('credits.balanceCard.noExpiry'),
                   })}
+                  {lot.usdPerCredit !== undefined ? ` · ${t('credits.balanceCard.rate', { rate: rateText(lot.usdPerCredit) })}` : ''}
                 </Text>
               ))}
             </Stack>
@@ -200,13 +219,19 @@ function SpendCard({ month, t, locale, refreshKey }: { month: string; t: Transla
   const rows = spend?.rows ?? [];
   const total = spend?.total;
   const hasSplit = rows.some((row) => row.fromMonthly > 0 || row.fromOneTime > 0);
+  // The USD column shows once any charge of the period has a rate (each charge priced at the rate its credits were sold at).
+  const totalUsd = total ? creditUsd(total.usd, total.credits, total.unpricedCredits) : null;
   return (
     <Paper withBorder p="md" radius="md">
       <Group justify="space-between" align="flex-start" mb="sm" wrap="wrap">
         <div>
           <Title order={4}>{t('credits.spend.title')}</Title>
           <Text size="sm" c="dimmed">
-            {total ? t('credits.spend.total', { total: formatNumber(total.credits, locale), month: formatPeriod(month, locale) }) : ' '}
+            {total
+              ? totalUsd
+                ? t('credits.spend.totalUsd', { total: formatNumber(total.credits, locale), usd: totalUsd.text + (totalUsd.partial ? '*' : ''), month: formatPeriod(month, locale) })
+                : t('credits.spend.total', { total: formatNumber(total.credits, locale), month: formatPeriod(month, locale) })
+              : ' '}
           </Text>
         </div>
         <SegmentedControl
@@ -246,6 +271,7 @@ function SpendCard({ month, t, locale, refreshKey }: { month: string; t: Transla
                 <Table.Th>{t(`credits.spend.columns.${group}`)}</Table.Th>
                 <Table.Th ta="right">{t('credits.spend.columns.calls')}</Table.Th>
                 <Table.Th ta="right">{t('credits.spend.columns.credits')}</Table.Th>
+                {totalUsd ? <Table.Th ta="right">{t('credits.spend.columns.usd')}</Table.Th> : null}
                 {hasSplit ? <Table.Th ta="right">{t('credits.spend.fromMonthly')}</Table.Th> : null}
                 {hasSplit ? <Table.Th ta="right">{t('credits.spend.fromOneTime')}</Table.Th> : null}
                 <Table.Th ta="right">{t('credits.spend.columns.share')}</Table.Th>
@@ -260,6 +286,9 @@ function SpendCard({ month, t, locale, refreshKey }: { month: string; t: Transla
                   </Table.Td>
                   <Table.Td ta="right">{formatNumber(row.count, locale)}</Table.Td>
                   <Table.Td ta="right"><Text size="sm" fw={600}>{formatNumber(row.credits, locale)}</Text></Table.Td>
+                  {totalUsd ? (
+                    <Table.Td ta="right"><UsdCell usd={row.usd} credits={row.credits} unpricedCredits={row.unpricedCredits} t={t} /></Table.Td>
+                  ) : null}
                   {hasSplit ? <Table.Td ta="right">{formatNumber(row.fromMonthly, locale)}</Table.Td> : null}
                   {hasSplit ? <Table.Td ta="right">{formatNumber(row.fromOneTime, locale)}</Table.Td> : null}
                   <Table.Td ta="right">
@@ -278,6 +307,7 @@ function SpendCard({ month, t, locale, refreshKey }: { month: string; t: Transla
 function MonthsCard({ months, t, locale }: { months: CreditMonth[]; t: Translate; locale: string }) {
   if (months.length === 0) return null;
   const num = (value: number) => formatNumber(value, locale);
+  const hasUsd = months.some((row) => creditUsd(row.chargedUsd, row.charged, row.chargedUnpricedCredits) !== null);
   return (
     <Paper withBorder p="md" radius="md">
       <Title order={4}>{t('credits.months.title')}</Title>
@@ -293,6 +323,7 @@ function MonthsCard({ months, t, locale }: { months: CreditMonth[]; t: Translate
               <Table.Th ta="right">{t('credits.months.columns.oneTimeAdded')}</Table.Th>
               <Table.Th ta="right">{t('credits.months.columns.oneTimeUsed')}</Table.Th>
               <Table.Th ta="right">{t('credits.months.columns.charged')}</Table.Th>
+              {hasUsd ? <Table.Th ta="right">{t('credits.months.columns.chargedUsd')}</Table.Th> : null}
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
@@ -305,6 +336,11 @@ function MonthsCard({ months, t, locale }: { months: CreditMonth[]; t: Translate
                 <Table.Td ta="right">{num(row.oneTimeAdded)}</Table.Td>
                 <Table.Td ta="right">{num(row.oneTimeUsed)}</Table.Td>
                 <Table.Td ta="right"><Text size="sm" fw={600}>{num(row.charged)}</Text></Table.Td>
+                {hasUsd ? (
+                  <Table.Td ta="right">
+                    <UsdCell usd={row.chargedUsd} credits={row.charged} unpricedCredits={row.chargedUnpricedCredits} t={t} />
+                  </Table.Td>
+                ) : null}
               </Table.Tr>
             ))}
           </Table.Tbody>
@@ -399,6 +435,16 @@ function LedgerCard({ month, t, locale, refreshKey }: { month: string; t: Transl
       render: (row) => (
         <Text size="sm" fw={600} c={row.credits > 0 ? 'teal' : undefined} style={{ whiteSpace: 'nowrap' }}>
           {row.credits > 0 ? '+' : ''}{formatNumber(row.credits, locale)}
+        </Text>
+      ),
+    },
+    {
+      key: 'usd',
+      label: t('credits.columns.usd'),
+      align: 'right',
+      render: (row) => (
+        <Text size="sm" style={{ whiteSpace: 'nowrap' }}>
+          {row.usd === undefined ? '' : (row.usd > 0 ? '+' : row.usd < 0 ? '-' : '') + '$' + formatUsd(Math.abs(row.usd))}
         </Text>
       ),
     },

@@ -70,13 +70,18 @@ export interface LicensePlanClaim {
   /** Seats: console members (owner, admin, project_admin, user + pending invites) and portal users. */
   seats?: { console?: number; portal?: number };
   limits?: LicensePlanLimits;
-  /** Credits granted at the start of every calendar month (UTC). */
-  credits?: { includedPerMonth?: number };
+  /**
+   * Credits granted at the start of every calendar month (UTC), and what one is worth in USD as it was sold
+   * (`usdPerCredit`, set by the CRM): spend is shown in USD at that rate. Absent rate = not known.
+   */
+  credits?: { includedPerMonth?: number; usdPerCredit?: number };
 }
 
 const PLAN_ID_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 /** Larger values are refused: they are almost certainly a typo. */
 const MAX_LIMIT_VALUE = 1_000_000_000;
+/** The highest USD per credit a license may carry (a guard against a typo, not a price policy). */
+export const MAX_USD_PER_CREDIT = 1000;
 
 class PlanClaimError extends Error {}
 
@@ -203,7 +208,11 @@ export function normalizePlanClaim(value: unknown): LicensePlanClaim | undefined
 
   const credits = section(value.credits, 'credits');
   if (credits) {
-    const normalized = compact({ includedPerMonth: limitValue(credits.includedPerMonth, 'credits.includedPerMonth') });
+    const usdPerCredit = limitValue(credits.usdPerCredit, 'credits.usdPerCredit', { integer: false });
+    if (usdPerCredit !== undefined && usdPerCredit > MAX_USD_PER_CREDIT) {
+      throw new PlanClaimError(`License plan.credits.usdPerCredit must be a number from 0 to ${MAX_USD_PER_CREDIT}`);
+    }
+    const normalized = compact({ includedPerMonth: limitValue(credits.includedPerMonth, 'credits.includedPerMonth'), usdPerCredit });
     if (normalized) claim.credits = normalized;
   }
 

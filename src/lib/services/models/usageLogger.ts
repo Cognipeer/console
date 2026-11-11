@@ -21,6 +21,7 @@ import {
   redactPiiFromLogPayload,
   redactPiiFromLogString,
 } from '@/lib/services/logPiiRedaction';
+import type { ManagedCreditQuote } from '@/enterprise/managed-credits';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
 import { recordRoutedUsage } from './dynamicRoutingState';
@@ -82,6 +83,26 @@ export interface UsageCostResult {
   /** Cache tokens this cost priced at an assumed rate (the input rate, 1.25 x it for a Claude cache write)
    *  because the model has no price entered for them. Absent when nothing was assumed. */
   assumedRates?: Array<'cacheRead' | 'cacheWrite'>;
+  /** Credit-paid (platform) calls: the credits charged, and the USD per credit `totalCost` was priced at. */
+  credits?: number;
+  usdPerCredit?: number;
+}
+
+/**
+ * The cost of a credit-paid call: the credits it is charged at the USD rate they were sold at. The whole amount is
+ * `totalCost` (a credit is not split into input and output).
+ */
+export function costOfCreditQuote(quote: ManagedCreditQuote): UsageCostResult {
+  return {
+    currency: 'USD',
+    inputCost: 0,
+    outputCost: 0,
+    cachedCost: 0,
+    cacheWriteCost: 0,
+    totalCost: quote.usd,
+    credits: quote.credits,
+    usdPerCredit: quote.usdPerCredit,
+  };
 }
 
 /**
@@ -182,6 +203,8 @@ export async function logModelUsage(
      *  `tool_calls`) — a property of the call, not of token usage. Normalized
      *  via `normalizeFinishReason` before persisting. */
     finishReason?: string;
+    /** The call's cost when it is not the model's token price: a credit-paid call (`costOfCreditQuote`). */
+    costOverride?: UsageCostResult;
   },
 ) {
   const db = await getDatabase();
@@ -194,7 +217,7 @@ export async function logModelUsage(
   // flows into calculateCost / pricingSnapshot.
   const pricingSnapshot = {
     ...model.pricing,
-    ...calculateCost(model.pricing, usage, model),
+    ...(payload.costOverride ?? calculateCost(model.pricing, usage, model)),
   };
   // The cache counts are subsets of inputTokens: a total never adds them again.
   const totalTokens =
