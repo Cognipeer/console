@@ -394,42 +394,57 @@ function totalsShare(doc: Pick<IRagDocument, 'status' | 'chunkCount'> | null): {
   return doc?.status === 'indexed' ? { documents: 1, chunks: doc.chunkCount ?? 0 } : { documents: 0, chunks: 0 };
 }
 
-/** Move a module's totals by the difference between a document's share before and after one write. */
-async function moveModuleTotals(
+/** Add (`sign` 1) or take off (`sign` -1) one document's share of its module's totals. */
+async function addModuleTotals(
   db: DatabaseProvider,
   ragModule: IRagModule,
-  before: Pick<IRagDocument, 'status' | 'chunkCount'> | null,
-  after: Pick<IRagDocument, 'status' | 'chunkCount'> | null,
+  share: { documents: number; chunks: number },
+  sign: 1 | -1,
 ): Promise<void> {
-  const was = totalsShare(before);
-  const now = totalsShare(after);
-  const documents = now.documents - was.documents;
-  const chunks = now.chunks - was.chunks;
-  if (documents !== 0 || chunks !== 0) {
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents, chunks });
-  }
+  if (share.documents === 0 && share.chunks === 0) return;
+  await db.incrementRagModuleTotals(String(ragModule._id), {
+    documents: sign * share.documents,
+    chunks: sign * share.chunks,
+  });
 }
+
+/** A write that moves a document through its lifecycle: it always sets the status, and an indexed one its chunk count. */
+type LifecycleWrite = Parameters<DatabaseProvider['updateRagDocument']>[1] & (
+  | { status: 'indexed'; chunkCount: number }
+  | { status: Exclude<IRagDocument['status'], 'indexed'> }
+);
 
 /**
  * Write a document's lifecycle fields and move its module's totals by exactly what this write changed.
  *
- * The change is taken from the row as it was when the write landed (the database reads it in the same atomic step),
- * never from a copy read earlier: two re-ingests, an ingest and a delete can overlap on one document, and a decision
- * taken on a stale copy counts the document twice or not at all. Answers the row as it was before the write, or null
- * when the document no longer exists (nothing is counted then).
+ * Two re-ingests, an ingest and a delete can overlap on one document, so nothing is decided on a copy of the row read
+ * earlier: the row this write replaced is read in the same atomic step as the write. Around the write, the totals move
+ * in two steps: what the document adds once the write lands goes on BEFORE the write, and what it added until then
+ * comes off AFTER it (or the first step is undone when the document turned out to be gone). The totals can therefore
+ * never fall below what the rows hold, not even while writes and their steps interleave, so the clamp at zero never
+ * swallows a step and each write's change is kept, whatever order the steps of overlapping writes land in.
+ *
+ * Answers the row as it was before the write, or null when the document no longer exists (nothing is counted then).
  */
 async function writeDocumentLifecycle(
   db: DatabaseProvider,
   ragModule: IRagModule,
   documentId: string,
-  data: Parameters<DatabaseProvider['updateRagDocument']>[1],
+  data: LifecycleWrite,
 ): Promise<IRagDocument | null> {
-  const before = await db.updateRagDocumentReturningPrevious(documentId, data);
-  if (!before) return null;
-  await moveModuleTotals(db, ragModule, before, {
-    status: data.status ?? before.status,
-    chunkCount: data.chunkCount ?? before.chunkCount,
-  });
+  const coming = totalsShare(data);
+  await addModuleTotals(db, ragModule, coming, 1);
+  let before: IRagDocument | null;
+  try {
+    before = await db.updateRagDocumentReturningPrevious(documentId, data);
+  } catch (error) {
+    // Most likely not written: what was added for it comes off again.
+    await addModuleTotals(db, ragModule, coming, -1).catch((err) => {
+      logger.warn('Failed to take back a module total after a document write failed', { documentId, error: err });
+    });
+    throw error;
+  }
+  await addModuleTotals(db, ragModule, before ? totalsShare(before) : coming, -1);
   return before;
 }
 
@@ -2442,11 +2457,11 @@ export async function deleteRagDocument(
   // The stored source outlives the row unless it is deleted here.
   await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
-  // Module stats count indexed documents only. What this document still counted is read from the row in the same
-  // step that deletes it, not from the copy fetched above: an overlapping re-ingest can have taken it out of the
-  // totals, or put it back, since then.
+  // Module stats count indexed documents only. What this document still counts is read from the row in the same
+  // step that deletes it, not from the copy fetched above: an overlapping re-ingest can have changed it since.
   const removed = await db.deleteRagDocumentReturningPrevious(request.documentId);
-  if (removed) await moveModuleTotals(db, ragModule, removed, null);
+  // Taken off after the row is gone, like every share a write replaces (see writeDocumentLifecycle).
+  if (removed) await addModuleTotals(db, ragModule, totalsShare(removed), -1);
   await deleteRagDocumentAcl(db, ragModule, request.documentId);
   return removed !== null;
 }

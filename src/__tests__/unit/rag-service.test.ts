@@ -782,7 +782,24 @@ describe('RAG Service', () => {
     it('does not count a document deleted while it was being indexed', async () => {
       db.updateRagDocument.mockResolvedValue(null);
       await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
-      expect(db.incrementRagModuleTotals).not.toHaveBeenCalled();
+      // Its share goes on before the write and comes off again when the write finds no row.
+      const deltas = (db.incrementRagModuleTotals as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]);
+      expect(deltas.reduce((n, d) => n + d.documents, 0)).toBe(0);
+      expect(deltas.reduce((n, d) => n + d.chunks, 0)).toBe(0);
+    });
+
+    it('adds the share of a document before its indexed write lands, never after', async () => {
+      const order: string[] = [];
+      db.incrementRagModuleTotals.mockImplementation(async (_id, delta) => {
+        const documents = delta.documents ?? 0;
+        order.push(`totals ${documents > 0 ? '+' : ''}${documents}`);
+      });
+      db.updateRagDocument.mockImplementation(async (id, patch) => {
+        order.push(`write ${patch.status}`);
+        return { ...mockDocument, _id: id, status: 'processing' as const, chunkCount: 0, ...patch };
+      });
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+      expect(order).toEqual(['totals +1', 'write indexed']);
     });
 
     it('keeps a document whose content was indexed out of the failed state when recording it goes wrong', async () => {

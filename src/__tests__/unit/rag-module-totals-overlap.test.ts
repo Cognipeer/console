@@ -4,15 +4,18 @@
  * someone re-indexes, a delete lands mid-way), and whatever order their writes land in, the totals have to end up
  * equal to what the rows say: every indexed row counted once, with its chunk count, and nothing else.
  *
- * The overlaps are made deterministic without sleeps: an operation is held at its first embedding call (after it has
- * claimed the row, before it writes the result) while the other one runs, then released.
+ * The overlaps are made deterministic without sleeps: an operation is held at a chosen point while the other one runs,
+ * then released. The points are its first embedding call (after it has claimed the row, before it writes the result),
+ * and right after one of its row writes has landed (before anything that follows that write, such as the totals). While
+ * an operation is held, the totals must not be below what the rows hold: a later write could otherwise take off a
+ * share that is not on yet, and the clamp at zero would swallow it for good.
  *
  * Real services over the real providers (SQLite, and MongoDB when mongodb-memory-server runs: PARITY_SKIP_MONGODB=1
  * skips it). Only what leaves the process is replaced: the embedding model, the vector store, the file store and the
  * job queue.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
@@ -24,6 +27,12 @@ const h = vi.hoisted(() => ({
   holds: [] as Array<{ reached: () => void; released: Promise<void> }>,
   /** Embedding calls to fail, after the holds are taken. */
   failures: 0,
+  /** Row writes to hold right after they land: the first write a hold matches takes it. */
+  writeHolds: [] as Array<{
+    match: (write: { method: 'update' | 'delete'; id: string; data?: Record<string, unknown> }) => boolean;
+    reached: () => void;
+    released: Promise<void>;
+  }>,
 }));
 
 vi.mock('@cognipeer/to-markdown', () => ({ convertToMarkdown: vi.fn() }));
@@ -63,7 +72,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
 });
 
 import { drainPendingTasks } from '@/lib/core/asyncTask';
-import type { DatabaseProvider } from '@/lib/database';
+import type { DatabaseProvider, IRagDocument } from '@/lib/database';
 import {
   deleteRagDocument,
   indexPendingRagDocument,
@@ -77,6 +86,16 @@ const CHUNK_CONFIG = { strategy: 'recursive_character' as const, chunkSize: 200,
 /** Text that splits into about `n` chunks of CHUNK_CONFIG. */
 function textOf(n: number, word: string): string {
   return Array.from({ length: n }, (_, i) => `${word} paragraph ${i + 1}. ${`${word} `.repeat(25).trim()}.`).join('\n\n');
+}
+
+/** Hold the first row write `match` accepts, right after it has landed: the operation making it waits there. */
+function holdAfterWrite(match: (typeof h.writeHolds)[number]['match']): { reached: Promise<void>; release: () => void } {
+  let reached!: () => void;
+  let release!: () => void;
+  const reachedPromise = new Promise<void>((resolve) => { reached = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  h.writeHolds.push({ match, reached, released });
+  return { reached: reachedPromise, release };
 }
 
 /** Hold the next embedding call that is not already held: the operation making it waits after its claim. */
@@ -94,6 +113,7 @@ describeForEachProvider('Knowledge base totals when operations on one document o
   let tenantId = '';
   let projectId = '';
   let kbCounter = 0;
+  const spies: Array<{ mockRestore(): void }> = [];
 
   const inTenant = <T>(fn: () => Promise<T>): Promise<T> => getDb().runWithTenant!(tenantDbName, fn);
 
@@ -117,6 +137,32 @@ describeForEachProvider('Knowledge base totals when operations on one document o
     vi.clearAllMocks();
     h.holds.length = 0;
     h.failures = 0;
+    h.writeHolds.length = 0;
+    // Row writes call through to the provider; one a hold matches waits after it has landed.
+    const db = getDb();
+    const real = {
+      update: db.updateRagDocumentReturningPrevious.bind(db),
+      remove: db.deleteRagDocumentReturningPrevious.bind(db),
+    };
+    const afterWrite = async (write: { method: 'update' | 'delete'; id: string; data?: Record<string, unknown> }) => {
+      const at = h.writeHolds.findIndex((hold) => hold.match(write));
+      if (at < 0) return;
+      const [hold] = h.writeHolds.splice(at, 1);
+      hold.reached();
+      await hold.released;
+    };
+    spies.push(
+      vi.spyOn(db, 'updateRagDocumentReturningPrevious').mockImplementation(async (id, data) => {
+        const before = await real.update(id, data);
+        await afterWrite({ method: 'update', id: String(id), data: data as Record<string, unknown> });
+        return before;
+      }),
+      vi.spyOn(db, 'deleteRagDocumentReturningPrevious').mockImplementation(async (id) => {
+        const removed = await real.remove(id);
+        await afterWrite({ method: 'delete', id: String(id) });
+        return removed;
+      }),
+    );
     h.publish.mockResolvedValue(undefined);
     h.embed.mockImplementation(async (input: { body: { input: string[] } }) => {
       const hold = h.holds.shift();
@@ -129,6 +175,10 @@ describeForEachProvider('Knowledge base totals when operations on one document o
       }
       return { response: { data: input.body.input.map(() => ({ embedding: [0.1, 0.2, 0.3] })) } };
     });
+  });
+
+  afterEach(() => {
+    for (const spy of spies.splice(0)) spy.mockRestore();
   });
 
   async function makeKb(): Promise<string> {
@@ -176,6 +226,16 @@ describeForEachProvider('Knowledge base totals when operations on one document o
     const indexed = (await rowsOf(kb)).filter((row) => row.status === 'indexed');
     return { documents: indexed.length, chunks: indexed.reduce((sum, row) => sum + (row.chunkCount ?? 0), 0) };
   }
+
+  /** While writes are in flight the totals may count more than the rows hold, never less. */
+  async function expectNotBelowRows(kb: string) {
+    const totals = await totalsOf(kb);
+    const rows = await totalsFromRows(kb);
+    expect(totals.documents).toBeGreaterThanOrEqual(rows.documents);
+    expect(totals.chunks).toBeGreaterThanOrEqual(rows.chunks);
+  }
+
+  const statusOf = (write: { data?: Record<string, unknown> }) => (write.data as Partial<IRagDocument> | undefined)?.status;
 
   /** An indexed document, and the totals it starts with. */
   async function indexedDocument(kb: string, chunks = 1): Promise<string> {
@@ -333,6 +393,113 @@ describeForEachProvider('Knowledge base totals when operations on one document o
       const [row] = await rowsOf(kb);
       expect(row.status).toBe('indexed');
       expect(await totalsOf(kb)).toEqual({ documents: 1, chunks: row.chunkCount });
+    });
+  });
+
+  describe('an operation held right after one of its row writes landed', () => {
+    it('re-ingest held after its indexed write: a second re-ingest in the gap leaves the document counted once', async () => {
+      const kb = await makeKb();
+      const id = await indexedDocument(kb);
+
+      const held = holdAfterWrite((write) => write.method === 'update' && statusOf(write) === 'indexed');
+      const a = reingest(kb, id, textOf(2, 'alpha'));
+      await held.reached;
+      await expectNotBelowRows(kb);
+      await reingest(kb, id, textOf(3, 'beta'));
+      await expectNotBelowRows(kb);
+      held.release();
+      await a;
+
+      const [row] = await rowsOf(kb);
+      expect(row.status).toBe('indexed');
+      expect(await totalsOf(kb)).toEqual({ documents: 1, chunks: row.chunkCount });
+    });
+
+    it('re-ingest held after its indexed write: a delete in the gap leaves nothing counted', async () => {
+      const kb = await makeKb();
+      const id = await indexedDocument(kb, 2);
+
+      const held = holdAfterWrite((write) => write.method === 'update' && statusOf(write) === 'indexed');
+      const a = reingest(kb, id, textOf(1, 'alpha'));
+      await held.reached;
+      expect(await remove(kb, id)).toBe(true);
+      await expectNotBelowRows(kb);
+      held.release();
+      await a;
+
+      expect(await rowsOf(kb)).toEqual([]);
+      expect(await totalsOf(kb)).toEqual({ documents: 0, chunks: 0 });
+    });
+
+    it('re-ingest held after it took the document out of indexed: a second re-ingest in the gap', async () => {
+      const kb = await makeKb();
+      const id = await indexedDocument(kb, 2);
+
+      const held = holdAfterWrite((write) => write.method === 'update' && statusOf(write) === 'processing');
+      const a = reingest(kb, id, textOf(1, 'alpha'));
+      await held.reached;
+      await expectNotBelowRows(kb);
+      await reingest(kb, id, textOf(3, 'beta'));
+      await expectNotBelowRows(kb);
+      held.release();
+      await a;
+
+      const [row] = await rowsOf(kb);
+      expect(row.status).toBe('indexed');
+      expect(await totalsOf(kb)).toEqual({ documents: 1, chunks: row.chunkCount });
+    });
+
+    it('re-ingest held after it took the document out of indexed: a delete in the gap', async () => {
+      const kb = await makeKb();
+      const id = await indexedDocument(kb, 2);
+
+      const held = holdAfterWrite((write) => write.method === 'update' && statusOf(write) === 'processing');
+      const a = reingest(kb, id, textOf(1, 'alpha'));
+      await held.reached;
+      expect(await remove(kb, id)).toBe(true);
+      await expectNotBelowRows(kb);
+      held.release();
+
+      await expect(a).rejects.toMatchObject({ statusCode: 404 });
+      expect(await rowsOf(kb)).toEqual([]);
+      expect(await totalsOf(kb)).toEqual({ documents: 0, chunks: 0 });
+    });
+
+    it('delete held after the row is gone: a re-ingest that finishes in the gap', async () => {
+      const kb = await makeKb();
+      const id = await indexedDocument(kb, 2);
+
+      const first = holdNextEmbedding();
+      const a = reingest(kb, id, textOf(3, 'alpha'));
+      await first.reached;
+      const held = holdAfterWrite((write) => write.method === 'delete');
+      const d = remove(kb, id);
+      await held.reached;
+      first.release();
+      await expect(a).rejects.toMatchObject({ statusCode: 404 });
+      await expectNotBelowRows(kb);
+      held.release();
+      expect(await d).toBe(true);
+
+      expect(await rowsOf(kb)).toEqual([]);
+      expect(await totalsOf(kb)).toEqual({ documents: 0, chunks: 0 });
+    });
+
+    it('first ingest held after its indexed write: a re-ingest and then a delete in the gap', async () => {
+      const kb = await makeKb();
+
+      const held = holdAfterWrite((write) => write.method === 'update' && statusOf(write) === 'indexed');
+      const a = ingest(kb, textOf(2, 'alpha'));
+      await held.reached;
+      const [row] = await rowsOf(kb);
+      await reingest(kb, String(row._id), textOf(1, 'beta'));
+      await expectNotBelowRows(kb);
+      expect(await remove(kb, String(row._id))).toBe(true);
+      held.release();
+      await a;
+
+      expect(await rowsOf(kb)).toEqual([]);
+      expect(await totalsOf(kb)).toEqual({ documents: 0, chunks: 0 });
     });
   });
 
