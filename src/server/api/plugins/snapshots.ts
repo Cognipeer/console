@@ -35,10 +35,26 @@ const logger = createLogger('api:snapshots');
 
 const SOURCES: SnapshotSource[] = ['gateway', 'tracing'];
 
-function parseDate(value: string | undefined): Date | undefined {
-  if (!value) return undefined;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+/** A `from` / `to` value that is present but not a date: 400, never an unbounded range. */
+class InvalidDateError extends Error {}
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * An invalid non-empty value used to be dropped silently, which widened the
+ * range to "everything". A date-only `to` means the whole of that UTC day, so
+ * it is moved to the day's last millisecond (`new Date('2026-11-09')` is
+ * midnight and would exclude the day itself).
+ */
+function parseDate(value: unknown, field: string, endOfDay = false): Date | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new InvalidDateError(`\`${field}\` must be a valid date`);
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) throw new InvalidDateError(`\`${field}\` must be a valid date`);
+  if (endOfDay && DATE_ONLY.test(trimmed)) parsed.setUTCHours(23, 59, 59, 999);
+  return parsed;
 }
 
 interface SnapshotRequestBody {
@@ -63,8 +79,8 @@ interface SnapshotRequestBody {
 
 function parseFilters(body: SnapshotRequestBody): SnapshotFilters {
   return {
-    from: parseDate(body.from),
-    to: parseDate(body.to),
+    from: parseDate(body.from, 'from'),
+    to: parseDate(body.to, 'to', true),
     modelKey: typeof body.modelKey === 'string' && body.modelKey.trim() ? body.modelKey.trim() : undefined,
     agentName: typeof body.agentName === 'string' && body.agentName.trim() ? body.agentName.trim() : undefined,
     status: body.status === 'success' || body.status === 'error' ? body.status : undefined,
@@ -84,10 +100,11 @@ export const snapshotsApiPlugin: FastifyPluginAsync = async (app) => {
       const query = request.query as { from?: string; to?: string };
       const options = await listSnapshotFilterOptions(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: session.userId },
-        { from: parseDate(query.from), to: parseDate(query.to) },
+        { from: parseDate(query.from, 'from'), to: parseDate(query.to, 'to', true) },
       );
       return reply.code(200).send(options);
     } catch (error) {
+      if (error instanceof InvalidDateError) return reply.code(400).send({ error: error.message });
       logger.error('Snapshot filter options error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
@@ -108,6 +125,7 @@ export const snapshotsApiPlugin: FastifyPluginAsync = async (app) => {
       );
       return reply.code(200).send(preview);
     } catch (error) {
+      if (error instanceof InvalidDateError) return reply.code(400).send({ error: error.message });
       logger.error('Snapshot preview error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
@@ -158,6 +176,7 @@ export const snapshotsApiPlugin: FastifyPluginAsync = async (app) => {
       );
       return reply.code(202).send(result);
     } catch (error) {
+      if (error instanceof InvalidDateError) return reply.code(400).send({ error: error.message });
       if (error instanceof Error && /required|must/.test(error.message)) {
         return reply.code(400).send({ error: error.message });
       }

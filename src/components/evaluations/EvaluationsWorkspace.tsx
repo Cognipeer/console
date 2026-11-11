@@ -8,9 +8,9 @@
  * switching in-page tabs.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Loader } from '@mantine/core';
+import { Alert, Button, Group, Loader } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
@@ -36,6 +36,17 @@ import CreateTargetModal from '@/components/evaluations/CreateTargetModal';
 import CreateDatasetModal from '@/components/evaluations/CreateDatasetModal';
 import CreateSuiteModal from '@/components/evaluations/CreateSuiteModal';
 import EvaluationApiUsage from '@/components/evaluations/EvaluationApiUsage';
+import {
+  RUN_LIST_MAX,
+  RUN_PAGE_SIZE,
+  appendRunPage,
+  deriveErrorRate,
+  isRunActive,
+  readErrorMessage,
+  refreshRunList,
+  runRefreshLimit,
+  scoredCount,
+} from '@/components/evaluations/runViewHelpers';
 import type {
   EvalDatasetView,
   EvalRunView,
@@ -45,6 +56,9 @@ import type {
 } from '@/components/evaluations/types';
 
 export type EvaluationSection = 'targets' | 'datasets' | 'suites' | 'runs' | 'api';
+
+type ListName = 'targets' | 'datasets' | 'suites' | 'runs';
+type LoadErrors = Partial<Record<ListName, string>>;
 
 const RUN_STATUS_BADGE: Record<string, string> = {
   completed: 'ds-badge-teal',
@@ -72,6 +86,12 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   const [datasets, setDatasets] = useState<EvalDatasetView[]>([]);
   const [suites, setSuites] = useState<EvalSuiteView[]>([]);
   const [runs, setRuns] = useState<EvalRunView[]>([]);
+  const [runsTotal, setRunsTotal] = useState(0);
+  const [loadingMoreRuns, setLoadingMoreRuns] = useState(false);
+  // How many runs are on screen, for refreshes that run from timers (a closure would see a stale count).
+  const runsLoadedRef = useRef(0);
+  // One message per failed list, so a 500 never reads as "nothing here yet".
+  const [loadErrors, setLoadErrors] = useState<LoadErrors>({});
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -85,34 +105,88 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   const [editSuite, setEditSuite] = useState<EvalSuiteView | null>(null);
   const [editDataset, setEditDataset] = useState<EvalDatasetView | null>(null);
 
+  const setListError = (name: ListName, message: string | null) => {
+    setLoadErrors((prev) => {
+      if ((prev[name] ?? null) === message) return prev;
+      const next = { ...prev };
+      if (message === null) delete next[name];
+      else next[name] = message;
+      return next;
+    });
+  };
+
+  /** Re-reads every run already on screen (summaries: items are left out by the server). */
+  const loadRuns = async () => {
+    const limit = runRefreshLimit(runsLoadedRef.current);
+    try {
+      const res = await fetch(`/api/evaluation/runs?limit=${limit}`, { cache: 'no-store' });
+      if (!res.ok) {
+        setListError('runs', await readErrorMessage(res, 'Could not load runs'));
+        return;
+      }
+      const data = await res.json();
+      const page: EvalRunView[] = data.runs ?? [];
+      setRuns((prev) => refreshRunList(prev, page, limit));
+      setRunsTotal(typeof data.total === 'number' ? data.total : page.length);
+      setListError('runs', null);
+    } catch (err) {
+      setListError('runs', err instanceof Error ? err.message : 'Could not load runs');
+    }
+  };
+
+  const loadMoreRuns = async () => {
+    setLoadingMoreRuns(true);
+    try {
+      const res = await fetch(`/api/evaluation/runs?limit=${RUN_PAGE_SIZE}&skip=${runs.length}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load more runs'));
+      const data = await res.json();
+      setRuns((prev) => appendRunPage(prev, data.runs ?? []));
+      if (typeof data.total === 'number') setRunsTotal(data.total);
+    } catch (err) {
+      notifications.show({ title: 'Could not load more runs', message: err instanceof Error ? err.message : 'Request failed', color: 'red' });
+    } finally {
+      setLoadingMoreRuns(false);
+    }
+  };
+
   const loadAll = async () => {
     setRefreshing(true);
-    try {
-      const [tRes, dRes, sRes, rRes, mRes] = await Promise.all([
-        fetch('/api/evaluation/targets', { cache: 'no-store' }),
-        fetch('/api/evaluation/datasets', { cache: 'no-store' }),
-        fetch('/api/evaluation/suites', { cache: 'no-store' }),
-        fetch('/api/evaluation/runs', { cache: 'no-store' }),
-        fetch('/api/models?category=llm', { cache: 'no-store' }),
-      ]);
-      if (tRes.ok) setTargets((await tRes.json()).targets ?? []);
-      if (dRes.ok) setDatasets((await dRes.json()).datasets ?? []);
-      if (sRes.ok) setSuites((await sRes.json()).suites ?? []);
-      if (rRes.ok) setRuns((await rRes.json()).runs ?? []);
-      if (mRes.ok) {
-        setModels(((await mRes.json()).models ?? []).map((m: { key: string; name: string }) => ({ value: m.key, label: m.name })));
+    // A failed refresh must not wipe what is already on screen: only replace a list on success.
+    const fetchList = async <T,>(name: Exclude<ListName, 'runs'>, url: string, pick: (body: Record<string, unknown>) => T[], set: (v: T[]) => void) => {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) {
+          setListError(name, await readErrorMessage(res, `Could not load ${name}`));
+          return;
+        }
+        set(pick(await res.json()));
+        setListError(name, null);
+      } catch (err) {
+        console.error(`Failed to load ${name}`, err);
+        setListError(name, err instanceof Error ? err.message : `Could not load ${name}`);
       }
-    } catch (err) {
-      console.error('Failed to load evaluations', err);
+    };
+    try {
+      await Promise.all([
+        fetchList('targets', '/api/evaluation/targets', (b) => (b.targets as EvalTargetView[]) ?? [], setTargets),
+        fetchList('datasets', '/api/evaluation/datasets', (b) => (b.datasets as EvalDatasetView[]) ?? [], setDatasets),
+        fetchList('suites', '/api/evaluation/suites', (b) => (b.suites as EvalSuiteView[]) ?? [], setSuites),
+        loadRuns(),
+        (async () => {
+          try {
+            const mRes = await fetch('/api/models?category=llm', { cache: 'no-store' });
+            if (mRes.ok) {
+              setModels(((await mRes.json()).models ?? []).map((m: { key: string; name: string }) => ({ value: m.key, label: m.name })));
+            }
+          } catch (err) {
+            console.error('Failed to load models', err);
+          }
+        })(),
+      ]);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
-
-  const loadRuns = async () => {
-    const res = await fetch('/api/evaluation/runs', { cache: 'no-store' });
-    if (res.ok) setRuns((await res.json()).runs ?? []);
   };
 
   useEffect(() => {
@@ -130,7 +204,22 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
     if (!hasGenerating) return;
     const timer = setInterval(() => { void loadAll(); }, 4000);
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasGenerating]);
+
+  // Runs execute in the background: keep the list fresh while any listed run is queued or running.
+  useEffect(() => {
+    runsLoadedRef.current = runs.length;
+  }, [runs.length]);
+
+  // Only the rows a refresh re-reads count: a run past that window would keep the timer alive forever.
+  const hasActiveRuns = runs.slice(0, RUN_LIST_MAX).some((r) => isRunActive(r.status));
+  useEffect(() => {
+    if (!hasActiveRuns) return;
+    const timer = setInterval(() => { void loadRuns(); }, 4000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasActiveRuns]);
 
   const runSuiteNow = async (suite: EvalSuiteView) => {
     setRunningKey(suite.key);
@@ -227,14 +316,14 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
         return <Group gap={6}><Loader size={12} /><span className="ds-faint" style={{ fontSize: 12 }}>Generating… (~{gen.requested})</span></Group>;
       }
       if (gen?.status === 'failed') {
-        return <span className="ds-badge ds-badge-red" title={gen.error}>Failed</span>;
+        return <span className="ds-badge ds-badge-err" title={gen.error}>Failed</span>;
       }
       const snap = d.metadata?.snapshot as { status?: string; error?: string } | undefined;
       if (snap && (snap.status === 'pending' || snap.status === 'running')) {
         return <Group gap={6}><Loader size={12} /><span className="ds-faint" style={{ fontSize: 12 }}>Snapshotting…</span></Group>;
       }
       if (snap?.status === 'failed') {
-        return <span className="ds-badge ds-badge-red" title={snap.error}>Failed</span>;
+        return <span className="ds-badge ds-badge-err" title={snap.error}>Failed</span>;
       }
       return <span>{d.itemCount}</span>;
     } },
@@ -269,7 +358,14 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   const runColumns: DataGridColumn<EvalRunView>[] = [
     { key: 'suite', label: 'Suite', render: (r) => <span className="ds-mono" style={{ fontSize: 12 }}>{r.suiteKey}</span> },
     { key: 'status', label: 'Status', render: (r) => <span className={`ds-badge ${RUN_STATUS_BADGE[r.status] ?? ''}`}>{r.status}</span> },
-    { key: 'pass', label: 'Pass rate', render: (r) => <span>{r.aggregate ? `${r.aggregate.passed}/${r.aggregate.total} (${pct(r.aggregate.passRate)})` : '—'}</span> },
+    { key: 'pass', label: 'Pass rate', render: (r) => (
+      <span title="Pass rate excludes errored and skipped items.">
+        {r.aggregate ? `${r.aggregate.passed}/${scoredCount(r.aggregate)} (${pct(r.aggregate.passRate)})` : '—'}
+        {r.aggregate && r.aggregate.failed > 0 ? (
+          <span className="ds-faint" style={{ fontSize: 11 }}>{` · ${r.aggregate.failed} errored (${pct(deriveErrorRate(r.aggregate))})`}</span>
+        ) : null}
+      </span>
+    ) },
     { key: 'score', label: 'Avg score', render: (r) => <span>{r.aggregate ? pct(r.aggregate.avgScore) : '—'}</span> },
     ...(anyRunHasCost
       ? [{
@@ -348,10 +444,23 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
         <StatTile label="Targets" icon={<IconRobot size={14} stroke={1.7} />} value={targets.length} />
         <StatTile label="Datasets" icon={<IconDatabase size={14} stroke={1.7} />} value={datasets.length} />
         <StatTile label="Suites" icon={<IconChecklist size={14} stroke={1.7} />} value={suites.length} />
-        <StatTile label="Runs" value={runs.length} />
+        <StatTile label="Runs" value={Math.max(runsTotal, runs.length)} />
       </div>
 
-      {section === 'targets' && (
+      {/* Per-list load error: shown instead of the empty state, with a retry. */}
+      {section !== 'api' && loadErrors[section] && ((): boolean => {
+        const list = section === 'targets' ? targets : section === 'datasets' ? datasets : section === 'suites' ? suites : runs;
+        return list.length === 0;
+      })() ? (
+        <Alert color="red" variant="light" mb="md" title={`Could not load ${section}`}>
+          <Group justify="space-between" wrap="nowrap">
+            <span>{loadErrors[section]}</span>
+            <Button size="xs" variant="default" loading={refreshing} onClick={() => void loadAll()}>Retry</Button>
+          </Group>
+        </Alert>
+      ) : null}
+
+      {section === 'targets' && !(loadErrors.targets && targets.length === 0) && (
         <DataGrid<EvalTargetView>
           records={targetsCtl.records}
           loading={loading}
@@ -377,7 +486,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
         />
       )}
 
-      {section === 'datasets' && (
+      {section === 'datasets' && !(loadErrors.datasets && datasets.length === 0) && (
         <DataGrid<EvalDatasetView>
           records={datasetsCtl.records}
           loading={loading}
@@ -403,7 +512,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
         />
       )}
 
-      {section === 'suites' && (
+      {section === 'suites' && !(loadErrors.suites && suites.length === 0) && (
         <DataGrid<EvalSuiteView>
           records={suitesCtl.records}
           loading={loading}
@@ -437,7 +546,8 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
         />
       )}
 
-      {section === 'runs' && (
+      {section === 'runs' && !(loadErrors.runs && runs.length === 0) && (
+        <>
         <DataGrid<EvalRunView>
           records={runsCtl.records}
           loading={loading}
@@ -455,6 +565,14 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
             description: 'Run a suite from the Suites section to see results here.',
           }}
         />
+        {runs.length < runsTotal ? (
+          <Group justify="center" mt="sm">
+            <Button size="xs" variant="default" loading={loadingMoreRuns} onClick={() => void loadMoreRuns()}>
+              Load more ({runs.length} of {runsTotal})
+            </Button>
+          </Group>
+        ) : null}
+        </>
       )}
 
       {section === 'api' && <EvaluationApiUsage suiteKey={suites[0]?.key} />}

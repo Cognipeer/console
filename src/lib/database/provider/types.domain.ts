@@ -1015,6 +1015,12 @@ export interface IEvaluationScorerConfig {
   selectionWeight?: number;
   sequenceWeight?: number;
   argsWeight?: number;
+  /** Opt-in per-item applicability; absent = always applies. */
+  applyWhen?: 'has-reference' | 'has-expected-tool-calls';
+  /** tool-call scorer: `false` fails the item on any unmatched actual call (default true). */
+  allowExtraCalls?: boolean;
+  /** json-shape scorer: `true` counts keys absent from the reference as problems (default false). */
+  strict?: boolean;
 }
 
 export interface IEvaluationSuite {
@@ -1046,6 +1052,10 @@ export interface IEvaluationScore {
   weight: number;
   detail?: Record<string, unknown>;
   error?: string;
+  /** The scorer did not apply to this item (`detail.reason` says why). */
+  skipped?: boolean;
+  /** Judge spend for this score. */
+  usage?: IEvaluationUsage;
 }
 
 /** Token / cost usage captured for one run item's target invocation. */
@@ -1053,6 +1063,8 @@ export interface IEvaluationUsage {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  cachedWriteTokens?: number;
+  reasoningTokens?: number;
   costUsd?: number;
 }
 
@@ -1061,6 +1073,8 @@ export interface IEvaluationRunItem {
   output?: {
     text: string;
     latencyMs?: number;
+    /** The output was cut off (token limit / content filter). */
+    truncated?: boolean;
     /** Tool calls emitted by the target (trajectory scoring / display). */
     toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
     /**
@@ -1075,6 +1089,7 @@ export interface IEvaluationRunItem {
       text: string;
       toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
       latencyMs?: number;
+      usage?: IEvaluationUsage;
     }>;
   };
   scores: IEvaluationScore[];
@@ -1082,6 +1097,10 @@ export interface IEvaluationRunItem {
   passed: boolean;
   latencyMs?: number;
   usage?: IEvaluationUsage;
+  /** Sum of `scores[].usage` (judge spend; never part of `usage`). */
+  scoringUsage?: IEvaluationUsage;
+  /** No scorer applied to this item (not an error, not a pass). */
+  skipped?: boolean;
   error?: string;
   /** See RunItemResult.kbRestricted (evaluation/types.ts). */
   kbRestricted?: string[];
@@ -1100,6 +1119,18 @@ export interface IEvaluationRunAggregate {
   /** Present only when at least one item reported provider usage. */
   totalCostUsd?: number;
   totalTokens?: number;
+  // Added later: runs written before these fields lack them (absent === null).
+  /** Completed items where no scorer applied. */
+  skipped?: number;
+  /** failed / total (0 when total is 0). */
+  errorRate?: number;
+  /** Completed items whose output was cut off. */
+  truncatedCount?: number;
+  /** Items that reported target usage (denominator for per-item averages). */
+  usageItems?: number;
+  /** Judge spend; never folded into totalCostUsd / totalTokens. */
+  scoringCostUsd?: number;
+  scoringTokens?: number;
 }
 
 export interface IEvaluationRun {
@@ -1119,10 +1150,27 @@ export interface IEvaluationRun {
   error?: string;
   startedAt?: Date;
   finishedAt?: Date;
+  /** A running run was asked to stop; the worker finalises it as cancelled. */
+  cancelRequestedAt?: Date;
+  /** Liveness stamp written while the run executes (stale-run detection). */
+  heartbeatAt?: Date;
+  /** Persistence had to shrink the stored item details to fit the document. */
+  itemsTruncated?: boolean;
+  /**
+   * Who started the run: a person in a dashboard session (`user`) or an API token through the client API
+   * (`api_token`). The run executes as them wherever it executes. Runs written before this was recorded have none.
+   */
+  actorType?: EvaluationRunActorType;
+  /** `api_token` runs: the id of the token (never the credential). */
+  apiTokenId?: string;
+  /** The person (`user`) or the token's owner (`api_token`; the 'api-token' placeholder when it has none). */
   createdBy: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** Who starts an evaluation run (see `IEvaluationRun.actorType`). */
+export type EvaluationRunActorType = 'user' | 'api_token';
 
 // ── Red-team (adversarial agent testing) types ───────────────────────────────
 
@@ -2432,6 +2480,7 @@ export type AlertMetric =
   | 'analysis_avg_accuracy'
   // evaluation (percentages, 0–100, averaged over completed runs in the window)
   | 'evaluation_pass_rate'
+  | 'evaluation_error_rate'
   | 'evaluation_avg_score'
   // red-team (percentages, 0–100, averaged over completed scans in the window)
   | 'redteam_attack_success_rate'

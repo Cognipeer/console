@@ -52,6 +52,25 @@ describe('compareEvaluationRuns', () => {
     expect(cmp.deltas.passRate).toBeCloseTo(0, 5);
   });
 
+  it('marks items that errored or were skipped in either run as not_comparable', () => {
+    const baseline = run([item('a', true, 1), item('b', true, 1), item('c', true, 1), item('d', true, 1)], 'base');
+    const current = run([
+      { ...item('a', false, 0), error: 'Scoring failed — llm-judge: boom' },
+      { ...item('b', false, 0), skipped: true },
+      item('c', false, 0),
+      item('d', true, 1),
+    ], 'cur');
+    baseline.items[3] = { ...item('d', false, 0), error: 'target failed' };
+    const cmp = compareEvaluationRuns(baseline, current);
+    expect(cmp.summary.not_comparable).toBe(3);
+    expect(cmp.summary.regressed).toBe(1);
+    expect(cmp.summary.fixed).toBe(0);
+    expect(cmp.changes.find((c) => c.itemId === 'a')?.status).toBe('not_comparable');
+    expect(cmp.changes.find((c) => c.itemId === 'd')?.status).toBe('not_comparable');
+    // regressed sorts before not_comparable
+    expect(cmp.changes[0].itemId).toBe('c');
+  });
+
   it('detects added and removed items', () => {
     const baseline = run([item('a', true, 1)], 'base');
     const current = run([item('a', true, 1), item('b', false, 0)], 'cur');

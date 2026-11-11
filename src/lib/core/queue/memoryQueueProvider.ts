@@ -214,7 +214,8 @@ export class MemoryQueueProvider implements QueueProvider {
       id: job.id,
       name: job.jobName,
       data: job.payload,
-      attemptsMade: job.attemptsMade,
+      // The counter above already includes this run; handlers get the BullMQ meaning (finished attempts).
+      attemptsMade: job.attemptsMade - 1,
     };
 
     try {

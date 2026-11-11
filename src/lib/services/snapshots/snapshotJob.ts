@@ -24,7 +24,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import { randomBytes } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
-import { createDataset, updateDataset } from '@/lib/services/evaluation/service';
+import { createDataset, patchDatasetMetadata, updateDataset } from '@/lib/services/evaluation/service';
 import type { AnonymizeOptions } from '@/lib/services/pii/anonymize';
 import { assertAnonymizeOptions, buildSnapshotDataset } from './snapshotService';
 import type {
@@ -116,10 +116,13 @@ async function writeSnapshotStatus(
   meta: Record<string, unknown>,
   items?: Parameters<typeof updateDataset>[3]['items'],
 ): Promise<void> {
-  await updateDataset(payload.tenantDbName, payload.datasetId, payload.userId ?? 'system', {
-    ...(items ? { items } : {}),
-    metadata: { snapshot: meta },
-  });
+  // Items first, status second: `ready` must never be visible before the items are. The items write leaves
+  // metadata alone and the status write patches ONLY `metadata.snapshot`, so a parity or labeling block written
+  // by another writer in the meantime is not overwritten.
+  if (items) {
+    await updateDataset(payload.tenantDbName, payload.datasetId, payload.userId ?? 'system', { items });
+  }
+  await patchDatasetMetadata(payload.tenantDbName, payload.datasetId, { snapshot: meta });
 }
 
 /**

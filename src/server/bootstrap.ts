@@ -36,6 +36,7 @@ import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startWebhookQueueConsumer } from '@/lib/services/webhooks/webhookConsumer';
 import { startAgentTriggerScheduler, stopAgentTriggerScheduler } from '@/lib/services/agents/agentTriggerScheduler';
 import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
+import { reconcileOrphanedEvaluationRuns, startEvaluationRunReconciler } from '@/lib/services/evaluation/evaluationRunReconciler';
 import { startTracingSessionFinalizer } from '@/lib/services/tracing/sessionFinalizer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
@@ -321,6 +322,7 @@ async function runBootstrap(): Promise<void> {
     // reconciler above, for the identical reason: a run created after this
     // point must never be observable as orphaned here.
     await bestEffort(reconcileOrphanedAgentRuns, 'Agent run reconciliation failed during startup');
+    await bestEffort(reconcileOrphanedEvaluationRuns, 'Evaluation run reconciliation failed during startup');
 
     // Existing web search providers become instances (idempotent, per tenant, both backends).
     await bestEffort(migrateWebSearchProvidersToInstances, 'Web search instance migration failed during startup');
@@ -368,6 +370,7 @@ async function runBootstrap(): Promise<void> {
     stopAgentTriggerScheduler();
   });
   startAgentRunReconciler();
+  startEvaluationRunReconciler();
   startTracingSessionFinalizer();
   startAnalysisScheduler();
   startRedTeamScheduler();

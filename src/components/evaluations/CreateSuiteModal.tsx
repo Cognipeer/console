@@ -14,7 +14,15 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import { configVersionTag } from '@/components/agents/agentVersionTag';
-import type { EvalDatasetView, EvalScorerView, EvalSuiteView, EvalTargetView, ModelOption } from './types';
+import type {
+  EvalDatasetView,
+  EvalScorerApplyWhen,
+  EvalScorerTypeView,
+  EvalScorerView,
+  EvalSuiteView,
+  EvalTargetView,
+  ModelOption,
+} from './types';
 
 interface CreateSuiteModalProps {
   opened: boolean;
@@ -44,6 +52,52 @@ interface FormValues {
   useGroundedness: boolean;
   embeddingModelKey: string;
   turnMode: 'single' | 'perTurn';
+  useToolCall: boolean;
+  /** tool-call scorer: when false, calls the target made beyond the expected ones fail the item. */
+  allowExtraCalls: boolean;
+  /** json-shape scorer: when true, keys the output has but the reference lacks are flagged too. */
+  strictShape: boolean;
+  /** Per scorer type: '' = always applies, otherwise the item field that must be present. */
+  applyWhen: Partial<Record<EvalScorerTypeView, EvalScorerApplyWhen | ''>>;
+}
+
+const APPLY_WHEN_OPTIONS = [
+  { value: '', label: 'Every item' },
+  { value: 'has-reference', label: 'Only items with a reference answer' },
+  { value: 'has-expected-tool-calls', label: 'Only items with expected tool calls' },
+];
+
+/** The scorer types this form has a checkbox for; every other stored type is carried through untouched. */
+const FORM_SCORER_TYPES: EvalScorerTypeView[] = [
+  'assertion',
+  'json-shape',
+  'llm-judge',
+  'semantic',
+  'tool-call',
+  'context-recall',
+  'context-precision',
+  'groundedness',
+];
+
+function enabledScorers(v: FormValues): Partial<Record<EvalScorerTypeView, boolean>> {
+  return {
+    assertion: v.useAssertion,
+    'json-shape': v.useJsonShape,
+    'llm-judge': v.useJudge,
+    semantic: v.useSemantic,
+    'tool-call': v.useToolCall,
+    'context-recall': v.useContextRecall,
+    'context-precision': v.useContextPrecision,
+    groundedness: v.useGroundedness,
+  };
+}
+
+function readApplyWhen(scorers: EvalScorerView[]): FormValues['applyWhen'] {
+  const out: FormValues['applyWhen'] = {};
+  for (const sc of scorers) {
+    if (out[sc.type] === undefined) out[sc.type] = sc.applyWhen ?? '';
+  }
+  return out;
 }
 
 /** Scorers that grade retrieval, and so need a target that reports its chunks. */
@@ -77,6 +131,10 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       useGroundedness: false,
       embeddingModelKey: '',
       turnMode: 'single',
+      useToolCall: false,
+      allowExtraCalls: true,
+      strictShape: false,
+      applyWhen: {},
     },
     validate: {
       name: (v) => (!v.trim() ? 'Name is required' : null),
@@ -86,7 +144,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
       judgeModelKey: (v, values) => (values.useJudge && !v ? 'A judge model is required for the LLM judge' : null),
       embeddingModelKey: (v, values) => (usesEmbedding(values) && !v ? 'An embedding model is required for embedding-backed scoring' : null),
       useAssertion: (v, values) => (
-        !v && !values.useJudge && !values.useJsonShape && !usesEmbedding(values) ? 'Select at least one scorer' : null
+        !v && !values.useJudge && !values.useJsonShape && !values.useToolCall && !usesEmbedding(values) ? 'Select at least one scorer' : null
       ),
     },
   });
@@ -114,6 +172,10 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
         useGroundedness: editing.scorers.some((s) => s.type === 'groundedness'),
         embeddingModelKey: editing.embeddingModelKey ?? '',
         turnMode: editing.runConfig?.turnMode ?? 'single',
+        useToolCall: editing.scorers.some((s) => s.type === 'tool-call'),
+        allowExtraCalls: editing.scorers.find((s) => s.type === 'tool-call')?.allowExtraCalls ?? true,
+        strictShape: editing.scorers.find((s) => s.type === 'json-shape')?.strict ?? false,
+        applyWhen: readApplyWhen(editing.scorers),
       });
     }
     void (async () => {
@@ -133,14 +195,40 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
   const handleSubmit = async () => {
     if (form.validate().hasErrors) return;
     const v = form.getValues();
+    const enabled = enabledScorers(v);
+    // Start from what is stored so a scorer's weight, threshold and any field this form has no
+    // control for survive an edit; only the fields the form owns are overwritten.
+    const shape = (base: EvalScorerView): EvalScorerView => {
+      const next: EvalScorerView = { ...base };
+      const when = v.applyWhen[base.type];
+      if (when) next.applyWhen = when;
+      else delete next.applyWhen;
+      if (base.type === 'llm-judge') next.rubric = v.rubric.trim();
+      if (base.type === 'tool-call') {
+        if (v.allowExtraCalls) delete next.allowExtraCalls;
+        else next.allowExtraCalls = false;
+      }
+      if (base.type === 'json-shape') {
+        if (v.strictShape) next.strict = true;
+        else delete next.strict;
+      }
+      return next;
+    };
     const scorers: EvalScorerView[] = [];
-    if (v.useAssertion) scorers.push({ type: 'assertion' });
-    if (v.useJsonShape) scorers.push({ type: 'json-shape' });
-    if (v.useJudge) scorers.push({ type: 'llm-judge', rubric: v.rubric.trim() });
-    if (v.useSemantic) scorers.push({ type: 'semantic' });
-    if (v.useContextRecall) scorers.push({ type: 'context-recall' });
-    if (v.useContextPrecision) scorers.push({ type: 'context-precision' });
-    if (v.useGroundedness) scorers.push({ type: 'groundedness' });
+    const present = new Set<EvalScorerTypeView>();
+    for (const stored of editing?.scorers ?? []) {
+      if (!FORM_SCORER_TYPES.includes(stored.type)) {
+        scorers.push(stored); // a type this form does not know: keep it exactly as stored
+        continue;
+      }
+      if (!enabled[stored.type]) continue; // unticked: the user removed it
+      // A second scorer of a type the form shows once (e.g. two judges) is kept as stored.
+      scorers.push(present.has(stored.type) ? stored : shape(stored));
+      present.add(stored.type);
+    }
+    for (const type of FORM_SCORER_TYPES) {
+      if (enabled[type] && !present.has(type)) scorers.push(shape({ type }));
+    }
     setLoading(true);
     try {
       const res = await fetch(
@@ -159,7 +247,8 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             scorers,
             judgeModelKey: v.useJudge ? v.judgeModelKey : null,
             embeddingModelKey: usesEmbedding(v) ? v.embeddingModelKey : null,
-            runConfig: { turnMode: v.turnMode },
+            // Merge so concurrency (and any later key) set through the API is not dropped by an edit.
+            runConfig: { ...(editing?.runConfig ?? {}), turnMode: v.turnMode },
           }),
         },
       );
@@ -190,7 +279,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
   const needsEmbedding = usesEmbedding(v);
   const validName = v.name.trim().length > 0;
   const validBinding = Boolean(v.targetKey) && Boolean(v.datasetKey);
-  const anyScorer = v.useAssertion || v.useJudge || v.useJsonShape || needsEmbedding;
+  const anyScorer = v.useAssertion || v.useJudge || v.useJsonShape || v.useToolCall || needsEmbedding;
   const judgeOk = !v.useJudge || (v.rubric.trim().length > 0 && Boolean(v.judgeModelKey));
   const embeddingOk = !needsEmbedding || Boolean(v.embeddingModelKey);
   const validScorers = anyScorer && judgeOk && embeddingOk;
@@ -207,6 +296,7 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
   const scorerLabels = [
     v.useAssertion ? 'assertion' : null,
     v.useJsonShape ? 'json-shape' : null,
+    v.useToolCall ? 'tool-call' : null,
     v.useJudge ? 'llm-judge' : null,
     v.useSemantic ? 'semantic' : null,
     v.useContextRecall ? 'context-recall' : null,
@@ -295,6 +385,11 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             {...form.getInputProps('useJsonShape', { type: 'checkbox' })}
           />
           <Checkbox
+            label="Tool-call scorer — did the target call the expected tools with the expected arguments?"
+            description="Needs expected tool calls on the dataset items. Items without any are not graded by this scorer."
+            {...form.getInputProps('useToolCall', { type: 'checkbox' })}
+          />
+          <Checkbox
             label="Context recall — is the expected answer covered by the retrieved passages?"
             description="Retrieval targets. Each claim in the gold answer is scored by its closest retrieved passage, so a half-covered answer reads as half recalled."
             {...form.getInputProps('useContextRecall', { type: 'checkbox' })}
@@ -318,6 +413,22 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
             Point this suite at a Knowledge Engine target, or drop those scorers — otherwise every item records a
             scorer error.
           </Alert>
+        )}
+
+        {v.useToolCall && (
+          <Checkbox
+            mt="sm"
+            label="Allow extra tool calls — calls the target makes beyond the expected ones do not fail the item"
+            {...form.getInputProps('allowExtraCalls', { type: 'checkbox' })}
+          />
+        )}
+
+        {v.useJsonShape && (
+          <Checkbox
+            mt="sm"
+            label="Strict JSON shape — also fail when the output has keys the reference answer does not"
+            {...form.getInputProps('strictShape', { type: 'checkbox' })}
+          />
         )}
 
         {useJudge && (
@@ -346,7 +457,31 @@ export default function CreateSuiteModal({ opened, onClose, onCreated, targets, 
         )}
       </FormSection>
 
-      <FormSection number={4} title="Replay" done>
+      <FormSection number={4} title="Applicability" done>
+        <Text size="xs" c="dimmed" mb="xs">
+          By default every selected scorer grades every item. Narrow a scorer to the items that carry what it needs;
+          the others skip it and do not count against the pass rate.
+        </Text>
+        <Stack gap="xs">
+          {FORM_SCORER_TYPES.filter((t) => enabledScorers(v)[t]).map((t) => (
+            <Select
+              key={t}
+              label={t}
+              data={APPLY_WHEN_OPTIONS}
+              allowDeselect={false}
+              value={v.applyWhen[t] ?? ''}
+              onChange={(val) =>
+                form.setFieldValue('applyWhen', {
+                  ...form.getValues().applyWhen,
+                  [t]: (val ?? '') as EvalScorerApplyWhen | '',
+                })
+              }
+            />
+          ))}
+        </Stack>
+      </FormSection>
+
+      <FormSection number={5} title="Replay" done>
         {/* The two modes measure different things, so this is a deliberate
             choice rather than a tuning knob — see EvaluationTurnMode. */}
         <Radio.Group {...form.getInputProps('turnMode')}>

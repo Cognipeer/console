@@ -171,6 +171,61 @@ describe('perTurn mode', () => {
     expect(lastCall.map((m) => m.content)).not.toContain("It's 21°C in Rome.");
   });
 
+  it('calls the model again after a trailing tool result and scores THAT output', async () => {
+    const item: DatasetItem = {
+      id: 'tail',
+      input: [
+        { role: 'user', content: 'weather in Rome?' },
+        { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'get_weather', args: { city: 'Rome' } }] },
+        { role: 'tool', content: '{"tempC":21}', toolCallId: 'c1', name: 'get_weather' },
+      ],
+      expected: { mustContain: ['final'] },
+    };
+    const { calls, invoke } = recordingInvoker((n) => (n === 2 ? 'final answer' : 'first guess'));
+    const result = await runEvaluation({
+      items: [item], scorers: ASSERTION, invokeTarget: invoke, config: { turnMode: 'perTurn' },
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].id).toBe('tail#turn-2');
+    const last = calls[1].input;
+    expect(last[last.length - 1].role).toBe('tool');
+    // The recorded exchange stays; the model's first answer (an answer to the same question) does not.
+    expect(last.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    expect(last.find((m) => m.toolCalls?.length)?.toolCalls?.[0].id).toBe('c1');
+    expect(result.items[0].output?.text).toBe('final answer');
+    expect(result.items[0].passed).toBe(true);
+    expect(result.items[0].output?.turns).toHaveLength(2);
+    expect(result.items[0].output?.turns?.[1].question).toBe('[tool result] get_weather');
+    expect(result.items[0].latencyMs).toBe(20);
+  });
+
+  it('moves the model’s answer behind a recorded tool exchange instead of duplicating it', async () => {
+    const item: DatasetItem = {
+      id: 'mid',
+      input: [
+        { role: 'user', content: 'weather in Rome?' },
+        { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'get_weather', args: { city: 'Rome' } }] },
+        { role: 'tool', content: '{"tempC":21}', toolCallId: 'c1', name: 'get_weather' },
+        { role: 'assistant', content: 'It is 21C.' },
+        { role: 'user', content: 'jacket?' },
+      ],
+    };
+    // The model's own answer issues a call; it must not be carried next to the recorded exchange.
+    const calls: DatasetItem[] = [];
+    const invoke: TargetInvoker = async (it) => {
+      calls.push(it);
+      return { text: `answer ${calls.length}`, toolCalls: [{ name: 'lookup', args: {} }] };
+    };
+    await replayPerTurn(item, invoke);
+
+    expect(calls).toHaveLength(2);
+    const second = calls[1].input;
+    expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant', 'user']);
+    expect(second[1].toolCalls?.[0].name).toBe('get_weather');
+    expect(second[3]).toEqual({ role: 'assistant', content: 'answer 1' });
+  });
+
   it('carries the model’s emitted tool calls into the next turn’s history', async () => {
     // A turn that decides to call a tool is part of the conversation the next
     // turn sees; dropping it would hide the decision from the rest of the run.

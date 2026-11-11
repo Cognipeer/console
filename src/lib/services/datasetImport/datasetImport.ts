@@ -226,8 +226,13 @@ function mapToolUseBlocks(content: unknown): RawToolCall[] {
   if (!Array.isArray(content)) return [];
   const calls: RawToolCall[] = [];
   for (const entry of content) {
-    const block = asRecord(entry);
-    if (!block || block.type !== 'tool_use' || typeof block.name !== 'string') continue;
+    const outer = asRecord(entry);
+    // Bedrock Converse wraps the block: `{toolUse: {toolUseId, name, input}}`; Anthropic is flat `{type:'tool_use'}`.
+    const converse = asRecord(outer?.toolUse);
+    const block = converse
+      ? { ...converse, id: converse.toolUseId }
+      : outer;
+    if (!block || (!converse && block.type !== 'tool_use') || typeof block.name !== 'string') continue;
     const args = asRecord(block.input);
     calls.push({
       ...(typeof block.id === 'string' ? { id: block.id } : {}),
@@ -250,7 +255,16 @@ function mapToolDefinitions(value: unknown): ParsedImportItem['tools'] {
     const record = asRecord(entry);
     if (!record) continue;
     const fn = asRecord(record.function);
-    if (fn && typeof fn.name === 'string') {
+    // Bedrock Converse: `{toolSpec: {name, description, inputSchema: {json}}}`.
+    const spec = asRecord(record.toolSpec);
+    if (spec && typeof spec.name === 'string') {
+      const schema = asRecord(spec.inputSchema);
+      tools.push({
+        name: spec.name,
+        description: asString(spec.description),
+        parameters: asRecord(schema?.json) ?? schema,
+      });
+    } else if (fn && typeof fn.name === 'string') {
       tools.push({
         name: fn.name,
         description: asString(fn.description),
@@ -260,7 +274,10 @@ function mapToolDefinitions(value: unknown): ParsedImportItem['tools'] {
       tools.push({
         name: record.name,
         description: asString(record.description),
-        parameters: asRecord(record.parameters) ?? asRecord(record.input_schema),
+        parameters: asRecord(record.parameters)
+          ?? asRecord(record.input_schema)
+          ?? asRecord(asRecord(record.inputSchema)?.json)
+          ?? asRecord(record.inputSchema),
       });
     }
   }
@@ -273,7 +290,9 @@ function normalizeOpenAiMessages(messages: unknown[]): RawMessage[] {
   for (const entry of messages) {
     const message = asRecord(entry);
     if (!message) continue;
-    const role = typeof message.role === 'string' ? message.role : '';
+    const rawRole = typeof message.role === 'string' ? message.role : '';
+    // Legacy OpenAI `function` role (the result of a `function_call`) is a tool turn without a call id.
+    const role = rawRole === 'function' ? 'tool' : rawRole;
     if (!EVAL_ROLES.has(role)) continue;
     const text = flattenContent(message.content);
     if (role === 'tool') {
@@ -286,7 +305,12 @@ function normalizeOpenAiMessages(messages: unknown[]): RawMessage[] {
       });
       continue;
     }
-    const toolCalls = role === 'assistant' ? mapOpenAiToolCalls(message.tool_calls) : [];
+    // Legacy `function_call` ({name, arguments}) is one call without an id: the replay links the following
+    // tool turn to it in order.
+    const legacyCall = role === 'assistant' && asRecord(message.function_call)
+      ? mapOpenAiToolCalls([{ function: message.function_call }])
+      : [];
+    const toolCalls = role === 'assistant' ? [...mapOpenAiToolCalls(message.tool_calls), ...legacyCall] : [];
     if (text === undefined && toolCalls.length === 0) continue;
     out.push({
       role: role as EvalRole,
@@ -322,7 +346,25 @@ function normalizeAnthropicBody(body: UnknownRecord): RawMessage[] {
       for (const blockEntry of message.content) {
         const block = asRecord(blockEntry);
         if (!block) continue;
-        if (block.type === 'tool_result') {
+        const converseResult = asRecord(block.toolResult);
+        if (converseResult) {
+          // Bedrock Converse: `{toolResult: {toolUseId, content: [{text} | {json}]}}`.
+          flushText();
+          const parts = Array.isArray(converseResult.content) ? converseResult.content : [];
+          const resultText = parts
+            .map((part) => {
+              const piece = asRecord(part);
+              if (typeof piece?.text === 'string') return piece.text;
+              return piece?.json !== undefined ? JSON.stringify(piece.json) : undefined;
+            })
+            .filter((text): text is string => typeof text === 'string')
+            .join('\n');
+          out.push({
+            role: 'tool',
+            text: resultText,
+            ...(typeof converseResult.toolUseId === 'string' ? { toolCallId: converseResult.toolUseId } : {}),
+          });
+        } else if (block.type === 'tool_result') {
           flushText();
           const resultText = flattenContent(block.content)
             ?? (block.content !== undefined ? JSON.stringify(block.content) : undefined);
@@ -332,7 +374,11 @@ function normalizeAnthropicBody(body: UnknownRecord): RawMessage[] {
             text: resultText,
             ...(typeof block.tool_use_id === 'string' ? { toolCallId: block.tool_use_id } : {}),
           });
-        } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+        } else if (
+          (block.type === 'text' || block.type === undefined)
+          && typeof block.text === 'string'
+          && block.text.length > 0
+        ) {
           textParts.push(block.text);
         }
       }
@@ -580,7 +626,7 @@ function mapOpenAiChatRecord(record: UnknownRecord): MapOutcome {
   const messages = Array.isArray(record.messages) ? record.messages : undefined;
   if (!messages || messages.length === 0) return { kind: 'skip', reason: 'missingMessages' };
   return buildItem(normalizeOpenAiMessages(messages), {
-    tools: mapToolDefinitions(record.tools),
+    tools: mapToolDefinitions(record.tools ?? record.functions),
     sourceModel: asString(record.model),
   });
 }
@@ -590,7 +636,7 @@ function mapOpenAiPairRecord(record: UnknownRecord): MapOutcome {
   if (!request) return { kind: 'skip', reason: 'missingMessages' };
   const response = pairResponse(record);
   return buildItem(normalizeOpenAiMessages(request.messages as unknown[]), {
-    tools: mapToolDefinitions(request.tools),
+    tools: mapToolDefinitions(request.tools ?? request.functions),
     responseExpected: expectedFromChoices(response),
     sourceModel: asString(request.model) ?? asString(record.model) ?? asString(record.modelId),
   });
@@ -603,20 +649,23 @@ function mapBedrockRecord(record: UnknownRecord): MapOutcome {
   }
   const outputBody = bedrockBody(record, 'output', 'outputBodyJson');
   return buildItem(normalizeAnthropicBody(inputBody), {
-    tools: mapToolDefinitions(inputBody.tools),
+    tools: mapToolDefinitions(inputBody.tools ?? asRecord(inputBody.toolConfig)?.tools),
     responseExpected: outputBody ? expectedFromAnthropicOutput(outputBody) : undefined,
     sourceModel: asString(record.modelId),
   });
 }
 
-/** Langfuse `input`: messages[], `{messages}`, or a bare string → user turn. */
-function langfuseInputMessages(input: unknown): RawMessage[] | undefined {
+/** Langfuse `input`: messages[], `{messages, tools?}`, or a bare string → user turn. */
+function langfuseInput(input: unknown): { raw: RawMessage[]; tools?: ParsedImportItem['tools'] } | undefined {
   if (typeof input === 'string') {
-    return input.length > 0 ? [{ role: 'user', text: input }] : undefined;
+    return input.length > 0 ? { raw: [{ role: 'user', text: input }] } : undefined;
   }
-  if (Array.isArray(input)) return normalizeOpenAiMessages(input);
+  if (Array.isArray(input)) return { raw: normalizeOpenAiMessages(input) };
   const record = asRecord(input);
-  if (record && Array.isArray(record.messages)) return normalizeOpenAiMessages(record.messages);
+  if (record && Array.isArray(record.messages)) {
+    // The tool menu rides next to the messages; without it every tool-call replay would score 0.
+    return { raw: normalizeOpenAiMessages(record.messages), tools: mapToolDefinitions(record.tools ?? record.functions) };
+  }
   return undefined;
 }
 
@@ -643,9 +692,10 @@ function langfuseOutputExpected(output: unknown): ParsedImportExpected | undefin
 }
 
 function mapLangfuseRecord(record: UnknownRecord): MapOutcome {
-  const raw = langfuseInputMessages(record.input);
-  if (!raw) return { kind: 'skip', reason: 'missingMessages' };
-  return buildItem(raw, {
+  const parsedInput = langfuseInput(record.input);
+  if (!parsedInput) return { kind: 'skip', reason: 'missingMessages' };
+  return buildItem(parsedInput.raw, {
+    tools: parsedInput.tools,
     responseExpected: langfuseOutputExpected(record.output),
     sourceModel: asString(record.model),
   });
@@ -656,7 +706,7 @@ function mapEmbeddedChatRecord(record: UnknownRecord): MapOutcome {
   if (!request) return { kind: 'skip', reason: 'missingMessages' };
   const response = findFirstRecord(record, hasChoices);
   return buildItem(normalizeOpenAiMessages(request.messages as unknown[]), {
-    tools: mapToolDefinitions(request.tools),
+    tools: mapToolDefinitions(request.tools ?? request.functions),
     responseExpected: expectedFromChoices(response),
     sourceModel: asString(request.model) ?? (response ? asString(response.model) : undefined),
   });
@@ -780,9 +830,9 @@ function cleanArgsRecord(
   const cleaned = cleanText(JSON.stringify(args), opts, counter);
   try {
     const parsed = JSON.parse(cleaned);
-    return asRecord(parsed) ?? { _raw: cleaned };
+    return asRecord(parsed) ?? { __raw: cleaned };
   } catch {
-    return { _raw: cleaned }; // keep the anonymized text when re-parsing fails
+    return { __raw: cleaned }; // keep the anonymized text when re-parsing fails
   }
 }
 
@@ -875,6 +925,10 @@ export async function createImportedDataset(
 
   const { items: parsed, skipped } = parseImportItems(params.content, params.format);
   const counter = { findings: 0 };
+  // Items that expect tool calls but carry no tool menu replay without tools and score 0 on the tool-call scorer.
+  const toolCallsWithoutTools = parsed.filter(
+    (item) => (item.expected?.toolCalls?.length ?? 0) > 0 && !(item.tools && item.tools.length > 0),
+  ).length;
   const items = parsed.map((item, index) => toDatasetItem(item, index, params.format, params.anonymize, counter));
 
   // Provenance — everything needed to understand the import, except the salt
@@ -891,6 +945,7 @@ export async function createImportedDataset(
       customPatternCount: params.anonymize.customPatterns?.length ?? 0,
     },
     piiFindings: counter.findings,
+    ...(toolCallsWithoutTools > 0 ? { warnings: { toolCallsWithoutTools } } : {}),
     createdAt: new Date().toISOString(),
   };
 
@@ -909,5 +964,6 @@ export async function createImportedDataset(
     created: items.length,
     skipped,
     piiFindings: counter.findings,
+    ...(toolCallsWithoutTools > 0 ? { warnings: { toolCallsWithoutTools } } : {}),
   };
 }

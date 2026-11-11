@@ -94,14 +94,41 @@ describe('scoreJsonShape', () => {
 
   it('skips items whose reference is prose — mixed datasets stay usable', () => {
     const result = scoreJsonShape(item('just a sentence'), out('another sentence'), { type: 'json-shape' });
-    expect(result.passed).toBe(true);
-    expect(result.detail?.skipped).toBe('reference is not JSON');
+    expect(result.skipped).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.detail?.reason).toBe('reference is not JSON');
   });
 
   it('skips items with no reference at all', () => {
     const result = scoreJsonShape(item(), out('{}'), { type: 'json-shape' });
+    expect(result.skipped).toBe(true);
+    expect(result.detail?.reason).toBe('no reference output');
+  });
+
+  it('fails an empty array where the reference has elements', () => {
+    const result = scoreJsonShape(
+      item(JSON.stringify({ items: [{ id: 1 }] })),
+      out(JSON.stringify({ items: [] })),
+      { type: 'json-shape' },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.score).toBeLessThan(1);
+    expect(diffShape({ items: [{ id: 1 }] }, { items: [] }).missingKeys).toEqual(['items[]']);
+  });
+
+  it('accepts an empty array when the reference array is empty too', () => {
+    const result = scoreJsonShape(item(JSON.stringify({ items: [] })), out(JSON.stringify({ items: [] })), { type: 'json-shape' });
     expect(result.passed).toBe(true);
-    expect(result.detail?.skipped).toBe('no reference output');
+  });
+
+  it('strict mode counts keys the reference lacks; default mode does not', () => {
+    const ref = item(JSON.stringify({ a: 1, b: 2 }));
+    const text = out(JSON.stringify({ a: 1, b: 2, c: 3, d: 4 }));
+    expect(scoreJsonShape(ref, text, { type: 'json-shape' }).passed).toBe(true);
+    const strict = scoreJsonShape(ref, text, { type: 'json-shape', strict: true });
+    expect(strict.passed).toBe(false);
+    expect(strict.score).toBeCloseTo(0.5);
+    expect(String(strict.detail?.reasoning)).toContain('unexpected: c, d');
   });
 
   it('scores partial conformance proportionally', () => {

@@ -219,19 +219,19 @@ export function itemToDraft(item: EvalDatasetItemView): ItemDraft {
 
   const extraItem: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(item as unknown as Record<string, unknown>)) {
-    if (!KNOWN_ITEM_KEYS.has(k) && v !== undefined) extraItem[k] = v;
+    if (!KNOWN_ITEM_KEYS.has(k) && v != null) extraItem[k] = v;
   }
   const extraExpected: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(expected)) {
-    if (!KNOWN_EXPECTED_KEYS.has(k) && v !== undefined) extraExpected[k] = v;
+    if (!KNOWN_EXPECTED_KEYS.has(k) && v != null) extraExpected[k] = v;
   }
 
   const expectedToolCalls = Array.isArray(expected.toolCalls)
     ? (expected.toolCalls as EvalExpectedToolCallView[]).map((tc) => ({
         name: tc.name ?? '',
         argsMatch: resolveArgsMatch(tc),
-        argsText: tc.args !== undefined ? stringifyPretty(tc.args) : '',
-        argsSchemaText: tc.argsSchema !== undefined ? stringifyPretty(tc.argsSchema) : '',
+        argsText: tc.args != null ? stringifyPretty(tc.args) : '',
+        argsSchemaText: tc.argsSchema != null ? stringifyPretty(tc.argsSchema) : '',
       }))
     : [];
 
@@ -251,7 +251,7 @@ export function itemToDraft(item: EvalDatasetItemView): ItemDraft {
     turns: (Array.isArray(item.input) ? item.input : []).map((m) => {
       const extra: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(m as unknown as Record<string, unknown>)) {
-        if (!KNOWN_MESSAGE_KEYS.has(k) && v !== undefined) extra[k] = v;
+        if (!KNOWN_MESSAGE_KEYS.has(k) && v != null) extra[k] = v;
       }
       return {
         role: (EVAL_ROLES as string[]).includes(m.role) ? m.role : 'user',
@@ -260,7 +260,7 @@ export function itemToDraft(item: EvalDatasetItemView): ItemDraft {
           ? m.toolCalls.map((tc) => ({
               id: tc.id ?? '',
               name: tc.name ?? '',
-              argsText: tc.args !== undefined ? stringifyPretty(tc.args) : '',
+              argsText: tc.args != null ? stringifyPretty(tc.args) : '',
             }))
           : [],
         toolCallId: m.toolCallId ?? '',
@@ -271,7 +271,7 @@ export function itemToDraft(item: EvalDatasetItemView): ItemDraft {
     tools: (Array.isArray(item.tools) ? item.tools : []).map((t) => ({
       name: t.name ?? '',
       description: t.description ?? '',
-      parametersText: t.parameters !== undefined ? stringifyPretty(t.parameters) : '',
+      parametersText: t.parameters != null ? stringifyPretty(t.parameters) : '',
     })),
     reference: typeof expected.reference === 'string' ? expected.reference : '',
     expectedToolCalls,
@@ -279,7 +279,7 @@ export function itemToDraft(item: EvalDatasetItemView): ItemDraft {
     mustNotContain: toStringArray(expected.mustNotContain),
     equals: typeof expected.equals === 'string' ? expected.equals : expected.equals != null ? String(expected.equals) : '',
     regex: typeof expected.regex === 'string' ? expected.regex : '',
-    jsonSchemaText: expected.jsonSchema !== undefined ? stringifyPretty(expected.jsonSchema) : '',
+    jsonSchemaText: expected.jsonSchema != null ? stringifyPretty(expected.jsonSchema) : '',
     jsonPathRules,
     toolResultRows: Object.entries(toolResults).map(([key, value]) => ({
       key,
@@ -543,7 +543,7 @@ export function summarizeItem(item: EvalDatasetItemView): ItemSummary {
       nonEmptyArray(expected.mustNotContain) ||
       (expected.equals !== undefined && expected.equals !== null && expected.equals !== '') ||
       (typeof expected.regex === 'string' && expected.regex !== '') ||
-      expected.jsonSchema !== undefined ||
+      expected.jsonSchema != null ||
       nonEmptyArray(expected.jsonPath),
   };
 }
@@ -618,6 +618,33 @@ export function toolDefinitionsToDrafts(tools: EvalToolDefinitionView[]): ToolDr
   return tools.map((t) => ({
     name: t.name ?? '',
     description: t.description ?? '',
-    parametersText: t.parameters !== undefined ? stringifyPretty(t.parameters) : '',
+    parametersText: t.parameters != null ? stringifyPretty(t.parameters) : '',
   }));
+}
+
+/**
+ * Turn the text a reviewer typed back into the type the label had. Labels are edited as
+ * strings, but the server (and the segment filters / summaries built on it) tells `3` from
+ * `"3"` and `true` from `"true"`, so a human review must not quietly retype them.
+ *
+ *  - text identical to how the original value reads: the original value, untouched
+ *    (this also keeps values the form cannot edit, such as arrays, exactly as they were);
+ *  - field type `number`/`score` or an original number: a number when the text is one;
+ *  - field type `boolean` or an original boolean: a boolean for `true`/`false`;
+ *  - anything else (or text that does not fit the type): the trimmed string.
+ */
+export function coerceLabelValue(text: string, fieldType: string | undefined, original: unknown): unknown {
+  const trimmed = text.trim();
+  if (original !== undefined && original !== null && trimmed === String(original)) return original;
+  const wantsNumber = fieldType === 'number' || fieldType === 'score' || (!fieldType && typeof original === 'number');
+  if (wantsNumber && trimmed !== '') {
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) return n;
+  }
+  const wantsBoolean = fieldType === 'boolean' || (!fieldType && typeof original === 'boolean');
+  if (wantsBoolean) {
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+  }
+  return trimmed;
 }

@@ -94,6 +94,19 @@ export interface SdkInvokeContext {
   projectId: string;
 }
 
+/**
+ * Sampling parameters a target pins through its `defaultParams` (R9). OPT-IN: absent keys leave
+ * the hub model's own settings in force, so other callers of `invokeChatViaSdk` are unchanged.
+ */
+export interface SdkSamplingParams {
+  temperature?: number;
+  topP?: number;
+  seed?: number;
+  stop?: string[];
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+}
+
 /** Usage snapshot in the shape the adapter's `toEvalUsage` pricing path takes. */
 export interface SdkUsageSnapshot {
   inputTokens?: number;
@@ -344,7 +357,13 @@ export function normalizeSdkToolCalls(calls: unknown): NormalizedToolCall[] {
   return normalized;
 }
 
-function parseToolArguments(raw: unknown): Record<string, unknown> {
+/**
+ * The ONE convention for tool-call arguments across every evaluation producer on the
+ * adapter side: an object stays as is, an empty/absent value is `{}`, a JSON object
+ * string is parsed, and anything else (invalid JSON, a JSON array/scalar) is kept
+ * verbatim as `{ __raw: <string> }` so it is visible and never throws.
+ */
+export function parseToolArguments(raw: unknown): Record<string, unknown> {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
   if (typeof raw !== 'string' || raw.trim() === '') return {};
   try {
@@ -427,6 +446,10 @@ export async function invokeChatViaSdk(
     reasoning?: unknown;
     /** Pre-resolved config (from `prepareSdkInvocation`) to skip re-resolution. */
     config?: ProviderConfig;
+    /** Target-pinned sampling parameters; `temperature` here beats the model record's. */
+    params?: SdkSamplingParams;
+    /** Cancels the HTTP request (the evaluation timeout). */
+    signal?: AbortSignal;
   },
 ): Promise<SdkChatResult> {
   const config =
@@ -467,7 +490,15 @@ export async function invokeChatViaSdk(
   const request: ChatCompletionRequest = {
     model: served.modelId,
     messages: toUnifiedMessages(wireMessages),
-    ...(typeof settings.temperature === 'number' ? { temperature: settings.temperature } : {}),
+    ...(typeof (opts?.params?.temperature ?? settings.temperature) === 'number'
+      ? { temperature: (opts?.params?.temperature ?? settings.temperature) as number }
+      : {}),
+    ...(opts?.params?.topP !== undefined ? { topP: opts.params.topP } : {}),
+    ...(opts?.params?.seed !== undefined ? { seed: opts.params.seed } : {}),
+    ...(opts?.params?.stop ? { stop: opts.params.stop } : {}),
+    ...(opts?.params?.presencePenalty !== undefined ? { presencePenalty: opts.params.presencePenalty } : {}),
+    ...(opts?.params?.frequencyPenalty !== undefined ? { frequencyPenalty: opts.params.frequencyPenalty } : {}),
+    ...(opts?.signal ? { signal: opts.signal } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(responseFormat ? { responseFormat } : {}),

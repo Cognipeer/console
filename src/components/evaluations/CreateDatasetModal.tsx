@@ -404,7 +404,7 @@ export default function CreateDatasetModal({ opened, models, onClose, onCreated,
                     <Textarea label="Question / input" placeholder="What the target is asked" autosize minRows={1} value={r.input} onChange={(e) => updateRow(idx, { input: e.currentTarget.value })} />
                     <Group grow align="flex-start">
                       <TextInput label="Expected answer" placeholder="Gold answer (judge / semantic)" value={r.reference} onChange={(e) => updateRow(idx, { reference: e.currentTarget.value })} />
-                      <TextInput label="Must contain" placeholder="comma / | separated" value={r.contains} onChange={(e) => updateRow(idx, { contains: e.currentTarget.value })} />
+                      <TextInput label="Must contain" placeholder="| or ; separated" value={r.contains} onChange={(e) => updateRow(idx, { contains: e.currentTarget.value })} />
                     </Group>
                     <Group grow align="flex-start">
                       <TextInput label="ID" placeholder="auto" value={r.id} onChange={(e) => updateRow(idx, { id: e.currentTarget.value })} />

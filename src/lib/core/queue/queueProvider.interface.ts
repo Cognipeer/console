@@ -52,6 +52,7 @@ export interface InvokeOptions extends JobOptions {
 export interface JobContext<T = QueuePayload> {
   name: string;
   data: T;
+  /** Attempts that FINISHED before this one (0 on the first run), as BullMQ counts them. */
   attemptsMade: number;
   /** Underlying job id assigned by the driver. */
   id: string;

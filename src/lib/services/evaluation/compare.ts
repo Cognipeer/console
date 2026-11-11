@@ -7,7 +7,7 @@
 
 import type { IEvaluationRun, IEvaluationRunItem } from '@/lib/database';
 
-export type EvalComparisonStatus = 'regressed' | 'fixed' | 'unchanged' | 'added' | 'removed';
+export type EvalComparisonStatus = 'regressed' | 'fixed' | 'unchanged' | 'added' | 'removed' | 'not_comparable';
 
 export interface EvalComparisonItem {
   itemId: string;
@@ -40,7 +40,7 @@ export function compareEvaluationRuns(baseline: IEvaluationRun, current: IEvalua
   const baseByItem = new Map<string, IEvaluationRunItem>(baseline.items.map((i) => [i.itemId, i]));
   const curByItem = new Map<string, IEvaluationRunItem>(current.items.map((i) => [i.itemId, i]));
 
-  const summary: Record<EvalComparisonStatus, number> = { regressed: 0, fixed: 0, unchanged: 0, added: 0, removed: 0 };
+  const summary: Record<EvalComparisonStatus, number> = { regressed: 0, fixed: 0, unchanged: 0, added: 0, removed: 0, not_comparable: 0 };
   const changes: EvalComparisonItem[] = [];
 
   const allIds = new Set([...baseByItem.keys(), ...curByItem.keys()]);
@@ -51,6 +51,9 @@ export function compareEvaluationRuns(baseline: IEvaluationRun, current: IEvalua
     let status: EvalComparisonStatus;
     if (!b) status = 'added';
     else if (!c) status = 'removed';
+    // An errored or skipped item has no verdict to compare: calling it a
+    // regression (or a fix) would blame the model for an infrastructure blip.
+    else if (b.error || c.error || b.skipped || c.skipped) status = 'not_comparable';
     else if (b.passed && !c.passed) status = 'regressed';
     else if (!b.passed && c.passed) status = 'fixed';
     else status = 'unchanged';
@@ -71,7 +74,7 @@ export function compareEvaluationRuns(baseline: IEvaluationRun, current: IEvalua
     }
   }
 
-  const order: Record<EvalComparisonStatus, number> = { regressed: 0, fixed: 1, added: 2, removed: 3, unchanged: 4 };
+  const order: Record<EvalComparisonStatus, number> = { regressed: 0, fixed: 1, added: 2, removed: 3, not_comparable: 4, unchanged: 5 };
   changes.sort((a, b) => order[a.status] - order[b.status]);
 
   const ba = baseline.aggregate;

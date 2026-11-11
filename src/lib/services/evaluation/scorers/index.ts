@@ -12,6 +12,7 @@ import { scoreJsonShape } from './jsonShapeScorer';
 import { scoreContextRecall } from './contextRecallScorer';
 import { scoreContextPrecision } from './contextPrecisionScorer';
 import { scoreGroundedness } from './groundednessScorer';
+import { hasReference, skippedScore } from './skip';
 
 export const SUPPORTED_SCORERS: ScorerType[] = [
   'assertion',
@@ -44,6 +45,72 @@ function missingInvoker(scorerType: ScorerType, weight: number, invoker: 'judge'
   return { scorerType, score: 0, passed: false, weight, error: `no ${invoker} invoker configured` };
 }
 
+/**
+ * Why a scorer does not apply to this item, or undefined when it does. Explicit
+ * `applyWhen` is checked first; the built-in rules cover scorers that are
+ * meaningless without a gold answer (the item is not wrong, the scorer is just
+ * not applicable). Tool-call abstention and the judge stay always-applicable
+ * unless the suite says otherwise.
+ */
+function inapplicableReason(item: DatasetItem, config: ScorerConfig): string | undefined {
+  const expectedCalls = item.expected?.toolCalls;
+  if (config.applyWhen === 'has-reference' && !hasReference(item.expected?.reference)) {
+    return 'item has no reference answer';
+  }
+  if (config.applyWhen === 'has-expected-tool-calls' && !(Array.isArray(expectedCalls) && expectedCalls.length > 0)) {
+    return 'item has no expected tool calls';
+  }
+  if (
+    (config.type === 'semantic' || config.type === 'context-recall' || config.type === 'context-precision') &&
+    !hasReference(item.expected?.reference)
+  ) {
+    return 'item has no reference answer';
+  }
+  return undefined;
+}
+
+async function runOne(
+  item: DatasetItem,
+  output: TargetOutput,
+  config: ScorerConfig,
+  deps: ScorerDeps,
+): Promise<ScoreResult> {
+  const weight = config.weight ?? 1;
+  switch (config.type) {
+    case 'assertion':
+      return scoreAssertion(item, output, config);
+    case 'tool-call':
+      return scoreToolCall(item, output, config);
+    case 'json-shape':
+      return scoreJsonShape(item, output, config);
+    case 'llm-judge':
+      return deps.invokeJudge
+        ? scoreLlmJudge(item, output, config, deps.invokeJudge)
+        : missingInvoker('llm-judge', weight, 'judge');
+    case 'semantic':
+      return deps.invokeEmbed
+        ? scoreSemantic(item, output, config, deps.invokeEmbed)
+        : missingInvoker('semantic', weight, 'embed');
+    case 'context-recall':
+      return deps.invokeEmbed
+        ? scoreContextRecall(item, output, config, deps.invokeEmbed)
+        : missingInvoker('context-recall', weight, 'embed');
+    case 'context-precision':
+      return deps.invokeEmbed
+        ? scoreContextPrecision(item, output, config, deps.invokeEmbed)
+        : missingInvoker('context-precision', weight, 'embed');
+    case 'groundedness':
+      return deps.invokeEmbed
+        ? scoreGroundedness(item, output, config, deps.invokeEmbed)
+        : missingInvoker('groundedness', weight, 'embed');
+    default: {
+      // Exhaustiveness guard — a new ScorerConfig variant must be handled.
+      const _never: never = config;
+      throw new Error(`unsupported scorer: ${JSON.stringify(_never)}`);
+    }
+  }
+}
+
 export async function runScorers(
   item: DatasetItem,
   output: TargetOutput,
@@ -52,57 +119,22 @@ export async function runScorers(
 ): Promise<ScoreResult[]> {
   const results: ScoreResult[] = [];
   for (const config of scorers) {
-    const weight = config.weight ?? 1;
-    switch (config.type) {
-      case 'assertion':
-        results.push(scoreAssertion(item, output, config));
-        break;
-      case 'tool-call':
-        results.push(scoreToolCall(item, output, config));
-        break;
-      case 'json-shape':
-        results.push(scoreJsonShape(item, output, config));
-        break;
-      case 'llm-judge':
-        if (!deps.invokeJudge) {
-          results.push(missingInvoker('llm-judge', weight, 'judge'));
-        } else {
-          results.push(await scoreLlmJudge(item, output, config, deps.invokeJudge));
-        }
-        break;
-      case 'semantic':
-        if (!deps.invokeEmbed) {
-          results.push(missingInvoker('semantic', weight, 'embed'));
-        } else {
-          results.push(await scoreSemantic(item, output, config, deps.invokeEmbed));
-        }
-        break;
-      case 'context-recall':
-        if (!deps.invokeEmbed) {
-          results.push(missingInvoker('context-recall', weight, 'embed'));
-        } else {
-          results.push(await scoreContextRecall(item, output, config, deps.invokeEmbed));
-        }
-        break;
-      case 'context-precision':
-        if (!deps.invokeEmbed) {
-          results.push(missingInvoker('context-precision', weight, 'embed'));
-        } else {
-          results.push(await scoreContextPrecision(item, output, config, deps.invokeEmbed));
-        }
-        break;
-      case 'groundedness':
-        if (!deps.invokeEmbed) {
-          results.push(missingInvoker('groundedness', weight, 'embed'));
-        } else {
-          results.push(await scoreGroundedness(item, output, config, deps.invokeEmbed));
-        }
-        break;
-      default: {
-        // Exhaustiveness guard — a new ScorerConfig variant must be handled.
-        const _never: never = config;
-        throw new Error(`unsupported scorer: ${JSON.stringify(_never)}`);
-      }
+    const reason = inapplicableReason(item, config);
+    if (reason) {
+      results.push(skippedScore(config.type, config.weight ?? 1, reason));
+      continue;
+    }
+    try {
+      results.push(await runOne(item, output, config, deps));
+    } catch (err) {
+      // One scorer blowing up must not erase the other scores of the item.
+      results.push({
+        scorerType: config.type,
+        score: 0,
+        passed: false,
+        weight: config.weight ?? 1,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return results;

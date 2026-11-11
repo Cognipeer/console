@@ -163,6 +163,7 @@ export const alertsTr: typeof alertsEn = {
     analysis_avg_accuracy: 'Analiz Ortalama Doğruluk',
     evaluation_pass_rate: 'Değerlendirme Geçme Oranı',
     evaluation_avg_score: 'Değerlendirme Ortalama Puanı',
+    evaluation_error_rate: 'Değerlendirme Hata Oranı',
     redteam_attack_success_rate: 'Red Team Saldırı Başarı Oranı',
     redteam_resilience_score: 'Red Team Dayanıklılık Puanı',
     appgw_requests: 'AI App Gateway İstekleri',

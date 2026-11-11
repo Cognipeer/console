@@ -73,7 +73,15 @@ export default function EvaluationApiUsage({ suiteKey }: Props) {
 curl -X POST ${BASE}/api/client/v1/evaluation/suites/${key}/run \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
-  -d '{"agent_version": "draft"}'`;
+  -d '{"agent_version": "draft"}'
+
+# Long suites: do not hold the connection open. "wait": false queues the run and
+# returns 202 with the pending run; poll GET /runs/{id} until its status is
+# completed, failed or cancelled.
+curl -X POST ${BASE}/api/client/v1/evaluation/suites/${key}/run \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"wait": false}'`;
 
   const runResponse = `{
   "run": {
@@ -83,8 +91,8 @@ curl -X POST ${BASE}/api/client/v1/evaluation/suites/${key}/run \\
     "dataset_key": "smoke-data",
     "status": "completed",
     "aggregate": {
-      "total": 24, "completed": 24, "failed": 0, "passed": 22,
-      "pass_rate": 0.9167, "avg_score": 0.94, "avg_latency_ms": 812
+      "total": 24, "completed": 24, "failed": 0, "skipped": 0, "passed": 22,
+      "error_rate": 0, "pass_rate": 0.9167, "avg_score": 0.94, "avg_latency_ms": 812
     },
     "items": [
       {
@@ -113,11 +121,13 @@ const { run } = await fetch(
   { method: 'POST', headers },
 ).then((r) => r.json());
 
+const errorRate = run.aggregate?.error_rate ?? 0;
 const passRate = run.aggregate?.pass_rate ?? 0;
 console.log(\`pass rate: \${(passRate * 100).toFixed(1)}% (\${run.aggregate.passed}/\${run.aggregate.total})\`);
 
-if (passRate < 0.9) {
-  console.error('Evaluation gate failed — pass rate below 90%');
+// pass_rate leaves errored items out, so a run where most items errored can still look perfect.
+if (run.status !== 'completed' || errorRate > 0.05 || passRate < 0.9) {
+  console.error('Evaluation gate failed — run not completed, too many errors, or pass rate below 90%');
   process.exit(1);
 }`;
 
@@ -141,13 +151,13 @@ if (passRate < 0.9) {
 
       <Snippet
         title="2 · Run a suite"
-        description="Trigger a synchronous run over the suite's dataset. Returns the scored result once it completes. For agent targets, the optional agent_version body field picks the draft or a version; the run reports the revision it used in agent_revision."
+        description="Trigger a run over the suite's dataset. By default the call waits and returns the scored result once it completes; send wait: false to get 202 with the pending run and poll it instead. For agent targets, the optional agent_version body field picks the draft or a version; the run reports the revision it used in agent_revision."
         code={runCurl}
       />
 
       <Snippet
         title="Run response"
-        description="The aggregate reports pass_rate, avg_score and avg_latency_ms; items carry per-case scores."
+        description="The aggregate reports pass_rate, avg_score and avg_latency_ms. pass_rate leaves errored (failed) and skipped items out, so also check failed or error_rate. Items carry per-case scores."
         code={runResponse}
       />
 

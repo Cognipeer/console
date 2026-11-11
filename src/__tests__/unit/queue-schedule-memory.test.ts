@@ -51,3 +51,19 @@ describe('MemoryQueueProvider.schedule', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 });
+
+describe('MemoryQueueProvider attempt count', () => {
+  it('hands handlers the number of FINISHED attempts, as BullMQ does (0 on the first run)', async () => {
+    const retrying = new MemoryQueueProvider({ attempts: 2, backoffMs: 10 });
+    await retrying.init();
+    const seen: number[] = [];
+    retrying.consume('gen', async (ctx) => {
+      seen.push(ctx.attemptsMade);
+      if (seen.length === 1) throw new Error('transient');
+    });
+    await retrying.publish('gen', 'gen', {});
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(seen).toEqual([0, 1]);
+    await retrying.destroy();
+  });
+});

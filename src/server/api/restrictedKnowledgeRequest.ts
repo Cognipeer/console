@@ -30,8 +30,18 @@ const logger = createLogger('api:restricted-knowledge');
 const readers = new WeakMap<FastifyRequest, Map<string, RestrictedKnowledgeReader>>();
 
 /**
- * The reader for `viewerUserId` in this request (`tenantDbName` is where the knowledge bases live). Kept on the
- * request, so the handlers and helpers of one request share its answers.
+ * The viewer a request through an API token is: the token, never its owner. A token reads only what is open to
+ * everyone and to the token itself, so a copy made for its owner is not the token's to read; one made for work the
+ * token did is. Never equal to a user id.
+ */
+export function apiTokenViewer(tokenId: string): string {
+  return `api_token:${tokenId}`;
+}
+
+/**
+ * The reader for `viewerUserId` in this request (`tenantDbName` is where the knowledge bases live): a user id, or
+ * `apiTokenViewer(id)` where an API token calls. Kept on the request, so the handlers and helpers of one request share
+ * its answers.
  */
 export function restrictedKnowledgeReaderFor(
   request: FastifyRequest,
@@ -150,17 +160,30 @@ export async function withoutRestrictedMcpLogContent<T extends {
 }
 
 /**
- * An evaluation or red-team run, with the items whose work handed on passages of knowledge base documents not open
- * to everyone (`kbRestricted`) cut down for a viewer who may not read them: the score and the verdict stay, the
- * output, the scorers' details and the error go. The run's starter may read them.
+ * Whom an evaluation run's stored copies were made for: the caller that started it. A run a token started, the token
+ * (`apiTokenViewer`) and the person who owns it, who may act as the token anyway; a run a person started, that person.
+ * A run that does not record its caller names only the person in `createdBy` (a token never reads it as its own).
  */
-export async function withoutRestrictedRunItems<R extends { createdBy?: string; items?: IEvaluationRunItem[] }>(
+function evaluationRunAskers(run: { createdBy?: string; actorType?: string; apiTokenId?: string }): string[] {
+  const person = run.createdBy ? [run.createdBy] : [];
+  return run.actorType === 'api_token' && run.apiTokenId ? [apiTokenViewer(run.apiTokenId), ...person] : person;
+}
+
+/**
+ * An evaluation run, with the items whose work handed on passages of knowledge base documents not open to everyone
+ * (`kbRestricted`) cut down for a viewer who may not read them: the score and the verdict stay, the output, the
+ * scorers' details and the error go. Whoever started the run may read them (`evaluationRunAskers`).
+ */
+export async function withoutRestrictedRunItems<
+  R extends { createdBy?: string; actorType?: string; apiTokenId?: string; items?: IEvaluationRunItem[] },
+>(
   request: FastifyRequest,
   input: { tenantDbName: string; viewerUserId: string | null | undefined },
   run: R,
 ): Promise<R> {
   const items = run.items ?? [];
-  const hidden = await rowsWithHiddenContent(request, input, items, (item) => ({ tags: item.kbRestricted, askers: [run.createdBy] }));
+  const askers = evaluationRunAskers(run);
+  const hidden = await rowsWithHiddenContent(request, input, items, (item) => ({ tags: item.kbRestricted, askers }));
   if (hidden.size === 0) return run;
   return {
     ...run,

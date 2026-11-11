@@ -146,6 +146,18 @@ export interface AppConfig {
   evaluation: {
     /** How evaluation targets are invoked (EVALUATION_INVOKER). `gateway` routes through the gateway; otherwise in-process. */
     invoker: 'gateway' | 'direct';
+    /** A running run without a heartbeat for this long is declared lost (EVALUATION_RUN_STALE_MS). */
+    runStaleMs: number;
+    /** How often a running run writes its heartbeat (EVALUATION_RUN_HEARTBEAT_MS). */
+    runHeartbeatMs: number;
+    /** How often a running executor looks for a cancel request (EVALUATION_RUN_CANCEL_POLL_MS). */
+    runCancelPollMs: number;
+    /** Timeout of one model / knowledge-base target call (EVALUATION_TARGET_TIMEOUT_MS). */
+    targetTimeoutMs: number;
+    /** Timeout of one agent target call (EVALUATION_AGENT_TIMEOUT_MS). */
+    agentTimeoutMs: number;
+    /** Timeout of one judge call (EVALUATION_JUDGE_TIMEOUT_MS). */
+    judgeTimeoutMs: number;
   };
 
   auth: {
@@ -1104,6 +1116,12 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     evaluation: {
       invoker: source.get('EVALUATION_INVOKER') === 'gateway' ? 'gateway' : 'direct',
+      runStaleMs: positiveInt(source, 'EVALUATION_RUN_STALE_MS', 600_000),
+      runHeartbeatMs: positiveInt(source, 'EVALUATION_RUN_HEARTBEAT_MS', 30_000),
+      runCancelPollMs: positiveInt(source, 'EVALUATION_RUN_CANCEL_POLL_MS', 5_000),
+      targetTimeoutMs: positiveInt(source, 'EVALUATION_TARGET_TIMEOUT_MS', 180_000),
+      agentTimeoutMs: positiveInt(source, 'EVALUATION_AGENT_TIMEOUT_MS', 600_000),
+      judgeTimeoutMs: positiveInt(source, 'EVALUATION_JUDGE_TIMEOUT_MS', 120_000),
     },
 
     auth: {

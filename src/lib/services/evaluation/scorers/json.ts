@@ -48,7 +48,15 @@ export interface PathLookup {
   value: unknown;
 }
 
-/** Resolve a dot / bracket path (e.g. `data.items[0].name`) against a value. */
+/** Own-property test: `in` also finds inherited names (`toString`, `constructor`, `__proto__`). */
+export function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/**
+ * Resolve a dot / bracket path against a value: `data.items[0].name`, and
+ * `["a.b"]` / `['a.b']` for keys that contain dots or brackets.
+ */
 export function getByPath(root: unknown, path: string): PathLookup {
   const tokens = tokenizePath(path);
   let current: unknown = root;
@@ -64,7 +72,7 @@ export function getByPath(root: unknown, path: string): PathLookup {
         return { exists: false, value: undefined };
       }
       const obj = current as Record<string, unknown>;
-      if (!(token in obj)) return { exists: false, value: undefined };
+      if (!hasOwn(obj, token)) return { exists: false, value: undefined };
       current = obj[token];
     }
   }
@@ -73,19 +81,57 @@ export function getByPath(root: unknown, path: string): PathLookup {
 
 function tokenizePath(path: string): Array<string | number> {
   const tokens: Array<string | number> = [];
-  // Split on dots that are not inside brackets, then expand [n] indices.
-  const segments = path.split('.').filter((s) => s.length > 0);
-  for (const segment of segments) {
-    const bracketMatch = segment.match(/^([^[]*)((\[\d+\])*)$/);
-    if (!bracketMatch) {
-      tokens.push(segment);
+  let i = 0;
+  while (i < path.length) {
+    const ch = path[i];
+    if (ch === '.') {
+      i += 1;
       continue;
     }
-    const [, name, indices] = bracketMatch;
-    if (name) tokens.push(name);
-    for (const idx of indices.match(/\[(\d+)\]/g) ?? []) {
-      tokens.push(Number(idx.slice(1, -1)));
+    if (ch === '[') {
+      const quote = path[i + 1];
+      if (quote === '"' || quote === "'") {
+        // Quoted key: read to the matching unescaped quote, then expect `]`.
+        let key = '';
+        let j = i + 2;
+        let closed = false;
+        while (j < path.length) {
+          const c = path[j];
+          if (c === '\\' && j + 1 < path.length) {
+            key += path[j + 1];
+            j += 2;
+            continue;
+          }
+          if (c === quote) {
+            closed = true;
+            break;
+          }
+          key += c;
+          j += 1;
+        }
+        if (closed && path[j + 1] === ']') {
+          tokens.push(key);
+          i = j + 2;
+          continue;
+        }
+        // Malformed: treat the rest literally rather than throwing.
+        tokens.push(path.slice(i));
+        return tokens;
+      }
+      const end = path.indexOf(']', i);
+      if (end === -1) {
+        tokens.push(path.slice(i));
+        return tokens;
+      }
+      const inner = path.slice(i + 1, end);
+      tokens.push(/^\d+$/.test(inner) ? Number(inner) : inner);
+      i = end + 1;
+      continue;
     }
+    let j = i;
+    while (j < path.length && path[j] !== '.' && path[j] !== '[') j += 1;
+    tokens.push(path.slice(i, j));
+    i = j;
   }
   return tokens;
 }
@@ -105,38 +151,165 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     const ak = Object.keys(ao);
     const bk = Object.keys(bo);
     if (ak.length !== bk.length) return false;
-    return ak.every((k) => k in bo && deepEqual(ao[k], bo[k]));
+    return ak.every((k) => hasOwn(bo, k) && deepEqual(ao[k], bo[k]));
   }
   return false;
 }
 
-/** Validate a value against the minimal JSON-schema subset; returns errors. */
+// ── JSON-schema subset ────────────────────────────────────────────────
+
+/**
+ * Thrown when a schema uses a keyword this validator does not implement (or an
+ * unusable pattern). It is a problem with the SCHEMA, not with the output being
+ * checked, so scorers turn it into a scorer error instead of a failed check.
+ */
+export class UnsupportedSchemaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsupportedSchemaError';
+  }
+}
+
+const SCHEMA_KEYWORDS = new Set([
+  'type', 'required', 'properties', 'items', 'enum', 'const',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum',
+  'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems',
+  'additionalProperties', 'anyOf', 'oneOf', 'allOf',
+  // Annotations: carry no validation semantics.
+  'description', 'title', '$schema', '$id', '$comment', 'default', 'examples',
+]);
+
+/** Pattern and input guards: a user-supplied regex runs on model output, so bound both. */
+const MAX_PATTERN_CHARS = 500;
+const MAX_PATTERN_INPUT_CHARS = 10_000;
+
+/** Walk the whole schema once and reject anything that would otherwise be silently ignored. */
+function assertSupportedSchema(schema: unknown, path: string): void {
+  if (typeof schema === 'boolean') return;
+  if (!isPlainObject(schema)) {
+    throw new UnsupportedSchemaError(`${path}: schema must be an object`);
+  }
+  for (const key of Object.keys(schema)) {
+    if (!SCHEMA_KEYWORDS.has(key)) {
+      throw new UnsupportedSchemaError(`${path}: unsupported schema keyword "${key}"`);
+    }
+  }
+  if (typeof schema.pattern === 'string') {
+    if (schema.pattern.length > MAX_PATTERN_CHARS) {
+      throw new UnsupportedSchemaError(`${path}: pattern longer than ${MAX_PATTERN_CHARS} characters`);
+    }
+    try {
+      new RegExp(schema.pattern);
+    } catch (err) {
+      throw new UnsupportedSchemaError(`${path}: invalid pattern (${(err as Error).message})`);
+    }
+  }
+  if (Array.isArray(schema.items)) {
+    throw new UnsupportedSchemaError(`${path}: unsupported schema keyword "items" (tuple form)`);
+  }
+  if (schema.items !== undefined) assertSupportedSchema(schema.items, `${path}.items`);
+  if (isPlainObject(schema.properties)) {
+    for (const [key, sub] of Object.entries(schema.properties)) assertSupportedSchema(sub, `${path}.${key}`);
+  }
+  if (isPlainObject(schema.additionalProperties)) {
+    assertSupportedSchema(schema.additionalProperties, `${path}.additionalProperties`);
+  }
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const list = schema[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) throw new UnsupportedSchemaError(`${path}: "${key}" must be an array`);
+    list.forEach((sub, i) => assertSupportedSchema(sub, `${path}.${key}[${i}]`));
+  }
+}
+
+/**
+ * Validate a value against the supported JSON-schema subset; returns errors.
+ * Throws `UnsupportedSchemaError` when the schema uses a keyword outside the
+ * subset (checked over the whole schema, including branches the value never reaches).
+ */
 export function validateSchema(value: unknown, schema: JsonSchema, path = '$'): string[] {
+  assertSupportedSchema(schema, path);
+  return validateNode(value, schema, path);
+}
+
+function validateNode(value: unknown, schema: JsonSchema | boolean, path: string): string[] {
+  if (schema === true) return [];
+  if (schema === false) return [`${path}: no value is allowed here`];
   const errors: string[] = [];
-  if (schema.type) {
-    if (!matchesType(value, schema.type)) {
-      errors.push(`${path}: expected ${schema.type}, got ${describeType(value)}`);
+
+  if (schema.type !== undefined) {
+    const types: string[] = Array.isArray(schema.type) ? (schema.type as string[]) : [schema.type];
+    if (!types.some((t) => matchesType(value, t))) {
+      errors.push(`${path}: expected ${types.join(' | ')}, got ${describeType(value)}`);
       return errors; // type mismatch — deeper checks are meaningless
     }
   }
-  if (schema.type === 'object' || (schema.properties && isPlainObject(value))) {
-    const obj = value as Record<string, unknown>;
-    for (const key of schema.required ?? []) {
-      if (!(key in obj)) errors.push(`${path}.${key}: required`);
-    }
-    if (schema.properties) {
-      for (const [key, sub] of Object.entries(schema.properties)) {
-        if (key in obj) errors.push(...validateSchema(obj[key], sub, `${path}.${key}`));
+
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => deepEqual(candidate, value))) {
+    errors.push(`${path}: not one of the allowed values`);
+  }
+  if (hasOwn(schema, 'const') && !deepEqual(schema.const, value)) {
+    errors.push(`${path}: does not equal the required constant`);
+  }
+
+  if (typeof value === 'number') {
+    if (typeof schema.minimum === 'number' && value < schema.minimum) errors.push(`${path}: ${value} is below the minimum ${schema.minimum}`);
+    if (typeof schema.maximum === 'number' && value > schema.maximum) errors.push(`${path}: ${value} is above the maximum ${schema.maximum}`);
+    if (typeof schema.exclusiveMinimum === 'number' && value <= schema.exclusiveMinimum) errors.push(`${path}: ${value} must be greater than ${schema.exclusiveMinimum}`);
+    if (typeof schema.exclusiveMaximum === 'number' && value >= schema.exclusiveMaximum) errors.push(`${path}: ${value} must be less than ${schema.exclusiveMaximum}`);
+  }
+
+  if (typeof value === 'string') {
+    if (typeof schema.minLength === 'number' && value.length < schema.minLength) errors.push(`${path}: shorter than ${schema.minLength} characters`);
+    if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) errors.push(`${path}: longer than ${schema.maxLength} characters`);
+    if (typeof schema.pattern === 'string') {
+      if (value.length > MAX_PATTERN_INPUT_CHARS) {
+        errors.push(`${path}: too long (${value.length} characters) to check against a pattern`);
+      } else if (!new RegExp(schema.pattern).test(value)) {
+        errors.push(`${path}: does not match the pattern`);
       }
     }
   }
-  if (schema.type === 'array' && schema.items && Array.isArray(value)) {
-    value.forEach((item, i) => errors.push(...validateSchema(item, schema.items as JsonSchema, `${path}[${i}]`)));
+
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) errors.push(`${path}: fewer than ${schema.minItems} items`);
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) errors.push(`${path}: more than ${schema.maxItems} items`);
+    if (schema.items) {
+      value.forEach((item, i) => errors.push(...validateNode(item, schema.items as JsonSchema, `${path}[${i}]`)));
+    }
+  }
+
+  if (isPlainObject(value)) {
+    for (const key of schema.required ?? []) {
+      if (!hasOwn(value, key)) errors.push(`${path}.${key}: required`);
+    }
+    const properties = schema.properties ?? {};
+    for (const [key, sub] of Object.entries(properties)) {
+      if (hasOwn(value, key)) errors.push(...validateNode(value[key], sub, `${path}.${key}`));
+    }
+    if (schema.additionalProperties !== undefined && schema.additionalProperties !== true) {
+      for (const key of Object.keys(value)) {
+        if (hasOwn(properties, key)) continue;
+        if (schema.additionalProperties === false) errors.push(`${path}.${key}: additional property not allowed`);
+        else errors.push(...validateNode(value[key], schema.additionalProperties, `${path}.${key}`));
+      }
+    }
+  }
+
+  if (schema.allOf) {
+    for (const sub of schema.allOf) errors.push(...validateNode(value, sub, path));
+  }
+  if (schema.anyOf && !schema.anyOf.some((sub) => validateNode(value, sub, path).length === 0)) {
+    errors.push(`${path}: does not match any of the allowed schemas`);
+  }
+  if (schema.oneOf) {
+    const matches = schema.oneOf.filter((sub) => validateNode(value, sub, path).length === 0).length;
+    if (matches !== 1) errors.push(`${path}: matches ${matches} of the oneOf schemas, expected exactly 1`);
   }
   return errors;
 }
 
-function matchesType(value: unknown, type: NonNullable<JsonSchema['type']>): boolean {
+function matchesType(value: unknown, type: string): boolean {
   switch (type) {
     case 'object': return isPlainObject(value);
     case 'array': return Array.isArray(value);

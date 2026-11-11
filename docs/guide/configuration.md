@@ -376,6 +376,12 @@ shared by all replicas.
 | `REDTEAM_SCAN_CONCURRENCY` | Red-team scans run at once per node | `2` |
 | `DATASET_GEN_CONCURRENCY` | Dataset generation jobs run at once per node | `2` |
 | `EVALUATION_RUN_CONCURRENCY` | Evaluation runs executed at once per node | `2` |
+| `EVALUATION_RUN_STALE_MS` | A running evaluation without a heartbeat for this long (ms) is marked failed | `600000` |
+| `EVALUATION_RUN_HEARTBEAT_MS` | How often a running evaluation writes its heartbeat (ms) | `30000` |
+| `EVALUATION_RUN_CANCEL_POLL_MS` | How often a running evaluation looks for a cancel request (ms) | `5000` |
+| `EVALUATION_TARGET_TIMEOUT_MS` | Timeout of one model or knowledge-base target call (ms) | `180000` |
+| `EVALUATION_AGENT_TIMEOUT_MS` | Timeout of one agent target call (ms) | `600000` |
+| `EVALUATION_JUDGE_TIMEOUT_MS` | Timeout of one judge call (ms) | `120000` |
 | `ANALYSIS_RUN_CONCURRENCY` | Analysis runs executed at once per node | `2` |
 | `ANALYSIS_MAX_RUN_CONVERSATIONS` | Upper bound of conversations one analysis run reads | `5000` |
 | `RAG_INGEST_CONCURRENCY` | Documents indexed at once per node | `2` |

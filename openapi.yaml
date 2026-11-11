@@ -6915,7 +6915,7 @@ paths:
       tags:
         - Evaluation
       summary: List evaluation runs
-      description: List evaluation runs for the token's project, newest first. Returns run summaries (aggregate only, no per-item breakdown). Fetch a single run by id for the full per-item scores.
+      description: List evaluation runs for the token's project, newest first. Returns run summaries (aggregate only, no per-item breakdown); `cancelled` runs are included. Fetch a single run by id for the full per-item scores.
       operationId: listEvaluationRuns
       parameters:
         - name: suite_key
@@ -7012,7 +7012,7 @@ paths:
       tags:
         - Evaluation
       summary: Run an evaluation suite
-      description: Run the named suite synchronously over its dataset and return the completed, scored run. Unlike the asynchronous dashboard surface, this token-authenticated client surface blocks until the run finishes and returns HTTP 201 with the completed run (aggregate + per-item scores). The suite, its target and its dataset must already exist. For an agent target, the optional `agent_version` body field overrides the target's default for this run (`published`, `draft`, or a version number); it is rejected with 400 when invalid (as is a body that is not a JSON object) or when the target is not an agent target, and 404 when the agent or version does not exist. If a run of the same suite on the same agent revision is already in progress, the request is rejected with 409; runs of different revisions may run side by side. Running an agent target (any version, the draft included) also needs write access to the Agents service, the same level as invoking the agent. The token's owner must hold it, capped by the token's scope. Without it the call is refused with 403 (`service` is `agents`, `required` is `write`) before any run is created. A target/judge error on an item is recorded on that item and counted in aggregate.failed; it does not abort the run.
+      description: Run the named suite over its dataset. By default this token-authenticated client surface blocks until the run finishes and returns HTTP 201 with the completed run (aggregate + per-item scores). With `wait` set to `false` the run is queued instead and the call returns HTTP 202 at once with the pending run summary; poll `GET /evaluation/runs/{id}` until `status` is `completed`, `failed` or `cancelled` (long suites outlive most HTTP clients' and proxies' timeouts). The suite, its target and its dataset must already exist. For an agent target, the optional `agent_version` body field overrides the target's default for this run (`published`, `draft`, or a version number); it is rejected with 400 when invalid (as is a body that is not a JSON object) or when the target is not an agent target, and 404 when the agent or version does not exist. If a run of the same suite on the same agent revision is already in progress, the request is rejected with 409; runs of different revisions may run side by side. Running an agent target (any version, the draft included) also needs write access to the Agents service, the same level as invoking the agent. The token's owner must hold it, capped by the token's scope. Without it the call is refused with 403 (`service` is `agents`, `required` is `write`) before any run is created. A target or scoring (judge) error on an item is recorded on that item and counted in aggregate.failed; it does not abort the run. Check `aggregate.failed` / `aggregate.error_rate` as well as `pass_rate` in CI, because the pass rate leaves errored and skipped items out.
       operationId: runEvaluationSuite
       parameters:
         - name: key
@@ -7023,19 +7023,30 @@ paths:
             type: string
       requestBody:
         required: false
-        description: Optional. Pick which agent configuration this run tests; omit the body to use the target's default.
+        description: Optional. Pick which agent configuration this run tests (`agent_version`) and whether to wait for the result (`wait`); omit the body to use the target's default and wait.
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AgentTestRunRequest"
+              allOf:
+                - $ref: "#/components/schemas/AgentTestRunRequest"
+                - type: object
+                  properties:
+                    wait:
+                      type: boolean
+                      default: true
+                      description: When `false`, queue the run and answer 202 with the pending run instead of blocking until it finishes. A non-boolean value is rejected with 400.
             examples:
               draft:
                 summary: Test the saved draft
                 value:
                   agent_version: draft
+              queued:
+                summary: Queue the run and poll for it
+                value:
+                  wait: false
       responses:
         "201":
-          description: The completed evaluation run.
+          description: The completed evaluation run (`wait` omitted or `true`).
           content:
             application/json:
               schema:
@@ -7043,6 +7054,15 @@ paths:
                 properties:
                   run:
                     $ref: "#/components/schemas/EvalRun"
+        "202":
+          description: The run was queued (`wait` is `false`). Poll `GET /evaluation/runs/{id}` for the outcome.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run:
+                    $ref: "#/components/schemas/EvalRunSummary"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -22104,6 +22124,10 @@ components:
           type: string
           description: Error message if this scorer failed to run.
           nullable: true
+        skipped:
+          type: boolean
+          description: True when this scorer did not apply to the item (its score is ignored).
+          nullable: true
     AgentTestRunRequest:
       type: object
       description: Optional body of an agent test run (evaluation run or red-team scan).
@@ -22164,19 +22188,41 @@ components:
           description: Items that produced a result.
         failed:
           type: integer
-          description: Items that errored (target/judge failure).
+          description: Items that errored (target failure or a scorer that could not produce a score, e.g. an unparseable judge answer).
         passed:
           type: integer
-          description: Items where every scorer passed.
+          description: Items where every applicable scorer passed.
         pass_rate:
           type: number
-          description: passed / total.
+          description: passed / (completed - skipped). Errored and skipped items are left out; read it together with `error_rate`.
         avg_score:
           type: number
-          description: Mean per-item score.
+          description: Mean score over the completed items that were not skipped.
         avg_latency_ms:
           type: number
-          description: Mean per-item target latency in milliseconds.
+          description: Mean target latency in milliseconds over the completed items.
+        skipped:
+          type: integer
+          description: Completed items where no scorer applied (not counted as passed or failed).
+        error_rate:
+          type: number
+          description: failed / total (0 when the run has no items). Absent on runs recorded before the field existed; derive it from `failed` / `total`.
+        truncated_count:
+          type: integer
+          description: Completed items whose output was cut off by the model's output limit.
+          nullable: true
+        usage_items:
+          type: integer
+          description: Items that reported target token usage; the denominator for per-item token and cost averages.
+          nullable: true
+        scoring_cost_usd:
+          type: number
+          description: Judge spend in USD, kept apart from the target's cost. Present only when a scorer reported usage.
+          nullable: true
+        scoring_tokens:
+          type: integer
+          description: Judge tokens, kept apart from the target's tokens. Present only when a scorer reported usage.
+          nullable: true
     EvalRunItem:
       type: object
       description: The scored result for one dataset item.
@@ -22200,7 +22246,11 @@ components:
           nullable: true
         error:
           type: string
-          description: Error recorded for this item, if the target/judge failed.
+          description: Error recorded for this item, if the target failed or a scorer could not produce a score (then it starts with `Scoring failed`).
+          nullable: true
+        skipped:
+          type: boolean
+          description: True when no scorer applied to this item (it is neither passed nor failed).
           nullable: true
         scores:
           type: array
@@ -22232,6 +22282,7 @@ components:
             - running
             - completed
             - failed
+            - cancelled
         aggregate:
           $ref: "#/components/schemas/EvalRunAggregate"
         error:

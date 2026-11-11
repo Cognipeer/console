@@ -162,6 +162,7 @@ export const alertsEn = {
     analysis_avg_accuracy: 'Analysis Average Accuracy',
     evaluation_pass_rate: 'Evaluation Pass Rate',
     evaluation_avg_score: 'Evaluation Average Score',
+    evaluation_error_rate: 'Evaluation Error Rate',
     redteam_attack_success_rate: 'Red Team Attack Success Rate',
     redteam_resilience_score: 'Red Team Resilience Score',
     appgw_requests: 'AI App Gateway Requests',

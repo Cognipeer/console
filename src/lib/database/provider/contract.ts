@@ -1026,16 +1026,66 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IEvaluationRun>;
   updateEvaluationRun(
     id: string,
-    data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
+    data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy' | 'actorType' | 'apiTokenId'>>,
   ): Promise<IEvaluationRun | null>;
   findEvaluationRunById(id: string): Promise<IEvaluationRun | null>;
   listEvaluationRuns(filters?: {
     projectId?: string;
     suiteKey?: string;
     status?: EvaluationRunStatus;
+    statuses?: EvaluationRunStatus[];
     limit?: number;
     skip?: number;
   }): Promise<IEvaluationRun[]>;
+  /** Atomic `pending` -> `running` (sets startedAt + heartbeatAt); null when the run is not pending. */
+  claimEvaluationRun(id: string, startedAt: Date): Promise<IEvaluationRun | null>;
+  /** Sets heartbeatAt only while the run is `running`. */
+  touchEvaluationRun(id: string, at: Date): Promise<boolean>;
+  /**
+   * pending -> cancelled; running -> cancelRequestedAt (status unchanged);
+   * terminal -> the run unchanged; missing -> null. Each transition is atomic.
+   */
+  requestEvaluationRunCancel(id: string, at: Date): Promise<IEvaluationRun | null>;
+  /** Fails `running` runs whose `heartbeatAt ?? startedAt` is older than the cutoff; returns how many changed. */
+  failStaleEvaluationRuns(heartbeatBefore: Date, message: string): Promise<number>;
+  /**
+   * Fails `pending` runs created before the cutoff, in one conditional write: a run a worker claims meanwhile is
+   * `running` and is not touched. Returns how many changed.
+   */
+  expirePendingEvaluationRuns(createdBefore: Date, message: string): Promise<number>;
+  /**
+   * Tenant-wide (no project filter), items projected out, ordered by createdAt then id. `after` continues from the
+   * last run of an earlier page (keyset paging: runs that leave the statuses meanwhile do not shift the pages).
+   */
+  listEvaluationRunsByStatus(
+    statuses: EvaluationRunStatus[],
+    opts?: { createdBefore?: Date; limit?: number; after?: { createdAt: Date; id: string } },
+  ): Promise<IEvaluationRun[]>;
+  /** Like listEvaluationRuns, but `items` is projected out (returned as `[]`). */
+  listEvaluationRunSummaries(filters: {
+    projectId?: string;
+    suiteKey?: string;
+    status?: EvaluationRunStatus;
+    statuses?: EvaluationRunStatus[];
+    limit?: number;
+    skip?: number;
+  }): Promise<IEvaluationRun[]>;
+  countEvaluationRuns(filters: {
+    projectId?: string;
+    suiteKey?: string;
+    status?: EvaluationRunStatus;
+    statuses?: EvaluationRunStatus[];
+  }): Promise<number>;
+  /**
+   * Atomic shallow merge of top-level metadata blocks (`undefined` unsets a
+   * key). With `unlessParityStatusIn` the write is skipped (null returned)
+   * when `metadata.parity.status` is in the list.
+   */
+  patchEvaluationDatasetMetadata(
+    id: string,
+    patch: Record<string, unknown>,
+    opts?: { unlessParityStatusIn?: string[] },
+  ): Promise<IEvaluationDataset | null>;
 
   // ── Red-team operations (tenant-specific) ──
   createRedTeamCampaign(

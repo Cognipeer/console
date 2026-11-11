@@ -62,7 +62,7 @@ export function rowsToItems(rows: Row[]): EvalDatasetItemView[] {
     const reference = pick(row, ALIASES.reference);
     if (reference) expected.reference = reference;
     const contains = pick(row, ALIASES.contains);
-    if (contains) expected.mustContain = contains.split(/[|;,]/).map((s) => s.trim()).filter(Boolean);
+    if (contains) expected.mustContain = contains.split(/[|;]/).map((s) => s.trim()).filter(Boolean);
     const equals = pick(row, ALIASES.equals);
     if (equals) expected.equals = equals;
 
@@ -96,7 +96,17 @@ export function parseJsonItems(raw: string): { items: EvalDatasetItemView[] } | 
     if (entry.tools !== undefined && !Array.isArray(entry.tools)) {
       return { error: `Item ${i}: "tools" must be an array of tool definitions` };
     }
-    items.push({
+    const isObject = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+    if (entry.responseFormat != null && !isObject(entry.responseFormat)) {
+      return { error: `Item ${i}: "responseFormat" must be an object` };
+    }
+    if (entry.labels != null && !isObject(entry.labels)) {
+      return { error: `Item ${i}: "labels" must be an object` };
+    }
+    // `responseFormat` is the recorded structured-output contract and `labels` the segment labels:
+    // dropping either turns a replay into a looser, unlabelled one. (`responseFormat` is not on
+    // EvalDatasetItemView yet, hence the widened type.)
+    const item: EvalDatasetItemView & { responseFormat?: Record<string, unknown> } = {
       id: typeof entry.id === 'string' && entry.id ? entry.id : `item-${i + 1}`,
       input: entry.input as EvalDatasetItemView['input'],
       expected: (entry.expected as Record<string, unknown> | undefined) ?? undefined,
@@ -108,7 +118,10 @@ export function parseJsonItems(raw: string): { items: EvalDatasetItemView[] } | 
           ? (entry.toolResults as Record<string, unknown>)
           : undefined,
       tags: Array.isArray(entry.tags) ? (entry.tags as string[]) : undefined,
-    });
+      ...(isObject(entry.responseFormat) ? { responseFormat: entry.responseFormat } : {}),
+      ...(isObject(entry.labels) ? { labels: entry.labels } : {}),
+    };
+    items.push(item);
   }
   return { items };
 }
@@ -259,7 +272,7 @@ export function editorRowsToItems(
     if (!r.input.trim()) return;
     const expected: Record<string, unknown> = {};
     if (r.reference.trim()) expected.reference = r.reference.trim();
-    if (r.contains.trim()) expected.mustContain = r.contains.split(/[|;,]/).map((s) => s.trim()).filter(Boolean);
+    if (r.contains.trim()) expected.mustContain = r.contains.split(/[|;]/).map((s) => s.trim()).filter(Boolean);
     items.push({
       id: r.id.trim() || `item-${i + 1}`,
       input: [{ role: 'user', content: r.input.trim() }],

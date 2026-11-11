@@ -132,6 +132,7 @@ export const ALERT_METRIC_CATALOG: AlertMetricDef[] = [
   legacy('analysis_avg_accuracy', 'analysis', 'Analysis Avg Accuracy', '%', 'up'),
   legacy('evaluation_pass_rate', 'evaluation', 'Evaluation Pass Rate', '%', 'up'),
   legacy('evaluation_avg_score', 'evaluation', 'Evaluation Avg Score', '%', 'up'),
+  legacy('evaluation_error_rate', 'evaluation', 'Evaluation Error Rate', '%', 'down'),
   legacy('redteam_attack_success_rate', 'redteam', 'Red Team Attack Success Rate', '%', 'down'),
   legacy('redteam_resilience_score', 'redteam', 'Red Team Resilience Score', '%', 'up'),
 

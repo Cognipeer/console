@@ -14,12 +14,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const h = vi.hoisted(() => ({
   createConversation: vi.fn(),
   executeAgentChat: vi.fn(),
+  deleteConversation: vi.fn(),
   getDatabase: vi.fn(),
 }));
 
 vi.mock('@/lib/services/agents/agentService', () => ({
   createConversation: h.createConversation,
   executeAgentChat: h.executeAgentChat,
+  deleteConversation: h.deleteConversation,
 }));
 vi.mock('@/lib/services/models/inferenceService', () => ({
   handleChatCompletion: vi.fn(),
@@ -49,6 +51,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.createConversation.mockResolvedValue({ _id: 'c1' });
   h.executeAgentChat.mockResolvedValue({ output: [{ content: [{ type: 'output_text', text: 'hi there' }] }] });
+  h.deleteConversation.mockResolvedValue(true);
+  h.getDatabase.mockResolvedValue({
+    switchToTenant: vi.fn(),
+    findAgentConversationById: vi.fn().mockResolvedValue(null),
+    updateAgentConversation: vi.fn().mockResolvedValue({ _id: 'c1' }),
+  });
 });
 
 describe('agent target invoker — which config it asks the runtime for', () => {
@@ -97,5 +105,63 @@ describe('agent target invoker — which config it asks the runtime for', () => 
     await expect(invoke(ITEM)).rejects.toThrow(/system-prompt override/);
     await expect(invoke(ITEM)).rejects.not.toThrow(/published prompt/);
     expect(h.executeAgentChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('agent target invoker — conversation, history and tool calls', () => {
+  it('seeds earlier user/assistant text turns and deletes the conversation afterwards (R8, R12)', async () => {
+    const update = vi.fn().mockResolvedValue({ _id: 'c1' });
+    h.getDatabase.mockResolvedValue({ switchToTenant: vi.fn(), findAgentConversationById: vi.fn().mockResolvedValue(null), updateAgentConversation: update });
+    const item: DatasetItem = {
+      id: 'q2',
+      input: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'answer one' },
+        { role: 'user', content: 'second' },
+      ],
+    };
+    await buildTargetInvoker(agentTarget(), CTX)(item);
+    const messages = update.mock.calls[0][1].messages as Array<{ role: string; content: string; timestamp: Date }>;
+    expect(messages.map((m) => [m.role, m.content])).toEqual([['user', 'first'], ['assistant', 'answer one']]);
+    expect(messages[0].timestamp).toBeInstanceOf(Date);
+    expect(h.executeAgentChat.mock.calls[0][0].userMessage).toBe('second');
+    expect(h.deleteConversation).toHaveBeenCalledWith('tenant_db', 'c1');
+  });
+
+  it('deletes the conversation even when the agent fails, and does not retry it (R7, R12)', async () => {
+    h.executeAgentChat.mockRejectedValue(Object.assign(new Error('overloaded'), { status: 503 }));
+    await expect(buildTargetInvoker(agentTarget(), CTX)(ITEM)).rejects.toThrow('overloaded');
+    expect(h.executeAgentChat).toHaveBeenCalledTimes(1);
+    expect(h.deleteConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the agent\'s own tool calls from the turn the runtime persisted, with its usage (T1)', async () => {
+    h.getDatabase.mockResolvedValue({
+      switchToTenant: vi.fn(),
+      updateAgentConversation: vi.fn().mockResolvedValue({ _id: 'c1' }),
+      findAgentConversationById: vi.fn().mockResolvedValue({
+        _id: 'c1',
+        messages: [
+          { role: 'user', content: 'Hello', timestamp: new Date() },
+          {
+            role: 'assistant',
+            content: 'hi there',
+            timestamp: new Date(),
+            steps: [
+              { name: 'search', args: { q: 'a' }, status: 'success' },
+              { name: 'fetch', args: '{bad', status: 'error' },
+            ],
+            usage: { inputTokens: 12, outputTokens: 5, costUsd: 0.001 },
+          },
+        ],
+      }),
+    });
+    const output = await buildTargetInvoker(agentTarget(), CTX)(ITEM);
+    expect(output.toolCalls).toEqual([
+      { name: 'search', args: { q: 'a' } },
+      { name: 'fetch', args: { __raw: '{bad' } },
+    ]);
+    expect(output.usage).toEqual({ inputTokens: 12, outputTokens: 5, costUsd: 0.001 });
   });
 });

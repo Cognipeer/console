@@ -90,7 +90,7 @@ async function setDraftPrompt(systemPrompt: string) {
 
 const promptsOf = (texts: Array<string | undefined>) => texts.map((t) => t?.replace(/^PROMPT=/, ''));
 
-const evalParams = { tenantDbName: TENANT_DB_NAME, projectId: PROJECT_ID, createdBy: ACTOR };
+const evalParams = { tenantDbName: TENANT_DB_NAME, projectId: PROJECT_ID, createdBy: ACTOR, actorType: 'user' as const };
 const redteamParams = { tenantDbName: TENANT_DB_NAME, projectId: PROJECT_ID, createdBy: ACTOR };
 
 /** An evaluation suite on a fresh agent target (default revision as given), graded by `mustContain` only. */
