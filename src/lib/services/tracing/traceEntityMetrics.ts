@@ -342,7 +342,7 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
     let pricer: TraceModelPricer | undefined;
     if (aiCalls.length > 0) {
       try {
-        const loader = params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId);
+        const loader = params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId, params.tenantId);
         pricer = await loader();
       } catch (error) {
         logger.warn('Model pricing unavailable for trace health metrics', {
@@ -521,7 +521,7 @@ async function priceSessionEvents(
     normalized(event.type) === 'ai_call' && isRunTraceEvent(event) && modelNameOf(event));
   if (aiCalls.length === 0) return 0;
   try {
-    const loader = params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId);
+    const loader = params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId, params.tenantId);
     const pricer = await loader();
     let cost = 0;
     for (const event of aiCalls) {

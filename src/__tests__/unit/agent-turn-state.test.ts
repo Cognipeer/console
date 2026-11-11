@@ -424,6 +424,44 @@ describe('state persistence helpers', () => {
         expect(buildCostEstimator([{ names: ['m'], pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 } as never }], undefined, calc)).toBeUndefined();
     });
 
+    it('prices a model paid with credits by its own call price, and an unmatched call by the fallback price', () => {
+        const calc = vi.fn(() => ({ totalCost: 1 }));
+        const price = vi.fn((usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => (usage.inputTokens > 1000 ? 0.05 : 0.02));
+        const estimator = buildCostEstimator(
+            [
+                { names: ['platform', 'platform-id'], pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 } as never, price },
+                { names: ['unpriced-child'], pricing: null, noFallback: true },
+            ],
+            undefined,
+            calc as never,
+            undefined,
+            price,
+        )!;
+        expect(estimator({ modelName: 'PLATFORM', inputTokens: 200, outputTokens: 10, cachedInputTokens: 50 })).toBe(0.02);
+        expect(price).toHaveBeenCalledWith({ inputTokens: 200, outputTokens: 10, cachedInputTokens: 50 });
+        expect(estimator({ modelName: 'platform-id', inputTokens: 5000, outputTokens: 10, cachedInputTokens: 0 })).toBe(0.05);
+        // A call under no known name falls back to the agent's own (credit) price; a sub-agent's unpriced model stays free.
+        expect(estimator({ modelName: 'other', inputTokens: 10, outputTokens: 1, cachedInputTokens: 0 })).toBe(0.02);
+        expect(estimator({ modelName: 'unpriced-child', inputTokens: 10, outputTokens: 1, cachedInputTokens: 0 })).toBe(0);
+        expect(calc).not.toHaveBeenCalled();
+    });
+
+    it('a call price that cannot price counts 0; a token-priced child keeps its token price next to a credit-priced parent', () => {
+        const calc = vi.fn((pricing: { inputTokenPer1M: number }, usage: { inputTokens?: number }) => ({ totalCost: (pricing.inputTokenPer1M * (usage.inputTokens ?? 0)) / 1e6 }));
+        const estimator = buildCostEstimator(
+            [
+                { names: ['platform'], pricing: null, price: () => null },
+                { names: ['child'], pricing: { inputTokenPer1M: 2, outputTokenPer1M: 0 } as never, noFallback: true },
+            ],
+            undefined,
+            calc as never,
+            undefined,
+            () => null,
+        )!;
+        expect(estimator({ modelName: 'platform', inputTokens: 100, outputTokens: 1 })).toBe(0);
+        expect(estimator({ modelName: 'child', inputTokens: 1_000_000, outputTokens: 0 })).toBe(2);
+    });
+
     it('forwards the cache-write count to the pricing function (the SDK arg `cacheWriteTokens` becomes `cachedWriteTokens`)', () => {
         const calc = vi.fn((_pricing: unknown, _usage: unknown) => ({ totalCost: 1 }));
         const pricing = { inputTokenPer1M: 1, outputTokenPer1M: 1 } as never;
