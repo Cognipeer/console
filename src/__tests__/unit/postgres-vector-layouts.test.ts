@@ -117,20 +117,31 @@ describe('table-per-index: createIndex', () => {
     expect(out.metadata).toEqual({ keep: 1, provider: 'postgres' });
     const t = out.externalId;
     const all = sqls();
-    expect(all[0]).toBe('CREATE EXTENSION IF NOT EXISTS vector');
-    expect(all[1]).toBe('SELECT 1 FROM pg_namespace WHERE nspname = $1');
-    expect(all[2]).toBe('CREATE SCHEMA IF NOT EXISTS "tenant_a"');
-    expect(all[3]).toBe('BEGIN');
-    expect(all[4]).toContain(`CREATE TABLE "tenant_a"."${t}" (`);
-    expect(all[4]).not.toContain('IF NOT EXISTS');
-    expect(all[4]).toContain('vector vector(3)');
-    expect(all[4]).toContain("metadata JSONB NOT NULL DEFAULT '{}'");
-    expect(all[5]).toBe(`CREATE INDEX "${t}_hnsw" ON "tenant_a"."${t}" USING hnsw (vector vector_cosine_ops)`);
-    expect(all[6]).toBe(`CREATE INDEX "${t}_fts" ON "tenant_a"."${t}" USING GIN (to_tsvector('simple', coalesce(content, '')))`);
-    expect(all[7]).toContain('format(\'COMMENT ON TABLE %I.%I IS %L\'');
-    expect(h.sql[7].params).toEqual(['tenant_a', t, JSON.stringify({ name: 'Product Docs!', metric: 'cosine' })]);
-    expect(all[8]).toBe('COMMENT ON TABLE x IS y');
-    expect(all[9]).toBe('COMMIT');
+    expect(all[0]).toBe("SELECT 1 FROM pg_extension WHERE extname = 'vector'");
+    expect(all[1]).toBe('CREATE EXTENSION IF NOT EXISTS vector');
+    expect(all[2]).toBe('SELECT 1 FROM pg_namespace WHERE nspname = $1');
+    expect(all[3]).toBe('CREATE SCHEMA IF NOT EXISTS "tenant_a"');
+    expect(all[4]).toBe('BEGIN');
+    expect(all[5]).toContain(`CREATE TABLE "tenant_a"."${t}" (`);
+    expect(all[5]).not.toContain('IF NOT EXISTS');
+    expect(all[5]).toContain('vector vector(3)');
+    expect(all[5]).toContain("metadata JSONB NOT NULL DEFAULT '{}'");
+    expect(all[6]).toBe(`CREATE INDEX "${t}_hnsw" ON "tenant_a"."${t}" USING hnsw (vector vector_cosine_ops)`);
+    expect(all[7]).toBe(`CREATE INDEX "${t}_fts" ON "tenant_a"."${t}" USING GIN (to_tsvector('simple', coalesce(content, '')))`);
+    expect(all[8]).toContain('format(\'COMMENT ON TABLE %I.%I IS %L\'');
+    expect(h.sql[8].params).toEqual(['tenant_a', t, JSON.stringify({ name: 'Product Docs!', metric: 'cosine' })]);
+    expect(all[9]).toBe('COMMENT ON TABLE x IS y');
+    expect(all[10]).toBe('COMMIT');
+  });
+
+  it('does not run CREATE EXTENSION when the extension exists (a non-admin role may be refused it even then)', async () => {
+    h.responder = (sql) => (sql.includes('pg_extension') || sql.includes('pg_namespace')
+      ? { rows: [{ '?column?': 1 }] }
+      : sql.startsWith('SELECT format') ? { rows: [{ statement: 'COMMENT ON TABLE x IS y' }] } : { rows: [] });
+    const out = await (await perIndex()).createIndex({ name: 'a', dimension: 3 });
+    expect(isPostgresIndexTableName(out.externalId)).toBe(true);
+    expect(sqls().some((q) => q.startsWith('CREATE EXTENSION'))).toBe(false);
+    expect(sqls().some((q) => q.startsWith('CREATE SCHEMA'))).toBe(false);
   });
 
   it.each([

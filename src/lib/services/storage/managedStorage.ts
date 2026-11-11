@@ -607,9 +607,15 @@ export function withoutBackendIdentifiers<T extends object>(
 ): T {
   const clean = (error: unknown): unknown => {
     const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-    if (!message) return error;
-    if (!identifiers.some((needle) => message.includes(needle)) && !alsoScrub?.(error, message)) return error;
-    log.error('Managed storage call failed with a message naming the backend', { kind, error: message });
+    // The extra check runs on an empty message too: a failed connect can arrive as an aggregate error with no message
+    // of its own, only a code and the addresses it tried.
+    const named = message !== '' && identifiers.some((needle) => message.includes(needle));
+    if (!named && !alsoScrub?.(error, message)) return error;
+    log.error('Managed storage call failed with a message naming the backend', {
+      kind,
+      error: message,
+      code: (error as { code?: unknown } | null)?.code,
+    });
     const refusal = new ManagedProviderError(MANAGED_STORAGE_UNAVAILABLE);
     const status = (error as { status?: unknown }).status;
     if (typeof status === 'number' && status >= 400 && status < 500) {

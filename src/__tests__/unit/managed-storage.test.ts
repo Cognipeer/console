@@ -655,6 +655,20 @@ describe('postgres connection failures', () => {
     }
     await expect(runtime.e()).rejects.toMatchObject({ message: 'duplicate key' });
   });
+
+  it('refuses a connection failure that arrives with an empty message, and lets other empty errors through', async () => {
+    const aggregate = Object.assign(new AggregateError([new Error('connect ECONNREFUSED 10.1.2.3:5432')], ''), { code: 'ECONNREFUSED' });
+    const plain = new Error('');
+    const runtime = withoutBackendIdentifiers({
+      async a() { throw aggregate; },
+      async b() { throw plain; },
+    }, ['db.internal.example'], 'vector', isConnectionLevelFailure);
+    await expect(runtime.a()).rejects.toMatchObject({ message: 'This provider is not available right now.' });
+    await expect(runtime.b()).rejects.toBe(plain);
+    // Without the extra check (every other driver) an empty message passes unchanged, as before.
+    const other = withoutBackendIdentifiers({ async a() { throw aggregate; } }, ['db.internal.example'], 'vector');
+    await expect(other.a()).rejects.toBe(aggregate);
+  });
 });
 
 describe('backendIdentifiers of the Azure drivers', () => {

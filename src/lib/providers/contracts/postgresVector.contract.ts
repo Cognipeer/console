@@ -323,10 +323,15 @@ function createTablePerIndexRuntime(opts: TablePerIndexOptions): VectorProviderR
       void _ignored;
 
       await withClient(async (client) => {
-        try {
-          await client.query('CREATE EXTENSION IF NOT EXISTS vector');
-        } catch (error) {
-          ignoreExisting(error, ['23505', '42710']);
+        // Some managed servers refuse CREATE EXTENSION to a non-admin role even when the extension exists (the
+        // permission check runs before IF NOT EXISTS), so only a missing extension is created.
+        const extension = await client.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'");
+        if (!extension?.rows?.length) {
+          try {
+            await client.query('CREATE EXTENSION IF NOT EXISTS vector');
+          } catch (error) {
+            ignoreExisting(error, ['23505', '42710']);
+          }
         }
         // CREATE SCHEMA IF NOT EXISTS still needs CREATE on the database, so only run it for a missing schema.
         const existing = await client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [schema]);
