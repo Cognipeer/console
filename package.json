@@ -55,7 +55,7 @@
     "@dagrejs/dagre": "3.1.1",
     "@elastic/elasticsearch": "^8.19.1",
     "@fastify/cookie": "^11.0.2",
-    "@fastify/websocket": "^11.2.0",
+    "@fastify/websocket": "^11.3.7",
     "@huggingface/transformers": "^3.8.1",
     "@mantine/charts": "^8.3.2",
     "@mantine/core": "^8.3.2",
