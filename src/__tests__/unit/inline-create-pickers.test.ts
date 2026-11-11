@@ -35,7 +35,7 @@ import { KnowledgeBindingsEditor } from '@/components/agents/KnowledgeBindingsEd
 import GuardrailBindingList from '@/components/guardrails/GuardrailBindingList';
 import PiiProtectionField from '@/components/pii/PiiProtectionField';
 import AgentMemoryPanel from '@/components/agents/studio/AgentMemoryPanel';
-import { ToolSelectorModal } from '@/components/agents/ToolSelectorModal';
+import AgentToolsList from '@/components/agents/studio/AgentToolsList';
 import CreateRagModuleModal from '@/components/rag/CreateRagModuleModal';
 import { LauncherProvider, type LauncherContextValue } from '@/components/layout/launcher/LauncherContext';
 import { canWriteDashboardService } from '@/lib/utils/dashboardServices';
@@ -257,23 +257,27 @@ describe('agent memory: + New memory store', () => {
   });
 });
 
-describe('agent tools: + New tool / + New MCP server', () => {
-  const selector = (writable: PermissionService[]) => {
+describe('agent tools: + Add > New custom tool / New MCP server for this agent', () => {
+  const list = (writable: PermissionService[]) => {
     installApiMock([
       ['GET', '/api/tools', () => ({ tools: [] })],
       ['GET', '/api/mcp', () => ({ servers: [] })],
     ]);
-    return shell(writable, h(ToolSelectorModal, { opened: true, onClose: noop, value: [], onChange: noop }));
+    return shell(writable, h(AgentToolsList, { agentId: 'agent-1', bindings: [], onBindingsChange: noop }));
   };
 
-  it('each offered only to someone who can create it', async () => {
-    await render(selector(['tools']));
-    expect(q('[data-testid="tool-create-inline"]')).not.toBeNull();
-    expect(q('[data-testid="mcp-create-inline"]')).toBeNull();
+  it('each offered only to someone who can create it; adding from the hub and the library always', async () => {
+    await render(list(['tools']));
+    await click(q('[data-testid="agent-tools-add"]'));
+    expect(q('[data-testid="agent-tools-new-tool"]')).not.toBeNull();
+    expect(q('[data-testid="agent-tools-new-mcp"]')).toBeNull();
+    expect(q('[data-testid="agent-tools-from-library"]')).not.toBeNull();
     await mounted?.unmount();
-    await render(selector(['mcp']));
-    expect(q('[data-testid="tool-create-inline"]')).toBeNull();
-    expect(q('[data-testid="mcp-create-inline"]')).not.toBeNull();
+    await render(list(['mcp']));
+    await click(q('[data-testid="agent-tools-add"]'));
+    expect(q('[data-testid="agent-tools-new-tool"]')).toBeNull();
+    expect(q('[data-testid="agent-tools-new-mcp"]')).not.toBeNull();
+    expect(q('[data-testid="agent-tools-from-library"]')).not.toBeNull();
   });
 });
 

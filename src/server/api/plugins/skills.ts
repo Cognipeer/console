@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import type { IAgentSkill } from '@/lib/database';
+import { parseAccessListInput, readAccessList } from '@/lib/iam/accessList';
 import {
   createSkill,
   deleteSkill,
@@ -7,6 +9,7 @@ import {
   listSkills,
   updateSkill,
 } from '@/lib/services/agents/skillService';
+import { ownedListFilterOf, readAgentIdInput, resolveOwningAgent } from '@/lib/services/agents/agentOwnedResources';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -16,16 +19,23 @@ import {
 
 const logger = createLogger('api:skills');
 
+/** A skill as the API answers it: its access list always present (a skill without one reads as open to everyone). */
+const skillView = (skill: IAgentSkill) => ({ ...skill, access: readAccessList(skill.access) });
+
 export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/skills', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const query = (request.query ?? {}) as { search?: string; status?: string };
+      const query = (request.query ?? {}) as { search?: string; status?: string; agentId?: string; owned?: string };
+      // The library by default; `agentId` adds that agent's own skills (`owned=only`: just those).
+      const owned = ownedListFilterOf(query);
+      if (!owned.ok) return reply.code(400).send({ error: owned.error });
       const skills = await listSkills(session.tenantDbName, projectId, {
         search: query.search,
         status: query.status === 'inactive' ? 'inactive' : query.status === 'active' ? 'active' : undefined,
+        ...owned.filter,
       });
-      return reply.code(200).send({ skills });
+      return reply.code(200).send({ skills: skills.map(skillView) });
     } catch (error) {
       logger.error('List skills error', { error });
       return sendProjectContextError(reply, error)
@@ -44,6 +54,13 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.header !== 'string' || !body.header.trim()) {
         return reply.code(400).send({ error: 'header is required' });
       }
+      const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (access && !access.ok) return reply.code(400).send({ error: access.error });
+      // Created inside an agent: the skill belongs to that agent of this project, and to nothing else.
+      const ownerInput = readAgentIdInput(body.ownerAgentId, 'ownerAgentId');
+      if (!ownerInput.ok) return reply.code(400).send({ error: ownerInput.error });
+      const owner = ownerInput.agentId ? await resolveOwningAgent(session.tenantDbName, projectId, ownerInput.agentId) : undefined;
+      if (owner === null) return reply.code(400).send({ error: 'ownerAgentId must be an agent of this project' });
 
       const skill = await createSkill(session.tenantDbName, session.tenantId, projectId, session.userId, {
         key: typeof body.key === 'string' ? body.key : undefined,
@@ -51,9 +68,11 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
         header: body.header,
         body: typeof body.body === 'string' ? body.body : '',
         minModelTier: body.minModelTier === 'small' || body.minModelTier === 'large' ? body.minModelTier : undefined,
+        ...(access?.ok ? { access: access.access } : {}),
+        ...(owner ? { owner } : {}),
         status: body.status === 'inactive' ? 'inactive' : 'active',
       });
-      return reply.code(201).send({ skill });
+      return reply.code(201).send({ skill: skillView(skill) });
     } catch (error) {
       logger.error('Create skill error', { error });
       return sendProjectContextError(reply, error)
@@ -67,7 +86,7 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const skill = await getSkillById(session.tenantDbName, projectId, id);
       if (!skill) return reply.code(404).send({ error: 'Skill not found' });
-      return reply.code(200).send({ skill });
+      return reply.code(200).send({ skill: skillView(skill) });
     } catch (error) {
       logger.error('Get skill error', { error });
       return sendProjectContextError(reply, error)
@@ -80,6 +99,8 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
       const body = readJsonBody<Record<string, unknown>>(request);
+      const access = body.access !== undefined ? parseAccessListInput(body.access) : undefined;
+      if (access && !access.ok) return reply.code(400).send({ error: access.error });
 
       const skill = await updateSkill(session.tenantDbName, projectId, id, session.userId, {
         title: typeof body.title === 'string' ? body.title : undefined,
@@ -88,10 +109,11 @@ export const skillsApiPlugin: FastifyPluginAsync = async (app) => {
         minModelTier: body.minModelTier === 'small' || body.minModelTier === 'large'
           ? body.minModelTier
           : body.minModelTier === null ? null : undefined,
+        ...(access?.ok ? { access: access.access } : {}),
         status: body.status === 'active' || body.status === 'inactive' ? body.status : undefined,
       });
       if (!skill) return reply.code(404).send({ error: 'Skill not found' });
-      return reply.code(200).send({ skill });
+      return reply.code(200).send({ skill: skillView(skill) });
     } catch (error) {
       logger.error('Update skill error', { error });
       return sendProjectContextError(reply, error)

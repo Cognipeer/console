@@ -21,6 +21,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import { runInTenant } from '@/lib/database/runInTenant';
 
 const logger = createLogger('agent-turn-cancel');
 
@@ -110,7 +111,7 @@ async function readRow(input: TurnWatchInput) {
   const db = await getDatabase();
   const read = () => db.getAgentRunById(input.runId!, input.tenantId, input.projectId);
   // Bound to the tenant for the whole read: the turn outlives the request that started it.
-  return db.runWithTenant ? db.runWithTenant(input.tenantDbName, read) : (await db.switchToTenant(input.tenantDbName), read());
+  return runInTenant(db, input.tenantDbName, read);
 }
 
 /** Aborts this node's own turns of the conversation at once (the poll covers other nodes). */

@@ -135,7 +135,7 @@ export interface ManagedPolicy {
   nameKey?: string;
   descriptionKey?: string;
   /** `rbac`: reproduces role-based access; `boundary`: a limit no allow can exceed; `portal`: who may open a portal and run its agents; `agent`: who may answer an agent session's pending requests. */
-  group: 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent';
+  group: 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent' | 'access';
   effect: IamEffect;
   cedar: string;
 }

@@ -7,7 +7,6 @@
  * metadata is stored here.
  */
 
-import { ObjectId } from 'mongodb';
 import type {
   IBrowser,
   IBrowserFlow,
@@ -17,15 +16,10 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { toIdString, toObjectIdOrThrow } from './docIds';
 
-function toId(value: ObjectId | string | undefined): string {
-  if (!value) return '';
-  return typeof value === 'string' ? value : value.toString();
-}
-
-function objectId(id: string): ObjectId {
-  return new ObjectId(id);
-}
+const toId = toIdString;
+const objectId = toObjectIdOrThrow;
 
 export function BrowserMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class BrowserOps extends Base {    // ── Browsers (parent profiles) ────────────────────────────────

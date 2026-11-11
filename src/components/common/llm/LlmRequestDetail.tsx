@@ -24,7 +24,8 @@ import { contentWithoutDrawnParts, messageImageViews, type TraceSessionFiles } f
  * grouping never reaches across an unrelated message.
  */
 export type LlmRequestItem =
-  | { itemType: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[] }
+  /** `anchorId` puts an element id on the message, for a link or a "go to" that scrolls to it. */
+  | { itemType: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[]; anchorId?: string }
   | { itemType: 'divider'; label: ReactNode }
   /** Escape hatch for content a surface already renders well (e.g. a tool-definitions
    *  or response-format section) — passed through as-is, in its position in the stream. */
@@ -103,7 +104,7 @@ interface TurnEntry {
 }
 
 type GroupedEntry =
-  | { kind: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[] }
+  | { kind: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[]; anchorId?: string }
   | { kind: 'divider'; label: ReactNode }
   | { kind: 'custom'; node: ReactNode }
   | { kind: 'turn'; turnId: string; name?: string; entries: TurnEntry[] };
@@ -131,7 +132,14 @@ function groupItems(items: LlmRequestItem[]): GroupedEntry[] {
       // grouping never reaches across an unrelated turn of the conversation.
       openTurns.clear();
       if (item.itemType === 'message') {
-        output.push({ kind: 'message', role: item.role, roleLabel: item.roleLabel, content: item.content, attachments: item.attachments });
+        output.push({
+          kind: 'message',
+          role: item.role,
+          roleLabel: item.roleLabel,
+          content: item.content,
+          attachments: item.attachments,
+          ...(item.anchorId ? { anchorId: item.anchorId } : {}),
+        });
       } else if (item.itemType === 'divider') {
         output.push({ kind: 'divider', label: item.label });
       } else {
@@ -271,7 +279,7 @@ export function LlmRequestItemsView({ items, labels: labelsOverride, sessionFile
         if (g.kind === 'message') {
           const drawnFromContent = messageImageViews(g.content, { sessionFiles });
           const files = [...(g.attachments ?? []), ...drawnFromContent];
-          return (
+          const block = (
             <MessageBlock
               key={i}
               messageRole={g.role}
@@ -281,6 +289,11 @@ export function LlmRequestItemsView({ items, labels: labelsOverride, sessionFile
               {files.length > 0 ? <MessageAttachments attachments={files} /> : null}
             </MessageBlock>
           );
+          return g.anchorId ? (
+            <Box key={i} id={g.anchorId} style={{ scrollMarginTop: 'var(--mantine-spacing-sm)' }}>
+              {block}
+            </Box>
+          ) : block;
         }
         if (g.kind === 'divider') {
           return <Divider key={i} label={g.label} labelPosition="left" />;

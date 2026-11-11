@@ -26,6 +26,8 @@ interface SkillEditorModalProps {
     onClose: () => void;
     skill: SkillView | null;
     onSaved: (skill: SkillView) => void;
+    /** Create the skill inside this agent: only that agent uses and manages it, it is not in the skill library. */
+    ownerAgentId?: string;
 }
 
 interface FormValues {
@@ -37,9 +39,10 @@ interface FormValues {
     status: 'active' | 'inactive';
 }
 
-export default function SkillEditorModal({ opened, onClose, skill, onSaved }: SkillEditorModalProps) {
+export default function SkillEditorModal({ opened, onClose, skill, onSaved, ownerAgentId }: SkillEditorModalProps) {
     const [saving, setSaving] = useState(false);
     const isEdit = Boolean(skill);
+    const ownedByAgent = isEdit ? Boolean(skill?.owner) : Boolean(ownerAgentId);
 
     const initialValues = useMemo<FormValues>(() => ({
         key: skill?.key ?? '',
@@ -80,6 +83,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                 body: values.body,
                 minModelTier: values.minModelTier === 'any' ? null : values.minModelTier,
                 status: values.status,
+                ...(!skill && ownerAgentId ? { ownerAgentId } : {}),
             };
             const res = await fetch(skill ? `/api/skills/${skill._id}` : '/api/skills', {
                 method: skill ? 'PATCH' : 'POST',
@@ -93,7 +97,9 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
             const data = await res.json();
             notifications.show({
                 title: isEdit ? 'Skill saved' : 'Skill created',
-                message: `"${data.skill.title}" is ready to attach to an agent`,
+                message: ownedByAgent
+                    ? `"${data.skill.title}" is saved in this agent`
+                    : `"${data.skill.title}" is ready to attach to an agent`,
                 color: 'teal',
             });
             onSaved(data.skill as SkillView);
@@ -134,8 +140,10 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
             open={opened}
             onClose={onClose}
             icon={<IconBulb size={16} />}
-            title={isEdit ? 'Edit skill' : 'New skill'}
-            subtitle="A capability an agent can discover and open on demand — the header is always visible to the model, the body only once it opens the skill."
+            title={isEdit ? 'Edit skill' : ownedByAgent ? 'New skill for this agent' : 'New skill'}
+            subtitle={ownedByAgent
+                ? 'Only this agent uses it and it is managed from the agent; it is not added to the skill library. The header is always visible to the model, the body only once it opens the skill.'
+                : 'A capability an agent can discover and open on demand — the header is always visible to the model, the body only once it opens the skill.'}
             summary={summary}
             footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
             primaryAction={{

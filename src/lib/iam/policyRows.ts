@@ -19,7 +19,7 @@ export interface ManagedPolicyView {
   /** i18n keys of the same texts (`iamApi.managed.<slug>.name|description`). */
   nameKey: string;
   descriptionKey: string;
-  group: 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent';
+  group: 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent' | 'access';
   effect: 'permit' | 'forbid';
   cedar: string;
 }
@@ -116,6 +116,14 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   'managed:agent:approve': {
     name: 'People who may approve an agent\'s tool calls',
     description: 'A person may approve a tool call of an agent session (allow, deny, edit the arguments, remember it for the session) when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule. Having Write access to Agents is not enough on its own; your own allow rules can appoint more approvers, such as a compliance group.',
+  },
+  'managed:access:use': {
+    name: 'People on an access list can use the shared MCP server or skill in agent runs',
+    description: 'An agent run gets the tools of an MCP server, or a skill of the project\'s library, when the access list of that MCP server or skill admits the person the run is made for: everyone who can run the agent (the default), or the people and groups it names. The list is edited on the MCP server or the skill; no rule is stored per record.',
+  },
+  'managed:access:use-boundary': {
+    name: 'Only the access list lets agent runs use a restricted MCP server or skill',
+    description: 'When an MCP server or a skill names who may use it, the run of anybody else does not get it, whatever their role or any allow rule says (a workspace owner who is not on the list is kept out too). A run made for no person, such as a flow step or a public endpoint, does not get it either. Deny rules can still block people who are on the list.',
   },
   'managed:agent:approve-token': {
     name: 'API tokens approve on behalf of their owner',

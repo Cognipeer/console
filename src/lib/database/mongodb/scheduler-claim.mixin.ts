@@ -8,8 +8,7 @@
 
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
-
-const DUPLICATE_KEY_ERROR_CODE = 11000;
+import { isDuplicateKeyError } from './errors';
 
 export function SchedulerClaimMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class SchedulerClaimOps extends Base {
@@ -21,7 +20,7 @@ export function SchedulerClaimMixin<TBase extends Constructor<MongoDBProviderBas
           .insertOne({ _id: key, createdAt: new Date(), expiresAt });
         return true;
       } catch (error) {
-        if ((error as { code?: number })?.code === DUPLICATE_KEY_ERROR_CODE) return false;
+        if (isDuplicateKeyError(error)) return false;
         throw error;
       }
     }

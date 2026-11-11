@@ -670,6 +670,16 @@ describe('public MCP routes', () => {
     });
   });
 
+  describe('a server that belongs to an agent', () => {
+    it('is not served on a public URL, whatever its exposure says: it is used only inside its agent', async () => {
+      await start();
+      current = server({ owner: { kind: 'agent', agentId: 'agent-1' } });
+      const response = await post(callTool());
+      expect(response.statusCode).toBe(404);
+      expect(executeMcpTool).not.toHaveBeenCalled();
+    });
+  });
+
   describe('sessions', () => {
     it('answers a message that names an unknown session with 404, not with an inline result', async () => {
       await start();
