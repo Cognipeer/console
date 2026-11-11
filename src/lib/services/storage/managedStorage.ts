@@ -6,10 +6,12 @@
  * counts against its plan storage, metered by the file and vector services.
  *
  * Tenant isolation is enforced here, by core, whatever the host returns:
- * - root-scoped drivers (`MANAGED_STORAGE_DRIVERS`, all but one): the runtime is rooted in a folder (or key prefix)
- *   named after the tenant under the backend's root. The driver adds its own tenant and provider folders below it.
- * - the name-scoped vector driver (one shared namespace of indexes): every index the tenant creates is named with the
- *   tenant's token, and any handle that does not name one of the tenant's indexes in the configured bucket is refused.
+ * - root-scoped drivers (`MANAGED_STORAGE_DRIVERS`, all but the name-scoped vector drivers): the runtime is rooted in a
+ *   folder (or key prefix, or blob prefix) named after the tenant under the backend's root. The driver adds its own
+ *   tenant and provider folders below it.
+ * - the name-scoped vector drivers (one shared namespace of indexes): every index the tenant creates is named with the
+ *   tenant's token, and any handle that does not name one of the tenant's indexes (in the configured bucket, for the
+ *   bucket-based driver) is refused.
  * - any other driver: refused (fail closed). The server log names the driver; the tenant gets a generic message.
  * Storage uses the FIRST live route only: stored data stays on the backend it was written to (no failover).
  *
@@ -36,12 +38,13 @@ export const MANAGED_STORAGE_UNAVAILABLE = 'This provider is not available right
 
 /** The drivers whose runtime core can confine to one tenant. Any other driver on a managed route is refused. */
 export const MANAGED_STORAGE_DRIVERS: Readonly<Record<ManagedStorageKind, readonly string[]>> = {
-  file: ['local-filesystem', 'aws-s3-files', 's3-compatible-files'],
-  vector: ['sqlite-vector', 'aws-s3-vectors'],
+  file: ['local-filesystem', 'aws-s3-files', 's3-compatible-files', 'azure-blob-files'],
+  vector: ['sqlite-vector', 'aws-s3-vectors', 'azure-ai-search'],
 };
 
-/** The vector driver with one shared namespace of indexes: scoped by index name, not by a root. */
+/** The vector drivers with one shared namespace of indexes: scoped by index name, not by a root. */
 const NAME_SCOPED_VECTOR_DRIVER = 'aws-s3-vectors';
+const SEARCH_VECTOR_DRIVER = 'azure-ai-search';
 
 /**
  * The tenant's folder (or index name prefix) on a platform storage backend: stable for the tenant, the same length for
@@ -71,7 +74,8 @@ export function scopeStorageSettings(
       return { ...settings, subdirectory: subdirectory ? `${subdirectory}/${token}` : token };
     }
     case 'aws-s3-files':
-    case 's3-compatible-files': {
+    case 's3-compatible-files':
+    case 'azure-blob-files': {
       const prefix = trimSlashes(settings.prefix);
       return { ...settings, prefix: prefix ? `${prefix}/${token}` : token };
     }
@@ -189,6 +193,78 @@ export function wrapNameScopedVectorRuntime(
   return runtime;
 }
 
+/** Azure AI Search index names: 2 to 128 lowercase letters, digits and hyphens, no hyphen at either end. */
+const SEARCH_INDEX_NAME = /^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/;
+/**
+ * The only handle metadata the search driver reads: the filter push-down and hybrid search markers. Every index the
+ * wrapper creates goes through the driver's createIndex, which always builds the filterable metadata and content
+ * fields, and platform index records do not keep handle metadata, so the markers are constants of a tenant index.
+ */
+const SEARCH_HANDLE_MARKERS: Readonly<Record<string, string>> = { filterSchema: 'kv-v1', contentSchema: 'text-v1' };
+
+/**
+ * The name-scoped wrapper of the search vector driver (one search service, one shared namespace of indexes). An index is
+ * the tenant's when its name is a valid index name that starts with the tenant's token. Handles are rebuilt before the
+ * driver sees them and before the services do: the metadata is replaced by the markers the driver reads (never the
+ * endpoint or the derived algorithm and profile names).
+ */
+export function wrapSearchVectorRuntime(inner: VectorProviderRuntime, token: string): VectorProviderRuntime {
+  const ownPrefix = `${token}-`;
+  const ownName = (value: unknown): string | null =>
+    typeof value === 'string' && SEARCH_INDEX_NAME.test(value) && value.startsWith(ownPrefix) ? value : null;
+  const refuse = (what: string): never => {
+    log.warn('Managed vector call refused: the index is not the tenant\'s', { what });
+    throw new ManagedProviderError('This index is not available.');
+  };
+  const markers = (): Record<string, unknown> => ({ ...SEARCH_HANDLE_MARKERS });
+  const checked = (handle: VectorIndexHandle): VectorIndexHandle => {
+    const name = ownName(handle?.externalId);
+    if (!name) return refuse('handle');
+    return { ...handle, externalId: name, metadata: markers() };
+  };
+
+  const runtime: VectorProviderRuntime = {
+    async createIndex(input: CreateVectorIndexInput) {
+      const physical = managedIndexName(token, input.name);
+      const handle = await inner.createIndex({ ...input, name: physical });
+      if (handle?.externalId !== physical || !ownName(physical)) {
+        try {
+          await inner.deleteIndex({ externalId: physical });
+        } catch (error) {
+          log.error('Could not remove a created index the wrapper refused', {
+            error: error instanceof Error ? error.message : error,
+          });
+        }
+        return refuse('created index');
+      }
+      return { ...handle, externalId: physical, name: input.name, metadata: markers() };
+    },
+    async deleteIndex({ externalId }) {
+      const name = ownName(externalId);
+      if (!name) return refuse('delete');
+      await inner.deleteIndex({ externalId: name });
+    },
+    async listIndexes() {
+      const all = await inner.listIndexes();
+      return all
+        .filter((item) => ownName(item?.externalId) !== null)
+        .map((item) => ({ ...item, metadata: markers() }));
+    },
+    upsertVectors: async (handle, items) => inner.upsertVectors(checked(handle), items),
+    queryVectors: async (handle, query) => inner.queryVectors(checked(handle), query),
+    deleteVectors: async (handle, ids) => inner.deleteVectors(checked(handle), ids),
+    ...(inner.existingVectorIds
+      ? { existingVectorIds: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectorIds!(checked(handle), ids) }
+      : {}),
+    ...(inner.existingVectors
+      ? { existingVectors: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectors!(checked(handle), ids) }
+      : {}),
+    listVectors: async (handle, input) => inner.listVectors(checked(handle), input),
+  };
+  if (inner.close) runtime.close = () => inner.close?.();
+  return runtime;
+}
+
 /**
  * The driver whose contract describes a provider's capabilities: the route's driver for a platform record (the record's
  * own driver is a placeholder), the record's driver otherwise. Only the route's driver id is read, never its connection.
@@ -273,6 +349,10 @@ export async function loadStorageProvider(
     // carries an ARN could point the driver at another bucket than the one checked.
     const hasArn = typeof arn === 'string' ? arn.trim() !== '' : arn !== undefined && arn !== null;
     settings = typeof bucket === 'string' && bucket.trim() !== '' && !hasArn ? { ...connection.settings } : null;
+  } else if (driver === SEARCH_VECTOR_DRIVER) {
+    // The service is located by this endpoint alone: without it the driver has nothing to confine.
+    const endpoint = connection.settings.foundryProjectEndpoint;
+    settings = typeof endpoint === 'string' && endpoint.trim() !== '' ? { ...connection.settings } : null;
   } else {
     settings = scopeStorageSettings(driver, connection.settings, token);
   }
@@ -332,14 +412,21 @@ export async function getManagedStorageRuntime<TRuntime>(
       metadata: {},
       logger: createLogger(`${kind}:${record.key}`),
     });
-    const confined = kind === 'vector' && managed.driver === NAME_SCOPED_VECTOR_DRIVER
-      ? wrapNameScopedVectorRuntime(
+    let confined: TRuntime = runtime;
+    if (kind === 'vector' && managed.driver === NAME_SCOPED_VECTOR_DRIVER) {
+      confined = wrapNameScopedVectorRuntime(
         runtime as unknown as VectorProviderRuntime,
         managed.token,
         String(managed.settings.vectorBucketName),
-      ) as unknown as TRuntime
-      : runtime;
-    return withoutBackendIdentifiers(confined as unknown as object, backendIdentifiers(managed), kind) as TRuntime;
+      ) as unknown as TRuntime;
+    } else if (kind === 'vector' && managed.driver === SEARCH_VECTOR_DRIVER) {
+      confined = wrapSearchVectorRuntime(runtime as unknown as VectorProviderRuntime, managed.token) as unknown as TRuntime;
+    }
+    return withoutBackendIdentifiers(
+      confined as unknown as object,
+      backendIdentifiers(managed, credentials),
+      kind,
+    ) as TRuntime;
   });
   return managed.cleanupOnly ? withoutWrites(runtime as unknown as object, kind) as TRuntime : runtime;
 }
@@ -352,7 +439,10 @@ const MIN_IDENTIFIER_LENGTH = 3;
  * folders, prefix), the tenant's token and any ARN. Settings that core scoped to the tenant are listed with and
  * without the token, so the backend's own root is covered too.
  */
-export function backendIdentifiers(managed: Pick<ManagedStorageConnection, 'settings' | 'token'>): string[] {
+export function backendIdentifiers(
+  managed: Pick<ManagedStorageConnection, 'settings' | 'token'>,
+  credentials?: Record<string, unknown>,
+): string[] {
   const { settings, token } = managed;
   const found = new Set<string>([token, 'arn:aws:']);
   const add = (value: unknown) => {
@@ -360,7 +450,7 @@ export function backendIdentifiers(managed: Pick<ManagedStorageConnection, 'sett
     const trimmed = value.trim();
     if (trimmed.length >= MIN_IDENTIFIER_LENGTH) found.add(trimmed);
   };
-  for (const key of ['bucket', 'vectorBucketName', 'vectorBucketArn', 'basePath', 'subdirectory', 'prefix'] as const) {
+  for (const key of ['bucket', 'vectorBucketName', 'vectorBucketArn', 'basePath', 'subdirectory', 'prefix', 'container', 'accountName'] as const) {
     const value = settings[key];
     add(value);
     if (typeof value === 'string') {
@@ -368,8 +458,8 @@ export function backendIdentifiers(managed: Pick<ManagedStorageConnection, 'sett
       add(parent);
     }
   }
-  const endpoint = settings.endpoint;
-  if (typeof endpoint === 'string' && endpoint.trim() !== '') {
+  const addEndpoint = (endpoint: unknown) => {
+    if (typeof endpoint !== 'string' || endpoint.trim() === '') return;
     add(endpoint);
     try {
       const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint.trim()) ? endpoint.trim() : `https://${endpoint.trim()}`);
@@ -378,6 +468,31 @@ export function backendIdentifiers(managed: Pick<ManagedStorageConnection, 'sett
     } catch {
       // Not a URL: the raw value above stands.
     }
+  };
+  addEndpoint(settings.endpoint);
+  addEndpoint(settings.foundryProjectEndpoint);
+  // The Azure blob endpoint a driver derives from the account: the account can sit in the settings or, for a connection
+  // string, only inside the credential. Only the account name, the blob endpoint and the host are taken from it; the
+  // credential itself (keys, tokens) is never added, logged or returned.
+  let suffix = 'core.windows.net';
+  const accounts = new Set<string>();
+  if (typeof settings.accountName === 'string') accounts.add(settings.accountName.trim());
+  const connectionString = credentials?.connectionString;
+  if (typeof connectionString === 'string') {
+    for (const part of connectionString.split(';')) {
+      const at = part.indexOf('=');
+      if (at < 0) continue;
+      const name = part.slice(0, at).trim().toLowerCase();
+      const value = part.slice(at + 1).trim();
+      if (name === 'accountname') accounts.add(value);
+      else if (name === 'endpointsuffix' && value) suffix = value;
+      else if (name === 'blobendpoint') addEndpoint(value);
+    }
+  }
+  for (const account of accounts) {
+    if (account.length < MIN_IDENTIFIER_LENGTH) continue;
+    add(account);
+    add(`${account}.blob.${suffix}`);
   }
   // The built-in data directory is the root of a local driver whose settings name none.
   add(getConfig().storage.dataDir);
