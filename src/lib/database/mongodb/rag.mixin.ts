@@ -16,6 +16,7 @@ import type {
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { OBJECT_ID_HEX, toObjectIds } from './objectIds';
+import { distinctStrings } from '../provider/normalize';
 
 /**
  * `$bucket` boundaries are [lower, upper), so an exact 1.0 needs a boundary
@@ -50,10 +51,6 @@ type RagDocumentCountFilters = Pick<
   RagDocumentListFilters,
   'status' | 'search' | 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged' | 'withUnscoped'
 >;
-
-function distinctStrings(values: readonly unknown[]): string[] {
-  return [...new Set(values.filter((v): v is string => typeof v === 'string' && v.length > 0))];
-}
 
 /**
  * Moves the listed fields out of `set` when they are present but empty

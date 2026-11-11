@@ -18,6 +18,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { isDuplicateKeyError } from './errors';
 
 /** IAnalysisResult fields a re-analysis may drop; removed when the new result lacks them. */
 const ANALYSIS_RESULT_OPTIONAL_FIELDS = [
@@ -310,7 +311,7 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       } catch (error) {
         // Two runs upserting the same conversation concurrently: the loser hits the unique index;
         // the retry then matches the winner's doc.
-        if ((error as { code?: number })?.code !== 11000) throw error;
+        if (!isDuplicateKeyError(error)) throw error;
         doc = await run();
       }
       return this.toAnalysisResult(doc as unknown as Record<string, unknown>);

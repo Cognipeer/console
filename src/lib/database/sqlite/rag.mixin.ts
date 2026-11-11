@@ -14,6 +14,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { distinctStrings } from '../provider/normalize';
 
 /** Labels, ascending: '0.0'..'0.9' plus '1.0'. Mirrors `mongodb/rag.mixin.ts`. */
 const SCORE_BUCKET_LABELS = Array.from({ length: 11 }, (_, i) => (i / 10).toFixed(1));
@@ -40,10 +41,6 @@ type RagDocumentCountFilters = Pick<
 >;
 
 /** The distinct, non-empty strings of `values`. */
-function distinctStrings(values: readonly unknown[]): string[] {
-  return [...new Set(values.filter((v): v is string => typeof v === 'string' && v.length > 0))];
-}
-
 /** A list handed to SQL as one JSON array: no bound variable per element, so no variable limit. */
 function jsonList(values: readonly string[]): string {
   return JSON.stringify(values);

@@ -13,8 +13,10 @@ export interface DetailShellTab extends TabsBarItem {
 }
 
 export interface DetailShellProps {
-  /** Optional href for the back chevron. Falls back to router.back(). */
+  /** Optional href for the back chevron. Falls back to `onBack`, then router.back(). */
   backHref?: string;
+  /** What the back chevron does when there is no `backHref`, e.g. close the drawer the screen is shown in. */
+  onBack?: () => void;
   /** Back-button tooltip. */
   backLabel?: string;
   /** Icon shown in the colored badge. */
@@ -35,6 +37,7 @@ export interface DetailShellProps {
 
 export default function DetailShell({
   backHref,
+  onBack,
   backLabel = 'Back',
   icon,
   title,
@@ -48,6 +51,7 @@ export default function DetailShell({
   const router = useRouter();
   const handleBack = () => {
     if (backHref) router.push(backHref);
+    else if (onBack) onBack();
     else router.back();
   };
 

@@ -108,6 +108,8 @@ export interface CompositeSelfRef {
   id?: string;
   tenantId: string;
   projectId?: string;
+  /** The agent the composite belongs to, if any: only that agent's own servers (and shared ones) can be members. */
+  ownerAgentId?: string;
 }
 
 /**
@@ -120,7 +122,8 @@ export function assertMemberUsable(
   member: IMcpServer | null,
   requestedServerId: string,
 ): void {
-  if (!member) {
+  // Another agent's own server is not there for anyone else, a composite included (nor for a shared composite).
+  if (!member || (member.owner && member.owner.agentId !== self.ownerAgentId)) {
     throw new Error(`Member server "${requestedServerId}" no longer exists`);
   }
   if (self.id && String(member._id) === String(self.id)) {

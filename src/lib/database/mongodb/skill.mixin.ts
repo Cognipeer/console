@@ -8,9 +8,9 @@
  */
 
 import { ObjectId, type Filter } from 'mongodb';
-import type { IAgentSkill } from '../provider.interface';
+import type { IAgentSkill, OwnedResourceListFilter } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, ownedResourceCondition } from './base';
 
 export function SkillMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class SkillOps extends Base {
@@ -68,9 +68,11 @@ export function SkillMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       projectId?: string;
       status?: IAgentSkill['status'];
       search?: string;
-    }): Promise<IAgentSkill[]> {
+    } & OwnedResourceListFilter): Promise<IAgentSkill[]> {
       const db = this.getTenantDb();
       const query: Filter<IAgentSkill> = {};
+      const owned = ownedResourceCondition(filters);
+      if (owned) query.$and = [owned as Filter<IAgentSkill>];
       if (filters?.projectId) query.projectId = filters.projectId;
       if (filters?.status) query.status = filters.status;
       if (filters?.search) {

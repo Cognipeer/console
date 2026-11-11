@@ -17,6 +17,7 @@ import type {
   IMcpToolAnnotations,
   McpLogServerScope,
   McpSourceType,
+  OwnedResourceListFilter,
 } from '@/lib/database';
 import type {
   CreateMcpServerInput,
@@ -26,6 +27,7 @@ import type {
   OpenApiSpec,
   OpenApiOperation,
 } from './types';
+import { readAccessList } from '@/lib/iam/accessList';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -89,6 +91,7 @@ import {
   getCompositeMemberSummaries,
   MAX_COMPOSITE_MEMBER_TOOLS,
   metadataWithComposite,
+  type CompositeSelfRef,
   type CompositeToolEntry,
   type IMcpCompositeMemberConfig,
   type IMcpCompositeMemberSummary,
@@ -518,6 +521,7 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
     id: typeof record._id === 'string' ? record._id : (record._id?.toString() ?? ''),
     sourceType: resolveSourceType(record),
     exposure: resolveExposure(record),
+    access: readAccessList(record.access),
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
     disabledTools: getDisabledToolNames(record),
@@ -536,6 +540,7 @@ export function serializeMcpServerFull(record: IMcpServer): McpServerView & { op
     id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
     sourceType: resolveSourceType(record),
     exposure: resolveExposure(record),
+    access: readAccessList(record.access),
     upstreamAuth: maskAuthConfig(record.upstreamAuth),
     stdioConfig: maskStdioConfig(record.stdioConfig),
     disabledTools: getDisabledToolNames(record),
@@ -914,7 +919,7 @@ interface BuiltCompositeTools {
 
 async function buildCompositeTools(
   db: DatabaseProvider,
-  self: { id?: string; tenantId: string; projectId?: string },
+  self: CompositeSelfRef,
   memberConfigs: Array<{ serverId: string; toolPrefix?: string; alwaysPrefix?: boolean }>,
   previousTools: IMcpTool[] = [],
 ): Promise<BuiltCompositeTools> {
@@ -1024,7 +1029,12 @@ async function reconcileOneComposite(
   }
   const built = await buildCompositeTools(
     db,
-    { id: String(composite._id ?? ''), tenantId: composite.tenantId, projectId: composite.projectId },
+    {
+      id: String(composite._id ?? ''),
+      tenantId: composite.tenantId,
+      projectId: composite.projectId,
+      ownerAgentId: composite.owner?.agentId,
+    },
     config.members,
     composite.tools,
   );
@@ -1059,7 +1069,8 @@ export async function reconcileCompositesForMember(
 ): Promise<void> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const all = await db.listMcpServers({});
+  // Every composite, agents' own ones included: a member that changes must reach each of them.
+  const all = await db.listMcpServers({ owned: 'include' });
   const composites = all.filter((s) => resolveSourceType(s) === 'composite'
     && getCompositeConfig(s).members.some((m) => m.serverId === memberId));
 
@@ -1165,7 +1176,7 @@ export async function createMcpServer(
       toolPrefix: m.toolPrefix,
       alwaysPrefix: m.alwaysPrefix,
     }));
-    const built = await buildCompositeTools(db, { tenantId, projectId }, memberConfigs);
+    const built = await buildCompositeTools(db, { tenantId, projectId, ownerAgentId: input.owner?.agentId }, memberConfigs);
     if (built.tokenOnlyMember && normalizeExposure(input.exposure).accessMode === 'public') {
       throw new McpServerConfigError(tokenOnlyMessage(built.tokenOnlyMember));
     }
@@ -1200,6 +1211,9 @@ export async function createMcpServer(
     // Absent bindings are OMITTED, never `undefined` (BSON null on Mongo), and
     // either column sent is projected onto the other for one release.
     ...projectMcpGuardrailBinding(input),
+    // Omitted when not given (a record without a list is open), never `undefined` (BSON null on Mongo).
+    ...(input.access ? { access: input.access } : {}),
+    ...(input.owner ? { owner: { kind: 'agent' as const, agentId: input.owner.agentId } } : {}),
     status: 'active',
     endpointSlug,
     totalRequests: 0,
@@ -1242,6 +1256,7 @@ export async function createMcpServer(
       name: { to: input.name.trim() },
       sourceType: { to: sourceType },
       exposure: { to: normalizeExposure(input.exposure) },
+      ...(input.access ? { access: { to: input.access } } : {}),
     },
     performedBy: audit?.performedBy ?? userId,
     ipAddress: audit?.ipAddress,
@@ -1267,6 +1282,7 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
   compare('status', before.status, after.status);
   compare('upstreamBaseUrl', before.upstreamBaseUrl, after.upstreamBaseUrl);
   compare('exposure', resolveExposure(before), after.exposure);
+  compare('access', readAccessList(before.access), after.access);
   compare('aegis', before.aegis, after.aegis);
   compare('guardrail', before.guardrail, after.guardrail);
   compare('remoteConfig', before.remoteConfig, after.remoteConfig);
@@ -1334,7 +1350,7 @@ async function assertTokenOnlyStaysTokenOnly(
   const becomes = tokenOnlyProviderOf(after);
   if (becomes && !isTokenOnlyServer(existing)) {
     const id = String(existing._id);
-    const publicComposite = (await db.listMcpServers({})).find((server) => resolveSourceType(server) === 'composite'
+    const publicComposite = (await db.listMcpServers({ owned: 'include' })).find((server) => resolveSourceType(server) === 'composite'
       && resolveExposure(server).accessMode === 'public'
       && getCompositeConfig(server).members.some((member) => member.serverId === id));
     if (publicComposite) {
@@ -1375,6 +1391,7 @@ export async function updateMcpServer(
     updateData.upstreamAuth = mergeAuthConfigUpdate(existing.upstreamAuth, input.upstreamAuth);
   }
   if (input.exposure !== undefined) updateData.exposure = normalizeExposure(input.exposure);
+  if (input.access !== undefined) updateData.access = input.access;
   if (input.endpointSlug !== undefined) {
     updateData.endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug, serverId);
   }
@@ -1488,7 +1505,7 @@ export async function updateMcpServer(
     }));
     const built = await buildCompositeTools(
       db,
-      { id: serverId, tenantId: existing.tenantId, projectId: existing.projectId },
+      { id: serverId, tenantId: existing.tenantId, projectId: existing.projectId, ownerAgentId: existing.owner?.agentId },
       memberConfigs,
       existing.tools,
     );
@@ -1797,9 +1814,10 @@ export async function getMcpServerByKey(
   return db.findMcpServerByKey(key, projectId);
 }
 
+/** The project's shared servers; an agent's own ones only when `owned` / `ownerAgentId` ask for them. */
 export async function listMcpServers(
   tenantDbName: string,
-  filters?: { projectId?: string; status?: 'active' | 'disabled'; search?: string },
+  filters?: { projectId?: string; status?: 'active' | 'disabled'; search?: string } & OwnedResourceListFilter,
 ): Promise<IMcpServer[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

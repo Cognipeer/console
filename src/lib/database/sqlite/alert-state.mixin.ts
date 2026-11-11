@@ -8,12 +8,7 @@
 import type { IAlertState, IAlertStateFilter } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
-
-function clampLimit(value: number | undefined, fallback: number, max: number): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(Math.floor(n), 1), max);
-}
+import { clampLimit } from '../provider/paging';
 
 export function AlertStateMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class AlertStateOps extends Base {

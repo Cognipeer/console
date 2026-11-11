@@ -214,7 +214,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(typeof row.createdAt).toBe('string');
 
       const list = await call('GET', '/api/iam/policies', A, 'reader');
-      expect(list.body.managed).toHaveLength(24); // six RBAC permits, six boundary forbids, eight portal rules, two messaging rules, two agent approval rules
+      expect(list.body.managed).toHaveLength(26); // six RBAC permits, six boundary forbids, eight portal rules, two messaging rules, two agent approval rules, two shared-resource access rules
       expect(list.body.managed.filter((m: any) => m.group === 'portal').map((m: any) => m.id)).toEqual([
         'managed:portal:use', 'managed:portal:use-boundary', 'managed:portal:agent', 'managed:portal:agent-boundary',
         'managed:portal:network-boundary', 'managed:portal:agent-network-boundary', 'managed:portal:test-use', 'managed:portal:test-agent',

@@ -23176,6 +23176,8 @@ components:
           $ref: "#/components/schemas/McpExposureInput"
         aegis:
           $ref: "#/components/schemas/McpAegisInput"
+        access:
+          $ref: "#/components/schemas/ResourceAccessList"
     McpExecuteRequest:
       type: object
       required:
@@ -23531,6 +23533,35 @@ components:
           type: string
           format: date-time
           description: Creation timestamp.
+        access:
+          $ref: "#/components/schemas/ResourceAccessList"
+    ResourceAccessList:
+      type: object
+      required:
+        - mode
+      description: >-
+        Who may use a shared resource (an MCP server, a skill) in agent runs. `all`: everyone who can run the agent.
+        `selected`: only runs made for the listed users or members of the listed groups; runs made for no person
+        (a flow step, a public endpoint) do not get the resource. The list is the resource's built-in IAM policy, so
+        IAM deny rules still apply on top. A record without a list reads as `all`.
+      properties:
+        mode:
+          type: string
+          enum:
+            - all
+            - selected
+        userIds:
+          type: array
+          items:
+            type: string
+            maxLength: 128
+          description: User ids. Together with `groupIds`, at most 500 entries.
+        groupIds:
+          type: array
+          items:
+            type: string
+            maxLength: 128
+          description: IAM group ids.
     McpStdioConfigInput:
       type: object
       required:
@@ -23667,6 +23698,8 @@ components:
           maxLength: 8000
           description: >-
             MCP `instructions` returned by `initialize`. Send `null` or an empty string to serve what the source supplies again.
+        access:
+          $ref: "#/components/schemas/ResourceAccessList"
     ConsoleIdentityJwks:
       type: object
       required:
