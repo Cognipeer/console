@@ -195,13 +195,17 @@ export function wrapNameScopedVectorRuntime(
 
 /** Azure AI Search index names: 2 to 128 lowercase letters, digits and hyphens, no hyphen at either end. */
 const SEARCH_INDEX_NAME = /^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/;
-/** The only handle metadata the search driver reads: filter push-down and hybrid search markers. */
-const SEARCH_HANDLE_MARKERS = ['filterSchema', 'contentSchema'] as const;
+/**
+ * The only handle metadata the search driver reads: the filter push-down and hybrid search markers. Every index the
+ * wrapper creates goes through the driver's createIndex, which always builds the filterable metadata and content
+ * fields, and platform index records do not keep handle metadata, so the markers are constants of a tenant index.
+ */
+const SEARCH_HANDLE_MARKERS: Readonly<Record<string, string>> = { filterSchema: 'kv-v1', contentSchema: 'text-v1' };
 
 /**
  * The name-scoped wrapper of the search vector driver (one search service, one shared namespace of indexes). An index is
  * the tenant's when its name is a valid index name that starts with the tenant's token. Handles are rebuilt before the
- * driver sees them and before the services do: only the markers the driver reads stay in the metadata (never the
+ * driver sees them and before the services do: the metadata is replaced by the markers the driver reads (never the
  * endpoint or the derived algorithm and profile names).
  */
 export function wrapSearchVectorRuntime(inner: VectorProviderRuntime, token: string): VectorProviderRuntime {
@@ -212,18 +216,11 @@ export function wrapSearchVectorRuntime(inner: VectorProviderRuntime, token: str
     log.warn('Managed vector call refused: the index is not the tenant\'s', { what });
     throw new ManagedProviderError('This index is not available.');
   };
-  const markers = (metadata: Record<string, unknown> | undefined): Record<string, unknown> => {
-    const kept: Record<string, unknown> = {};
-    for (const key of SEARCH_HANDLE_MARKERS) {
-      const value = metadata?.[key];
-      if (typeof value === 'string') kept[key] = value;
-    }
-    return kept;
-  };
+  const markers = (): Record<string, unknown> => ({ ...SEARCH_HANDLE_MARKERS });
   const checked = (handle: VectorIndexHandle): VectorIndexHandle => {
     const name = ownName(handle?.externalId);
     if (!name) return refuse('handle');
-    return { ...handle, externalId: name, metadata: markers(handle.metadata) };
+    return { ...handle, externalId: name, metadata: markers() };
   };
 
   const runtime: VectorProviderRuntime = {
@@ -240,7 +237,7 @@ export function wrapSearchVectorRuntime(inner: VectorProviderRuntime, token: str
         }
         return refuse('created index');
       }
-      return { ...handle, externalId: physical, name: input.name, metadata: markers(handle.metadata) };
+      return { ...handle, externalId: physical, name: input.name, metadata: markers() };
     },
     async deleteIndex({ externalId }) {
       const name = ownName(externalId);
@@ -251,7 +248,7 @@ export function wrapSearchVectorRuntime(inner: VectorProviderRuntime, token: str
       const all = await inner.listIndexes();
       return all
         .filter((item) => ownName(item?.externalId) !== null)
-        .map((item) => ({ ...item, metadata: markers(item.metadata) }));
+        .map((item) => ({ ...item, metadata: markers() }));
     },
     upsertVectors: async (handle, items) => inner.upsertVectors(checked(handle), items),
     queryVectors: async (handle, query) => inner.queryVectors(checked(handle), query),

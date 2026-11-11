@@ -333,6 +333,29 @@ describe('error messages of a platform storage runtime', () => {
   });
 });
 
+describe('an azure-blob-files runtime with a connection-string credential', () => {
+  it('scrubs the account and host that exist only inside the credential from tenant-visible errors', async () => {
+    h.records.set('platform-files', platformRecord('platform-files', 'file'));
+    h.connection = {
+      driver: 'azure-blob-files',
+      settings: { container: 'c1' },
+      credentials: { connectionString: 'DefaultEndpointsProtocol=https;AccountName=csacct;AccountKey=TOPSECRETKEY==;EndpointSuffix=core.windows.net' },
+    };
+    const create = vi.spyOn(providerRegistry, 'createRuntime').mockResolvedValue({
+      downloadFile: async () => { throw new Error('connect ENOTFOUND csacct.blob.core.windows.net'); },
+    } as never);
+    try {
+      const loaded = await loadStorageProvider('file', { tenantDbName: 'db', tenantId: 'tenant-az', providerKey: 'platform-files' });
+      const runtime = await getManagedStorageRuntime<FileProviderRuntime>('file', loaded as any, { tenantId: 'tenant-az' });
+      const error = await runtime.downloadFile('k').catch((e: Error) => e);
+      expect((error as Error).message).toBe('This provider is not available right now.');
+      expect(String((error as Error).message)).not.toContain('csacct');
+    } finally {
+      create.mockRestore();
+    }
+  });
+});
+
 describe('a platform vector route with a bucket ARN', () => {
   it('is refused: the driver would prefer the ARN to the bucket name that was checked', async () => {
     h.records.set('platform-vector', platformRecord('platform-vector', 'vector'));
@@ -518,7 +541,7 @@ describe('the search vector runtime', () => {
     expect(list[0].metadata).toEqual({ filterSchema: 'kv-v1', contentSchema: 'text-v1' });
   });
 
-  it('hands the driver a rebuilt handle: markers kept, endpoint and derived names dropped, non-string markers dropped', async () => {
+  it('hands the driver a rebuilt handle: markers always set, endpoint and derived names dropped, even when no metadata was stored', async () => {
     const seen: unknown[] = [];
     const inner = baseInner({
       upsertVectors: async (h0) => { seen.push(h0); },
@@ -532,8 +555,11 @@ describe('the search vector runtime', () => {
     await runtime.queryVectors(h1, { topK: 1, vector: [1] });
     await runtime.deleteVectors(h1, ['a']);
     await runtime.listVectors(h1);
-    for (const item of seen) expect((item as VectorIndexHandle).metadata).toEqual({ filterSchema: 'kv-v1' });
-    expect(seen).toHaveLength(4);
+    // platform index records keep no handle metadata: a handle without any still reaches the driver with both markers
+    const bare = { externalId: own, name: 'docs', dimension: 3, metric: 'cosine' } as VectorIndexHandle;
+    await runtime.queryVectors(bare, { topK: 1, vector: [1] });
+    for (const item of seen) expect((item as VectorIndexHandle).metadata).toEqual({ filterSchema: 'kv-v1', contentSchema: 'text-v1' });
+    expect(seen).toHaveLength(5);
   });
 
   it('refuses any handle or id that is not the tenant\'s index name', async () => {
@@ -545,6 +571,7 @@ describe('the search vector runtime', () => {
       listVectors: async () => { touched.push('l'); return { items: [] }; },
       deleteIndex: async () => { touched.push('i'); },
       existingVectorIds: async () => { touched.push('e'); return []; },
+      existingVectors: async () => { touched.push('x'); return []; },
     });
     const runtime = wrapSearchVectorRuntime(inner, token);
     for (const externalId of [
@@ -557,6 +584,7 @@ describe('the search vector runtime', () => {
       await expect(runtime.listVectors(handle(externalId))).rejects.toBeInstanceOf(ManagedProviderError);
       await expect(runtime.deleteIndex({ externalId })).rejects.toBeInstanceOf(ManagedProviderError);
       await expect(runtime.existingVectorIds!(handle(externalId), ['a'])).rejects.toBeInstanceOf(ManagedProviderError);
+      await expect(runtime.existingVectors!(handle(externalId), ['a'])).rejects.toBeInstanceOf(ManagedProviderError);
     }
     expect(touched).toEqual([]);
   });
@@ -574,6 +602,17 @@ describe('the search vector runtime', () => {
     await runtime.close?.();
     expect(closed).toBe(1);
     expect(wrapSearchVectorRuntime(baseInner(), token).existingVectorIds).toBeUndefined();
+  });
+
+  it('passes existingVectors through with a rebuilt handle for the tenant\'s index, and offers it only when the driver has it', async () => {
+    const seen: VectorIndexHandle[] = [];
+    const inner = baseInner({ existingVectors: (async (h0: VectorIndexHandle) => { seen.push(h0); return []; }) as never });
+    const runtime = wrapSearchVectorRuntime(inner, token);
+    await runtime.existingVectors!(handle(own, rich), ['a']);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].externalId).toBe(own);
+    expect(seen[0].metadata).toEqual({ filterSchema: 'kv-v1', contentSchema: 'text-v1' });
+    expect(wrapSearchVectorRuntime(baseInner(), token).existingVectors).toBeUndefined();
   });
 
   it('still refuses writes on a cleanup-only route and wraps the runtime getManagedStorageRuntime builds', async () => {

@@ -385,6 +385,34 @@ describe('a full cycle through the SDK', () => {
   });
 });
 
+describe('hostile keys against the driver', () => {
+  it('only ever names blobs and list prefixes inside the tenant folder', async () => {
+    const server = await serve();
+    server.containers.set('cont1', new Map());
+    const rt = await runtimeFor(server.endpoint, { settings: { prefix: 'pre/tok' } });
+    const folder = 'pre/tok/t1/prov/';
+    for (const key of ['%2e%2e/x', '//a', 'a%2F..%2Fb', 'a\\b']) {
+      await rt.uploadFile({ key, name: 'n', data: Buffer.from('x') });
+    }
+    for (const key of ['..', '\\..', 'a/../b', '../x']) {
+      await expect(rt.uploadFile({ key, name: 'n', data: Buffer.from('x') }), key).rejects.toThrow(/Invalid file key/);
+      await expect(rt.downloadFile(key), key).rejects.toThrow(/Invalid file key/);
+    }
+    for (const prefix of ['%2e%2e/', '//a', '\\x']) await rt.listFiles({ prefix });
+    for (const prefix of ['..', '../', '\\..']) await expect(rt.listFiles({ prefix }), prefix).rejects.toThrow();
+    const names = [...server.containers.get('cont1')!.keys()];
+    expect(names).toHaveLength(4);
+    for (const name of names) expect(name.startsWith(folder), name).toBe(true);
+    for (const request of server.seen) {
+      const url = new URL(request.url, 'http://x');
+      const named = decodeURIComponent(url.pathname).replace(/^\/devstoreaccount1\/cont1\/?/, '');
+      const listed = url.searchParams.get('prefix');
+      if (listed !== null) expect(listed.startsWith(folder), listed).toBe(true);
+      else if (named) expect(named.startsWith(folder), named).toBe(true);
+    }
+  });
+});
+
 describe('Test connection through the SDK', () => {
   const steps = (result: FileConnectionCheck) => result.steps?.map((s) => [s.step, s.ok]);
 
