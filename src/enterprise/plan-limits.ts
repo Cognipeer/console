@@ -29,8 +29,32 @@ export interface PlanCreditSummary {
     /** ISO time the earliest lot ends, when any lot ends. */
     nextExpiry?: string;
   };
+  /** When the monthly credits renew and how much is granted then. Absent when the edition does not report it. */
+  renewal?: {
+    /** ISO time of the next renewal (start of the next UTC month). */
+    at: string;
+    /** Credits granted at each renewal. */
+    includedPerMonth: number;
+    /** Unused monthly credits never carry over to the next month. */
+    rollover: false;
+  };
+  /** The open one-time credit lots. Absent when the edition does not report them. */
+  oneTimeLots?: PlanCreditLot[];
   /** Days the balance lasts at the last 7 days' spend; absent when there was no spend. */
   runwayDays?: number;
+}
+
+/** One open one-time credit lot. */
+export interface PlanCreditLot {
+  id: string;
+  /** Where the lot came from: a redeemed code or a direct grant. */
+  source: 'code' | 'grant';
+  credits: number;
+  remaining: number;
+  /** ISO time the lot was added. */
+  addedAt: string;
+  /** ISO time the lot ends; null when it does not expire. */
+  expiresAt: string | null;
 }
 
 export interface PlanLimitsContribution {

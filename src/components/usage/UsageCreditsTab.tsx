@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Badge, Button, Group, Paper, Progress, SegmentedControl, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
+import { BarChart } from '@mantine/charts';
+import { Badge, Button, Group, Paper, Progress, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { ApiError, apiRequest } from '@/lib/api/client';
@@ -11,12 +12,16 @@ import {
   CREDIT_LEDGER_KINDS,
   describeCreditEntry,
   fetchCreditLedger,
-  fetchCreditSpend,
+  creditExportUrl,
+  fetchCreditMonths,
+  fetchCreditSpendGrouped,
+  fillDailySpend,
   utcMonth,
   type CreditLedgerEntry,
   type CreditLedgerKind,
-  type CreditSpend,
-  type CreditSpendModel,
+  type CreditMonth,
+  type CreditSpendGrouped,
+  type CreditSpendRow,
 } from './creditsApi';
 import { formatDate, formatNumber, formatPeriod, runwayText } from './format';
 
@@ -27,6 +32,8 @@ const PAGE_SIZES = [25, 50, 100];
 const KIND_COLORS: Record<CreditLedgerKind, string> = {
   charge: 'gray',
   redeem: 'teal',
+  grant: 'teal',
+  revoke: 'red',
   monthly_grant: 'blue',
   refund: 'teal',
   adjust: 'violet',
@@ -49,71 +56,120 @@ export function redeemErrorCode(error: unknown): string {
 
 type Translate = ReturnType<typeof useTranslations>;
 
-function spendLabel(row: CreditSpendModel, t: Translate): string {
-  if (row.model === 'search' || row.service === 'search') return t('credits.services.search');
-  return row.label ?? row.model ?? t('credits.spend.other');
+const SPEND_GROUPS = ['model', 'service', 'project', 'agent'] as const;
+type SpendGroup = (typeof SPEND_GROUPS)[number];
+
+function spendLabel(row: CreditSpendRow, t: Translate, group: SpendGroup): string {
+  if (row.key === 'unknown') return t('credits.spend.other');
+  if (group === 'service') return row.key === 'chat' || row.key === 'embedding' || row.key === 'search' ? t(`credits.services.${row.key}`) : (row.label ?? row.key);
+  if (row.key === 'search' || row.service === 'search') return t('credits.services.search');
+  return row.label ?? row.key;
 }
 
-function spendUsage(row: CreditSpendModel, t: Translate, locale: string): string {
-  if (row.model === 'search' || row.service === 'search') {
-    return t('credits.spend.searchUsage', { count: formatNumber(row.count, locale), units: formatNumber(row.units, locale) });
-  }
-  if (row.service === 'embedding') return t('credits.spend.embeddingUsage', { input: formatNumber(row.inputTokens, locale) });
-  return t('credits.spend.chatUsage', { input: formatNumber(row.inputTokens, locale), output: formatNumber(row.outputTokens, locale) });
-}
-
-function BalanceCard({ summary, t, locale }: { summary: UsageSummary; t: Translate; locale: string }) {
+function BalanceCard({
+  summary,
+  monthRow,
+  isCurrent,
+  month,
+  t,
+  locale,
+}: {
+  summary: UsageSummary;
+  monthRow: CreditMonth | undefined;
+  isCurrent: boolean;
+  month: string;
+  t: Translate;
+  locale: string;
+}) {
   const credits = summary.credits;
   if (!credits) return null;
-  const { included, prepaid } = credits;
-  const includedPct = included.granted > 0 ? Math.min(100, (included.used / included.granted) * 100) : 0;
+  const { included, prepaid, renewal } = credits;
+  // The balance is always today's; the monthly card follows the picked month when its history is known.
+  const showRow = !isCurrent && monthRow !== undefined;
+  const granted = showRow ? monthRow.monthlyGranted : included.granted;
+  const used = showRow ? monthRow.monthlyUsed : included.used;
+  const monthlyPct = granted > 0 ? Math.min(100, (used / granted) * 100) : 0;
+  const remainingMonthly = showRow ? Math.max(0, granted - used - monthRow.monthlyExpired) : Math.max(0, granted - used);
+  const lots = credits.oneTimeLots;
   return (
-    <Paper withBorder p="md" radius="md">
-      <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="lg">
+    <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="lg">
+      <Paper withBorder p="md" radius="md">
         <Stack gap={4}>
           <Text size="sm" c="dimmed">{t('creditCard.balance')}</Text>
           <Text size="xl" fw={700}>{formatNumber(credits.balance, locale)}</Text>
           <Text size="xs" c="dimmed">{runwayText(t, locale, credits.runwayDays)}</Text>
         </Stack>
+      </Paper>
+      <Paper withBorder p="md" radius="md">
         <Stack gap={4}>
-          <Text size="sm" c="dimmed">{t('credits.balanceCard.included', { month: formatPeriod(included.period, locale) })}</Text>
+          <Text size="sm" c="dimmed">{t('credits.balanceCard.monthly', { month: formatPeriod(showRow ? month : included.period, locale) })}</Text>
           <Text size="sm" fw={600}>
-            {t('creditCard.includedValue', { used: formatNumber(included.used, locale), granted: formatNumber(included.granted, locale) })}
+            {t('credits.balanceCard.monthlyValue', {
+              granted: formatNumber(granted, locale),
+              used: formatNumber(used, locale),
+              remaining: formatNumber(remainingMonthly, locale),
+            })}
           </Text>
-          <Progress value={includedPct} size="sm" aria-label={t('credits.balanceCard.includedBar')} />
-          <Text size="xs" c="dimmed">{t('credits.balanceCard.includedEnds', { date: formatDate(included.endsAt, locale) ?? '' })}</Text>
+          <Progress value={monthlyPct} size="sm" aria-label={t('credits.balanceCard.monthlyBar')} />
+          {renewal && !showRow ? (
+            <Text size="xs" c="dimmed">
+              {t('credits.balanceCard.renews', { date: formatDate(renewal.at, locale) ?? '', credits: formatNumber(renewal.includedPerMonth, locale) })}
+            </Text>
+          ) : (
+            <Text size="xs" c="dimmed">{t('credits.balanceCard.includedEnds', { date: formatDate(included.endsAt, locale) ?? '' })}</Text>
+          )}
         </Stack>
+      </Paper>
+      <Paper withBorder p="md" radius="md">
         <Stack gap={4}>
-          <Text size="sm" c="dimmed">{t('creditCard.prepaid')}</Text>
+          <Text size="sm" c="dimmed">{t('credits.balanceCard.oneTime')}</Text>
           <Text size="sm" fw={600}>{t('creditCard.prepaidValue', { remaining: formatNumber(prepaid.remaining, locale) })}</Text>
-          <Text size="xs" c="dimmed">
-            {prepaid.lots > 0
-              ? [
-                  t('creditCard.prepaidLots', { lots: prepaid.lots }),
-                  prepaid.nextExpiry ? t('credits.balanceCard.nextExpiry', { date: formatDate(prepaid.nextExpiry, locale) ?? '' }) : null,
-                ].filter(Boolean).join(' · ')
-              : t('credits.balanceCard.noLots')}
-          </Text>
+          {lots && lots.length > 0 ? (
+            <Stack gap={2}>
+              {lots.map((lot) => (
+                <Text key={lot.id} size="xs" c="dimmed">
+                  {t('credits.balanceCard.lot', {
+                    remaining: formatNumber(lot.remaining, locale),
+                    credits: formatNumber(lot.credits, locale),
+                    expiry: lot.expiresAt
+                      ? t('credits.balanceCard.lotEnds', { date: formatDate(lot.expiresAt, locale) ?? '' })
+                      : t('credits.balanceCard.noExpiry'),
+                  })}
+                </Text>
+              ))}
+            </Stack>
+          ) : (
+            <Text size="xs" c="dimmed">
+              {prepaid.lots > 0
+                ? [
+                    t('creditCard.prepaidLots', { lots: prepaid.lots }),
+                    prepaid.nextExpiry ? t('credits.balanceCard.nextExpiry', { date: formatDate(prepaid.nextExpiry, locale) ?? '' }) : null,
+                  ].filter(Boolean).join(' · ')
+                : t('credits.balanceCard.noLots')}
+            </Text>
+          )}
           <Text size="xs" c="dimmed">{t('credits.balanceCard.order')}</Text>
         </Stack>
-      </SimpleGrid>
-    </Paper>
+      </Paper>
+    </SimpleGrid>
   );
 }
 
-function SpendCard({ t, locale, refreshKey }: { t: Translate; locale: string; refreshKey: number }) {
-  const [monthsBack, setMonthsBack] = useState('0');
-  const [spend, setSpend] = useState<CreditSpend | null>(null);
+function SpendCard({ month, t, locale, refreshKey }: { month: string; t: Translate; locale: string; refreshKey: number }) {
+  const [group, setGroup] = useState<SpendGroup>('model');
+  const [spend, setSpend] = useState<CreditSpendGrouped | null>(null);
+  const [daily, setDaily] = useState<CreditSpendGrouped | null>(null);
   const [unavailable, setUnavailable] = useState(false);
-  const month = utcMonth(new Date(), Number(monthsBack));
 
   useEffect(() => {
     let cancelled = false;
-    fetchCreditSpend({ month })
+    setSpend(null);
+    fetchCreditSpendGrouped(month, group)
       .then((data) => {
         if (!cancelled) {
+          // An older server that did not group as asked: hide the section rather than show an empty table.
           setSpend(data);
-          setUnavailable(false);
+          setUnavailable(data.groupBy !== group);
         }
       })
       .catch(() => {
@@ -122,56 +178,92 @@ function SpendCard({ t, locale, refreshKey }: { t: Translate; locale: string; re
     return () => {
       cancelled = true;
     };
+  }, [month, group, refreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDaily(null);
+    // An older server cannot group by day; the chart is then left out.
+    fetchCreditSpendGrouped(month, 'day')
+      .then((data) => {
+        if (!cancelled && data.groupBy === 'day') setDaily(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [month, refreshKey]);
 
+  const chartData = useMemo(() => (daily ? fillDailySpend(month, daily.rows) : []), [daily, month]);
+
   if (unavailable) return null;
-  const rows = spend?.models ?? [];
+  const rows = spend?.rows ?? [];
+  const total = spend?.total;
+  const hasSplit = rows.some((row) => row.fromMonthly > 0 || row.fromOneTime > 0);
   return (
     <Paper withBorder p="md" radius="md">
       <Group justify="space-between" align="flex-start" mb="sm" wrap="wrap">
         <div>
           <Title order={4}>{t('credits.spend.title')}</Title>
           <Text size="sm" c="dimmed">
-            {spend ? t('credits.spend.total', { total: formatNumber(spend.total, locale), month: formatPeriod(month, locale) }) : ' '}
+            {total ? t('credits.spend.total', { total: formatNumber(total.credits, locale), month: formatPeriod(month, locale) }) : ' '}
           </Text>
         </div>
         <SegmentedControl
           size="xs"
-          value={monthsBack}
-          onChange={setMonthsBack}
-          data={[
-            { value: '0', label: t('credits.spend.thisMonth') },
-            { value: '1', label: t('credits.spend.lastMonth') },
-          ]}
-          aria-label={t('credits.spend.periodLabel')}
+          value={group}
+          onChange={(value) => setGroup(value as SpendGroup)}
+          data={SPEND_GROUPS.map((value) => ({ value, label: t(`credits.spend.groups.${value}`) }))}
+          aria-label={t('credits.spend.groupLabel')}
         />
       </Group>
+      {daily && daily.rows.length > 0 ? (
+        <Stack gap={4} mb="md">
+          <Text size="sm" fw={500}>{t('credits.spend.dailyTitle')}</Text>
+          <BarChart
+            h={180}
+            data={chartData}
+            dataKey="day"
+            type="stacked"
+            withLegend
+            tickLine="x"
+            series={[
+              { name: 'fromMonthly', label: t('credits.spend.fromMonthly'), color: 'blue.6' },
+              { name: 'fromOneTime', label: t('credits.spend.fromOneTime'), color: 'teal.6' },
+              { name: 'other', label: t('credits.spend.unsplit'), color: 'gray.5' },
+            ]}
+            xAxisProps={{ tickFormatter: (value: string) => String(Number(value.slice(8))) }}
+          />
+        </Stack>
+      ) : null}
       {spend && rows.length === 0 ? (
         <Text size="sm" c="dimmed">{t('credits.spend.empty')}</Text>
       ) : (
-        <Table.ScrollContainer minWidth={560}>
+        <Table.ScrollContainer minWidth={520}>
           <Table verticalSpacing="xs" fz="sm">
             <Table.Thead>
               <Table.Tr>
-                <Table.Th>{t('credits.spend.columns.model')}</Table.Th>
-                <Table.Th>{t('credits.spend.columns.usage')}</Table.Th>
+                <Table.Th>{t(`credits.spend.columns.${group}`)}</Table.Th>
                 <Table.Th ta="right">{t('credits.spend.columns.calls')}</Table.Th>
                 <Table.Th ta="right">{t('credits.spend.columns.credits')}</Table.Th>
+                {hasSplit ? <Table.Th ta="right">{t('credits.spend.fromMonthly')}</Table.Th> : null}
+                {hasSplit ? <Table.Th ta="right">{t('credits.spend.fromOneTime')}</Table.Th> : null}
                 <Table.Th ta="right">{t('credits.spend.columns.share')}</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {rows.map((row) => (
-                <Table.Tr key={row.model ?? 'other'}>
+                <Table.Tr key={row.key}>
                   <Table.Td>
-                    <Text size="sm" fw={500}>{spendLabel(row, t)}</Text>
-                    {row.label && row.model && row.model !== 'search' ? <Text size="xs" c="dimmed">{row.model}</Text> : null}
+                    <Text size="sm" fw={500}>{spendLabel(row, t, group)}</Text>
+                    {group === 'model' && row.label && row.key !== 'search' ? <Text size="xs" c="dimmed">{row.key}</Text> : null}
                   </Table.Td>
-                  <Table.Td><Text size="sm" c="dimmed">{spendUsage(row, t, locale)}</Text></Table.Td>
                   <Table.Td ta="right">{formatNumber(row.count, locale)}</Table.Td>
                   <Table.Td ta="right"><Text size="sm" fw={600}>{formatNumber(row.credits, locale)}</Text></Table.Td>
+                  {hasSplit ? <Table.Td ta="right">{formatNumber(row.fromMonthly, locale)}</Table.Td> : null}
+                  {hasSplit ? <Table.Td ta="right">{formatNumber(row.fromOneTime, locale)}</Table.Td> : null}
                   <Table.Td ta="right">
-                    {spend && spend.total > 0 ? `${Math.round((row.credits / spend.total) * 100)}%` : '—'}
+                    {total && total.credits > 0 ? `${Math.round((row.credits / total.credits) * 100)}%` : '—'}
                   </Table.Td>
                 </Table.Tr>
               ))}
@@ -183,7 +275,46 @@ function SpendCard({ t, locale, refreshKey }: { t: Translate; locale: string; re
   );
 }
 
-function LedgerCard({ t, locale, refreshKey }: { t: Translate; locale: string; refreshKey: number }) {
+function MonthsCard({ months, t, locale }: { months: CreditMonth[]; t: Translate; locale: string }) {
+  if (months.length === 0) return null;
+  const num = (value: number) => formatNumber(value, locale);
+  return (
+    <Paper withBorder p="md" radius="md">
+      <Title order={4}>{t('credits.months.title')}</Title>
+      <Text size="sm" c="dimmed" mb="sm">{t('credits.months.description')}</Text>
+      <Table.ScrollContainer minWidth={640}>
+        <Table verticalSpacing="xs" fz="sm">
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>{t('credits.months.columns.month')}</Table.Th>
+              <Table.Th ta="right">{t('credits.months.columns.monthlyGranted')}</Table.Th>
+              <Table.Th ta="right">{t('credits.months.columns.monthlyUsed')}</Table.Th>
+              <Table.Th ta="right">{t('credits.months.columns.monthlyExpired')}</Table.Th>
+              <Table.Th ta="right">{t('credits.months.columns.oneTimeAdded')}</Table.Th>
+              <Table.Th ta="right">{t('credits.months.columns.oneTimeUsed')}</Table.Th>
+              <Table.Th ta="right">{t('credits.months.columns.charged')}</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {months.slice(0, 12).map((row) => (
+              <Table.Tr key={row.period}>
+                <Table.Td>{formatPeriod(row.period, locale)}</Table.Td>
+                <Table.Td ta="right">{num(row.monthlyGranted)}</Table.Td>
+                <Table.Td ta="right">{num(row.monthlyUsed)}</Table.Td>
+                <Table.Td ta="right">{num(row.monthlyExpired)}</Table.Td>
+                <Table.Td ta="right">{num(row.oneTimeAdded)}</Table.Td>
+                <Table.Td ta="right">{num(row.oneTimeUsed)}</Table.Td>
+                <Table.Td ta="right"><Text size="sm" fw={600}>{num(row.charged)}</Text></Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Table.ScrollContainer>
+    </Paper>
+  );
+}
+
+function LedgerCard({ month, t, locale, refreshKey }: { month: string; t: Translate; locale: string; refreshKey: number }) {
   const [kind, setKind] = useState<'all' | CreditLedgerKind>('all');
   const [model, setModel] = useState('all');
   const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
@@ -208,6 +339,7 @@ function LedgerCard({ t, locale, refreshKey }: { t: Translate; locale: string; r
         cursor,
         ...(kind !== 'all' ? { kind } : {}),
         ...(model !== 'all' ? { model } : {}),
+        month,
       });
       if (id !== requestId.current) return;
       cursors.current = cursors.current.slice(0, target);
@@ -222,31 +354,27 @@ function LedgerCard({ t, locale, refreshKey }: { t: Translate; locale: string; r
     } finally {
       if (id === requestId.current) setLoading(false);
     }
-  }, [kind, model, pageSize]);
+  }, [kind, model, pageSize, month]);
 
   useEffect(() => {
     cursors.current = [null];
     void load(1);
   }, [load, refreshKey]);
 
-  // The model filter offers what was charged recently (this month and last month).
+  // The model filter offers what was charged in the picked month.
   useEffect(() => {
     let cancelled = false;
-    const now = new Date();
-    Promise.all([fetchCreditSpend({ month: utcMonth(now) }), fetchCreditSpend({ month: utcMonth(now, 1) })])
-      .then((spends) => {
+    setModel('all');
+    fetchCreditSpendGrouped(month, 'model')
+      .then((spend) => {
         if (cancelled) return;
-        const seen = new Map<string, string>();
-        for (const row of spends.flatMap((spend) => spend.models)) {
-          if (row.model && !seen.has(row.model)) seen.set(row.model, spendLabel(row, t));
-        }
-        setModelOptions([...seen].map(([value, label]) => ({ value, label })));
+        setModelOptions(spend.rows.filter((row) => row.key !== 'unknown').map((row) => ({ value: row.key, label: spendLabel(row, t, 'model') })));
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [refreshKey, t]);
+  }, [month, refreshKey, t]);
 
   const columns: DataGridColumn<CreditLedgerEntry>[] = useMemo(() => [
     {
@@ -275,6 +403,18 @@ function LedgerCard({ t, locale, refreshKey }: { t: Translate; locale: string; r
       ),
     },
     {
+      key: 'fromMonthly',
+      label: t('credits.spend.fromMonthly'),
+      align: 'right',
+      render: (row) => <Text size="sm">{row.fromMonthly === undefined ? '' : formatNumber(row.fromMonthly, locale)}</Text>,
+    },
+    {
+      key: 'fromOneTime',
+      label: t('credits.spend.fromOneTime'),
+      align: 'right',
+      render: (row) => <Text size="sm">{row.fromOneTime === undefined ? '' : formatNumber(row.fromOneTime, locale)}</Text>,
+    },
+    {
       key: 'balance',
       label: t('credits.columns.balance'),
       align: 'right',
@@ -286,8 +426,15 @@ function LedgerCard({ t, locale, refreshKey }: { t: Translate; locale: string; r
   const filtered = kind !== 'all' || model !== 'all';
   return (
     <Paper withBorder p="md" radius="md">
-      <Title order={4}>{t('credits.ledgerTitle')}</Title>
-      <Text size="sm" c="dimmed" mb="sm">{t('credits.ledgerDescription')}</Text>
+      <Group justify="space-between" align="flex-start" wrap="wrap" mb="sm">
+        <div>
+          <Title order={4}>{t('credits.ledgerTitle')}</Title>
+          <Text size="sm" c="dimmed">{t('credits.ledgerDescription')}</Text>
+        </div>
+        <Button component="a" href={creditExportUrl(month)} download variant="light" size="xs">
+          {t('credits.exportCsv')}
+        </Button>
+      </Group>
       <DataGrid<CreditLedgerEntry>
         records={entries ?? []}
         rowKey={(row) => row.id}
@@ -344,6 +491,29 @@ export default function UsageCreditsTab({
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const currentMonth = utcMonth(new Date());
+  const [month, setMonth] = useState(currentMonth);
+  // null = not loaded yet or not offered by this edition (the picker and the history table are then left out).
+  const [months, setMonths] = useState<CreditMonth[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCreditMonths(12)
+      .then((rows) => {
+        if (!cancelled) setMonths(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setMonths(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  const monthOptions = useMemo(() => {
+    const periods = new Set<string>([currentMonth, ...(months ?? []).map((row) => row.period)]);
+    return [...periods].sort().reverse().map((value) => ({ value, label: formatPeriod(value, locale) }));
+  }, [months, currentMonth, locale]);
 
   const redeem = async () => {
     const trimmed = code.trim();
@@ -365,7 +535,26 @@ export default function UsageCreditsTab({
 
   return (
     <Stack gap="lg">
-      <BalanceCard summary={summary} t={t} locale={locale} />
+      {months ? (
+        <Select
+          label={t('credits.monthPicker.label')}
+          description={t('credits.monthPicker.hint')}
+          data={monthOptions}
+          value={month}
+          onChange={(value) => setMonth(value ?? currentMonth)}
+          allowDeselect={false}
+          w={240}
+        />
+      ) : null}
+
+      <BalanceCard
+        summary={summary}
+        monthRow={months?.find((row) => row.period === month)}
+        isCurrent={month === currentMonth}
+        month={month}
+        t={t}
+        locale={locale}
+      />
 
       <Paper withBorder p="md" radius="md">
         <Title order={4}>{t('credits.redeemTitle')}</Title>
@@ -396,8 +585,9 @@ export default function UsageCreditsTab({
         </form>
       </Paper>
 
-      <SpendCard t={t} locale={locale} refreshKey={refreshKey} />
-      <LedgerCard t={t} locale={locale} refreshKey={refreshKey} />
+      <SpendCard month={month} t={t} locale={locale} refreshKey={refreshKey} />
+      {months ? <MonthsCard months={months} t={t} locale={locale} /> : null}
+      <LedgerCard month={month} t={t} locale={locale} refreshKey={refreshKey} />
     </Stack>
   );
 }

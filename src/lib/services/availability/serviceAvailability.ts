@@ -26,6 +26,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getRequestContext } from '@/lib/core/requestContext';
 import { getDatabase } from '@/lib/database';
 import type { LicenseServiceClaim } from '@/lib/license/license-manager';
+import { getDefaultEntitlements } from '@/lib/license/defaultEntitlements';
 import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 import {
   isAlwaysOnService,
@@ -144,7 +145,10 @@ export async function getDisabledServices(tenantId: string): Promise<ReadonlyMap
   if (cached && Date.now() - cached.at < MEMO_MS) return cached.off;
   let claim: LicenseServiceClaim | null = null;
   try {
-    claim = (await resolveLiveLicenseForTenant(tenantId)).services ?? null;
+    const license = await resolveLiveLicenseForTenant(tenantId);
+    claim = license.services ?? null;
+    // A free-tier tenant without a claim of its own gets the deployment default (if any).
+    if (!claim && license.licenseType === 'FREE') claim = getDefaultEntitlements()?.services ?? null;
   } catch (error) {
     // An unreadable license must not take every service down: the environment
     // still applies, and the next lookup (after the memo) tries the license again.

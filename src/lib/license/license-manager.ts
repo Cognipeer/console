@@ -4,6 +4,7 @@ import { getConfig } from '@/lib/core/config';
 import type { ITenant } from '@/lib/database';
 import type { QuotaLimits, QuotaResourceCaps } from '@/lib/quota/types';
 import policies from '@/config/policies.json';
+import { getDefaultEntitlements } from './defaultEntitlements';
 import { normalizePlanClaim, readStoredPlanClaim, type LicensePlanClaim } from './planClaim';
 
 export interface FeaturePolicy {
@@ -118,7 +119,14 @@ function storedServiceClaim(payload: OfflineLicensePayload): LicenseServiceClaim
 }
 
 const FREE_PROJECT_LIMIT = 2;
+
 const ALLOWED_LICENSE_ALGORITHMS = new Set(['EdDSA', 'ES256', 'RS256', 'PS256']);
+
+/** Project limit of the free tier: the registered default, else the built-in one. */
+function freeTierProjectLimit(): number {
+  const value = getDefaultEntitlements()?.maxProjects;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : FREE_PROJECT_LIMIT;
+}
 
 const endpointRegexCache = new Map<string, RegExp>();
 
@@ -218,9 +226,17 @@ function toQuotaLimits(limits: OfflineLicenseLimits): QuotaLimits {
 export class LicenseManager {
   private static policyConfig = policies;
 
+  /** Merge base of every license: the built-in limit, never the registered default. */
   private static getFreeLimits(): OfflineLicenseLimits {
     return {
       maxProjects: FREE_PROJECT_LIMIT,
+    };
+  }
+
+  /** Limits of the free tier (no license, inactive, expired, or a stored FREE license). */
+  private static getFreeTierLimits(): OfflineLicenseLimits {
+    return {
+      maxProjects: freeTierProjectLimit(),
     };
   }
 
@@ -260,7 +276,7 @@ export class LicenseManager {
       features: this.getFeaturesForLicense('FREE'),
       licenseId: 'FREE',
       licenseType: 'FREE',
-      limits: this.getFreeLimits(),
+      limits: this.getFreeTierLimits(),
       source: 'free',
       status: 'free',
     };
@@ -286,7 +302,7 @@ export class LicenseManager {
       : 'FREE';
     const features = this.getFeaturesForLicense(licenseType);
     const limits = mergeLicenseLimits(
-      this.getFreeLimits(),
+      licenseType === 'FREE' ? this.getFreeTierLimits() : this.getFreeLimits(),
       normalizeLimits(payload.limits),
     );
     // The API-token auth cache stores the tenant as JSON (Redis), so a Date comes
@@ -489,7 +505,7 @@ export class LicenseManager {
   }
 
   static getLimits(): OfflineLicenseLimits {
-    return this.getFreeLimits();
+    return this.getFreeTierLimits();
   }
 
   static getAllLicenses(): Record<LicenseType, LicensePolicy> {

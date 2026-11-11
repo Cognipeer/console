@@ -63,7 +63,7 @@ describe('usage messages', () => {
     for (const code of ['invalid_code', 'code_expired', 'wrong_tenant', 'already_redeemed', 'code_void', 'credits_unavailable', 'unknown']) {
       expect(en.has(`credits.errors.${code}`), code).toBe(true);
     }
-    for (const kind of ['monthly_grant', 'redeem', 'charge', 'refund', 'adjust', 'expire']) {
+    for (const kind of ['monthly_grant', 'redeem', 'grant', 'revoke', 'charge', 'refund', 'adjust', 'expire']) {
       expect(en.has(`credits.kinds.${kind}`), kind).toBe(true);
     }
     for (const outcome of ['refused', 'would_refuse', 'queued', 'waited']) {
