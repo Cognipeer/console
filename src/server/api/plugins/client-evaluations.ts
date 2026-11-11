@@ -40,7 +40,8 @@ import {
   sendApiTokenError,
   withClientApiRequestContext,
 } from '../fastify-utils';
-import { withoutRestrictedRunItems } from '../restrictedKnowledgeRequest';
+import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { apiTokenViewer, withoutRestrictedRunItems } from '../restrictedKnowledgeRequest';
 import { requireAgentTestAccess, sendAgentTestRefusal } from './agent-test-permission';
 
 const logger = createLogger('api:client-evaluation');
@@ -50,6 +51,23 @@ function clampLimit(raw: unknown): number | undefined {
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n <= 0) return undefined;
   return Math.min(n, 200);
+}
+
+/**
+ * A client API run is started by the token that calls, never by the token's owner: the run is stored with the token
+ * and executes as it, synchronously or from the queue (delegated or not, see RunSuiteParams.actorType).
+ */
+function startedByToken(ctx: Pick<ApiTokenContext, 'tokenRecord'>) {
+  return {
+    createdBy: ctx.tokenRecord.userId ?? 'api-token',
+    actorType: 'api_token' as const,
+    ...(ctx.tokenRecord._id ? { apiTokenId: String(ctx.tokenRecord._id) } : {}),
+  };
+}
+
+/** Whose stored copies a token reads: what the token itself started, nothing a person did (see apiTokenViewer). */
+function tokenViewer(ctx: Pick<ApiTokenContext, 'tenantDbName' | 'tokenRecord'>) {
+  return { tenantDbName: ctx.tenantDbName, viewerUserId: ctx.tokenRecord._id ? apiTokenViewer(String(ctx.tokenRecord._id)) : null };
 }
 
 function fail(reply: import('fastify').FastifyReply, error: unknown, scope: string) {
@@ -108,8 +126,7 @@ export const clientEvaluationsApiPlugin: FastifyPluginAsync = async (app) => {
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
           projectId: ctx.projectId,
-          createdBy: ctx.tokenRecord.userId ?? 'api-token',
-          ...(ctx.tokenRecord._id ? { apiTokenId: String(ctx.tokenRecord._id) } : {}),
+          ...startedByToken(ctx),
           suiteKey: key,
           agentVersion: revision.revision,
           authorizeAgentRun: () => requireAgentTestAccess(request),
@@ -120,16 +137,14 @@ export const clientEvaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
-        createdBy: ctx.tokenRecord.userId ?? 'api-token',
-        ...(ctx.tokenRecord._id ? { apiTokenId: String(ctx.tokenRecord._id) } : {}),
+        ...startedByToken(ctx),
         suiteKey: key,
         agentVersion: revision.revision,
         // Asked by the service once it knows the suite's target is an agent, before a run row exists. For a
         // token it is the owner's permission, capped by the token's scope.
         authorizeAgentRun: () => requireAgentTestAccess(request),
       });
-      const viewer = { tenantDbName: ctx.tenantDbName, viewerUserId: ctx.tokenRecord.userId ?? null };
-      return reply.code(201).send({ run: toRunView(await withoutRestrictedRunItems(request, viewer, run)) });
+      return reply.code(201).send({ run: toRunView(await withoutRestrictedRunItems(request, tokenViewer(ctx), run)) });
     } catch (error) {
       if (error instanceof AgentRevisionError) return reply.code(400).send({ error: error.message });
       // The same suite on the same revision is already running (a different revision may run alongside).
@@ -161,8 +176,7 @@ export const clientEvaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const run = await getRun(ctx.tenantDbName, id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      const viewer = { tenantDbName: ctx.tenantDbName, viewerUserId: ctx.tokenRecord.userId ?? null };
-      return reply.code(200).send({ run: toRunView(await withoutRestrictedRunItems(request, viewer, run)) });
+      return reply.code(200).send({ run: toRunView(await withoutRestrictedRunItems(request, tokenViewer(ctx), run)) });
     } catch (error) {
       return fail(reply, error, 'get run');
     }

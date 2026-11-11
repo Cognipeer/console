@@ -47,6 +47,33 @@ describeForEachProvider('Evaluation DB layer', (getDb) => {
       createdBy: 'tester',
     } as never);
 
+  describe('who started a run', () => {
+    it('keeps the caller a run was started by through every read, and none for a run that records none', async () => {
+      const db = getDb();
+      const token = await seedRun({ actorType: 'api_token', apiTokenId: 'tok-1', createdBy: 'owner-1' });
+      const person = await seedRun({ actorType: 'user', createdBy: 'person-1' });
+      const legacy = await seedRun();
+      const ids = [token, person, legacy].map((run) => String(run._id));
+
+      expect(await db.findEvaluationRunById(ids[0])).toMatchObject({ actorType: 'api_token', apiTokenId: 'tok-1', createdBy: 'owner-1' });
+      const pending = await db.listEvaluationRunsByStatus(['pending'], { limit: 10 });
+      const listed = new Map(pending.map((run) => [String(run._id), run]));
+      expect(listed.get(ids[0])).toMatchObject({ actorType: 'api_token', apiTokenId: 'tok-1' });
+      expect(listed.get(ids[1])).toMatchObject({ actorType: 'user' });
+      expect(listed.get(ids[1])?.apiTokenId).toBeUndefined();
+      expect(listed.get(ids[2])?.actorType).toBeUndefined();
+      expect(listed.get(ids[2])?.apiTokenId).toBeUndefined();
+
+      const claimed = await db.claimEvaluationRun(ids[0], new Date());
+      expect(claimed).toMatchObject({ status: 'running', actorType: 'api_token', apiTokenId: 'tok-1' });
+      // Later writes leave it as it was.
+      await db.updateEvaluationRun(ids[0], { status: 'completed', finishedAt: new Date() });
+      expect(await db.findEvaluationRunById(ids[0])).toMatchObject({ status: 'completed', actorType: 'api_token', apiTokenId: 'tok-1' });
+      const summaries = await db.listEvaluationRunSummaries({ projectId: 'p1', limit: 10 });
+      expect(summaries.find((run) => String(run._id) === ids[0])).toMatchObject({ actorType: 'api_token', apiTokenId: 'tok-1' });
+    });
+  });
+
   describe('run lifecycle', () => {
     it('claims a pending run exactly once', async () => {
       const db = getDb();

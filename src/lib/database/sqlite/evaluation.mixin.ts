@@ -27,6 +27,7 @@ import type {
   EvaluationTargetKind,
   EvaluationDatasetSource,
   EvaluationRunStatus,
+  EvaluationRunActorType,
   EvaluationDatasetItemQuery,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
@@ -96,7 +97,7 @@ function toIso(value: Date | string | undefined | null): string | null {
 
 /** Run columns without the (potentially huge) `items` JSON. */
 const RUN_SUMMARY_COLUMNS =
-  'id, tenantId, projectId, suiteKey, targetKey, datasetKey, status, mode, progress, aggregate, agentRevision, error, startedAt, finishedAt, cancelRequestedAt, heartbeatAt, itemsTruncated, createdBy, createdAt, updatedAt';
+  'id, tenantId, projectId, suiteKey, targetKey, datasetKey, status, mode, progress, aggregate, agentRevision, error, startedAt, finishedAt, cancelRequestedAt, heartbeatAt, itemsTruncated, actorType, apiTokenId, createdBy, createdAt, updatedAt';
 
 /** Integer >= 0 for values interpolated into LIMIT/OFFSET (never raw input). */
 function toNonNegativeInt(value: unknown, fallback: number): number {
@@ -749,10 +750,10 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         INSERT INTO ${TABLES.evaluationRuns}
         (id, tenantId, projectId, suiteKey, targetKey, datasetKey, status, mode, progress,
          aggregate, items, agentRevision, error, startedAt, finishedAt, cancelRequestedAt, heartbeatAt, itemsTruncated,
-         createdBy, createdAt, updatedAt)
+         actorType, apiTokenId, createdBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @suiteKey, @targetKey, @datasetKey, @status, @mode, @progress,
          @aggregate, @items, @agentRevision, @error, @startedAt, @finishedAt, @cancelRequestedAt, @heartbeatAt, @itemsTruncated,
-         @createdBy, @createdAt, @updatedAt)
+         @actorType, @apiTokenId, @createdBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: run.tenantId,
@@ -772,6 +773,8 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         cancelRequestedAt: toIso(run.cancelRequestedAt),
         heartbeatAt: toIso(run.heartbeatAt),
         itemsTruncated: run.itemsTruncated === undefined ? null : run.itemsTruncated ? 1 : 0,
+        actorType: run.actorType ?? null,
+        apiTokenId: run.apiTokenId ?? null,
         createdBy: run.createdBy,
         createdAt: now,
         updatedAt: now,
@@ -781,7 +784,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
 
     async updateEvaluationRun(
       id: string,
-      data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
+      data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy' | 'actorType' | 'apiTokenId'>>,
     ): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
       const sets: string[] = ['updatedAt = @updatedAt'];
@@ -1106,6 +1109,8 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         cancelRequestedAt: this.toDate(r.cancelRequestedAt),
         heartbeatAt: this.toDate(r.heartbeatAt),
         itemsTruncated: r.itemsTruncated == null ? undefined : Number(r.itemsTruncated) === 1,
+        actorType: (r.actorType as EvaluationRunActorType | null) ?? undefined,
+        apiTokenId: (r.apiTokenId as string | null) ?? undefined,
         createdBy: r.createdBy as string,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),

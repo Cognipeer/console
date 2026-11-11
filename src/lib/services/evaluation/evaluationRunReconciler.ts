@@ -73,6 +73,9 @@ function jobPayloadFor(run: IEvaluationRun): EvaluationRunJobPayload {
     tenantId: run.tenantId,
     projectId: run.projectId,
     createdBy: run.createdBy,
+    // The caller stored with the run: a run that records none (queued before runs did) is failed by its worker.
+    ...(run.actorType ? { actorType: run.actorType } : {}),
+    ...(run.apiTokenId ? { apiTokenId: run.apiTokenId } : {}),
     suiteKey: run.suiteKey,
     runId: String(run._id),
   };

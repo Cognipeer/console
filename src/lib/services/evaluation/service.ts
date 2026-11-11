@@ -23,6 +23,7 @@ import type {
   EvaluationDatasetSource,
   EvaluationTurnMode,
   EvaluationDatasetItemQuery,
+  EvaluationRunActorType,
   AgentRevision,
   IAgentRunRevision,
 } from '@/lib/database';
@@ -1027,8 +1028,16 @@ export interface RunSuiteParams {
   tenantDbName: string;
   tenantId: string;
   projectId?: string;
+  /** The person who starts the run, or the owner of the API token that starts it (see `actorType`). */
   createdBy: string;
-  /** The API token a client API call starts the run with: its targets read knowledge bases as the token. */
+  /**
+   * Who starts the run: a person in a dashboard session (`user`), or an API token through the client API
+   * (`api_token`, with `apiTokenId`). It is stored with the run, and wherever the run executes (in the request, from
+   * the queue, after a restart) its targets read knowledge bases and run agents as this caller: a run started with a
+   * token as the token, never as the token's owner (delegated or not, a client API run is the token's).
+   */
+  actorType: EvaluationRunActorType;
+  /** `api_token` runs: the token's id (never the credential). */
   apiTokenId?: string;
   suiteKey: string;
   /**
@@ -1046,6 +1055,12 @@ export interface RunSuiteParams {
 }
 
 /**
+ * What executes a run: its id and what its job carried. A job queued before runs recorded their caller carries no
+ * `actorType`; whom the run acts for always comes from the run itself (see `executingActor`).
+ */
+export type ExecuteRunParams = Omit<RunSuiteParams, 'actorType'> & { actorType?: EvaluationRunActorType; runId: string };
+
+/**
  * `perTurn` walks a conversation, feeds the model its own answers back, and
  * grades the LAST one. Retrieval has no conversation to walk: the mode would
  * fire one query per user turn, throw away every result but the final one, and
@@ -1060,8 +1075,40 @@ function assertTurnModeSupported(target: IEvaluationTarget, turnMode: Evaluation
   }
 }
 
+type RunActor = { actorType: 'user' } | { actorType: 'api_token'; apiTokenId: string };
+
+/** The caller a new run is stored with. A token run without its token, or a person run naming one, is refused. */
+function startingActor(params: Pick<RunSuiteParams, 'actorType' | 'apiTokenId'>): RunActor {
+  if (params.actorType === 'api_token' && params.apiTokenId) return { actorType: 'api_token', apiTokenId: params.apiTokenId };
+  if (params.actorType === 'user' && !params.apiTokenId) return { actorType: 'user' };
+  throw new Error('An evaluation run must say who starts it: a person, or an API token and its id');
+}
+
+/**
+ * The caller a run executes as: the one stored with the run. A run written before runs recorded their caller cannot
+ * say whom it acts for, and a job that names another caller than its run does not belong to it; either is failed
+ * rather than run as anybody.
+ */
+function executingActor(
+  stored: IEvaluationRun,
+  job: { actorType?: EvaluationRunActorType; apiTokenId?: string; createdBy: string },
+): RunActor {
+  const again = 'start the run again';
+  let actor: RunActor;
+  if (stored.actorType === 'api_token' && stored.apiTokenId) actor = { actorType: 'api_token', apiTokenId: stored.apiTokenId };
+  else if (stored.actorType === 'user' && !stored.apiTokenId) actor = { actorType: 'user' };
+  else throw new Error(`The run does not record who started it (it was queued before runs did); ${again}`);
+  const jobToken = job.actorType === 'api_token' ? job.apiTokenId : undefined;
+  const storedToken = actor.actorType === 'api_token' ? actor.apiTokenId : undefined;
+  if (job.actorType !== actor.actorType || jobToken !== storedToken || job.createdBy !== stored.createdBy) {
+    throw new Error(`The job does not name the caller its run was started by; ${again}`);
+  }
+  return actor;
+}
+
 /** Resolve suite/target/dataset, guard against a concurrent run, create a pending run. */
 async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mode']): Promise<WithId<IEvaluationRun>> {
+  const actor = startingActor(params);
   await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'evaluations');
   const { tenantDbName, tenantId, projectId, createdBy, suiteKey } = params;
   const db = await getDatabase();
@@ -1133,6 +1180,7 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
     progress: { total, completed: 0, failed: 0 },
     items: [],
     ...(agentRevision ? { agentRevision } : {}),
+    ...actor,
     createdBy,
   });
 
@@ -1162,10 +1210,10 @@ async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mo
  * record/retry; per-item errors never abort.
  */
 export async function executeRun(
-  params: RunSuiteParams & { runId: string },
+  params: ExecuteRunParams,
   deps: RunSuiteDeps = {},
 ): Promise<WithId<IEvaluationRun>> {
-  const { tenantDbName, tenantId, projectId, createdBy, suiteKey, runId } = params;
+  const { tenantDbName, tenantId, projectId, suiteKey, runId } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -1186,6 +1234,8 @@ export async function executeRun(
   let stopRequested = false;
 
   try {
+    // Whoever started the run, the run executes as them: the caller stored with it, never one inferred from the job.
+    const actor = executingActor(claimed, params);
     // Inside the try so the run is recorded as failed rather than left running
     // when the service has been switched off since it was queued.
     await assertServiceEnabled({ tenantDbName, tenantId }, 'evaluations');
@@ -1254,8 +1304,8 @@ export async function executeRun(
       tenantDbName,
       tenantId,
       projectId: projectId ?? '',
-      userId: createdBy,
-      ...(params.apiTokenId ? { tokenId: params.apiTokenId } : {}),
+      userId: claimed.createdBy,
+      ...(actor.actorType === 'api_token' ? { tokenId: actor.apiTokenId } : {}),
     };
     const makeTarget = deps.buildTargetInvoker ?? buildTargetInvoker;
     const makeJudge = deps.buildJudgeInvoker ?? buildJudgeInvoker;

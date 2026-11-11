@@ -1026,7 +1026,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IEvaluationRun>;
   updateEvaluationRun(
     id: string,
-    data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
+    data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy' | 'actorType' | 'apiTokenId'>>,
   ): Promise<IEvaluationRun | null>;
   findEvaluationRunById(id: string): Promise<IEvaluationRun | null>;
   listEvaluationRuns(filters?: {

@@ -15,15 +15,20 @@
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { createAsyncRun, executeRun, markRunFailed, type RunSuiteParams, type WithId } from './service';
-import type { IEvaluationRun } from '@/lib/database';
+import type { EvaluationRunActorType, IEvaluationRun } from '@/lib/database';
 
 const logger = createLogger('evaluation:job');
 
 export const EVALUATION_RUN_QUEUE = 'evaluation-run';
 export const EVALUATION_RUN_JOB = 'evaluation.run';
 
-/** What a queued run carries: the run's parameters without the hook that answered for the request that made it. */
-export interface EvaluationRunJobPayload extends QueuePayload, Omit<RunSuiteParams, 'authorizeAgentRun'> {
+/**
+ * What a queued run carries: the run's parameters without the hook that answered for the request that made it. The
+ * caller (`actorType`, `apiTokenId`) rides along and must match the one stored with the run; a job queued before runs
+ * recorded their caller has none, and its run is failed rather than run as anybody (see `executeRun`).
+ */
+export interface EvaluationRunJobPayload extends QueuePayload, Omit<RunSuiteParams, 'authorizeAgentRun' | 'actorType'> {
+  actorType?: EvaluationRunActorType;
   runId: string;
 }
 
@@ -39,6 +44,8 @@ export async function enqueueSuiteRun(params: RunSuiteParams): Promise<WithId<IE
     tenantId: params.tenantId,
     projectId: params.projectId,
     createdBy: params.createdBy,
+    actorType: params.actorType,
+    ...(params.apiTokenId ? { apiTokenId: params.apiTokenId } : {}),
     suiteKey: params.suiteKey,
     agentVersion: params.agentVersion,
     runId: run.id,
@@ -66,6 +73,8 @@ export async function runSuiteJob(payload: EvaluationRunJobPayload): Promise<voi
     tenantId: payload.tenantId,
     projectId: payload.projectId,
     createdBy: payload.createdBy,
+    ...(payload.actorType ? { actorType: payload.actorType } : {}),
+    ...(payload.apiTokenId ? { apiTokenId: payload.apiTokenId } : {}),
     suiteKey: payload.suiteKey,
     runId: payload.runId,
     agentVersion: payload.agentVersion,

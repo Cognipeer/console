@@ -95,7 +95,7 @@ describe('Evaluation service — full vertical (SQLite)', () => {
     const judgeFn = vi.fn(async () => '{"score":1,"passed":true}');
 
     const run = await runSuite(
-      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, suiteKey: suite.key },
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, actorType: 'user' as const, suiteKey: suite.key },
       { buildTargetInvoker: () => targetFn, buildJudgeInvoker: () => judgeFn },
     );
 
@@ -156,7 +156,7 @@ describe('Evaluation service — full vertical (SQLite)', () => {
     });
 
     const run = await runSuite(
-      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, suiteKey: suite.key },
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, actorType: 'user' as const, suiteKey: suite.key },
       { buildTargetInvoker: () => async () => { throw new Error('model exploded'); } },
     );
 
@@ -184,7 +184,7 @@ describe('Evaluation service — full vertical (SQLite)', () => {
 
     // Only the first item's answer reads a document not open to everyone (what the agent's knowledge tools note).
     const run = await runSuite(
-      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, suiteKey: suite.key },
+      { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, createdBy: ACTOR, actorType: 'user' as const, suiteKey: suite.key },
       {
         buildTargetInvoker: () => async (item: { id: string }) => {
           if (item.id === 'k1') await noteRestrictedKnowledge(['p-eval:handbook']);

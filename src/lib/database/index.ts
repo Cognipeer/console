@@ -316,6 +316,7 @@ export type {
   EvaluationTargetKind,
   EvaluationRunStatus,
   EvaluationRunMode,
+  EvaluationRunActorType,
   EvaluationDatasetSource,
   EvaluationScorerType,
   EvaluationTurnMode,

@@ -1156,10 +1156,21 @@ export interface IEvaluationRun {
   heartbeatAt?: Date;
   /** Persistence had to shrink the stored item details to fit the document. */
   itemsTruncated?: boolean;
+  /**
+   * Who started the run: a person in a dashboard session (`user`) or an API token through the client API
+   * (`api_token`). The run executes as them wherever it executes. Runs written before this was recorded have none.
+   */
+  actorType?: EvaluationRunActorType;
+  /** `api_token` runs: the id of the token (never the credential). */
+  apiTokenId?: string;
+  /** The person (`user`) or the token's owner (`api_token`; the 'api-token' placeholder when it has none). */
   createdBy: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** Who starts an evaluation run (see `IEvaluationRun.actorType`). */
+export type EvaluationRunActorType = 'user' | 'api_token';
 
 // ── Red-team (adversarial agent testing) types ───────────────────────────────
 

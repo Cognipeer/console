@@ -1076,6 +1076,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         projectId,
         createdBy: session.userId,
+        actorType: 'user',
         suiteKey: key,
         agentVersion: revision.revision,
         // Asked by the service once it knows the suite's target is an agent, before a run row exists.

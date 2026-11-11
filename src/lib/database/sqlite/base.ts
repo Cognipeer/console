@@ -1177,6 +1177,9 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.evaluationRuns, 'cancelRequestedAt', 'cancelRequestedAt TEXT');
     this.ensureTableColumn(db, TABLES.evaluationRuns, 'heartbeatAt', 'heartbeatAt TEXT');
     this.ensureTableColumn(db, TABLES.evaluationRuns, 'itemsTruncated', 'itemsTruncated INTEGER');
+    // Who started a run (a person or an API token, and which token), so a queued or recovered run executes as them.
+    this.ensureTableColumn(db, TABLES.evaluationRuns, 'actorType', 'actorType TEXT');
+    this.ensureTableColumn(db, TABLES.evaluationRuns, 'apiTokenId', 'apiTokenId TEXT');
     this.ensureTableColumn(db, TABLES.redTeamCampaigns, 'agentVersion', 'agentVersion TEXT');
     this.ensureTableColumn(db, TABLES.redTeamRuns, 'agentRevision', 'agentRevision TEXT');
     // Red-team run lifecycle (claim, lease, cancel) and the attempt-row store.

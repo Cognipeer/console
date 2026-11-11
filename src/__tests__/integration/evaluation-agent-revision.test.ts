@@ -121,6 +121,7 @@ const paramsFor = (suiteKey: string, extra: Partial<RunSuiteParams> = {}): RunSu
   tenantId: TENANT_ID,
   projectId: PROJECT_ID,
   createdBy: ACTOR,
+  actorType: 'user',
   suiteKey,
   ...extra,
 });
@@ -475,6 +476,7 @@ describe('a run asks the caller before it creates anything', () => {
       tenantId: TENANT_ID,
       projectId: PROJECT_ID,
       createdBy: ACTOR,
+      actorType: 'user',
       suiteKey: suite.key,
       agentVersion: 'draft',
       runId: run.id,

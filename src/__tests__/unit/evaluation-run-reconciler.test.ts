@@ -40,7 +40,10 @@ import {
   triggerEvaluationRunReconcilerRun,
 } from '@/lib/services/evaluation/evaluationRunReconciler';
 
-const pendingRun = {
+const pendingRun: {
+  _id: string; tenantId: string; projectId: string; createdBy: string; suiteKey: string; createdAt: Date;
+  actorType?: 'user' | 'api_token'; apiTokenId?: string;
+} = {
   _id: 'r-pending', tenantId: 't1', projectId: 'p1', createdBy: 'u', suiteKey: 's1', createdAt: new Date('2026-01-01T00:00:00.000Z'),
 };
 
@@ -90,6 +93,28 @@ describe('boot pass', () => {
     expect(jobName).toBe('evaluation.run');
     expect(payload).toMatchObject({ tenantDbName: 'tenant_one', runId: 'r-pending', suiteKey: 's1', projectId: 'p1' });
     expect(result).toMatchObject({ failedRunning: 2, requeuedPending: 1 });
+  });
+
+  it('republishes a run with the caller stored with it, and one that records none without a caller', async () => {
+    const at = new Date('2026-01-01T00:00:00.000Z');
+    state.db.listEvaluationRunsByStatus = pagedRuns([
+      { ...pendingRun, _id: 'r-token', createdAt: at, actorType: 'api_token', apiTokenId: 'tok-9' },
+      { ...pendingRun, _id: 'r-user', createdAt: at, actorType: 'user' },
+      { ...pendingRun, _id: 'r-legacy', createdAt: at },
+    ]);
+
+    await reconcileOrphanedEvaluationRuns();
+
+    const byRun = new Map(state.queue.publish.mock.calls.map((call) => {
+      const payload = call[2] as Record<string, unknown>;
+      return [payload.runId, payload] as const;
+    }));
+    expect(byRun.get('r-token')).toMatchObject({ actorType: 'api_token', apiTokenId: 'tok-9', createdBy: 'u' });
+    expect(byRun.get('r-user')).toMatchObject({ actorType: 'user' });
+    expect(byRun.get('r-user')).not.toHaveProperty('apiTokenId');
+    // The worker fails it rather than guess who it acts for (evaluation-run-caller.test.ts).
+    expect(byRun.get('r-legacy')).not.toHaveProperty('actorType');
+    expect(byRun.get('r-legacy')).not.toHaveProperty('apiTokenId');
   });
 
   it('with the memory queue republishes every pending run, past the first page', async () => {

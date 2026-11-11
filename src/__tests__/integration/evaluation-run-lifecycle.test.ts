@@ -51,6 +51,7 @@ const params = (suiteKey: string) => ({
   tenantDbName: TENANT_DB_NAME,
   tenantId: TENANT_ID,
   createdBy: ACTOR,
+  actorType: 'user' as const,
   suiteKey,
 });
 

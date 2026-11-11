@@ -1229,6 +1229,8 @@ export const TENANT_SCHEMA_SQL = `
     cancelRequestedAt TEXT,
     heartbeatAt TEXT,
     itemsTruncated INTEGER,
+    actorType TEXT,
+    apiTokenId TEXT,
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL

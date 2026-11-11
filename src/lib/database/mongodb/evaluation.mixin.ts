@@ -790,7 +790,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     async updateEvaluationRun(
       id: string,
-      data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
+      data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy' | 'actorType' | 'apiTokenId'>>,
     ): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
       const oid = toObjectId(id);
