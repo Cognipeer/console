@@ -1148,9 +1148,6 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     source TEXT NOT NULL DEFAULT 'manual',
-    -- LEGACY: live items are rows in evaluation_dataset_items; this column
-    -- survives only for pre-split rows and is cleared on migration.
-    items TEXT DEFAULT '[]',
     itemCount INTEGER,
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
@@ -1160,8 +1157,7 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_datasets_key ON evaluation_datasets(key);
 
-  -- One row per dataset item (split out of evaluation_datasets.items so a
-  -- dataset is no longer bounded by a single row/document).
+  -- One row per dataset item (a dataset is not bounded by a single row).
   CREATE TABLE IF NOT EXISTS evaluation_dataset_items (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,

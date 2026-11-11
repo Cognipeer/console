@@ -11,9 +11,6 @@
  * every item on every read. The dataset write methods still ACCEPT an inline
  * `items` array (create inserts, update replaces) so existing writers keep
  * working unchanged, and `itemCount` is maintained on the dataset document.
- * Legacy documents whose items are still embedded are served transparently
- * by the item read methods and migrated (idempotently) on the first item
- * write.
  */
 
 import { ObjectId } from 'mongodb';
@@ -35,7 +32,7 @@ import { MongoDBProviderBase, COLLECTIONS, escapeRegex } from './base';
 import { definedFields } from './definedFields';
 import { mongoLabelCandidates } from '../provider/labelMatch';
 import { isDuplicateKeyError } from './errors';
-import { assertUniqueItemIds, legacyItemMatches, sanitizeLegacyItemIds } from '../provider/evaluationItems';
+import { assertUniqueItemIds } from '../provider/evaluationItems';
 
 /** Mongo filter for one dataset's items, optionally narrowed by search/labels. */
 function itemFilter(
@@ -169,8 +166,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
         .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: updateData }, { returnDocument: 'after' });
       if (!result) return null;
       if (items !== undefined) {
-        // Full replace, mirroring the old embedded-array semantics. Also
-        // clears any legacy embedded array still on the document.
+        // Full replace of the item rows.
         await this.writeDatasetItemsReplacing(db, result, items);
       }
       return this.mapDatasetDoc(result);
@@ -179,7 +175,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
     async deleteEvaluationDataset(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       const result = await db.collection(COLLECTIONS.evaluationDatasets).deleteOne({ _id: new ObjectId(id) });
-      // Cascade the item rows; a dataset that never migrated has none.
+      // Cascade the item rows.
       await db.collection(COLLECTIONS.evaluationDatasetItems).deleteMany({ datasetId: id });
       return result.deletedCount === 1;
     }
@@ -188,9 +184,9 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       const db = this.getTenantDb();
       const doc = await db
         .collection(COLLECTIONS.evaluationDatasets)
-        .findOne({ _id: new ObjectId(id) }, { projection: { items: 0 } });
+        .findOne({ _id: new ObjectId(id) });
       if (!doc) return null;
-      return this.withResolvedItemCount(db, this.mapDatasetDoc(doc as unknown as IEvaluationDataset));
+      return this.mapDatasetDoc(doc as unknown as IEvaluationDataset);
     }
 
     async findEvaluationDatasetByKey(key: string, projectId?: string): Promise<IEvaluationDataset | null> {
@@ -199,9 +195,9 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       if (projectId !== undefined) filter.projectId = projectId;
       const doc = await db
         .collection(COLLECTIONS.evaluationDatasets)
-        .findOne(filter, { projection: { items: 0 } });
+        .findOne(filter);
       if (!doc) return null;
-      return this.withResolvedItemCount(db, this.mapDatasetDoc(doc as unknown as IEvaluationDataset));
+      return this.mapDatasetDoc(doc as unknown as IEvaluationDataset);
     }
 
     async listEvaluationDatasets(filters?: { projectId?: string; source?: EvaluationDatasetSource; search?: string }): Promise<IEvaluationDataset[]> {
@@ -216,58 +212,17 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
           { key: { $regex: filters.search, $options: 'i' } },
         ];
       }
-      // Legacy documents may still embed multi-megabyte item arrays — never
-      // ship those on a list. Their itemCount is derived server-side from the
-      // array size; only the number crosses the wire.
       const docs = await db
         .collection(COLLECTIONS.evaluationDatasets)
-        .aggregate([
-          { $match: filter },
-          { $sort: { createdAt: -1 } },
-          { $addFields: { legacyItemCount: { $size: { $ifNull: ['$items', []] } } } },
-          { $project: { items: 0 } },
-        ])
+        .find(filter)
+        .sort({ createdAt: -1 })
         .toArray();
-      return docs.map((doc) => this.mapDatasetDoc(doc as unknown as IEvaluationDataset & { legacyItemCount?: number }));
+      return docs.map((doc) => this.mapDatasetDoc(doc as unknown as IEvaluationDataset));
     }
 
-    /** Normalise a dataset document: string _id, itemCount fallback, no items. */
-    private mapDatasetDoc(
-      doc: IEvaluationDataset & { _id?: ObjectId | string; legacyItemCount?: number },
-    ): IEvaluationDataset {
-      const { items, legacyItemCount, ...rest } = doc;
-      return {
-        ...rest,
-        _id: doc._id?.toString(),
-        // Keep undefined when nothing is known (legacy doc read with items
-        // projected out) so withResolvedItemCount knows to resolve it.
-        itemCount: doc.itemCount ?? legacyItemCount ?? (Array.isArray(items) ? items.length : undefined),
-      } as IEvaluationDataset;
-    }
-
-    /**
-     * A document without `itemCount` predates the item-collection split, so
-     * its items are still embedded; resolve the count with a $size pipeline
-     * (only the number is transferred, never the array).
-     */
-    private async withResolvedItemCount(db: Db, dataset: IEvaluationDataset): Promise<IEvaluationDataset> {
-      if (typeof dataset.itemCount === 'number') return dataset;
-      const legacy = await this.legacyEmbeddedItemCount(db, String(dataset._id));
-      return { ...dataset, itemCount: legacy };
-    }
-
-    /** Embedded-array length of a legacy dataset document (0 when absent). */
-    private async legacyEmbeddedItemCount(db: Db, datasetId: string): Promise<number> {
-      if (!ObjectId.isValid(datasetId)) return 0;
-      const rows = await db
-        .collection(COLLECTIONS.evaluationDatasets)
-        .aggregate([
-          { $match: { _id: new ObjectId(datasetId) } },
-          { $project: { n: { $size: { $ifNull: ['$items', []] } } } },
-        ])
-        .toArray();
-      const n = rows[0]?.n;
-      return typeof n === 'number' ? n : 0;
+    /** Normalise a dataset document: string _id, itemCount defaulting to 0. */
+    private mapDatasetDoc(doc: IEvaluationDataset & { _id?: ObjectId | string }): IEvaluationDataset {
+      return { ...doc, _id: doc._id?.toString(), itemCount: doc.itemCount ?? 0 } as IEvaluationDataset;
     }
 
     // ── Dataset items (separate collection) ─────────────────────────
@@ -326,9 +281,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
      * Atomicity: on a duplicate-id failure the batch's OWN committed prefix
      * is rolled back (rows are identified by pre-assigned _ids, so nothing
      * else can be touched) — an append/replace either fully lands or leaves
-     * no trace. With `ignoreDuplicates` (legacy migration) rows that already
-     * exist are skipped instead: the migration never overwrites rows written
-     * after the split (e.g. an item edited post-migration).
+     * no trace.
      */
     private async insertDatasetItems(
       db: Db,
@@ -337,7 +290,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       projectId: string | undefined,
       items: IEvaluationDatasetItem[],
       startPosition: number,
-      opts?: { ignoreDuplicates?: boolean },
     ): Promise<void> {
       if (items.length === 0) return;
       await this.ensureDatasetItemIndexes(db);
@@ -359,20 +311,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
         };
       });
       const coll = db.collection(COLLECTIONS.evaluationDatasetItems);
-      if (opts?.ignoreDuplicates) {
-        try {
-          await coll.insertMany(docs, { ordered: false });
-        } catch (error) {
-          const writeErrors = (error as { writeErrors?: Array<{ code?: number }> }).writeErrors;
-          const onlyDuplicates =
-            isDuplicateKeyError(error)
-            || (Array.isArray(writeErrors)
-              && writeErrors.length > 0
-              && writeErrors.every((e) => e?.code === 11000 || e?.code === 11001));
-          if (!onlyDuplicates) throw error;
-        }
-        return;
-      }
       try {
         await coll.insertMany(docs);
       } catch (error) {
@@ -384,44 +322,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
         }
         throw error;
       }
-    }
-
-    /**
-     * Idempotent, NON-destructive legacy migration: if the dataset document
-     * still embeds an `items` array, copy it into the item collection
-     * (duplicate rows — e.g. from a crashed earlier attempt, or rows already
-     * written post-split by a concurrent writer — are skipped, never
-     * overwritten), then clear the embedded array and stamp the real row
-     * count. Legacy ids are sanitized first (old storage never enforced
-     * uniqueness). No-op for migrated/new datasets; an empty embedded array
-     * migrates too (stamps itemCount so reads stop probing $size forever).
-     */
-    private async migrateLegacyEmbeddedItems(db: Db, datasetId: string): Promise<void> {
-      if (!ObjectId.isValid(datasetId)) return;
-      const doc = await db
-        .collection(COLLECTIONS.evaluationDatasets)
-        .findOne(
-          { _id: new ObjectId(datasetId) },
-          { projection: { items: 1, tenantId: 1, projectId: 1 } },
-        );
-      const embedded = (doc as { items?: unknown } | null)?.items;
-      if (!doc || !Array.isArray(embedded)) return;
-      if (embedded.length > 0) {
-        await this.insertDatasetItems(
-          db,
-          datasetId,
-          (doc as unknown as { tenantId: string }).tenantId,
-          (doc as unknown as { projectId?: string }).projectId,
-          sanitizeLegacyItemIds(embedded as IEvaluationDatasetItem[]),
-          0,
-          { ignoreDuplicates: true },
-        );
-      }
-      await db.collection(COLLECTIONS.evaluationDatasets).updateOne(
-        { _id: new ObjectId(datasetId) },
-        { $unset: { items: 1 } },
-      );
-      await this.stampDatasetItemCount(db, datasetId);
     }
 
     /** Recount item rows and stamp the parent document's itemCount. */
@@ -448,34 +348,9 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       await this.ensureDatasetItemIndexes(db);
       await db.collection(COLLECTIONS.evaluationDatasetItems).deleteMany({ datasetId });
       await this.insertDatasetItems(db, datasetId, dataset.tenantId, dataset.projectId, items, 0);
-      // Clear any legacy embedded array and stamp the count from the actual
-      // rows (the caller's optimistic $set can lie if anything went sideways).
-      await db.collection(COLLECTIONS.evaluationDatasets).updateOne(
-        { _id: new ObjectId(datasetId) },
-        { $unset: { items: 1 } },
-      );
+      // Stamp the count from the actual rows (the caller's optimistic $set
+      // can lie if anything went sideways).
       await this.stampDatasetItemCount(db, datasetId);
-    }
-
-    /** Legacy read helper: embedded items + parent header, or null. */
-    private async readLegacyEmbeddedItems(
-      db: Db,
-      datasetId: string,
-    ): Promise<{ items: IEvaluationDatasetItem[]; tenantId: string; projectId?: string } | null> {
-      if (!ObjectId.isValid(datasetId)) return null;
-      const doc = await db
-        .collection(COLLECTIONS.evaluationDatasets)
-        .findOne(
-          { _id: new ObjectId(datasetId) },
-          { projection: { items: 1, tenantId: 1, projectId: 1 } },
-        );
-      const items = (doc as { items?: unknown } | null)?.items;
-      if (!doc || !Array.isArray(items) || items.length === 0) return null;
-      return {
-        items: items as IEvaluationDatasetItem[],
-        tenantId: (doc as unknown as { tenantId: string }).tenantId,
-        projectId: (doc as unknown as { projectId?: string }).projectId,
-      };
     }
 
     async createEvaluationDatasetItems(datasetId: string, items: IEvaluationDatasetItem[]): Promise<number> {
@@ -483,7 +358,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       if (items.length === 0) return 0;
       assertUniqueItemIds(items);
       const parent = await this.requireDatasetHeader(db, datasetId);
-      await this.migrateLegacyEmbeddedItems(db, datasetId);
       const coll = db.collection(COLLECTIONS.evaluationDatasetItems);
       const last = await coll
         .find({ datasetId })
@@ -508,15 +382,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       return items.length;
     }
 
-    /** O(1) existence probe (mirrors the SQLite side) — the legacy-branch
-     *  decision must not pay a full countDocuments per page on Cosmos. */
-    private async hasDatasetItemRows(db: Db, datasetId: string): Promise<boolean> {
-      const row = await db
-        .collection(COLLECTIONS.evaluationDatasetItems)
-        .findOne({ datasetId }, { projection: { _id: 1 } });
-      return row !== null;
-    }
-
     async listEvaluationDatasetItems(
       datasetId: string,
       options?: EvaluationDatasetItemQuery,
@@ -525,19 +390,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       const skip = Math.max(0, options?.skip ?? 0);
       const limit = Math.max(1, Math.min(options?.limit ?? 100, 500));
       const coll = db.collection(COLLECTIONS.evaluationDatasetItems);
-      if (!(await this.hasDatasetItemRows(db, datasetId))) {
-        // Legacy dataset — serve a slice of the embedded array read-only.
-        const legacy = await this.readLegacyEmbeddedItems(db, datasetId);
-        if (!legacy) return [];
-        const filtered = legacy.items.filter((item) => legacyItemMatches(item, options));
-        return filtered.slice(skip, skip + limit).map((item, i) => ({
-          ...item,
-          datasetId,
-          tenantId: legacy.tenantId,
-          projectId: legacy.projectId,
-          position: skip + i,
-        }));
-      }
       const docs = await coll
         .find(itemFilter(datasetId, options?.search, options))
         // `id` tiebreak keeps the order total even if positions ever collide.
@@ -555,14 +407,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
     ): Promise<number> {
       const db = this.getTenantDb();
       const coll = db.collection(COLLECTIONS.evaluationDatasetItems);
-      if (await this.hasDatasetItemRows(db, datasetId)) {
-        return coll.countDocuments(itemFilter(datasetId, search, filters));
-      }
-      const filtering = !!search || !!filters?.label || filters?.labeled !== undefined;
-      if (!filtering) return this.legacyEmbeddedItemCount(db, datasetId);
-      const legacy = await this.readLegacyEmbeddedItems(db, datasetId);
-      if (!legacy) return 0;
-      return legacy.items.filter((item) => legacyItemMatches(item, { ...filters, search })).length;
+      return coll.countDocuments(itemFilter(datasetId, search, filters));
     }
 
     async findEvaluationDatasetItem(datasetId: string, itemId: string): Promise<IEvaluationDatasetItemRecord | null> {
@@ -570,18 +415,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       const doc = await db
         .collection(COLLECTIONS.evaluationDatasetItems)
         .findOne({ datasetId, id: itemId });
-      if (doc) return { ...doc, _id: doc._id?.toString() } as unknown as IEvaluationDatasetItemRecord;
-      const legacy = await this.readLegacyEmbeddedItems(db, datasetId);
-      if (!legacy) return null;
-      const index = legacy.items.findIndex((item) => item.id === itemId);
-      if (index < 0) return null;
-      return {
-        ...legacy.items[index],
-        datasetId,
-        tenantId: legacy.tenantId,
-        projectId: legacy.projectId,
-        position: index,
-      };
+      return doc ? ({ ...doc, _id: doc._id?.toString() } as unknown as IEvaluationDatasetItemRecord) : null;
     }
 
     async updateEvaluationDatasetItem(
@@ -590,7 +424,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       data: Partial<Omit<IEvaluationDatasetItem, 'id'>>,
     ): Promise<IEvaluationDatasetItemRecord | null> {
       const db = this.getTenantDb();
-      await this.migrateLegacyEmbeddedItems(db, datasetId);
       const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
       // Never let an update move the row or rewrite system fields.
       for (const key of ['_id', 'id', 'datasetId', 'tenantId', 'projectId', 'position', 'createdAt']) {
@@ -622,7 +455,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     async deleteEvaluationDatasetItem(datasetId: string, itemId: string): Promise<boolean> {
       const db = this.getTenantDb();
-      await this.migrateLegacyEmbeddedItems(db, datasetId);
       const result = await db
         .collection(COLLECTIONS.evaluationDatasetItems)
         .deleteOne({ datasetId, id: itemId });

@@ -969,13 +969,10 @@ export interface IEvaluationDataset {
   description?: string;
   source: EvaluationDatasetSource;
   /**
-   * LEGACY embedded storage. Live items are rows in the separate
-   * `evaluation_dataset_items` collection/table (see
-   * IEvaluationDatasetItemRecord); this field survives only on documents
-   * created before the split and is migrated (then cleared) on the first
-   * item write. Writers may still PASS `items` to create/update — the
-   * provider routes them to the item collection — but readers must use the
-   * item methods, never this field.
+   * Write-only input: items passed to create/update are routed by the provider
+   * to the item collection/table (create inserts, update replaces). Never
+   * persisted on the dataset itself and never returned by reads — readers use
+   * the item methods (see IEvaluationDatasetItemRecord).
    */
   items?: IEvaluationDatasetItem[];
   /** Denormalised item count, maintained by the provider's item methods. */
@@ -989,10 +986,9 @@ export interface IEvaluationDataset {
 
 /**
  * One dataset item as persisted in the dedicated `evaluation_dataset_items`
- * collection/table. Items used to live embedded on the dataset document,
- * which capped a whole dataset at one Mongo document (16MB) and forced every
- * read/write to ship the full array; each item is now its own row keyed by
- * (datasetId, itemId) with a stable `position` for ordering.
+ * collection/table: each item is its own row keyed by (datasetId, itemId)
+ * with a stable `position` for ordering, so a dataset is not bounded by a
+ * single document.
  */
 export interface IEvaluationDatasetItemRecord extends IEvaluationDatasetItem {
   _id?: ObjectId | string;
