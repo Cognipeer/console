@@ -41,6 +41,7 @@ import { ManagedProviderError } from '@/lib/services/providers/managedProviderEr
 import type { FileProviderRuntime } from '@/lib/providers/domains/file';
 import type { VectorIndexHandle, VectorProviderRuntime } from '@/lib/providers/domains/vector';
 import { providerRegistry } from '@/lib/providers/registry';
+import { sanitizeBlobKey } from '@/lib/providers/contracts/azure/blobKeys';
 import {
   MANAGED_STORAGE_DRIVERS,
   backendIdentifiers,
@@ -51,6 +52,7 @@ import {
   tenantStorageToken,
   withoutBackendIdentifiers,
   wrapNameScopedVectorRuntime,
+  wrapSearchVectorRuntime,
 } from '@/lib/services/storage/managedStorage';
 
 const platformRecord = (key: string, type: 'file' | 'vector'): any => ({
@@ -100,13 +102,15 @@ describe('scopeStorageSettings', () => {
     expect(scopeStorageSettings('aws-s3-files', { bucket: 'b', region: 'r' }, token)).toEqual({ bucket: 'b', region: 'r', prefix: 'tabc' });
     expect(scopeStorageSettings('aws-s3-files', { bucket: 'b', prefix: '/tenants/' }, token)).toEqual({ bucket: 'b', prefix: 'tenants/tabc' });
     expect(scopeStorageSettings('s3-compatible-files', { endpoint: 'e', prefix: 'x' }, token)).toEqual({ endpoint: 'e', prefix: 'x/tabc' });
+    expect(scopeStorageSettings('azure-blob-files', { container: 'c', accountName: 'acct' }, token)).toEqual({ container: 'c', accountName: 'acct', prefix: 'tabc' });
+    expect(scopeStorageSettings('azure-blob-files', { container: 'c', prefix: '/tenants/' }, token)).toEqual({ container: 'c', prefix: 'tenants/tabc' });
     expect(scopeStorageSettings('sqlite-vector', { basePath: '/srv/vec' }, token)).toEqual({ basePath: path.join('/srv/vec', 'tabc') });
     const fallback = scopeStorageSettings('sqlite-vector', {}, token);
     expect(String(fallback?.basePath)).toMatch(/vectors[/\\]tabc$/);
   });
 
   it('answers null for any driver that is not root-scoped', () => {
-    for (const driver of ['aws-s3-vectors', 'system-default', 'azure-blob-files', 'mongo-gridfs', 'unknown']) {
+    for (const driver of ['aws-s3-vectors', 'azure-ai-search', 'system-default', 'mongo-gridfs', 'unknown']) {
       expect(scopeStorageSettings(driver, { basePath: '/x' }, token)).toBeNull();
     }
   });
@@ -376,7 +380,7 @@ describe('loadStorageProvider', () => {
     h.records.set('platform-files', platformRecord('platform-files', 'file'));
     h.records.set('platform-vector', platformRecord('platform-vector', 'vector'));
     for (const [key, kind, driver] of [
-      ['platform-files', 'file', 'azure-blob-files'],
+      ['platform-files', 'file', 'mongo-gridfs'],
       ['platform-files', 'file', 'sqlite-vector'],
       ['platform-vector', 'vector', 'system-default'],
       ['platform-vector', 'vector', 'local-filesystem'],
@@ -398,9 +402,27 @@ describe('loadStorageProvider', () => {
 
   it('allows exactly the drivers it can confine', () => {
     expect(MANAGED_STORAGE_DRIVERS).toEqual({
-      file: ['local-filesystem', 'aws-s3-files', 's3-compatible-files'],
-      vector: ['sqlite-vector', 'aws-s3-vectors'],
+      file: ['local-filesystem', 'aws-s3-files', 's3-compatible-files', 'azure-blob-files'],
+      vector: ['sqlite-vector', 'aws-s3-vectors', 'azure-ai-search'],
     });
+  });
+
+  it('serves azure-blob-files from the tenant\'s blob prefix', async () => {
+    h.records.set('platform-files', platformRecord('platform-files', 'file'));
+    h.connection = { driver: 'azure-blob-files', settings: { container: 'c1', prefix: 'tenants' }, credentials: { accountKey: 'k' } };
+    const loaded = await loadStorageProvider('file', context('platform-files'));
+    expect(loaded.managed?.settings).toEqual({ container: 'c1', prefix: `tenants/${tenantStorageToken('t1')}` });
+  });
+
+  it('serves azure-ai-search with its endpoint setting unchanged, and refuses it without one', async () => {
+    h.records.set('platform-vector', platformRecord('platform-vector', 'vector'));
+    const settings = { foundryProjectEndpoint: 'https://search.example.net', serviceVersion: '2023-11-01' };
+    h.connection = { driver: 'azure-ai-search', settings, credentials: { apiKey: 'k' } };
+    expect((await loadStorageProvider('vector', context('platform-vector'))).managed?.settings).toEqual(settings);
+    for (const bad of [undefined, '', '   ', 5, null]) {
+      h.connection = { driver: 'azure-ai-search', settings: { foundryProjectEndpoint: bad }, credentials: {} };
+      await expect(loadStorageProvider('vector', context('platform-vector'))).rejects.toThrow('This provider is not available right now.');
+    }
   });
 });
 
@@ -428,5 +450,177 @@ describe('getManagedStorageRuntime with the real local file driver', () => {
     expect(String((await runtimes[1].downloadFile('docs/a.txt')).data)).toBe('hello tenant-b');
     // A key that tries to climb out of the tenant root is refused by the driver.
     await expect(runtimes[1].downloadFile(`../../${tenantStorageToken('tenant-a')}/tenant-a/platform-files/docs/a.txt`)).rejects.toThrow();
+  });
+});
+
+describe('blob keys cannot leave the tenant folder', () => {
+  it('rejects dot segments and keeps percent-encoding, doubled and leading slashes inside the folder as literal names', () => {
+    for (const bad of ['..', '.', 'a/../b', '../a', '\\..\\x', 'a/./b']) expect(() => sanitizeBlobKey(bad), bad).toThrow();
+    // Percent-encoded dots are not decoded by the driver (the SDK encodes the name, so "%2e" is sent as "%252e").
+    expect(sanitizeBlobKey('%2e%2e/x')).toBe('%2e%2e/x');
+    expect(sanitizeBlobKey('a%2F..%2Fb')).toBe('a%2F..%2Fb');
+    expect(sanitizeBlobKey('//a///b//')).toBe('a/b');
+    expect(sanitizeBlobKey('a\\b')).toBe('a/b');
+  });
+});
+
+describe('the search vector runtime', () => {
+  const token = tenantStorageToken('tenant-a');
+  const other = tenantStorageToken('tenant-b');
+  const own = `${token}-docs-11111111`;
+  const rich = { provider: 'azure-ai-search', endpoint: 'https://search.example.net', algoName: 'x-hnsw', profileName: 'x-profile', filterSchema: 'kv-v1', contentSchema: 'text-v1' };
+  const handle = (externalId: string, metadata: Record<string, unknown> = {}): VectorIndexHandle =>
+    ({ externalId, name: 'docs', dimension: 3, metric: 'cosine', metadata });
+  const baseInner = (over: Partial<VectorProviderRuntime> = {}): VectorProviderRuntime => ({
+    createIndex: async (input) => handle(input.name, rich),
+    deleteIndex: async () => undefined,
+    listIndexes: async () => [],
+    upsertVectors: async () => undefined,
+    queryVectors: async () => ({ matches: [] }),
+    deleteVectors: async () => undefined,
+    listVectors: async () => ({ items: [] }),
+    ...over,
+  });
+
+  it('names the index with the token, which is a valid index name, and returns the tenant name with markers only', async () => {
+    const created: string[] = [];
+    const inner = baseInner({ createIndex: async (input) => { created.push(input.name); return handle(input.name, rich); } });
+    const result = await wrapSearchVectorRuntime(inner, token).createIndex({ name: 'Docs', dimension: 3 });
+    expect(created[0]).toMatch(new RegExp(`^${token}-docs-[0-9a-f]{8}$`));
+    expect(created[0]).toMatch(/^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$/);
+    // the driver derives "<name>-hnsw" and "<name>-profile": still valid names at the longest index name
+    const longest = managedIndexName(token, 'x'.repeat(200));
+    expect(longest.length).toBeLessThanOrEqual(63);
+    for (const derived of [`${longest}-hnsw`, `${longest}-profile`]) expect(derived).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/);
+    expect(result).toMatchObject({ externalId: created[0], name: 'Docs' });
+    expect(result.metadata).toEqual({ filterSchema: 'kv-v1', contentSchema: 'text-v1' });
+  });
+
+  it('refuses and removes a created index whose name is not the one asked for', async () => {
+    const deleted: string[] = [];
+    const inner = baseInner({
+      createIndex: async () => handle(`${other}-docs-22222222`),
+      deleteIndex: async ({ externalId }) => { deleted.push(externalId); },
+    });
+    await expect(wrapSearchVectorRuntime(inner, token).createIndex({ name: 'docs', dimension: 3 })).rejects.toBeInstanceOf(ManagedProviderError);
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]).toMatch(new RegExp(`^${token}-docs-`));
+  });
+
+  it('lists only the tenant\'s indexes, with the markers and nothing else', async () => {
+    const inner = baseInner({
+      listIndexes: async () => [
+        handle(own, rich), handle(`${other}-docs-22222222`), handle('operator-index'), handle(`${token}-Docs-1`), handle(`${token}x`),
+      ],
+    });
+    const list = await wrapSearchVectorRuntime(inner, token).listIndexes();
+    expect(list.map((i) => i.externalId)).toEqual([own]);
+    expect(list[0].metadata).toEqual({ filterSchema: 'kv-v1', contentSchema: 'text-v1' });
+  });
+
+  it('hands the driver a rebuilt handle: markers kept, endpoint and derived names dropped, non-string markers dropped', async () => {
+    const seen: unknown[] = [];
+    const inner = baseInner({
+      upsertVectors: async (h0) => { seen.push(h0); },
+      queryVectors: async (h0) => { seen.push(h0); return { matches: [] }; },
+      deleteVectors: async (h0) => { seen.push(h0); },
+      listVectors: async (h0) => { seen.push(h0); return { items: [] }; },
+    });
+    const runtime = wrapSearchVectorRuntime(inner, token);
+    const h1 = handle(own, { ...rich, contentSchema: 5 });
+    await runtime.upsertVectors(h1, []);
+    await runtime.queryVectors(h1, { topK: 1, vector: [1] });
+    await runtime.deleteVectors(h1, ['a']);
+    await runtime.listVectors(h1);
+    for (const item of seen) expect((item as VectorIndexHandle).metadata).toEqual({ filterSchema: 'kv-v1' });
+    expect(seen).toHaveLength(4);
+  });
+
+  it('refuses any handle or id that is not the tenant\'s index name', async () => {
+    const touched: string[] = [];
+    const inner = baseInner({
+      upsertVectors: async () => { touched.push('u'); },
+      queryVectors: async () => { touched.push('q'); return { matches: [] }; },
+      deleteVectors: async () => { touched.push('d'); },
+      listVectors: async () => { touched.push('l'); return { items: [] }; },
+      deleteIndex: async () => { touched.push('i'); },
+      existingVectorIds: async () => { touched.push('e'); return []; },
+    });
+    const runtime = wrapSearchVectorRuntime(inner, token);
+    for (const externalId of [
+      `${other}-docs-22222222`, 'operator-index', own.toUpperCase(), `${token}-x/../y`, `${token}-x%2Fy`, `${token}-%2e%2e`,
+      '..', `${token}-`, `${token}`, `${token}-a_b`, `${token}-docs-\u0000`, '', `${token}-docs-1-`,
+    ]) {
+      await expect(runtime.upsertVectors(handle(externalId), [])).rejects.toBeInstanceOf(ManagedProviderError);
+      await expect(runtime.queryVectors(handle(externalId), { topK: 1, vector: [1] })).rejects.toBeInstanceOf(ManagedProviderError);
+      await expect(runtime.deleteVectors(handle(externalId), ['a'])).rejects.toBeInstanceOf(ManagedProviderError);
+      await expect(runtime.listVectors(handle(externalId))).rejects.toBeInstanceOf(ManagedProviderError);
+      await expect(runtime.deleteIndex({ externalId })).rejects.toBeInstanceOf(ManagedProviderError);
+      await expect(runtime.existingVectorIds!(handle(externalId), ['a'])).rejects.toBeInstanceOf(ManagedProviderError);
+    }
+    expect(touched).toEqual([]);
+  });
+
+  it('passes existingVectorIds through for the tenant\'s index, offers it only when the driver has it, and closes', async () => {
+    const seen: string[] = [];
+    let closed = 0;
+    const inner = baseInner({
+      existingVectorIds: async (h0, ids) => { seen.push(h0.externalId); return ids.slice(0, 1); },
+      close: async () => { closed += 1; },
+    });
+    const runtime = wrapSearchVectorRuntime(inner, token);
+    expect(await runtime.existingVectorIds!(handle(own), ['a', 'b'])).toEqual(['a']);
+    expect(seen).toEqual([own]);
+    await runtime.close?.();
+    expect(closed).toBe(1);
+    expect(wrapSearchVectorRuntime(baseInner(), token).existingVectorIds).toBeUndefined();
+  });
+
+  it('still refuses writes on a cleanup-only route and wraps the runtime getManagedStorageRuntime builds', async () => {
+    h.records.set('platform-vector', platformRecord('platform-vector', 'vector'));
+    h.connection = { driver: 'azure-ai-search', settings: { foundryProjectEndpoint: 'https://search.example.net' }, credentials: { apiKey: 'k' } };
+    const calls: string[] = [];
+    const create = vi.spyOn(providerRegistry, 'createRuntime').mockResolvedValue(baseInner({
+      createIndex: async (input) => { calls.push('create'); return handle(input.name, rich); },
+      upsertVectors: async () => { calls.push('upsert'); },
+      listIndexes: async () => [handle(own, rich), handle('operator-index')],
+    }) as never);
+    try {
+      const context = { tenantDbName: 'db', tenantId: 'tenant-cleanup', providerKey: 'platform-vector' };
+      const loaded = await loadStorageProvider('vector', context);
+      const own2 = (await getManagedStorageRuntime<VectorProviderRuntime>('vector', loaded as any, { tenantId: context.tenantId }));
+      expect((await own2.listIndexes()).map((i) => i.externalId)).toEqual([]);
+      const cleanup = await getManagedStorageRuntime<VectorProviderRuntime>('vector', { ...loaded, managed: { ...loaded.managed!, cleanupOnly: true } } as any, { tenantId: context.tenantId });
+      await expect(cleanup.createIndex({ name: 'x', dimension: 3 })).rejects.toThrow('This provider is not available right now.');
+      await expect(cleanup.upsertVectors(handle(`${loaded.managed!.token}-x-11111111`), [])).rejects.toThrow('This provider is not available right now.');
+      expect(calls).toEqual([]);
+    } finally {
+      create.mockRestore();
+    }
+  });
+});
+
+describe('backendIdentifiers of the Azure drivers', () => {
+  const token = tenantStorageToken('tenant-a');
+
+  it('names the container, the account, the derived blob host and the endpoint for the account key, SAS and Entra methods', () => {
+    const ids = backendIdentifiers({ token, settings: { container: 'ops-container', accountName: 'opsaccount', prefix: `files/${token}`, endpoint: 'https://custom.blob.example.net:10000/opsaccount' } }, { accountKey: 'SECRETKEY123' });
+    expect(ids).toEqual(expect.arrayContaining(['ops-container', 'opsaccount', 'opsaccount.blob.core.windows.net', 'custom.blob.example.net:10000', 'custom.blob.example.net', 'files']));
+    expect(ids.join('|')).not.toContain('SECRETKEY123');
+  });
+
+  it('derives the account and host from a connection string without returning the credential', () => {
+    const connectionString = 'DefaultEndpointsProtocol=https;AccountName=csaccount;AccountKey=TOPSECRETKEY==;EndpointSuffix=core.example.cloud';
+    const ids = backendIdentifiers({ token, settings: { container: 'ops-container' } }, { connectionString });
+    expect(ids).toEqual(expect.arrayContaining(['csaccount', 'csaccount.blob.core.example.cloud']));
+    expect(ids.join('|')).not.toContain('TOPSECRETKEY');
+    const viaEndpoint = backendIdentifiers({ token, settings: {} }, { connectionString: 'BlobEndpoint=https://x.blob.example.net/;SharedAccessSignature=sv=1&sig=SIGSECRET' });
+    expect(viaEndpoint).toEqual(expect.arrayContaining(['x.blob.example.net']));
+    expect(viaEndpoint.join('|')).not.toContain('SIGSECRET');
+  });
+
+  it('names the search endpoint (raw value, host and hostname)', () => {
+    const ids = backendIdentifiers({ token, settings: { foundryProjectEndpoint: 'https://ops-search.search.example.net:8443' } });
+    expect(ids).toEqual(expect.arrayContaining(['https://ops-search.search.example.net:8443', 'ops-search.search.example.net:8443', 'ops-search.search.example.net']));
   });
 });
