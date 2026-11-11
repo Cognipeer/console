@@ -49,12 +49,12 @@ describe('parseBuiltInReason', () => {
 
   it('classifies every built-in policy the engine ships (none falls through to "other")', () => {
     const ids = listManagedPolicies().map((p) => p.id);
-    expect(ids.length).toBe(24);
+    expect(ids.length).toBe(26);
     for (const id of ids) {
       const parsed = parseBuiltInReason(id);
       expect(parsed.kind, id).not.toBe('other');
-      // a portal or messaging rule is not about a level: it is the access list; an approval rule is the session's owner and the agent's setting
-      if (id.startsWith('managed:portal:') || id.startsWith('managed:messaging:') || id.startsWith('managed:agent:')) expect(parsed.level, id).toBeNull();
+      // a portal, messaging or shared-resource rule is not about a level: it is the access list; an approval rule is the session's owner and the agent's setting
+      if (id.startsWith('managed:portal:') || id.startsWith('managed:messaging:') || id.startsWith('managed:agent:') || id.startsWith('managed:access:')) expect(parsed.level, id).toBeNull();
       else expect(parsed.level, id).not.toBeNull();
     }
   });
@@ -65,6 +65,12 @@ describe('parseBuiltInReason', () => {
     expect(parseBuiltInReason('managed:portal:use-boundary')).toEqual({ kind: 'portalBoundary', level: null });
     expect(parseBuiltInReason('managed:portal:agent-boundary')).toEqual({ kind: 'portalBoundary', level: null });
     expect(parseBuiltInReason('managed:portal:something-new')).toEqual({ kind: 'other', level: null });
+  });
+
+  it('knows the shared-resource access rules: the list admits, or the resource stays out of the run', () => {
+    expect(parseBuiltInReason('managed:access:use')).toEqual({ kind: 'accessList', level: null });
+    expect(parseBuiltInReason('managed:access:use-boundary')).toEqual({ kind: 'accessBoundary', level: null });
+    expect(parseBuiltInReason('managed:access:something-new')).toEqual({ kind: 'other', level: null });
   });
 
   it('knows the portal network boundary and the test-session rules', () => {

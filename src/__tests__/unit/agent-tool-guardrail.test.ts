@@ -60,6 +60,8 @@ const hoisted = vi.hoisted(() => ({
   createBrowserSession: vi.fn(),
   closeBrowserSession: vi.fn(),
   buildWebSearchAgentTools: vi.fn(),
+  // The access-list gate of a shared MCP server: by default what it answers for a run made for no one (open only).
+  mayUseSharedResource: vi.fn(async (_run: unknown, record: { access?: { mode?: string } }) => !record.access || record.access.mode === 'all'),
 }));
 
 // The engine, not the barrel: mocking `@/lib/services/guardrail` would take the
@@ -105,6 +107,10 @@ vi.mock('@/lib/services/browser', () => ({
 
 vi.mock('@/lib/services/webSearch', () => ({
   buildWebSearchAgentTools: hoisted.buildWebSearchAgentTools,
+}));
+
+vi.mock('@/lib/services/agents/sharedResourceAccess', () => ({
+  mayUseSharedResource: hoisted.mayUseSharedResource,
 }));
 
 import { buildBoundTools, createAgentToolGuard } from '@/lib/services/agents/agentService';
@@ -540,6 +546,52 @@ describe('MCP tools are evaluated exactly once', () => {
 });
 
 // ── 4. Legacy configs bind nothing to the tool hooks ────────────────────────
+
+describe('the access list of an MCP server', () => {
+  const RESTRICTED = { mode: 'selected' as const, userIds: ['u-listed'], groupIds: [] };
+
+  async function buildFor(userId: string | undefined) {
+    const { createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+    return buildBoundTools(
+      SCOPE.tenantDbName,
+      SCOPE.tenantId,
+      SCOPE.projectId,
+      [MCP_BINDING],
+      createTool,
+      z,
+      guardFor(ARMED),
+      { source: 'api' },
+      userId ? { userId, source: 'api' } as never : undefined,
+    );
+  }
+
+  it('asks the gate for the person the run is made for, with the server as the resource', async () => {
+    hoisted.getMcpServerByKey.mockResolvedValue({ ...mcpServer(), _id: 'srv-1', access: RESTRICTED });
+    hoisted.mayUseSharedResource.mockResolvedValueOnce(true);
+    const { tools } = await buildFor('u-listed');
+    expect(tools).toHaveLength(1);
+    expect(hoisted.mayUseSharedResource).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantDbName: SCOPE.tenantDbName, tenantId: SCOPE.tenantId, source: 'api', caller: expect.objectContaining({ userId: 'u-listed' }) }),
+      { type: 'mcp-server', id: 'srv-1', key: 'acme-api', projectId: SCOPE.projectId, access: RESTRICTED },
+    );
+  });
+
+  it('leaves every tool of the server out when the gate says no, so the model never sees them', async () => {
+    hoisted.getMcpServerByKey.mockResolvedValue({ ...mcpServer(), _id: 'srv-1', access: RESTRICTED });
+    hoisted.mayUseSharedResource.mockResolvedValueOnce(false);
+    const { tools, definitions } = await buildFor('u-other');
+    expect(tools).toEqual([]);
+    expect(definitions).toEqual([]);
+    expect(hoisted.executeMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('keeps an open server in a run made for no one, and a restricted one out', async () => {
+    expect((await buildFor(undefined)).tools).toHaveLength(1);
+    hoisted.getMcpServerByKey.mockResolvedValue({ ...mcpServer(), access: RESTRICTED });
+    expect((await buildFor(undefined)).tools).toEqual([]);
+  });
+});
 
 describe('legacy single-slot config', () => {
   it('binds nothing to tool.pre / tool.post, so yesterday\'s calls still run', async () => {

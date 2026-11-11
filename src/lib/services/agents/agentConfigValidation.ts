@@ -29,6 +29,7 @@ import {
     resolveAgentBindingTool,
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
+import { isUsableByAgent } from './agentOwnedResources';
 import { validateSeedFiles } from './agentSandboxSeedFiles';
 import { unsuppliableRequiredVariables, validateVariableDeclaration } from './agentVariables';
 import { resolveSubagentTarget } from './subagentRoster';
@@ -637,6 +638,11 @@ export async function validateAgentConfig(input: {
     config: IAgentConfig;
     /** The agent being saved, so a sub-agent that references it can be caught. */
     agentKey?: string;
+    /**
+     * The agent being saved, so its own MCP servers and skills resolve (`IAgentResourceOwner`). Looked up from
+     * `agentKey` when not given; a new agent has none.
+     */
+    agentId?: string;
     /** For the license-gated parts (sandbox access). */
     tenantId?: string;
 }): Promise<AgentConfigValidation> {
@@ -650,6 +656,8 @@ export async function validateAgentConfig(input: {
 
     const db = await getDatabase();
     await db.switchToTenant(input.tenantDbName);
+    const agentId = input.agentId
+        ?? (input.agentKey ? (await db.findAgentByKey(input.agentKey, projectId).catch(() => null))?._id?.toString() : undefined);
 
     const checkModel = async (field: string, key: string, requirePrice: boolean) => {
         const model = await db.findModelByKey(key, projectId).catch(() => null);
@@ -792,7 +800,7 @@ export async function validateAgentConfig(input: {
     }
     for (const key of config.skills ?? []) {
         const skill = await db.findSkillByKey(key, projectId).catch(() => null);
-        if (!skill) issues.errors.push({ field: 'skills', message: `Skill "${key}" does not exist` });
+        if (!skill || !isUsableByAgent(skill, agentId)) issues.errors.push({ field: 'skills', message: `Skill "${key}" does not exist` });
         else if (skill.status !== 'active') issues.warnings.push({ field: 'skills', message: `Skill "${key}" is not active and is skipped` });
     }
 
@@ -805,7 +813,7 @@ export async function validateAgentConfig(input: {
         }
     }
 
-    await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, 'toolBindings', config.toolBindings);
+    await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, 'toolBindings', config.toolBindings, agentId);
 
     for (const [index, entry] of (config.subagents ?? []).entries()) {
         const field = `subagents[${index}]`;
@@ -851,7 +859,8 @@ export async function validateAgentConfig(input: {
             }
         }
         if (entry.knowledgeEngineKey) await checkKnowledge(`${field}.knowledgeEngineKey`, entry.knowledgeEngineKey);
-        await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, `${field}.toolBindings`, entry.toolBindings);
+        // A referenced agent's bindings were checked when it was saved; these are this agent's inline child's.
+        await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, `${field}.toolBindings`, entry.toolBindings, agentId);
     }
 
     return issues;
@@ -865,6 +874,8 @@ async function checkBindingReferences(
     projectId: string,
     prefix: string,
     bindings: IAgentToolBinding[] | undefined,
+    /** The agent being saved: its own MCP servers resolve. */
+    agentId?: string,
 ): Promise<void> {
     for (const [index, binding] of (bindings ?? []).entries()) {
         const field = `${prefix}[${index}]`;
@@ -899,7 +910,7 @@ async function checkBindingReferences(
             if (!tenantId) continue;
             await checkFlowReference(issues, field, tenantDbName, tenantId, projectId, { key: binding.sourceKey }, binding.config?.version === 'draft' ? 'draft' : 'published', 'tool');
         } else if (binding.source === 'mcp') {
-            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId).catch(() => null);
+            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId, agentId).catch(() => null);
             if (!server) {
                 issues.errors.push({ field, message: `MCP server "${binding.sourceKey}" does not exist in this project` });
                 continue;

@@ -2,7 +2,6 @@
  * MongoDB Provider – Crawlers, Crawl jobs & results mixin
  */
 
-import { ObjectId } from 'mongodb';
 import type {
   CrawlResultFilters,
   ICrawler,
@@ -12,15 +11,10 @@ import type {
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { foldedRegexSource } from '@/lib/shared/searchFold';
+import { toIdString, toObjectIdOrThrow } from './docIds';
 
-function toId(value: ObjectId | string | undefined): string {
-  if (!value) return '';
-  return typeof value === 'string' ? value : value.toString();
-}
-
-function objectId(id: string): ObjectId {
-  return new ObjectId(id);
-}
+const toId = toIdString;
+const objectId = toObjectIdOrThrow;
 
 export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class CrawlerOps extends Base {

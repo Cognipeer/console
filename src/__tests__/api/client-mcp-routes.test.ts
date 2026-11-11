@@ -254,6 +254,29 @@ describe('token MCP routes', () => {
     });
   });
 
+  describe('a server that belongs to an agent', () => {
+    // Created inside an agent, it is used only inside that agent: the client API answers as for an unknown key.
+    beforeEach(() => {
+      vi.mocked(getMcpServerByKey).mockResolvedValue({ ...server(), owner: { kind: 'agent', agentId: 'agent-1' } } as IMcpServer);
+    });
+
+    it('is not served over JSON-RPC', async () => {
+      const rpc = JSON.parse((await post('/api/client/v1/mcp/crm/message', callTool())).body) as Rpc;
+      expect(rpc.error?.code).toBe(-32001);
+      expect(executeMcpTool).not.toHaveBeenCalled();
+    });
+
+    it('cannot be called, changed or deleted through the REST routes', async () => {
+      expect((await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup', arguments: {} })).statusCode).toBe(404);
+      const patched = await app.inject({ method: 'PATCH', url: '/api/client/v1/mcp/crm', headers, payload: JSON.stringify({ name: 'Renamed' }) });
+      expect(patched.statusCode).toBe(404);
+      const deleted = await app.inject({ method: 'DELETE', url: '/api/client/v1/mcp/crm', headers });
+      expect(deleted.statusCode).toBe(404);
+      expect(executeMcpTool).not.toHaveBeenCalled();
+      expect(updateMcpServer).not.toHaveBeenCalled();
+    });
+  });
+
   describe('a failed call, as the token caller sees it', () => {
     it('keeps the detail of the failure', async () => {
       vi.mocked(executeMcpTool).mockRejectedValueOnce(

@@ -95,6 +95,60 @@
 }
 
 /*
+ * The newest message, pinned above the transcript: in a long run it sits above
+ * a tail of tool rows or under a page of steps, and this is where you read it.
+ */
+.latestBar {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+  background: var(--mantine-color-gray-0);
+}
+
+[data-mantine-color-scheme='dark'] .latestBar {
+  border-bottom-color: var(--mantine-color-dark-4);
+  background: var(--mantine-color-dark-6);
+}
+
+.latestCard {
+  border: 1px solid var(--mantine-color-gray-3);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-gray-0);
+}
+
+[data-mantine-color-scheme='dark'] .latestCard {
+  border-color: var(--mantine-color-dark-4);
+  background: var(--mantine-color-dark-6);
+}
+
+.latestIcon {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--mantine-color-dimmed);
+}
+
+/* Holds the transcript and the "jump to latest" button that floats over its bottom edge. */
+.chatScrollWrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.jumpLatest {
+  position: absolute;
+  right: var(--mantine-spacing-md);
+  bottom: var(--mantine-spacing-sm);
+  z-index: 2;
+  box-shadow: var(--mantine-shadow-sm);
+}
+
+/* An answer jumped to from the bar lands with a little room above it. */
+.answerAnchor {
+  scroll-margin-top: var(--mantine-spacing-sm);
+}
+
+/*
  * Full-width turns rather than chat bubbles: a turn here carries reasoning,
  * a tool timeline and a structured-output block, none of which fit a 75%-wide
  * bubble, and reading a transcript top-to-bottom beats ping-ponging across

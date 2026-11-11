@@ -26,6 +26,7 @@ import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { runInTenant } from '@/lib/database/runInTenant';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getConfig } from '@/lib/core/config';
 import { gatePublicRequestRate } from '../publicRpmGate';
@@ -88,9 +89,7 @@ async function withTenantDb<T>(
   tenantDbName: string,
   fn: () => T | Promise<T>,
 ): Promise<T> {
-  if (db.runWithTenant) return db.runWithTenant(tenantDbName, fn);
-  await db.switchToTenant(tenantDbName);
-  return fn();
+  return runInTenant(db, tenantDbName, () => fn());
 }
 
 /**
@@ -112,6 +111,8 @@ async function resolvePublicServer(
     db.findMcpServerByEndpointSlug(endpointSlug));
 
   if (!server || server.status !== 'active') return null;
+  // An agent's own server is used only inside that agent, never through a public endpoint.
+  if (server.owner) return null;
   if (resolveExposure(server).accessMode !== 'public') return null;
   // A browser or a sandbox is served with a token only, whatever the stored settings say.
   if (await withTenantDb(db, tenant.dbName, () => reachesTokenOnlyServer(db, server))) return null;

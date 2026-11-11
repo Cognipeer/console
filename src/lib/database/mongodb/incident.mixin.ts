@@ -9,22 +9,11 @@ import type { IIncident, IIncidentStatRow, IncidentSort, IncidentStatus, Inciden
 import { foldedRegexSource } from '@/lib/shared/searchFold';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { clampLimit, clampSkip } from '../provider/paging';
 
 const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
 
 const toIncident = (doc: Record<string, unknown>): IIncident => ({ ...doc, _id: String(doc._id) }) as unknown as IIncident;
-
-function clampLimit(value: number | undefined, fallback: number): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(Math.floor(n), 1), 200);
-}
-
-function clampSkip(value: number | undefined): number {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  return Math.floor(n);
-}
 
 /** `{ _id }` filter for a hex id, plus the optional project scope; null when the id is malformed. */
 function idFilter(id: string, projectId?: string): Record<string, unknown> | null {

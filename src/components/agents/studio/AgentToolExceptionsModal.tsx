@@ -50,6 +50,8 @@ export interface AgentToolExceptionsModalProps {
     /** A client tool's argument schema (Configure → Client tools); other tools' schemas are fetched. */
     clientSchema?: unknown;
     onApply: (exceptions: AgentToolApprovalException[]) => void;
+    /** The agent being edited, so the schema of one of its own MCP servers' tools is found too. */
+    agentId?: string;
 }
 
 interface DraftLine {
@@ -76,7 +78,7 @@ function isBlank(line: DraftLine): boolean {
  * tool, a client tool). Built-in tools have no schema here, so the field stays
  * free text for them.
  */
-function useArgumentFields(row: HitlToolRow | null, clientSchema: unknown, opened: boolean): string[] {
+function useArgumentFields(row: HitlToolRow | null, clientSchema: unknown, opened: boolean, agentId?: string): string[] {
     const [fetched, setFetched] = useState<string[]>([]);
     const origin = row?.origin;
     const sourceKey = row?.sourceKey;
@@ -95,7 +97,10 @@ function useArgumentFields(row: HitlToolRow | null, clientSchema: unknown, opene
                     const action = data.tools?.find((tool) => tool.key === sourceKey)?.actions?.find((a) => a.key === name);
                     if (!cancelled) setFetched(schemaFieldPaths(action?.inputSchema));
                 } else {
-                    const res = await fetch('/api/mcp?status=active', { cache: 'no-store' });
+                    const res = await fetch(
+                        `/api/mcp?status=active${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''}`,
+                        { cache: 'no-store' },
+                    );
                     if (!res.ok) return;
                     const data = (await res.json()) as { servers?: Array<{ key: string; tools?: Array<{ name: string; inputSchema?: unknown }> }> };
                     const tool = data.servers?.find((server) => server.key === sourceKey)?.tools?.find((t) => t.name === name);
@@ -108,7 +113,7 @@ function useArgumentFields(row: HitlToolRow | null, clientSchema: unknown, opene
         return () => {
             cancelled = true;
         };
-    }, [opened, origin, sourceKey, name]);
+    }, [opened, origin, sourceKey, name, agentId]);
 
     return origin === 'client' ? schemaFieldPaths(clientSchema) : fetched;
 }
@@ -124,7 +129,7 @@ function parseSampleArgs(text: string): { value?: Record<string, unknown>; inval
     }
 }
 
-export default function AgentToolExceptionsModal({ opened, onClose, row, hitl, clientSchema, onApply }: AgentToolExceptionsModalProps) {
+export default function AgentToolExceptionsModal({ opened, onClose, row, hitl, clientSchema, onApply, agentId }: AgentToolExceptionsModalProps) {
     const t = useTranslations('agents.hitl');
     const [lines, setLines] = useState<DraftLine[]>([]);
     const [sample, setSample] = useState('');
@@ -135,7 +140,7 @@ export default function AgentToolExceptionsModal({ opened, onClose, row, hitl, c
         setSample('');
     }, [opened, row]);
 
-    const schemaFields = useArgumentFields(row, clientSchema, opened);
+    const schemaFields = useArgumentFields(row, clientSchema, opened, agentId);
     const fieldOptions = useMemo(
         () => [...new Set([...schemaFields, ...lines.map((line) => line.field.trim()).filter(Boolean)])],
         [schemaFields, lines],

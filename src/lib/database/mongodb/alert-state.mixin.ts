@@ -9,6 +9,7 @@ import type { Db } from 'mongodb';
 import type { IAlertState, IAlertStateFilter } from '../provider/types.domain';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { isDuplicateKeyError } from './errors';
 
 const toState = (doc: Record<string, unknown>): IAlertState => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertState;
 
@@ -126,7 +127,7 @@ export function AlertStateMixin<TBase extends Constructor<MongoDBProviderBase>>(
       } catch (error) {
         // Two evaluators upserting the same (rule, entity) concurrently: the
         // loser hits the unique index; the retry then matches the winner's doc.
-        if ((error as { code?: number })?.code !== 11000) throw error;
+        if (!isDuplicateKeyError(error)) throw error;
         doc = await run();
       }
       return toState(doc as unknown as Record<string, unknown>);

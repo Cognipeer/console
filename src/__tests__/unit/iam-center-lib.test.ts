@@ -133,7 +133,7 @@ describe('policy rows', () => {
 
   it('describes every managed policy in plain language', () => {
     const views = listManagedPolicyViews();
-    expect(views.map((v) => v.id)).toHaveLength(24);
+    expect(views.map((v) => v.id)).toHaveLength(26);
     for (const v of views) {
       expect(v.name.length).toBeGreaterThan(5);
       expect(v.description.length).toBeGreaterThan(20);
@@ -146,6 +146,8 @@ describe('policy rows', () => {
     expect(describeManagedPolicy('managed:messaging:agent-boundary')).toMatchObject({ group: 'messaging', effect: 'forbid', nameKey: 'iamApi.managed.messaging-agent-boundary.name' });
     expect(describeManagedPolicy('managed:agent:approve')).toMatchObject({ group: 'agent', effect: 'permit', nameKey: 'iamApi.managed.agent-approve.name' });
     expect(describeManagedPolicy('managed:agent:approve-token')).toMatchObject({ group: 'agent', effect: 'permit' });
+    expect(describeManagedPolicy('managed:access:use')).toMatchObject({ group: 'access', effect: 'permit', nameKey: 'iamApi.managed.access-use.name' });
+    expect(describeManagedPolicy('managed:access:use-boundary')).toMatchObject({ group: 'access', effect: 'forbid' });
     expect(describeManagedPolicy('managed:unknown:x')).toMatchObject({ name: 'managed:unknown:x', description: '', effect: 'permit' });
   });
 });
