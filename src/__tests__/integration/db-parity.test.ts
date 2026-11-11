@@ -2784,6 +2784,67 @@ describeForEachProvider('RAG module teardown + shared index accounting', (getDb)
     expect(found?.totalChunks).toBe(0);
   });
 
+  it('answers a document as it was before a lifecycle write or delete, and null once it is gone', async () => {
+    const db = getDb();
+    const created = await db.createRagDocument({
+      tenantId, projectId: 'proj-1', ragModuleKey: 'km-life', fileName: 'a.txt', status: 'indexed', chunkCount: 5, createdBy: 'tester',
+    });
+    const id = String(created._id);
+
+    const claimed = await db.updateRagDocumentReturningPrevious(id, { status: 'processing', errorMessage: undefined });
+    expect(String(claimed?._id)).toBe(id);
+    expect(claimed).toMatchObject({ status: 'indexed', chunkCount: 5, fileName: 'a.txt' });
+    expect(await db.findRagDocumentById(id)).toMatchObject({ status: 'processing', chunkCount: 5 });
+
+    // A second claim that overlaps the first sees what the first one wrote, not the row both started from.
+    expect(await db.updateRagDocumentReturningPrevious(id, { status: 'processing' })).toMatchObject({ status: 'processing' });
+
+    expect(await db.updateRagDocumentReturningPrevious(id, { status: 'indexed', chunkCount: 2 }))
+      .toMatchObject({ status: 'processing', chunkCount: 5 });
+    expect(await db.findRagDocumentById(id)).toMatchObject({ status: 'indexed', chunkCount: 2 });
+
+    await db.replaceRagAclEntries('km-life', { type: 'document', id }, [
+      { tenantId, projectId: 'proj-1', principal: 'user:u1', createdBy: 'tester' },
+    ], 'proj-1');
+    const removed = await db.deleteRagDocumentReturningPrevious(id);
+    expect(String(removed?._id)).toBe(id);
+    expect(removed).toMatchObject({ status: 'indexed', chunkCount: 2 });
+    expect(await db.findRagDocumentById(id)).toBeNull();
+    // Its permission entries go with it, as with deleteRagDocument.
+    expect(await db.listRagAclEntries('km-life', { projectId: 'proj-1', nodeType: 'document', nodeId: id })).toEqual([]);
+
+    expect(await db.deleteRagDocumentReturningPrevious(id)).toBeNull();
+    expect(await db.updateRagDocumentReturningPrevious(id, { status: 'failed' })).toBeNull();
+    expect(await db.deleteRagDocument(id)).toBe(false);
+  });
+
+  it('chains concurrent lifecycle writes: each answers the row the one before it left, none the same', async () => {
+    const db = getDb();
+    const id = String((await db.createRagDocument({
+      tenantId, projectId: 'proj-1', ragModuleKey: 'km-life', fileName: 'b.txt', status: 'indexed', chunkCount: 0, createdBy: 'tester',
+    }))._id);
+
+    const befores = await Promise.all(
+      Array.from({ length: 12 }, (_, i) => db.updateRagDocumentReturningPrevious(id, { status: 'indexed', chunkCount: i + 1 })),
+    );
+    const last = (await db.findRagDocumentById(id))!.chunkCount!;
+    // Read and write are one step: no two writes saw the same row, so the counts they replaced, plus the one left
+    // at the end, are every count exactly once.
+    expect([...befores.map((row) => row!.chunkCount), last].sort((a, b) => a! - b!))
+      .toEqual(Array.from({ length: 13 }, (_, i) => i));
+  });
+
+  it('gives a document to exactly one of two concurrent deletes', async () => {
+    const db = getDb();
+    const id = String((await db.createRagDocument({
+      tenantId, projectId: 'proj-1', ragModuleKey: 'km-life', fileName: 'c.txt', status: 'indexed', chunkCount: 3, createdBy: 'tester',
+    }))._id);
+
+    const results = await Promise.all([db.deleteRagDocumentReturningPrevious(id), db.deleteRagDocumentReturningPrevious(id)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.find(Boolean)).toMatchObject({ status: 'indexed', chunkCount: 3 });
+  });
+
   it('persists the retrieval controls and the re-index handshake on a module', async () => {
     const db = getDb();
     const created = await db.createRagModule({

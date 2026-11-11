@@ -349,7 +349,36 @@ export function createMockDb(overrides: Partial<MockDb> = {}): MockDb {
     },
   };
 
-  return new Proxy({}, handler) as unknown as MockDb;
+  const db = new Proxy({}, handler) as unknown as MockDb;
+  primeRagDocumentLifecycle(db, primers);
+  return db;
+}
+
+/**
+ * The knowledge-base lifecycle writes that answer the row as it was (`updateRagDocumentReturningPrevious`,
+ * `deleteRagDocumentReturningPrevious`) are the plain writes plus a read in the same step. They are passed on to
+ * `updateRagDocument` / `deleteRagDocument`, so a suite that primes or asserts those keeps working, and they answer
+ * the row the suite serves from `findRagDocumentById` with this instance's earlier writes applied to it, as a
+ * database would. A falsy answer from the plain write means the row is gone (null), like the service has always read it.
+ */
+function primeRagDocumentLifecycle(db: MockDb, primers: Record<string, Mock>): void {
+  type Row = Record<string, unknown>;
+  const written = new Map<string, Row>();
+  const rowBefore = async (id: string): Promise<Row> => (
+    written.get(id) ?? ((await db.findRagDocumentById(id)) as Row | null) ?? {}
+  );
+  primers.updateRagDocumentReturningPrevious = vi.fn(async (id: string, data: Row) => {
+    const before = await rowBefore(id);
+    if (!(await db.updateRagDocument(id, data as never))) return null;
+    written.set(id, { ...before, ...data });
+    return before;
+  });
+  primers.deleteRagDocumentReturningPrevious = vi.fn(async (id: string) => {
+    const before = await rowBefore(id);
+    const deleted = await db.deleteRagDocument(id);
+    written.delete(id);
+    return deleted ? before : null;
+  });
 }
 
 /** Convenience: tenant record fixture */

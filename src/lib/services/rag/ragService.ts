@@ -389,6 +389,50 @@ function documentVectorIds(ragModuleKey: string, documentId: string, chunkCount:
   return ids;
 }
 
+/** What a document adds to its module's totals: an indexed document counts once, with its chunks. */
+function totalsShare(doc: Pick<IRagDocument, 'status' | 'chunkCount'> | null): { documents: number; chunks: number } {
+  return doc?.status === 'indexed' ? { documents: 1, chunks: doc.chunkCount ?? 0 } : { documents: 0, chunks: 0 };
+}
+
+/** Move a module's totals by the difference between a document's share before and after one write. */
+async function moveModuleTotals(
+  db: DatabaseProvider,
+  ragModule: IRagModule,
+  before: Pick<IRagDocument, 'status' | 'chunkCount'> | null,
+  after: Pick<IRagDocument, 'status' | 'chunkCount'> | null,
+): Promise<void> {
+  const was = totalsShare(before);
+  const now = totalsShare(after);
+  const documents = now.documents - was.documents;
+  const chunks = now.chunks - was.chunks;
+  if (documents !== 0 || chunks !== 0) {
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents, chunks });
+  }
+}
+
+/**
+ * Write a document's lifecycle fields and move its module's totals by exactly what this write changed.
+ *
+ * The change is taken from the row as it was when the write landed (the database reads it in the same atomic step),
+ * never from a copy read earlier: two re-ingests, an ingest and a delete can overlap on one document, and a decision
+ * taken on a stale copy counts the document twice or not at all. Answers the row as it was before the write, or null
+ * when the document no longer exists (nothing is counted then).
+ */
+async function writeDocumentLifecycle(
+  db: DatabaseProvider,
+  ragModule: IRagModule,
+  documentId: string,
+  data: Parameters<DatabaseProvider['updateRagDocument']>[1],
+): Promise<IRagDocument | null> {
+  const before = await db.updateRagDocumentReturningPrevious(documentId, data);
+  if (!before) return null;
+  await moveModuleTotals(db, ragModule, before, {
+    status: data.status ?? before.status,
+    chunkCount: data.chunkCount ?? before.chunkCount,
+  });
+  return before;
+}
+
 /**
  * Best-effort vector removal. The store is a third-party system: a failure here
  * must never block the database-side cleanup that follows it, or a module and
@@ -1167,7 +1211,7 @@ export async function ingestDocumentUnchecked(
     try {
       await commitRagDocumentPlacement(db, placementCtx, ragModule, docRecord, placement);
     } catch (error) {
-      await db.updateRagDocument(documentId, {
+      await writeDocumentLifecycle(db, ragModule, documentId, {
         status: 'failed',
         errorMessage: error instanceof Error ? error.message : 'Could not store the document permissions',
         // A queued extraction will not run: the row must not keep saying it waits to be read.
@@ -1190,8 +1234,9 @@ export async function ingestDocumentUnchecked(
     return withoutInlineSource(docRecord);
   }
 
+  let chunkCount: number;
   try {
-    const chunkCount = await indexDocumentContent({
+    chunkCount = await indexDocumentContent({
       db,
       tenantDbName,
       tenantId,
@@ -1203,25 +1248,25 @@ export async function ingestDocumentUnchecked(
       text: request.content,
       metadata,
     });
-
-    const lastIndexedAt = new Date();
-    await db.updateRagDocument(documentId, {
-      status: 'indexed',
-      chunkCount,
-      lastIndexedAt,
-    });
-
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
-
-    return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Ingestion failed';
-    await db.updateRagDocument(documentId, {
+    await writeDocumentLifecycle(db, ragModule, documentId, {
       status: 'failed',
       errorMessage: msg,
     });
     throw error;
   }
+
+  // Recorded outside the failure handling above: a document whose content is indexed is never marked failed (and
+  // uncounted) because writing that down went wrong.
+  const lastIndexedAt = new Date();
+  await writeDocumentLifecycle(db, ragModule, documentId, {
+    status: 'indexed',
+    chunkCount,
+    lastIndexedAt,
+  });
+
+  return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
 }
 
 /**
@@ -1257,15 +1302,18 @@ export async function indexPendingRagDocument(
   // once the service is back.
   // A queued extraction that will not run must not keep saying it waits to be read.
   const settled = doc.extraction?.stage ? { extraction: settledExtraction(doc.extraction) } : {};
+  const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
   const off = await serviceOffReason({ tenantDbName, tenantId }, 'rag');
   if (off) {
     const refusal = new ServiceDisabledError(off);
-    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}`, ...settled });
+    const failed = { status: 'failed' as const, errorMessage: `${refusal.code}: ${refusal.message}`, ...settled };
+    // An overlapping re-ingest may have indexed it since it was read above: the totals follow the row, not that copy.
+    if (ragModule) await writeDocumentLifecycle(db, ragModule, documentId, failed);
+    else await db.updateRagDocument(documentId, failed);
     logger.warn('Deferred Knowledge Engine ingest refused: service is off', { documentId, ragModuleKey, code: refusal.code });
     return;
   }
 
-  const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
   if (!ragModule) {
     await db.updateRagDocument(documentId, {
       status: 'failed',
@@ -1283,7 +1331,7 @@ export async function indexPendingRagDocument(
   // Nothing more to do for a queued extraction that failed: its row says why.
   if (extractionPending && text === undefined) return;
   if (!text) {
-    await db.updateRagDocument(documentId, {
+    await writeDocumentLifecycle(db, ragModule, documentId, {
       status: 'failed',
       errorMessage: 'Stored source text is unavailable for this document',
     });
@@ -1291,10 +1339,11 @@ export async function indexPendingRagDocument(
   }
 
   // Deleted since the job started (its pages can take minutes to read): nothing is indexed for a row that is gone.
-  if (!(await db.updateRagDocument(documentId, { status: 'processing' }))) return;
+  if (!(await writeDocumentLifecycle(db, ragModule, documentId, { status: 'processing' }))) return;
 
+  let chunkCount: number;
   try {
-    const chunkCount = await indexDocumentContent({
+    chunkCount = await indexDocumentContent({
       db,
       tenantDbName,
       tenantId,
@@ -1306,35 +1355,33 @@ export async function indexPendingRagDocument(
       text,
       metadata: doc.metadata,
     });
-
-    const indexed = await db.updateRagDocument(documentId, {
-      status: 'indexed',
-      chunkCount,
-      lastIndexedAt: new Date(),
-    });
-    if (!indexed) {
-      // Deleted while it was being indexed: what this run wrote must not outlive the row.
-      await removeVectors(
-        tenantDbName, tenantId, projectId, ragModule,
-        documentVectorIds(ragModuleKey, documentId, chunkCount),
-        `ingest of document ${documentId}, deleted meanwhile`,
-      );
-      await db.deleteRagChunksByDocumentId(documentId).catch((err) => {
-        logger.warn('Failed to delete the chunks of a document deleted during its ingest', { documentId, error: err });
-      });
-      return;
-    }
-
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Ingestion failed';
-    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: msg });
+    await writeDocumentLifecycle(db, ragModule, documentId, { status: 'failed', errorMessage: msg });
     logger.error('Deferred Knowledge Engine ingest failed', {
       documentId,
       ragModuleKey,
       error: msg,
     });
     throw error;
+  }
+
+  // Recorded outside the failure handling above, like ingestDocument.
+  const indexed = await writeDocumentLifecycle(db, ragModule, documentId, {
+    status: 'indexed',
+    chunkCount,
+    lastIndexedAt: new Date(),
+  });
+  if (!indexed) {
+    // Deleted while it was being indexed: what this run wrote must not outlive the row.
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule,
+      documentVectorIds(ragModuleKey, documentId, chunkCount),
+      `ingest of document ${documentId}, deleted meanwhile`,
+    );
+    await db.deleteRagChunksByDocumentId(documentId).catch((err) => {
+      logger.warn('Failed to delete the chunks of a document deleted during its ingest', { documentId, error: err });
+    });
   }
 }
 
@@ -1437,7 +1484,7 @@ async function extractQueuedDocument(
 
   const original = await loadOriginalFile(tenantDbName, tenantId, projectId, doc);
   if (!original) {
-    await db.updateRagDocument(documentId, {
+    await writeDocumentLifecycle(db, ragModule, documentId, {
       status: 'failed',
       errorMessage: ORIGINAL_MISSING_MESSAGE,
       extraction: settledExtraction(base),
@@ -1523,7 +1570,7 @@ async function extractQueuedDocument(
     clearInterval(heartbeat);
     await writes;
     const msg = error instanceof Error ? error.message : 'Extraction failed';
-    await db.updateRagDocument(documentId, {
+    await writeDocumentLifecycle(db, ragModule, documentId, {
       status: 'failed',
       errorMessage: msg,
       extraction: failedExtraction(base, error),
@@ -2395,16 +2442,13 @@ export async function deleteRagDocument(
   // The stored source outlives the row unless it is deleted here.
   await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
-  // Update module stats. Only an indexed document was ever counted in them
-  // (ingest raises the totals once it reached `indexed`), so a failed, pending
-  // or processing one must not lower the counters of the documents that are.
-  if (doc.status === 'indexed') {
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
-  }
-
-  const deleted = await db.deleteRagDocument(request.documentId);
+  // Module stats count indexed documents only. What this document still counted is read from the row in the same
+  // step that deletes it, not from the copy fetched above: an overlapping re-ingest can have taken it out of the
+  // totals, or put it back, since then.
+  const removed = await db.deleteRagDocumentReturningPrevious(request.documentId);
+  if (removed) await moveModuleTotals(db, ragModule, removed, null);
   await deleteRagDocumentAcl(db, ragModule, request.documentId);
-  return deleted;
+  return removed !== null;
 }
 
 /**
@@ -2716,21 +2760,17 @@ export async function reingestDocument(
     logger.warn('Reingest: failed to delete old MongoDB chunks', { error: err });
   }
 
-  // Mark document as processing
-  if (!(await db.updateRagDocument(request.documentId, { status: 'processing', errorMessage: undefined }))) {
+  // Mark document as processing. The module totals count indexed documents only: a document that was indexed stops
+  // being counted in this write, and is counted again once it has indexed. Every lifecycle write moves the totals by
+  // what it changed on the row as it found it, so re-ingests, ingests and deletes that overlap on one document leave
+  // it counted once (or not at all, once deleted), whatever order they land in.
+  if (!(await writeDocumentLifecycle(db, ragModule, request.documentId, { status: 'processing', errorMessage: undefined }))) {
     throw new RagDocumentGoneError();
   }
 
-  // The module totals count indexed documents only. One that was indexed stops
-  // being counted the moment it leaves that state, so a re-ingest that fails
-  // or a delete that lands mid-way leaves the totals right; it is counted
-  // again below once it has indexed.
-  if (doc.status === 'indexed') {
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -oldChunkCount });
-  }
-
+  let chunkCount: number;
   try {
-    const chunkCount = await indexDocumentContent({
+    chunkCount = await indexDocumentContent({
       db,
       tenantDbName,
       tenantId,
@@ -2742,71 +2782,69 @@ export async function reingestDocument(
       text: textContent,
       metadata,
     });
-
-    const now = new Date();
-    // The whole source block is rewritten, not merged: an inline source that
-    // outgrew the cap (or the reverse) has to leave the field it moved out of
-    // empty, or the document would carry two disagreeing copies of itself.
-    // Already committed above, before the destructive steps.
-    const sourceFields = {};
-
-    const indexed = await db.updateRagDocument(request.documentId, {
-      status: 'indexed',
-      chunkCount,
-      lastIndexedAt: now,
-      fileName: request.fileName ?? doc.fileName,
-      size: Buffer.byteLength(textContent, 'utf-8'),
-      updatedBy: request.updatedBy,
-      // Persisted so the next re-index reproduces these chunks rather than
-      // silently reverting to the module's config.
-      ...(request.chunkConfig ? { chunkConfig: request.chunkConfig } : {}),
-      // Only when the caller supplied keys: the row and the vectors have to
-      // agree on what this document is filterable by, and an untouched row
-      // already does.
-      ...(requested ? { metadata } : {}),
-      ...sourceFields,
-    });
-    if (!indexed) {
-      // Deleted while it was being indexed: what this run wrote must not outlive the row.
-      await removeVectors(
-        tenantDbName, tenantId, projectId, ragModule,
-        documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
-        `re-ingest of document ${request.documentId}, deleted meanwhile`,
-      );
-      await db.deleteRagChunksByDocumentId(request.documentId).catch((err) => {
-        logger.warn('Failed to delete the chunks of a document deleted during its re-ingest', { documentId: request.documentId, error: err });
-      });
-      throw new RagDocumentGoneError();
-    }
-
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
-
-    logger.debug('Re-indexed document', {
-      documentId: request.documentId,
-      ragModuleKey: request.ragModuleKey,
-      origin: source.origin,
-      chunkCount,
-    });
-
-    return withoutInlineSource({
-      ...doc,
-      ...sourceFields,
-      status: 'indexed' as const,
-      chunkCount,
-      lastIndexedAt: now,
-      fileName: request.fileName ?? doc.fileName,
-      ...(source.extraction ? { extraction: source.extraction } : {}),
-      ...(request.metadata ? { metadata } : {}),
-    });
   } catch (error) {
-    if (error instanceof RagDocumentGoneError) throw error;
     const msg = error instanceof Error ? error.message : 'Re-ingest failed';
-    await db.updateRagDocument(request.documentId, {
+    await writeDocumentLifecycle(db, ragModule, request.documentId, {
       status: 'failed',
       errorMessage: msg,
     });
     throw error;
   }
+
+  // Recorded outside the failure handling above, like ingestDocument.
+  const now = new Date();
+  // The whole source block is rewritten, not merged: an inline source that
+  // outgrew the cap (or the reverse) has to leave the field it moved out of
+  // empty, or the document would carry two disagreeing copies of itself.
+  // Already committed above, before the destructive steps.
+  const sourceFields = {};
+
+  const indexed = await writeDocumentLifecycle(db, ragModule, request.documentId, {
+    status: 'indexed',
+    chunkCount,
+    lastIndexedAt: now,
+    fileName: request.fileName ?? doc.fileName,
+    size: Buffer.byteLength(textContent, 'utf-8'),
+    updatedBy: request.updatedBy,
+    // Persisted so the next re-index reproduces these chunks rather than
+    // silently reverting to the module's config.
+    ...(request.chunkConfig ? { chunkConfig: request.chunkConfig } : {}),
+    // Only when the caller supplied keys: the row and the vectors have to
+    // agree on what this document is filterable by, and an untouched row
+    // already does.
+    ...(requested ? { metadata } : {}),
+    ...sourceFields,
+  });
+  if (!indexed) {
+    // Deleted while it was being indexed: what this run wrote must not outlive the row.
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule,
+      documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
+      `re-ingest of document ${request.documentId}, deleted meanwhile`,
+    );
+    await db.deleteRagChunksByDocumentId(request.documentId).catch((err) => {
+      logger.warn('Failed to delete the chunks of a document deleted during its re-ingest', { documentId: request.documentId, error: err });
+    });
+    throw new RagDocumentGoneError();
+  }
+
+  logger.debug('Re-indexed document', {
+    documentId: request.documentId,
+    ragModuleKey: request.ragModuleKey,
+    origin: source.origin,
+    chunkCount,
+  });
+
+  return withoutInlineSource({
+    ...doc,
+    ...sourceFields,
+    status: 'indexed' as const,
+    chunkCount,
+    lastIndexedAt: now,
+    fileName: request.fileName ?? doc.fileName,
+    ...(source.extraction ? { extraction: source.extraction } : {}),
+    ...(request.metadata ? { metadata } : {}),
+  });
 }
 
 /* ── Query logs ──────────────────────────────────────────────────────── */

@@ -671,7 +671,10 @@ describe('RAG Service', () => {
     beforeEach(() => {
       db.findRagModuleByKey.mockResolvedValue(mockModule);
       db.createRagDocument.mockResolvedValue({ ...mockDocument, _id: 'ragdoc-1', status: 'processing', chunkCount: 0 });
-      db.updateRagDocument.mockResolvedValue(null);
+      // The row exists: an update answers it, as both providers do (null means it is gone).
+      db.updateRagDocument.mockImplementation(async (id: string, patch: object) => ({
+        ...mockDocument, _id: id, status: 'processing', chunkCount: 0, ...patch,
+      }));
       db.updateRagModule.mockResolvedValue(null);
       db.bulkInsertRagChunks.mockResolvedValue(undefined);
     });
@@ -774,6 +777,18 @@ describe('RAG Service', () => {
         'ragmod-1',
         expect.objectContaining({ documents: 1 }),
       );
+    });
+
+    it('does not count a document deleted while it was being indexed', async () => {
+      db.updateRagDocument.mockResolvedValue(null);
+      await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
+      expect(db.incrementRagModuleTotals).not.toHaveBeenCalled();
+    });
+
+    it('keeps a document whose content was indexed out of the failed state when recording it goes wrong', async () => {
+      db.incrementRagModuleTotals.mockRejectedValueOnce(new Error('totals unavailable'));
+      await expect(ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq)).rejects.toThrow('totals unavailable');
+      expect(db.updateRagDocument).not.toHaveBeenCalledWith('ragdoc-1', expect.objectContaining({ status: 'failed' }));
     });
 
     it('marks document as failed and rethrows on embedding error', async () => {
