@@ -24,7 +24,6 @@ const base = {
   kind: 'concurrency' as const,
   dimension: 'agent',
   outcome: 'refused' as const,
-  mode: 'on' as const,
   source: { type: 'user' as const, id: 'u1' },
 };
 
@@ -68,7 +67,7 @@ describe('recordLimitEvent', () => {
   it('samples per key', async () => {
     recordLimitEvent(base);
     recordLimitEvent({ ...base, dimension: 'flow' });
-    recordLimitEvent({ ...base, outcome: 'would_refuse' });
+    recordLimitEvent({ ...base, outcome: 'waited' });
     recordLimitEvent({ ...base, source: { type: 'user', id: 'u2' } });
     recordLimitEvent({ ...base, tenantId: 't2' });
     await flushLimitEvents();
@@ -89,15 +88,15 @@ describe('recordLimitEvent', () => {
 });
 
 describe('outcomeEventFor', () => {
-  it('records only non-allowed decisions', async () => {
-    outcomeEventFor({ allowed: true, outcome: 'allowed', kind: 'monthly', dimension: 'searches' }, { tenantId: 't1', mode: 'on' });
+  it('records only non-allowed decisions, always as mode on', async () => {
+    outcomeEventFor({ allowed: true, outcome: 'allowed', kind: 'monthly', dimension: 'searches' }, { tenantId: 't1' });
     outcomeEventFor(
-      { allowed: true, outcome: 'would_refuse', kind: 'monthly', dimension: 'searches', limit: 5, used: 5 },
-      { tenantId: 't1', mode: 'shadow' },
+      { allowed: false, outcome: 'refused', kind: 'monthly', dimension: 'flowRuns', limit: 5, used: 5 },
+      { tenantId: 't1' },
     );
     await flushLimitEvents();
     expect(stored()).toHaveLength(1);
-    expect(stored()[0]).toMatchObject({ outcome: 'would_refuse', mode: 'shadow', limit: 5, used: 5, kind: 'monthly' });
+    expect(stored()[0]).toMatchObject({ outcome: 'refused', mode: 'on', limit: 5, used: 5, kind: 'monthly' });
   });
 });
 
@@ -109,6 +108,16 @@ describe('list and prune', () => {
     expect(h.db.listPlanLimitEvents).toHaveBeenCalledWith('t1', { since: undefined, kind: undefined, limit: 1000 });
     await listLimitEvents('t1');
     expect(h.db.listPlanLimitEvents).toHaveBeenLastCalledWith('t1', { since: undefined, kind: undefined, limit: 200 });
+  });
+
+  it('hides rows stored by the retired measure-only mode', async () => {
+    const at = new Date(0);
+    h.db.listPlanLimitEvents.mockResolvedValueOnce([
+      { tenantId: 't1', kind: 'monthly', outcome: 'would_refuse', mode: 'shadow', count: 1, at },
+      { tenantId: 't1', kind: 'monthly', outcome: 'refused', mode: 'on', count: 1, at },
+    ] as never);
+    const events = await listLimitEvents('t1');
+    expect(events.map((e) => e.outcome)).toEqual(['refused']);
   });
 
   it('prunes events older than 90 days', async () => {

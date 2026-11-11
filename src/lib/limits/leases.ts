@@ -184,7 +184,7 @@ async function tryAcquire(input: AcquirePlanLeaseInput, record: boolean): Promis
       retryAfterMs: REFUSED_RETRY_MS,
     });
     notePeak(tenantId, pool, result.count);
-    if (record) outcomeEventFor(decision, { tenantId, mode: 'on', source: input.source });
+    if (record) outcomeEventFor(decision, { tenantId, source: input.source });
     return { decision, lease: null };
   }
 
@@ -201,7 +201,6 @@ async function tryAcquire(input: AcquirePlanLeaseInput, record: boolean): Promis
   if (record) {
     outcomeEventFor(decision, {
       tenantId,
-      mode: plan.mode === 'on' ? 'on' : 'shadow',
       source: input.source,
     });
   }
@@ -250,16 +249,11 @@ export async function waitForPlanLease(
           kind: 'concurrency',
           dimension: input.pool,
           outcome: 'waited',
-          mode: 'on',
           limit: last.decision.limit,
           used: last.decision.used,
           waitMs: Date.now() - startedAt,
           source: input.source,
         });
-      }
-      // Shadow measurement: tryAcquire was called without recording, so write the would-refuse hit here.
-      if (!queued && last.decision.outcome === 'would_refuse') {
-        outcomeEventFor(last.decision, { tenantId: input.tenantId, mode: 'shadow', source: input.source });
       }
       return last;
     }
@@ -280,7 +274,6 @@ export async function waitForPlanLease(
     if (elapsed >= input.maxWaitMs || input.signal?.aborted) {
       outcomeEventFor(last.decision, {
         tenantId: input.tenantId,
-        mode: 'on',
         source: input.source,
         waitMs: elapsed,
       });

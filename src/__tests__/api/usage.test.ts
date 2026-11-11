@@ -49,7 +49,7 @@ const HEADERS = {
 };
 
 const SUMMARY: UsageSummary = {
-  mode: 'shadow',
+  mode: 'on',
   plan: null,
   capacity: [{ dimension: 'agent', used: 1, limit: 4 }],
   monthly: [{ dimension: 'searches', used: 2 }],
@@ -73,7 +73,7 @@ describe('usage API', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    withEnv({ DEPLOYMENT_MODE: 'saas', PLAN_LIMITS_MODE: 'shadow' });
+    withEnv({ DEPLOYMENT_MODE: 'saas' });
     db = createMockDb();
     db.findTenantById.mockResolvedValue({ _id: 'tenant-1', slug: 'acme', dbName: 'tenant_acme', licenseType: 'FREE' } as never);
     db.findUserById.mockResolvedValue({ _id: 'user-1', tenantId: 'tenant-1', role: 'owner' } as never);
@@ -96,18 +96,18 @@ describe('usage API', () => {
       expect(buildUsageSummary).toHaveBeenCalledWith('tenant-1');
     });
 
-    it('answers 404 when PLAN_LIMITS_MODE is off', async () => {
+    it('stays active on saas even when the retired PLAN_LIMITS_MODE=off is still set', async () => {
       withEnv({ DEPLOYMENT_MODE: 'saas', PLAN_LIMITS_MODE: 'off' });
       const response = await app.inject({ method: 'GET', url: '/api/usage/summary', headers: HEADERS });
-      expect(response.statusCode).toBe(404);
-      expect(parseJsonBody(response.body)).toEqual({ error: 'Not Found' });
-      expect(buildUsageSummary).not.toHaveBeenCalled();
+      expect(response.statusCode).toBe(200);
+      expect(buildUsageSummary).toHaveBeenCalledWith('tenant-1');
     });
 
-    it('answers 404 on an onprem deployment whatever PLAN_LIMITS_MODE says', async () => {
+    it('answers 404 on an onprem deployment', async () => {
       withEnv({ DEPLOYMENT_MODE: 'onprem', PLAN_LIMITS_MODE: 'on' });
       const response = await app.inject({ method: 'GET', url: '/api/usage/summary', headers: HEADERS });
       expect(response.statusCode).toBe(404);
+      expect(parseJsonBody(response.body)).toEqual({ error: 'Not Found' });
       expect(buildUsageSummary).not.toHaveBeenCalled();
     });
 
@@ -134,7 +134,7 @@ describe('usage API', () => {
       const at = new Date('2026-11-07T10:00:00Z');
       vi.mocked(listLimitEvents).mockResolvedValue([
         { tenantId: 'tenant-1', kind: 'concurrency', dimension: 'agent', outcome: 'refused', mode: 'on', count: 2, at },
-        { tenantId: 'tenant-1', kind: 'monthly', dimension: 'searches', outcome: 'would_refuse', mode: 'shadow', count: 1, at },
+        { tenantId: 'tenant-1', kind: 'monthly', dimension: 'searches', outcome: 'refused', mode: 'on', count: 1, at },
       ]);
       const response = await app.inject({
         method: 'GET',
@@ -160,11 +160,12 @@ describe('usage API', () => {
       expect(bad.statusCode).toBe(400);
     });
 
-    it('answers 404 when plan limits are off and on onprem', async () => {
-      for (const env of [
-        { DEPLOYMENT_MODE: 'saas', PLAN_LIMITS_MODE: 'off' },
+    it('answers 404 on onprem', async () => {
+      const envs: Array<Record<string, string>> = [
+        { DEPLOYMENT_MODE: 'onprem' },
         { DEPLOYMENT_MODE: 'onprem', PLAN_LIMITS_MODE: 'on' },
-      ]) {
+      ];
+      for (const env of envs) {
         withEnv(env);
         const response = await app.inject({ method: 'GET', url: '/api/usage/events', headers: HEADERS });
         expect(response.statusCode, JSON.stringify(env)).toBe(404);

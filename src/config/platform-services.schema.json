@@ -151,7 +151,7 @@
         },
         "requiresPlanUsage": {
           "type": "boolean",
-          "description": "Shown only when plan limits are active on the deployment (hosted deployments with PLAN_LIMITS_MODE shadow or on)."
+          "description": "Shown only when plan limits are active on the deployment (hosted deployments)."
         },
         "enterpriseModule": {
           "type": "string",

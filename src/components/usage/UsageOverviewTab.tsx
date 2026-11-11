@@ -1,7 +1,6 @@
 'use client';
 
-import { Alert, Button, Group, Paper, SimpleGrid, Stack, Text, Title } from '@mantine/core';
-import { IconInfoCircle } from '@tabler/icons-react';
+import { Button, Group, Paper, SimpleGrid, Stack, Text, Title } from '@mantine/core';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { CapacityDimension, MonthlyDimension, UsageRow, UsageSummary } from '@/lib/limits/usageSummary';
 import UsageBar from './UsageBar';
@@ -69,10 +68,6 @@ export default function UsageOverviewTab({
 
   return (
     <Stack gap="lg">
-      {summary.mode === 'shadow' ? (
-        <Alert color="blue" icon={<IconInfoCircle size={16} />}>{t('shadowNotice')}</Alert>
-      ) : null}
-
       <SimpleGrid cols={{ base: 1, md: credits ? 2 : 1 }} spacing="md">
         <Paper withBorder p="md" radius="md">
           <Title order={4} mb="sm">{t('plan.title')}</Title>

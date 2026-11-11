@@ -107,7 +107,7 @@ export async function resolveTenantPlan(tenantId: string): Promise<ResolvedTenan
     const license = LicenseManager.getEffectiveLicenseForTenant(tenant);
     const claim = license.plan
       ?? (licenseLapsed(tenant, license) ? getRestrictedPlanClaim() ?? getDefaultPlanClaim() : getDefaultPlanClaim());
-    const mode = effectivePlanLimitsMode(claim?.enforcement);
+    const mode = effectivePlanLimitsMode();
     const value: ResolvedTenantPlan = {
       tenantId,
       mode,

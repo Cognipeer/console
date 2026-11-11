@@ -6,10 +6,8 @@ describe('decideLimit', () => {
 
   it.each([
     ['off', 5, 5, 'allowed', true],
-    ['shadow', 5, 5, 'would_refuse', true],
     ['on', 5, 5, 'refused', false],
     ['on', 5, 4, 'allowed', true],
-    ['shadow', 5, 4, 'allowed', true],
   ] as const)('mode %s limit %i used %i -> %s', (mode, limit, used, outcome, allowed) => {
     const d = decideLimit({ ...base, mode, limit, used });
     expect(d.outcome).toBe(outcome);

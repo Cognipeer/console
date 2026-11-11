@@ -90,7 +90,7 @@ describe('browser session leases', () => {
     expect(h.release).toHaveBeenCalledTimes(1);
   });
 
-  it('never refuses when no lease is handed back (limits off / shadow with room)', async () => {
+  it('never refuses when no lease is handed back (limits off, or no limit for the pool)', async () => {
     h.acquire.mockResolvedValue({ decision: allowed, lease: null });
     await expect(createBrowserSession(CTX, { browserId: 'br-1' } as never)).resolves.toBeDefined();
     expect(h.release).not.toHaveBeenCalled();

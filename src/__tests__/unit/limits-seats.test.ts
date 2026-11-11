@@ -1,6 +1,6 @@
 /**
  * Seat limits at the places a seat is taken: the refusal is 402 `seat_limit_reached` with the plan-limit envelope,
- * shadow mode allows and records, off mode counts nothing.
+ * off mode counts nothing.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,7 +20,7 @@ vi.mock('@/lib/limits/events', () => ({
 import { assertSeats } from '@/lib/limits/seats';
 import { sendPlanLimitRefusal } from '@/server/api/planLimitReply';
 
-function setPlan(mode: 'on' | 'shadow' | 'off', seats: { console?: number; portal?: number }) {
+function setPlan(mode: 'on' | 'off', seats: { console?: number; portal?: number }) {
   h.plan = { tenantId: 't1', mode, limits: { concurrency: {}, monthly: {}, seats, credits: {} } };
 }
 
@@ -66,13 +66,6 @@ describe('seats at invitation, user creation and role change', () => {
     expect(h.db.iamCountUsers).toHaveBeenCalledWith(expect.objectContaining({ roles: ['portal_user'] }));
     h.db.iamCountUsers.mockResolvedValue(5);
     await expect(assertSeats({ tenantId: 't1', kind: 'portal' })).rejects.toMatchObject({ code: 'seat_limit_reached' });
-  });
-
-  it('allows and records the would-be refusal in shadow mode', async () => {
-    setPlan('shadow', { console: 1 });
-    h.db.iamCountUsers.mockResolvedValue(1);
-    await expect(assertSeats({ tenantId: 't1', kind: 'console' })).resolves.toBeUndefined();
-    expect(h.events).toHaveLength(1);
   });
 
   it('does not count anything when off or without a seat limit', async () => {

@@ -44,7 +44,7 @@ import { assertMonthlyAllowance, clearMeterCacheForTests } from '@/lib/limits/me
 
 const ctx = { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' };
 
-function setPlan(mode: 'on' | 'shadow' | 'off', crawlerPages?: number) {
+function setPlan(mode: 'on' | 'off', crawlerPages?: number) {
   h.plan = {
     tenantId: 'tenant-1',
     mode,
@@ -95,20 +95,6 @@ describe('crawl job runner and the monthly crawler-page allowance', () => {
     expect(h.events.length).toBeGreaterThan(0);
   });
 
-  it('counts pages but lets the crawl finish in shadow mode, recording the would-be refusal', async () => {
-    setPlan('shadow', 3);
-    let stored = 0;
-    h.db.incrementPlanUsageMonthly.mockImplementation(async (_t?: string, _p?: string, delta: Record<string, number> = {}) => {
-      stored += delta.crawlerPages ?? 0;
-    });
-    h.db.getPlanUsageMonthly.mockImplementation(async () => ({ crawlerPages: stored }));
-
-    await runCrawlJobLocal(ctx as never, 'job-1');
-
-    expect(stored).toBe(6);
-    expect(db.finalizeCrawlJob).toHaveBeenCalledWith('job-1', 'tenant-1', expect.objectContaining({ pagesProcessed: 6 }));
-  });
-
   it('touches nothing when limits are off', async () => {
     setPlan('off', 3);
     await runCrawlJobLocal(ctx as never, 'job-1');
@@ -126,13 +112,6 @@ describe('starting a crawl against the allowance', () => {
       code: 'monthly_allowance_exhausted',
       status: 402,
     });
-  });
-
-  it('allows and records in shadow mode', async () => {
-    setPlan('shadow', 10);
-    h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 10 });
-    await expect(assertMonthlyAllowance({ tenantId: 'tenant-1', meter: 'crawlerPages' })).resolves.toBeUndefined();
-    expect(h.events).toHaveLength(1);
   });
 
   it('allows when off or when there is no limit', async () => {

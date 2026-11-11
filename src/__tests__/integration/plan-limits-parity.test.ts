@@ -86,7 +86,7 @@ describeForEachProvider('Plan limits usage', (getDb) => {
         count: 1,
         at: new Date(base + 60_000),
       },
-      { tenantId, kind: 'monthly', outcome: 'would_refuse', mode: 'shadow', count: 1, at: new Date(base + 120_000) },
+      { tenantId, kind: 'monthly', outcome: 'refused', mode: 'on', count: 1, at: new Date(base + 120_000) },
       { tenantId: otherTenantId, kind: 'api_rpm', outcome: 'refused', mode: 'on', count: 1, at: new Date(base) },
     ];
     await db.insertPlanLimitEvents(events);

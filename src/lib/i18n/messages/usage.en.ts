@@ -16,7 +16,6 @@ export const usageEn = {
   retry: 'Try again',
   noAccessTitle: 'Usage is visible to owners and admins',
   noAccessDescription: 'Ask an owner or admin of this workspace for the plan and usage numbers.',
-  shadowNotice: 'Limits are measured but not enforced yet. Nothing is refused; limit events show what would have been.',
   scopeCluster: 'Counted across the whole cluster.',
   scopePod: 'Counted on this server only, so the numbers can differ between servers.',
   noPlan: 'No plan applies',
@@ -226,7 +225,7 @@ export const usageEn = {
   },
   events: {
     title: 'Limit events',
-    description: 'Times a limit was reached, or would have been in shadow mode. Similar events close together are folded into one row.',
+    description: 'Times a limit was reached. Similar events close together are folded into one row.',
     empty: 'No limit events in this period.',
     sinceLabel: 'Period',
     since: {
@@ -247,7 +246,6 @@ export const usageEn = {
     },
     outcomes: {
       refused: 'Refused',
-      would_refuse: 'Would refuse',
       queued: 'Queued',
       waited: 'Waited',
     },

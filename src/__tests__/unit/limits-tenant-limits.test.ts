@@ -26,7 +26,7 @@ vi.mock('@/lib/license/license-manager', () => ({
 }));
 vi.mock('@/lib/limits/mode', () => ({
   planLimitsActive: () => h.active,
-  effectivePlanLimitsMode: (e?: 'shadow' | 'on') => (h.active ? e ?? 'shadow' : 'off'),
+  effectivePlanLimitsMode: () => (h.active ? 'on' : 'off'),
 }));
 vi.mock('@/lib/license/enterprise-license-cache', () => ({
   invalidateEnterpriseLicenseCache: h.invalidateEnterprise,
@@ -47,7 +47,8 @@ const claim = {
   id: 'test-plan',
   name: 'Test',
   capacityPacks: 2,
-  enforcement: 'on' as const,
+  // Written by older CRM releases; ignored: a saas deployment always enforces.
+  enforcement: 'shadow' as const,
   seats: { console: 5, portal: 20 },
   limits: {
     apiRequestsPerMinute: 120,
@@ -115,7 +116,7 @@ describe('resolveTenantPlan', () => {
     expect(h.findTenantById).not.toHaveBeenCalled();
   });
 
-  it('uses the license plan and its enforcement', async () => {
+  it('uses the license plan and enforces it whatever its legacy enforcement says', async () => {
     h.findTenantById.mockResolvedValue({ _id: 't1' });
     h.effective.mockReturnValue({ plan: claim, expiresAt: new Date('2030-01-01') });
     const r = await resolveTenantPlan('t1');
@@ -133,7 +134,7 @@ describe('resolveTenantPlan', () => {
     h.defaultClaim = null;
     const none = await resolveTenantPlan('t1');
     expect(none.limits).toBeNull();
-    expect(none.mode).toBe('shadow');
+    expect(none.mode).toBe('on');
   });
 
   it('puts a lapsed stored license on the restricted plan, and no license on the default plan', async () => {
@@ -196,7 +197,7 @@ describe('resolveTenantPlan', () => {
     h.findTenantById.mockRejectedValue(new Error('db down'));
     const r = await resolveTenantPlan('t1');
     expect(r.limits).toBeNull();
-    expect(r.mode).toBe('shadow');
+    expect(r.mode).toBe('on');
     h.findTenantById.mockResolvedValue(null);
     clearTenantPlanCacheForTests();
     expect((await resolveTenantPlan('t1')).limits).toBeNull();

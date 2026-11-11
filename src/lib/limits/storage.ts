@@ -104,7 +104,7 @@ async function decideStorage(
     amount,
   });
   if (decision.outcome !== 'allowed') {
-    outcomeEventFor(decision, { tenantId, mode: plan.mode === 'on' ? 'on' : 'shadow', source: input.source });
+    outcomeEventFor(decision, { tenantId, source: input.source });
   }
   const held = reserve && decision.allowed ? amount : 0;
   if (held > 0) hold(tenantId, held);

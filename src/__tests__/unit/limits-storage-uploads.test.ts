@@ -1,6 +1,6 @@
 /**
  * Storage at the upload sites: the refusal is 413 `storage_quota_exceeded` on the Files routes (`describeFileError`),
- * shadow mode allows and records, off mode never reads the stored bytes, and the Files UI words the code.
+ * off mode never reads the stored bytes, and the Files UI words the code.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -24,7 +24,7 @@ import { FilesApiError } from '@/components/files/filesApi';
 import { filesCommonEn } from '@/lib/i18n/messages/filesCommon.en';
 import { filesCommonTr } from '@/lib/i18n/messages/filesCommon.tr';
 
-function setPlan(mode: 'on' | 'shadow' | 'off', storageBytes?: number) {
+function setPlan(mode: 'on' | 'off', storageBytes?: number) {
   h.plan = {
     tenantId: 't1',
     mode,
@@ -58,12 +58,6 @@ describe('storage refusal at an upload', () => {
     expect(answer.unexpected).toBe(false);
     expect(answer.body).toMatchObject({ code: 'storage_quota_exceeded', kind: 'storage', limit: 1000, used: 900 });
     expect(typeof answer.body.error).toBe('string');
-  });
-
-  it('allows and records in shadow mode', async () => {
-    setPlan('shadow', 1000);
-    expect(await refusal()).toBeUndefined();
-    expect(h.events).toHaveLength(1);
   });
 
   it('never reads the stored bytes when off or without a limit', async () => {

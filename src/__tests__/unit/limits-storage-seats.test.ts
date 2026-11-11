@@ -26,7 +26,7 @@ import {
 } from '@/lib/limits/storage';
 import { assertSeats, checkSeats } from '@/lib/limits/seats';
 
-function setPlan(mode: 'on' | 'shadow' | 'off', patch: Record<string, unknown>) {
+function setPlan(mode: 'on' | 'off', patch: Record<string, unknown>) {
   h.plan = {
     tenantId: 't1',
     mode,
@@ -61,12 +61,6 @@ describe('checkStorageStock', () => {
     const d = await checkStorageStock({ tenantId: 't1', incomingBytes: 101 });
     expect(d).toMatchObject({ allowed: false, outcome: 'refused', kind: 'storage', limit: 1000, used: 900 });
     expect(h.events).toHaveLength(1);
-  });
-
-  it('shadow allows but reports', async () => {
-    setPlan('shadow', { storageBytes: 10 });
-    h.db.sumFileRecordBytes.mockResolvedValue(10);
-    expect(await checkStorageStock({ tenantId: 't1', incomingBytes: 1 })).toMatchObject({ allowed: true, outcome: 'would_refuse' });
   });
 
   it('caches the sum and noteStoredBytes adjusts it', async () => {
@@ -137,11 +131,9 @@ describe('checkSeats', () => {
     expect((await checkSeats({ tenantId: 't1', kind: 'console' })).allowed).toBe(true);
   });
 
-  it('shadow reports and allows; assertSeats throws seat_limit_reached', async () => {
-    setPlan('shadow', { seats: { console: 1 } });
-    h.db.iamCountUsers.mockResolvedValue(1);
-    expect(await checkSeats({ tenantId: 't1', kind: 'console' })).toMatchObject({ allowed: true, outcome: 'would_refuse' });
+  it('assertSeats throws seat_limit_reached (402) at the limit', async () => {
     setPlan('on', { seats: { console: 1 } });
+    h.db.iamCountUsers.mockResolvedValue(1);
     const err = await assertSeats({ tenantId: 't1', kind: 'console' }).catch((e) => e);
     expect(err.code).toBe('seat_limit_reached');
     expect(err.status).toBe(402);

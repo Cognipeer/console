@@ -4,8 +4,8 @@
  * default plan). Hosted (saas) deployments only; see `mode.ts`.
  */
 
-/** off = not measured; shadow = measured, would-be refusals recorded, nothing refused; on = refusals apply. */
-export type PlanLimitsMode = 'off' | 'shadow' | 'on';
+/** off = not measured (onprem); on = measured and refused at the limit (saas). */
+export type PlanLimitsMode = 'off' | 'on';
 
 /** Things counted while they are in progress (a lease is held for each). */
 export type ConcurrencyPool = 'agent' | 'flow' | 'job' | 'crawler' | 'browser' | 'realtime' | 'sandbox';
@@ -53,13 +53,13 @@ export interface TenantLimits {
 
 export interface ResolvedTenantPlan {
   tenantId: string;
-  /** Effective for this tenant (deployment mode × tenant enforcement). */
+  /** The deployment's mode: on for saas, off for onprem. */
   mode: PlanLimitsMode;
   /** null = no plan applies (nothing to measure against). */
   limits: TenantLimits | null;
 }
 
-export type PlanLimitOutcome = 'allowed' | 'refused' | 'would_refuse';
+export type PlanLimitOutcome = 'allowed' | 'refused';
 
 export interface PlanLimitDecision {
   /** false only when the effective mode is `on` and the limit is reached. */
@@ -94,13 +94,14 @@ export interface PlanLimitSource {
   label?: string;
 }
 
-/** A refusal (on), a would-be refusal (shadow), or a wait for a free slot. */
+/** A refusal, or a wait for a free slot. */
 export interface PlanLimitEvent {
   tenantId: string;
   kind: PlanLimitKind;
   dimension?: string;
-  outcome: 'refused' | 'would_refuse' | 'queued' | 'waited';
-  mode: 'shadow' | 'on';
+  outcome: 'refused' | 'queued' | 'waited';
+  /** Always `on`; kept because stored rows carry it. */
+  mode: 'on';
   limit?: number;
   used?: number;
   waitMs?: number;
