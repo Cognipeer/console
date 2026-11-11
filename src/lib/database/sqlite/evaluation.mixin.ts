@@ -860,7 +860,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
 
     async listEvaluationRunsByStatus(
       statuses: EvaluationRunStatus[],
-      opts?: { createdBefore?: Date; limit?: number },
+      opts?: { createdBefore?: Date; limit?: number; after?: { createdAt: Date; id: string } },
     ): Promise<IEvaluationRun[]> {
       if (statuses.length === 0) return [];
       const db = this.getTenantDb();
@@ -870,6 +870,12 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (opts?.createdBefore) {
         where += ' AND createdAt < @createdBefore';
         params.createdBefore = opts.createdBefore.toISOString();
+      }
+      if (opts?.after) {
+        // After (createdAt, id) of the last run of the previous page, in the order the runs are sorted by.
+        where += ' AND (createdAt > @afterCreatedAt OR (createdAt = @afterCreatedAt AND id > @afterId))';
+        params.afterCreatedAt = opts.after.createdAt.toISOString();
+        params.afterId = opts.after.id;
       }
       const limit = Math.max(1, Math.min(toNonNegativeInt(opts?.limit, 1000) || 1000, 5000));
       const rows = db.prepare(
@@ -929,6 +935,17 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
          SET status = 'failed', error = @message, finishedAt = @now, updatedAt = @now
          WHERE status = 'running' AND COALESCE(heartbeatAt, startedAt, createdAt) < @cutoff`,
       ).run({ message, now, cutoff: heartbeatBefore.toISOString() }).changes;
+    }
+
+    async expirePendingEvaluationRuns(createdBefore: Date, message: string): Promise<number> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      // The guard is in the WHERE: a run claimed meanwhile is `running` and does not match.
+      return db.prepare(
+        `UPDATE ${TABLES.evaluationRuns}
+         SET status = 'failed', error = @message, finishedAt = @now, updatedAt = @now
+         WHERE status = 'pending' AND createdAt < @cutoff`,
+      ).run({ message, now, cutoff: createdBefore.toISOString() }).changes;
     }
 
     // ── Dataset metadata (atomic per-block patch) ───────────────────

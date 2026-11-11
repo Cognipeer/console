@@ -1048,10 +1048,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   requestEvaluationRunCancel(id: string, at: Date): Promise<IEvaluationRun | null>;
   /** Fails `running` runs whose `heartbeatAt ?? startedAt` is older than the cutoff; returns how many changed. */
   failStaleEvaluationRuns(heartbeatBefore: Date, message: string): Promise<number>;
-  /** Tenant-wide (no project filter), items projected out. */
+  /**
+   * Fails `pending` runs created before the cutoff, in one conditional write: a run a worker claims meanwhile is
+   * `running` and is not touched. Returns how many changed.
+   */
+  expirePendingEvaluationRuns(createdBefore: Date, message: string): Promise<number>;
+  /**
+   * Tenant-wide (no project filter), items projected out, ordered by createdAt then id. `after` continues from the
+   * last run of an earlier page (keyset paging: runs that leave the statuses meanwhile do not shift the pages).
+   */
   listEvaluationRunsByStatus(
     statuses: EvaluationRunStatus[],
-    opts?: { createdBefore?: Date; limit?: number },
+    opts?: { createdBefore?: Date; limit?: number; after?: { createdAt: Date; id: string } },
   ): Promise<IEvaluationRun[]>;
   /** Like listEvaluationRuns, but `items` is projected out (returned as `[]`). */
   listEvaluationRunSummaries(filters: {

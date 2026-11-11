@@ -878,12 +878,20 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     async listEvaluationRunsByStatus(
       statuses: EvaluationRunStatus[],
-      opts?: { createdBefore?: Date; limit?: number },
+      opts?: { createdBefore?: Date; limit?: number; after?: { createdAt: Date; id: string } },
     ): Promise<IEvaluationRun[]> {
       if (statuses.length === 0) return [];
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { status: { $in: statuses } };
       if (opts?.createdBefore) filter.createdAt = { $lt: opts.createdBefore };
+      if (opts?.after) {
+        // After (createdAt, _id) of the last run of the previous page, in the order the runs are sorted by.
+        const afterId = toObjectId(opts.after.id);
+        filter.$or = [
+          { createdAt: { $gt: opts.after.createdAt } },
+          ...(afterId ? [{ createdAt: opts.after.createdAt, _id: { $gt: afterId } }] : []),
+        ];
+      }
       const docs = await db
         .collection(COLLECTIONS.evaluationRuns)
         .find(filter, { projection: { items: 0 } })
@@ -960,6 +968,17 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
             { heartbeatAt: null, startedAt: null, createdAt: { $lt: heartbeatBefore } },
           ],
         },
+        { $set: { status: 'failed', error: message, finishedAt: now, updatedAt: now } },
+      );
+      return result.modifiedCount;
+    }
+
+    async expirePendingEvaluationRuns(createdBefore: Date, message: string): Promise<number> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      // The guard is in the FILTER: a run claimed meanwhile is `running` and does not match.
+      const result = await db.collection(COLLECTIONS.evaluationRuns).updateMany(
+        { status: 'pending', createdAt: { $lt: createdBefore } },
         { $set: { status: 'failed', error: message, finishedAt: now, updatedAt: now } },
       );
       return result.modifiedCount;

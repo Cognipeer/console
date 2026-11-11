@@ -38,7 +38,7 @@ const logger = createLogger('evaluation:reconcile');
 const CHECK_INTERVAL_MS = 60_000;
 const SCHEDULER_LOCK_KEY = 'scheduler:evaluation-run-reconciler';
 const SCHEDULER_LOCK_TTL_SECONDS = 5 * 60;
-/** Bound on how many pending runs one pass republishes or fails per tenant. */
+/** How many pending runs the boot pass reads (and republishes) at a time. */
 const PENDING_BATCH = 200;
 
 const RESTART_MESSAGE = 'The server restarted while this run was in progress';
@@ -101,36 +101,44 @@ async function sweep(mode: 'boot' | 'periodic'): Promise<EvaluationSweepResult> 
           result.failedRunning += await db.failStaleEvaluationRuns(new Date(now - staleMs), staleMessage(staleMs));
         }
 
-        const expired = await db.listEvaluationRunsByStatus(['pending'], {
-          createdBefore: new Date(now - EVAL_RUN_PENDING_MAX_AGE_MS),
-          limit: PENDING_BATCH,
-        });
-        for (const run of expired) {
-          await db.updateEvaluationRun(String(run._id), {
-            status: 'failed',
-            error: PENDING_EXPIRED_MESSAGE,
-            finishedAt: new Date(),
-          });
-          result.expiredPending += 1;
-        }
+        // One conditional write (`pending` and older than the cutoff): a run a worker claims at any moment is
+        // `running` by then and is left alone, so a live run is never failed under its executor.
+        result.expiredPending += await db.expirePendingEvaluationRuns(
+          new Date(now - EVAL_RUN_PENDING_MAX_AGE_MS),
+          PENDING_EXPIRED_MESSAGE,
+        );
 
         if (queue && queueLost) {
-          const pending = await db.listEvaluationRunsByStatus(['pending'], { limit: PENDING_BATCH });
-          for (const run of pending) {
-            try {
-              await queue.publish(
-                EVALUATION_RUN_QUEUE,
-                EVALUATION_RUN_JOB,
-                { ...jobPayloadFor(run), tenantDbName },
-                { attempts: 1, backoffMs: 5000 },
-              );
-              result.requeuedPending += 1;
-            } catch (error) {
-              logger.warn('Failed to republish a pending evaluation run', {
-                runId: String(run._id),
-                error: error instanceof Error ? error.message : String(error),
-              });
+          // Every run that was pending when this pass started lost its job with the process: all of them are
+          // published again, a page at a time. The pages follow (createdAt, id), so runs the republished jobs claim
+          // meanwhile leave the pending set without making a later page skip any.
+          const createdBefore = new Date(now);
+          let after: { createdAt: Date; id: string } | undefined;
+          for (;;) {
+            const pending = await db.listEvaluationRunsByStatus(['pending'], {
+              createdBefore,
+              limit: PENDING_BATCH,
+              ...(after ? { after } : {}),
+            });
+            for (const run of pending) {
+              try {
+                await queue.publish(
+                  EVALUATION_RUN_QUEUE,
+                  EVALUATION_RUN_JOB,
+                  { ...jobPayloadFor(run), tenantDbName },
+                  { attempts: 1, backoffMs: 5000 },
+                );
+                result.requeuedPending += 1;
+              } catch (error) {
+                logger.warn('Failed to republish a pending evaluation run', {
+                  runId: String(run._id),
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
             }
+            const last = pending[pending.length - 1];
+            if (pending.length < PENDING_BATCH || !last?.createdAt) break;
+            after = { createdAt: new Date(last.createdAt), id: String(last._id) };
           }
         }
       });

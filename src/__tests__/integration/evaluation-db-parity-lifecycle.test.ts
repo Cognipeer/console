@@ -113,6 +113,25 @@ describeForEachProvider('Evaluation DB layer', (getDb) => {
       expect((await db.findEvaluationRunById(String(pending._id)))?.status).toBe('pending');
     });
 
+    it('expires only runs still pending and older than the cutoff, never one a worker has claimed', async () => {
+      const db = getDb();
+      const claimed = await seedRun();
+      const waiting = await seedRun();
+      // Claimed after the runs were created (and after any sweep could have selected them): it is running now.
+      expect(await db.claimEvaluationRun(String(claimed._id), new Date())).not.toBeNull();
+
+      expect(await db.expirePendingEvaluationRuns(new Date('2000-01-01'), 'never started')).toBe(0);
+      expect(await db.expirePendingEvaluationRuns(new Date(Date.now() + 60_000), 'never started')).toBe(1);
+
+      const expired = await db.findEvaluationRunById(String(waiting._id));
+      expect(expired?.status).toBe('failed');
+      expect(expired?.error).toBe('never started');
+      expect(expired?.finishedAt).toBeInstanceOf(Date);
+      expect((await db.findEvaluationRunById(String(claimed._id)))?.status).toBe('running');
+      // And the other order: once expired, a late claim finds nothing to run.
+      expect(await db.claimEvaluationRun(String(waiting._id), new Date())).toBeNull();
+    });
+
     it('falls back to startedAt when a running run never wrote a heartbeat', async () => {
       const db = getDb();
       const legacy = await seedRun({ status: 'running', startedAt: new Date('2026-01-01T09:00:00.000Z') });
@@ -155,6 +174,29 @@ describeForEachProvider('Evaluation DB layer', (getDb) => {
       for (const r of rows) expect(r.items).toEqual([]);
       expect(await db.listEvaluationRunsByStatus(['pending'], { createdBefore: new Date('2000-01-01') })).toEqual([]);
       expect(await db.listEvaluationRunsByStatus([])).toEqual([]);
+    });
+
+    it('pages pending runs after the last one read, without skipping any when runs leave the set meanwhile', async () => {
+      const db = getDb();
+      const ids: string[] = [];
+      for (let i = 0; i < 7; i += 1) ids.push(String((await seedRun())._id));
+
+      const seen: string[] = [];
+      let after: { createdAt: Date; id: string } | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const rows = await db.listEvaluationRunsByStatus(['pending'], { limit: 3, ...(after ? { after } : {}) });
+        seen.push(...rows.map((r) => String(r._id)));
+        // A run of a later page is claimed while this one is processed: the next page must not shift past others.
+        if (page === 0) await db.claimEvaluationRun(ids.find((id) => !seen.includes(id))!, new Date());
+        if (rows.length < 3) break;
+        const last = rows[rows.length - 1];
+        after = { createdAt: new Date(last.createdAt!), id: String(last._id) };
+      }
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(seen).toHaveLength(6);
+      const claimed = ids.filter((id) => !seen.includes(id));
+      expect(claimed).toHaveLength(1);
+      expect((await db.findEvaluationRunById(claimed[0]))?.status).toBe('running');
     });
 
     it('round-trips itemsTruncated and the new aggregate fields', async () => {
