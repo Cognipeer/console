@@ -38,6 +38,8 @@ import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
 import { sessionFilesUrl, toAttachmentViews, type SessionFileItem } from '../session/sessionFilesUi';
+import LatestMessageBar from '../session/LatestMessageBar';
+import { INSPECTOR_LATEST_ANCHOR_ID, latestMessageOf } from '../session/latestMessageUi';
 import AgentRunsTable from './AgentRunsTable';
 import { cancelReminder, fireReminderNow } from './reminderActions';
 import { formatUntil, isUpcomingReminder, reminderOfMessage } from './reminderUi';
@@ -72,12 +74,18 @@ export interface TranscriptFiles {
 /**
  * The stored transcript as the inspector's ordered stream: a divider per turn,
  * the user message with the files it carried, the turn's tool calls (call +
- * result grouped by step id), then the answer.
+ * result grouped by step id), then the answer. `anchor` puts an element id on
+ * one message (the newest, which the latest-message bar jumps to).
  */
-export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFiles): LlmRequestItem[] {
+export function toItems(
+    messages: ChatMessage[],
+    transcriptFiles?: TranscriptFiles,
+    anchor?: { messageIndex: number; anchorId: string },
+): LlmRequestItem[] {
     const items: LlmRequestItem[] = [];
     let turn = 0;
     messages.forEach((message, index) => {
+        const anchorPart = anchor?.messageIndex === index ? { anchorId: anchor.anchorId } : {};
         if (message.role === 'user') {
             turn += 1;
             const at = message.timestamp;
@@ -91,8 +99,8 @@ export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFil
             // A reminder's wake-up turn is the agent's own note, not something a person wrote.
             const reminder = reminderOfMessage(message);
             items.push(reminder
-                ? { itemType: 'message', role: 'user', roleLabel: 'Reminder', content: reminder.message }
-                : { itemType: 'message', role: 'user', content: message.content, ...(attachments ? { attachments } : {}) });
+                ? { itemType: 'message', role: 'user', roleLabel: 'Reminder', content: reminder.message, ...anchorPart }
+                : { itemType: 'message', role: 'user', content: message.content, ...(attachments ? { attachments } : {}), ...anchorPart });
             return;
         }
         (message.steps ?? []).forEach((step, stepIndex) => {
@@ -105,7 +113,7 @@ export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFil
                 content: step.error ? { error: step.error } : (step.rawOutput ?? step.output),
             });
         });
-        items.push({ itemType: 'message', role: message.role, content: message.content });
+        items.push({ itemType: 'message', role: message.role, content: message.content, ...anchorPart });
     });
     return items;
 }
@@ -370,8 +378,20 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             </Alert>
         ) : null;
 
+        // The newest message, first thing under the badges: a long run's transcript opens at turn 1.
+        const latest = record ? latestMessageOf({ messages, liveSegments: [], liveActive: false }) : null;
+        const latestAnchor = latest?.messageIndex !== undefined ? { messageIndex: latest.messageIndex, anchorId: INSPECTOR_LATEST_ANCHOR_ID } : undefined;
+
         const banner = (
             <Stack gap="xs">
+                {latest ? (
+                    <LatestMessageBar
+                        view={latest}
+                        running={ongoing}
+                        framed
+                        onJump={() => document.getElementById(INSPECTOR_LATEST_ANCHOR_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                    />
+                ) : null}
                 {notices}
                 {openActions.length > 0 ? (
                     <Alert color="orange" variant="light" icon={<IconHandStop size={16} />} title={blocked ? tsa('waitingElsewhereBadge') : th('waitingBadge')}>
@@ -434,7 +454,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         return {
             badges,
             banner,
-            items: record ? toItems(messages, { agentId, sessionId: session._id, files }) : [],
+            items: record ? toItems(messages, { agentId, sessionId: session._id, files }, latestAnchor) : [],
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };

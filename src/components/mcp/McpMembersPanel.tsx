@@ -54,6 +54,8 @@ interface McpMembersPanelProps {
   serverId: string;
   members: McpMemberSummary[];
   onServerUpdated: (server: unknown) => void;
+  /** The agent the composite belongs to, if any: its own servers can be members too. */
+  ownerAgentId?: string;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -63,7 +65,7 @@ const SOURCE_LABELS: Record<string, string> = {
   internal: 'Internal service',
 };
 
-export default function McpMembersPanel({ serverId, members, onServerUpdated }: McpMembersPanelProps) {
+export default function McpMembersPanel({ serverId, members, onServerUpdated, ownerAgentId }: McpMembersPanelProps) {
   const { confirmAction } = useConfirm();
   const tq = useTranslations('common.confirm.qos');
   const [adding, setAdding] = useState(false);
@@ -76,7 +78,8 @@ export default function McpMembersPanel({ serverId, members, onServerUpdated }: 
 
   useEffect(() => {
     if (!pickerOpen) return;
-    fetch('/api/mcp?status=active')
+    // The hub's servers, plus the agent's own ones when the composite belongs to an agent.
+    fetch(`/api/mcp?status=active${ownerAgentId ? `&agentId=${encodeURIComponent(ownerAgentId)}` : ''}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const list = Array.isArray(data?.servers) ? data.servers : [];
@@ -94,7 +97,7 @@ export default function McpMembersPanel({ serverId, members, onServerUpdated }: 
         );
       })
       .catch(() => setOptions([]));
-  }, [pickerOpen, serverId]);
+  }, [pickerOpen, serverId, ownerAgentId]);
 
   const patchMembers = async (nextServerIds: string[]) => {
     const res = await fetch(`/api/mcp/${serverId}`, {

@@ -30,6 +30,11 @@ interface CreateMcpModalProps {
   opened: boolean;
   onClose: () => void;
   onCreated: (server: McpServerView) => void;
+  /**
+   * Create the server inside this agent (`IAgentResourceOwner`): only that agent uses and manages it, so it is not
+   * put in the MCP hub and has no endpoint of its own (the exposure section and the hub picker are left out).
+   */
+  ownerAgentId?: string;
 }
 
 type AuthType = 'none' | 'token' | 'header' | 'basic' | 'console_identity';
@@ -253,7 +258,9 @@ export default function CreateMcpModal({
   opened,
   onClose,
   onCreated,
+  ownerAgentId,
 }: CreateMcpModalProps) {
+  const ownedByAgent = Boolean(ownerAgentId);
   const [loading, setLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<McpCapabilities | null>(null);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
@@ -411,7 +418,7 @@ export default function CreateMcpModal({
       .catch(() => setHubs([]));
     // Candidate members for a composite server — any other active MCP server
     // on this project. Composite-sourced servers are excluded (no nesting).
-    fetch('/api/mcp?status=active')
+    fetch(`/api/mcp?status=active${ownerAgentId ? `&agentId=${encodeURIComponent(ownerAgentId)}` : ''}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const list = Array.isArray(data?.servers) ? data.servers : [];
@@ -439,7 +446,7 @@ export default function CreateMcpModal({
   // Default the hub picker once hubs are known: one hub → preselect it,
   // none → offer creating one, several → leave unattached by default.
   useEffect(() => {
-    if (!opened || form.values.sourceType !== 'internal') return;
+    if (!opened || ownedByAgent || form.values.sourceType !== 'internal') return;
     if (form.values.hubChoice !== NO_HUB_VALUE) return;
     if (hubs.length === 1) {
       form.setFieldValue('hubChoice', hubs[0].id);
@@ -529,6 +536,7 @@ export default function CreateMcpModal({
                 : v.guardrailKey,
             }
           : undefined,
+        ...(ownerAgentId ? { ownerAgentId } : {}),
       };
 
       if (v.sourceType === 'openapi') {
@@ -584,7 +592,7 @@ export default function CreateMcpModal({
 
       // Optional hub attach — only reachable when sourceType is 'internal'
       // and mcpHub is licensed (see the "Add to Hub" section below).
-      if (v.sourceType === 'internal' && v.hubChoice !== NO_HUB_VALUE) {
+      if (!ownedByAgent && v.sourceType === 'internal' && v.hubChoice !== NO_HUB_VALUE) {
         try {
           if (v.hubChoice === NEW_HUB_VALUE) {
             await fetch('/api/mcp/hubs', {
@@ -663,7 +671,8 @@ export default function CreateMcpModal({
     { id: 1, label: 'Name provided', done: validIdentity },
     { id: 2, label: 'Source configured', done: validSource },
     { id: 3, label: 'Authentication configured', done: validAuth },
-    { id: 4, label: 'Exposure configured', done: validExposure },
+    // An agent's own server has no endpoint to configure.
+    ...(ownedByAgent ? [] : [{ id: 4, label: 'Exposure configured', done: validExposure }]),
   ];
 
   const authLabel: Record<AuthType, string> = {
@@ -756,7 +765,7 @@ export default function CreateMcpModal({
                 value={selectedInstance?.label || <span className="ds-faint">—</span>}
               />
             ) : null}
-            <SummaryKV
+            {ownedByAgent ? null : <SummaryKV
               label="Hub"
               value={
                 v.hubChoice === NO_HUB_VALUE
@@ -765,7 +774,7 @@ export default function CreateMcpModal({
                     ? `New: ${v.newHubName || '…'}`
                     : hubs.find((h) => h.id === v.hubChoice)?.name || '—'
               }
-            />
+            />}
           </>
         ) : null}
         {v.sourceType === 'composite' ? (
@@ -780,20 +789,26 @@ export default function CreateMcpModal({
         ) : null}
       </SummaryGroup>
 
-      <SummaryGroup title="Exposure">
-        <SummaryKV
-          label="Protocols"
-          value={[v.protocolHttp ? 'HTTP' : null, v.protocolSse ? 'SSE' : null]
-            .filter(Boolean)
-            .join(' + ') || '—'}
-        />
-        <SummaryKV
-          label="Access"
-          value={v.accessMode === 'public' ? 'Public URL (no auth)' : 'API token required'}
-        />
-        {v.accessMode === 'public' ? (
-          <SummaryKV label="Custom path" value={v.endpointSlug.trim() || 'Auto-generated'} />
-        ) : null}
+      <SummaryGroup title={ownedByAgent ? 'Use' : 'Exposure'}>
+        {ownedByAgent ? (
+          <SummaryKV label="Used by" value="This agent only" />
+        ) : (
+          <>
+            <SummaryKV
+              label="Protocols"
+              value={[v.protocolHttp ? 'HTTP' : null, v.protocolSse ? 'SSE' : null]
+                .filter(Boolean)
+                .join(' + ') || '—'}
+            />
+            <SummaryKV
+              label="Access"
+              value={v.accessMode === 'public' ? 'Public URL (no auth)' : 'API token required'}
+            />
+            {v.accessMode === 'public' ? (
+              <SummaryKV label="Custom path" value={v.endpointSlug.trim() || 'Auto-generated'} />
+            ) : null}
+          </>
+        )}
         {v.guardrailMode !== 'off' ? (
           <SummaryKV
             label="Guardrail"
@@ -823,8 +838,10 @@ export default function CreateMcpModal({
       open={opened}
       onClose={onClose}
       icon={<IconPlug size={16} />}
-      title="New MCP server"
-      subtitle="Expose an API, a remote MCP server, or an npx/uvx package as MCP tools."
+      title={ownedByAgent ? 'New MCP server for this agent' : 'New MCP server'}
+      subtitle={ownedByAgent
+        ? 'Only this agent uses it and it is managed from the agent. It is not added to the MCP hub.'
+        : 'Expose an API, a remote MCP server, or an npx/uvx package as MCP tools.'}
       summary={summary}
       footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
       primaryAction={{
@@ -969,7 +986,7 @@ export default function CreateMcpModal({
               </Alert>
             )}
 
-            <FormField
+            {ownedByAgent ? null : <FormField
               label="Add to hub"
               optional
               hint={capabilities?.mcpHub?.available
@@ -986,8 +1003,8 @@ export default function CreateMcpModal({
                 value={v.hubChoice}
                 onChange={(val) => form.setFieldValue('hubChoice', val ?? NO_HUB_VALUE)}
               />
-            </FormField>
-            {v.hubChoice === NEW_HUB_VALUE ? (
+            </FormField>}
+            {!ownedByAgent && v.hubChoice === NEW_HUB_VALUE ? (
               <FormRow cols={1}>
                 <FormField label="New hub name" required>
                   <TextInput
@@ -1211,6 +1228,7 @@ export default function CreateMcpModal({
         </FormSection>
       ) : null}
 
+      {ownedByAgent ? null : (
       <FormSection
         number={v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 3 : 4}
         title="Endpoint exposure"
@@ -1278,8 +1296,10 @@ export default function CreateMcpModal({
         ) : null}
       </FormSection>
 
+      )}
+
       <FormSection
-        number={v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 4 : 5}
+        number={(v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 4 : 5) - (ownedByAgent ? 1 : 0)}
         title="Guardrail"
         description="Guardrail enforcement on this server's tool calls, on the tool.pre and tool.post hooks."
         done

@@ -36,6 +36,7 @@ export default function ManagedPolicies({ policies, labels }: ManagedPoliciesPro
   const portals = policies.filter((p) => p.group === 'portal');
   const messaging = policies.filter((p) => p.group === 'messaging');
   const agents = policies.filter((p) => p.group === 'agent');
+  const shared = policies.filter((p) => p.group === 'access');
 
   const toggleCedar = (id: string) =>
     setShown((prev) => {
@@ -148,6 +149,19 @@ export default function ManagedPolicies({ policies, labels }: ManagedPoliciesPro
           </Text>
           <Accordion variant="separated" multiple>
             {agents.map(renderItem)}
+          </Accordion>
+        </div>
+      ) : null}
+      {shared.length > 0 ? (
+        <div data-testid="managed-access-group">
+          <Text size="xs" fw={600} c="dimmed" tt="uppercase" mb={4}>
+            {t('managed.accessBased')}
+          </Text>
+          <Text size="xs" c="dimmed" mb={6}>
+            {t('managed.accessHelp')}
+          </Text>
+          <Accordion variant="separated" multiple>
+            {shared.map(renderItem)}
           </Accordion>
         </div>
       ) : null}

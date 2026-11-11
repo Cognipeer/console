@@ -315,8 +315,8 @@ describe('the channel, the seam and what is enforced', () => {
     expect(isIamChannel('messaging')).toBe(true);
     expect(RUNTIME_IAM_CHANNELS).toEqual(['portal', 'messaging']);
     expect(RUNTIME_ENFORCED_ACTIONS['agent.invoke']).toEqual(['portal', 'messaging']);
-    // only agent.invoke is asked in it: approvals and the rest are not (yet)
-    expect(Object.entries(RUNTIME_ENFORCED_ACTIONS).filter(([, c]) => c.includes('messaging')).map(([id]) => id)).toEqual(['agent.invoke']);
+    // agent.invoke is asked in it, and the access lists of the MCP servers and skills a run gets; approvals are not (yet)
+    expect(Object.entries(RUNTIME_ENFORCED_ACTIONS).filter(([, c]) => c.includes('messaging')).map(([id]) => id)).toEqual(['agent.invoke', 'mcp-server.use', 'skill.use']);
     expect(auditServiceOf('messaging', 'agent.invoke')).toBe('channels');
     expect(auditServiceOf('portal', 'agent.invoke')).toBe('portals');
     expect(auditServiceOf('dashboard', 'agent.invoke')).toBe('agents');

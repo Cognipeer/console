@@ -22,6 +22,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { runInTenant } from '@/lib/database/runInTenant';
 import type { IWebhookDelivery, IWebhookEndpoint, WebhookDisabledReason } from '@/lib/database';
 import { decryptObject } from '@/lib/utils/crypto';
 import { isServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
@@ -46,12 +47,9 @@ export interface WebhookDeliveryJob extends QueuePayload {
   tenantDbName: string;
 }
 
-/** Bound to the tenant DB for the whole callback — see `runWithTenantDb` in agentRunService (not imported: it would be a cycle). */
+/** Bound to the tenant DB for the whole callback (see `runInTenant`). */
 async function inTenant<T>(tenantDbName: string, fn: (db: DatabaseProvider) => Promise<T>): Promise<T> {
-  const db = await getDatabase();
-  if (db.runWithTenant) return db.runWithTenant(tenantDbName, () => fn(db));
-  await db.switchToTenant(tenantDbName);
-  return fn(db);
+  return runInTenant(await getDatabase(), tenantDbName, fn);
 }
 
 export const newWebhookEventId = () => `evt_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;

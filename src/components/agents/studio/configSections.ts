@@ -12,6 +12,7 @@
 export const CONFIG_SECTION_TITLES: Record<string, string> = {
     basic: 'General',
     prompt: 'Prompt',
+    tools: 'Tools',
     subagents: 'Delegation',
     skills: 'Skills',
     memory: 'Memory',
@@ -30,6 +31,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
  * rest of the headings are English until their sections are localized.
  */
 export const CONFIG_SECTION_TITLE_KEYS: Record<string, string> = {
+    tools: 'config.tools',
     callback: 'runSettings.sectionTitle',
     files: 'attachments.sectionTitle',
     hitl: 'hitl.sectionTitle',
@@ -46,8 +48,9 @@ export function configSectionTitle(id: string, translate: (key: string) => strin
 export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     // `knowledgeBindings` / `knowledgeToolMode` replaced `knowledgeEngineKey` (which a save now clears): without them a
     // knowledge base attached or removed since the published version did not count as a change.
-    basic: ['modelKey', 'reasoningEffort', 'reasoningBudgetTokens', 'showReasoning', 'additionalModels', 'knowledgeEngineKey', 'knowledgeBindings', 'knowledgeToolMode', 'toolBindings', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey', 'piiProtection'],
+    basic: ['modelKey', 'reasoningEffort', 'reasoningBudgetTokens', 'showReasoning', 'additionalModels', 'knowledgeEngineKey', 'knowledgeBindings', 'knowledgeToolMode', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey', 'piiProtection'],
     prompt: ['systemPrompt', 'promptKey', 'promptVariables'],
+    tools: ['toolBindings'],
     subagents: ['subagents', 'subagentPolicy'],
     skills: ['skills', 'skillPolicy'],
     memory: ['memory'],
@@ -88,9 +91,9 @@ function canonical(value: unknown): string {
  * comes first, then what it can do, then how it behaves.
  */
 export const BUILD_SECTION_GROUPS: ReadonlyArray<{ id: 'essentials' | 'capabilities' | 'behavior'; sections: readonly string[] }> = [
-    { id: 'essentials', sections: ['basic', 'prompt'] },
-    { id: 'capabilities', sections: ['subagents', 'skills', 'memory', 'files', 'sandbox', 'clienttools'] },
-    { id: 'behavior', sections: ['hitl', 'callback', 'advanced', 'variables', 'output'] },
+    { id: 'essentials', sections: ['basic', 'prompt', 'variables'] },
+    { id: 'capabilities', sections: ['tools', 'skills', 'subagents', 'clienttools', 'memory', 'files', 'sandbox'] },
+    { id: 'behavior', sections: ['hitl', 'callback', 'output', 'advanced'] },
 ];
 
 export const BUILD_SECTION_ORDER: readonly string[] = BUILD_SECTION_GROUPS.flatMap((group) => group.sections);

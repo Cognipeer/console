@@ -120,6 +120,7 @@ import {
     resolveAgentBindingTool,
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
+import { deleteAgentOwnedResources } from './agentOwnedResources';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 import { buildWebSearchAgentTools } from '@/lib/services/webSearch';
 import { buildWebFetchAgentTools } from '@/lib/services/crawler';
@@ -213,6 +214,7 @@ import { getConfig } from '@/lib/core/config';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { mayUseSharedResource } from './sharedResourceAccess';
 import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import {
     buildCostEstimator,
@@ -2018,6 +2020,8 @@ type BuildSubagentsInput = {
     tenantDbName: string;
     tenantId: string;
     projectId: string;
+    /** The parent agent: an inline child's bindings may use its own MCP servers (`IAgentResourceOwner`). */
+    agentId?: string;
     /** The entries that can run (`activeSubagentEntries`): a roster switched off is never built. */
     subagents: IAgentSubagent[];
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
@@ -2114,6 +2118,7 @@ export async function buildAgentSubagents(
 
         let systemPrompt: string | undefined;
         let toolBindings = entry.toolBindings;
+        let childAgentId: string | undefined;
         let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
         let modelKey = entry.modelKey;
         let targetHitl: ResolvedHitlConfig | undefined;
@@ -2130,6 +2135,7 @@ export async function buildAgentSubagents(
             }
             systemPrompt = await resolveChildPrompt(input, entry, target);
             toolBindings = target.config.toolBindings;
+            childAgentId = target.agent._id ? String(target.agent._id) : undefined;
             knowledgeSource = {
                 knowledgeEngineKey: target.config.knowledgeEngineKey,
                 knowledgeBindings: target.config.knowledgeBindings,
@@ -2178,6 +2184,9 @@ export async function buildAgentSubagents(
                 input.identity && entry.kind === 'ref' && entry.agentKey
                     ? { ...input.identity, agentKey: entry.agentKey }
                     : input.identity,
+                undefined,
+                // Whose own MCP servers the child's bindings may use: the referenced agent's, or (inline) its parent's.
+                entry.kind === 'ref' ? childAgentId : input.agentId,
             );
             childTools.push(...bound.tools);
             cleanupTasks.push(...bound.cleanupTasks);
@@ -2387,6 +2396,8 @@ export async function buildBoundTools(
     identity?: ConsoleIdentityCaller,
     /** What a Flow tool (`source: 'flow'`) copies onto its run: the Session it belongs to, and whether anyone is there to answer. */
     flowCaller?: { conversationId?: string; unattended?: boolean; accountableUserId?: string },
+    /** The agent the bindings belong to: its own MCP servers resolve, another agent's do not (`IAgentResourceOwner`). */
+    agentId?: string,
 ): Promise<{
     cleanupTasks: Array<() => Promise<void>>;
     tools: AgentSdkToolInterface[];
@@ -2493,9 +2504,19 @@ export async function buildBoundTools(
             }
         } else if (binding.source === 'mcp') {
             // ── Legacy MCP server bindings ───────────────────────
-            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId);
+            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId, agentId);
             if (!server || server.status !== 'active') {
                 logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
+                continue;
+            }
+            // The server's access list decides for the person this run is made for (managed:access:*); a server they
+            // may not use is left out, so the model never sees its tools.
+            const mayUse = await mayUseSharedResource(
+                { tenantDbName, tenantId, caller: mcpIdentity, source: runtimeContext?.source },
+                { type: 'mcp-server', id: String(server._id ?? ''), key: server.key, projectId: server.projectId, access: server.access },
+            );
+            if (!mayUse) {
+                logger.info('MCP server is not open to the person this run is made for; its tools are left out', { key: binding.sourceKey });
                 continue;
             }
 
@@ -3419,6 +3440,10 @@ export async function deleteAgentRecord(
             for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
             await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
         }
+        return deleted;
+    }).then(async (deleted) => {
+        // The MCP servers and skills created inside the agent were part of it, so they go too.
+        if (deleted) await deleteAgentOwnedResources(tenantDbName, agentId);
         return deleted;
     });
 }
@@ -4791,6 +4816,7 @@ async function buildLocalAgentRun(input: {
             ...(input.unattended !== undefined ? { unattended: input.unattended } : {}),
             ...(input.accountableUserId ? { accountableUserId: input.accountableUserId } : {}),
         },
+        agent._id ? String(agent._id) : undefined,
     );
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
@@ -5075,6 +5101,7 @@ async function buildLocalAgentRun(input: {
         tenantDbName,
         tenantId,
         projectId,
+        ...(agent._id ? { agentId: String(agent._id) } : {}),
         subagents: activeSubagentEntries(config),
         createToolFn: createTool,
         zod: z,
@@ -5110,7 +5137,13 @@ async function buildLocalAgentRun(input: {
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
-    const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
+    // A skill whose access list keeps this run's person out is left out of the catalog (managed:access:*).
+    const skills = await buildAgentSkills(tenantDbName, projectId, config.skills, {
+        tenantDbName,
+        tenantId,
+        caller: identity,
+        source: runtimeContext?.source,
+    }, agent._id ? String(agent._id) : undefined);
     const outputSchema = resolveTurnOutputSchema(config, input.responseFormat);
     const skillPolicy = resolveAgentSkillPolicy(config);
     // A hidden agent a flow owns is traced under its flow even when no flow run started the turn (the Build editor's playground).
