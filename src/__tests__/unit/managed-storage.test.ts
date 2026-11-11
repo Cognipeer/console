@@ -52,6 +52,7 @@ import {
   tenantStorageToken,
   withoutBackendIdentifiers,
   wrapNameScopedVectorRuntime,
+  wrapPostgresVectorRuntime,
   wrapSearchVectorRuntime,
 } from '@/lib/services/storage/managedStorage';
 
@@ -426,7 +427,7 @@ describe('loadStorageProvider', () => {
   it('allows exactly the drivers it can confine', () => {
     expect(MANAGED_STORAGE_DRIVERS).toEqual({
       file: ['local-filesystem', 'aws-s3-files', 's3-compatible-files', 'azure-blob-files'],
-      vector: ['sqlite-vector', 'aws-s3-vectors', 'azure-ai-search'],
+      vector: ['sqlite-vector', 'aws-s3-vectors', 'azure-ai-search', 'postgres'],
     });
   });
 
@@ -661,5 +662,120 @@ describe('backendIdentifiers of the Azure drivers', () => {
   it('names the search endpoint (raw value, host and hostname)', () => {
     const ids = backendIdentifiers({ token, settings: { foundryProjectEndpoint: 'https://ops-search.search.example.net:8443' } });
     expect(ids).toEqual(expect.arrayContaining(['https://ops-search.search.example.net:8443', 'ops-search.search.example.net:8443', 'ops-search.search.example.net']));
+  });
+});
+
+describe('postgres as platform vector storage', () => {
+  const token = tenantStorageToken('tenant-a');
+
+  it('is in the vector allowlist only', () => {
+    expect(MANAGED_STORAGE_DRIVERS.vector).toContain('postgres');
+    expect(MANAGED_STORAGE_DRIVERS.file).not.toContain('postgres');
+  });
+
+  it('scopes the schema with the token, forces the layout and drops the table name', () => {
+    expect(scopeStorageSettings('postgres', { host: 'h', tableName: 'shared', indexLayout: 'shared-table' }, token))
+      .toEqual({ host: 'h', schema: token, indexLayout: 'table-per-index' });
+    expect(scopeStorageSettings('postgres', { schema: 'platform_vec' }, token))
+      .toEqual({ schema: `platform_vec_${token}`, indexLayout: 'table-per-index' });
+    expect(scopeStorageSettings('postgres', { schema: '  ' }, token)?.schema).toBe(token);
+    expect(`platform_vec_${token}`.length).toBeLessThanOrEqual(63);
+  });
+
+  it('fails closed on a bad schema base', () => {
+    for (const schema of ['Public', 'a-b', '1x', 'x"y', 'a'.repeat(42), 'a.b', 5]) {
+      expect(scopeStorageSettings('postgres', { schema }, token)).toBeNull();
+    }
+  });
+
+  describe('the wrapper', () => {
+    const calls: Array<{ method: string; args: any[] }> = [];
+    const inner = (): VectorProviderRuntime => {
+      const rec = (method: string, result?: unknown) => async (...args: any[]) => { calls.push({ method, args }); return result as any; };
+      return {
+        createIndex: rec('createIndex', { externalId: 'v_docs_0123abcd', name: 'docs', dimension: 3, metric: 'cosine', metadata: { tableName: 'x', provider: 'postgres' } }),
+        deleteIndex: rec('deleteIndex'),
+        listIndexes: rec('listIndexes', [
+          { externalId: 'v_docs_0123abcd', name: 'docs', dimension: 3, metric: 'cosine', metadata: { a: 1 } },
+          { externalId: 'legacy_table', name: 'x', dimension: 3, metric: 'cosine' },
+        ]),
+        upsertVectors: rec('upsertVectors'),
+        queryVectors: rec('queryVectors', { matches: [] }),
+        deleteVectors: rec('deleteVectors'),
+        existingVectorIds: rec('existingVectorIds', []),
+        existingVectors: rec('existingVectors', []),
+        listVectors: rec('listVectors', { items: [] }),
+      };
+    };
+    const hnd = (externalId: string, metadata?: Record<string, unknown>): VectorIndexHandle =>
+      ({ externalId, name: 'docs', dimension: 3, metric: 'cosine', metadata });
+    beforeEach(() => { calls.length = 0; });
+
+    it('rebuilds every handle without metadata', async () => {
+      const w = wrapPostgresVectorRuntime(inner());
+      const evil = hnd('v_docs_0123abcd', { tableName: 'other', schema: 'x' });
+      await w.upsertVectors(evil, []);
+      await w.queryVectors(evil, { topK: 1, vector: [1] });
+      await w.deleteVectors(evil, ['a']);
+      await w.existingVectorIds!(evil, ['a']);
+      await w.existingVectors!(evil, ['a']);
+      await w.listVectors(evil);
+      expect(calls).toHaveLength(6);
+      for (const call of calls) {
+        expect(call.args[0]).toEqual({ externalId: 'v_docs_0123abcd', name: 'docs', dimension: 3, metric: 'cosine' });
+      }
+    });
+
+    it('refuses an externalId that is not a valid index table', async () => {
+      const w = wrapPostgresVectorRuntime(inner());
+      for (const externalId of ['x"; drop table y', 'other.v_a_0123abcd', 'V_A_0123abcd', 'vectors']) {
+        const bad = hnd(externalId);
+        await expect(w.upsertVectors(bad, [])).rejects.toBeInstanceOf(ManagedProviderError);
+        await expect(w.queryVectors(bad, { topK: 1, vector: [1] })).rejects.toBeInstanceOf(ManagedProviderError);
+        await expect(w.deleteVectors(bad, [])).rejects.toBeInstanceOf(ManagedProviderError);
+        await expect(w.existingVectorIds!(bad, [])).rejects.toBeInstanceOf(ManagedProviderError);
+        await expect(w.existingVectors!(bad, [])).rejects.toBeInstanceOf(ManagedProviderError);
+        await expect(w.listVectors(bad)).rejects.toBeInstanceOf(ManagedProviderError);
+        await expect(w.deleteIndex({ externalId })).rejects.toBeInstanceOf(ManagedProviderError);
+      }
+      expect(calls).toHaveLength(0);
+    });
+
+    it('createIndex carries no metadata into the driver and hands none back; listIndexes keeps valid tables only', async () => {
+      const w = wrapPostgresVectorRuntime(inner());
+      const out = await w.createIndex({ name: 'docs', dimension: 3, metadata: { tableName: 'evil' } });
+      expect(calls[0].args[0]).toEqual({ name: 'docs', dimension: 3 });
+      expect(out.metadata).toEqual({});
+      const listed = await w.listIndexes();
+      expect(listed.map((i) => i.externalId)).toEqual(['v_docs_0123abcd']);
+      expect(listed[0].metadata).toEqual({});
+    });
+
+    it('refuses and does not return a created index with an invalid table name', async () => {
+      const bad = { ...inner(), createIndex: async () => hnd('vectors') };
+      await expect(wrapPostgresVectorRuntime(bad).createIndex({ name: 'x', dimension: 3 })).rejects.toBeInstanceOf(ManagedProviderError);
+    });
+  });
+
+  describe('backendIdentifiers', () => {
+    it('names host, database and user from settings and credentials, never the password', () => {
+      const ids = backendIdentifiers(
+        { token, settings: { host: 'pg.internal.example', database: 'platformdb', user: 'svc_vec', schema: token } },
+        { host: 'creds.example', database: 'cdb', user: 'cuser', password: 'HUNTER2PASS' },
+      );
+      expect(ids).toEqual(expect.arrayContaining(['pg.internal.example', 'platformdb', 'svc_vec', 'creds.example', 'cdb', 'cuser']));
+      expect(ids.join('|')).not.toContain('HUNTER2PASS');
+    });
+
+    it('parses a postgres connection string and coexists with the Azure ones', () => {
+      const ids = backendIdentifiers(
+        { token, settings: {} },
+        { connectionString: 'postgresql://app%40svc:S3CRETPW@db.example.net:6543/vecdb?sslmode=require' },
+      );
+      expect(ids).toEqual(expect.arrayContaining(['db.example.net:6543', 'db.example.net', 'vecdb', 'app@svc']));
+      expect(ids.join('|')).not.toContain('S3CRETPW');
+      const azure = backendIdentifiers({ token, settings: {} }, { connectionString: 'AccountName=csaccount;AccountKey=K==' });
+      expect(azure).toContain('csaccount');
+    });
   });
 });

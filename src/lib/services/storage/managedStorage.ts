@@ -25,6 +25,7 @@ import { hashRuntimeConfig, runtimePool } from '@/lib/core/runtimePool';
 import { isManagedProviderRecord, listManagedRoutes } from '@/enterprise/managed-credits';
 import type { IProviderRecord } from '@/lib/database';
 import { providerRegistry } from '@/lib/providers/registry';
+import { isPostgresIndexTableName } from '@/lib/providers/contracts/postgresVector.contract';
 import type { CreateVectorIndexInput, VectorIndexHandle, VectorProviderRuntime } from '@/lib/providers/domains/vector';
 import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import { ManagedProviderError } from '@/lib/services/providers/managedProviderErrors';
@@ -39,12 +40,15 @@ export const MANAGED_STORAGE_UNAVAILABLE = 'This provider is not available right
 /** The drivers whose runtime core can confine to one tenant. Any other driver on a managed route is refused. */
 export const MANAGED_STORAGE_DRIVERS: Readonly<Record<ManagedStorageKind, readonly string[]>> = {
   file: ['local-filesystem', 'aws-s3-files', 's3-compatible-files', 'azure-blob-files'],
-  vector: ['sqlite-vector', 'aws-s3-vectors', 'azure-ai-search'],
+  vector: ['sqlite-vector', 'aws-s3-vectors', 'azure-ai-search', 'postgres'],
 };
 
 /** The vector drivers with one shared namespace of indexes: scoped by index name, not by a root. */
 const NAME_SCOPED_VECTOR_DRIVER = 'aws-s3-vectors';
 const SEARCH_VECTOR_DRIVER = 'azure-ai-search';
+const POSTGRES_VECTOR_DRIVER = 'postgres';
+/** The optional base of a tenant's schema on the platform database. */
+const POSTGRES_SCHEMA_BASE = /^[a-z][a-z0-9_]{0,40}$/;
 
 /**
  * The tenant's folder (or index name prefix) on a platform storage backend: stable for the tenant, the same length for
@@ -84,6 +88,17 @@ export function scopeStorageSettings(
         ? settings.basePath.trim()
         : path.join(getConfig().storage.dataDir, 'vectors');
       return { ...settings, basePath: path.join(base, token) };
+    }
+    case 'postgres': {
+      // One schema per tenant, the table-per-index layout whatever the catalog says, and no shared table.
+      const rawBase = settings.schema;
+      const base = typeof rawBase === 'string' ? rawBase.trim() : '';
+      if (rawBase !== undefined && rawBase !== null && (typeof rawBase !== 'string' || (base !== '' && !POSTGRES_SCHEMA_BASE.test(base)))) {
+        return null;
+      }
+      const { tableName: _table, ...rest } = settings;
+      void _table;
+      return { ...rest, schema: base ? `${base}_${token}` : token, indexLayout: 'table-per-index' };
     }
     default:
       return null;
@@ -178,6 +193,53 @@ export function wrapNameScopedVectorRuntime(
         .map((item) => ({ ...item, metadata: {} }));
     },
     // Async, so a refusal is a rejected promise like any other failure of the call.
+    upsertVectors: async (handle, items) => inner.upsertVectors(checked(handle), items),
+    queryVectors: async (handle, query) => inner.queryVectors(checked(handle), query),
+    deleteVectors: async (handle, ids) => inner.deleteVectors(checked(handle), ids),
+    ...(inner.existingVectorIds
+      ? { existingVectorIds: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectorIds!(checked(handle), ids) }
+      : {}),
+    ...(inner.existingVectors
+      ? { existingVectors: async (handle: VectorIndexHandle, ids: string[]) => inner.existingVectors!(checked(handle), ids) }
+      : {}),
+    listVectors: async (handle, input) => inner.listVectors(checked(handle), input),
+  };
+  if (inner.close) runtime.close = () => inner.close?.();
+  return runtime;
+}
+
+/**
+ * The wrapper of the platform postgres vector runtime. The driver already resolves the table from the handle's
+ * externalId alone; this is the second line: every handle is rebuilt without metadata (which a tenant can set) and
+ * with an externalId that is a valid index table name, and nothing but the name, dimension and metric reaches createIndex.
+ */
+export function wrapPostgresVectorRuntime(inner: VectorProviderRuntime): VectorProviderRuntime {
+  const refuse = (what: string): never => {
+    log.warn('Managed vector call refused: the index is not valid', { what });
+    throw new ManagedProviderError(MANAGED_STORAGE_UNAVAILABLE);
+  };
+  const checked = (handle: VectorIndexHandle): VectorIndexHandle => {
+    if (!isPostgresIndexTableName(handle?.externalId)) return refuse('handle');
+    return { externalId: handle.externalId, name: handle.name, dimension: handle.dimension, metric: handle.metric };
+  };
+  const stripped = (item: VectorIndexHandle): VectorIndexHandle => ({ ...item, metadata: {} });
+
+  const runtime: VectorProviderRuntime = {
+    async createIndex(input: CreateVectorIndexInput) {
+      const { metadata: _metadata, ...rest } = input;
+      void _metadata;
+      const handle = await inner.createIndex(rest);
+      if (!isPostgresIndexTableName(handle?.externalId)) return refuse('created index');
+      return stripped(handle);
+    },
+    async deleteIndex({ externalId }) {
+      if (!isPostgresIndexTableName(externalId)) return refuse('delete');
+      await inner.deleteIndex({ externalId });
+    },
+    async listIndexes() {
+      const all = await inner.listIndexes();
+      return all.filter((item) => isPostgresIndexTableName(item?.externalId)).map(stripped);
+    },
     upsertVectors: async (handle, items) => inner.upsertVectors(checked(handle), items),
     queryVectors: async (handle, query) => inner.queryVectors(checked(handle), query),
     deleteVectors: async (handle, ids) => inner.deleteVectors(checked(handle), ids),
@@ -421,6 +483,8 @@ export async function getManagedStorageRuntime<TRuntime>(
       ) as unknown as TRuntime;
     } else if (kind === 'vector' && managed.driver === SEARCH_VECTOR_DRIVER) {
       confined = wrapSearchVectorRuntime(runtime as unknown as VectorProviderRuntime, managed.token) as unknown as TRuntime;
+    } else if (kind === 'vector' && managed.driver === POSTGRES_VECTOR_DRIVER) {
+      confined = wrapPostgresVectorRuntime(runtime as unknown as VectorProviderRuntime) as unknown as TRuntime;
     }
     return withoutBackendIdentifiers(
       confined as unknown as object,
@@ -469,6 +533,12 @@ export function backendIdentifiers(
       // Not a URL: the raw value above stands.
     }
   };
+  // Postgres: where the database is and who connects (never the password).
+  for (const source of [settings, credentials ?? {}]) {
+    add(source.host);
+    add(source.database);
+    add(source.user);
+  }
   addEndpoint(settings.endpoint);
   addEndpoint(settings.foundryProjectEndpoint);
   // The Azure blob endpoint a driver derives from the account: the account can sit in the settings or, for a connection
@@ -478,7 +548,17 @@ export function backendIdentifiers(
   const accounts = new Set<string>();
   if (typeof settings.accountName === 'string') accounts.add(settings.accountName.trim());
   const connectionString = credentials?.connectionString;
-  if (typeof connectionString === 'string') {
+  if (typeof connectionString === 'string' && /^postgres(ql)?:\/\//i.test(connectionString.trim())) {
+    try {
+      const url = new URL(connectionString.trim());
+      add(url.host);
+      add(url.hostname);
+      add(url.pathname.replace(/^\/+/, ''));
+      try { add(decodeURIComponent(url.username)); } catch { add(url.username); }
+    } catch {
+      // Not parseable: the host settings above stand.
+    }
+  } else if (typeof connectionString === 'string') {
     for (const part of connectionString.split(';')) {
       const at = part.indexOf('=');
       if (at < 0) continue;
