@@ -4,6 +4,7 @@
  */
 
 import { getFlowsHost } from '@/enterprise/flows';
+import { isManagedModel, loadManagedCreditPricer } from '@/enterprise/managed-credits';
 import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
@@ -158,6 +159,8 @@ export interface TraceModelTokens {
   cachedInputTokens: number;
   /** Cache-WRITE subset of `inputTokens`; priced at the cache-write rate. */
   cachedWriteTokens?: number;
+  /** How many model calls the counts add up (default 1): a model paid with credits is charged per call. */
+  calls?: number;
 }
 
 /**
@@ -173,10 +176,12 @@ export interface TraceModelPricer {
 
 export type TraceModelPricerLoader = () => Promise<TraceModelPricer>;
 
-async function loadTraceModelPricer(tenantDbName: string, projectId?: string): Promise<TraceModelPricer> {
+async function loadTraceModelPricer(tenantDbName: string, projectId?: string, tenantId?: string): Promise<TraceModelPricer> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const models = await db.listModels({ projectId });
+  // A model paid with credits has no token price: its calls are priced in credits at the tenant's rate.
+  const creditPricer = models.some((model) => isManagedModel(model)) ? await loadManagedCreditPricer(tenantId) : null;
   const byKey = new Map(models.map((model) => [model.key.toLowerCase(), model]));
   const byModelId = new Map(models.map((model) => [model.modelId.toLowerCase(), model]));
   const externalEntries = await db.listExternalModelPricing(projectId);
@@ -192,6 +197,23 @@ async function loadTraceModelPricer(tenantDbName: string, projectId?: string): P
     price(modelName, tokens) {
       const lookup = modelName.toLowerCase();
       const hubModel = byKey.get(lookup) ?? byModelId.get(lookup);
+      if (hubModel && creditPricer && isManagedModel(hubModel)) {
+        const quote = creditPricer(
+          {
+            providerKey: hubModel.providerKey,
+            modelKey: hubModel.key,
+            modelId: hubModel.modelId,
+            kind: hubModel.category === 'embedding' ? 'embedding' : 'chat',
+          },
+          {
+            inputTokens: tokens.inputTokens,
+            outputTokens: tokens.outputTokens,
+            cachedInputTokens: tokens.cachedInputTokens,
+            ...(tokens.calls !== undefined ? { calls: tokens.calls } : {}),
+          },
+        );
+        if (quote) return { refKey: hubModel.key, costUsd: quote.usd };
+      }
       const externalEntry = externalByName.get(lookup);
       const pricing = hubModel?.pricing
         ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
@@ -206,11 +228,11 @@ async function loadTraceModelPricer(tenantDbName: string, projectId?: string): P
  * however many emitters (usage rollup, entity health) need a price, and not at
  * all when nothing is billable. A failed load is retried on the next call.
  */
-export function createTraceModelPricerLoader(tenantDbName: string, projectId?: string): TraceModelPricerLoader {
+export function createTraceModelPricerLoader(tenantDbName: string, projectId?: string, tenantId?: string): TraceModelPricerLoader {
   let loaded: Promise<TraceModelPricer> | undefined;
   return () => {
     if (!loaded) {
-      loaded = loadTraceModelPricer(tenantDbName, projectId).catch((error) => {
+      loaded = loadTraceModelPricer(tenantDbName, projectId, tenantId).catch((error) => {
         loaded = undefined;
         throw error;
       });
@@ -251,7 +273,7 @@ export async function recordTraceModelUsage(params: {
       ? sumTokensByModel(params.previousEvents)
       : undefined;
 
-    const pricer = await (params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId))();
+    const pricer = await (params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId, params.tenantId))();
 
     for (const [modelName, totals] of current) {
       const prior = previous?.get(modelName);
@@ -279,6 +301,7 @@ export async function recordTraceModelUsage(params: {
         outputTokens,
         cachedInputTokens,
         cachedWriteTokens,
+        ...(calls > 0 ? { calls } : {}),
       });
 
       recordUsageEvent({

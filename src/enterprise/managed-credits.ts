@@ -102,10 +102,43 @@ export interface ManagedUsage {
   estimated?: boolean;
 }
 
+/** What a call's usage costs in credits, and in USD at the rate of the credits its hold took. */
+export interface ManagedCreditQuote {
+  credits: number;
+  usdPerCredit: number;
+  usd: number;
+}
+
+/** A managed call to price without reserving anything (see `ManagedCreditsHost.pricer`). */
+export interface ManagedPriceQuery {
+  providerKey: string;
+  /** Model key (chat, embedding); undefined for search. */
+  modelKey?: string;
+  modelId?: string;
+  kind: 'chat' | 'embedding' | 'search';
+}
+
+/** Usage to price: one call's, or the sum of `calls` calls of one model (each priced at their average; default 1). */
+export interface ManagedPriceUsage extends ManagedUsage {
+  calls?: number;
+}
+
+/**
+ * Prices managed usage in credits and USD. Synchronous and pure. Null when the call is not paid with credits here or
+ * the credits' USD rate is not known.
+ */
+export type ManagedCreditPricer = (query: ManagedPriceQuery, usage: ManagedPriceUsage) => ManagedCreditQuote | null;
+
 export interface ManagedCreditLease {
   readonly id: string;
   /** chat only: the highest output token limit this call may be sent with; undefined = no clamp. */
   readonly maxOutputTokens?: number;
+  /**
+   * What `usage` will be charged, without booking it: the call's recorded cost (usage row, budgets) is this USD, since
+   * a credit-paid model has no token price. Synchronous and pure; null when the credits' USD rate is not known.
+   * Optional: a host without it leaves the cost to the model's own pricing.
+   */
+  quote?(usage: ManagedUsage): ManagedCreditQuote | null;
   /** Books the real usage. Idempotent, never throws (the host logs and reconciles). */
   settle(usage: ManagedUsage): Promise<void>;
   /** Returns the hold. Idempotent, never throws. */
@@ -125,6 +158,13 @@ export interface ManagedCreditsHost {
    * The connection behind a route, for a managed record. The only door to operator secrets: null refuses the call.
    */
   resolveConnection?(ref: ManagedProviderRef, connectionId: string): ManagedConnection | null;
+  /**
+   * Prices this tenant's managed usage without reserving or booking anything, at the rate its next credits would be
+   * taken at (the balance is read once, when the pricer is made). For estimates made outside a call: an agent's cost
+   * limit and turn cost, trace-derived usage. A call's own cost comes from its lease's `quote`. Null when nothing is
+   * paid with credits for this tenant or no rate is known.
+   */
+  pricer?(tenantId: string): Promise<ManagedCreditPricer | null>;
 }
 
 let host: ManagedCreditsHost | null = null;
@@ -167,6 +207,31 @@ export function listManagedRoutes(query: ManagedRouteQuery): ManagedRoute[] {
     console.error('managed-credits: listRoutes threw; no route is available', error instanceof Error ? error.message : String(error));
     return [];
   }
+}
+
+/**
+ * The host's pricer for a tenant, or null (no host, no `pricer`, nothing paid with credits, no known rate, a throw).
+ * Never throws, and neither does the pricer it returns: a pricer that throws or answers a bad USD gives null.
+ */
+export async function loadManagedCreditPricer(tenantId: string | undefined): Promise<ManagedCreditPricer | null> {
+  if (!host?.pricer || !tenantId) return null;
+  let pricer: ManagedCreditPricer | null;
+  try {
+    pricer = await host.pricer(tenantId);
+  } catch (error) {
+    console.error('managed-credits: pricer threw; managed usage is not priced', error instanceof Error ? error.message : String(error));
+    return null;
+  }
+  if (typeof pricer !== 'function') return null;
+  const inner = pricer;
+  return (query, usage) => {
+    try {
+      const quote = inner(query, usage);
+      return quote && Number.isFinite(quote.usd) && quote.usd >= 0 ? quote : null;
+    } catch {
+      return null;
+    }
+  };
 }
 
 /** Tests only. */

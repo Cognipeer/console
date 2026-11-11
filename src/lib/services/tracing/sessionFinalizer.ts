@@ -111,11 +111,11 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
   const historyBeforeMs = now - Math.max(HISTORY_AGE_MS, staleMinutes * 60_000 + HISTORY_MARGIN_MS);
   // One lazy, memoized model-price loader per (tenant, project) and sweep: the Model Hub is read once, not once per session.
   const pricerLoaders = new Map<string, TraceModelPricerLoader>();
-  const pricerLoaderFor = (tenantDbName: string, projectId: string): TraceModelPricerLoader => {
+  const pricerLoaderFor = (tenantDbName: string, projectId: string, tenantId: string): TraceModelPricerLoader => {
     const key = `${tenantDbName}\u0001${projectId}`;
     let loader = pricerLoaders.get(key);
     if (!loader) {
-      loader = createTraceModelPricerLoader(tenantDbName, projectId || undefined);
+      loader = createTraceModelPricerLoader(tenantDbName, projectId || undefined, tenantId || undefined);
       pricerLoaders.set(key, loader);
     }
     return loader;
@@ -174,7 +174,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
             previousOutcome: claimed.metricsOutcome,
             source: 'tracing',
             atMs: Date.now(),
-            pricerLoader: pricerLoaderFor(tenantDbName, claimed.projectId ?? projectId),
+            pricerLoader: pricerLoaderFor(tenantDbName, claimed.projectId ?? projectId, claimed.tenantId || tenantId),
           });
         }
 
@@ -207,7 +207,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
               source: abandoned.metadata?.agentKey ? 'hosted' : 'tracing',
               // The abandon happens now, whenever the run last made progress.
               atMs: Date.now(),
-              pricerLoader: pricerLoaderFor(tenantDbName, abandoned.projectId ?? candidate.projectId ?? ''),
+              pricerLoader: pricerLoaderFor(tenantDbName, abandoned.projectId ?? candidate.projectId ?? '', abandoned.tenantId || tenantId),
             });
           }
           // A page that closed nothing is the same head again (waiting sessions stay in_progress): stop paging.

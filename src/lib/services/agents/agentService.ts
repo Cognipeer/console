@@ -7,6 +7,7 @@
 
 import { getFlowsHost, FlowsUnavailableError, type FlowAgentTurnActivity } from '@/enterprise/flows';
 import { getChannelToolsHost, isChannelToolName } from '@/enterprise/channel-tools';
+import { isManagedModel, loadManagedCreditPricer } from '@/enterprise/managed-credits';
 import type { AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 import { channelFromSource, getRoutingCaller, noteRoutingRun, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 import { randomUUID } from 'node:crypto';
@@ -1798,6 +1799,8 @@ export const __testables = {
     persistedUserTurn,
     firstTurnTitle,
     toToolCallEvent,
+    buildAgentCostEstimator,
+    priceAgentTurn,
 };
 
 /**
@@ -1816,27 +1819,50 @@ async function buildAgentCostEstimator(
     subagentModels: PricedModel[],
     sessionBudgetActive = false,
     onWarning?: (message: string) => void,
+    tenantId?: string,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
     const limited = sessionBudgetActive || Number(config.runtime?.limits?.maxCostUsd) > 0;
-    if (!limited && subagentModels.length === 0) return undefined;
+    // A model paid with credits has no token price: its turn cost is the sum of its calls, so the estimator is
+    // built for it even without a limit.
+    const primaryManaged = isManagedModel(primary);
+    if (!limited && subagentModels.length === 0 && !primaryManaged) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
+    const creditPricer = primaryManaged || subagentModels.some((child) => isManagedModel(child))
+        ? await loadManagedCreditPricer(tenantId)
+        : null;
+    const callPricer = (model: PricedModel) => creditCallPricer(creditPricer, model);
+    const primaryPrice = primaryManaged ? callPricer(primary) : undefined;
     const models: Parameters<typeof buildCostEstimator>[0] = [
-        { names: [primary.key, primary.modelId], pricing: primary.pricing, model: primary },
+        { names: [primary.key, primary.modelId], pricing: primary.pricing, model: primary, ...(primaryPrice ? { price: primaryPrice } : {}) },
     ];
     for (const child of subagentModels) {
         if (child.key && child.key === primary.key) continue;
-        models.push({ names: [child.key, child.modelId], pricing: child.pricing, model: child, noFallback: true });
-        if (limited && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
+        const price = isManagedModel(child) ? callPricer(child) : undefined;
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing, model: child, noFallback: true, ...(price ? { price } : {}) });
+        if (limited && !price && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
             onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted against the cost limit or the session budget.`);
         }
     }
-    const estimator = buildCostEstimator(models, primary.pricing, calculateCost, primary);
+    const estimator = buildCostEstimator(models, primary.pricing, calculateCost, primary, primaryPrice);
     if (!estimator && limited) {
         logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
         });
     }
     return estimator;
+}
+
+/**
+ * One call of a model paid with credits, in USD at the rate the tenant's next credits would be taken at. Undefined
+ * when there is no pricer (no host, plan limits off, no known rate): the model then stays unpriced.
+ */
+function creditCallPricer(
+    pricer: Awaited<ReturnType<typeof loadManagedCreditPricer>>,
+    model: PricedModel,
+): ((usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => number | null) | undefined {
+    if (!pricer || !model.providerKey) return undefined;
+    const query = { providerKey: model.providerKey, modelKey: model.key, modelId: model.modelId, kind: 'chat' as const };
+    return (usage) => pricer(query, usage)?.usd ?? null;
 }
 
 /**
@@ -2281,7 +2307,7 @@ async function resolveChildPrompt(
 }
 
 /** What the cost estimator needs of a model: the names its requests are reported under, and its prices. */
-type PricedModel = { key?: string; modelId?: string; providerDriver?: string; pricing?: IModelPricing | null };
+type PricedModel = { key?: string; modelId?: string; providerKey?: string; providerDriver?: string; pricing?: IModelPricing | null };
 
 /**
  * Builds the gateway chat model for a sub-agent's model override. Answers why
@@ -2334,7 +2360,7 @@ export async function buildSubagentModel(
         return {
             ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
-            model: { key: model.key, modelId: model.modelId, providerDriver: model.providerDriver, pricing: model.pricing },
+            model: { key: model.key, modelId: model.modelId, providerKey: model.providerKey, providerDriver: model.providerDriver, pricing: model.pricing },
             takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
         };
     } catch (error) {
@@ -5170,7 +5196,7 @@ async function buildLocalAgentRun(input: {
         },
     );
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
-    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message));
+    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message), tenantId);
     if (sessionBudgetActive && !costEstimator) {
         // A budget nothing can measure would let the session spend without
         // limit, so the turn is refused rather than run unmetered.
@@ -6597,7 +6623,7 @@ async function priceAgentTurn(input: {
     pricing: IModelPricing | null | undefined;
     usage: AgentPlaygroundChatResult['usage'];
     /** Driver + model id of the pricing's model (a Claude cache write follows the provider's rate). */
-    model?: { providerDriver?: string; modelId?: string };
+    model?: { providerKey?: string; providerDriver?: string; modelId?: string };
 }): Promise<number | undefined> {
     const perRequest = (input.result.state as {
         usage?: {
@@ -6622,9 +6648,11 @@ async function priceAgentTurn(input: {
     // A turn whose own model has no price stays unpriced however its children are priced:
     // a cost that left the parent's calls out would read as the whole bill.
     const estimate = input.costEstimator;
+    // A model paid with credits is charged per call (by its tier), never at a token price: only its calls price it.
+    const perCall = isManagedModel(input.model);
     if (
         estimate && Array.isArray(perRequest) && perRequest.length > 0
-        && (input.plan || (input.pricing && perRequest.some((request) => request.subagent)))
+        && (perCall || input.plan || (input.pricing && perRequest.some((request) => request.subagent)))
     ) {
         let cost = 0;
         for (const request of perRequest) {
@@ -6639,6 +6667,8 @@ async function priceAgentTurn(input: {
         }
         return cost;
     }
+    // Its token price is 0, which would read as "free": a turn that cannot be priced by its calls stays unpriced.
+    if (perCall) return undefined;
     return priceTurn(input.pricing, input.usage, input.model);
 }
 

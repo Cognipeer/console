@@ -40,6 +40,8 @@ export interface CreditLedgerEntry {
   fromMonthly?: number;
   /** Part of `credits` taken from (or returned to) one-time credits; same sign as `credits`. Absent on old entries. */
   fromOneTime?: number;
+  /** What the entry is worth in USD at the rate its credits were sold at; same sign as `credits`. Absent = no rate known. */
+  usd?: number;
 }
 
 export interface CreditLedgerPage {
@@ -76,6 +78,10 @@ export interface CreditSpendTotals {
   count: number;
   fromMonthly: number;
   fromOneTime: number;
+  /** USD of the charges that have one: each charge at the rate its credits were sold at. */
+  usd: number;
+  /** Credits of the charges without a USD value (no rate known); all of them on a server that reports no USD. */
+  unpricedCredits: number;
 }
 
 export type CreditSpendGroup = 'model' | 'service' | 'project' | 'agent' | 'source' | 'day';
@@ -105,6 +111,10 @@ export interface CreditMonth {
   oneTimeAdded: number;
   oneTimeUsed: number;
   charged: number;
+  /** USD of the month's charges that have one; absent on a server that reports no USD. */
+  chargedUsd?: number;
+  /** Credits charged in the month without a USD value. */
+  chargedUnpricedCredits?: number;
   refunded: number;
 }
 
@@ -149,12 +159,16 @@ export async function fetchCreditSpend(range?: { month: string } | URLSearchPara
 
 /** `total` is a number on older servers and an object with the bucket split on newer ones. */
 export function normalizeTotals(total: number | Partial<CreditSpendTotals> | undefined): CreditSpendTotals {
-  if (typeof total === 'number') return { credits: total, count: 0, fromMonthly: 0, fromOneTime: 0 };
+  if (typeof total === 'number') return { credits: total, count: 0, fromMonthly: 0, fromOneTime: 0, usd: 0, unpricedCredits: total };
+  const credits = total?.credits ?? 0;
   return {
-    credits: total?.credits ?? 0,
+    credits,
     count: total?.count ?? 0,
     fromMonthly: total?.fromMonthly ?? 0,
     fromOneTime: total?.fromOneTime ?? 0,
+    // A server without USD priced nothing.
+    usd: total?.usd ?? 0,
+    unpricedCredits: total?.usd === undefined ? credits : (total.unpricedCredits ?? 0),
   };
 }
 
@@ -169,13 +183,16 @@ export async function fetchCreditSpendGrouped(month: string, groupBy: CreditSpen
     models?: CreditSpendModel[];
   }>(`/api/usage/credits/spend?${params.toString()}`);
   const rows: CreditSpendRow[] = data.rows
-    ?? (groupBy === 'model'
+    ? data.rows.map((row) => ({ ...row, ...normalizeTotals(row) }))
+    : (groupBy === 'model'
       ? (data.models ?? []).map((m) => ({
           key: m.model ?? 'unknown',
           credits: m.credits,
           count: m.count,
           fromMonthly: 0,
           fromOneTime: 0,
+          usd: 0,
+          unpricedCredits: m.credits,
           ...(m.label ? { label: m.label } : {}),
           ...(m.service ? { service: m.service } : {}),
         }))

@@ -156,10 +156,13 @@ export const usageTr: typeof usageEn = {
       nextExpiry: 'en yakın bitiş {date}',
       noLots: 'Tek seferlik kredi yok',
       order: 'Önce aylık krediler, sonra süresi en yakın bitecek tek seferlik krediler kullanılır.',
+      rate: 'kredi başına {rate}',
     },
     spend: {
       title: 'Harcama',
       total: '{month}: {total} kredi',
+      totalUsd: '{month}: {total} kredi ({usd})',
+      usdPartial: 'Bu harcamaların bir kısmının kredi kuru yok; tutar onları içermez.',
       groupLabel: 'Gruplama',
       groups: {
         model: 'Model adı',
@@ -180,6 +183,7 @@ export const usageTr: typeof usageEn = {
         agent: 'Ajan',
         calls: 'Çağrı',
         credits: 'Kredi',
+        usd: 'Tutar',
         share: 'Pay',
       },
     },
@@ -194,6 +198,7 @@ export const usageTr: typeof usageEn = {
         oneTimeAdded: 'Tek seferlik eklenen',
         oneTimeUsed: 'Tek seferlik kullanılan',
         charged: 'Harcanan',
+        chargedUsd: 'Harcanan tutar',
       },
     },
     monthPicker: {
@@ -205,6 +210,7 @@ export const usageTr: typeof usageEn = {
       time: 'Zaman',
       kind: 'Tür',
       credits: 'Kredi',
+      usd: 'Tutar',
       balance: 'İşlem sonrası bakiye',
       detail: 'Ayrıntı',
     },

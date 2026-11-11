@@ -3,6 +3,7 @@
  * banner text. No React imports so they can be tested on their own.
  */
 import type { UsageBanner } from '@/lib/limits/usageSummary';
+import { formatUsd } from '@/lib/utils/formatUsd';
 
 export type UsageSeverity = 'ok' | 'warning' | 'critical';
 
@@ -25,6 +26,23 @@ export function fillPercent(used: number, limit: number | undefined): number {
 
 export function formatNumber(value: number, locale?: string): string {
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(value);
+}
+
+/**
+ * The USD figure of credits (`$` + `formatUsd`), or null when none of the `credits` has a USD value (no rate was
+ * known for them): the caller shows a dash then. `partial` = some of the credits have no USD value, so the figure
+ * is a lower bound.
+ */
+export function creditUsd(
+  usd: number | undefined,
+  credits: number,
+  unpricedCredits: number | undefined,
+): { text: string; partial: boolean } | null {
+  if (usd === undefined || !Number.isFinite(usd)) return null;
+  const unpriced = Math.abs(unpricedCredits ?? 0);
+  if (Math.abs(credits) > 0 && unpriced >= Math.abs(credits) - 1e-9) return null;
+  const sign = usd < 0 ? '-' : '';
+  return { text: sign + '$' + formatUsd(Math.abs(usd)), partial: unpriced > 0 };
 }
 
 export function formatBytes(bytes: number, locale?: string): string {

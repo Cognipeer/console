@@ -37,6 +37,8 @@ export interface PlanCreditSummary {
     includedPerMonth: number;
     /** Unused monthly credits never carry over to the next month. */
     rollover: false;
+    /** What one monthly credit is worth in USD (the license's rate); absent = not known. */
+    usdPerCredit?: number;
   };
   /** The open one-time credit lots. Absent when the edition does not report them. */
   oneTimeLots?: PlanCreditLot[];
@@ -55,6 +57,8 @@ export interface PlanCreditLot {
   addedAt: string;
   /** ISO time the lot ends; null when it does not expire. */
   expiresAt: string | null;
+  /** What one credit of the lot is worth in USD, as it was sold; absent = not known. */
+  usdPerCredit?: number;
 }
 
 export interface PlanLimitsContribution {

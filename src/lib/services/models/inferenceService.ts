@@ -47,7 +47,7 @@ import { normalizeInferenceError } from './openaiErrors';
 
 export { OutputTokenLimitError } from './openaiErrors';
 
-import { logModelUsage, TokenUsage, UsageCostResult } from './usageLogger';
+import { costOfCreditQuote, logModelUsage, TokenUsage, UsageCostResult } from './usageLogger';
 import type { IModelUsageRouting } from '@/lib/database';
 import type { RoutingCallerContext } from './routingCallerContext';
 import { buildModelRuntime } from './runtimeService';
@@ -546,9 +546,17 @@ export async function handleEmbeddingRequest(params: {
     totalTokens: tokenEstimate,
   };
 
+  // A credit-paid model costs its credits at the rate they were sold at (its token price is 0).
+  let creditCost: UsageCostResult | undefined;
   if (lease) {
     const held = lease;
     const booked = { inputTokens: tokenEstimate, outputTokens: 0, ...(providerTokens > 0 ? {} : { estimated: true }) };
+    try {
+      const quote = held.quote?.(booked);
+      if (quote && Number.isFinite(quote.usd) && quote.usd >= 0) creditCost = costOfCreditQuote(quote);
+    } catch {
+      /* the row falls back to the model's own pricing */
+    }
     fireAndForget('managed-credit-settle', () => held.settle(booked));
   }
 
@@ -566,6 +574,7 @@ export async function handleEmbeddingRequest(params: {
       }),
       latencyMs,
       usage,
+      ...(creditCost ? { costOverride: creditCost } : {}),
     }),
   );
 

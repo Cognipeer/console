@@ -102,9 +102,21 @@ export async function listWebSearchRunLogs(
   return db.listWebSearchRunLogs(searchKey, options);
 }
 
+/** The USD of a managed search from its lease, or undefined (no lease, no quote, no known rate, a throw). */
+function searchQuoteUsd(lease: ManagedCreditLease | undefined, units: number): number | undefined {
+  try {
+    const usd = lease?.quote?.({ units })?.usd;
+    return typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? usd : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function logRun(
   tenantDbName: string,
   entry: Omit<IWebSearchRunLog, '_id' | 'createdAt'>,
+  /** A managed search's cost: its credits at the rate they were taken at. */
+  costUsd?: number,
 ): void {
   // Resolve attribution + rollup synchronously so the request ALS is in scope.
   const attribution = recordUsageEvent({
@@ -116,6 +128,7 @@ function logRun(
     status: entry.status,
     latencyMs: entry.latencyMs,
     units: { results: entry.resultCount },
+    ...(costUsd !== undefined ? { costUsd } : {}),
   });
   fireAndForget('log-websearch-run', async () => {
     const db = await withTenantDb(tenantDbName);
@@ -520,6 +533,7 @@ export async function runWebSearch(
     warnings.push(...(cacheSession?.warnings ?? []));
 
     let lease: ManagedCreditLease | undefined;
+    let creditUsd: number | undefined;
     let providerResult: Awaited<ReturnType<typeof callWebSearchProvider>>;
     if (cacheSession?.hit) {
       // A cache hit is free: nothing is reserved.
@@ -579,6 +593,8 @@ export async function runWebSearch(
         }
         throw error;
       }
+      // What the search costs in USD (the credits at the rate they are taken at), read before it is booked.
+      creditUsd = searchQuoteUsd(lease, units);
       void lease?.settle({ units }).catch(() => undefined);
     }
     const { results, answer: providerAnswer } = providerResult;
@@ -627,7 +643,7 @@ export async function runWebSearch(
           ...(cache ? { cache } : {}),
         }
         : undefined,
-    });
+    }, creditUsd);
 
     return {
       providerKey: searchKey,

@@ -155,10 +155,13 @@ export const usageEn = {
       nextExpiry: 'next ends {date}',
       noLots: 'No one-time credits',
       order: 'Monthly credits are used first, then the one-time credits that end soonest.',
+      rate: '{rate} per credit',
     },
     spend: {
       title: 'Spend',
       total: '{total} credits in {month}',
+      totalUsd: '{total} credits ({usd}) in {month}',
+      usdPartial: 'Some of these charges have no rate per credit; their value leaves them out.',
       groupLabel: 'Group by',
       groups: {
         model: 'Model',
@@ -179,6 +182,7 @@ export const usageEn = {
         agent: 'Agent',
         calls: 'Calls',
         credits: 'Credits',
+        usd: 'Value',
         share: 'Share',
       },
     },
@@ -193,6 +197,7 @@ export const usageEn = {
         oneTimeAdded: 'One-time added',
         oneTimeUsed: 'One-time used',
         charged: 'Charged',
+        chargedUsd: 'Charged value',
       },
     },
     monthPicker: {
@@ -204,6 +209,7 @@ export const usageEn = {
       time: 'Time',
       kind: 'Type',
       credits: 'Credits',
+      usd: 'Value',
       balance: 'Balance after',
       detail: 'Detail',
     },

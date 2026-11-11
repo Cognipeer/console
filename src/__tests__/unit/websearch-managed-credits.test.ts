@@ -14,6 +14,7 @@ vi.mock('@/lib/database', () => ({
   }),
 }));
 vi.mock('@/lib/core/asyncTask', () => ({ fireAndForget: vi.fn() }));
+vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: vi.fn(() => ({})) }));
 vi.mock('@/lib/services/providers/providerService', () => ({
   listProviderConfigs: vi.fn(),
   loadProviderRuntimeData: vi.fn(),
@@ -51,6 +52,7 @@ import { listProviderConfigs, loadProviderRuntimeData } from '@/lib/services/pro
 import { callWebSearchProvider } from '@/lib/services/webSearch/webSearchAdapter';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getDatabase } from '@/lib/database';
+import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 
 const view = (key: string, managed: boolean, extra: Record<string, unknown> = {}) => ({
   tenantId: 'tenant-1',
@@ -61,7 +63,7 @@ const view = (key: string, managed: boolean, extra: Record<string, unknown> = {}
   settings: { ...(managed ? { managed: true } : {}), ...extra },
 });
 
-let lease: { id: string; settle: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> };
+let lease: { id: string; settle: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn>; quote?: ReturnType<typeof vi.fn> };
 let reserve: ReturnType<typeof vi.fn>;
 
 const MANAGED_KEYS = new Set(['m', 'm-a', 'm-b']);
@@ -155,6 +157,28 @@ describe('reserve / settle / release', () => {
     expect(reserve.mock.invocationCallOrder[0]).toBeLessThan(
       (callWebSearchProvider as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0],
     );
+  });
+
+  it('books the search at its credits\' USD (the lease quote, read before the settle)', async () => {
+    install();
+    lease.quote = vi.fn((usage: { units?: number }) => ({ credits: 2 * (usage.units ?? 1), usdPerCredit: 0.006, usd: 0.012 * (usage.units ?? 1) }));
+    useRecord(view('m', true));
+    await run({ providerKey: 'm', searchDepth: 'advanced' });
+    expect(lease.quote).toHaveBeenCalledWith({ units: 2 });
+    expect(lease.quote.mock.invocationCallOrder[0]).toBeLessThan(lease.settle.mock.invocationCallOrder[0]);
+    expect(recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ service: 'websearch', status: 'success', costUsd: 0.024 }));
+  });
+
+  it('records no cost when the lease has no quote, no known rate or a quote that throws', async () => {
+    install();
+    useRecord(view('m', true));
+    for (const quote of [undefined, vi.fn(() => null), vi.fn(() => { throw new Error('boom'); })]) {
+      (recordUsageEvent as ReturnType<typeof vi.fn>).mockClear();
+      lease.quote = quote;
+      await run({ providerKey: 'm' });
+      expect(lease.settle).toHaveBeenCalled();
+      expect((recordUsageEvent as ReturnType<typeof vi.fn>).mock.calls[0][0]).not.toHaveProperty('costUsd');
+    }
   });
 
   it('reserves 2 units for an advanced search asked for by the request', async () => {

@@ -51,6 +51,7 @@ import {
   isManagedModel,
   isManagedProviderRecord,
   type ManagedCreditLease,
+  type ManagedCreditQuote,
   type ManagedUsage,
 } from '@/enterprise/managed-credits';
 import { replicaOrder, replicaBreakerKey, modelForReplica, shouldTryNextReplica, type ResolvedReplica } from './replicaPool';
@@ -64,7 +65,7 @@ import {
 } from './openaiErrors';
 import { buildCacheVariantKey, isSemanticCacheEnabled, lookupCache, storeInCache } from './semanticCacheService';
 import { currentKnowledgeExposure } from '@/lib/services/rag/access/exposure';
-import { calculateCost, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
+import { calculateCost, costOfCreditQuote, logModelUsage, type TokenUsage, type UsageCostResult } from './usageLogger';
 import {
   describeRequestContract,
   resolveModelInvocationConfig,
@@ -532,24 +533,43 @@ function settleUsage(
   /** The counts are the gateway's own estimate (a cancelled stream, an upstream that sent no usage), not the provider's. */
   estimated?: boolean,
 ): UsageCostResult {
-  const cost = calculateCost(state.model.pricing, usage, state.model);
-  if (state.creditLease) settleLease(state, usage, estimated);
+  const booked = state.creditLease ? managedUsageOf(usage, estimated) : undefined;
+  // A credit-paid call costs its credits at the rate they were sold at (its token price is 0), so the budget
+  // and the usage row both see what the tenant really spent.
+  const quote = booked ? quoteLease(state.creditLease, booked) : null;
+  const cost = quote ? costOfCreditQuote(quote) : calculateCost(state.model.pricing, usage, state.model);
+  if (booked) settleLease(state, booked);
   state.context.onUsageSettled?.(cost, usage);
-  usageRow(state, label, { ...row, usage } as Parameters<typeof logModelUsage>[2]);
+  usageRow(state, label, { ...row, usage, ...(quote ? { costOverride: cost } : {}) } as Parameters<typeof logModelUsage>[2]);
   return cost;
 }
 
-/** A managed provider's credit hold takes the call's real usage. Fire-and-forget: never on the response path, never throws. */
-function settleLease(state: CallState, usage: TokenUsage, estimated?: boolean): void {
-  const lease = state.creditLease;
-  if (!lease) return;
-  state.creditLease = undefined;
-  const booked: ManagedUsage = {
+/** The usage a managed provider's credit hold is settled with. */
+function managedUsageOf(usage: TokenUsage, estimated?: boolean): ManagedUsage {
+  return {
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,
     ...(usage.cachedInputTokens ? { cachedInputTokens: usage.cachedInputTokens } : {}),
     ...(estimated ? { estimated: true } : {}),
   };
+}
+
+/** The lease's price for `usage`; null when it has none (no rate known, or no quote). Never throws. */
+function quoteLease(lease: ManagedCreditLease | undefined, usage: ManagedUsage): ManagedCreditQuote | null {
+  if (!lease?.quote) return null;
+  try {
+    const quote = lease.quote(usage);
+    return quote && Number.isFinite(quote.usd) && quote.usd >= 0 ? quote : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A managed provider's credit hold takes the call's real usage. Fire-and-forget: never on the response path, never throws. */
+function settleLease(state: CallState, booked: ManagedUsage): void {
+  const lease = state.creditLease;
+  if (!lease) return;
+  state.creditLease = undefined;
   fireAndForget('managed-credit-settle', () => lease.settle(booked));
 }
 

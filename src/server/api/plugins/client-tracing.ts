@@ -939,7 +939,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           }
 
           // Fingerprint-deduped, so each event is costed exactly once.
-          const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
+          const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId, ctx.tenantId);
           await recordTraceModelUsage({
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
@@ -1288,7 +1288,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           }
         }
 
-        const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
+        const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId, ctx.tenantId);
         await recordTraceModelUsage({
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -1580,7 +1580,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
 
         await backgroundDb.createAgentTracingEvent(eventDoc);
 
-        const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
+        const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId, ctx.tenantId);
         await recordTraceModelUsage({
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,

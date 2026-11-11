@@ -1215,6 +1215,9 @@ export interface IModelUsageCostSnapshot {
   totalCost?: number;
   /** Cache tokens priced at the input rate because the model had no price entered for them. */
   assumedRates?: Array<'cacheRead' | 'cacheWrite'>;
+  /** Credit-paid (platform) calls: the credits charged and the USD per credit `totalCost` is priced at. */
+  credits?: number;
+  usdPerCredit?: number;
 }
 
 /**

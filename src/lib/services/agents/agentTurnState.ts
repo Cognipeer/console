@@ -732,6 +732,12 @@ export type CostModelContext = { providerDriver?: string; modelId?: string };
 export type AgentCostEstimator = (args: Parameters<CostEstimator>[0] & { cacheWriteTokens?: number }) => number;
 
 /**
+ * The USD of ONE model call, for a model paid with credits (it has no token price: a call is charged by its tier).
+ * Null when it cannot be priced.
+ */
+export type AgentCallPricer = (usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => number | null;
+
+/**
  * The SDK enforces `limits.maxCostUsd` only through a `costEstimator` — with
  * none, the limit was silently a no-op. Prices each model call from the
  * console model's own `pricing`, the same numbers the bill uses.
@@ -741,26 +747,41 @@ export type AgentCostEstimator = (args: Parameters<CostEstimator>[0] & { cacheWr
  * own model, which makes the cap err on the side of stopping.
  */
 export function buildCostEstimator(
-    models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null; /** Driver + model id: lets a Claude cache write be priced at its assumed rate. */ model?: CostModelContext; /** A model with no price of its own that must not be priced at the fallback rate (a sub-agent's). */ noFallback?: boolean }>,
+    models: Array<{
+        names: Array<string | undefined>;
+        pricing?: IModelPricing | null;
+        /** Driver + model id: lets a Claude cache write be priced at its assumed rate. */
+        model?: CostModelContext;
+        /** A model with no price of its own that must not be priced at the fallback rate (a sub-agent's). */
+        noFallback?: boolean;
+        /** A model paid with credits: each call is priced by this instead of `pricing`. */
+        price?: AgentCallPricer;
+    }>,
     fallback: IModelPricing | null | undefined,
     calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cachedWriteTokens?: number }, model?: CostModelContext) => { totalCost: number },
     fallbackModel?: CostModelContext,
+    /** The agent's own model when it is paid with credits: prices a call whose name matches nothing, as `fallback` does. */
+    fallbackPrice?: AgentCallPricer,
 ): AgentCostEstimator | undefined {
     // A pricing record of zeros is "nobody entered prices", not "free": it
     // would price every call at $0 and the cap would never fire.
     const priced = (pricing: IModelPricing | null | undefined): pricing is IModelPricing =>
         !!pricing && ((pricing.inputTokenPer1M ?? 0) > 0 || (pricing.outputTokenPer1M ?? 0) > 0);
-    const fallbackPricing = priced(fallback) ? fallback : undefined;
-    const byName = new Map<string, { pricing: IModelPricing; model?: CostModelContext }>();
+    const fallbackPricing = fallbackPrice ? undefined : priced(fallback) ? fallback : undefined;
+    const byName = new Map<string, { pricing?: IModelPricing; price?: AgentCallPricer; model?: CostModelContext }>();
     const unpriced = new Set<string>();
     for (const entry of models) {
+        if (entry.price) {
+            for (const name of entry.names) if (name) byName.set(name.toLowerCase(), { price: entry.price });
+            continue;
+        }
         if (!priced(entry.pricing)) {
             if (entry.noFallback) for (const name of entry.names) if (name) unpriced.add(name.toLowerCase());
             continue;
         }
         for (const name of entry.names) if (name) byName.set(name.toLowerCase(), { pricing: entry.pricing, model: entry.model });
     }
-    if (byName.size === 0 && !fallbackPricing) return undefined;
+    if (byName.size === 0 && !fallbackPricing && !fallbackPrice) return undefined;
     // agent-sdk >= 0.21 passes `cacheWriteTokens` in the estimator args, so the live
     // budget stop prices a cache write at its own rate, as `priceAgentTurn` does
     // post-turn. `inputTokens` is the whole prompt, cache read + write included (the
@@ -770,7 +791,15 @@ export function buildCostEstimator(
         // A sub-agent's model nobody priced counts as free here (the owner is warned) rather than at the parent's rate.
         if (name && !byName.has(name) && unpriced.has(name)) return 0;
         const hit = name ? byName.get(name) : undefined;
-        const pricing = hit?.pricing ?? fallbackPricing;
+        const callPrice = hit ? hit.price : fallbackPrice;
+        if (callPrice) {
+            return callPrice({
+                inputTokens: Number(args.inputTokens) || 0,
+                outputTokens: Number(args.outputTokens) || 0,
+                cachedInputTokens: Number(args.cachedInputTokens) || 0,
+            }) ?? 0;
+        }
+        const pricing = hit ? hit.pricing : fallbackPricing;
         if (!pricing) return 0;
         return calculate(pricing, {
             inputTokens: args.inputTokens,

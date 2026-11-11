@@ -30,6 +30,9 @@ vi.mock('@/lib/services/models/semanticCacheService', () => ({
 vi.mock('@/lib/services/models/usageLogger', () => ({
   logModelUsage: vi.fn().mockResolvedValue(undefined),
   calculateCost: () => ({ currency: 'USD', inputCost: 0, outputCost: 0, cachedCost: 0, cacheWriteCost: 0, totalCost: 0 }),
+  costOfCreditQuote: (quote: { credits: number; usd: number; usdPerCredit: number }) => ({
+    currency: 'USD', inputCost: 0, outputCost: 0, cachedCost: 0, cacheWriteCost: 0, totalCost: quote.usd, credits: quote.credits, usdPerCredit: quote.usdPerCredit,
+  }),
 }));
 vi.mock('@/lib/services/models/dynamicRoutingState', () => ({
   getConversationState: vi.fn().mockResolvedValue({}),
@@ -514,6 +517,69 @@ describe('managed streamed call', () => {
     const outcome = await executeModelCall({ ...BASE, request: { ...ASK, maxTokens: 5000 } as never, stream: true });
     await collect(outcome.stream!);
     expect(sentRequest(client, 'stream').maxTokens).toBe(100);
+  });
+});
+
+// ── credit-paid cost ─────────────────────────────────────────────────────
+
+describe('cost of a credit-paid call', () => {
+  /** A host whose leases price a usage at 2 credits per 10 output tokens, $0.006 per credit. */
+  function installQuotingHost(quote: ManagedCreditLease['quote']) {
+    const host = installHost();
+    host.reserve.mockImplementation(async (call: ManagedCallInfo) => {
+      reserveCalls.push(call);
+      const lease: Lease = { id: 'q', quote, settle: vi.fn(async () => {}), release: vi.fn(async () => {}) };
+      leases.push(lease);
+      return lease;
+    });
+    return host;
+  }
+  const usageRows = () => (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((callArgs) => callArgs[2] as Record<string, unknown>);
+
+  it('records the quoted USD as the call cost (usage row and budget), and still settles the credits', async () => {
+    const quote = vi.fn(() => ({ credits: 4, usdPerCredit: 0.006, usd: 0.024 }));
+    installQuotingHost(quote);
+    wire();
+    const settled: number[] = [];
+    await executeModelCall({ ...BASE, request: ASK, context: { onUsageSettled: (cost: { totalCost: number }) => settled.push(cost.totalCost) } as never });
+    await flush();
+
+    expect(quote).toHaveBeenCalledWith({ inputTokens: 40, outputTokens: 12 });
+    expect(leases[0].settle).toHaveBeenCalledWith({ inputTokens: 40, outputTokens: 12 });
+    expect(settled).toEqual([0.024]);
+    expect(usageRows().at(-1)?.costOverride).toMatchObject({ currency: 'USD', totalCost: 0.024, credits: 4, usdPerCredit: 0.006 });
+  });
+
+  it('a lease that cannot price the call (no rate) leaves the cost to the model pricing', async () => {
+    installQuotingHost(() => null);
+    wire();
+    await executeModelCall({ ...BASE, request: ASK });
+    await flush();
+    expect(leases[0].settle).toHaveBeenCalledTimes(1);
+    expect(usageRows().at(-1)).not.toHaveProperty('costOverride');
+  });
+
+  it('a quote that throws never fails the call or the settlement', async () => {
+    installQuotingHost(() => { throw new Error('boom'); });
+    wire();
+    const outcome = await executeModelCall({ ...BASE, request: ASK });
+    await flush();
+    expect(outcome.result?.response.content).toBe('hi');
+    expect(leases[0].settle).toHaveBeenCalledTimes(1);
+    expect(usageRows().at(-1)).not.toHaveProperty('costOverride');
+  });
+
+  it('prices a credit-paid embedding the same way', async () => {
+    stubModel({ ...model(), category: 'embedding' as const, modelId: 'text-embedding-3-small', key: 'emb', settings: {} });
+    installQuotingHost((usage) => ({ credits: 0.01, usdPerCredit: 0.006, usd: 0.00006 * ((usage.inputTokens ?? 0) / 7) }));
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: { createNativeEmbedder: vi.fn().mockResolvedValue({ embed: vi.fn().mockResolvedValue({ vectors: [[0.1]], usage: { inputTokens: 7 } }) }) },
+      record: { key: 'prov', driver: 'openai', type: 'embedding' },
+    });
+    await handleEmbeddingRequest({ tenantDbName: 'tenant_acme', modelKey: 'emb', projectId: 'proj-1', body: { input: 'abcdefgh' } });
+    await flush();
+    expect(leases[0].settle).toHaveBeenCalledWith({ inputTokens: 7, outputTokens: 0 });
+    expect(usageRows().at(-1)?.costOverride).toMatchObject({ totalCost: 0.00006, credits: 0.01 });
   });
 });
 

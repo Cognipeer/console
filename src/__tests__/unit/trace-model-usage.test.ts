@@ -4,7 +4,7 @@
  * helper (also used by the entity-health emitters); these tests pin the exact
  * usage rows so the refactor cannot change what spend reports see.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
@@ -15,6 +15,11 @@ vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
 vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: hoisted.recordUsageEvent }));
 
 import { recordTraceModelUsage } from '@/lib/services/agentTracing';
+import {
+  registerManagedCreditsHost,
+  resetManagedCreditsHostForTests,
+  type ManagedCreditPricer,
+} from '@/enterprise/managed-credits';
 
 const TENANT_DB = 'tenant_acme';
 
@@ -209,5 +214,56 @@ describe('recordTraceModelUsage', () => {
     hoisted.getDatabase.mockClear();
     await recordTraceModelUsage({ ...base, events: [{ model: 'm', inputTokens: 0, outputTokens: 0 }] });
     expect(hoisted.getDatabase).not.toHaveBeenCalled();
+  });
+});
+
+describe('recordTraceModelUsage: a model paid with credits', () => {
+  const platform = { key: 'cognipeer.chat', modelId: 'chat-1', providerKey: 'cognipeer', category: 'llm', pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 } };
+  const pricer = vi.fn<ManagedCreditPricer>((_query, usage) => ({ credits: 2 * (usage.calls ?? 1), usdPerCredit: 0.01, usd: 0.02 * (usage.calls ?? 1) }));
+  const install = (answer: ManagedCreditPricer | null) => registerManagedCreditsHost({
+    isManagedProvider: (ref) => ref.key === 'cognipeer',
+    reserve: async () => { throw new Error('not in these tests'); },
+    pricer: async () => answer,
+  });
+
+  beforeEach(() => {
+    hoisted.recordUsageEvent.mockClear();
+    hoisted.getDatabase.mockReset();
+    pricer.mockClear();
+  });
+  afterEach(() => resetManagedCreditsHostForTests());
+
+  it('prices its calls in credits at the tenant rate, the call count included', async () => {
+    install(pricer);
+    hoisted.getDatabase.mockResolvedValue(makeDb({ models: [platform] }));
+    await recordTraceModelUsage({
+      ...base,
+      events: [
+        { model: 'cognipeer.chat', inputTokens: 1000, outputTokens: 100 },
+        { model: 'cognipeer.chat', inputTokens: 3000, outputTokens: 300 },
+      ],
+    });
+    expect(pricer).toHaveBeenCalledWith(
+      { providerKey: 'cognipeer', modelKey: 'cognipeer.chat', modelId: 'chat-1', kind: 'chat' },
+      { inputTokens: 4000, outputTokens: 400, cachedInputTokens: 0, calls: 2 },
+    );
+    expect(hoisted.recordUsageEvent.mock.calls[0][0]).toMatchObject({ refKey: 'cognipeer.chat', costUsd: 0.04 });
+  });
+
+  it('stays at its token price (0) when no rate is known, and an own model is never asked about', async () => {
+    install(null);
+    hoisted.getDatabase.mockResolvedValue(makeDb({
+      models: [platform, { key: 'own', modelId: 'gpt-x', providerKey: 'openai', category: 'llm', pricing: { inputTokenPer1M: 1, outputTokenPer1M: 0 } }],
+    }));
+    await recordTraceModelUsage({
+      ...base,
+      events: [
+        { model: 'cognipeer.chat', inputTokens: 1000, outputTokens: 100 },
+        { model: 'own', inputTokens: 1_000_000, outputTokens: 0 },
+      ],
+    });
+    const rows = hoisted.recordUsageEvent.mock.calls.map((call) => call[0]);
+    expect(rows.find((row) => row.refKey === 'cognipeer.chat')).toMatchObject({ costUsd: 0 });
+    expect(rows.find((row) => row.refKey === 'own')).toMatchObject({ costUsd: 1 });
   });
 });
