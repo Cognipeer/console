@@ -24,7 +24,9 @@
  *     `agent.session_manage_others` (Write: look at / act on a session somebody else
  *     started). `portal.use` and `agent.invoke` are decided by the portal runtime, the
  *     session verbs by the agent routes (RUNTIME_ENFORCED_ACTIONS); the rest are
- *     evaluated by the Access check only.
+ *     evaluated by the Access check only. `mcp-server.use` and `skill.use` (Read) are
+ *     asked by the agent runtime for the person a run is made for: using a shared
+ *     resource of the project, decided by the record's access list (accessListCatalog.ts).
  *
  * Pure data + pure functions: no Cedar, no database. UIs import `describeActions`
  * / `ACTION_LEVEL_GROUPS` for labels and grouping.
@@ -99,6 +101,10 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
   { type: 'rag-module', verb: 'query', level: 'write' },
   { type: 'model', verb: 'infer', level: 'write' },
   { type: 'portal', verb: 'use', level: 'read' },
+  // Using a shared resource of a project in an agent run: the tools of an MCP server, a skill. Decided for the PERSON
+  // the run is made for by the record's access list (managed:access:*, accessListCatalog.ts), never by an RBAC level.
+  { type: 'mcp-server', verb: 'use', level: 'read' },
+  { type: 'skill', verb: 'use', level: 'read' },
   // A report (enterprise, lib/iam/reportEntities.ts) is a resource of the `reports` service. Seeing it and downloading
   // its CSV are Read; seeing it across all projects and the breakdowns that name people or API tokens are Admin, so only
   // the holders of `reports` Admin (owners and administrators) have them until a policy grants them.
@@ -145,6 +151,9 @@ export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChann
   'agent.approve': ['dashboard', 'api', 'portal'],
   'agent.session_view_others': ['dashboard', 'api'],
   'agent.session_manage_others': ['dashboard', 'api'],
+  // The agent runtime asks these for the person a run is made for, whichever channel the run came through.
+  'mcp-server.use': ['dashboard', 'api', 'portal', 'messaging'],
+  'skill.use': ['dashboard', 'api', 'portal', 'messaging'],
   // Where an agent keeps its session files is a Files decision about THAT bucket (agents routes ask it).
   'file-bucket.get': ['dashboard', 'api'],
   'file-bucket.update': ['dashboard', 'api'],

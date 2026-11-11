@@ -103,11 +103,15 @@
  * still apply on top. Answering an agent's QUESTION is not an approval: it follows the ownership
  * of the session (`agent.session_manage_others`, agentEntities.ts).
  *
+ * SHARED RESOURCES - `managed:access:*`, `@managed("access")`: who may use a project's MCP server or skill in an
+ * agent run, read from the record's ACCESS LIST like a portal's (see ACCESS_POLICIES below).
+ *
  * Written so that they cannot error: every attribute read is behind `has`, the list
  * members are typed entity references (portalEntities.ts), and a managed forbid
  * that nevertheless errors fails the decision instead of being skipped (engine.ts).
  */
 
+import { ACCESS_LIST_ACTIONS } from './accessListCatalog';
 import { PORTAL_NETWORK_SLOTS } from './portalNetworks';
 
 export const MANAGED_ANNOTATION = 'managed';
@@ -353,20 +357,56 @@ when {
 };`,
 });
 
-/** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids, the portal and messaging access rules and the agent approval rules. */
+export const ACCESS_POLICY_IDS = {
+  use: 'managed:access:use',
+  useBoundary: 'managed:access:use-boundary',
+} as const;
+
+const ACCESS_LIST_ACTION_SET = ACCESS_LIST_ACTIONS.map((action) => `Action::"${action}"`).join(', ');
+
+/**
+ * SHARED RESOURCES - `managed:access:*`, `@managed("access")`: who may use a shared resource of a project in an agent
+ * run (the tools of an MCP server, a skill: accessListCatalog.ts) is decided by the record's ACCESS LIST, the same way
+ * a portal's list decides who opens it. The list is stored on the record (`IResourceAccessList`) and sent as attributes
+ * of its entity (accessList.ts); nothing is stored per record in the policy store.
+ *
+ *   access:use            the list GRANTS `<type>.use` to people: everyone when its mode is `all` (the default of a record
+ *                         that never set one), else the people and groups it names
+ *   access:use-boundary   forbids everyone the list does not admit, so no RBAC level and no custom permit lets a person
+ *                         use a resource the list keeps them from (a workspace owner who is not on it is kept out too),
+ *                         and an API token is never the subject: the runtime asks about the person a run is made for
+ *
+ * Custom forbids still restrict on top: a rule that blocks a group from one MCP server wins over an open list.
+ */
+export const ACCESS_POLICIES: Readonly<Record<string, string>> = Object.freeze({
+  [ACCESS_POLICY_IDS.use]: `@managed("access")
+permit (principal is User, action in [${ACCESS_LIST_ACTION_SET}], resource)
+when {
+  ${onAccessList('resource', '  ', false)}
+};`,
+  [ACCESS_POLICY_IDS.useBoundary]: `@managed("access")
+forbid (principal, action in [${ACCESS_LIST_ACTION_SET}], resource)
+unless {
+  principal is User
+  && ${onAccessList('resource', '  ', false)}
+};`,
+});
+
+/** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids, the portal and messaging access rules, the agent approval rules and the access lists of shared resources. */
 export const ALL_MANAGED_POLICIES: Readonly<Record<string, string>> = Object.freeze({
   ...MANAGED_POLICIES,
   ...BOUNDARY_POLICIES,
   ...PORTAL_POLICIES,
   ...MESSAGING_POLICIES,
   ...AGENT_POLICIES,
+  ...ACCESS_POLICIES,
 });
 
 export function isManagedPolicyId(id: string): boolean {
   return id.startsWith('managed:');
 }
 
-export type ManagedPolicyGroup = 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent';
+export type ManagedPolicyGroup = 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent' | 'access';
 
 export interface ManagedPolicyInfo {
   /** Cedar policy id (`managed:rbac:user-read`). */
@@ -392,6 +432,7 @@ function managedGroupOf(id: string): ManagedPolicyGroup {
   if (id.startsWith('managed:portal:')) return 'portal';
   if (id.startsWith('managed:messaging:')) return 'messaging';
   if (id.startsWith('managed:agent:')) return 'agent';
+  if (id.startsWith('managed:access:')) return 'access';
   return 'rbac';
 }
 

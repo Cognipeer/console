@@ -42,6 +42,7 @@ import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { ensureTenantCollectionIndexes } from './indexManifest';
 import { toObjectId, toObjectIds } from './objectIds';
+import { isDuplicateKeyError } from './errors';
 
 const DUPLICATE_KEY_ERROR_CODE = 11000;
 /** Directory users written per `bulkWrite`, so a big sync never builds one enormous request. */
@@ -61,10 +62,6 @@ function compact<T extends Record<string, unknown>>(record: T): Record<string, u
 
 function withStringId<T>(doc: { _id?: unknown }): T {
   return { ...doc, _id: doc._id?.toString() } as unknown as T;
-}
-
-function isDuplicateKeyError(error: unknown): boolean {
-  return (error as { code?: number } | null)?.code === DUPLICATE_KEY_ERROR_CODE;
 }
 
 export function RagAccessMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {

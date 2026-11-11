@@ -18,6 +18,7 @@ import {
   OCR_TENANT_SCHEMA_SQL,
   TENANT_SCHEMA_SQL,
 } from './schema';
+import type { IAgentResourceOwner, OwnedResourceListFilter } from '../provider/types.domain';
 
 export const logger = createLogger('sqlite');
 
@@ -1124,6 +1125,17 @@ export class SQLiteProviderBase {
     // normaliser needs it to keep an existing binding armed.
     this.ensureTableColumn(db, TABLES.mcpServers, 'guardrail', 'guardrail TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'lastError', 'lastError TEXT');
+    // Who may use the server's tools in an agent run (IResourceAccessList, JSON); NULL = everyone who can run the agent.
+    this.ensureTableColumn(db, TABLES.mcpServers, 'access', 'access TEXT');
+    this.ensureTableColumn(db, TABLES.agentSkills, 'access', 'access TEXT');
+    // MCP servers and skills created inside an agent (IAgentResourceOwner): `owner` is the JSON, `ownerAgentId` the
+    // indexed copy (NULL for every shared record, which is what a list without an owner filter returns).
+    for (const table of [TABLES.mcpServers, TABLES.agentSkills]) {
+      this.ensureTableColumn(db, table, 'owner', 'owner TEXT');
+      this.ensureTableColumn(db, table, 'ownerAgentId', 'ownerAgentId TEXT');
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_servers_owner_agent ON ${TABLES.mcpServers}(ownerAgentId)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_askill_owner_agent ON ${TABLES.agentSkills}(ownerAgentId)`);
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerType', 'callerType TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'callerUserId', 'callerUserId TEXT');
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'transport', 'transport TEXT');
@@ -1681,6 +1693,25 @@ export class SQLiteProviderBase {
    */
   protected likeAny(columns: readonly string[], param: string): string {
     return `(${columns.map((column) => `${column} LIKE ${param} ESCAPE '\\'`).join(' OR ')})`;
+  }
+
+  /**
+   * The WHERE clause that picks which agent-owned records a list returns (`OwnedResourceListFilter`), for a table with
+   * an `ownerAgentId` column; null when the list returns every record. Sets `@ownerAgentId` in `params` when it uses it.
+   */
+  protected ownedResourceClause(filter: OwnedResourceListFilter | undefined, params: Record<string, unknown>): string | null {
+    const agentId = filter?.ownerAgentId;
+    if (agentId) {
+      params.ownerAgentId = agentId;
+      return filter?.owned === 'include' ? '(ownerAgentId IS NULL OR ownerAgentId = @ownerAgentId)' : 'ownerAgentId = @ownerAgentId';
+    }
+    if (filter?.owned === 'include') return null;
+    return filter?.owned === 'only' ? 'ownerAgentId IS NOT NULL' : 'ownerAgentId IS NULL';
+  }
+
+  /** `owner` of a row of a table with an `ownerAgentId` column: present only when the row belongs to an agent. */
+  protected ownerOfRow(row: Record<string, unknown>): { owner?: IAgentResourceOwner } {
+    return row.ownerAgentId ? { owner: { kind: 'agent', agentId: String(row.ownerAgentId) } } : {};
   }
 
   protected normalizeThreadId(value: unknown): string | undefined {

@@ -30,6 +30,7 @@ import {
   AgentRunIdempotencyKeyTakenError,
 } from '@/lib/database';
 import type { AgentResponseFormat, AgentRunClass, IAgent, IAgentConfig, IAgentRun } from '@/lib/database';
+import { runInTenant } from '@/lib/database/runInTenant';
 import { resolveRemindersConfig, type ResolvedRemindersConfig } from './agentRemindersConfig';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getThisNodeName } from '@/lib/core/cluster/nodeRegistry';
@@ -98,10 +99,7 @@ export async function runWithTenantDb<T>(
   tenantDbName: string,
   fn: (db: DatabaseProvider) => T | Promise<T>,
 ): Promise<T> {
-  const db = await getDatabase();
-  if (db.runWithTenant) return db.runWithTenant(tenantDbName, () => fn(db));
-  await db.switchToTenant(tenantDbName);
-  return fn(db);
+  return runInTenant(await getDatabase(), tenantDbName, fn);
 }
 
 /** Resolves once `ms` has elapsed, with the given sentinel — never rejects. */

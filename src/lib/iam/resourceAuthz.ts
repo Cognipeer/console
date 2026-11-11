@@ -59,6 +59,7 @@
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import type { RbacUserLike } from '@/lib/security/rbac';
+import { isAccessListAction, type AccessListAction } from './accessListCatalog';
 import { RUNTIME_ENFORCED_ACTIONS } from './actions';
 import { IAM_CHANNELS, isRuntimeIamChannel, type IamChannel } from './context';
 import { recordPortalTestSession, recordResourceDenial } from './denialAudit';
@@ -87,6 +88,10 @@ export const RESOURCE_AUTHZ_ACTIONS = [
   'report.export',
   'report.view_all_projects',
   'report.view_people',
+  // Using a shared resource of a project in an agent run, asked for the person the run is made for
+  // (`authorizeResourceForPerson`): the tools of an MCP server, a skill (accessListCatalog.ts).
+  'mcp-server.use',
+  'skill.use',
 ] as const;
 export type ResourceAuthzAction = (typeof RESOURCE_AUTHZ_ACTIONS)[number];
 
@@ -166,6 +171,25 @@ export interface ResourceAuthzInput {
   /** What the audit row and the decision lookup name: `portalId` in the portal channel, `deploymentId` in the messaging channel. */
   subject: ResourceAuthzSubject;
   client?: ResourceAuthzClient;
+}
+
+/**
+ * A decision of the AGENT RUNTIME about the person a run is made for: may this run use a shared resource of the project
+ * (`mcp-server.use`, `skill.use`). The person is described the way the portal describes them (role, groups, projects;
+ * no project narrowing and never an API token): the access list of the resource is about people, and a run started
+ * with a token is made for the token's owner. `channel` is the channel the run came through (`iamChannelOfRunSource`),
+ * which a custom rule may name.
+ */
+export interface ResourcePersonAuthzInput {
+  tenantDbName: string;
+  tenantId: string;
+  /** The person the run is made for. */
+  userId: string;
+  channel: IamChannel;
+  action: AccessListAction;
+  /** The record with its access list (`accessListResource`); a function receives the person's groups to slice a long list. */
+  resource: IamResource | ((requester: ResourceAuthzRequester) => IamResource);
+  subject?: ResourceAuthzSubject;
 }
 
 /** A decision for a request of the dashboard or the API: the principal is the one the request gate built. */
@@ -379,6 +403,8 @@ function validDecision(input: unknown): input is Decision {
   if (!(RESOURCE_AUTHZ_ACTIONS as readonly string[]).includes(i.action as string)) return false;
   // An action is only ever asked in the channels its runtime decides it in (actions.ts).
   if (!RUNTIME_ENFORCED_ACTIONS[i.action as string]?.includes(i.channel as IamChannel)) return false;
+  // A shared resource is decided for the person (the principal is built here), whatever channel the run came through.
+  if (isAccessListAction(i.action)) return !i.principal && !!i.subject;
   if (i.channel === 'portal') return !!i.subject && isText(i.subject.portalId);
   // The messaging runtime describes the person itself (no prebuilt principal: a token never speaks for a person here) and
   // must name the deployment whose access list decides: without one the decision could not be replayed, so it is not made.
@@ -572,4 +598,27 @@ export async function authorizeResourceForPrincipal(input: ResourcePrincipalAuth
     auditUnavailable: i.auditUnavailable ?? true,
     quiet: i.quiet === true,
   });
+}
+
+/** The agent runtime's decision about the person a run is made for (`ResourcePersonAuthzInput`). Never throws. */
+export async function authorizeResourceForPerson(input: ResourcePersonAuthzInput): Promise<ResourceAuthzResult> {
+  const decision: Decision = {
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    userId: input.userId,
+    channel: input.channel,
+    action: input.action,
+    resource: input.resource,
+    subject: input.subject ?? {},
+    // An outage is answered by the runtime (the resource is left out of the run), not audited as a refusal here.
+    auditUnavailable: false,
+  };
+  if (!validDecision(decision)) {
+    return { allowed: false, unavailable: true, source: 'unavailable', reasons: [], policyIds: [] };
+  }
+  try {
+    return await decide(decision);
+  } catch (error) {
+    return refuseUnavailable({ input: decision, resource: null, principal: null }, 'evaluation_error', error);
+  }
 }

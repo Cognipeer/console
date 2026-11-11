@@ -50,6 +50,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
+    IconArrowDown,
     IconChevronDown,
     IconChevronRight,
     IconClock,
@@ -98,6 +99,8 @@ import {
     type LiveToolEvent,
 } from './liveFlow';
 import LiveTurnFlow from './LiveTurnFlow';
+import LatestMessageBar from './LatestMessageBar';
+import { answerAnchorId, latestMessageOf } from './latestMessageUi';
 import StoredTurnFlow from './StoredTurnFlow';
 import { PlanDock } from './PlanCard';
 import { currentPlanOf, type SessionPlanRecord } from './planUi';
@@ -534,28 +537,52 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const deepLinkedMessage = searchParams.get('message');
     const scrolledToMessage = useRef<string | null>(null);
     useEffect(() => {
-        if (deepLinkedMessage === null || scrolledToMessage.current === deepLinkedMessage || messages.length === 0) return;
+        // Not while the spinner is up: the transcript is not drawn yet, and the link would be spent on nothing.
+        if (loading || deepLinkedMessage === null || scrolledToMessage.current === deepLinkedMessage || messages.length === 0) return;
         const target = screenIndexOf(messages, Number(deepLinkedMessage));
         if (target < 0) return;
         scrolledToMessage.current = deepLinkedMessage;
-        const frame = requestAnimationFrame(() => turnRefs.current[target]?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+        const frame = requestAnimationFrame(() => {
+            const node = turnRefs.current[target];
+            if (!node) return;
+            // The page opened on this message, not at the end: nothing that lands later (ratings) may pull it back down.
+            nearBottom.current = false;
+            node.scrollIntoView({ block: 'center' });
+        });
         return () => cancelAnimationFrame(frame);
-    }, [deepLinkedMessage, messages]);
-
-    useEffect(() => {
-        if (viewportRef.current) {
-            viewportRef.current.scrollTop = viewportRef.current.scrollHeight;
-        }
-    }, [messages]);
+    }, [deepLinkedMessage, messages, loading]);
 
     // A running turn grows below the fold: follow it, unless the person scrolled up to read. "Near the bottom" is
     // judged when they scroll (before the new content makes the page taller), not after it has grown.
     const nearBottom = useRef(true);
+    // The transcript is taller than its panel (the latest-message bar is worth showing), and the person is not at its end
+    // (the "jump to latest" button is).
+    const [overflowing, setOverflowing] = useState(false);
+    const [awayFromBottom, setAwayFromBottom] = useState(false);
     const trackScroll = useCallback(() => {
         const viewport = viewportRef.current;
         if (!viewport) return;
         nearBottom.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= AUTOSCROLL_WITHIN_PX;
+        const overflow = viewport.scrollHeight > viewport.clientHeight + 1;
+        setOverflowing(overflow);
+        setAwayFromBottom(overflow && !nearBottom.current);
     }, []);
+
+    // Open at the end of the transcript, and go back there when it changes. `loading` is in the deps because the
+    // transcript is set while the page still shows its spinner (the versions are read after it): the scroll area
+    // only exists once loading ends, and without it a session opened at turn 1.
+    useEffect(() => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        viewport.scrollTop = viewport.scrollHeight;
+        nearBottom.current = true;
+        trackScroll();
+    }, [messages, loading, trackScroll]);
+    // Ratings arrive after the transcript has landed and make it taller: stay at the end if that is where the person is.
+    useEffect(() => {
+        const viewport = viewportRef.current;
+        if (viewport && nearBottom.current) viewport.scrollTop = viewport.scrollHeight;
+    }, [messageFeedback]);
     useEffect(() => {
         const viewport = viewportRef.current;
         if (viewport && liveSegments.length > 0 && nearBottom.current) viewport.scrollTop = viewport.scrollHeight;
@@ -607,6 +634,38 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         const node = document.getElementById(anchorId);
         if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         else goToTurn(turnIndex);
+    };
+
+    // The newest message, for the bar above the transcript: in a long run it is buried under steps or above a tail of tool rows.
+    const latest = useMemo(
+        () => latestMessageOf({ messages, liveSegments, liveActive, followedUserText: following ? (followedUser?.reminder?.message ?? followedUser?.content) : null }),
+        [messages, liveSegments, liveActive, following, followedUser],
+    );
+
+    /** Puts the start of the newest message at the top of the transcript. */
+    const goToLatest = () => {
+        if (!latest) return;
+        const scroll = () => {
+            const anchor = latest.anchorId ? document.getElementById(latest.anchorId) : null;
+            const node = anchor ?? (latest.messageIndex !== undefined ? turnRefs.current[latest.messageIndex] : null);
+            if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            else scrollToEnd();
+        };
+        // A search that hides the message clears first; scroll once the transcript has drawn it again.
+        if (latest.messageIndex !== undefined && matchedIndexes && !matchedIndexes.has(latest.messageIndex)) {
+            setSearch('');
+            requestAnimationFrame(() => requestAnimationFrame(scroll));
+        } else {
+            scroll();
+        }
+    };
+
+    /** Back to the end of the transcript; a running turn is followed again from there. */
+    const scrollToEnd = () => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        nearBottom.current = true;
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
     };
 
     /** Marks the session as no longer running / waiting once a turn's result lands. */
@@ -1305,6 +1364,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <TurnTimeline entries={timeline} zoom={zoom} onSelect={goToTurn} />
                         ) : null}
 
+                        {latest && overflowing ? (
+                            <LatestMessageBar view={latest} agentName={agent.name} running={liveActive} onJump={goToLatest} />
+                        ) : null}
+
                         <div className={classes.panelBody}>
                             {messages.length === 0 && !liveActive ? (
                                 <Center className={classes.chatEmpty}>
@@ -1319,6 +1382,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                     </Stack>
                                 </Center>
                             ) : (
+                                <div className={classes.chatScrollWrap}>
                                 <ScrollArea className={classes.chatScroll} viewportRef={viewportRef} onScrollPositionChange={trackScroll} px="md" py="sm">
                                     <Stack gap="lg">
                                         {messages.map((msg, i) => {
@@ -1434,6 +1498,19 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         ) : null}
                                     </Stack>
                                 </ScrollArea>
+                                {awayFromBottom ? (
+                                    <Button
+                                        size="xs"
+                                        radius="xl"
+                                        leftSection={<IconArrowDown size={14} />}
+                                        className={classes.jumpLatest}
+                                        onClick={scrollToEnd}
+                                        data-testid="agent-session-jump-latest"
+                                    >
+                                        {tp('jumpToLatest')}
+                                    </Button>
+                                ) : null}
+                                </div>
                             )}
 
                             {budgetView && budgetBannerShown ? (
@@ -1770,7 +1847,9 @@ function AssistantTurn({
             {message.stopReason && !(message.stopReason === 'paused' && message.pendingActions?.length)
                 ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} budgetStops={budgetStops} />
                 : null}
-            <Markdown text={message.content} />
+            <Box id={answerAnchorId(messageIndex)} className={classes.answerAnchor}>
+                <Markdown text={message.content} />
+            </Box>
             {message.pendingActions?.length ? (
                 <PendingActionList
                     actions={message.pendingActions}

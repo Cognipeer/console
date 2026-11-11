@@ -45,6 +45,8 @@ import { isSafeId, type PolicyIssue } from './policySpec';
 import { getIamSchema } from './schemaState';
 import { isManagedPolicyId } from './managedPolicies';
 import { portalAgentResource, portalResource } from './portalEntities';
+import { accessListResource } from './accessList';
+import { isAccessListAction, type AccessListResourceType } from './accessListCatalog';
 import { isRuntimeEnforced } from './runtimeEnforced';
 import { listPolicies, policyIdFromCedarId, type IIamPolicy } from './store';
 
@@ -269,6 +271,15 @@ interface SessionFacts {
   approvers: AgentApprovers;
 }
 
+/** The stored access list of a shared resource (undefined: the record has none, which reads as open). */
+async function accessListOf(tenant: IamTenant, type: AccessListResourceType, id: string): Promise<unknown> {
+  // A failed read is an error of the check, never an open list.
+  return runWithTenantScope(tenant.tenantDbName, async (db) => {
+    const record = type === 'mcp-server' ? await db.findMcpServerById(id) : await db.findSkillById(id);
+    return record?.access;
+  });
+}
+
 async function resolveResource(
   tenant: IamTenant,
   action: ActionDefinition,
@@ -322,6 +333,14 @@ async function resolveResource(
         projectId: detail.projectId ?? undefined,
       };
     }
+    if (isAccessListAction(action.id)) {
+      // The registry knows the record exists; its access list (the record's built-in policy) is on the record itself.
+      const access = await accessListOf(tenant, input.type as AccessListResourceType, input.id);
+      return {
+        resource: accessListResource({ type: input.type as AccessListResourceType, id: input.id, projectId: detail.projectId, key: detail.key ?? undefined, access }),
+        projectId: detail.projectId ?? undefined,
+      };
+    }
     return {
       resource: {
         kind: 'resource',
@@ -352,6 +371,13 @@ async function resolveResource(
   if (isSessionResourceAction(action.id)) {
     return {
       resource: agentSessionResource({ id: '(new)', projectId: input.projectId, ownerIds: [session.ownerId], approvers: session.approvers }),
+      projectId: input.projectId,
+    };
+  }
+  if (isAccessListAction(action.id) && action.resourceType) {
+    // A new record starts with no list: everyone who can run the agent may use it.
+    return {
+      resource: accessListResource({ type: action.resourceType as AccessListResourceType, id: '(new)', projectId: input.projectId, access: undefined }),
       projectId: input.projectId,
     };
   }

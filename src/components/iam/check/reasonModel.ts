@@ -36,6 +36,10 @@ export type BuiltInKind =
   | 'messagingBoundary'
   /** `managed:agent:approve*`: the session's owner, or whoever the agent accepts, may approve its tool calls. */
   | 'approvalRule'
+  /** `managed:access:use`: the access list of a shared MCP server or skill admits the person. */
+  | 'accessList'
+  /** `managed:access:use-boundary`: nothing but that access list gives the person's agent runs the resource. */
+  | 'accessBoundary'
   | 'other';
 
 export interface BuiltInReason {
@@ -50,6 +54,7 @@ const PORTAL_NETWORK_MANAGED = /^managed:portal:(agent-)?network-boundary$/;
 const PORTAL_TEST_MANAGED = /^managed:portal:test-(use|agent)$/;
 const MESSAGING_MANAGED = /^managed:messaging:agent(-boundary)?$/;
 const AGENT_MANAGED = /^managed:agent:approve(-token)?$/;
+const ACCESS_MANAGED = /^managed:access:use(-boundary)?$/;
 
 export function parseBuiltInReason(cedarId: string): BuiltInReason {
   const portal = PORTAL_MANAGED.exec(cedarId);
@@ -60,6 +65,8 @@ export function parseBuiltInReason(cedarId: string): BuiltInReason {
   if (messaging) return { kind: messaging[1] ? 'messagingBoundary' : 'messagingList', level: null };
   const agent = AGENT_MANAGED.exec(cedarId);
   if (agent) return { kind: 'approvalRule', level: null };
+  const access = ACCESS_MANAGED.exec(cedarId);
+  if (access) return { kind: access[1] ? 'accessBoundary' : 'accessList', level: null };
   const match = MANAGED.exec(cedarId);
   if (!match) return { kind: 'other', level: null };
   const [, group, who, level] = match;

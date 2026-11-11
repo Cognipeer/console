@@ -218,6 +218,7 @@ import type {
   AnalysisResultFilter,
   AnalysisConversationSource,
   AnalysisRunStatus,
+  OwnedResourceListFilter,
 } from './types';
 import type { EnterpriseDbMethods } from '@/enterprise/registry';
 import type { MonthlyMeter, PlanLimitEvent, PlanLimitKind } from '@/lib/limits/types';
@@ -551,11 +552,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   deleteSkill(id: string): Promise<boolean>;
   findSkillById(id: string, projectId?: string): Promise<IAgentSkill | null>;
   findSkillByKey(key: string, projectId?: string): Promise<IAgentSkill | null>;
+  /** Shared skills only, unless `owned` / `ownerAgentId` ask for agent-owned ones (`OwnedResourceListFilter`). */
   listSkills(filters?: {
     projectId?: string;
     status?: IAgentSkill['status'];
     search?: string;
-  }): Promise<IAgentSkill[]>;
+  } & OwnedResourceListFilter): Promise<IAgentSkill[]>;
 
   createPromptVersion(
     version: Omit<IPromptVersion, '_id' | 'createdAt'>,
@@ -2303,11 +2305,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    */
   findMcpServerByKey(key: string, projectId?: string | null): Promise<IMcpServer | null>;
   findMcpServerByEndpointSlug(endpointSlug: string): Promise<IMcpServer | null>;
+  /** Shared servers only, unless `owned` / `ownerAgentId` ask for agent-owned ones (`OwnedResourceListFilter`). */
   listMcpServers(filters?: {
     projectId?: string;
     status?: McpServerStatus;
     search?: string;
-  }): Promise<IMcpServer[]>;
+  } & OwnedResourceListFilter): Promise<IMcpServer[]>;
 
   // ── MCP Request Log operations (tenant-specific) ──
   createMcpRequestLog(

@@ -3097,11 +3097,61 @@ export interface IAgentSkill {
   body: string;
   /** Hide this skill from a small-tier model — see agent-sdk's `SkillModelTier`. */
   minModelTier?: 'small' | 'large';
+  /** Who may use this skill in an agent run. Absent = everyone who can run the agent (see `IResourceAccessList`). */
+  access?: IResourceAccessList;
+  /** Present for a skill created inside an agent: only that agent lists, uses and manages it (`IAgentResourceOwner`). */
+  owner?: IAgentResourceOwner;
   status: 'active' | 'inactive';
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * The agent an MCP server or a skill belongs to, when it was created inside that agent.
+ *
+ * An owned record is part of its agent: only that agent lists it, binds it, runs it and manages it. It is not in
+ * the MCP hub or the skill library, other agents' pickers cannot see or run it, the client API and the public MCP
+ * endpoint do not serve it, and it is deleted together with the agent. Records without an owner are the project's
+ * shared ones and behave as before.
+ */
+export interface IAgentResourceOwner {
+  kind: 'agent';
+  agentId: string;
+}
+
+/**
+ * Which agent-owned records a list returns (`IAgentResourceOwner`). Without it a list has the project's shared
+ * records only, so a list that does not ask never shows an agent's own records.
+ *
+ *   ownerAgentId            that agent's own records only
+ *   owned 'include'         shared records and owned ones: with `ownerAgentId` only that agent's, otherwise every agent's
+ *   owned 'only'            owned records only (with `ownerAgentId`, that agent's)
+ */
+export interface OwnedResourceListFilter {
+  owned?: 'include' | 'only';
+  ownerAgentId?: string;
+}
+
+/**
+ * Who may USE a shared resource of a project in an agent run: the tools of an MCP server, a skill.
+ *
+ *   mode 'all'       everyone who can run the agent (the default: a record without a list behaves as before)
+ *   mode 'selected'  only the people and groups named; the run of anybody else does not get the resource,
+ *                    and neither does a run that is made for no person (a flow step, a public endpoint)
+ *
+ * The same shape as the access list of a portal and of a messaging deployment. IAM reads it as the resource's
+ * built-in policy (`managed:access:*`, managedPolicies.ts): the list is stored on the record, never as a policy, and
+ * custom deny rules still apply on top. It is the shape resource sharing grows on (an agent shared inside the
+ * company), so a new shareable resource takes this field rather than a shape of its own.
+ */
+export interface IResourceAccessList {
+  mode: 'all' | 'selected';
+  /** Console user ids. */
+  userIds: string[];
+  /** Console group ids. */
+  groupIds: string[];
 }
 
 export interface IAgentSkillPolicy {

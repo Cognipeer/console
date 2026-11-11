@@ -11,10 +11,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
-
-function normalizeBetaAccessCode(code: string): string {
-  return code.trim().toUpperCase();
-}
+import { normalizeBetaAccessCode } from '../provider/normalize';
 
 export function BetaAccessCodeMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class BetaAccessCodeOps extends Base {

@@ -8,25 +8,18 @@
  * agent turns can carry irreversible tool side effects that crawl jobs do not.
  */
 
-import { ObjectId, MongoServerError, type Filter } from 'mongodb';
+import type { Filter } from 'mongodb';
 import type { AgentRunClass, IAgentRun } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { toIdString, toObjectIdOrThrow } from './docIds';
+import { isDuplicateKeyError } from './errors';
 
-function toId(value: ObjectId | string | undefined): string {
-  if (!value) return '';
-  return typeof value === 'string' ? value : value.toString();
-}
-
-function objectId(id: string): ObjectId {
-  return new ObjectId(id);
-}
+const toId = toIdString;
+const objectId = toObjectIdOrThrow;
 
 const toRun = (doc: IAgentRun): IAgentRun => ({ ...doc, _id: toId(doc._id) });
-
-/** Mongo's duplicate-key error code, shared across every unique index violation. */
-const DUPLICATE_KEY_ERROR_CODE = 11000;
 
 const ACTIVE_STATUSES = new Set(['queued', 'running']);
 /**
@@ -44,9 +37,7 @@ interface AgentRunLockDoc {
   expiresAt?: Date | null;
 }
 
-function isDuplicateKey(error: unknown): boolean {
-  return error instanceof MongoServerError && error.code === DUPLICATE_KEY_ERROR_CODE;
-}
+const isDuplicateKey = isDuplicateKeyError;
 
 type IAgentRunListFn = (filter: {
   tenantId: string;
