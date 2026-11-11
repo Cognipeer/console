@@ -30,10 +30,6 @@ export function decideLimit(input: DecideLimitInput): PlanLimitDecision {
   if (input.mode === 'off' || !over) return decision;
   decision.retryAfterMs = input.retryAfterMs;
   decision.resetAt = input.resetAt;
-  if (input.mode === 'shadow') {
-    decision.outcome = 'would_refuse';
-    return decision;
-  }
   decision.allowed = false;
   decision.outcome = 'refused';
   return decision;

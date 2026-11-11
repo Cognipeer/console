@@ -32,7 +32,7 @@ import {
   waitForPlanLease,
 } from '@/lib/limits/leases';
 
-function setPlan(mode: 'on' | 'shadow' | 'off', agent?: number) {
+function setPlan(mode: 'on' | 'off', agent?: number) {
   h.plan = {
     tenantId: 't1',
     mode,
@@ -94,15 +94,6 @@ describe('acquirePlanLease', () => {
     await a.lease!.release(); // idempotent
     expect(await countPlanLeases('t1', 'agent')).toBe(1);
     expect((await acquirePlanLease({ tenantId: 't1', pool: 'agent', holderId: 'c' })).lease).not.toBeNull();
-  });
-
-  it('shadow mode admits everyone but reports would_refuse', async () => {
-    setPlan('shadow', 1);
-    await acquirePlanLease({ tenantId: 't1', pool: 'agent', holderId: 'a' });
-    const b = await acquirePlanLease({ tenantId: 't1', pool: 'agent', holderId: 'b' });
-    expect(b.lease).not.toBeNull();
-    expect(b.decision).toMatchObject({ allowed: true, outcome: 'would_refuse', used: 2 });
-    expect(await countPlanLeases('t1', 'agent')).toBe(2);
   });
 
   it('counts without limiting when the pool has no limit', async () => {

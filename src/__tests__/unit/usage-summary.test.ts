@@ -217,10 +217,10 @@ describe('buildUsageSummary', () => {
   });
 
   it('has a null plan but still reports usage when no plan applies', async () => {
-    vi.mocked(resolveTenantPlan).mockResolvedValue(plan('shadow', null));
+    vi.mocked(resolveTenantPlan).mockResolvedValue(plan('on', null));
     vi.mocked(getMonthlyUsage).mockResolvedValue({ searches: 4, flowRuns: 0, crawlerPages: 0, sandboxSeconds: 0 });
     const summary = (await buildUsageSummary('t1'))!;
-    expect(summary.mode).toBe('shadow');
+    expect(summary.mode).toBe('on');
     expect(summary.plan).toBeNull();
     expect(summary.monthly[0]).toEqual({ dimension: 'searches', used: 4 });
     expect(summary.banners).toEqual([]);
@@ -238,8 +238,8 @@ describe('buildUsageSummary', () => {
       tenantId: 't1',
       kind: 'concurrency',
       dimension: 'agent',
-      outcome: 'would_refuse',
-      mode: 'shadow',
+      outcome: 'refused',
+      mode: 'on',
       count: 1,
       at: new Date(),
       ...overrides,

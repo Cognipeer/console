@@ -65,7 +65,7 @@ export async function checkSeats(input: {
     amount: input.adding ?? 1,
   });
   if (decision.outcome !== 'allowed') {
-    outcomeEventFor(decision, { tenantId, mode: plan.mode === 'on' ? 'on' : 'shadow', source: input.source });
+    outcomeEventFor(decision, { tenantId, source: input.source });
   }
   return decision;
 }

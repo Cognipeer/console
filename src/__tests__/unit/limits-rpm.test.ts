@@ -28,7 +28,7 @@ import { isPlanLimitError } from '@/lib/limits/errors';
 
 const source = { type: 'api_token' as const, id: 'tok' };
 
-function setLimit(mode: 'on' | 'shadow' | 'off', apiRpm?: number) {
+function setLimit(mode: 'on' | 'off', apiRpm?: number) {
   h.plan = { tenantId: 't1', mode, limits: { apiRpm, concurrency: {}, monthly: {}, seats: {}, credits: {} } };
 }
 
@@ -98,16 +98,6 @@ describe('enforceApiRequestRate', () => {
     expect(r.decision.outcome).toBe('refused');
     expect(r.decision.used).toBe(10);
     expect(r.decision.retryAfterMs).toBeGreaterThan(0);
-    expect(h.events).toHaveLength(1);
-  });
-
-  it('shadow mode never refuses but reports would_refuse', async () => {
-    setLimit('shadow', 2);
-    await enforceApiRequestRate({ tenantId: 't1', source });
-    await enforceApiRequestRate({ tenantId: 't1', source });
-    const r = await enforceApiRequestRate({ tenantId: 't1', source });
-    expect(r.decision.allowed).toBe(true);
-    expect(r.decision.outcome).toBe('would_refuse');
     expect(h.events).toHaveLength(1);
   });
 

@@ -10,8 +10,6 @@
  * newer release still activates on an older one.
  */
 
-export type PlanEnforcement = 'shadow' | 'on';
-
 export interface LicensePlanConcurrentLimits {
   /** Agent turns in progress started from the console, a portal, a channel or a schedule. */
   agentSessions?: number;
@@ -65,8 +63,6 @@ export interface LicensePlanClaim {
   name?: string;
   /** Capacity packs included in the limits below (shown to the tenant; limits are already multiplied). */
   capacityPacks?: number;
-  /** Per-tenant enforcement; absent = the deployment default (PLAN_LIMITS_DEFAULT_ENFORCEMENT). */
-  enforcement?: PlanEnforcement;
   /** Seats: console members (owner, admin, project_admin, user + pending invites) and portal users. */
   seats?: { console?: number; portal?: number };
   limits?: LicensePlanLimits;
@@ -134,12 +130,7 @@ export function normalizePlanClaim(value: unknown): LicensePlanClaim | undefined
 
   if (value.capacityPacks !== undefined) claim.capacityPacks = limitValue(value.capacityPacks, 'capacityPacks');
 
-  if (value.enforcement !== undefined) {
-    if (value.enforcement !== 'shadow' && value.enforcement !== 'on') {
-      throw new PlanClaimError('License plan.enforcement must be "shadow" or "on"');
-    }
-    claim.enforcement = value.enforcement;
-  }
+  // `enforcement` (shadow | on), written by older CRM releases, is ignored: a saas deployment always enforces.
 
   const seats = section(value.seats, 'seats');
   if (seats) {

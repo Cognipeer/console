@@ -129,7 +129,7 @@ export async function checkMonthlyAllowance(input: {
     resetAt,
   });
   if (decision.outcome !== 'allowed') {
-    outcomeEventFor(decision, { tenantId, mode: plan.mode === 'on' ? 'on' : 'shadow', source: input.source });
+    outcomeEventFor(decision, { tenantId, source: input.source });
   }
   return decision;
 }

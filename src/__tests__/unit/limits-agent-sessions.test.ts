@@ -115,13 +115,6 @@ describe('acquireAgentSessionSlot', () => {
     });
   });
 
-  it('never refuses in shadow mode (the decision stays allowed)', async () => {
-    h.wait.mockResolvedValue({ decision: { ...allowed, outcome: 'would_refuse' }, lease: lease() });
-    const slot = await acquireAgentSessionSlot({ tenantId: 't1', origin: 'channel' });
-    await slot.release();
-    expect(h.release).toHaveBeenCalledTimes(1);
-  });
-
   it('is a no-op slot when limits are off (no lease handed back)', async () => {
     h.wait.mockResolvedValue({ decision: allowed, lease: null });
     const slot = await acquireAgentSessionSlot({ tenantId: 't1', origin: 'console' });

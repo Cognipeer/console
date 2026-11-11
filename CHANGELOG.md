@@ -7,6 +7,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ### Incompatible changes
 
+- **Plan limits have no shadow mode.** A hosted deployment (`DEPLOYMENT_MODE=saas`) always enforces the plan limits of
+  every organization; a self-hosted one (`onprem`) never measures or refuses them. `PLAN_LIMITS_MODE` and
+  `PLAN_LIMITS_DEFAULT_ENFORCEMENT` are no longer read, a license `plan.enforcement` is ignored, and limit events of
+  the old measure-only mode are no longer shown. A self-hosted install on MongoDB must set `DEPLOYMENT_MODE=onprem`,
+  or it runs with hosted plan limits.
 - The OpenAI Assistants-compatible adapter is removed (`/client/v1/assistants`, `/client/v1/threads`, and the Studio
   card for it). Use the agent runs and sessions API, the Responses API or chat completions instead.
 - Agent **schedules** are replaced by [triggers](docs/guide/agent-triggers.md). Existing schedules are not converted:

@@ -222,7 +222,7 @@ export async function buildUsageSummary(tenantId: string): Promise<UsageSummary 
   const capacityHits: Partial<Record<CapacityDimension, number>> = {};
   for (const event of events) {
     if (event.kind !== 'api_rpm' && event.kind !== 'concurrency') continue;
-    if (event.outcome !== 'refused' && event.outcome !== 'would_refuse') continue;
+    if (event.outcome !== 'refused') continue;
     const dimension = (event.kind === 'api_rpm' ? 'apiRpm' : event.dimension) as CapacityDimension | undefined;
     if (!dimension || !CAPACITY_DIMENSIONS.includes(dimension)) continue;
     capacityHits[dimension] = (capacityHits[dimension] ?? 0) + (event.count || 1);

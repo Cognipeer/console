@@ -17,7 +17,6 @@ export const usageTr: typeof usageEn = {
   retry: 'Yeniden deneyin',
   noAccessTitle: 'Kullanım bilgisini sahipler ve yöneticiler görür',
   noAccessDescription: 'Plan ve kullanım bilgisi için bu çalışma alanının bir sahibine veya yöneticisine başvurun.',
-  shadowNotice: 'Limitler ölçülüyor ancak henüz uygulanmıyor. Hiçbir istek reddedilmez; limit olayları, uygulansaydı neyin reddedileceğini gösterir.',
   scopeCluster: 'Tüm küme genelinde sayılır.',
   scopePod: 'Yalnızca bu sunucuda sayılır; bu nedenle sunucular arasında değerler farklı olabilir.',
   noPlan: 'Geçerli bir plan yok',
@@ -221,7 +220,7 @@ export const usageTr: typeof usageEn = {
   },
   events: {
     title: 'Limit olayları',
-    description: 'Bir limite ulaşılan ya da gölge modda ulaşılacak olan anlar. Birbirine yakın benzer olaylar tek satırda toplanır.',
+    description: 'Bir limite ulaşılan anlar. Birbirine yakın benzer olaylar tek satırda toplanır.',
     empty: 'Bu dönemde limit olayı yok.',
     sinceLabel: 'Dönem',
     since: {
@@ -242,7 +241,6 @@ export const usageTr: typeof usageEn = {
     },
     outcomes: {
       refused: 'Reddedildi',
-      would_refuse: 'Reddedilecekti',
       queued: 'Kuyruğa alındı',
       waited: 'Beklendi',
     },

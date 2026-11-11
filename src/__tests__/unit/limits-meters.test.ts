@@ -26,7 +26,7 @@ import {
   periodEnd,
 } from '@/lib/limits/meters';
 
-function setPlan(mode: 'on' | 'shadow' | 'off', monthly: Record<string, number> = {}) {
+function setPlan(mode: 'on' | 'off', monthly: Record<string, number> = {}) {
   h.plan = { tenantId: 't1', mode, limits: { concurrency: {}, monthly, seats: {}, credits: {} } };
 }
 
@@ -100,13 +100,6 @@ describe('checkMonthlyAllowance', () => {
     expect(d.resetAt).toEqual(periodEnd(currentPeriod()));
     expect(d.retryAfterMs).toBeGreaterThan(0);
     expect(h.events).toHaveLength(1);
-  });
-
-  it('shadow mode reports would_refuse and allows', async () => {
-    setPlan('shadow', { crawlerPages: 1 });
-    h.db.getPlanUsageMonthly.mockResolvedValue({ crawlerPages: 1 });
-    const d = await checkMonthlyAllowance({ tenantId: 't1', meter: 'crawlerPages' });
-    expect(d).toMatchObject({ allowed: true, outcome: 'would_refuse' });
   });
 
   it('never limits searches: they are paid with credits and only counted', async () => {

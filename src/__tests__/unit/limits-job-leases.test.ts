@@ -62,7 +62,7 @@ describe('runJobUnderLease', () => {
     expect(h.release).not.toHaveBeenCalled();
   });
 
-  it('runs without a lease when limits are off or in shadow with no lease handed back', async () => {
+  it('runs without a lease when limits are off or no lease is handed back', async () => {
     h.acquire.mockResolvedValue({ decision: allowed, lease: null });
     const run = vi.fn(async () => 1);
     const result = await runJobUnderLease({ tenantId: 't1', holderId: 'j1', queueName: 'q', jobName: 'n', payload, run });

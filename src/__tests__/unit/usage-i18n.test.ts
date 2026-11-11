@@ -66,7 +66,7 @@ describe('usage messages', () => {
     for (const kind of ['monthly_grant', 'redeem', 'grant', 'revoke', 'charge', 'refund', 'adjust', 'expire']) {
       expect(en.has(`credits.kinds.${kind}`), kind).toBe(true);
     }
-    for (const outcome of ['refused', 'would_refuse', 'queued', 'waited']) {
+    for (const outcome of ['refused', 'queued', 'waited']) {
       expect(en.has(`events.outcomes.${outcome}`), outcome).toBe(true);
     }
     for (const row of ['apiRpm', 'agent', 'flow', 'job', 'browser', 'realtime', 'sandbox', 'searches', 'flowRuns', 'crawlerPages', 'sandboxHours']) {

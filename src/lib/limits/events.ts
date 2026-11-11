@@ -1,5 +1,5 @@
 /**
- * Limit events: refusals, would-be refusals (shadow) and waits. Recording is
+ * Limit events: refusals and waits. Recording is
  * fire-and-forget and sampled so a flood of refusals costs a handful of writes:
  * one stored event per key per 10 s per process, the dropped ones folded into
  * the `count` of the next stored one.
@@ -19,7 +19,7 @@ const PRUNE_EVERY_MS = 6 * 3600 * 1000;
 const DEFAULT_LIST_LIMIT = 200;
 const MAX_LIST_LIMIT = 1000;
 
-export type RecordLimitEventInput = Omit<PlanLimitEvent, 'count' | 'at'> & { at?: Date };
+export type RecordLimitEventInput = Omit<PlanLimitEvent, 'count' | 'at' | 'mode'> & { at?: Date };
 
 const sampling = new Map<string, { lastStoredAt: number; folded: number }>();
 let queue: PlanLimitEvent[] = [];
@@ -104,7 +104,7 @@ export function recordLimitEvent(event: RecordLimitEventInput): void {
     sampling.set(key, { lastStoredAt: now, folded: 0 });
     if (sampling.size > MAX_KEYS) pruneSampling(now);
 
-    queue.push({ ...event, count, at: event.at ?? new Date(now) });
+    queue.push({ ...event, mode: 'on', count, at: event.at ?? new Date(now) });
     if (queue.length >= FLUSH_BATCH) void flushLimitEvents();
     else scheduleFlush();
   } catch {
@@ -117,7 +117,6 @@ export function outcomeEventFor(
   decision: PlanLimitDecision,
   context: {
     tenantId: string;
-    mode: 'shadow' | 'on';
     source?: PlanLimitSource;
     waitMs?: number;
   },
@@ -128,7 +127,6 @@ export function outcomeEventFor(
     kind: decision.kind,
     dimension: decision.dimension,
     outcome: decision.outcome,
-    mode: context.mode,
     limit: decision.limit,
     used: decision.used,
     waitMs: context.waitMs,
@@ -144,7 +142,9 @@ export async function listLimitEvents(
   // Make recent events visible to the page that asked.
   await flushLimitEvents();
   const db = await getDatabase();
-  return db.listPlanLimitEvents(tenantId, { since: opts.since, kind: opts.kind, limit });
+  const events = await db.listPlanLimitEvents(tenantId, { since: opts.since, kind: opts.kind, limit });
+  // Rows from the retired measure-only mode (outcome would_refuse) were never refusals: not shown.
+  return events.filter((event) => (event.outcome as string) !== 'would_refuse');
 }
 
 export async function pruneLimitEvents(): Promise<number> {

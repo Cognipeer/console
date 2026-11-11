@@ -1,8 +1,8 @@
 /**
  * Re-enabling a disabled account takes a seat again:
  * POST /users/:id/enable (session) and POST /client/v1/members/:id/enable (token).
- * on: refused with 402 seat_limit_reached and nothing is written; shadow: enabled and the
- * would-be refusal recorded; off: no seat is even counted. Accounts that take no seat are not checked.
+ * on: refused with 402 seat_limit_reached and nothing is written; off: no seat is even counted.
+ * Accounts that take no seat are not checked.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
@@ -70,7 +70,7 @@ const USERS: Record<string, Record<string, unknown>> = {
   'on-console': { _id: 'on-console', role: 'user', tenantId: 'tenant-1', email: 'c@acme.com' },
 };
 
-function setPlan(mode: 'on' | 'shadow' | 'off', seats: { console?: number; portal?: number }) {
+function setPlan(mode: 'on' | 'off', seats: { console?: number; portal?: number }) {
   h.plan = { tenantId: 'tenant-1', mode, limits: { concurrency: {}, monthly: {}, seats, credits: {} } };
 }
 
@@ -158,14 +158,6 @@ describe('seats when a disabled account is re-enabled', () => {
       setPlan('on', { console: 4 });
       const res = await enable('off-console');
       expect(res.statusCode).toBe(200);
-      expect(db.updateUser).toHaveBeenCalled();
-    });
-
-    it('is allowed and the would-be refusal recorded in shadow mode', async () => {
-      setPlan('shadow', { console: 3 });
-      const res = await enable('off-console');
-      expect(res.statusCode).toBe(200);
-      expect(h.events).toHaveLength(1);
       expect(db.updateUser).toHaveBeenCalled();
     });
 

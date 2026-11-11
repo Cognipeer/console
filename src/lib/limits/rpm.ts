@@ -104,7 +104,7 @@ export async function enforceApiRequestRate(input: {
   notePeak(tenantId, bucket === 'public' ? 'publicRpm' : 'apiRpm', decision.used);
 
   if (decision.outcome !== 'allowed') {
-    outcomeEventFor(decision, { tenantId, mode: plan.mode === 'on' ? 'on' : 'shadow', source });
+    outcomeEventFor(decision, { tenantId, source });
   }
 
   const headers: Record<string, string> = {};

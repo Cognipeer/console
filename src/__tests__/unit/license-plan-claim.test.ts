@@ -10,7 +10,6 @@ const FULL = {
   id: 'team',
   name: 'Team',
   capacityPacks: 2,
-  enforcement: 'on',
   seats: { console: 5, portal: 50 },
   limits: {
     apiRequestsPerMinute: 300,
@@ -82,10 +81,14 @@ describe('normalizePlanClaim', () => {
     expect(() => normalizePlanClaim({ id })).toThrow(/plan\.id/);
   });
 
-  it('refuses a bad name or enforcement', () => {
+  it('refuses a bad name', () => {
     expect(() => normalizePlanClaim({ id: 'p', name: '' })).toThrow(/plan\.name/);
     expect(() => normalizePlanClaim({ id: 'p', name: 'n'.repeat(61) })).toThrow(/plan\.name/);
-    expect(() => normalizePlanClaim({ id: 'p', enforcement: 'strict' })).toThrow(/plan\.enforcement/);
+  });
+
+  it.each(['shadow', 'on', 'strict', 5])('ignores a legacy plan.enforcement (%s): a saas deployment always enforces', (enforcement) => {
+    expect(normalizePlanClaim({ id: 'p', enforcement })).toEqual({ id: 'p' });
+    expect(readStoredPlanClaim({ id: 'p', enforcement })).toEqual({ id: 'p' });
   });
 
   it.each([
