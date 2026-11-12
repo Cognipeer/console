@@ -6,6 +6,9 @@ import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { resolveProviderCategories } from '@/components/models/catalog/catalogPrefill';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
+import { useListedModelProviders } from '@/lib/api/queries/models';
+
+const NO_PROVIDERS: ModelProviderView[] = [];
 
 type ModelCategory = NonNullable<ComponentProps<typeof CreateModelModal>['defaultCategory']>;
 
@@ -26,7 +29,13 @@ export default function InlineModelCreate({
   category?: ModelCategory;
   onCreated: (model: IModel) => void;
 }) {
-  const [providers, setProviders] = useState<ModelProviderView[]>([]);
+  const listedProviders = useListedModelProviders(opened).data ?? NO_PROVIDERS;
+  // Providers added in this form join the listed ones until the list is read again.
+  const [addedProviders, setAddedProviders] = useState<ModelProviderView[]>([]);
+  const providers = useMemo(
+    () => [...listedProviders, ...addedProviders.filter((added) => !listedProviders.some((p) => p.key === added.key))],
+    [listedProviders, addedProviders],
+  );
   const [addingProvider, setAddingProvider] = useState(false);
   const [providerKey, setProviderKey] = useState<string | undefined>();
   // The form starts on the first provider, which may not serve the category asked for (an embedding model on an
@@ -41,19 +50,7 @@ export default function InlineModelCreate({
     if (!opened) return;
     setAddingProvider(false);
     setProviderKey(undefined);
-    let cancelled = false;
-    void (async () => {
-      try {
-        const response = await fetch('/api/models?includeProviders=true', { cache: 'no-store' });
-        const data = response.ok ? await response.json() : {};
-        if (!cancelled) setProviders((data.providers ?? []) as ModelProviderView[]);
-      } catch {
-        if (!cancelled) setProviders([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    setAddedProviders([]);
   }, [opened]);
 
   return (
@@ -72,7 +69,7 @@ export default function InlineModelCreate({
         opened={opened && addingProvider}
         onClose={() => setAddingProvider(false)}
         onCreated={(provider) => {
-          setProviders((current) =>
+          setAddedProviders((current) =>
             current.some((p) => p.key === provider.key) ? current : [...current, provider],
           );
           setProviderKey(provider.key);

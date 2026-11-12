@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Alert, Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -18,6 +18,9 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { isApiError } from '@/lib/api/client';
+import { failureText } from '@/lib/api/queries/models';
+import { useDeleteWebSearchInstance, useWebSearchProviders } from '@/lib/api/queries/websearch';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import WebSearchInstanceCreate from '@/components/websearch/WebSearchInstanceCreate';
@@ -46,43 +49,24 @@ export default function WebSearchListPage() {
   const deleteResource = useDeleteResource();
   const canManage = canManageWebSearch(useDashboardUser()?.role);
 
-  const [rows, setRows] = useState<WebSearchListRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const listQuery = useWebSearchProviders();
+  const rows = useMemo(() => listRows(listQuery.data ?? []), [listQuery.data]);
+  const loading = listQuery.isPending;
+  const refreshing = listQuery.isFetching && !listQuery.isPending;
   // A role without web search access: say so instead of a load error and an empty list that offers to create.
-  const [forbidden, setForbidden] = useState(false);
+  const forbidden = isApiError(listQuery.error) && listQuery.error.status === 403;
+  const deleteInstance = useDeleteWebSearchInstance();
   const [query, setQuery] = useState('');
   // Creating: open, and the provider picked to start with (a row that has no instance yet).
   const [creating, setCreating] = useState<{ providerKey: string | null } | null>(null);
   const [editing, setEditing] = useState<WebSearchInstanceView | null>(null);
 
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      // The compatible list: the instances, then the providers whose key no instance has.
-      const res = await fetch('/api/websearch/providers', { cache: 'no-store' });
-      if (res.status === 403) {
-        setForbidden(true);
-        return;
-      }
-      if (!res.ok) throw new Error(t('loadFailed'));
-      const data = (await res.json()) as { providers?: WebSearchListRow[] };
-      setRows(listRows(data.providers ?? []));
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: t('title'),
-        message: err instanceof Error ? err.message : t('loadFailed'),
-      });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, [t]);
-
+  const { refetch: refetchList, isError: listFailed } = listQuery;
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (!listFailed || forbidden) return;
+    notifications.show({ color: 'red', title: t('title'), message: t('loadFailed') });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listFailed, forbidden]);
 
   const summary = useMemo(() => {
     const instances = rows.filter((row) => row.kind === 'instance');
@@ -111,16 +95,15 @@ export default function WebSearchListPage() {
       id: String(row._id),
       extraWarning: tConfirm('extras.websearchKeyFails'),
       action: async () => {
-        const res = await fetch(`/api/websearch/instances/${encodeURIComponent(row.key)}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.error || t('deleteFailed'));
+        try {
+          await deleteInstance.mutateAsync(row.key);
+        } catch (error) {
+          throw new Error(failureText(error, t('deleteFailed')));
         }
       },
     });
     if (!deleted) return;
     notifications.show({ color: 'teal', title: t('deleted'), message: row.label });
-    await load();
   }
 
   const platformBadge = <span className="ds-badge ds-badge-info">{tPlatform('badge')}</span>;
@@ -261,7 +244,7 @@ export default function WebSearchListPage() {
           onChange: setQuery,
           placeholder: t('searchPlaceholder'),
         }}
-        onRefresh={load}
+        onRefresh={() => void refetchList()}
         refreshing={refreshing}
         empty={{
           icon: <IconWorldSearch size={26} stroke={1.7} />,
@@ -330,7 +313,6 @@ export default function WebSearchListPage() {
         resetKey={editing?.key ?? ''}
         onSaved={() => {
           setEditing(null);
-          void load();
         }}
       />
     </PageContainer>

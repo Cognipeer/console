@@ -1,7 +1,7 @@
 'use client';
 
 import { resolveUpstreamApi, supportsUpstreamApiChoice, type UpstreamApi } from '@/lib/services/models/upstreamApi';
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Badge, Button, Group, NumberInput, Select, Text } from '@mantine/core';
 import ModelFormLayout from '@/components/models/ModelFormLayout';
@@ -30,6 +30,16 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBrain, IconDeviceFloppy, IconShield } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import {
+  NO_MODEL_OPTIONS,
+  useGuardrailPickerRows,
+  useModelOptions,
+  useModelProviders,
+  useModelRecord,
+  useUpdateModel,
+  useVectorIndexPickerRows,
+  useVectorProviderPickerRows,
+} from '@/lib/api/queries/models';
 import { normalizePromptCaching } from '@/components/models/promptCachingForm';
 import { useCatalogCachePrices } from '@/components/models/useCatalogCachePrices';
 import { promptCachingSupport } from '@/lib/services/models/promptCaching';
@@ -210,21 +220,59 @@ interface EditModelModalProps {
   initialSection?: 'reasoning' | 'promptCaching';
 }
 
-export default function EditModelModal({ modelId: editModelId, opened, onClose, onSaved, initialSection }: EditModelModalProps) {
+/**
+ * Mounted only while open, so every opening reads the model and the lists it picks from afresh and starts from a
+ * clean form.
+ */
+export default function EditModelModal(props: EditModelModalProps) {
+  if (!props.opened || !props.modelId) return null;
+  return <EditModelModalBody {...props} />;
+}
+
+function EditModelModalBody({ modelId: editModelId, opened, onClose, onSaved, initialSection }: EditModelModalProps) {
   const t = useTranslations('modelEdit');
   const tPii = useTranslations('piiProtection');
   const tWizard = useTranslations('modelWizard');
   const tNouns = useTranslations('common.confirm.nouns');
   const confirmKeyChange = useConfirmKeyChange();
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [, setRefreshing] = useState(false);
+  const updateModel = useUpdateModel();
+  const modelQuery = useModelRecord<ModelDetailDto>(editModelId);
+  const loading = modelQuery.isPending;
+  // The editable copy: it starts from the record and follows a guardrail save made from this form.
   const [model, setModel] = useState<ModelDetailDto | null>(null);
-  const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
-  const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
-  const [vectorIndexes, setVectorIndexes] = useState<VectorIndexOption[]>([]);
-  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([]);
-  const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
+  const providerRows = useModelProviders().data;
+  const vectorProviderRows = useVectorProviderPickerRows<VectorProviderOption>(true).data;
+  const embeddingModels: EmbeddingModelOption[] = useModelOptions('embedding').data ?? NO_MODEL_OPTIONS;
+  const guardrailRows = useGuardrailPickerRows<GuardrailOption>(true).data;
+  // Platform providers are not offered: the server refuses models and replicas on them.
+  const modelProviders = useMemo<ModelProviderOption[]>(
+    () =>
+      (providerRows ?? [])
+        .filter((p) => p.platform !== true)
+        .map((p) => ({
+          key: p.key,
+          label: p.label || p.key,
+          status: p.status || 'active',
+          driver: p.driver || '',
+        })),
+    [providerRows],
+  );
+  const vectorProviders = useMemo<VectorProviderOption[]>(
+    () => (vectorProviderRows ?? []).map((p) => ({ key: p.key, label: p.label })),
+    [vectorProviderRows],
+  );
+  const guardrails = useMemo<GuardrailOption[]>(
+    () =>
+      (guardrailRows ?? []).map((g) => ({
+        key: g.key,
+        name: g.name,
+        type: g.type,
+        action: g.action,
+        enabled: g.enabled,
+      })),
+    [guardrailRows],
+  );
   const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
   // Held as text so a half-typed JSON object doesn't get thrown away on rerender.
   const [requestDefaultsText, setRequestDefaultsText] = useState('');
@@ -362,180 +410,71 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     ],
   );
 
-  const loadVectorIndexes = useCallback(async (providerKey: string) => {
-    if (!providerKey) {
-      setVectorIndexes([]);
-      return;
-    }
-    try {
-      const res = await fetch(`/api/vector/indexes?providerKey=${encodeURIComponent(providerKey)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setVectorIndexes(
-          (data.indexes ?? []).map((idx: { key: string; name: string }) => ({
-            key: idx.key,
-            name: idx.name,
-          })),
-        );
-      }
-    } catch {
-      setVectorIndexes([]);
-    }
-  }, []);
+  const vectorIndexRows = useVectorIndexPickerRows<VectorIndexOption>(form.values.semanticCacheVectorProviderKey).data;
+  const vectorIndexes = useMemo<VectorIndexOption[]>(
+    () => (vectorIndexRows ?? []).map((idx) => ({ key: idx.key, name: idx.name })),
+    [vectorIndexRows],
+  );
 
-  const loadModel = async (silenceNotification = false) => {
-    const modelId = editModelId;
-    if (!modelId) return;
+  // The form fills itself once, from the record read when it opened.
+  const filledRef = useRef(false);
+  useEffect(() => {
+    const nextModel = modelQuery.data;
+    if (!nextModel || filledRef.current) return;
+    filledRef.current = true;
+    setModel(nextModel);
 
-    setRefreshing(!loading);
-    try {
-      const [modelResponse, providerResponse, vectorProviderResponse, embeddingModelsResponse, guardrailsResponse] = await Promise.all([
-        fetch(`/api/models/${modelId}`),
-        fetch('/api/models/providers'),
-        fetch('/api/vector/providers'),
-        fetch('/api/models?category=embedding'),
-        // Unfiltered on purpose: a guardrail disabled AFTER it was bound still
-        // has to resolve to its name here, or an attached binding renders as
-        // "unknown" and reads as deleted when it is merely switched off.
-        fetch('/api/guardrails'),
-      ]);
+    const settings = { ...nextModel.settings };
+    setRequestDefaultsText(formatRequestDefaults(settings.requestDefaults));
+    setInputModalities(storedInputModalities(nextModel.metadata, nextModel));
 
-      if (!modelResponse.ok) {
-        throw new Error('failed');
-      }
+    const cache = nextModel.semanticCache;
 
-      const modelData = await modelResponse.json();
-      const nextModel: ModelDetailDto = modelData.model;
-      setModel(nextModel);
-
-      const settings = { ...nextModel.settings };
-      setRequestDefaultsText(formatRequestDefaults(settings.requestDefaults));
-      setInputModalities(storedInputModalities(nextModel.metadata, nextModel));
-
-      const cache = nextModel.semanticCache;
-
-      form.setValues({
-        name: nextModel.name,
-        description: nextModel.description,
-        key: nextModel.key,
-        providerKey: nextModel.providerKey || '',
-        modelId: nextModel.modelId,
-        pricing: {
-          currency: nextModel.pricing.currency || 'USD',
-          inputTokenPer1M: nextModel.pricing.inputTokenPer1M,
-          outputTokenPer1M: nextModel.pricing.outputTokenPer1M,
-          // A stored 0 means "not entered" (billed at the input price): show it blank.
-          cachedTokenPer1M: nextModel.pricing.cachedTokenPer1M || '',
-          cacheWriteTokenPer1M: nextModel.pricing.cacheWriteTokenPer1M || '',
-        },
-        settings,
-        isMultimodal: Boolean(nextModel.isMultimodal),
-        supportsToolCalls: Boolean(nextModel.supportsToolCalls),
-        contextWindow: nextModel.capabilities?.contextWindow ?? '',
-        maxOutputTokens: nextModel.capabilities?.maxOutputTokens ?? '',
-        supportsReasoning: Boolean(nextModel.capabilities?.supportsReasoning),
-        supportsStructuredOutputs: Boolean(
-          nextModel.capabilities?.supportsStructuredOutputs,
-        ),
-        semanticCacheEnabled: Boolean(cache?.enabled),
-        semanticCacheVectorProviderKey: cache?.vectorProviderKey || '',
-        semanticCacheVectorIndexKey: cache?.vectorIndexKey || '',
-        semanticCacheEmbeddingModelKey: cache?.embeddingModelKey || '',
-        semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
-        semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
-        piiPolicyKey: piiPolicyKeyOf(nextModel.piiProtection) ?? '',
-      });
-      setLoadVersion((v) => v + 1);
-
-      if (providerResponse.ok) {
-        const providerData = await providerResponse.json();
-        // Platform providers are not offered: the server refuses models and replicas on them.
-        const rawProviders = ((providerData.providers ?? []) as Array<Record<string, string> & { platform?: boolean }>)
-          .filter((p) => p.platform !== true);
-        setModelProviders(
-          rawProviders.map((p: Record<string, string>) => ({
-            key: p.key,
-            label: p.label || p.key,
-            status: p.status || 'active',
-            driver: p.driver || '',
-          }))
-        );
-      }
-
-      if (vectorProviderResponse.ok) {
-        const vpData = await vectorProviderResponse.json();
-        setVectorProviders(
-          (vpData.providers ?? []).map((p: { key: string; label: string }) => ({
-            key: p.key,
-            label: p.label,
-          })),
-        );
-      }
-
-      if (embeddingModelsResponse.ok) {
-        const emData = await embeddingModelsResponse.json();
-        setEmbeddingModels(
-          (emData.models ?? []).map((m: { key: string; name: string }) => ({
-            key: m.key,
-            name: m.name,
-          })),
-        );
-      }
-
-      if (guardrailsResponse.ok) {
-        const gData = await guardrailsResponse.json();
-        setGuardrails(
-          (gData.guardrails ?? []).map(
-            (g: {
-              key: string;
-              name: string;
-              type: 'preset' | 'custom';
-              action: string;
-              enabled?: boolean;
-            }) => ({
-              key: g.key,
-              name: g.name,
-              type: g.type,
-              action: g.action,
-              enabled: g.enabled,
-            }),
-          ),
-        );
-      }
-
-      // Load vector indexes for current provider if set
-      if (cache?.vectorProviderKey) {
-        await loadVectorIndexes(cache.vectorProviderKey);
-      }
-
-      if (!silenceNotification) {
-        notifications.show({
-          title: t('notifications.loadedTitle'),
-          message: t('notifications.loadedMessage'),
-          color: 'teal',
-        });
-      }
-    } catch (error) {
-      console.error('Failed to load model', error);
-      notifications.show({
-        title: t('notifications.errorTitle'),
-        message: t('notifications.errorMessage'),
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
+    form.setValues({
+      name: nextModel.name,
+      description: nextModel.description,
+      key: nextModel.key,
+      providerKey: nextModel.providerKey || '',
+      modelId: nextModel.modelId,
+      pricing: {
+        currency: nextModel.pricing.currency || 'USD',
+        inputTokenPer1M: nextModel.pricing.inputTokenPer1M,
+        outputTokenPer1M: nextModel.pricing.outputTokenPer1M,
+        // A stored 0 means "not entered" (billed at the input price): show it blank.
+        cachedTokenPer1M: nextModel.pricing.cachedTokenPer1M || '',
+        cacheWriteTokenPer1M: nextModel.pricing.cacheWriteTokenPer1M || '',
+      },
+      settings,
+      isMultimodal: Boolean(nextModel.isMultimodal),
+      supportsToolCalls: Boolean(nextModel.supportsToolCalls),
+      contextWindow: nextModel.capabilities?.contextWindow ?? '',
+      maxOutputTokens: nextModel.capabilities?.maxOutputTokens ?? '',
+      supportsReasoning: Boolean(nextModel.capabilities?.supportsReasoning),
+      supportsStructuredOutputs: Boolean(
+        nextModel.capabilities?.supportsStructuredOutputs,
+      ),
+      semanticCacheEnabled: Boolean(cache?.enabled),
+      semanticCacheVectorProviderKey: cache?.vectorProviderKey || '',
+      semanticCacheVectorIndexKey: cache?.vectorIndexKey || '',
+      semanticCacheEmbeddingModelKey: cache?.embeddingModelKey || '',
+      semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
+      semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
+      piiPolicyKey: piiPolicyKeyOf(nextModel.piiProtection) ?? '',
+    });
+    setLoadVersion((v) => v + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelQuery.data]);
 
   useEffect(() => {
-    if (!opened || !editModelId) return;
-    setLoading(true);
-    setModel(null);
-    setBaseline(null);
-    void loadModel(true);
+    if (!modelQuery.isError) return;
+    console.error('Failed to load model', modelQuery.error);
+    notifications.show({
+      title: t('notifications.errorTitle'),
+      message: t('notifications.errorMessage'),
+      color: 'red',
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, editModelId]);
+  }, [modelQuery.isError]);
 
   const handleSubmit = async (values: FormValues) => {
     if (!model || saving) return;
@@ -590,12 +529,9 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
     if (!proceed) return;
 
     try {
-      const response = await fetch(`/api/models/${model._id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      await updateModel.mutateAsync({
+        id: String(model._id),
+        body: {
           name: values.name,
           description: values.description,
           key: values.key,
@@ -674,13 +610,8 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           // on a model whose bindings moved into the list — the exact write the
           // API rejects with "send the full `guardrails` array instead". An
           // update that omits them leaves both columns untouched.
-        }),
+        },
       });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to update model');
-      }
 
       notifications.show({
         title: t('notifications.savedTitle'),
@@ -1018,11 +949,6 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
                         onChange={(val) => {
                           form.setFieldValue('semanticCacheVectorProviderKey', val || '');
                           form.setFieldValue('semanticCacheVectorIndexKey', '');
-                          if (val) {
-                            void loadVectorIndexes(val);
-                          } else {
-                            setVectorIndexes([]);
-                          }
                         }}
                       />
                     ) : (

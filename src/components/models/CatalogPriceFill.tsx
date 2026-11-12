@@ -13,11 +13,11 @@
  * notification instead of touching the form.
  */
 
-import { useState } from 'react';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconSparkles } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useSuggestModelPrice } from '@/lib/api/queries/models';
 
 export interface CatalogPricingFill {
   inputTokenPer1M: number;
@@ -49,7 +49,8 @@ function positiveInt(value: unknown): number | undefined {
 
 export default function CatalogPriceFill({ modelId, onApply, size = 'compact-xs' }: CatalogPriceFillProps) {
   const t = useTranslations('modelPriceCatalog');
-  const [loading, setLoading] = useState(false);
+  const suggestPrice = useSuggestModelPrice();
+  const loading = suggestPrice.isPending;
 
   const fill = async () => {
     const name = modelId.trim();
@@ -61,14 +62,8 @@ export default function CatalogPriceFill({ modelId, onApply, size = 'compact-xs'
       });
       return;
     }
-    setLoading(true);
     try {
-      const response = await fetch(
-        `/api/model-price-catalog/suggest?names=${encodeURIComponent(name)}`,
-      );
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? 'Request failed');
-      const match = payload.suggestions?.[0]?.match;
+      const match = await suggestPrice.mutateAsync(name);
       if (!match) {
         notifications.show({
           color: 'blue',
@@ -105,8 +100,6 @@ export default function CatalogPriceFill({ modelId, onApply, size = 'compact-xs'
         title: t('fill.errorTitle'),
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-    } finally {
-      setLoading(false);
     }
   };
 

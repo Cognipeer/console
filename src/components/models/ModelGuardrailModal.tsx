@@ -20,7 +20,7 @@
  * guardrail on one screen was the confusion, not the safeguard.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Group, Loader, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertCircle, IconCheck, IconShield } from '@tabler/icons-react';
@@ -31,6 +31,16 @@ import GuardrailBindingList, {
   type GuardrailBindingOption,
   type GuardrailBindingRow,
 } from '@/components/guardrails/GuardrailBindingList';
+import { useGuardrailPickerRows, useModelRecord, useUpdateModel } from '@/lib/api/queries/models';
+
+const NO_OPTIONS: GuardrailBindingOption[] = [];
+
+/** The part of the model record this screen reads. */
+interface StoredModelGuardrails {
+  guardrails?: GuardrailBindingRow[];
+  inputGuardrailKey?: string;
+  outputGuardrailKey?: string;
+}
 
 interface ModelGuardrailModalProps {
   opened: boolean;
@@ -53,82 +63,47 @@ export default function ModelGuardrailModal({
   onClose,
   onSaved,
 }: ModelGuardrailModalProps) {
-  const [options, setOptions] = useState<GuardrailBindingOption[]>([]);
   const [bindings, setBindings] = useState<GuardrailBindingRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  // Unfiltered on purpose: a guardrail disabled AFTER it was bound must still render as a (badged) row.
+  // `GuardrailBindingList` keeps disabled ones out of the picker instead.
+  const optionsQuery = useGuardrailPickerRows<GuardrailBindingOption>(opened);
+  const options = optionsQuery.data ?? NO_OPTIONS;
+  // The record, not the list page's row: `guardrails` is what decides whether this model is on the list or still
+  // on the legacy slots, and the list page does not carry it.
+  const recordQuery = useModelRecord<StoredModelGuardrails>(modelId, opened);
+  const updateModel = useUpdateModel();
+  const saving = updateModel.isPending;
+  const loading = opened && (optionsQuery.isFetching || recordQuery.isFetching);
+  const model = recordQuery.data;
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [guardrailRes, modelRes] = await Promise.all([
-        // Unfiltered on purpose: a guardrail disabled AFTER it was bound must
-        // still render as a (badged) row. `GuardrailBindingList` keeps disabled
-        // ones out of the picker instead.
-        fetch('/api/guardrails', { cache: 'no-store' }),
-        // The record, not the list page's row: `guardrails` is what decides
-        // whether this model is on the list or still on the legacy slots, and
-        // the list page does not carry it.
-        fetch(`/api/models/${modelId}`, { cache: 'no-store' }),
-      ]);
-
-      if (guardrailRes.ok) {
-        const data = await guardrailRes.json();
-        setOptions((data.guardrails ?? []) as GuardrailBindingOption[]);
-      }
-
-      const model = modelRes.ok
-        ? ((await modelRes.json()).model as {
-          guardrails?: GuardrailBindingRow[];
-          inputGuardrailKey?: string;
-          outputGuardrailKey?: string;
-        })
-        : undefined;
-
-      const stored = model?.guardrails;
-      if (Array.isArray(stored)) {
-        // Already on the list — including an explicitly empty one, which is a
-        // real operator decision ("bound to nothing") and not a legacy row.
-        //
-        // Shared mapping: an absent `hooks` must stay absent, or "wherever the
-        // guardrail declares" becomes "runs nowhere" on the next Save.
-        setBindings(bindingRowsFromStored(stored));
-        return;
-      }
-
-      setBindings(bindingRowsFromLegacySlots(
-        model?.inputGuardrailKey ?? initialInputGuardrailKey,
-        model?.outputGuardrailKey ?? initialOutputGuardrailKey,
-      ));
-      // A model with neither slot set is simply unbound, not legacy: showing it
-      // a migration banner would ask an operator to convert nothing.
-    } catch (err) {
-      console.error('[model-guardrail-modal]', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [modelId, initialInputGuardrailKey, initialOutputGuardrailKey]);
-
+  // Each opening seeds the bindings from the record once both reads have settled.
   useEffect(() => {
-    if (!opened) return;
-    void load();
-  }, [opened, load]);
+    if (!opened || optionsQuery.isFetching || recordQuery.isFetching) return;
+    const stored = model?.guardrails;
+    if (Array.isArray(stored)) {
+      // Already on the list — including an explicitly empty one, which is a
+      // real operator decision ("bound to nothing") and not a legacy row.
+      //
+      // Shared mapping: an absent `hooks` must stay absent, or "wherever the
+      // guardrail declares" becomes "runs nowhere" on the next Save.
+      setBindings(bindingRowsFromStored(stored));
+      return;
+    }
+    setBindings(bindingRowsFromLegacySlots(
+      model?.inputGuardrailKey ?? initialInputGuardrailKey,
+      model?.outputGuardrailKey ?? initialOutputGuardrailKey,
+    ));
+    // A model with neither slot set is simply unbound, not legacy: showing it
+    // a migration banner would ask an operator to convert nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, optionsQuery.isFetching, recordQuery.isFetching]);
 
   const handleSave = async () => {
-    setSaving(true);
     try {
       // Only `guardrails` is sent: the API derives the deprecated slots from it
       // so an older console binary on the same tenant DB keeps enforcing, and
       // sending both would let the two disagree.
-      const res = await fetch(`/api/models/${modelId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ guardrails: bindings }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error((err as { error?: string }).error ?? 'Failed to save');
-      }
+      await updateModel.mutateAsync({ id: modelId, body: { guardrails: bindings } });
       notifications.show({
         title: 'Guardrails saved',
         message: `Guardrail bindings updated for "${modelName}"`,
@@ -143,8 +118,6 @@ export default function ModelGuardrailModal({
         message: err instanceof Error ? err.message : 'Failed to save',
         color: 'red',
       });
-    } finally {
-      setSaving(false);
     }
   };
 

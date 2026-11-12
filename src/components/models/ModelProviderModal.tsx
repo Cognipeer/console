@@ -21,6 +21,14 @@ import type { ModelProviderView } from '@/lib/services/models/types';
 import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import ProviderFormRenderer from '@/components/providers/ProviderFormRenderer';
 import { partitionProviderValues } from '@/components/providers/providerFormModel';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useCreateModelProvider,
+  useModelProviderDriverForm,
+  useModelProviderDrivers,
+} from '@/lib/api/queries/models';
+
+const NO_DRIVERS: ProviderDescriptor[] = [];
 
 interface ModelProviderModalProps {
   opened: boolean;
@@ -37,14 +45,17 @@ interface FormValues extends Record<string, unknown> {
 }
 
 export default function ModelProviderModal({ opened, onClose, onCreated }: ModelProviderModalProps) {
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
-  const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
-  const [schemaLoading, setSchemaLoading] = useState(false);
-  const [schemaError, setSchemaError] = useState<string | null>(null);
-  const formRef = useRef<HTMLFormElement>(null);
-  const [submitting, setSubmitting] = useState(false);
   const [selectedDriver, setSelectedDriver] = useState('');
+  const formRef = useRef<HTMLFormElement>(null);
+  const driversQuery = useModelProviderDrivers<ProviderDescriptor>(opened);
+  const drivers = driversQuery.data ?? NO_DRIVERS;
+  const driversLoading = opened && driversQuery.isPending;
+  const schemaQuery = useModelProviderDriverForm<ProviderFormSchema>(selectedDriver, opened);
+  const schema = opened && selectedDriver ? (schemaQuery.data ?? null) : null;
+  const schemaLoading = opened && Boolean(selectedDriver) && schemaQuery.isPending;
+  const schemaError = schemaQuery.isError ? errorMessage(schemaQuery.error, 'Unable to load form schema') : null;
+  const createProvider = useCreateModelProvider();
+  const submitting = createProvider.isPending;
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -66,97 +77,26 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
     [drivers],
   );
 
+  // Each opening starts on the first driver.
   useEffect(() => {
-    if (!opened) {
-      return;
-    }
-
-    let aborted = false;
-
-    async function loadDrivers() {
-      setDriversLoading(true);
-      try {
-        const response = await fetch('/api/models/providers/drivers');
-        if (!response.ok) {
-          throw new Error('Failed to load model provider drivers');
-        }
-        const data = await response.json();
-        if (!aborted) {
-          setDrivers(data.drivers ?? []);
-          const defaultDriver = data.drivers?.[0]?.id ?? '';
-          setSelectedDriver(defaultDriver);
-          setFieldValue('driver', defaultDriver);
-        }
-      } catch (error) {
-        console.error(error);
-        if (!aborted) {
-          notifications.show({
-            color: 'red',
-            title: 'Unable to load drivers',
-            message: error instanceof Error ? error.message : 'Unexpected error',
-          });
-        }
-      } finally {
-        if (!aborted) {
-          setDriversLoading(false);
-        }
-      }
-    }
-
-    void loadDrivers();
-    return () => {
-      aborted = true;
-    };
-  }, [opened, setFieldValue]);
+    if (!opened || drivers.length === 0) return;
+    const defaultDriver = drivers[0]?.id ?? '';
+    setSelectedDriver(defaultDriver);
+    setFieldValue('driver', defaultDriver);
+  }, [opened, drivers, setFieldValue]);
 
   useEffect(() => {
-    if (!opened || !selectedDriver) {
-      setSchema(null);
-      return;
-    }
-
-    let aborted = false;
-
-    async function loadSchema() {
-      setSchemaError(null);
-      setSchemaLoading(true);
-      try {
-        const response = await fetch(
-          `/api/models/providers/drivers/${selectedDriver}/form`,
-        );
-        if (!response.ok) {
-          throw new Error('Failed to load provider form schema');
-        }
-        const data = await response.json();
-        if (!aborted) {
-          setSchema(data.schema ?? null);
-        }
-      } catch (error) {
-        console.error(error);
-        if (!aborted) {
-          setSchemaError(
-            error instanceof Error ? error.message : 'Unable to load form schema',
-          );
-          setSchema(null);
-        }
-      } finally {
-        if (!aborted) {
-          setSchemaLoading(false);
-        }
-      }
-    }
-
-    void loadSchema();
-    return () => {
-      aborted = true;
-    };
-  }, [opened, selectedDriver]);
+    if (!driversQuery.isError) return;
+    notifications.show({
+      color: 'red',
+      title: 'Unable to load drivers',
+      message: errorMessage(driversQuery.error, 'Unexpected error'),
+    });
+  }, [driversQuery.isError, driversQuery.error]);
 
   const handleClose = () => {
     onClose();
     reset();
-    setSchema(null);
-    setSchemaError(null);
   };
 
   const handleSubmit = form.onSubmit(async (values) => {
@@ -171,12 +111,8 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
 
     const buckets = partitionProviderValues(schema, values);
 
-    setSubmitting(true);
     try {
-      const response = await fetch('/api/models/providers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const created = await createProvider.mutateAsync({
           key: values.key,
           label: values.label,
           description: values.description,
@@ -185,21 +121,13 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
           credentials: buckets.credentials,
           settings: buckets.settings,
           metadata: buckets.metadata,
-        }),
       });
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to create provider');
-      }
-
-      const data = await response.json();
       notifications.show({
         color: 'green',
         title: 'Provider created',
         message: `${values.label} is ready to use`,
       });
-      onCreated(data.provider as ModelProviderView);
+      onCreated(created);
       handleClose();
     } catch (error) {
       console.error(error);
@@ -208,8 +136,6 @@ export default function ModelProviderModal({ opened, onClose, onCreated }: Model
         title: 'Unable to create provider',
         message: error instanceof Error ? error.message : 'Unexpected error occurred',
       });
-    } finally {
-      setSubmitting(false);
     }
   });
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -29,6 +29,13 @@ import DetailShell, {
 } from '@/components/common/ui/DetailShell';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { isApiError } from '@/lib/api/client';
+import {
+  useDeleteProvider,
+  useProvider,
+  useProviderDrivers,
+  useUpdateProvider,
+} from '@/lib/api/queries/providers';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
@@ -43,10 +50,7 @@ import {
   serviceGlyphFontSize,
   DOMAIN_LABELS,
 } from '@/lib/services/serviceCatalog';
-import type {
-  ProviderDescriptor,
-  ProviderFormSchema,
-} from '@/lib/providers';
+import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import type { ProviderDomain } from '@/lib/database';
 
@@ -81,6 +85,8 @@ function formatDate(input?: string | Date | null) {
   return d.toLocaleString();
 }
 
+const NO_DRIVERS: ProviderDescriptor[] = [];
+
 export default function ProviderDetailPage() {
   const params = useParams<{ providerId: string }>();
   const router = useRouter();
@@ -95,74 +101,18 @@ export default function ProviderDetailPage() {
   const [assignOpen, setAssignOpen] = useState(false);
   const usage = useProviderUsage(providerId);
 
-  const [provider, setProvider] = useState<ProviderRecord | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const providerQuery = useProvider<ProviderRecord>(providerId);
+  const provider = providerQuery.data ?? null;
+  const loading = providerQuery.isPending;
+  const refreshing = providerQuery.isFetching && !providerQuery.isPending;
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
-  const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
-
-  const loadProvider = useCallback(
-    async (silent = false) => {
-      if (!providerId) return;
-      if (silent) setRefreshing(true);
-      else setLoading(true);
-      try {
-        const res = await fetch(
-          `/api/providers/${encodeURIComponent(providerId)}?scope=tenant`,
-          { cache: 'no-store' },
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.error || 'Failed to load provider');
-        }
-        const data = (await res.json()) as { provider?: ProviderRecord };
-        if (!data.provider) {
-          throw new Error('Provider not found');
-        }
-        setProvider(data.provider);
-      } catch (error) {
-        notifications.show({
-          color: 'red',
-          title: 'Provider',
-          message: error instanceof Error ? error.message : 'Failed to load',
-        });
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    },
-    [providerId],
-  );
-
-  const loadDrivers = useCallback(async (type: ProviderDomain) => {
-    setDriversLoading(true);
-    try {
-      const res = await fetch(
-        `/api/providers/drivers?domain=${encodeURIComponent(type)}`,
-        { cache: 'no-store' },
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { drivers?: ProviderDescriptor[] };
-        setDrivers(data.drivers ?? []);
-      }
-    } catch (error) {
-      console.error('Failed to load drivers', error);
-    } finally {
-      setDriversLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadProvider();
-  }, [loadProvider]);
-
-  useEffect(() => {
-    if (!provider || !editOpen) return;
-    void loadDrivers(provider.type as ProviderDomain);
-  }, [provider, editOpen, loadDrivers]);
+  const driversQuery = useProviderDrivers<ProviderDescriptor>(provider?.type, editOpen);
+  const drivers = driversQuery.data ?? NO_DRIVERS;
+  const driversLoading = editOpen && driversQuery.isFetching;
+  const updateProvider = useUpdateProvider();
+  const deleteProviderRecord = useDeleteProvider();
+  const { refetch: refetchProvider } = providerQuery;
 
   const handleDelete = async () => {
     if (!provider) return;
@@ -174,14 +124,7 @@ export default function ProviderDetailPage() {
         type: 'provider',
         id: String(provider._id),
         action: async () => {
-          const res = await fetch(
-            `/api/providers/${encodeURIComponent(String(provider._id))}?scope=tenant`,
-            { method: 'DELETE' },
-          );
-          if (!res.ok) {
-            const body = await res.json().catch(() => null);
-            throw new Error(body?.error || 'Failed to delete provider');
-          }
+          await deleteProviderRecord.mutateAsync(String(provider._id));
         },
       });
       if (!deleted) return;
@@ -247,7 +190,7 @@ export default function ProviderDetailPage() {
     ? usageSummary(usage.entries)
     : { assigned: assignedIds.length, total: assignedIds.length };
   const reloadAll = async () => {
-    await Promise.all([loadProvider(true), usage.reload()]);
+    await Promise.all([refetchProvider(), usage.reload()]);
   };
 
   const actions = (
@@ -257,7 +200,7 @@ export default function ProviderDetailPage() {
         size="sm"
         leftSection={<IconRefresh size={14} stroke={1.7} />}
         loading={refreshing}
-        onClick={() => void loadProvider(true)}
+        onClick={() => void refetchProvider()}
       >
         Refresh
       </Button>
@@ -615,10 +558,7 @@ export default function ProviderDetailPage() {
 
       <ProviderConfigModal
         opened={editOpen}
-        onClose={() => {
-          setEditOpen(false);
-          setSchema(null);
-        }}
+        onClose={() => setEditOpen(false)}
         mode="edit"
         provider={provider as ProviderConfigView}
         drivers={drivers}
@@ -634,16 +574,10 @@ export default function ProviderDetailPage() {
           if (Object.keys(options.values.credentials).length > 0) {
             updatePayload.credentials = options.values.credentials;
           }
-          const res = await fetch(
-            `/api/providers/${encodeURIComponent(String(provider._id))}?scope=tenant`,
-            {
-              method: 'PATCH',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(updatePayload),
-            },
-          );
-          const body = await res.json().catch(() => null);
-          if (!res.ok) {
+          try {
+            await updateProvider.mutateAsync({ id: String(provider._id), body: updatePayload });
+          } catch (error) {
+            const body = isApiError(error) ? error.payload : null;
             // The refusal names the form field it is about: the edit form marks it.
             throw providerRequestError(body, 'Failed to update provider');
           }
@@ -653,14 +587,9 @@ export default function ProviderDetailPage() {
             message: 'Provider updated',
           });
           setEditOpen(false);
-          setSchema(null);
-          await loadProvider(true);
+          await refetchProvider();
         }}
       />
-      {/* schema state kept here to satisfy a future "JSON inspector" tab; for now unused */}
-      <span hidden aria-hidden="true">
-        {schema ? '1' : '0'}
-      </span>
     </DetailShell>
   );
 }

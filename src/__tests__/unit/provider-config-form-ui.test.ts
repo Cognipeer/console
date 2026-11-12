@@ -8,22 +8,12 @@
  */
 import { createElement, useState } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  click,
-  installApiMock,
-  installDomStubs,
-  jsonResponse,
-  mount,
-  q,
-  qa,
-  setInput,
-  settle,
-  text,
-  wait,
-  type ApiMock,
-  type Mounted,
-  type RouteHandler,
-} from '../helpers/iamCenterUi';
+import { click, installApiMock, installDomStubs, jsonResponse, q, qa, setInput, settle, text, wait, type ApiMock, type Mounted, type RouteHandler } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import ProviderConfigModal, {
   type ProviderConfigModalProps,
   type ProviderConfigModalSubmitPayload,

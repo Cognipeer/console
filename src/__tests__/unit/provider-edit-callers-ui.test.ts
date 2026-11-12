@@ -11,22 +11,12 @@ import { createElement } from 'react';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buttonByText,
-  click,
-  installApiMock,
-  installDomStubs,
-  jsonResponse,
-  mount,
-  q,
-  qa,
-  setInput,
-  settle,
-  wait,
-  type ApiMock,
-  type Mounted,
-  type RouteHandler,
-} from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, q, qa, setInput, settle, wait, type ApiMock, type Mounted, type RouteHandler } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import CreateProjectShell from '@/components/projects/CreateProjectShell';
 import { DashboardUserProvider } from '@/components/layout/DashboardUserContext';
 import TenantProviders from '@/components/settings/TenantProviders';
@@ -305,7 +295,7 @@ describe('the pages that edit a provider', () => {
 
   it.each(PAGES)('%s hands the refusal of a save, with its field, to the form', (file) => {
     const source = readFileSync(path.join(ROOT, file), 'utf8');
-    expect(source).toMatch(/throw providerRequestError\(body, 'Failed to update (provider|instance)'\)/);
+    expect(source).toMatch(/throw providerRequestError\((body|error\.payload), 'Failed to update (provider|instance)'\)/);
     // the plain Error of the text alone would drop the field the form needs
     expect(source).not.toMatch(/throw new Error\(body\?\.error \|\| 'Failed to update (provider|instance)'\)/);
   });

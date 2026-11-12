@@ -7,23 +7,12 @@
  */
 import { createElement, type ReactElement } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buttonByText,
-  click,
-  installApiMock,
-  installDomStubs,
-  jsonResponse,
-  mount,
-  q,
-  qa,
-  setInput,
-  settle,
-  text,
-  wait,
-  type ApiMock,
-  type Mounted,
-  type RouteHandler,
-} from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, q, qa, setInput, settle, text, wait, type ApiMock, type Mounted, type RouteHandler } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import { DashboardUserProvider, type DashboardUser } from '@/components/layout/DashboardUserContext';
 import WebSearchListPage from '@/app/dashboard/websearch/page';
 import WebSearchInstancePage from '@/app/dashboard/websearch/[key]/page';

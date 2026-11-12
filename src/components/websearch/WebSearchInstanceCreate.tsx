@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { notifications } from '@mantine/notifications';
 import type { ProviderDescriptor } from '@/lib/providers/types';
 import type { WebSearchInstanceView } from '@/lib/services/webSearch/webSearchInstanceView';
@@ -8,10 +8,15 @@ import { useTranslations } from '@/lib/i18n';
 import ProviderConfigModal, { type CreatedProviderSummary } from '@/components/providers/ProviderConfigModal';
 import { useTenantProjects } from '@/components/providers/ProviderAssignStep';
 import { providerRequestError } from '@/components/providers/providerFormModel';
+import { isApiError } from '@/lib/api/client';
+import { useCreateProvider, useProvidersOfType } from '@/lib/api/queries/providers';
+import { useWebSearchDrivers } from '@/lib/api/queries/websearch';
 import WebSearchInstanceFormModal from './WebSearchInstanceFormModal';
 import type { WebSearchProviderOption } from './webSearchModel';
 
 const WEBSEARCH_DOMAIN = 'websearch' as const;
+const NO_PROVIDERS: WebSearchProviderOption[] = [];
+const NO_DRIVERS: ProviderDescriptor[] = [];
 
 export interface WebSearchInstanceCreateProps {
   /** Owners and admins only: the API refuses a create from anyone else. */
@@ -35,51 +40,27 @@ export default function WebSearchInstanceCreate({
 }: WebSearchInstanceCreateProps) {
   const t = useTranslations('webSearch.form');
   const [resetKey, setResetKey] = useState(0);
-  const [providers, setProviders] = useState<WebSearchProviderOption[]>([]);
-  const [providersLoading, setProvidersLoading] = useState(false);
+  const providersQuery = useProvidersOfType<WebSearchProviderOption>(WEBSEARCH_DOMAIN, opened);
+  const providers = providersQuery.data ?? NO_PROVIDERS;
+  const providersLoading = opened && providersQuery.isFetching;
+  const createProvider = useCreateProvider();
   const [providerKey, setProviderKey] = useState<string | null>(null);
 
   const [providerFormOpen, setProviderFormOpen] = useState(false);
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
+  const driversQuery = useWebSearchDrivers(providerFormOpen);
+  const drivers = driversQuery.data ?? NO_DRIVERS;
+  const driversLoading = providerFormOpen && driversQuery.isFetching;
   // A new provider is assigned to the project the instance is made in.
   const { activeProjectId } = useTenantProjects(opened);
-
-  const loadProviders = useCallback(async () => {
-    setProvidersLoading(true);
-    try {
-      const res = await fetch(`/api/providers?type=${WEBSEARCH_DOMAIN}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as { providers?: WebSearchProviderOption[] };
-      setProviders(body.providers ?? []);
-    } catch {
-      setProviders([]);
-    } finally {
-      setProvidersLoading(false);
-    }
-  }, []);
 
   useEffect(() => {
     if (!opened) return;
     setResetKey((current) => current + 1);
     setProviderKey(initialProviderKey);
     setProviderFormOpen(false);
-    void loadProviders();
     // A create starts from the provider it was opened for; a change of that while it is open is not one.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, loadProviders]);
-
-  const openProviderForm = async () => {
-    setProviderFormOpen(true);
-    setDriversLoading(true);
-    try {
-      const res = await fetch('/api/websearch/providers/drivers', { cache: 'no-store' });
-      const body = res.ok ? ((await res.json()) as { drivers?: ProviderDescriptor[] }) : null;
-      setDrivers(body?.drivers ?? []);
-    } finally {
-      setDriversLoading(false);
-    }
-  };
+  }, [opened]);
 
   return (
     <>
@@ -91,7 +72,7 @@ export default function WebSearchInstanceCreate({
         providersLoading={providersLoading}
         providerKey={providerKey}
         onProviderKeyChange={setProviderKey}
-        onNewProvider={() => void openProviderForm()}
+        onNewProvider={() => setProviderFormOpen(true)}
         canSetTenantWide
         resetKey={resetKey}
         onSaved={onCreated}
@@ -105,10 +86,9 @@ export default function WebSearchInstanceCreate({
         domain={WEBSEARCH_DOMAIN}
         initialProjectIds={activeProjectId ? [activeProjectId] : []}
         onSubmit={async (options): Promise<CreatedProviderSummary> => {
-          const res = await fetch('/api/providers?scope=tenant', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
+          let created: { _id?: string; key?: string; label?: string } | undefined;
+          try {
+            created = await createProvider.mutateAsync({
               key: options.values.base.key,
               label: options.values.base.label,
               description: options.values.base.description,
@@ -119,15 +99,13 @@ export default function WebSearchInstanceCreate({
               settings: options.values.settings,
               metadata: options.values.metadata,
               projectIds: options.projectIds,
-            }),
-          });
-          const body = await res.json().catch(() => null);
-          // The refusal names the form field it is about: the provider form marks it.
-          if (!res.ok) throw providerRequestError(body, t('providerCreateFailed'));
-          const created = body?.provider as { _id?: string; key?: string; label?: string } | undefined;
+            });
+          } catch (error) {
+            // The refusal names the form field it is about: the provider form marks it.
+            throw providerRequestError(isApiError(error) ? error.payload : null, t('providerCreateFailed'));
+          }
           const key = String(created?.key ?? options.values.base.key);
           notifications.show({ color: 'teal', title: t('providerCreated'), message: created?.label ?? key });
-          await loadProviders();
           setProviderKey(key);
           // The provider form closes itself (after its assign step, when no project was picked).
           return {

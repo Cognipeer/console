@@ -31,6 +31,8 @@ import FormShell, {
 import { SkeletonRegion, SkeletonText } from '@/components/common/ui/Skeletons';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useConfirm } from '@/components/common/confirm/ConfirmProvider';
+import { failureText, useAddPlatformModels, useCreateModel } from '@/lib/api/queries/models';
+import { useAssignProviderToActiveProject } from '@/lib/api/queries/providers';
 import { formatRelative } from '@/components/iam/timeFormat';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
@@ -49,7 +51,6 @@ import {
 import { noteCatalogModelsCreated, useProviderModelCatalog } from './useProviderModelCatalog';
 import {
   isPlatformCatalog,
-  mergeProjectIds,
   type PlatformCatalogData,
   platformCatalogToModels,
   type PlatformProviderView,
@@ -159,6 +160,9 @@ export default function ModelCatalogModal({
   const { confirm } = useConfirm();
   const role = useDashboardUser()?.role;
   const canManage = role === 'owner' || role === 'admin';
+  const createModel = useCreateModel({ refresh: false });
+  const addPlatformModels = useAddPlatformModels();
+  const assignProvider = useAssignProviderToActiveProject();
   const [assigning, setAssigning] = useState(false);
   const [addingPlatform, setAddingPlatform] = useState(false);
   const [providerKey, setProviderKey] = useState<string | undefined>(undefined);
@@ -301,18 +305,11 @@ export default function ModelCatalogModal({
       }
       setBulk({ done: index + 1, total: payloads.length });
       try {
-        const response = await fetch('/api/models', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload.body),
-        });
-        const body = await response.json().catch(() => null) as { model?: IModel; error?: unknown } | null;
-        if (!response.ok || !body?.model) {
-          throw new Error(typeof body?.error === 'string' && body.error ? body.error : t('bulk.unknownError'));
-        }
+        const body = await createModel.mutateAsync(payload.body);
+        if (!body?.model) throw new Error(t('bulk.unknownError'));
         created.push(body.model);
       } catch (error) {
-        firstError ??= `${payload.model.id}: ${error instanceof Error ? error.message : t('bulk.unknownError')}`;
+        firstError ??= `${payload.model.id}: ${failureText(error, t('bulk.unknownError'))}`;
       }
     }
     setBulk(null);
@@ -358,15 +355,7 @@ export default function ModelCatalogModal({
     const keys = selectedModels.map((model) => model.id);
     setAddingPlatform(true);
     try {
-      const response = await fetch('/api/models/platform/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys }),
-      });
-      const body = await response.json().catch(() => null) as { added?: string[]; error?: unknown } | null;
-      if (!response.ok) {
-        throw new Error(typeof body?.error === 'string' && body.error ? body.error : t('platform.addFailed'));
-      }
+      const body = await addPlatformModels.mutateAsync(keys);
       const addedCount = Array.isArray(body?.added) ? body.added.length : keys.length;
       notifications.show({
         color: 'green',
@@ -380,7 +369,7 @@ export default function ModelCatalogModal({
       notifications.show({
         color: 'red',
         title: t('platform.addFailed'),
-        message: error instanceof Error ? error.message : t('platform.addFailed'),
+        message: failureText(error, t('platform.addFailed')),
       });
     } finally {
       setAddingPlatform(false);
@@ -393,37 +382,7 @@ export default function ModelCatalogModal({
     const target = provider;
     setAssigning(true);
     try {
-      const projectsResponse = await fetch('/api/projects', { cache: 'no-store' });
-      const projectsBody = projectsResponse.ok
-        ? await projectsResponse.json().catch(() => null) as { activeProjectId?: string } | null
-        : null;
-      const activeProjectId = projectsBody?.activeProjectId;
-      if (!activeProjectId) throw new Error(t('platform.assignFailed'));
-
-      // The provider's projects are read again so a change made meanwhile is not overwritten; the list the page
-      // holds is the fallback when that read fails.
-      let current: { projectId?: unknown; projectIds?: unknown } = target;
-      try {
-        const listResponse = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-        if (listResponse.ok) {
-          const listBody = await listResponse.json().catch(() => null) as
-            { providers?: Array<{ _id?: unknown; key?: string; projectId?: unknown; projectIds?: unknown }> } | null;
-          const fresh = listBody?.providers?.find((entry) => String(entry._id) === String(target._id));
-          if (fresh) current = fresh;
-        }
-      } catch {
-        // keep the list at hand
-      }
-
-      const response = await fetch(`/api/providers/${encodeURIComponent(String(target._id))}?scope=tenant`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectIds: mergeProjectIds(current, activeProjectId) }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => null) as { error?: unknown } | null;
-        throw new Error(typeof body?.error === 'string' && body.error ? body.error : t('platform.assignFailed'));
-      }
+      await assignProvider.mutateAsync({ provider: target, failedMessage: t('platform.assignFailed') });
       notifications.show({
         color: 'green',
         title: t('platform.assignedTitle'),
@@ -435,7 +394,7 @@ export default function ModelCatalogModal({
       notifications.show({
         color: 'red',
         title: t('platform.assignFailed'),
-        message: error instanceof Error ? error.message : t('platform.assignFailed'),
+        message: failureText(error, t('platform.assignFailed')),
       });
     } finally {
       setAssigning(false);

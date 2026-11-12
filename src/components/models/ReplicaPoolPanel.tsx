@@ -17,6 +17,8 @@ import {
   TextInput,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { isApiError } from '@/lib/api/client';
+import { serverErrorText, useUpdateModel } from '@/lib/api/queries/models';
 import {
   IconAlertTriangle,
   IconDeviceFloppy,
@@ -54,7 +56,8 @@ export default function ReplicaPoolPanel({
   onSaved,
 }: ReplicaPoolPanelProps) {
   const [replicas, setReplicas] = useState<ReplicaDraft[]>(initialReplicas ?? []);
-  const [saving, setSaving] = useState(false);
+  const updateModel = useUpdateModel();
+  const saving = updateModel.isPending;
   const [error, setError] = useState<string | null>(null);
 
   const pooled = replicas.length > 0;
@@ -75,16 +78,9 @@ export default function ReplicaPoolPanel({
   };
 
   const save = async () => {
-    setSaving(true);
     setError(null);
     try {
-      const response = await fetch(`/api/models/${modelId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ replicas }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || `Save failed (${response.status})`);
+      await updateModel.mutateAsync({ id: modelId, body: { replicas } });
       notifications.show({
         color: 'teal',
         title: pooled ? 'Pool saved' : 'Pool cleared',
@@ -94,11 +90,10 @@ export default function ReplicaPoolPanel({
       });
       onSaved?.(replicas);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Save failed';
+      const message = serverErrorText(err)
+        ?? (isApiError(err) ? `Save failed (${err.status})` : err instanceof Error ? err.message : 'Save failed');
       setError(message);
       notifications.show({ color: 'red', title: 'Could not save the pool', message });
-    } finally {
-      setSaving(false);
     }
   };
 

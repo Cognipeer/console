@@ -11,6 +11,9 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { serverErrorText } from '@/lib/api/queries/models';
+import { useSwitchActiveProject, useTenantProjectsQuery, useUpdateProvider } from '@/lib/api/queries/providers';
 import { DOMAIN_LABELS } from '@/lib/services/serviceCatalog';
 import {
   diffAssignment,
@@ -24,43 +27,17 @@ import {
   type AccessProject,
 } from './providerAccessModel';
 
+const NO_PROJECTS: AccessProject[] = [];
+
 /** The tenant's projects with their per-domain provider counts (`GET /api/projects?include=stats`). */
 export function useTenantProjects(enabled = true) {
-  const [projects, setProjects] = useState<AccessProject[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
-  const [loading, setLoading] = useState(enabled);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!enabled) return;
-    let aborted = false;
-    setLoading(true);
-    setError(null);
-    fetch('/api/projects?include=stats', { cache: 'no-store' })
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.error || 'Failed to load projects');
-        }
-        return (await res.json()) as { projects?: AccessProject[]; activeProjectId?: string };
-      })
-      .then((data) => {
-        if (aborted) return;
-        setProjects(data.projects ?? []);
-        setActiveProjectId(data.activeProjectId);
-      })
-      .catch((e: unknown) => {
-        if (!aborted) setError(e instanceof Error ? e.message : 'Failed to load projects');
-      })
-      .finally(() => {
-        if (!aborted) setLoading(false);
-      });
-    return () => {
-      aborted = true;
-    };
-  }, [enabled]);
-
-  return { projects, activeProjectId, loading, error };
+  const query = useTenantProjectsQuery(enabled);
+  return {
+    projects: query.data?.projects ?? NO_PROJECTS,
+    activeProjectId: query.data?.activeProjectId,
+    loading: enabled && query.isPending,
+    error: query.isError ? errorMessage(query.error, 'Failed to load projects') : null,
+  };
 }
 
 export interface ProjectPickerProps {
@@ -239,6 +216,8 @@ export default function ProviderAssignStep({
   const tp = useTranslations('providerAccess.projects');
   const router = useRouter();
   const { projects, activeProjectId, loading, error } = useTenantProjects(opened);
+  const updateProvider = useUpdateProvider();
+  const switchProject = useSwitchActiveProject();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState<'assign' | 'models' | null>(null);
   const before = useMemo(() => initialProjectIds ?? [], [initialProjectIds]);
@@ -253,17 +232,13 @@ export default function ProviderAssignStep({
   const changed = diff.added.length > 0 || diff.removed.length > 0;
 
   const save = async (): Promise<string[] | null> => {
-    const res = await fetch(`/api/providers/${encodeURIComponent(provider.id)}?scope=tenant`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ projectIds: diff.next }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => null);
+    try {
+      await updateProvider.mutateAsync({ id: provider.id, body: { projectIds: diff.next } });
+    } catch (error) {
       notifications.show({
         color: 'red',
         title: t('assignFailed'),
-        message: body?.error || t('assignFailed'),
+        message: serverErrorText(error) || t('assignFailed'),
       });
       return null;
     }
@@ -296,17 +271,13 @@ export default function ProviderAssignStep({
         return;
       }
       if (target.needsSwitch) {
-        const res = await fetch('/api/projects/active', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ projectId: target.projectId }),
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
+        try {
+          await switchProject.mutateAsync(target.projectId);
+        } catch (error) {
           notifications.show({
             color: 'red',
             title: provider.name,
-            message: body?.error || t('assignFailed'),
+            message: serverErrorText(error) || t('assignFailed'),
           });
           onClose();
           return;

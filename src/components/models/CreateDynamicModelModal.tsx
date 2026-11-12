@@ -22,6 +22,7 @@ import {
 } from '@/components/common/ui/FormShell';
 import ModelFormLayout from './ModelFormLayout';
 import RoutingAnalyticsPanel from './RoutingAnalyticsPanel';
+import { useSaveDynamicModel } from '@/lib/api/queries/models';
 import type {
   DynamicPoolPolicy,
   DynamicRoutingOperator,
@@ -226,7 +227,8 @@ export default function CreateDynamicModelModal({
   editModel,
   onSaved,
 }: Props) {
-  const [submitting, setSubmitting] = useState(false);
+  const saveDynamicModel = useSaveDynamicModel();
+  const submitting = saveDynamicModel.isPending;
   const [name, setName] = useState('');
   const [key, setKey] = useState('');
   const [description, setDescription] = useState('');
@@ -484,25 +486,14 @@ export default function CreateDynamicModelModal({
 
   const submit = async () => {
     if (!canSubmit) return;
-    setSubmitting(true);
     try {
       const dynamic = buildConfig();
       const payload = { name: name.trim(), key: key.trim() || undefined, description: description.trim(), dynamic };
-      const url = isEdit ? `/api/models/${editModel!._id}` : '/api/models/dynamic';
-      const method = isEdit ? 'PUT' : 'POST';
       const body = isEdit
         ? { name: payload.name, description: payload.description, settings: { dynamic } }
         : payload;
 
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to save dynamic model');
-      }
+      await saveDynamicModel.mutateAsync({ id: isEdit ? String(editModel!._id) : undefined, body });
       notifications.show({
         color: 'green',
         title: isEdit ? 'Dynamic LLM updated' : 'Dynamic LLM created',
@@ -516,8 +507,6 @@ export default function CreateDynamicModelModal({
         title: 'Unable to save dynamic model',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 

@@ -6,7 +6,12 @@
  */
 import { createElement } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { click, installApiMock, installDomStubs, jsonResponse, mount, q, qa, settle, type Mounted } from '../helpers/iamCenterUi';
+import { click, installApiMock, installDomStubs, jsonResponse, q, qa, settle, type Mounted } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import ServiceCard from '@/components/common/ui/ServiceCard';
 import ProviderDetailPage from '@/app/dashboard/providers/[providerId]/page';
 import { findServiceById } from '@/lib/services/serviceCatalog';

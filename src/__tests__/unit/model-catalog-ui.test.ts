@@ -34,7 +34,9 @@ import { modelCatalogEn } from '@/lib/i18n/messages/modelCatalog.en';
 import { modelCatalogTr } from '@/lib/i18n/messages/modelCatalog.tr';
 import type { CatalogModel, ProviderModelCatalog } from '@/lib/services/models/catalog/types';
 import type { ModelProviderView } from '@/lib/services/models/types';
-import { buttonByText, click, installDomStubs, setInput, wait } from '../helpers/iamCenterUi';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
+import { buttonByText, click, jsonResponse, installDomStubs, setInput, wait } from '../helpers/iamCenterUi';
 
 type Loose = ComponentType<{ locale?: string; children?: ReactNode; env?: string }>;
 const Mantine = MantineProvider as unknown as Loose;
@@ -85,7 +87,7 @@ let catalogs: Record<string, { status: number; body: unknown }>;
 let posted: Array<Record<string, unknown>>;
 let fetchMock: ReturnType<typeof vi.fn>;
 
-const reply = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const reply = (status: number, body: unknown) => jsonResponse(body, status);
 const catalogCalls = (key: string) =>
   fetchMock.mock.calls.filter(([url]) => String(url) === `/api/models/providers/${encodeURIComponent(key)}/catalog`).length;
 
@@ -128,6 +130,7 @@ beforeEach(() => {
 
 let root: Root | undefined;
 let host: HTMLElement | undefined;
+const queryClient = newTestQueryClient();
 
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
@@ -135,6 +138,7 @@ afterEach(async () => {
   root = undefined;
   host = undefined;
   document.body.innerHTML = '';
+  queryClient.clear();
   vi.unstubAllGlobals();
 });
 
@@ -145,7 +149,7 @@ async function render(element: ReactNode, locale = 'en') {
     root = createRoot(host);
   }
   await act(async () => {
-    root!.render(h(Mantine, { env: 'test' }, h(I18n, { locale }, h(Confirm, null, element))));
+    root!.render(h(QueryClientProvider, { client: queryClient }, h(Mantine, { env: 'test' }, h(I18n, { locale }, h(Confirm, null, element)))));
   });
   await wait(0);
   await wait(0);
