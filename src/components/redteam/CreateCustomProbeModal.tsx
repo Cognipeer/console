@@ -26,11 +26,28 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
+import Link from 'next/link';
 import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import { CUSTOM_PROBE_LIMITS } from '@/lib/services/redteam/limits';
 import { OWASP_LLM_CATEGORIES, OWASP_LLM_LABELS, normalizeOwaspCategory } from '@/lib/services/redteam/owasp';
-import { attemptIdError, highestAttemptSuffix, nextAttemptId, splitPatternLines } from './helpers';
-import type { CustomProbeView } from './types';
+import { NAMED_DETECTOR_KEYS } from '@/lib/services/redteam/types';
+import { attemptIdError, detectorInfo, highestAttemptSuffix, nextAttemptId, probeSourceLabel, splitPatternLines } from './helpers';
+import type { BuiltinProbeDefinitionView, CustomProbeAttemptView, CustomProbeView, RedTeamProbePolarity } from './types';
+
+const POLARITY_OPTIONS = [
+  { value: 'attack', label: 'Attack: a hit means the attack worked' },
+  { value: 'over-refusal', label: 'Over-refusal: harmless prompts, a refusal is the failure' },
+];
+
+const HISTORY_ROLE_OPTIONS = [
+  { value: 'user', label: 'user' },
+  { value: 'assistant', label: 'assistant' },
+];
+
+interface HistoryDraft {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 const CATEGORY_OPTIONS = OWASP_LLM_CATEGORIES.map((value) => ({ value, label: OWASP_LLM_LABELS[value] }));
 const DEFAULT_CATEGORY = 'LLM01-prompt-injection';
@@ -40,6 +57,8 @@ const SEVERITY_OPTIONS = ['low', 'medium', 'high', 'critical'].map((s) => ({ val
 interface AttemptDraft {
   id: string;
   turns: string[];
+  /** Forged earlier turns sent before the first user turn. */
+  history: HistoryDraft[];
   system: string;
   canary: string;
   /** One pattern per line. */
@@ -59,6 +78,7 @@ function emptyAttempt(id: string): AttemptDraft {
   return {
     id,
     turns: [''],
+    history: [],
     system: '',
     canary: '',
     forbiddenPatterns: '',
@@ -80,14 +100,30 @@ function needsPatternDetector(a: AttemptDraft): boolean {
   return a.canary.trim().length > 0 || splitPatternLines(a.forbiddenPatterns).length > 0;
 }
 
+function toAttemptDraft(a: CustomProbeAttemptView, i: number): AttemptDraft {
+  return {
+    id: a.id || `attempt-${i + 1}`,
+    turns: a.turns.length ? a.turns : [''],
+    history: (a.history ?? []).map((m) => ({ role: m.role, content: m.content })),
+    system: a.system ?? '',
+    canary: a.canary ?? '',
+    forbiddenPatterns: (a.forbiddenPatterns ?? []).join('\n'),
+    refusalExpected: a.refusalExpected ?? true,
+    adaptive: a.adaptive ?? false,
+    objective: a.objective ?? '',
+  };
+}
+
 interface Props {
   opened: boolean;
   editing?: CustomProbeView | null;
+  /** Create mode prefilled from a built-in probe; saving posts `clonedFrom`. */
+  cloneOf?: BuiltinProbeDefinitionView | null;
   onClose: () => void;
   onSaved: () => void;
 }
 
-export default function CreateCustomProbeModal({ opened, editing, onClose, onSaved }: Props) {
+export default function CreateCustomProbeModal({ opened, editing, cloneOf, onClose, onSaved }: Props) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<string>(DEFAULT_CATEGORY);
@@ -97,6 +133,8 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
   const [refusal, setRefusal] = useState(true);
   const [pattern, setPattern] = useState(true);
   const [judges, setJudges] = useState<JudgeDraft[]>([]);
+  const [named, setNamed] = useState<string[]>([]);
+  const [polarity, setPolarity] = useState<RedTeamProbePolarity>('attack');
   const [saving, setSaving] = useState(false);
   // Highest attempt-id suffix seen in this edit session, so an id that was removed is not handed out again.
   const maxAttemptSuffix = useRef(1);
@@ -111,22 +149,28 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
       setSeverity(editing.severity);
       setEnabled(editing.enabled !== false);
       maxAttemptSuffix.current = Math.max(1, highestAttemptSuffix(editing.attempts.map((a) => a.id || '')));
-      setAttempts(
-        editing.attempts.map((a, i) => ({
-          id: a.id || `attempt-${i + 1}`,
-          turns: a.turns.length ? a.turns : [''],
-          system: a.system ?? '',
-          canary: a.canary ?? '',
-          forbiddenPatterns: (a.forbiddenPatterns ?? []).join('\n'),
-          refusalExpected: a.refusalExpected ?? true,
-          adaptive: a.adaptive ?? false,
-          objective: a.objective ?? '',
-        })),
-      );
+      setAttempts(editing.attempts.map(toAttemptDraft));
       setRefusal(editing.detectors.refusal !== false);
       setPattern(editing.detectors.pattern !== false);
+      setNamed(editing.detectors.named ?? []);
+      setPolarity(editing.polarity ?? 'attack');
       setJudges((editing.detectors.judges ?? []).map((j) => ({ lens: j.lens, rubric: j.rubric, threshold: j.threshold ?? '' })));
+    } else if (cloneOf) {
+      setName(`${cloneOf.key}-copy`);
+      setDescription(cloneOf.description ?? '');
+      setCategory(normalizeOwaspCategory(cloneOf.category));
+      setSeverity(cloneOf.severity);
+      setEnabled(true);
+      maxAttemptSuffix.current = Math.max(1, highestAttemptSuffix(cloneOf.attempts.map((a) => a.id || '')));
+      setAttempts(cloneOf.attempts.map(toAttemptDraft));
+      setRefusal(cloneOf.detectorSpec.refusal === true);
+      setPattern(cloneOf.detectorSpec.pattern === true);
+      setNamed(cloneOf.detectorSpec.named ?? []);
+      setPolarity(cloneOf.polarity ?? 'attack');
+      setJudges((cloneOf.detectorSpec.judges ?? []).map((j) => ({ lens: j.lens, rubric: j.rubric, threshold: j.threshold ?? '' })));
     } else {
+      setNamed([]);
+      setPolarity('attack');
       setName('');
       setDescription('');
       setCategory(DEFAULT_CATEGORY);
@@ -138,7 +182,7 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
       setPattern(true);
       setJudges([]);
     }
-  }, [opened, editing]);
+  }, [opened, editing, cloneOf]);
 
   const updateAttempt = (idx: number, patch: Partial<AttemptDraft>) => {
     setAttempts((prev) => prev.map((a, i) => (i === idx ? { ...a, ...patch } : a)));
@@ -146,8 +190,14 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
 
   // The ids of the other attempts, to check one attempt's id against.
   const idErrors = attempts.map((a, idx) => attemptIdError(a.id, attempts.filter((_, i) => i !== idx).map((o) => o.id)));
-  const patternForced = attempts.some(needsPatternDetector);
-  const patternOn = pattern || patternForced;
+  const overRefusal = polarity === 'over-refusal';
+  const patternForced = !overRefusal && attempts.some(needsPatternDetector);
+  const patternOn = !overRefusal && (pattern || patternForced);
+  const refusalOn = overRefusal || refusal;
+  const namedOn = overRefusal ? [] : named;
+  // An over-refusal probe has no canary or patterns: it only checks whether the target refuses.
+  const overRefusalHasPatterns = overRefusal && attempts.some(needsPatternDetector);
+  const historyIncomplete = attempts.some((a) => a.history.some((m) => !m.content.trim()));
 
   const valid =
     name.trim().length > 0 &&
@@ -155,7 +205,9 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
     attempts.every((a) => a.turns.some((t) => t.trim().length > 0)) &&
     idErrors.every((e) => e === null) &&
     !attempts.some(canaryNotPlanted) &&
-    (refusal || patternOn || judges.some((j) => j.lens.trim() && j.rubric.trim()));
+    !overRefusalHasPatterns &&
+    !historyIncomplete &&
+    (refusalOn || patternOn || namedOn.length > 0 || judges.some((j) => j.lens.trim() && j.rubric.trim()));
 
   const submit = async () => {
     if (!valid) {
@@ -173,9 +225,12 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
         category,
         severity,
         enabled,
+        polarity,
+        ...(!editing && cloneOf ? { clonedFrom: { probeKey: cloneOf.key, version: cloneOf.version ?? 1 } } : {}),
         attempts: attempts.map((a, i) => ({
           id: a.id || `attempt-${i + 1}`,
           turns: a.turns.map((t) => t.trim()).filter(Boolean),
+          history: a.history.map((m) => ({ role: m.role, content: m.content.trim() })),
           system: a.system.trim() || undefined,
           canary: a.canary.trim() || undefined,
           forbiddenPatterns: splitPatternLines(a.forbiddenPatterns),
@@ -184,8 +239,9 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
           objective: a.objective.trim() || undefined,
         })),
         detectors: {
-          refusal,
+          refusal: refusalOn,
           pattern: patternOn,
+          named: namedOn,
           judges: judges
             .filter((j) => j.lens.trim() && j.rubric.trim())
             .map((j) => ({ lens: j.lens.trim(), rubric: j.rubric.trim(), threshold: typeof j.threshold === 'number' ? j.threshold : undefined })),
@@ -216,7 +272,7 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
     <FormShell
       open={opened}
       onClose={onClose}
-      title={editing ? 'Edit custom probe' : 'New custom probe'}
+      title={editing ? 'Edit custom probe' : cloneOf ? 'Clone built-in probe' : 'New custom probe'}
       primaryAction={{
         label: editing ? 'Save probe' : 'Create probe',
         loading: saving,
@@ -228,6 +284,35 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
     >
       <FormSection title="Probe">
         <Stack gap="md">
+          {!editing && cloneOf ? (
+            <Text size="sm" c="dimmed" data-testid="redteam-clone-banner">
+              Cloned from{' '}
+              <Link href={`/dashboard/redteam/probes/builtin/${encodeURIComponent(cloneOf.key)}`}>
+                {cloneOf.key} v{cloneOf.version ?? 1}
+              </Link>
+              . The built-in probe is not changed.
+            </Text>
+          ) : null}
+          {editing?.origin === 'clone' && editing.clonedFrom ? (
+            <Text size="sm" c="dimmed">
+              {probeSourceLabel(editing)}
+              {' · '}
+              <Link href={`/dashboard/redteam/probes/builtin/${encodeURIComponent(editing.clonedFrom.probeKey)}`}>view the original</Link>
+            </Text>
+          ) : null}
+          {editing?.origin === 'import' ? (
+            <Text size="sm" c="dimmed" data-testid="redteam-import-source">
+              {probeSourceLabel(editing)}
+              {editing.source?.license ? ` · licence ${editing.source.license}` : ''}
+              {editing.source?.fileName ? ` · ${editing.source.fileName}` : ''}
+              {editing.source?.url ? (
+                <>
+                  {' · '}
+                  <a href={editing.source.url} target="_blank" rel="noopener noreferrer">source</a>
+                </>
+              ) : null}
+            </Text>
+          ) : null}
           <Group grow align="flex-start">
             <TextInput label="Name" required value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="My injection probe" />
             <Select
@@ -241,6 +326,17 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
             <Select label="Severity" data={SEVERITY_OPTIONS} value={severity} onChange={(v) => setSeverity(v ?? severity)} w={140} allowDeselect={false} />
           </Group>
           <Textarea label="Description" value={description} onChange={(e) => setDescription(e.currentTarget.value)} autosize minRows={1} placeholder="What this probe tests" />
+          <Select
+            label="Polarity"
+            description="An over-refusal probe sends harmless prompts and counts refusals as its own rate; it never counts in the attack success rate."
+            data={POLARITY_OPTIONS}
+            value={polarity}
+            onChange={(v) => setPolarity(v === 'over-refusal' ? 'over-refusal' : 'attack')}
+            allowDeselect={false}
+          />
+          {overRefusalHasPatterns ? (
+            <Text size="xs" c="red">An over-refusal probe cannot have a canary or forbidden patterns. Clear them or switch the polarity back to attack.</Text>
+          ) : null}
           <Switch
             label="Enabled"
             description="A disabled probe stays in the library but campaigns skip it."
@@ -287,6 +383,62 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
                     onChange={(e) => updateAttempt(idx, { id: e.currentTarget.value })}
                   />
                 ) : null}
+                <Stack gap={4}>
+                  <Text size="sm" fw={500}>History (optional)</Text>
+                  <Text size="xs" c="dimmed">
+                    Forged earlier turns sent before the first user turn, up to {CUSTOM_PROBE_LIMITS.maxHistoryMessages}. The scan skips this attempt on targets that do not take caller history, such as agents.
+                  </Text>
+                  {a.history.map((m, hi) => (
+                    <Group key={hi} align="flex-start" gap="xs" wrap="nowrap">
+                      <Select
+                        aria-label={`History message ${hi + 1} role of attempt ${idx + 1}`}
+                        data={HISTORY_ROLE_OPTIONS}
+                        value={m.role}
+                        w={120}
+                        allowDeselect={false}
+                        onChange={(v) =>
+                          updateAttempt(idx, { history: a.history.map((x, i) => (i === hi ? { ...x, role: v === 'assistant' ? 'assistant' : 'user' } : x)) })
+                        }
+                      />
+                      <Textarea
+                        aria-label={`History message ${hi + 1} of attempt ${idx + 1}`}
+                        style={{ flex: 1 }}
+                        value={m.content}
+                        maxLength={CUSTOM_PROBE_LIMITS.maxTurnChars}
+                        onChange={(e) => {
+                          const content = e.currentTarget.value;
+                          updateAttempt(idx, { history: a.history.map((x, i) => (i === hi ? { ...x, content } : x)) });
+                        }}
+                        autosize
+                        minRows={1}
+                      />
+                      <ActionIcon
+                        variant="subtle"
+                        color="red"
+                        mt={4}
+                        aria-label={`Remove history message ${hi + 1} of attempt ${idx + 1}`}
+                        onClick={() => updateAttempt(idx, { history: a.history.filter((_, i) => i !== hi) })}
+                      >
+                        <IconTrash size={15} />
+                      </ActionIcon>
+                    </Group>
+                  ))}
+                  <Group>
+                    <Button
+                      size="compact-xs"
+                      variant="subtle"
+                      leftSection={<IconPlus size={13} />}
+                      disabled={a.history.length >= CUSTOM_PROBE_LIMITS.maxHistoryMessages}
+                      onClick={() =>
+                        updateAttempt(idx, {
+                          history: [...a.history, { role: a.history.length % 2 === 0 ? 'user' : 'assistant', content: '' }],
+                        })
+                      }
+                    >
+                      Add history message
+                    </Button>
+                  </Group>
+                </Stack>
                 {a.turns.map((turn, ti) => (
                   <Group key={ti} align="flex-start" gap="xs" wrap="nowrap">
                     <Textarea
@@ -379,15 +531,48 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
       <FormSection title="Detectors">
         <Stack gap="md">
           <Group align="flex-start">
-            <Checkbox label="Refusal gate" description="Cheap explicit-refusal safe signal" checked={refusal} onChange={(e) => setRefusal(e.currentTarget.checked)} />
+            <Checkbox
+              label="Refusal gate"
+              description={overRefusal ? 'Always on: a refusal is what an over-refusal probe measures.' : 'Cheap explicit-refusal safe signal'}
+              checked={refusalOn}
+              disabled={overRefusal}
+              onChange={(e) => setRefusal(e.currentTarget.checked)}
+            />
             <Checkbox
               label="Pattern / canary"
-              description={patternForced ? 'Always on: an attempt sets a canary or forbidden patterns.' : 'Deterministic hard-proof detector'}
+              description={
+                overRefusal
+                  ? 'Off for an over-refusal probe.'
+                  : patternForced
+                    ? 'Always on: an attempt sets a canary or forbidden patterns.'
+                    : 'Deterministic hard-proof detector'
+              }
               checked={patternOn}
-              disabled={patternForced}
+              disabled={patternForced || overRefusal}
               onChange={(e) => setPattern(e.currentTarget.checked)}
             />
           </Group>
+          <Stack gap="xs">
+            <Text size="sm" fw={500}>Named detectors</Text>
+            <Text size="xs" c="dimmed">
+              Ready-made deterministic checks on the output (up to {CUSTOM_PROBE_LIMITS.maxNamedDetectors}).
+              {overRefusal ? ' Off for an over-refusal probe.' : ''}
+            </Text>
+            <Checkbox.Group value={namedOn} onChange={setNamed}>
+              <Group align="flex-start" gap="lg">
+                {NAMED_DETECTOR_KEYS.map((key) => (
+                  <Checkbox
+                    key={key}
+                    value={key}
+                    label={detectorInfo(key).label}
+                    description={detectorInfo(key).help}
+                    disabled={overRefusal || (!namedOn.includes(key) && namedOn.length >= CUSTOM_PROBE_LIMITS.maxNamedDetectors)}
+                    w={260}
+                  />
+                ))}
+              </Group>
+            </Checkbox.Group>
+          </Stack>
           <Stack gap="xs">
             <Text size="sm" fw={500}>LLM-judge lenses</Text>
             <Text size="xs" c="dimmed">

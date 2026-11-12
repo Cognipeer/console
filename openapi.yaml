@@ -26180,6 +26180,31 @@ components:
               - no-completed-attempts
               - target-errors
               - judge-errors
+        overRefusal:
+          $ref: "#/components/schemas/RedTeamOverRefusalBreakdown"
+    RedTeamOverRefusalBreakdown:
+      type: object
+      description: Harmless prompts (over-refusal probes), counted apart from the attack figures above, which leave them out. Present only when the run had such attempts.
+      properties:
+        total:
+          type: integer
+          description: Over-refusal attempts.
+        completed:
+          type: integer
+          description: Over-refusal attempts the target answered.
+        failed:
+          type: integer
+          description: Over-refusal attempts whose target invocation failed.
+        refused:
+          type: integer
+          description: Harmless prompts the target refused.
+        needsReview:
+          type: integer
+          description: Over-refusal attempts needing review.
+        rate:
+          type: number
+          nullable: true
+          description: "`refused / completed`. `null` when none completed."
     RedTeamCampaign:
       type: object
       description: A named, reusable scan configuration.
@@ -26210,7 +26235,7 @@ components:
           description: Target model reference (set when `target_kind` is `model`).
         probe_keys:
           type: array
-          description: Selected probes. Empty means all built-ins run. `custom:`-prefixed keys reference custom probes.
+          description: Selected probes. Empty means the default set of built-ins runs. `custom:`-prefixed keys reference custom probes.
           items:
             type: string
         judge_model_key:
@@ -26286,6 +26311,65 @@ components:
         custom:
           type: boolean
           description: Always `false` on the client surface (built-in probes only).
+        version:
+          type: integer
+          description: Definition version of the probe.
+        technique:
+          type: string
+          description: The attack technique the probe tests, in a sentence.
+        references:
+          type: array
+          description: Where the technique is described.
+          items:
+            type: object
+            properties:
+              title:
+                type: string
+              url:
+                type: string
+        targets:
+          type: array
+          description: Target kinds the probe runs against.
+          items:
+            type: string
+            enum:
+              - model
+              - agent
+        requires:
+          type: array
+          description: What a target must offer for the probe to apply.
+          items:
+            type: string
+            enum:
+              - long-context
+              - caller-history
+              - usage-metrics
+        addedAt:
+          type: string
+          description: Date the probe was added to the library (YYYY-MM-DD).
+        polarity:
+          type: string
+          description: "`over-refusal` probes use harmless prompts and are reported as their own rate."
+          enum:
+            - attack
+            - over-refusal
+        requiresHistory:
+          type: boolean
+          description: Every attempt sends forged earlier turns, so the probe needs a target that takes caller history.
+        attemptCount:
+          type: integer
+          description: Attempts the probe generates.
+        agentAttemptCount:
+          type: integer
+          description: Attempts that run against an agent (no planted system prompt, no forged history, and the probe targets agents).
+        detectors:
+          type: array
+          description: Detector keys in the order they run.
+          items:
+            type: string
+        isDefault:
+          type: boolean
+          description: Whether the probe is in the default set that runs when a campaign selects none.
     RedTeamProbesResponse:
       type: object
       properties:
@@ -26354,6 +26438,11 @@ components:
         partial:
           type: boolean
           description: "`true` when the target answered at least one turn before the error; the verdict is on that part of the conversation."
+        polarity:
+          type: string
+          description: Set to `over-refusal` for a harmless-prompt attempt, where `vulnerable` means the target refused. Absent on attack attempts.
+          enum:
+            - over-refusal
     RedTeamRunDetail:
       description: "Full run view: summary plus progress, error, and per-attempt verdicts."
       allOf:
@@ -26379,7 +26468,7 @@ components:
               description: Attempts left out because the run reached its attempt limit.
             not_applicable_attempts:
               type: integer
-              description: Attempts not run because they plant a system prompt and the target (an agent) keeps its own instructions.
+              description: Attempts not run because the target cannot take them, for example they plant a system prompt or forged history and the target (an agent) keeps its own instructions and conversation, or the probe does not apply to the target kind.
             attempts:
               type: array
               description: Per-attempt verdicts.

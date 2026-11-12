@@ -236,6 +236,8 @@ export async function buildComplianceReport(
     for (const a of await loadRunAttempts(db, whole)) {
       // An attempt the target never answered says nothing about the system.
       if (isFailedAttempt(a)) continue;
+      // Over-refusal attempts measure unhelpfulness on harmless prompts; they are neither evidence nor findings.
+      if (a.polarity === 'over-refusal') continue;
       // An exported document: an attempt that handed on passages of knowledge base documents not open to everyone
       // never becomes evidence text (its finding is still counted below).
       const sample = restrictedKnowledgeTagsOf(a.kbRestricted).length > 0 ? undefined : toSample(run, a);

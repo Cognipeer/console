@@ -66,6 +66,13 @@ export default function RedTeamOverview() {
         <StatTile label="Overall resilience" icon={<IconShieldCheck size={14} stroke={1.7} />} value={overview ? pct(overview.resilienceScore) : '—'} />
         <StatTile label="Vulnerabilities" icon={<IconAlertTriangle size={14} stroke={1.7} />} value={overview?.vulnerable ?? '—'} />
         <StatTile label="Needs review" icon={<IconEye size={14} stroke={1.7} />} value={overview?.needsReview ?? '—'} />
+        {overview && overview.overRefusalRate !== null && overview.overRefusalRate !== undefined ? (
+          <StatTile
+            label="Over-refusal"
+            value={pct(overview.overRefusalRate)}
+            delta={`${overview.overRefusalRuns ?? 0} scan${overview.overRefusalRuns === 1 ? '' : 's'} with harmless prompts`}
+          />
+        ) : null}
       </div>
 
       {overview && overview.scans === 0 ? (

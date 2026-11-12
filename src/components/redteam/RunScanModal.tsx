@@ -163,6 +163,7 @@ export default function RunScanModal({ opened, campaign, probes, disabledProbes,
                 value={probeKeys}
                 onChange={setProbeKeys}
                 emptyHint="No probes selected — the campaign's default selection will run."
+                targetKind={campaign?.targetKind}
               />
             </div>
 

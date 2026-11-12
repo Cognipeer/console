@@ -373,9 +373,9 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const statement = db.prepare(`
         INSERT INTO ${TABLES.redTeamRunAttempts}
         (id, tenantId, projectId, runId, attemptKey, seq, probeKey, attemptId, family, category, severity, outcome,
-         decidedBy, confidence, transcript, signals, latencyMs, error, partial, review, kbRestricted, createdAt, updatedAt)
+         decidedBy, confidence, transcript, signals, latencyMs, error, partial, review, kbRestricted, polarity, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @runId, @attemptKey, @seq, @probeKey, @attemptId, @family, @category, @severity, @outcome,
-         @decidedBy, @confidence, @transcript, @signals, @latencyMs, @error, @partial, @review, @kbRestricted, @createdAt, @updatedAt)
+         @decidedBy, @confidence, @transcript, @signals, @latencyMs, @error, @partial, @review, @kbRestricted, @polarity, @createdAt, @updatedAt)
         ON CONFLICT(runId, attemptKey) DO UPDATE SET
           tenantId = excluded.tenantId,
           projectId = excluded.projectId,
@@ -394,6 +394,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
           error = excluded.error,
           partial = excluded.partial,
           kbRestricted = excluded.kbRestricted,
+          polarity = excluded.polarity,
           updatedAt = excluded.updatedAt
       `);
       const now = this.now();
@@ -421,6 +422,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
             partial: row.partial === undefined ? null : this.toBoolInt(row.partial),
             review: row.review ? this.toJson(row.review) : null,
             kbRestricted: row.kbRestricted ? this.toJson(row.kbRestricted) : null,
+            polarity: row.polarity ?? null,
             createdAt: now,
             updatedAt: now,
           });
@@ -491,9 +493,9 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       db.prepare(`
         INSERT INTO ${TABLES.redTeamCustomProbes}
         (id, tenantId, projectId, key, name, description, family, category, severity,
-         attempts, detectors, enabled, createdBy, updatedBy, createdAt, updatedAt)
+         attempts, detectors, enabled, polarity, origin, clonedFrom, source, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @family, @category, @severity,
-         @attempts, @detectors, @enabled, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @attempts, @detectors, @enabled, @polarity, @origin, @clonedFrom, @source, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: probe.tenantId,
@@ -507,6 +509,10 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         attempts: this.toJson(probe.attempts ?? []),
         detectors: this.toJson(probe.detectors ?? {}),
         enabled: probe.enabled === false ? 0 : 1,
+        polarity: probe.polarity ?? null,
+        origin: probe.origin ?? null,
+        clonedFrom: probe.clonedFrom ? this.toJson(probe.clonedFrom) : null,
+        source: probe.source ? this.toJson(probe.source) : null,
         createdBy: probe.createdBy,
         updatedBy: probe.updatedBy ?? null,
         createdAt: now,
@@ -531,6 +537,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.attempts !== undefined) { sets.push('attempts = @attempts'); params.attempts = this.toJson(data.attempts); }
       if (data.detectors !== undefined) { sets.push('detectors = @detectors'); params.detectors = this.toJson(data.detectors); }
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = data.enabled ? 1 : 0; }
+      if (data.polarity !== undefined) { sets.push('polarity = @polarity'); params.polarity = data.polarity; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       db.prepare(`UPDATE ${TABLES.redTeamCustomProbes} SET ${sets.join(', ')} WHERE id = @id`).run(params);
@@ -573,6 +580,8 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
     // ── Row mappers ──────────────────────────────────────────────────
 
     protected mapCustomProbeRow(r: SqliteRow): IRedTeamCustomProbe {
+      // The source is stored as JSON, so its import date comes back as a string.
+      const source = this.parseJson<(Omit<NonNullable<IRedTeamCustomProbe['source']>, 'importedAt'> & { importedAt?: string | Date }) | null>(r.source, null);
       return {
         _id: r.id as string,
         tenantId: r.tenantId as string,
@@ -586,6 +595,10 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         attempts: this.parseJson<IRedTeamCustomAttempt[]>(r.attempts, []),
         detectors: this.parseJson<IRedTeamCustomDetectors>(r.detectors, {}),
         enabled: (r.enabled as number) !== 0,
+        polarity: (r.polarity as IRedTeamCustomProbe['polarity'] | null) ?? undefined,
+        origin: (r.origin as IRedTeamCustomProbe['origin'] | null) ?? undefined,
+        clonedFrom: this.parseJson<IRedTeamCustomProbe['clonedFrom'] | null>(r.clonedFrom, null) ?? undefined,
+        source: source ? { ...source, importedAt: source.importedAt ? new Date(source.importedAt) : undefined } : undefined,
         createdBy: r.createdBy as string,
         updatedBy: (r.updatedBy as string | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
@@ -679,6 +692,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         // Reviews are stored as JSON, so the date comes back as a string.
         review: review ? { ...review, reviewedAt: new Date(review.reviewedAt) } : undefined,
         kbRestricted: kbRestricted ?? undefined,
+        polarity: (r.polarity as IRedTeamRunAttempt['polarity'] | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

@@ -13,6 +13,26 @@ export interface DisabledProbeView {
   name: string;
 }
 
+export type RedTeamProbePolarity = 'attack' | 'over-refusal';
+export type RedTeamProbeOrigin = 'manual' | 'clone' | 'import';
+export type RedTeamProbeRequirement = 'long-context' | 'caller-history' | 'usage-metrics';
+
+export interface ProbeReferenceView {
+  title: string;
+  url: string;
+}
+
+/** Where an imported probe came from (mirrors IRedTeamProbeSource; dates arrive as strings). */
+export interface ProbeSourceView {
+  format?: string;
+  name: string;
+  license?: string;
+  attribution?: string;
+  url?: string;
+  fileName?: string;
+  importedAt?: string;
+}
+
 export interface ProbeCatalogView {
   key: string;
   name: string;
@@ -21,15 +41,43 @@ export interface ProbeCatalogView {
   severity: string;
   description: string;
   custom?: boolean;
+  /** Every field below is absent on an older server; screens fall back to the old behaviour. */
+  version?: number;
+  technique?: string;
+  references?: ProbeReferenceView[];
+  targets?: RedTeamTargetKind[];
+  requires?: RedTeamProbeRequirement[];
+  addedAt?: string;
+  polarity?: RedTeamProbePolarity;
+  /** Every attempt carries forged history, so the probe needs a target that takes caller history. */
+  requiresHistory?: boolean;
+  attemptCount?: number;
+  /** Attempts that would run on an agent (no system prompt, no history, targets include agent). */
+  agentAttemptCount?: number;
+  /** Detector keys in build order, e.g. `refusal`, `pattern`, `markdown-exfil`, `llm-judge:<lens>`. */
+  detectors?: string[];
+  /** Part of the set that runs when a campaign selects no probes. */
+  isDefault?: boolean;
+  /** Custom probes only. */
+  id?: string;
+  origin?: RedTeamProbeOrigin;
+  clonedFrom?: { probeKey: string; version: number };
+  sourceName?: string;
   /** The probe plants its own system prompt; an agent keeps its own instructions, so these attempts are not run against agents. */
   requiresSystemPrompt?: boolean;
   /** The probe has multi-turn or adaptive attempts, which need a judge / attacker model on the campaign. */
   needsJudgeModel?: boolean;
 }
 
+export interface ProbeHistoryMessageView {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface CustomProbeAttemptView {
   id: string;
   turns: string[];
+  history?: ProbeHistoryMessageView[];
   system?: string;
   canary?: string;
   forbiddenPatterns?: string[];
@@ -47,6 +95,7 @@ export interface CustomProbeJudgeView {
 export interface CustomProbeDetectorsView {
   refusal?: boolean;
   pattern?: boolean;
+  named?: string[];
   judges?: CustomProbeJudgeView[];
 }
 
@@ -60,9 +109,19 @@ export interface CustomProbeView {
   severity: RedTeamSeverity;
   attempts: CustomProbeAttemptView[];
   detectors: CustomProbeDetectorsView;
+  polarity?: RedTeamProbePolarity;
+  origin?: RedTeamProbeOrigin;
+  clonedFrom?: { probeKey: string; version: number };
+  source?: ProbeSourceView;
   enabled?: boolean;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/** GET /api/redteam/probes/builtin/:key: a built-in probe in custom-probe form. */
+export interface BuiltinProbeDefinitionView extends ProbeCatalogView {
+  attempts: CustomProbeAttemptView[];
+  detectorSpec: CustomProbeDetectorsView;
 }
 
 export interface RedTeamCampaignView {
@@ -124,6 +183,8 @@ export interface RedTeamAttemptView {
   /** The target failed after some turns: the transcript so far was judged, so the verdict is based on partial evidence. */
   partial?: boolean;
   review?: RedTeamReviewView;
+  /** `over-refusal`: the prompts were harmless, so a refusal is the failure. Absent means an attack attempt. */
+  polarity?: RedTeamProbePolarity;
   /** The attempt used knowledge base documents this viewer may not read: its transcript and rationales are left out. */
   restricted?: boolean;
 }
@@ -147,6 +208,17 @@ export interface RedTeamAggregateView {
   inconclusive?: boolean;
   /** Absent on runs stored before reasons were recorded; `inconclusive: true` without it means judge errors. */
   inconclusiveReasons?: RedTeamInconclusiveReason[];
+  /** Present only when the run had over-refusal attempts; they are not counted above. */
+  overRefusal?: RedTeamOverRefusalView;
+}
+
+export interface RedTeamOverRefusalView {
+  total: number;
+  completed: number;
+  failed: number;
+  refused: number;
+  needsReview: number;
+  rate: number | null;
 }
 
 export interface RedTeamRunView {
@@ -210,6 +282,9 @@ export interface RedTeamOverviewView {
   latestRunAt?: string;
   /** How many of the latest completed runs the figures cover (the service default is 100). */
   windowRuns?: number;
+  /** Share of harmless prompts refused over the runs that had any; null when none did. */
+  overRefusalRate?: number | null;
+  overRefusalRuns?: number;
 }
 
 /** GET /api/redteam/runs answer: one page plus the total across pages. */

@@ -38,6 +38,7 @@ import type {
   IRedTeamCustomProbe,
   IRedTeamCustomAttempt,
   IRedTeamCustomDetectors,
+  IRedTeamProbeSource,
   RedTeamInconclusiveReason,
   RedTeamOutcome,
   RedTeamRunStatus,
@@ -52,7 +53,10 @@ import {
   validateCustomProbeDefinition,
   validateCustomProbePatterns,
   CustomProbeError,
+  builtinProbeDefinition,
+  type BuiltinProbeDefinition,
 } from './probes';
+import type { ImportProbeDraft } from './import/types';
 import { compareRedTeamRuns, type RedTeamComparison } from './compare';
 import { mapOwaspToEu, EU_RISK_CATEGORIES, type EuRiskCategory } from './euTaxonomy';
 import type { CampaignComplianceMeta } from './compliance/types';
@@ -69,6 +73,7 @@ import { attemptKeyOf, parseAttemptKey } from './attemptKey';
 import {
   ATTEMPT_ID_PATTERN,
   CUSTOM_PROBE_LIMITS,
+  IMPORT_LIMITS,
   RUN_LIFECYCLE,
   RUN_LIMITS,
   clampConcurrency,
@@ -234,6 +239,7 @@ function mapAttempt(a: AttemptResult): IRedTeamAttemptResult {
     error: a.error ? truncateText(a.error, MAX_ATTEMPT_ERROR_CHARS) : undefined,
     ...(a.partial ? { partial: true } : {}),
     ...(a.kbRestricted?.length ? { kbRestricted: a.kbRestricted } : {}),
+    ...(a.polarity === 'over-refusal' ? { polarity: 'over-refusal' as const } : {}),
   };
 }
 
@@ -738,6 +744,10 @@ export interface RedTeamOverview {
   windowRuns: number;
   /** Runs among them left out of the figures because their rates cannot be trusted. */
   inconclusiveRuns: number;
+  /** Harmless prompts refused / harmless prompts completed, over the runs that carry them; null when none. */
+  overRefusalRate: number | null;
+  /** Runs among the considered ones that carry over-refusal attempts. */
+  overRefusalRuns: number;
 }
 
 /**
@@ -777,6 +787,9 @@ export async function getOverview(
   let completed = 0;
   let vulnerable = 0;
   let needsReview = 0;
+  let overRefused = 0;
+  let overRefusalCompleted = 0;
+  let overRefusalRuns = 0;
 
   for (const run of runs) {
     const agg = run.aggregate;
@@ -790,6 +803,11 @@ export async function getOverview(
     completed += agg.completed;
     vulnerable += agg.vulnerable;
     needsReview += agg.needsReview;
+    if (agg.overRefusal && agg.overRefusal.completed > 0) {
+      overRefusalRuns += 1;
+      overRefused += agg.overRefusal.refused;
+      overRefusalCompleted += agg.overRefusal.completed;
+    }
     for (const sev of Object.keys(bySeverity)) bySeverity[sev] += agg.bySeverity?.[sev] ?? 0;
     for (const [cat, bucket] of Object.entries(agg.byCategory ?? {})) {
       const key = normalizeOwaspCategory(cat);
@@ -870,6 +888,8 @@ export async function getOverview(
     latestRunAt: runs[0]?.finishedAt,
     windowRuns: runs.length,
     inconclusiveRuns,
+    overRefusalRate: overRefusalCompleted > 0 ? overRefused / overRefusalCompleted : null,
+    overRefusalRuns,
   };
 }
 
@@ -902,16 +922,54 @@ function targetAcceptsSystem(campaign: IRedTeamCampaign): boolean {
   return campaign.targetKind !== 'agent';
 }
 
+/** What a campaign's target takes; an attempt or probe the target cannot take is not run. */
+interface TargetCapabilities {
+  acceptsSystem: boolean;
+  acceptsHistory: boolean;
+  kind: RedTeamTargetKind;
+}
+
+function targetCapabilities(campaign: IRedTeamCampaign): TargetCapabilities {
+  return {
+    acceptsSystem: targetAcceptsSystem(campaign),
+    // An agent keeps its own conversation, so forged history cannot be sent to it.
+    acceptsHistory: campaign.targetKind !== 'agent',
+    kind: campaign.targetKind,
+  };
+}
+
+/** Why a target cannot take an attempt, or null when it can (the runner skips the same attempts). */
+function notApplicableCause(
+  probe: Probe,
+  attempt: { system?: string; history?: unknown[] },
+  caps: TargetCapabilities,
+): 'system' | 'other' | null {
+  if (probe.targets && !probe.targets.includes(caps.kind)) return 'other';
+  if (attempt.history?.length && !caps.acceptsHistory) return 'other';
+  if (attempt.system && !caps.acceptsSystem) return 'system';
+  return null;
+}
+
 /** How many attempts a scan of these probes will run, after the per-run cap and the attempts a target cannot take. */
-function plannedAttempts(probes: Probe[], acceptsSystem: boolean): number {
+function plannedAttempts(probes: Probe[], caps: TargetCapabilities): number {
   let runnable = 0;
   for (const probe of probes) {
     for (const attempt of probe.generate()) {
-      if (!acceptsSystem && attempt.system) continue;
+      if (notApplicableCause(probe, attempt, caps)) continue;
       runnable += 1;
     }
   }
   return Math.min(runnable, RUN_LIMITS.maxAttemptsPerRun);
+}
+
+/** Whether the attempts a target cannot take all fail only because they plant a system prompt (the common agent case). */
+function onlySystemCause(probes: Probe[], caps: TargetCapabilities): boolean {
+  for (const probe of probes) {
+    for (const attempt of probe.generate()) {
+      if (notApplicableCause(probe, attempt, caps) === 'other') return false;
+    }
+  }
+  return true;
 }
 
 function newWorkerId(): string {
@@ -1016,8 +1074,8 @@ export async function executeRun(
       started = await startAgentRevision(tenantDbName, campaign.agentKey, projectId, requested);
     }
 
-    const acceptsSystem = targetAcceptsSystem(campaign);
-    const plannedTotal = plannedAttempts(probes, acceptsSystem);
+    const caps = targetCapabilities(campaign);
+    const plannedTotal = plannedAttempts(probes, caps);
     observe(
       await db.updateRedTeamRunIf(runId, guard, {
         leaseUntil: renewedLease(),
@@ -1039,7 +1097,9 @@ export async function executeRun(
         policy: campaign.policy,
         maxTurns: options?.maxTurns,
         maxAttempts: RUN_LIMITS.maxAttemptsPerRun,
-        targetAcceptsSystem: acceptsSystem,
+        targetAcceptsSystem: caps.acceptsSystem,
+        targetAcceptsHistory: caps.acceptsHistory,
+        targetKind: caps.kind,
         shouldStop: () => control.stop,
       },
       // Each attempt (every turn, the attacker and the judge) in its own exposure: its stored copy and its model
@@ -1092,8 +1152,11 @@ export async function executeRun(
       finalWarnings.push(`${attemptsWere(result.skipped)} not run: a scan runs at most ${RUN_LIMITS.maxAttemptsPerRun} attempts.`);
     }
     if (result.notApplicable) {
+      const n = result.notApplicable;
       finalWarnings.push(
-        `${attemptsWere(result.notApplicable)} not run: ${result.notApplicable === 1 ? 'it plants' : 'they plant'} a system prompt, and an agent keeps its own instructions.`,
+        onlySystemCause(probes, caps)
+          ? `${attemptsWere(n)} not run: ${n === 1 ? 'it plants' : 'they plant'} a system prompt, and an agent keeps its own instructions.`
+          : `${attemptsWere(n)} not run: ${n === 1 ? 'it needs' : 'they need'} a target that takes a system prompt or history, or a model.`,
       );
     }
     const cancelled = Boolean(result.stopped) && control.cancelled;
@@ -1227,7 +1290,7 @@ async function createPendingRun(
 
   const customProbes = await db.listRedTeamCustomProbes({ projectId });
   const { probes } = buildProbesLenient(resolveProbeKeys(campaign, params.options), customProbes);
-  const probeCount = plannedAttempts(probes, targetAcceptsSystem(campaign));
+  const probeCount = plannedAttempts(probes, targetCapabilities(campaign));
 
   // Insert first, then look: two requests that race both insert, both see both rows, and both agree that the
   // older one (oldest createdAt, then smallest id) goes on. The other removes its own row and reports the
@@ -1383,6 +1446,9 @@ export interface CustomProbeInput {
   detectors: IRedTeamCustomDetectors;
   enabled?: boolean;
   projectId?: string;
+  polarity?: 'attack' | 'over-refusal';
+  /** Set when the probe is a copy of a built-in (the key must be a built-in key). */
+  clonedFrom?: { probeKey: string; version: number };
 }
 
 /** Generate a unique `custom:`-prefixed key from a desired name. */
@@ -1433,8 +1499,23 @@ export async function createCustomProbe(
   const category = customProbeCategory(input.category);
   validateCustomProbe({ attempts: input.attempts, detectors: input.detectors });
   assertAttemptIds(input.attempts);
-  validateCustomProbeDefinition({ category, attempts: input.attempts, detectors: input.detectors });
+  validateCustomProbeDefinition({ category, attempts: input.attempts, detectors: input.detectors, polarity: input.polarity });
   validateCustomProbePatterns(input.attempts);
+  if (input.clonedFrom && !getBuiltinProbeDefinition(input.clonedFrom.probeKey)) {
+    throw new CustomProbeError('clonedFrom.probeKey must be the key of a built-in probe');
+  }
+  return storeCustomProbe(tenantDbName, tenantId, createdBy, input, category, input.clonedFrom ? 'clone' : 'manual');
+}
+
+async function storeCustomProbe(
+  tenantDbName: string,
+  tenantId: string,
+  createdBy: string,
+  input: CustomProbeInput,
+  category: string,
+  origin: 'manual' | 'clone' | 'import',
+  source?: IRedTeamProbeSource,
+): Promise<WithId<IRedTeamCustomProbe>> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const probe = await createWithUniqueKey(
@@ -1451,11 +1532,131 @@ export async function createCustomProbe(
       attempts: input.attempts,
       detectors: input.detectors,
       enabled: input.enabled ?? true,
+      ...(input.polarity ? { polarity: input.polarity } : {}),
+      origin,
+      ...(origin === 'clone' && input.clonedFrom ? { clonedFrom: input.clonedFrom } : {}),
+      ...(source ? { source } : {}),
       createdBy,
     }),
     'custom probe',
   );
   return toView(probe);
+}
+
+/** The code-defined definition of a built-in probe (attempts, detectors), or null for an unknown or custom key. */
+export function getBuiltinProbeDefinition(key: string): BuiltinProbeDefinition | null {
+  if (typeof key !== 'string' || key.startsWith(CUSTOM_PROBE_PREFIX)) return null;
+  return builtinProbeDefinition(key);
+}
+
+export interface ImportCustomProbesInput {
+  tenantId: string;
+  projectId?: string;
+  createdBy: string;
+  drafts: ImportProbeDraft[];
+}
+
+function importSourceError(source: unknown): string | null {
+  if (!source || typeof source !== 'object') return 'source is required';
+  const src = source as Record<string, unknown>;
+  if (typeof src.name !== 'string' || !src.name.trim()) return 'source.name is required';
+  const limits: Array<[string, number]> = [
+    ['name', IMPORT_LIMITS.maxSourceNameChars],
+    ['license', IMPORT_LIMITS.maxSourceLicenseChars],
+    ['attribution', IMPORT_LIMITS.maxSourceAttributionChars],
+    ['format', IMPORT_LIMITS.maxSourceFormatChars],
+    ['fileName', IMPORT_LIMITS.maxSourceFileNameChars],
+    ['url', IMPORT_LIMITS.maxSourceUrlChars],
+  ];
+  for (const [field, max] of limits) {
+    const value = src[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string') return `source.${field} must be text`;
+    if (value.length > max) return `source.${field} is longer than ${max} characters`;
+  }
+  if (typeof src.url === 'string' && src.url) {
+    let protocol = '';
+    try {
+      protocol = new URL(src.url).protocol;
+    } catch {
+      protocol = '';
+    }
+    if (protocol !== 'http:' && protocol !== 'https:') return 'source.url must be an http or https link';
+  }
+  return null;
+}
+
+/** The stored source of an imported probe: the known fields only, whatever else the caller sent. */
+function importedSource(source: IRedTeamProbeSource, importedAt: Date): IRedTeamProbeSource {
+  const { name, format, license, attribution, url, fileName } = source;
+  return {
+    name,
+    ...(format ? { format } : {}),
+    ...(license ? { license } : {}),
+    ...(attribution ? { attribution } : {}),
+    ...(url ? { url } : {}),
+    ...(fileName ? { fileName } : {}),
+    importedAt,
+  };
+}
+
+/**
+ * Create custom probes from import drafts (built in the browser from a file). Every draft is
+ * validated before the first one is stored, so a bad draft creates nothing.
+ */
+export async function importCustomProbes(
+  tenantDbName: string,
+  input: ImportCustomProbesInput,
+): Promise<WithId<IRedTeamCustomProbe>[]> {
+  const { drafts } = input;
+  if (!Array.isArray(drafts) || drafts.length === 0) throw new RedTeamValidationError('probes must list at least one probe');
+  if (drafts.length > IMPORT_LIMITS.maxProbesPerImport) {
+    throw new RedTeamValidationError(`an import can create at most ${IMPORT_LIMITS.maxProbesPerImport} probes`);
+  }
+  const prepared = drafts.map((draft, index) => {
+    const label = `probe ${index + 1}${typeof draft?.name === 'string' && draft.name ? ` ("${draft.name}")` : ''}`;
+    try {
+      if (!draft || typeof draft.name !== 'string' || !draft.name.trim()) throw new CustomProbeError('name is required');
+      const sourceError = importSourceError(draft.source);
+      if (sourceError) throw new CustomProbeError(sourceError);
+      const category = customProbeCategory(draft.category);
+      validateCustomProbe({ attempts: draft.attempts, detectors: draft.detectors });
+      assertAttemptIds(draft.attempts);
+      validateCustomProbeDefinition({ category, attempts: draft.attempts, detectors: draft.detectors, polarity: draft.polarity });
+      validateCustomProbePatterns(draft.attempts);
+      return { draft, category };
+    } catch (err) {
+      if (err instanceof CustomProbeError) throw new RedTeamValidationError(`${label}: ${err.message}`);
+      throw err;
+    }
+  });
+  const importedAt = new Date();
+  const created: WithId<IRedTeamCustomProbe>[] = [];
+  for (const { draft, category } of prepared) {
+    created.push(
+      await storeCustomProbe(
+        tenantDbName,
+        input.tenantId,
+        input.createdBy,
+        {
+          name: draft.name.trim(),
+          description: draft.description,
+          family: draft.family,
+          category,
+          severity: draft.severity,
+          attempts: draft.attempts,
+          detectors: draft.detectors,
+          enabled: true,
+          projectId: input.projectId,
+          polarity: draft.polarity,
+        },
+        category,
+        'import',
+        importedSource(draft.source, importedAt),
+      ),
+    );
+  }
+  return created;
 }
 
 export async function listCustomProbes(
@@ -1481,7 +1682,7 @@ export async function getCustomProbe(tenantDbName: string, id: string): Promise<
  * `custom` family): neither is ever stored as a null.
  */
 export type UpdateCustomProbeInput = Partial<
-  Pick<IRedTeamCustomProbe, 'name' | 'category' | 'severity' | 'attempts' | 'detectors' | 'enabled' | 'projectId'>
+  Pick<IRedTeamCustomProbe, 'name' | 'category' | 'severity' | 'attempts' | 'detectors' | 'enabled' | 'projectId' | 'polarity'>
 > & {
   description?: string | null;
   family?: string | null;
@@ -1497,7 +1698,7 @@ export async function updateCustomProbe(
   await db.switchToTenant(tenantDbName);
   const category = data.category !== undefined ? customProbeCategory(data.category) : undefined;
   // Validate the resulting definition when the attempts / detectors change.
-  if (data.attempts !== undefined || data.detectors !== undefined) {
+  if (data.attempts !== undefined || data.detectors !== undefined || data.polarity !== undefined) {
     const existing = await db.findRedTeamCustomProbeById(id);
     if (!existing) return null;
     const attempts = data.attempts ?? existing.attempts;
@@ -1508,6 +1709,7 @@ export async function updateCustomProbe(
       category: category ?? existing.category,
       attempts,
       detectors,
+      polarity: data.polarity ?? existing.polarity,
     }, existing.attempts);
     if (data.attempts !== undefined) validateCustomProbePatterns(data.attempts, existing.attempts);
   }

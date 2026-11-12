@@ -337,6 +337,8 @@ export type {
   IRedTeamCustomAttempt,
   IRedTeamCustomJudgeLens,
   IRedTeamCustomDetectors,
+  IRedTeamProbeSource,
+  IRedTeamOverRefusalBreakdown,
   IRedTeamRunAttempt,
   IRedTeamRunGuard,
   RedTeamInconclusiveReason,

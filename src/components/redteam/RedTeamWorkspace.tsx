@@ -8,12 +8,16 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, List, Modal, Stack, Switch, Text } from '@mantine/core';
+import { Badge, Button, Group, List, Modal, Select, Stack, Switch, Tabs, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
 import {
   IconBug,
+  IconCopy,
+  IconDownload,
+  IconEye,
+  IconFileImport,
   IconPencil,
   IconPlayerPlay,
   IconPlus,
@@ -30,12 +34,32 @@ import { configVersionTag, runVersionTag } from '@/components/agents/agentVersio
 import { AGENT_TEST_ACCESS_HINT, useAgentTestAccess } from '@/components/agents/useAgentTestAccess';
 import CreateCampaignModal from '@/components/redteam/CreateCampaignModal';
 import CreateCustomProbeModal from '@/components/redteam/CreateCustomProbeModal';
+import ImportProbesWizard from '@/components/redteam/ImportProbesWizard';
 import RunScanModal from '@/components/redteam/RunScanModal';
 import RedTeamApiUsage from '@/components/redteam/RedTeamApiUsage';
-import { POLL_PAGE_LIMIT, appendPage, inconclusiveReasons, mergePolledPage, pct } from '@/components/redteam/helpers';
+import {
+  POLL_PAGE_LIMIT,
+  appendPage,
+  detectionKind,
+  exportFileName,
+  filterBuiltinProbes,
+  inconclusiveReasons,
+  isNewProbe,
+  mergePolledPage,
+  pct,
+  probeOriginOf,
+  probeSourceLabel,
+  toNativeProbe,
+  worksWithLabels,
+  type DetectionFilter,
+  type SourceFilter,
+} from '@/components/redteam/helpers';
+import { downloadText } from '@/components/redteam/download';
 import { runStatusBadgeClass, severityBadgeClass } from '@/components/redteam/severity';
-import { owaspCategoryLabel } from '@/lib/services/redteam/owasp';
+import { exportNativeProbes } from '@/lib/services/redteam/import';
+import { OWASP_LLM_CATEGORIES, owaspCategoryLabel } from '@/lib/services/redteam/owasp';
 import type {
+  BuiltinProbeDefinitionView,
   CustomProbeView,
   DisabledProbeView,
   ProbeCatalogView,
@@ -99,6 +123,56 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   const [campaignModal, setCampaignModal] = useState(false);
   const [probeModal, setProbeModal] = useState(false);
   const [editingProbe, setEditingProbe] = useState<CustomProbeView | null>(null);
+  const [cloneOf, setCloneOf] = useState<BuiltinProbeDefinitionView | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [probeTab, setProbeTab] = useState<'builtin' | 'custom'>('builtin');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter | null>(null);
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [severityFilter, setSeverityFilter] = useState<string | null>(null);
+  const [targetFilter, setTargetFilter] = useState<'model' | 'agent' | null>(null);
+  const [detectionFilter, setDetectionFilter] = useState<DetectionFilter | null>(null);
+  const [cloningKey, setCloningKey] = useState<string | null>(null);
+  // "Use in campaign" from a built-in probe page arrives as ?newWithProbe=<key>.
+  const [campaignProbeKeys, setCampaignProbeKeys] = useState<string[] | undefined>(undefined);
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (section === 'probes' && params.get('tab') === 'custom') setProbeTab('custom');
+      const withProbe = params.get('newWithProbe');
+      if (section === 'campaigns' && withProbe) {
+        setCampaignProbeKeys([withProbe]);
+        setCampaignModal(true);
+        router.replace('/dashboard/redteam');
+      }
+    } catch {
+      // No query string to read.
+    }
+  }, [section, router]);
+
+  const openClone = async (key: string) => {
+    setCloningKey(key);
+    try {
+      const res = await fetch(`/api/redteam/probes/builtin/${encodeURIComponent(key)}`, { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.probe) throw new Error(data.error || 'Could not load the probe');
+      setEditingProbe(null);
+      setCloneOf(data.probe as BuiltinProbeDefinitionView);
+      setProbeModal(true);
+    } catch (err) {
+      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Could not load the probe', color: 'red' });
+    } finally {
+      setCloningKey(null);
+    }
+  };
+
+  const exportCustomProbe = (p: CustomProbeView) => {
+    try {
+      downloadText(exportFileName(p.key), exportNativeProbes([toNativeProbe(p)]));
+    } catch (err) {
+      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Could not export the probe', color: 'red' });
+    }
+  };
 
   const applyRuns = (data: { runs?: RedTeamRunView[]; total?: number }, mode: 'replace' | 'append' | 'merge') => {
     const page = data.runs ?? [];
@@ -265,10 +339,53 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
     searchText: (r) => `${r.campaignKey} ${r.status}`,
     searchPlaceholder: 'Filter by campaign or status…',
   });
-  const probesCtl = useTableControls(customProbes, {
-    searchText: (p) => `${p.name} ${p.key} ${p.category} ${p.severity}`,
+  const visibleCustomProbes = useMemo(
+    () => (sourceFilter ? customProbes.filter((p) => probeOriginOf(p) === sourceFilter) : customProbes),
+    [customProbes, sourceFilter],
+  );
+  const probesCtl = useTableControls(visibleCustomProbes, {
+    searchText: (p) => `${p.name} ${p.key} ${p.category} ${p.severity} ${probeSourceLabel(p)}`,
     searchPlaceholder: 'Filter by name, category, or severity…',
   });
+  const builtinProbes = useMemo(
+    () =>
+      filterBuiltinProbes(probes.filter((p) => !p.custom), {
+        category: categoryFilter,
+        severity: severityFilter,
+        target: targetFilter,
+        detection: detectionFilter,
+      }),
+    [probes, categoryFilter, severityFilter, targetFilter, detectionFilter],
+  );
+  const builtinCtl = useTableControls(builtinProbes, {
+    searchText: (p) => `${p.name} ${p.key} ${p.category} ${p.severity} ${p.technique ?? ''}`,
+    searchPlaceholder: 'Filter by name, key, or category…',
+  });
+
+  const builtinColumns: DataGridColumn<ProbeCatalogView>[] = [
+    { key: 'name', label: 'Name', render: (p) => (
+      <div className="ds-col" style={{ gap: 2 }}>
+        <Group gap={6} wrap="nowrap">
+          <span style={{ fontWeight: 500, color: 'var(--ds-text)' }}>{p.name}</span>
+          {isNewProbe(p.addedAt) ? <Badge size="xs" variant="filled" color="teal">NEW</Badge> : null}
+          {p.polarity === 'over-refusal' ? <Badge size="xs" variant="light" color="blue">over-refusal</Badge> : null}
+        </Group>
+        <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{p.key}</span>
+      </div>
+    ) },
+    { key: 'category', label: 'OWASP category (2025)', render: (p) => <span className="ds-muted" style={{ fontSize: 12 }}>{owaspCategoryLabel(p.category)}</span> },
+    { key: 'severity', label: 'Severity', render: (p) => <span className={severityBadgeClass(p.severity)}>{p.severity}</span> },
+    { key: 'works', label: 'Works with', render: (p) => (
+      <Group gap={4}>
+        {worksWithLabels(p).map((l) => <span key={l} className="ds-badge">{l}</span>)}
+      </Group>
+    ) },
+    { key: 'attempts', label: 'Attempts', render: (p) => <span>{p.attemptCount ?? '—'}</span> },
+    { key: 'detection', label: 'Detection', render: (p) => {
+      const kind = detectionKind(p.detectors);
+      return <span className="ds-faint" style={{ fontSize: 12 }}>{kind === 'unknown' ? '—' : kind === 'both' ? 'deterministic + judge' : kind}</span>;
+    } },
+  ];
 
   const campaignColumns: DataGridColumn<RedTeamCampaignView>[] = [
     { key: 'name', label: 'Name', render: (c) => (
@@ -285,7 +402,7 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
           : c.modelKey ?? '—'}
       </span>
     ) },
-    { key: 'probes', label: 'Probes', render: (c) => <span>{c.probeKeys.length === 0 ? 'all' : c.probeKeys.length}</span> },
+    { key: 'probes', label: 'Probes', render: (c) => <span>{c.probeKeys.length === 0 ? 'default set' : c.probeKeys.length}</span> },
     { key: 'schedule', label: 'Schedule', render: (c) => (
       c.schedule?.enabled
         ? <span className="ds-badge ds-badge-info ds-mono" title="cron (UTC)">{c.schedule.cron}</span>
@@ -331,11 +448,13 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
     ) },
     { key: 'category', label: 'OWASP category (2025)', render: (p) => <span className="ds-muted" style={{ fontSize: 12 }}>{owaspCategoryLabel(p.category)}</span> },
     { key: 'severity', label: 'Severity', render: (p) => <span className={severityBadgeClass(p.severity)}>{p.severity}</span> },
+    { key: 'source', label: 'Source', render: (p) => <span className="ds-faint" style={{ fontSize: 12 }}>{probeSourceLabel(p)}</span> },
     { key: 'attempts', label: 'Attempts', render: (p) => <span>{p.attempts.length}</span> },
     { key: 'detectors', label: 'Detectors', render: (p) => {
       const parts: string[] = [];
       if (p.detectors.refusal) parts.push('refusal');
       if (p.detectors.pattern) parts.push('pattern');
+      if (p.detectors.named?.length) parts.push(`${p.detectors.named.length} named`);
       if (p.detectors.judges?.length) parts.push(`${p.detectors.judges.length} judge`);
       return <span className="ds-faint" style={{ fontSize: 12 }}>{parts.join(' · ') || '—'}</span>;
     } },
@@ -362,9 +481,14 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
     }
     if (section === 'probes') {
       return (
-        <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => { setEditingProbe(null); setProbeModal(true); }}>
-          New custom probe
-        </Button>
+        <Group gap="xs">
+          <Button variant="default" size="sm" leftSection={<IconFileImport size={14} stroke={1.7} />} onClick={() => setImportOpen(true)}>
+            Import from file
+          </Button>
+          <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => { setEditingProbe(null); setCloneOf(null); setProbeModal(true); }}>
+            New custom probe
+          </Button>
+        </Group>
       );
     }
     return null;
@@ -449,6 +573,108 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
       ) : null}
 
       {section === 'probes' && (
+        <Tabs value={probeTab} onChange={(v) => setProbeTab(v === 'custom' ? 'custom' : 'builtin')} mb="md" keepMounted={false}>
+          <Tabs.List>
+            <Tabs.Tab value="builtin">Built-in ({probes.filter((p) => !p.custom).length})</Tabs.Tab>
+            <Tabs.Tab value="custom">Custom ({customProbes.length})</Tabs.Tab>
+          </Tabs.List>
+        </Tabs>
+      )}
+
+      {section === 'probes' && probeTab === 'builtin' && (
+        <>
+          <Group gap="xs" mb="sm" align="flex-end">
+            <Select
+              size="xs"
+              label="OWASP category"
+              placeholder="All"
+              clearable
+              w={240}
+              data={OWASP_LLM_CATEGORIES.map((c) => ({ value: c, label: owaspCategoryLabel(c) }))}
+              value={categoryFilter}
+              onChange={setCategoryFilter}
+            />
+            <Select
+              size="xs"
+              label="Severity"
+              placeholder="All"
+              clearable
+              w={120}
+              data={['critical', 'high', 'medium', 'low'].map((s) => ({ value: s, label: s }))}
+              value={severityFilter}
+              onChange={setSeverityFilter}
+            />
+            <Select
+              size="xs"
+              label="Target"
+              placeholder="All"
+              clearable
+              w={120}
+              data={[{ value: 'model', label: 'Model' }, { value: 'agent', label: 'Agent' }]}
+              value={targetFilter}
+              onChange={(v) => setTargetFilter(v === 'model' || v === 'agent' ? v : null)}
+            />
+            <Select
+              size="xs"
+              label="Detection"
+              placeholder="All"
+              clearable
+              w={160}
+              data={[{ value: 'deterministic', label: 'Deterministic' }, { value: 'judge', label: 'Uses a judge' }]}
+              value={detectionFilter}
+              onChange={(v) => setDetectionFilter(v === 'deterministic' || v === 'judge' ? v : null)}
+            />
+          </Group>
+          <DataGrid<ProbeCatalogView>
+            records={builtinCtl.records}
+            loading={loading}
+            rowKey={(p) => p.key}
+            columns={builtinColumns}
+            search={builtinCtl.search}
+            pagination={builtinCtl.pagination}
+            footerLeft={builtinCtl.footerLeft('built-in probes')}
+            onRefresh={loadAll}
+            refreshing={refreshing}
+            onRowClick={(p) => router.push(`/dashboard/redteam/probes/builtin/${encodeURIComponent(p.key)}`)}
+            empty={{
+              icon: <IconBug size={26} stroke={1.7} />,
+              title: 'No built-in probes match',
+              description: 'Change the filters to see more of the built-in library.',
+            }}
+            rowActions={(p) => [
+              { id: 'view', label: 'View', icon: <IconEye size={14} />, onClick: () => router.push(`/dashboard/redteam/probes/builtin/${encodeURIComponent(p.key)}`) },
+              {
+                id: 'clone',
+                label: 'Clone',
+                icon: <IconCopy size={14} />,
+                disabled: cloningKey === p.key,
+                onClick: () => void openClone(p.key),
+              },
+            ]}
+          />
+        </>
+      )}
+
+      {section === 'probes' && probeTab === 'custom' && (
+        <Group gap="xs" mb="sm" align="flex-end">
+          <Select
+            size="xs"
+            label="Source"
+            placeholder="All"
+            clearable
+            w={160}
+            data={[
+              { value: 'manual', label: 'Manual' },
+              { value: 'clone', label: 'Clone' },
+              { value: 'import', label: 'Imported' },
+            ]}
+            value={sourceFilter}
+            onChange={(v) => setSourceFilter(v === 'manual' || v === 'clone' || v === 'import' ? v : null)}
+          />
+        </Group>
+      )}
+
+      {section === 'probes' && probeTab === 'custom' && (
         <DataGrid<CustomProbeView>
           records={probesCtl.records}
           loading={loading}
@@ -459,15 +685,16 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
           footerLeft={probesCtl.footerLeft('custom probes')}
           onRefresh={loadAll}
           refreshing={refreshing}
-          onRowClick={(p) => { setEditingProbe(p); setProbeModal(true); }}
+          onRowClick={(p) => { setEditingProbe(p); setCloneOf(null); setProbeModal(true); }}
           empty={{
             icon: <IconBug size={26} stroke={1.7} />,
-            title: 'No custom probes yet',
-            description: 'Author your own adversarial probes (attacks + detectors) to extend the built-in catalog. They become selectable in any campaign.',
-            primaryAction: { label: 'New custom probe', icon: <IconPlus size={14} />, onClick: () => { setEditingProbe(null); setProbeModal(true); } },
+            title: sourceFilter ? 'No custom probes from this source' : 'No custom probes yet',
+            description: 'Author your own adversarial probes (attacks + detectors), clone a built-in one, or import a file, to extend the built-in catalog. They become selectable in any campaign.',
+            primaryAction: { label: 'New custom probe', icon: <IconPlus size={14} />, onClick: () => { setEditingProbe(null); setCloneOf(null); setProbeModal(true); } },
           }}
           rowActions={(p) => [
-            { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => { setEditingProbe(p); setProbeModal(true); } },
+            { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => { setEditingProbe(p); setCloneOf(null); setProbeModal(true); } },
+            { id: 'export', label: 'Export YAML', icon: <IconDownload size={14} />, onClick: () => exportCustomProbe(p) },
             { divider: true },
             { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDeleteProbe({ id: p.id, name: p.name }) },
           ]}
@@ -478,11 +705,12 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
 
       <CreateCampaignModal
         opened={campaignModal}
-        onClose={() => setCampaignModal(false)}
+        onClose={() => { setCampaignModal(false); setCampaignProbeKeys(undefined); }}
         agents={agents}
         models={models}
         probes={probes}
         disabledProbes={disabledProbes}
+        initialProbeKeys={campaignProbeKeys}
         onSaved={(c) => { void loadAll(); if (c?.id) router.push(`/dashboard/redteam/campaigns/${c.id}`); }}
       />
 
@@ -522,8 +750,22 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
       <CreateCustomProbeModal
         opened={probeModal}
         editing={editingProbe}
-        onClose={() => { setProbeModal(false); setEditingProbe(null); }}
-        onSaved={() => { void loadAll(); }}
+        cloneOf={cloneOf}
+        onClose={() => { setProbeModal(false); setEditingProbe(null); setCloneOf(null); }}
+        onSaved={() => {
+          void loadAll();
+          if (cloneOf) setProbeTab('custom');
+        }}
+      />
+
+      <ImportProbesWizard
+        opened={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => {
+          setProbeTab('custom');
+          setSourceFilter('import');
+          void loadAll();
+        }}
       />
     </PageContainer>
   );

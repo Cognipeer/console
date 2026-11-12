@@ -34,6 +34,8 @@ interface Props {
   models: SelectOption[];
   probes: ProbeCatalogView[];
   disabledProbes?: DisabledProbeView[];
+  /** Probes preselected on a new campaign (the "Use in campaign" button of a built-in probe). */
+  initialProbeKeys?: string[];
   onSaved: (campaign?: RedTeamCampaignView) => void;
 }
 
@@ -54,7 +56,7 @@ function versionLabel(value: string): string {
   return value === 'draft' ? 'draft' : value === 'published' ? 'published' : `v${value}`;
 }
 
-export default function CreateCampaignModal({ opened, editing, onClose, agents, models, probes, disabledProbes, onSaved }: Props) {
+export default function CreateCampaignModal({ opened, editing, onClose, agents, models, probes, disabledProbes, initialProbeKeys, onSaved }: Props) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [targetKind, setTargetKind] = useState<RedTeamTargetKind>('agent');
@@ -79,7 +81,7 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
     setAgentKey(editing?.agentKey ?? null);
     setAgentVersion(versionSelectValue(editing?.agentVersion));
     setModelKey(editing?.modelKey ?? null);
-    setProbeKeys(editing?.probeKeys ?? []);
+    setProbeKeys(editing?.probeKeys ?? initialProbeKeys ?? []);
     setJudgeModelKey(editing?.judgeModelKey ?? null);
     setScheduleEnabled(editing?.schedule?.enabled ?? false);
     setCron(editing?.schedule?.cron ?? DEFAULT_CRON);
@@ -103,10 +105,10 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
   const canSubmit =
     validIdentity && validTarget && !draftScheduled && !agentBlocked && validConcurrency && validMaxTokens && !scheduleError && !saving;
 
-  // What a scan would actually run: with nothing selected it is the whole built-in catalog.
+  // What a scan would actually run: with nothing selected it is the default set of built-in probes.
   const effectiveProbes = probeKeys.length > 0
     ? probes.filter((p) => probeKeys.includes(p.key))
-    : probes.filter((p) => !p.custom);
+    : probes.filter((p) => !p.custom && p.isDefault !== false);
   const needsJudge = effectiveProbes.filter((p) => p.needsJudgeModel);
   const plantsSystemPrompt = targetKind === 'agent' ? effectiveProbes.filter((p) => p.requiresSystemPrompt) : [];
 
@@ -195,7 +197,7 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
           : `${targetKind} · ${targetRef ?? '—'}`}
         mono
       />
-      <SummaryKV label="Probes" value={probeKeys.length === 0 ? 'all built-in' : `${probeKeys.length} selected`} />
+      <SummaryKV label="Probes" value={probeKeys.length === 0 ? 'default set' : `${probeKeys.length} selected`} />
       <SummaryKV label="Judge" value={judgeModelKey ?? 'none'} mono />
       <SummaryKV label="Concurrency" value={validConcurrency ? String(concurrency) : '—'} mono />
       <SummaryKV label="Schedule" value={scheduleEnabled ? cron : 'manual'} mono />
@@ -285,13 +287,13 @@ export default function CreateCampaignModal({ opened, editing, onClose, agents, 
       </FormSection>
 
       <FormSection number={3} title="Probes & judge" done={probeKeys.length > 0 || Boolean(judgeModelKey)}>
-        <FormField label="Probes" optional hint="Leave empty to run the entire built-in catalog. Custom probes must be selected explicitly.">
+        <FormField label="Probes" optional hint="Leave empty to run the default set of built-in probes. The other built-in probes and custom probes must be selected explicitly.">
           <ProbePicker
             probes={probes}
             disabledProbes={disabledProbes}
             value={probeKeys}
             onChange={setProbeKeys}
-            emptyHint="No probes selected — the entire built-in catalog will run."
+            targetKind={targetKind}
           />
         </FormField>
         {plantsSystemPrompt.length > 0 ? (

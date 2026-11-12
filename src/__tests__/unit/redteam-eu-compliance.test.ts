@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   BUILTIN_PROBE_KEYS,
+  DEFAULT_PROBE_KEYS,
   PROBE_REGISTRY,
   buildProbes,
 } from '@/lib/services/redteam/probes';
@@ -53,11 +54,15 @@ describe('EU risk taxonomy', () => {
       'system-prompt-leakage': 'LLM07-system-prompt-leakage',
       'overreliance-hallucination': 'LLM09-misinformation',
     };
-    expect([...BUILTIN_PROBE_KEYS].sort()).toEqual(Object.keys(expected).sort());
-    for (const key of BUILTIN_PROBE_KEYS) {
+    expect([...DEFAULT_PROBE_KEYS].sort()).toEqual(Object.keys(expected).sort());
+    for (const key of DEFAULT_PROBE_KEYS) {
       const probe = PROBE_REGISTRY[key]();
       expect(isOwaspLlmCategory(probe.category)).toBe(true);
       expect(probe.category).toBe(expected[key]);
+    }
+    // The library probes are opt-in but carry a 2025 key too.
+    for (const key of BUILTIN_PROBE_KEYS) {
+      expect(isOwaspLlmCategory(PROBE_REGISTRY[key]().category)).toBe(true);
     }
   });
 

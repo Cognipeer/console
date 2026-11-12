@@ -10,7 +10,10 @@ import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { BUILTIN_PROBE_KEYS, listProbeCatalog, validateCustomProbeDefinition } from '@/lib/services/redteam/probes';
-import { ATTEMPT_ID_PATTERN, CUSTOM_PROBE_LIMITS } from '@/lib/services/redteam/limits';
+import { isNamedDetectorKey } from '@/lib/services/redteam/detectors/named';
+import { NAMED_DETECTOR_KEYS } from '@/lib/services/redteam/types';
+import { ATTEMPT_ID_PATTERN, CUSTOM_PROBE_LIMITS, IMPORT_LIMITS } from '@/lib/services/redteam/limits';
+import type { ImportProbeDraft } from '@/lib/services/redteam/import/types';
 import { ATTEMPT_KEY_SEPARATOR } from '@/lib/services/redteam/attemptKey';
 import { OWASP_LLM_CATEGORIES, isKnownOwaspCategory, normalizeOwaspCategory } from '@/lib/services/redteam/owasp';
 import type { IRedTeamCustomAttempt, IRedTeamCustomDetectors, RedTeamSeverity } from '@/lib/database';
@@ -38,8 +41,10 @@ import {
   deleteCampaign,
   deleteCustomProbe,
   getCampaign,
+  getBuiltinProbeDefinition,
   getCustomProbe,
   getOverview,
+  importCustomProbes,
   getRun,
   listCampaigns,
   listCustomProbes,
@@ -341,6 +346,27 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
     if (objective && objective.length > L.maxObjectiveChars) {
       return { error: `attempt ${i + 1}: objective may be at most ${L.maxObjectiveChars} characters` };
     }
+    let history: IRedTeamCustomAttempt['history'];
+    if (a.history !== undefined && a.history !== null) {
+      if (!Array.isArray(a.history)) return { error: `attempt ${i + 1}: history must be a list of messages` };
+      if (a.history.length > L.maxHistoryMessages) {
+        return { error: `attempt ${i + 1}: history may have at most ${L.maxHistoryMessages} messages` };
+      }
+      history = [];
+      for (const m of a.history as unknown[]) {
+        const message = m as Record<string, unknown> | null;
+        if (!message || typeof message !== 'object' || (message.role !== 'user' && message.role !== 'assistant')) {
+          return { error: `attempt ${i + 1}: each history message needs a role of "user" or "assistant"` };
+        }
+        if (typeof message.content !== 'string' || !message.content.trim()) {
+          return { error: `attempt ${i + 1}: each history message needs text` };
+        }
+        if (message.content.length > L.maxTurnChars) {
+          return { error: `attempt ${i + 1}: a history message may be at most ${L.maxTurnChars} characters` };
+        }
+        history.push({ role: message.role, content: message.content });
+      }
+    }
     attempts.push({
       id,
       turns,
@@ -352,7 +378,23 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
       refusalExpected: typeof a.refusalExpected === 'boolean' ? a.refusalExpected : undefined,
       adaptive: typeof a.adaptive === 'boolean' ? a.adaptive : undefined,
       objective,
+      ...(history && history.length > 0 ? { history } : {}),
     });
+  }
+  if (body.polarity !== undefined && body.polarity !== 'attack' && body.polarity !== 'over-refusal') {
+    return { error: 'polarity must be "attack" or "over-refusal"' };
+  }
+  const polarity = body.polarity as 'attack' | 'over-refusal' | undefined;
+  let clonedFrom: CustomProbeInput['clonedFrom'];
+  if (body.clonedFrom !== undefined && body.clonedFrom !== null) {
+    const c = body.clonedFrom as Record<string, unknown>;
+    if (typeof c !== 'object' || typeof c.probeKey !== 'string' || !BUILTIN_PROBE_KEYS.includes(c.probeKey)) {
+      return { error: 'clonedFrom.probeKey must be the key of a built-in probe' };
+    }
+    if (typeof c.version !== 'number' || !Number.isInteger(c.version) || c.version < 1) {
+      return { error: 'clonedFrom.version must be a positive integer' };
+    }
+    clonedFrom = { probeKey: c.probeKey, version: c.version };
   }
   const rawDetectors = (body.detectors ?? {}) as Record<string, unknown>;
   const judges = Array.isArray(rawDetectors.judges)
@@ -369,13 +411,27 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
   if (judges.some((j) => j.rubric.length > L.maxRubricChars)) {
     return { error: `a judge rubric may be at most ${L.maxRubricChars} characters` };
   }
+  let named: string[] = [];
+  if (rawDetectors.named !== undefined && rawDetectors.named !== null) {
+    if (!Array.isArray(rawDetectors.named) || rawDetectors.named.some((n) => typeof n !== 'string')) {
+      return { error: 'detectors.named must be a list of named detector keys' };
+    }
+    named = rawDetectors.named as string[];
+    const unknown = named.find((n) => !isNamedDetectorKey(n));
+    if (unknown !== undefined) return { error: `named detector "${unknown}" is not known; use one of ${NAMED_DETECTOR_KEYS.join(', ')}` };
+    if (named.length > L.maxNamedDetectors) {
+      return { error: `a custom probe may have at most ${L.maxNamedDetectors} named detectors` };
+    }
+  }
   const detectors: IRedTeamCustomDetectors = {
     refusal: rawDetectors.refusal !== false,
-    pattern: rawDetectors.pattern !== false,
+    // An over-refusal probe only looks at the refusal; the pattern detector stays off unless asked for.
+    pattern: polarity === 'over-refusal' ? rawDetectors.pattern === true : rawDetectors.pattern !== false,
     judges,
+    ...(named.length > 0 ? { named } : {}),
   };
-  if (!detectors.refusal && !detectors.pattern && judges.length === 0) {
-    return { error: 'select at least one detector (refusal, pattern, or a judge lens)' };
+  if (!detectors.refusal && !detectors.pattern && judges.length === 0 && named.length === 0) {
+    return { error: 'select at least one detector (refusal, pattern, a named detector, or a judge lens)' };
   }
   return {
     input: {
@@ -388,7 +444,23 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
       attempts,
       detectors,
       ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+      ...(polarity ? { polarity } : {}),
+      ...(clonedFrom ? { clonedFrom } : {}),
     },
+  };
+}
+
+/** The source fields an import draft may carry; the service checks lengths and the link. */
+function sanitizeImportSource(raw: unknown): ImportProbeDraft['source'] {
+  const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const text = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined);
+  return {
+    name: typeof src.name === 'string' ? src.name : '',
+    ...(text(src.format) ? { format: text(src.format) } : {}),
+    ...(text(src.license) ? { license: text(src.license) } : {}),
+    ...(text(src.attribution) ? { attribution: text(src.attribution) } : {}),
+    ...(text(src.url) ? { url: text(src.url) } : {}),
+    ...(text(src.fileName) ? { fileName: text(src.fileName) } : {}),
   };
 }
 
@@ -397,12 +469,15 @@ function sanitizeCustomProbe(body: Record<string, unknown>): CustomProbeResult {
  * passed too, so an attempt whose patterns did not change is not held to rules added after it was saved.
  */
 function definitionError(
-  input: Pick<CustomProbeInput, 'category' | 'attempts'>,
+  input: Pick<CustomProbeInput, 'category' | 'attempts' | 'polarity'>,
   detectors: IRedTeamCustomDetectors,
   storedAttempts?: IRedTeamCustomAttempt[],
 ): string | null {
   try {
-    validateCustomProbeDefinition({ category: input.category, attempts: input.attempts, detectors }, storedAttempts);
+    validateCustomProbeDefinition(
+      { category: input.category, attempts: input.attempts, detectors, polarity: input.polarity },
+      storedAttempts,
+    );
     return null;
   } catch (error) {
     if (error instanceof CustomProbeError || error instanceof RedTeamValidationError) return error.message;
@@ -420,6 +495,19 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
         .filter((def) => def.enabled === false)
         .map((def) => ({ key: def.key, name: def.name }));
       return reply.code(200).send({ probes: listProbeCatalog(customProbes), disabledProbes });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  // The code-defined definition of one built-in probe (what "Clone" starts from).
+  app.get('/redteam/probes/builtin/:key', withApiRequestContext(async (request, reply) => {
+    try {
+      await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const probe = getBuiltinProbeDefinition(key);
+      if (!probe) return reply.code(404).send({ error: 'Probe not found' });
+      return reply.code(200).send({ probe });
     } catch (error) {
       return internalError(reply, error);
     }
@@ -875,6 +963,52 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // Drafts made in the browser from a file (see redteam/import); every one is validated before any is stored.
+  app.post('/redteam/custom-probes/import', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (!Array.isArray(body.probes) || body.probes.length === 0) {
+        return reply.code(400).send({ error: 'probes must list at least one probe' });
+      }
+      if (body.probes.length > IMPORT_LIMITS.maxProbesPerImport) {
+        return reply.code(400).send({ error: `an import can create at most ${IMPORT_LIMITS.maxProbesPerImport} probes` });
+      }
+      const drafts: ImportProbeDraft[] = [];
+      for (let i = 0; i < body.probes.length; i += 1) {
+        const raw = body.probes[i] as Record<string, unknown>;
+        const label = `probe ${i + 1}${raw && typeof raw.name === 'string' && raw.name ? ` ("${raw.name}")` : ''}`;
+        if (!raw || typeof raw !== 'object') return reply.code(400).send({ error: `probe ${i + 1} must be an object` });
+        const result = sanitizeCustomProbe(raw);
+        if ('error' in result) return reply.code(400).send({ error: `${label}: ${result.error}` });
+        const { input } = result;
+        const invalid = definitionError(input, input.detectors);
+        if (invalid) return reply.code(400).send({ error: `${label}: ${invalid}` });
+        drafts.push({
+          name: input.name,
+          description: input.description ?? '',
+          family: input.family ?? 'imported',
+          category: input.category as ImportProbeDraft['category'],
+          severity: input.severity,
+          polarity: input.polarity ?? 'attack',
+          attempts: input.attempts,
+          detectors: input.detectors,
+          source: sanitizeImportSource(raw.source),
+        });
+      }
+      const probes = await importCustomProbes(session.tenantDbName, {
+        tenantId: session.tenantId,
+        projectId,
+        createdBy: session.userId,
+        drafts,
+      });
+      return reply.code(201).send({ probes });
+    } catch (error) {
+      logger.error('Import custom probes error', { error });
+      return internalError(reply, error);
+    }
+  }));
+
   app.get('/redteam/custom-probes/:id', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -908,13 +1042,15 @@ export const redTeamApiPlugin: FastifyPluginAsync = async (app) => {
       const stored = inActiveProject(await getCustomProbe(session.tenantDbName, id), projectId);
       if (!stored) return reply.code(404).send({ error: 'Custom probe not found' });
       const invalid = definitionError(
-        result.input,
+        { ...result.input, polarity: result.input.polarity ?? stored.polarity },
         body.detectors !== undefined ? result.input.detectors : stored.detectors,
         stored.attempts,
       );
       if (invalid) return reply.code(400).send({ error: invalid });
       // The sanitizer fills in the create-time detectors when the body has none; a PATCH keeps the stored ones.
-      const { detectors, ...input } = result.input;
+      // A clone's lineage is set when it is created and never changed.
+      const { detectors, clonedFrom: _clonedFrom, ...input } = result.input;
+      void _clonedFrom;
       const probe = await updateCustomProbe(session.tenantDbName, id, session.userId, {
         ...input,
         ...(body.detectors !== undefined ? { detectors } : {}),
