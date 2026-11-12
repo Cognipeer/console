@@ -37,6 +37,7 @@ import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IGuardrail, IPiiPolicy, ITenant } from '@/lib/database';
+import { hasUsableHooks } from './contract';
 
 /** Same window as the word-list cache, deliberately: one staleness story. */
 export const RECORD_CACHE_TTL_MS = 60_000;
@@ -308,7 +309,14 @@ export async function getCachedGuardrail(
   projectId?: string | null,
 ): Promise<IGuardrail | null> {
   return guardrailCache.get(recordKey(tenantDbName, key, projectId), () =>
-    runWithTenantScope(tenantDbName, (db) => db.findGuardrailByKey(key, projectId)),
+    runWithTenantScope(tenantDbName, async (db) => {
+      const record = await db.findGuardrailByKey(key, projectId);
+      // Logged once per load (at most once per cache TTL per replica), not per evaluation.
+      if (record?.enabled && !hasUsableHooks(record)) {
+        logger.warn('Enabled guardrail has no usable hooks and enforces nothing', { key, projectId: projectId ?? null });
+      }
+      return record;
+    }),
   );
 }
 

@@ -651,6 +651,17 @@ export function readHooks(record: { hooks?: GuardrailHooksConfig | null }): Guar
 }
 
 /**
+ * Whether a record carries a `hooks` config `readHooks` can use. A record
+ * without one enforces nothing (see `readHooks`); the record cache logs a
+ * warning when it loads such a record that is enabled, so the gap is visible
+ * instead of silent.
+ */
+export function hasUsableHooks(record: { hooks?: GuardrailHooksConfig | null }): boolean {
+  const hooks = normalizeHooksConfig(record.hooks);
+  return Boolean(hooks && Array.isArray(hooks.policies));
+}
+
+/**
  * The policy id on a finding / mutation / degraded entry read off the wire.
  *
  * Emitted as `policyId`; `checkId` is what every build before the rename sent,
