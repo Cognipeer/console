@@ -21,8 +21,7 @@ import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
-import { runInTenant } from '@/lib/database/runInTenant';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IWebhookDelivery, IWebhookEndpoint, WebhookDisabledReason } from '@/lib/database';
 import { decryptObject } from '@/lib/utils/crypto';
 import { isServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
@@ -47,9 +46,9 @@ export interface WebhookDeliveryJob extends QueuePayload {
   tenantDbName: string;
 }
 
-/** Bound to the tenant DB for the whole callback (see `runInTenant`). */
+/** Bound to the tenant DB for the whole callback (see `runWithTenantScope`). */
 async function inTenant<T>(tenantDbName: string, fn: (db: DatabaseProvider) => Promise<T>): Promise<T> {
-  return runInTenant(await getDatabase(), tenantDbName, fn);
+  return runWithTenantScope(tenantDbName, fn);
 }
 
 export const newWebhookEventId = () => `evt_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;

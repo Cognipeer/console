@@ -198,11 +198,10 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-
-      const users = await db.listUsers();
-      return reply.code(200).send({ users: users.map(serializeUser) });
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const users = await db.listUsers();
+        return reply.code(200).send({ users: users.map(serializeUser) });
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -220,15 +219,14 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const user = await findUserByIdSafe(db, id, session.tenantId);
+        if (!user) {
+          return fail(reply, 404, 'user_not_found', 'User not found');
+        }
 
-      const user = await findUserByIdSafe(db, id, session.tenantId);
-      if (!user) {
-        return fail(reply, 404, 'user_not_found', 'User not found');
-      }
-
-      return reply.code(200).send({ user: serializeUser(user) });
+        return reply.code(200).send({ user: serializeUser(user) });
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -275,80 +273,80 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       const limit = checkRateLimit(`people-edit:${session.userId}`, EDIT_RATE_LIMIT);
       if (!limit.allowed) return tooManyRequests(reply, limit.retryAfterSeconds);
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-      const target = await findUserByIdSafe(db, id, session.tenantId);
-      if (!target) return fail(reply, 404, 'user_not_found', 'User not found');
-      const actor = { id: session.userId, role: session.userRole };
-      // A role that follows the directory at every sign-in is not changed by hand (409 directory_managed).
-      const person = targetOf(target, {
-        roleManaged: input.role !== undefined && input.role !== target.role
-          ? await isRoleManagedByDirectory({ tenantDbName: session.tenantDbName, tenantId: session.tenantId }, target)
-          : false,
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const target = await findUserByIdSafe(db, id, session.tenantId);
+        if (!target) return fail(reply, 404, 'user_not_found', 'User not found');
+        const actor = { id: session.userId, role: session.userRole };
+        // A role that follows the directory at every sign-in is not changed by hand (409 directory_managed).
+        const person = targetOf(target, {
+          roleManaged: input.role !== undefined && input.role !== target.role
+            ? await isRoleManagedByDirectory({ tenantDbName: session.tenantDbName, tenantId: session.tenantId }, target)
+            : false,
+        });
+
+        // What would actually change: a value equal to the stored one is not a change.
+        const patch: PersonPatch = {};
+        if (input.name !== undefined) {
+          if (typeof input.name !== 'string') return fail(reply, 400, 'invalid_body', 'name must be a string', [{ field: 'name', message: 'Must be a string' }]);
+          const name = input.name.trim();
+          if (name.length < MIN_NAME_LENGTH || name.length > MAX_NAME_LENGTH) {
+            return fail(reply, 400, 'invalid_body', `name must be between ${MIN_NAME_LENGTH} and ${MAX_NAME_LENGTH} characters`, [{ field: 'name', message: `Between ${MIN_NAME_LENGTH} and ${MAX_NAME_LENGTH} characters` }]);
+          }
+          if (name !== target.name) patch.name = name;
+        }
+        if (input.email !== undefined) {
+          if (typeof input.email !== 'string') return fail(reply, 400, 'invalid_body', 'email must be a string', [{ field: 'email', message: 'Must be a string' }]);
+          const email = input.email.trim();
+          if (email === '' && target.canLogin !== false) {
+            return fail(reply, 400, 'email_required', 'Email is required unless the account cannot sign in');
+          }
+          if (email !== '' && !EMAIL_PATTERN.test(email)) {
+            return fail(reply, 400, 'invalid_body', 'Invalid email format', [{ field: 'email', message: 'Invalid email format' }]);
+          }
+          if (email !== (target.email ?? '')) patch.email = email;
+        }
+        if (input.role !== undefined && input.role !== target.role) {
+          patch.role = input.role as PersonPatch['role'];
+        }
+
+        // The same rules the directory reports, judged on the role the actor has NOW (the session context carries it).
+        const profileFields: ProfileField[] = [];
+        if (patch.name !== undefined) profileFields.push('name');
+        if (patch.email !== undefined) profileFields.push('email');
+        if (profileFields.length > 0) {
+          const verdict = checkProfileChange(actor, person, profileFields);
+          if (!verdict.ok) return refuse(reply, verdict);
+        }
+        if (patch.role !== undefined) {
+          const verdict = checkRoleChange(actor, person, patch.role);
+          if (!verdict.ok) return refuse(reply, verdict);
+          // A role of the other seat kind takes a seat of that kind (hosted deployments only).
+          const seatKind = seatKindOfRole(patch.role);
+          if (seatKind !== seatKindOfRole(target.role) && target.canLogin !== false && target.kind !== 'external' && target.status !== 'disabled') {
+            await assertSeats({ tenantId: session.tenantId, kind: seatKind, source: { type: 'user', id: session.userId } });
+          }
+        }
+
+        if (patch.email) {
+          const taken = await db.findUserByEmail(patch.email);
+          if (taken && String(taken._id) !== String(target._id)) {
+            return fail(reply, 409, 'email_taken', 'User with this email already exists in your organization');
+          }
+        }
+
+        const changed = (['name', 'email', 'role'] as const).filter((field) => patch[field] !== undefined);
+        if (changed.length === 0) {
+          return reply.code(200).send({ user: serializeUser(target), changed });
+        }
+
+        const updated = await updatePerson(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId, actor: auditActorOf(request, session) },
+          target,
+          patch,
+        );
+        if (!updated) return fail(reply, 404, 'user_not_found', 'User not found');
+        return reply.code(200).send({ user: serializeUser(updated), changed });
       });
-
-      // What would actually change: a value equal to the stored one is not a change.
-      const patch: PersonPatch = {};
-      if (input.name !== undefined) {
-        if (typeof input.name !== 'string') return fail(reply, 400, 'invalid_body', 'name must be a string', [{ field: 'name', message: 'Must be a string' }]);
-        const name = input.name.trim();
-        if (name.length < MIN_NAME_LENGTH || name.length > MAX_NAME_LENGTH) {
-          return fail(reply, 400, 'invalid_body', `name must be between ${MIN_NAME_LENGTH} and ${MAX_NAME_LENGTH} characters`, [{ field: 'name', message: `Between ${MIN_NAME_LENGTH} and ${MAX_NAME_LENGTH} characters` }]);
-        }
-        if (name !== target.name) patch.name = name;
-      }
-      if (input.email !== undefined) {
-        if (typeof input.email !== 'string') return fail(reply, 400, 'invalid_body', 'email must be a string', [{ field: 'email', message: 'Must be a string' }]);
-        const email = input.email.trim();
-        if (email === '' && target.canLogin !== false) {
-          return fail(reply, 400, 'email_required', 'Email is required unless the account cannot sign in');
-        }
-        if (email !== '' && !EMAIL_PATTERN.test(email)) {
-          return fail(reply, 400, 'invalid_body', 'Invalid email format', [{ field: 'email', message: 'Invalid email format' }]);
-        }
-        if (email !== (target.email ?? '')) patch.email = email;
-      }
-      if (input.role !== undefined && input.role !== target.role) {
-        patch.role = input.role as PersonPatch['role'];
-      }
-
-      // The same rules the directory reports, judged on the role the actor has NOW (the session context carries it).
-      const profileFields: ProfileField[] = [];
-      if (patch.name !== undefined) profileFields.push('name');
-      if (patch.email !== undefined) profileFields.push('email');
-      if (profileFields.length > 0) {
-        const verdict = checkProfileChange(actor, person, profileFields);
-        if (!verdict.ok) return refuse(reply, verdict);
-      }
-      if (patch.role !== undefined) {
-        const verdict = checkRoleChange(actor, person, patch.role);
-        if (!verdict.ok) return refuse(reply, verdict);
-        // A role of the other seat kind takes a seat of that kind (hosted deployments only).
-        const seatKind = seatKindOfRole(patch.role);
-        if (seatKind !== seatKindOfRole(target.role) && target.canLogin !== false && target.kind !== 'external' && target.status !== 'disabled') {
-          await assertSeats({ tenantId: session.tenantId, kind: seatKind, source: { type: 'user', id: session.userId } });
-        }
-      }
-
-      if (patch.email) {
-        const taken = await db.findUserByEmail(patch.email);
-        if (taken && String(taken._id) !== String(target._id)) {
-          return fail(reply, 409, 'email_taken', 'User with this email already exists in your organization');
-        }
-      }
-
-      const changed = (['name', 'email', 'role'] as const).filter((field) => patch[field] !== undefined);
-      if (changed.length === 0) {
-        return reply.code(200).send({ user: serializeUser(target), changed });
-      }
-
-      const updated = await updatePerson(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, actor: auditActorOf(request, session) },
-        target,
-        patch,
-      );
-      if (!updated) return fail(reply, 404, 'user_not_found', 'User not found');
-      return reply.code(200).send({ user: serializeUser(updated), changed });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -368,58 +366,57 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return fail(reply, 403, 'forbidden', 'Only owners and admins can delete users');
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        if (id === session.userId) {
+          return fail(reply, 400, 'self_not_allowed', 'You cannot delete your own account');
+        }
 
-      if (id === session.userId) {
-        return fail(reply, 400, 'self_not_allowed', 'You cannot delete your own account');
-      }
+        const userToDelete = await findUserByIdSafe(db, id, session.tenantId);
+        if (!userToDelete) {
+          return fail(reply, 404, 'user_not_found', 'User not found');
+        }
 
-      const userToDelete = await findUserByIdSafe(db, id, session.tenantId);
-      if (!userToDelete) {
-        return fail(reply, 404, 'user_not_found', 'User not found');
-      }
+        // The owner and the signed-in person are never deleted, nobody deletes upward, and an
+        // account of a directory is disabled instead (it would be created again at its next sign-in).
+        const verdict = checkDelete({ id: session.userId, role: session.userRole }, targetOf(userToDelete));
+        if (!verdict.ok) return refuse(reply, verdict);
 
-      // The owner and the signed-in person are never deleted, nobody deletes upward, and an
-      // account of a directory is disabled instead (it would be created again at its next sign-in).
-      const verdict = checkDelete({ id: session.userId, role: session.userRole }, targetOf(userToDelete));
-      if (!verdict.ok) return refuse(reply, verdict);
+        const deleted = await db.deleteUser(id);
+        if (!deleted) {
+          return reply.code(500).send({ error: 'Failed to delete user' });
+        }
 
-      const deleted = await db.deleteUser(id);
-      if (!deleted) {
-        return reply.code(500).send({ error: 'Failed to delete user' });
-      }
+        // The row is gone, so what hung on it would otherwise be orphaned: its tokens, its
+        // group and project memberships. Never fails the delete.
+        const cleanup = await cleanupDeletedUser(session.tenantDbName, id, session.tenantId);
 
-      // The row is gone, so what hung on it would otherwise be orphaned: its tokens, its
-      // group and project memberships. Never fails the delete.
-      const cleanup = await cleanupDeletedUser(session.tenantDbName, id, session.tenantId);
-
-      recordPeopleAudit(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
-        auditActorOf(request, session),
-        {
-          event: 'user.delete',
-          resourceType: 'user',
-          resourceId: id,
-          metadata: {
-            targetName: userToDelete.name,
-            targetRole: userToDelete.role,
-            cleanup: {
-              revokedTokens: cleanup.revokedTokens,
-              removedGroupMemberships: cleanup.removedGroupMemberships,
-              removedProjectMemberships: cleanup.removedProjectMemberships,
+        recordPeopleAudit(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+          auditActorOf(request, session),
+          {
+            event: 'user.delete',
+            resourceType: 'user',
+            resourceId: id,
+            metadata: {
+              targetName: userToDelete.name,
+              targetRole: userToDelete.role,
+              cleanup: {
+                revokedTokens: cleanup.revokedTokens,
+                removedGroupMemberships: cleanup.removedGroupMemberships,
+                removedProjectMemberships: cleanup.removedProjectMemberships,
+              },
             },
           },
-        },
-      );
+        );
 
-      return reply.code(200).send({
-        message: 'User deleted successfully',
-        cleanup: {
-          revokedTokens: cleanup.revokedTokens,
-          removedGroupMemberships: cleanup.removedGroupMemberships,
-          removedProjectMemberships: cleanup.removedProjectMemberships,
-        },
+        return reply.code(200).send({
+          message: 'User deleted successfully',
+          cleanup: {
+            revokedTokens: cleanup.revokedTokens,
+            removedGroupMemberships: cleanup.removedGroupMemberships,
+            removedProjectMemberships: cleanup.removedProjectMemberships,
+          },
+        });
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
@@ -514,45 +511,44 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return fail(reply, 400, 'invalid_body', 'servicePermissions must be an object', [{ field: 'servicePermissions', message: 'Must be an object' }]);
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const target = await findUserByIdSafe(db, id, session.tenantId);
+        if (!target) {
+          return fail(reply, 404, 'user_not_found', 'User not found');
+        }
+        const verdict = checkPermissionsEdit({ id: session.userId, role: session.userRole }, targetOf(target));
+        if (!verdict.ok) return refuse(reply, verdict);
+        if (target.role === 'portal_user') {
+          return fail(reply, 400, 'invalid_body', 'A portal user holds no service permission. Change their role first.');
+        }
 
-      const target = await findUserByIdSafe(db, id, session.tenantId);
-      if (!target) {
-        return fail(reply, 404, 'user_not_found', 'User not found');
-      }
-      const verdict = checkPermissionsEdit({ id: session.userId, role: session.userRole }, targetOf(target));
-      if (!verdict.ok) return refuse(reply, verdict);
-      if (target.role === 'portal_user') {
-        return fail(reply, 400, 'invalid_body', 'A portal user holds no service permission. Change their role first.');
-      }
+        // Clamped to the granting admin's own effective permission, same as
+        // POST /users/invite — an admin can never grant a target user a
+        // service level they don't themselves have.
+        const servicePermissions = (await resolveRequestedTokenScope(
+          db,
+          session.userId,
+          requested,
+        )) ?? {};
 
-      // Clamped to the granting admin's own effective permission, same as
-      // POST /users/invite — an admin can never grant a target user a
-      // service level they don't themselves have.
-      const servicePermissions = (await resolveRequestedTokenScope(
-        db,
-        session.userId,
-        requested,
-      )) ?? {};
+        const updated = await db.updateUser(id, { servicePermissions });
+        if (!updated) {
+          return reply.code(500).send({ error: 'Failed to update permissions' });
+        }
 
-      const updated = await db.updateUser(id, { servicePermissions });
-      if (!updated) {
-        return reply.code(500).send({ error: 'Failed to update permissions' });
-      }
+        recordPeopleAudit(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+          auditActorOf(request, session),
+          {
+            event: 'user.permissions.update',
+            resourceType: 'user',
+            resourceId: id,
+            metadata: { services: Object.keys(servicePermissions).sort() },
+          },
+        );
 
-      recordPeopleAudit(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
-        auditActorOf(request, session),
-        {
-          event: 'user.permissions.update',
-          resourceType: 'user',
-          resourceId: id,
-          metadata: { services: Object.keys(servicePermissions).sort() },
-        },
-      );
-
-      return reply.code(200).send({ user: serializeUser(updated) });
+        return reply.code(200).send({ user: serializeUser(updated) });
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -628,68 +624,67 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-
-      let group;
-      if (groupAction) {
-        try {
-          group = await db.findGroupById(input.groupId as string);
-        } catch {
-          group = null; // an id the database cannot parse names no group
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        let group;
+        if (groupAction) {
+          try {
+            group = await db.findGroupById(input.groupId as string);
+          } catch {
+            group = null; // an id the database cannot parse names no group
+          }
+          if (!group || String(group.tenantId) !== String(session.tenantId)) {
+            return fail(reply, 404, 'group_not_found', 'Group not found');
+          }
+          if (isGroupDirectoryManaged(group)) {
+            return fail(reply, 409, 'group_directory_managed', 'Membership of directory groups is managed by the directory');
+          }
         }
-        if (!group || String(group.tenantId) !== String(session.tenantId)) {
-          return fail(reply, 404, 'group_not_found', 'Group not found');
-        }
-        if (isGroupDirectoryManaged(group)) {
-          return fail(reply, 409, 'group_directory_managed', 'Membership of directory groups is managed by the directory');
-        }
-      }
 
-      const batchId = newBatchId();
-      const audit = auditActorOf(request, session);
-      const results = await runBulk({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        actor: { id: session.userId, role: session.userRole },
-        audit,
-        action,
-        ids,
-        reason: typeof input.reason === 'string' ? input.reason : undefined,
-        group: group ?? undefined,
-        dryRun,
-        batchId,
-      });
-      const summary = summarizeBulk(results);
-
-      if (!dryRun) {
-        recordPeopleAudit(
-          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+        const batchId = newBatchId();
+        const audit = auditActorOf(request, session);
+        const results = await runBulk({
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          actor: { id: session.userId, role: session.userRole },
           audit,
-          {
-            event: 'user.bulk',
-            resourceType: 'user',
-            resourceId: batchId,
-            metadata: {
-              action,
-              batchId,
-              requested: ids.length,
-              ok: summary.ok,
-              skipped: summary.skipped,
-              failed: summary.failed,
-              ...(group ? { groupId: String(group._id) } : {}),
-            },
-          },
-        );
-      }
+          action,
+          ids,
+          reason: typeof input.reason === 'string' ? input.reason : undefined,
+          group: group ?? undefined,
+          dryRun,
+          batchId,
+        });
+        const summary = summarizeBulk(results);
 
-      return reply.code(200).send({
-        action,
-        dryRun,
-        requested: ids.length,
-        ...summary,
-        batchId,
-        results,
+        if (!dryRun) {
+          recordPeopleAudit(
+            { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+            audit,
+            {
+              event: 'user.bulk',
+              resourceType: 'user',
+              resourceId: batchId,
+              metadata: {
+                action,
+                batchId,
+                requested: ids.length,
+                ok: summary.ok,
+                skipped: summary.skipped,
+                failed: summary.failed,
+                ...(group ? { groupId: String(group._id) } : {}),
+              },
+            },
+          );
+        }
+
+        return reply.code(200).send({
+          action,
+          dryRun,
+          requested: ids.length,
+          ...summary,
+          batchId,
+          results,
+        });
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
@@ -740,86 +735,86 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'No usable rows found in that file', invalid });
       }
 
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(session.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(session.tenantId);
       if (!tenant) return reply.code(404).send({ error: 'Tenant not found' });
-      await db.switchToTenant(session.tenantDbName);
-
-      const existingUsers = await db.listUsers();
-      // Same rule the insert loop applies (email if present, else name), so the
-      // quota is charged for exactly the rows that will be created — not for
-      // name-only rows the loop is going to skip.
-      const knownEmails = new Set(
-        existingUsers.filter((u) => u.email).map((u) => String(u.email).toLowerCase()),
-      );
-      const knownNames = new Set(existingUsers.map((u) => String(u.name ?? '').toLowerCase()));
-      const newcomers = rows.filter((r) => !rowAlreadyExists(r, knownEmails, knownNames));
-
-      const defaultProject = await ensureDefaultProject(
-        session.tenantDbName,
-        session.tenantId,
-        session.userId || session.tenantId,
-      );
-      const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
-      if (!defaultProjectId) {
-        return reply.code(400).send({ error: 'Project context is missing' });
-      }
-
-      const quotaContext = {
-        domain: 'global' as const,
-        licenseType: tenant.licenseType as LicenseType,
-        projectId: defaultProjectId,
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        userId: session.userId,
-      };
-
-      // Checked against the count AFTER the import, so a batch that would cross
-      // the limit is refused whole. A re-upload with nothing new to create is
-      // a no-op and must not 429 at the limit.
-      if (newcomers.length > 0) {
-        const quota = await checkResourceQuota(
-          quotaContext,
-          'users',
-          existingUsers.length + newcomers.length - 1,
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const existingUsers = await db.listUsers();
+        // Same rule the insert loop applies (email if present, else name), so the
+        // quota is charged for exactly the rows that will be created — not for
+        // name-only rows the loop is going to skip.
+        const knownEmails = new Set(
+          existingUsers.filter((u) => u.email).map((u) => String(u.email).toLowerCase()),
         );
-        if (!quota.allowed) {
-          return reply.code(429).send({
-            error: quota.reason || 'User quota exceeded',
-            wouldCreate: newcomers.length,
-            current: existingUsers.length,
-          });
+        const knownNames = new Set(existingUsers.map((u) => String(u.name ?? '').toLowerCase()));
+        const newcomers = rows.filter((r) => !rowAlreadyExists(r, knownEmails, knownNames));
+
+        const defaultProject = await ensureDefaultProject(
+          session.tenantDbName,
+          session.tenantId,
+          session.userId || session.tenantId,
+        );
+        const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
+        if (!defaultProjectId) {
+          return reply.code(400).send({ error: 'Project context is missing' });
         }
-      }
 
-      const projectIds = typeof body.projectId === 'string' && body.projectId
-        ? [body.projectId]
-        : undefined;
-      const { created, halted } = await importProgrammaticUsers({
-        tenantId: session.tenantId,
-        rows,
-        role,
-        projectIds,
-        licenseId: tenant.licenseType,
-        createdBy: session.userId,
-        // The table was read above for the quota arithmetic; the import reuses it instead of reading it again.
-        existing: existingUsers,
-        checkQuota: (currentCount) => checkResourceQuota(quotaContext, 'users', currentCount),
-      });
+        const quotaContext = {
+          domain: 'global' as const,
+          licenseType: tenant.licenseType as LicenseType,
+          projectId: defaultProjectId,
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userId: session.userId,
+        };
 
-      const createdEmails = new Set(created.map((c) => (c.email ?? '').toLowerCase()));
-      const skippedExisting = rows
-        .filter((r) => !created.some((c) => c.name === r.name && (c.email ?? '') === (r.email ?? '')))
-        .map((r) => r.email ?? r.name)
-        .filter((v) => !createdEmails.has(v.toLowerCase()));
+        // Checked against the count AFTER the import, so a batch that would cross
+        // the limit is refused whole. A re-upload with nothing new to create is
+        // a no-op and must not 429 at the limit.
+        if (newcomers.length > 0) {
+          const quota = await checkResourceQuota(
+            quotaContext,
+            'users',
+            existingUsers.length + newcomers.length - 1,
+          );
+          if (!quota.allowed) {
+            return reply.code(429).send({
+              error: quota.reason || 'User quota exceeded',
+              wouldCreate: newcomers.length,
+              current: existingUsers.length,
+            });
+          }
+        }
 
-      return reply.code(201).send({
-        created,
-        createdCount: created.length,
-        skippedExisting,
-        invalid: invalid.slice(0, 25),
-        invalidCount: invalid.length,
-        ...(halted ? { halted } : {}),
+        const projectIds = typeof body.projectId === 'string' && body.projectId
+          ? [body.projectId]
+          : undefined;
+        const { created, halted } = await importProgrammaticUsers({
+          tenantId: session.tenantId,
+          rows,
+          role,
+          projectIds,
+          licenseId: tenant.licenseType,
+          createdBy: session.userId,
+          // The table was read above for the quota arithmetic; the import reuses it instead of reading it again.
+          existing: existingUsers,
+          checkQuota: (currentCount) => checkResourceQuota(quotaContext, 'users', currentCount),
+        });
+
+        const createdEmails = new Set(created.map((c) => (c.email ?? '').toLowerCase()));
+        const skippedExisting = rows
+          .filter((r) => !created.some((c) => c.name === r.name && (c.email ?? '') === (r.email ?? '')))
+          .map((r) => r.email ?? r.name)
+          .filter((v) => !createdEmails.has(v.toLowerCase()));
+
+        return reply.code(201).send({
+          created,
+          createdCount: created.length,
+          skippedExisting,
+          invalid: invalid.slice(0, 25),
+          invalidCount: invalid.length,
+          ...(halted ? { halted } : {}),
+        });
       });
     } catch (error) {
       if (error instanceof CsvImportError) {
@@ -884,166 +879,168 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const grants = grantsResult.grants;
 
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(session.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(session.tenantId);
       if (!tenant) {
         return reply.code(404).send({ error: 'Tenant not found' });
       }
 
-      await db.switchToTenant(session.tenantDbName);
-      if (grants.length > 0) {
-        const missing = unknownProjectIds(grants, await loadTenantProjects(db, session.tenantId));
-        if (missing.length > 0) {
-          return fail(reply, 400, 'project_not_found', `Unknown project: ${missing.join(', ')}`);
+      const { name: userName } = body;
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        if (grants.length > 0) {
+          const missing = unknownProjectIds(grants, await loadTenantProjects(db, session.tenantId));
+          if (missing.length > 0) {
+            return fail(reply, 400, 'project_not_found', `Unknown project: ${missing.join(', ')}`);
+          }
         }
-      }
-      const trimmedEmail = (body.email ?? '').trim();
-      if (trimmedEmail) {
-        const existingUser = await db.findUserByEmail(trimmedEmail);
-        if (existingUser) {
-          return reply.code(409).send({
-            error: 'User with this email already exists in your organization',
-            code: 'email_taken',
+        const trimmedEmail = (body.email ?? '').trim();
+        if (trimmedEmail) {
+          const existingUser = await db.findUserByEmail(trimmedEmail);
+          if (existingUser) {
+            return reply.code(409).send({
+              error: 'User with this email already exists in your organization',
+              code: 'email_taken',
+            });
+          }
+        }
+
+        // Always CSPRNG-generated (never Math.random) — for the invite-email
+        // path it's a one-time temp password emailed to the user; for the
+        // no-invite path it's returned once in the response as
+        // `generatedPassword`.
+        const tempPassword = generateSecurePassword();
+        const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_ROUNDS);
+        // sendInvite path: force a change on first login (unchanged behavior).
+        // No-invite path: force a change only if the account can actually log
+        // in — a canLogin=false user has no login to force a change on.
+        const mustChangePassword = sendInvite ? true : canLogin;
+
+        const defaultProject = await ensureDefaultProject(
+          session.tenantDbName,
+          session.tenantId,
+          session.userId || session.tenantId,
+        );
+        const defaultProjectId = defaultProject._id
+          ? String(defaultProject._id)
+          : undefined;
+
+        if (!defaultProjectId) {
+          return reply.code(400).send({ error: 'Project context is missing' });
+        }
+
+        const userQuotaCheck = await checkResourceQuota(
+          {
+            domain: 'global',
+            licenseType: tenant.licenseType as LicenseType,
+            projectId: defaultProjectId,
+            tenantDbName: session.tenantDbName,
+            tenantId: session.tenantId,
+            userId: session.userId,
+          },
+          'users',
+          // a count, not the whole table: the quota only needs how many there are
+          await db.iamCountUsers({ tenantId: session.tenantId }),
+        );
+
+        if (!userQuotaCheck.allowed) {
+          return reply.code(429).send({
+            error: userQuotaCheck.reason || 'User quota exceeded',
+            code: 'quota_exceeded',
           });
         }
-      }
 
-      // Always CSPRNG-generated (never Math.random) — for the invite-email
-      // path it's a one-time temp password emailed to the user; for the
-      // no-invite path it's returned once in the response as
-      // `generatedPassword`.
-      const tempPassword = generateSecurePassword();
-      const hashedPassword = await bcrypt.hash(tempPassword, BCRYPT_ROUNDS);
-      // sendInvite path: force a change on first login (unchanged behavior).
-      // No-invite path: force a change only if the account can actually log
-      // in — a canLogin=false user has no login to force a change on.
-      const mustChangePassword = sendInvite ? true : canLogin;
+        // The plan's seats (hosted deployments only; a no-op elsewhere). Accounts that cannot sign in are not seats.
+        if (canLogin) {
+          await assertSeats({
+            tenantId: session.tenantId,
+            kind: body.role === 'portal_user' ? 'portal' : 'console',
+            source: { type: 'user', id: session.userId },
+          });
+        }
 
-      const defaultProject = await ensureDefaultProject(
-        session.tenantDbName,
-        session.tenantId,
-        session.userId || session.tenantId,
-      );
-      const defaultProjectId = defaultProject._id
-        ? String(defaultProject._id)
-        : undefined;
+        const initialProjectIds = grants.length > 0 ? grants.map((grant) => grant.projectId) : undefined;
 
-      if (!defaultProjectId) {
-        return reply.code(400).send({ error: 'Project context is missing' });
-      }
+        // Clamped to the inviting admin's own effective permission — an admin
+        // can never grant a new user a higher service permission than they
+        // themselves hold (same rule as token minting in tokens.ts).
+        // A portal user holds no service permission, whatever the request carries.
+        const servicePermissions = body.role === 'portal_user'
+          ? {}
+          : (await resolveRequestedTokenScope(
+            db,
+            session.userId,
+            body.servicePermissions,
+          )) ?? {};
 
-      const userQuotaCheck = await checkResourceQuota(
-        {
-          domain: 'global',
-          licenseType: tenant.licenseType as LicenseType,
-          projectId: defaultProjectId,
-          tenantDbName: session.tenantDbName,
-          tenantId: session.tenantId,
-          userId: session.userId,
-        },
-        'users',
-        // a count, not the whole table: the quota only needs how many there are
-        await db.iamCountUsers({ tenantId: session.tenantId }),
-      );
-
-      if (!userQuotaCheck.allowed) {
-        return reply.code(429).send({
-          error: userQuotaCheck.reason || 'User quota exceeded',
-          code: 'quota_exceeded',
-        });
-      }
-
-      // The plan's seats (hosted deployments only; a no-op elsewhere). Accounts that cannot sign in are not seats.
-      if (canLogin) {
-        await assertSeats({
-          tenantId: session.tenantId,
-          kind: body.role === 'portal_user' ? 'portal' : 'console',
-          source: { type: 'user', id: session.userId },
-        });
-      }
-
-      const initialProjectIds = grants.length > 0 ? grants.map((grant) => grant.projectId) : undefined;
-
-      // Clamped to the inviting admin's own effective permission — an admin
-      // can never grant a new user a higher service permission than they
-      // themselves hold (same rule as token minting in tokens.ts).
-      // A portal user holds no service permission, whatever the request carries.
-      const servicePermissions = body.role === 'portal_user'
-        ? {}
-        : (await resolveRequestedTokenScope(
-          db,
-          session.userId,
-          body.servicePermissions,
-        )) ?? {};
-
-      const user = await db.createUser({
-        canLogin,
-        email: trimmedEmail,
-        features: [],
-        invitedAt: new Date(),
-        invitedBy: session.userId,
-        licenseId: tenant.licenseType,
-        mustChangePassword,
-        name: body.name,
-        password: hashedPassword,
-        projectIds: initialProjectIds,
-        role: body.role as 'user' | 'admin' | 'project_admin' | 'portal_user',
-        servicePermissions,
-        tenantId: session.tenantId,
-      });
-
-      for (const grant of grants) {
-        await db.upsertUserProject({
+        const user = await db.createUser({
+          canLogin,
+          email: trimmedEmail,
+          features: [],
+          invitedAt: new Date(),
           invitedBy: session.userId,
-          projectId: grant.projectId,
-          role: grant.role,
-          servicePermissions: undefined,
-          source: 'manual',
+          licenseId: tenant.licenseType,
+          mustChangePassword,
+          name: userName,
+          password: hashedPassword,
+          projectIds: initialProjectIds,
+          role: body.role as 'user' | 'admin' | 'project_admin' | 'portal_user',
+          servicePermissions,
           tenantId: session.tenantId,
-          userId: String(user._id),
         });
-      }
 
-      const invitationUrl = sendInvite
-        ? await createInvitationUrl(user, tenant.slug)
-        : undefined;
-      let invitationEmailSent = false;
-      if (sendInvite) {
-        try {
-          invitationEmailSent = await sendEmail(trimmedEmail, 'user-invitation', {
-            companyName: tenant.companyName,
-            email: trimmedEmail,
-            // The person who invites, by name: the mail says who asked, not what role they have.
-            inviterName: request.rbacUser?.name || session.userEmail || 'An administrator',
-            inviteUrl: invitationUrl,
-            name: body.name,
-            slug: tenant.slug,
-          });
-        } catch (error) {
-          logger.error('Failed to send invitation email', { error });
-        }
-
-        if (!invitationEmailSent) {
-          logger.warn('Invitation email was not delivered', {
+        for (const grant of grants) {
+          await db.upsertUserProject({
+            invitedBy: session.userId,
+            projectId: grant.projectId,
+            role: grant.role,
+            servicePermissions: undefined,
+            source: 'manual',
+            tenantId: session.tenantId,
             userId: String(user._id),
           });
         }
-      }
 
-      return reply.code(201).send({
-        message: sendInvite ? 'User invited successfully' : 'User created successfully',
-        user: {
-          canLogin: user.canLogin !== false,
-          email: user.email,
-          id: user._id,
-          name: user.name,
-          role: user.role,
-          servicePermissions: normalizeServicePermissions(user.servicePermissions),
-        },
-        ...(sendInvite ? { invitationEmailSent, invitationUrl } : {}),
-        // Shown once, mirroring POST /tokens' one-time plaintext `token`
-        // field — never retrievable again after this response.
-        ...(sendInvite ? {} : { generatedPassword: tempPassword }),
+        const invitationUrl = sendInvite
+          ? await createInvitationUrl(user, tenant.slug)
+          : undefined;
+        let invitationEmailSent = false;
+        if (sendInvite) {
+          try {
+            invitationEmailSent = await sendEmail(trimmedEmail, 'user-invitation', {
+              companyName: tenant.companyName,
+              email: trimmedEmail,
+              // The person who invites, by name: the mail says who asked, not what role they have.
+              inviterName: request.rbacUser?.name || session.userEmail || 'An administrator',
+              inviteUrl: invitationUrl,
+              name: body.name,
+              slug: tenant.slug,
+            });
+          } catch (error) {
+            logger.error('Failed to send invitation email', { error });
+          }
+
+          if (!invitationEmailSent) {
+            logger.warn('Invitation email was not delivered', {
+              userId: String(user._id),
+            });
+          }
+        }
+
+        return reply.code(201).send({
+          message: sendInvite ? 'User invited successfully' : 'User created successfully',
+          user: {
+            canLogin: user.canLogin !== false,
+            email: user.email,
+            id: user._id,
+            name: user.name,
+            role: user.role,
+            servicePermissions: normalizeServicePermissions(user.servicePermissions),
+          },
+          ...(sendInvite ? { invitationEmailSent, invitationUrl } : {}),
+          // Shown once, mirroring POST /tokens' one-time plaintext `token`
+          // field — never retrievable again after this response.
+          ...(sendInvite ? {} : { generatedPassword: tempPassword }),
+        });
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
@@ -1064,24 +1061,25 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { id } = request.params as { id: string };
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(session.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(session.tenantId);
       if (!tenant) {
         return reply.code(404).send({ error: 'Tenant not found' });
       }
 
-      await db.switchToTenant(session.tenantDbName);
-      const user = await findUserByIdSafe(db, id, session.tenantId);
-      if (!user || isUserLoginBlocked(user) || !user.invitedBy || user.inviteAcceptedAt) {
-        return reply.code(404).send({ error: 'Pending invitation not found', code: 'no_pending_invite' });
-      }
-      // The rule the directory reports as allowedActions.copyInvitationLink (never upward, the owner only by themself):
-      // the link signs whoever opens it in as that person, so it follows the same rule as every other act on them.
-      const verdict = canActOnPerson({ id: session.userId, role: session.userRole }, targetOf(user));
-      if (!verdict.ok) return refuse(reply, verdict);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const user = await findUserByIdSafe(db, id, session.tenantId);
+        if (!user || isUserLoginBlocked(user) || !user.invitedBy || user.inviteAcceptedAt) {
+          return reply.code(404).send({ error: 'Pending invitation not found', code: 'no_pending_invite' });
+        }
+        // The rule the directory reports as allowedActions.copyInvitationLink (never upward, the owner only by themself):
+        // the link signs whoever opens it in as that person, so it follows the same rule as every other act on them.
+        const verdict = canActOnPerson({ id: session.userId, role: session.userRole }, targetOf(user));
+        if (!verdict.ok) return refuse(reply, verdict);
 
-      return reply.code(200).send({
-        invitationUrl: await createInvitationUrl(user, tenant.slug),
+        return reply.code(200).send({
+          invitationUrl: await createInvitationUrl(user, tenant.slug),
+        });
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
@@ -1120,73 +1118,72 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return fail(reply, 400, 'invalid_body', 'notify must be true or false');
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const target = await findUserByIdSafe(db, id, session.tenantId);
+        if (!target) return fail(reply, 404, 'user_not_found', 'User not found');
+        if (target.kind === 'external') {
+          return fail(reply, 400, 'external_user', 'External users cannot be project members');
+        }
+        if (target.role === 'owner' || target.role === 'admin') {
+          return fail(reply, 400, 'implicit_access', 'Owners and admins are implicitly assigned to all projects');
+        }
 
-      const target = await findUserByIdSafe(db, id, session.tenantId);
-      if (!target) return fail(reply, 404, 'user_not_found', 'User not found');
-      if (target.kind === 'external') {
-        return fail(reply, 400, 'external_user', 'External users cannot be project members');
-      }
-      if (target.role === 'owner' || target.role === 'admin') {
-        return fail(reply, 400, 'implicit_access', 'Owners and admins are implicitly assigned to all projects');
-      }
-
-      const projects = await loadTenantProjects(db, session.tenantId);
-      const skipped: Array<{ projectId: string; reason: string }> = [];
-      const known = parsed.grants.filter((grant) => {
-        if (projects.has(grant.projectId)) return true;
-        skipped.push({ projectId: grant.projectId, reason: 'project_not_found' });
-        return false;
-      });
-
-      const administered = await projectsAdministeredBy(db, { userId: session.userId, role: session.userRole }, known.map((grant) => grant.projectId));
-      if (known.some((grant) => !administered.has(grant.projectId))) {
-        return fail(reply, 403, 'forbidden', 'You can only add people to projects you administer');
-      }
-
-      // Service access a person is given is clamped to what the actor holds themself (the same rule as inviting a person).
-      const servicePermissions = custom === undefined || custom === null
-        ? custom
-        : (await resolveRequestedTokenScope(db, session.userId, custom)) ?? {};
-
-      const applied = await applyProjectGrants(db, {
-        actorId: session.userId,
-        grants: known,
-        servicePermissions,
-        tenantId: session.tenantId,
-        userId: String(target._id),
-      });
-      skipped.push(...applied.skipped);
-
-      if (applied.added.length > 0 || applied.updated.length > 0) {
-        recordPeopleAudit(
-          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
-          auditActorOf(request, session),
-          {
-            event: 'user.projects.add',
-            resourceType: 'user',
-            resourceId: String(target._id),
-            metadata: { added: applied.added, updated: applied.updated },
-          },
-        );
-      }
-
-      if (body.notify === true && applied.added.length > 0) {
-        const tenant = await db.findTenantById(session.tenantId);
-        // A mail that cannot be sent (no mail server, no address) never undoes the memberships.
-        await sendProjectsAddedEmail({
-          adderName: request.rbacUser?.name || session.userEmail || 'An administrator',
-          companyName: tenant?.companyName ?? '',
-          projects: applied.added.map((projectId) => ({
-            name: projects.get(projectId)?.name ?? projectId,
-            role: known.find((grant) => grant.projectId === projectId)?.role ?? 'member',
-          })),
-          to: target,
+        const projects = await loadTenantProjects(db, session.tenantId);
+        const skipped: Array<{ projectId: string; reason: string }> = [];
+        const known = parsed.grants.filter((grant) => {
+          if (projects.has(grant.projectId)) return true;
+          skipped.push({ projectId: grant.projectId, reason: 'project_not_found' });
+          return false;
         });
-      }
 
-      return reply.code(200).send({ added: applied.added, updated: applied.updated, skipped });
+        const administered = await projectsAdministeredBy(db, { userId: session.userId, role: session.userRole }, known.map((grant) => grant.projectId));
+        if (known.some((grant) => !administered.has(grant.projectId))) {
+          return fail(reply, 403, 'forbidden', 'You can only add people to projects you administer');
+        }
+
+        // Service access a person is given is clamped to what the actor holds themself (the same rule as inviting a person).
+        const servicePermissions = custom === undefined || custom === null
+          ? custom
+          : (await resolveRequestedTokenScope(db, session.userId, custom)) ?? {};
+
+        const applied = await applyProjectGrants(db, {
+          actorId: session.userId,
+          grants: known,
+          servicePermissions,
+          tenantId: session.tenantId,
+          userId: String(target._id),
+        });
+        skipped.push(...applied.skipped);
+
+        if (applied.added.length > 0 || applied.updated.length > 0) {
+          recordPeopleAudit(
+            { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+            auditActorOf(request, session),
+            {
+              event: 'user.projects.add',
+              resourceType: 'user',
+              resourceId: String(target._id),
+              metadata: { added: applied.added, updated: applied.updated },
+            },
+          );
+        }
+
+        if (body.notify === true && applied.added.length > 0) {
+          const tenant = await db.findTenantById(session.tenantId);
+          // A mail that cannot be sent (no mail server, no address) never undoes the memberships.
+          await sendProjectsAddedEmail({
+            adderName: request.rbacUser?.name || session.userEmail || 'An administrator',
+            companyName: tenant?.companyName ?? '',
+            projects: applied.added.map((projectId) => ({
+              name: projects.get(projectId)?.name ?? projectId,
+              role: known.find((grant) => grant.projectId === projectId)?.role ?? 'member',
+            })),
+            to: target,
+          });
+        }
+
+        return reply.code(200).send({ added: applied.added, updated: applied.updated, skipped });
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -1255,111 +1252,111 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return fail(reply, 400, 'invalid_issuer', 'This issuer is not configured in the workspace');
       }
 
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(session.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(session.tenantId);
       if (!tenant) return reply.code(404).send({ error: 'Tenant not found' });
-      await db.switchToTenant(session.tenantDbName);
-
-      if (email && (await db.findUserByEmail(email))) {
-        return fail(reply, 409, 'email_taken', 'An account with this email address already exists');
-      }
-
-      const holders = await db.findUsersByExternalIdentity(issuer, subject);
-      if (holders.some((holder) => !holder.tenantId || String(holder.tenantId) === String(session.tenantId))) {
-        return fail(reply, 409, 'identity_taken', 'An account with this identity already exists');
-      }
-
-      // Groups first, so a refused group leaves no half-made account behind. An external account joins no group that grants access.
-      const groups = [];
-      for (const groupId of groupIds) {
-        const group = await db.findGroupById(groupId).catch(() => null);
-        if (!group || String(group.tenantId) !== String(session.tenantId)) {
-          return fail(reply, 400, 'group_not_found', 'Group not found');
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        if (email && (await db.findUserByEmail(email))) {
+          return fail(reply, 409, 'email_taken', 'An account with this email address already exists');
         }
-        const verdict = checkGroupMembership(
-          { id: session.userId, role: session.userRole },
-          targetOf({ role: 'user', kind: 'external', canLogin: false }),
-          group,
+
+        const holders = await db.findUsersByExternalIdentity(issuer, subject);
+        if (holders.some((holder) => !holder.tenantId || String(holder.tenantId) === String(session.tenantId))) {
+          return fail(reply, 409, 'identity_taken', 'An account with this identity already exists');
+        }
+
+        // Groups first, so a refused group leaves no half-made account behind. An external account joins no group that grants access.
+        const groups = [];
+        for (const groupId of groupIds) {
+          const group = await db.findGroupById(groupId).catch(() => null);
+          if (!group || String(group.tenantId) !== String(session.tenantId)) {
+            return fail(reply, 400, 'group_not_found', 'Group not found');
+          }
+          const verdict = checkGroupMembership(
+            { id: session.userId, role: session.userRole },
+            targetOf({ role: 'user', kind: 'external', canLogin: false }),
+            group,
+          );
+          if (!verdict.ok) return refuse(reply, verdict);
+          groups.push(group);
+        }
+
+        // Counts toward the licence's user limit, like every other account (and like the one a verified assertion creates).
+        const defaultProject = await ensureDefaultProject(session.tenantDbName, session.tenantId, session.userId || session.tenantId);
+        const quota = await checkResourceQuota(
+          {
+            domain: 'global',
+            licenseType: tenant.licenseType as LicenseType,
+            projectId: defaultProject._id ? String(defaultProject._id) : '',
+            tenantDbName: session.tenantDbName,
+            tenantId: session.tenantId,
+            userId: session.userId,
+          },
+          'users',
+          await db.iamCountUsers({ tenantId: session.tenantId }),
         );
-        if (!verdict.ok) return refuse(reply, verdict);
-        groups.push(group);
-      }
+        if (!quota.allowed) {
+          return fail(reply, 429, 'quota_exceeded', quota.reason || 'User quota exceeded');
+        }
 
-      // Counts toward the licence's user limit, like every other account (and like the one a verified assertion creates).
-      const defaultProject = await ensureDefaultProject(session.tenantDbName, session.tenantId, session.userId || session.tenantId);
-      const quota = await checkResourceQuota(
-        {
-          domain: 'global',
-          licenseType: tenant.licenseType as LicenseType,
-          projectId: defaultProject._id ? String(defaultProject._id) : '',
-          tenantDbName: session.tenantDbName,
+        const user = await createExternalAccount(db, {
+          email: email || undefined,
+          issuer,
+          licenseId: tenant.licenseType,
+          name: name || undefined,
+          subject,
           tenantId: session.tenantId,
-          userId: session.userId,
-        },
-        'users',
-        await db.iamCountUsers({ tenantId: session.tenantId }),
-      );
-      if (!quota.allowed) {
-        return fail(reply, 429, 'quota_exceeded', quota.reason || 'User quota exceeded');
-      }
+        });
 
-      const user = await createExternalAccount(db, {
-        email: email || undefined,
-        issuer,
-        licenseId: tenant.licenseType,
-        name: name || undefined,
-        subject,
-        tenantId: session.tenantId,
+        // No unique index (by design): of the accounts that hold the identity the OLDEST wins, a later one removes itself.
+        const rivals = await db.findUsersByExternalIdentity(issuer, subject);
+        const winner = rivals.find((candidate) => !candidate.tenantId || String(candidate.tenantId) === String(session.tenantId));
+        if (winner && String(winner._id) !== String(user._id)) {
+          await db.deleteUser(String(user._id)).catch((error: unknown) => {
+            logger.warn('Could not remove the duplicate of a concurrently created account', { error: error instanceof Error ? error.message : String(error) });
+          });
+          return fail(reply, 409, 'identity_taken', 'An account with this identity already exists');
+        }
+
+        for (const group of groups) {
+          await db.addGroupMember({
+            addedBy: session.userId,
+            groupId: String(group._id),
+            role: 'member',
+            source: 'local',
+            tenantId: session.tenantId,
+            userId: String(user._id),
+          });
+        }
+
+        let created: IUser = user;
+        if (body.active === false) {
+          const disabled = await setUserStatus({
+            actor: { type: 'user', userId: session.userId, email: session.userEmail, role: session.userRole },
+            ipAddress: getClientIp(request),
+            requestId: session.requestId,
+            status: 'disabled',
+            targetUserId: String(user._id),
+            tenantDbName: session.tenantDbName,
+            tenantId: session.tenantId,
+            userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
+          });
+          if (disabled.ok) created = disabled.user;
+        }
+
+        recordPeopleAudit(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+          auditActorOf(request, session),
+          {
+            event: 'user.external.create',
+            resourceType: 'user',
+            resourceId: String(user._id),
+            metadata: { issuer, groups: groups.map((group) => String(group._id)), active: body.active !== false },
+          },
+        );
+
+        return reply.code(201).send({ user: serializeUser(created) });
       });
-
-      // No unique index (by design): of the accounts that hold the identity the OLDEST wins, a later one removes itself.
-      const rivals = await db.findUsersByExternalIdentity(issuer, subject);
-      const winner = rivals.find((candidate) => !candidate.tenantId || String(candidate.tenantId) === String(session.tenantId));
-      if (winner && String(winner._id) !== String(user._id)) {
-        await db.deleteUser(String(user._id)).catch((error: unknown) => {
-          logger.warn('Could not remove the duplicate of a concurrently created account', { error: error instanceof Error ? error.message : String(error) });
-        });
-        return fail(reply, 409, 'identity_taken', 'An account with this identity already exists');
-      }
-
-      for (const group of groups) {
-        await db.addGroupMember({
-          addedBy: session.userId,
-          groupId: String(group._id),
-          role: 'member',
-          source: 'local',
-          tenantId: session.tenantId,
-          userId: String(user._id),
-        });
-      }
-
-      let created: IUser = user;
-      if (body.active === false) {
-        const disabled = await setUserStatus({
-          actor: { type: 'user', userId: session.userId, email: session.userEmail, role: session.userRole },
-          ipAddress: getClientIp(request),
-          requestId: session.requestId,
-          status: 'disabled',
-          targetUserId: String(user._id),
-          tenantDbName: session.tenantDbName,
-          tenantId: session.tenantId,
-          userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
-        });
-        if (disabled.ok) created = disabled.user;
-      }
-
-      recordPeopleAudit(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
-        auditActorOf(request, session),
-        {
-          event: 'user.external.create',
-          resourceType: 'user',
-          resourceId: String(user._id),
-          metadata: { issuer, groups: groups.map((group) => String(group._id)), active: body.active !== false },
-        },
-      );
-
-      return reply.code(201).send({ user: serializeUser(created) });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
@@ -1392,57 +1389,57 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return fail(reply, 400, 'invalid_body', `message is at most ${MAX_ACCESS_REQUEST_MESSAGE_LENGTH} characters`);
       }
 
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(session.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(session.tenantId);
       if (!tenant) return reply.code(404).send({ error: 'Tenant not found' });
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const user = await findUserByIdSafe(db, session.userId, session.tenantId);
+        if (!user) return fail(reply, 404, 'user_not_found', 'User not found');
 
-      const user = await findUserByIdSafe(db, session.userId, session.tenantId);
-      if (!user) return fail(reply, 404, 'user_not_found', 'User not found');
-
-      // A stale id (a deleted project) is no access.
-      let hasAccess = user.role === 'owner' || user.role === 'admin';
-      if (!hasAccess) {
-        const reachable = await collectAccessibleProjectIds(db, String(user._id), user.projectIds);
-        if (reachable.length > 0) {
-          const existing = await loadTenantProjects(db, session.tenantId);
-          hasAccess = reachable.some((projectId) => existing.has(projectId));
+        // A stale id (a deleted project) is no access.
+        let hasAccess = user.role === 'owner' || user.role === 'admin';
+        if (!hasAccess) {
+          const reachable = await collectAccessibleProjectIds(db, String(user._id), user.projectIds);
+          if (reachable.length > 0) {
+            const existing = await loadTenantProjects(db, session.tenantId);
+            hasAccess = reachable.some((projectId) => existing.has(projectId));
+          }
         }
-      }
-      if (hasAccess) {
-        return fail(reply, 409, 'already_has_access', 'You already have access to a project');
-      }
+        if (hasAccess) {
+          return fail(reply, 409, 'already_has_access', 'You already have access to a project');
+        }
 
-      const now = new Date();
-      const last = user.accessRequest?.at ? new Date(user.accessRequest.at).getTime() : 0;
-      const waitMs = last + ACCESS_REQUEST_INTERVAL_MS - now.getTime();
-      if (last > 0 && waitMs > 0) {
-        return tooManyRequests(reply, Math.ceil(waitMs / 1000));
-      }
+        const now = new Date();
+        const last = user.accessRequest?.at ? new Date(user.accessRequest.at).getTime() : 0;
+        const waitMs = last + ACCESS_REQUEST_INTERVAL_MS - now.getTime();
+        if (last > 0 && waitMs > 0) {
+          return tooManyRequests(reply, Math.ceil(waitMs / 1000));
+        }
 
-      const accessRequest = { at: now, ...(message ? { message } : {}) };
-      await db.updateUser(String(user._id), { accessRequest });
+        const accessRequest = { at: now, ...(message ? { message } : {}) };
+        await db.updateUser(String(user._id), { accessRequest });
 
-      recordPeopleAudit(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
-        auditActorOf(request, session),
-        {
-          event: 'user.access.request',
-          resourceType: 'user',
-          resourceId: String(user._id),
-          metadata: { hasMessage: message.length > 0 },
-        },
-      );
+        recordPeopleAudit(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+          auditActorOf(request, session),
+          {
+            event: 'user.access.request',
+            resourceType: 'user',
+            resourceId: String(user._id),
+            metadata: { hasMessage: message.length > 0 },
+          },
+        );
 
-      await sendAccessRequestEmails(db, {
-        at: now,
-        companyName: tenant.companyName,
-        message: message || undefined,
-        requester: user,
-        tenantId: session.tenantId,
+        await sendAccessRequestEmails(db, {
+          at: now,
+          companyName: tenant.companyName,
+          message: message || undefined,
+          requester: user,
+          tenantId: session.tenantId,
+        });
+
+        return reply.code(200).send({ accessRequest: { at: now.toISOString(), message: message || null } });
       });
-
-      return reply.code(200).send({ accessRequest: { at: now.toISOString(), message: message || null } });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });

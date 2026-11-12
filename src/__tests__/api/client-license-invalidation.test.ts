@@ -15,7 +15,10 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/limits/invalidate', () => ({ invalidateTenantLicenseState: h.invalidate }));
-vi.mock('@/lib/database', () => ({ getDatabase: async () => h.db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => h.db,
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(h.db)),
+}));
 vi.mock('@/lib/license/license-manager', () => ({
   LicenseManager: {
     verifyOfflineLicenseKey: vi.fn(async () => ({ licenseId: 'L1', licenseType: 'PRO', payload: {}, expiresAt: new Date() })),

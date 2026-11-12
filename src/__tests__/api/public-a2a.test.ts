@@ -14,8 +14,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/lib/database', async () => {
   const errors = await import('@/lib/database/provider/errors');
+  const getDatabase = vi.fn();
   return {
-    getDatabase: vi.fn(),
+    getDatabase,
+    // The real helper: bind the tenant for the whole callback on the shared provider.
+    runWithTenantScope: vi.fn(async (tenantDbName: string, fn: (db: unknown) => unknown) => {
+      const db = await getDatabase() as { runWithTenant: (name: string, run: () => unknown) => unknown };
+      return db.runWithTenant(tenantDbName, () => fn(db));
+    }),
     AgentRunConflictError: errors.AgentRunConflictError,
     AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
   };

@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import {
   activatePromptDeployment,
   comparePromptVersions,
@@ -99,51 +99,50 @@ export const promptsApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const prompts = await listPrompts(session.tenantDbName, projectId, {});
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const versionCounts = await Promise.all(
+          prompts.map((prompt) =>
+            db
+              .listPromptVersions(prompt.id, projectId)
+              .then((versions) => versions.length)
+              .catch(() => 0),
+          ),
+        );
 
-      const versionCounts = await Promise.all(
-        prompts.map((prompt) =>
-          db
-            .listPromptVersions(prompt.id, projectId)
-            .then((versions) => versions.length)
-            .catch(() => 0),
-        ),
-      );
+        const totalVersions = versionCounts.reduce((sum, count) => sum + count, 0);
+        const totalVariablePrompts = prompts.filter((prompt) => /{{\s*\w+\s*}}/.test(prompt.template)).length;
+        const recentlyUpdated = [...prompts]
+          .sort((left, right) => {
+            const leftTime = left.updatedAt ? new Date(left.updatedAt).getTime() : 0;
+            const rightTime = right.updatedAt ? new Date(right.updatedAt).getTime() : 0;
+            return rightTime - leftTime;
+          })
+          .slice(0, 6)
+          .map((prompt) => ({
+            createdAt: prompt.createdAt,
+            currentVersion: prompt.currentVersion ?? 1,
+            id: prompt.id,
+            key: prompt.key,
+            name: prompt.name,
+            updatedAt: prompt.updatedAt,
+          }));
 
-      const totalVersions = versionCounts.reduce((sum, count) => sum + count, 0);
-      const totalVariablePrompts = prompts.filter((prompt) => /{{\s*\w+\s*}}/.test(prompt.template)).length;
-      const recentlyUpdated = [...prompts]
-        .sort((left, right) => {
-          const leftTime = left.updatedAt ? new Date(left.updatedAt).getTime() : 0;
-          const rightTime = right.updatedAt ? new Date(right.updatedAt).getTime() : 0;
-          return rightTime - leftTime;
-        })
-        .slice(0, 6)
-        .map((prompt) => ({
-          createdAt: prompt.createdAt,
-          currentVersion: prompt.currentVersion ?? 1,
-          id: prompt.id,
-          key: prompt.key,
-          name: prompt.name,
-          updatedAt: prompt.updatedAt,
-        }));
-
-      return reply.code(200).send({
-        overview: {
-          avgVersionsPerPrompt: prompts.length > 0
-            ? Math.round((totalVersions / prompts.length) * 10) / 10
-            : 0,
-          totalPrompts: prompts.length,
-          totalVariablePrompts,
-          totalVersions,
-        },
-        recentlyUpdated,
-        versionDistribution: [
-          { count: versionCounts.filter((count) => count <= 1).length, label: '1 version' },
-          { count: versionCounts.filter((count) => count >= 2 && count <= 5).length, label: '2-5 versions' },
-          { count: versionCounts.filter((count) => count > 5).length, label: '6+ versions' },
-        ],
+        return reply.code(200).send({
+          overview: {
+            avgVersionsPerPrompt: prompts.length > 0
+              ? Math.round((totalVersions / prompts.length) * 10) / 10
+              : 0,
+            totalPrompts: prompts.length,
+            totalVariablePrompts,
+            totalVersions,
+          },
+          recentlyUpdated,
+          versionDistribution: [
+            { count: versionCounts.filter((count) => count <= 1).length, label: '1 version' },
+            { count: versionCounts.filter((count) => count >= 2 && count <= 5).length, label: '2-5 versions' },
+            { count: versionCounts.filter((count) => count > 5).length, label: '6+ versions' },
+          ],
+        });
       });
     } catch (error) {
       logger.error('Prompt stats error', { error });

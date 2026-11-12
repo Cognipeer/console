@@ -20,7 +20,14 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock('@/lib/database', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/database')>();
-  return { ...actual, getDatabase: hoisted.getDatabase };
+  return {
+    ...actual,
+    getDatabase: hoisted.getDatabase,
+    runWithTenantScope: async (tenantDbName: string, fn: (db: any) => unknown) => {
+      const db = await hoisted.getDatabase();
+      return db.runWithTenant(tenantDbName, () => fn(db));
+    },
+  };
 });
 
 vi.mock('@/lib/security/outboundFetch', () => ({

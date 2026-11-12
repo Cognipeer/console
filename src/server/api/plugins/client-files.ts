@@ -3,7 +3,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { assertStorageStock } from '@/lib/limits';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
   composeUploadKeyHint,
@@ -261,49 +261,51 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(429).send({ error: rateLimitResult.reason || 'Rate limit exceeded' });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(ctx.tenantDbName);
-      const currentFilesTotal = await db.countFileRecords({ projectId: ctx.projectId });
-      const resourceCheck = await checkResourceQuota(quotaContext, 'filesTotal', currentFilesTotal);
-      if (!resourceCheck.allowed) {
-        return reply.code(429).send({ error: resourceCheck.reason || 'File quota exceeded' });
-      }
-
-      const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
-      if (storageLimit !== undefined && storageLimit !== -1) {
-        const currentBytes = await db.sumFileRecordBytes({ projectId: ctx.projectId });
-        const projected = currentBytes + estimatedFileBytes;
-        if (projected > storageLimit) {
-          return reply.code(429).send({
-            error: `storageBytes limit exceeded (${projected}/${storageLimit})`,
-          });
+      // Narrowed above; a closure does not keep that narrowing.
+      const { data: fileData, fileName } = body;
+      return await runWithTenantScope(ctx.tenantDbName, async (db) => {
+        const currentFilesTotal = await db.countFileRecords({ projectId: ctx.projectId });
+        const resourceCheck = await checkResourceQuota(quotaContext, 'filesTotal', currentFilesTotal);
+        if (!resourceCheck.allowed) {
+          return reply.code(429).send({ error: resourceCheck.reason || 'File quota exceeded' });
         }
-      }
 
-      // The plan's tenant-wide storage (hosted deployments only; a no-op elsewhere): 413 'storage_quota_exceeded'.
-      await assertStorageStock({
-        tenantId: ctx.tenantId,
-        incomingBytes: estimatedFileBytes,
-        source: { type: 'api_token', id: tokenId },
-      });
+        const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
+        if (storageLimit !== undefined && storageLimit !== -1) {
+          const currentBytes = await db.sumFileRecordBytes({ projectId: ctx.projectId });
+          const projected = currentBytes + estimatedFileBytes;
+          if (projected > storageLimit) {
+            return reply.code(429).send({
+              error: `storageBytes limit exceeded (${projected}/${storageLimit})`,
+            });
+          }
+        }
 
-      const result = await uploadFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        bucketKey,
-        contentType: body.contentType as string | undefined,
-        convertToMarkdown: (body.convertToMarkdown as boolean | undefined) ?? false,
-        createdBy: ctx.user?._id?.toString() ?? 'api',
-        data: body.data,
-        fileName: body.fileName,
-        keyHint: destination.keyHint,
-        ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
-        // A client that goes away stops the OCR run it was waiting for.
-        ...(extraction.extraction?.ocr ? { signal: clientGone(reply) } : {}),
-        metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
-      });
+        // The plan's tenant-wide storage (hosted deployments only; a no-op elsewhere): 413 'storage_quota_exceeded'.
+        await assertStorageStock({
+          tenantId: ctx.tenantId,
+          incomingBytes: estimatedFileBytes,
+          source: { type: 'api_token', id: tokenId },
+        });
 
-      return reply.code(201).send({
-        file: result.record,
-        message: 'File uploaded successfully',
+        const result = await uploadFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+          bucketKey,
+          contentType: body.contentType as string | undefined,
+          convertToMarkdown: (body.convertToMarkdown as boolean | undefined) ?? false,
+          createdBy: ctx.user?._id?.toString() ?? 'api',
+          data: fileData,
+          fileName,
+          keyHint: destination.keyHint,
+          ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
+          // A client that goes away stops the OCR run it was waiting for.
+          ...(extraction.extraction?.ocr ? { signal: clientGone(reply) } : {}),
+          metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
+        });
+
+        return reply.code(201).send({
+          file: result.record,
+          message: 'File uploaded successfully',
+        });
       });
     } catch (error) {
       return fail(reply, error, 'upload', { storage: true, body: true });

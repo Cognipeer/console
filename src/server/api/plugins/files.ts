@@ -3,7 +3,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { isFileTypeFilter } from '@/lib/database/fileTypeFilter';
 import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
 import { providerRegistry } from '@/lib/providers';
@@ -89,12 +89,12 @@ async function withAgentIds<T extends { purpose?: string; agentKey?: string }>(
   if (keys.length === 0) return records;
   const ids = new Map<string, string>();
   try {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    for (const key of keys) {
-      const agent = await db.findAgentByKey(key, projectId);
-      if (agent) ids.set(key, String(agent._id));
-    }
+    await runWithTenantScope(tenantDbName, async (db) => {
+      for (const key of keys) {
+        const agent = await db.findAgentByKey(key, projectId);
+        if (agent) ids.set(key, String(agent._id));
+      }
+    });
   } catch (error) {
     logger.warn('Could not resolve the agents of session files', { error: error instanceof Error ? error.message : String(error) });
   }
@@ -741,49 +741,49 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-      const currentFilesTotal = await db.countFileRecords({ projectId });
-      const resourceCheck = await checkResourceQuota(
-        quotaContext,
-        'filesTotal',
-        currentFilesTotal,
-      );
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const currentFilesTotal = await db.countFileRecords({ projectId });
+        const resourceCheck = await checkResourceQuota(
+          quotaContext,
+          'filesTotal',
+          currentFilesTotal,
+        );
 
-      if (!resourceCheck.allowed) {
-        return reply.code(429).send({
-          error: resourceCheck.reason || 'File quota exceeded',
-        });
-      }
-
-      const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
-      if (storageLimit !== undefined && storageLimit !== -1) {
-        const currentBytes = await db.sumFileRecordBytes({ projectId });
-        const projected = currentBytes + estimatedFileBytes;
-        if (projected > storageLimit) {
+        if (!resourceCheck.allowed) {
           return reply.code(429).send({
-            error: `storageBytes limit exceeded (${projected}/${storageLimit})`,
+            error: resourceCheck.reason || 'File quota exceeded',
           });
         }
-      }
 
-      // The plan's tenant-wide storage is checked by `uploadFile` (413 'storage_quota_exceeded').
-      const result = await uploadFile(session.tenantDbName, session.tenantId, projectId, {
-        bucketKey,
-        contentType: body.contentType as string | undefined,
-        convertToMarkdown: body.convertToMarkdown !== false,
-        // The Document Store does not wait for the converter: the record says `pending` and a job fills it in.
-        markdown: 'queued',
-        createdBy: session.userId,
-        data: body.data as string,
-        fileName: body.fileName as string,
-        ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
-        ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
-        metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
-        providerKey: (body.providerKey as string | undefined) ?? undefined,
+        const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
+        if (storageLimit !== undefined && storageLimit !== -1) {
+          const currentBytes = await db.sumFileRecordBytes({ projectId });
+          const projected = currentBytes + estimatedFileBytes;
+          if (projected > storageLimit) {
+            return reply.code(429).send({
+              error: `storageBytes limit exceeded (${projected}/${storageLimit})`,
+            });
+          }
+        }
+
+        // The plan's tenant-wide storage is checked by `uploadFile` (413 'storage_quota_exceeded').
+        const result = await uploadFile(session.tenantDbName, session.tenantId, projectId, {
+          bucketKey,
+          contentType: body.contentType as string | undefined,
+          convertToMarkdown: body.convertToMarkdown !== false,
+          // The Document Store does not wait for the converter: the record says `pending` and a job fills it in.
+          markdown: 'queued',
+          createdBy: session.userId,
+          data: body.data as string,
+          fileName: body.fileName as string,
+          ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
+          ...(extraction.extraction ? { extraction: extraction.extraction } : {}),
+          metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
+          providerKey: (body.providerKey as string | undefined) ?? undefined,
+        });
+
+        return reply.code(201).send({ record: result.record });
       });
-
-      return reply.code(201).send({ record: result.record });
     } catch (error) {
       return fail(reply, error, 'upload', { storage: true, body: true });
     }
