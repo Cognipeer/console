@@ -5,7 +5,7 @@
  * per-node negative cache, the body limit and media type, every generic auth
  * mode, disabled / filtered answers, the accepted run and its flags,
  * de-duplication with the attempt chain, the run rate, the abuse ceiling,
- * rotation grace, the delivery log, and the retired vendor presets (410).
+ * rotation grace and the delivery log.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -337,49 +337,6 @@ describe('a generic webhook', () => {
     const { trigger, secret } = await webhookTrigger({ auth: 'header', header_name: 'x-ticket-secret' }, { variables: { pr: '{{payload.number}}' } });
     expect((await post(hookUrl(trigger), JSON.stringify({ number: 9 }), { 'x-ticket-secret': secret })).statusCode).toBe(202);
     expect((await post(hookUrl(trigger), JSON.stringify({ number: 9 }), { 'x-ticket-secret': 'wrong' })).statusCode).toBe(401);
-  });
-});
-
-describe('retired vendor presets', () => {
-  /** A webhook trigger stored the way the vendor presets left it (the preset and auth are what the old API wrote). */
-  async function retiredTrigger(preset: 'github' | 'gitlab' | 'azure_devops', auth: 'github_signature' | 'gitlab_token' | 'basic') {
-    const parsed = parseWebhookWrite({ preset: 'generic' }, null);
-    if (!parsed.ok) throw new Error(JSON.stringify(parsed.errors));
-    const trigger = await createAgentTrigger(scope(), AGENT_KEY, {
-      name: `legacy ${preset}`, type: 'webhook', webhook: { ...parsed.webhook, preset, auth }, prompt: 'Review.',
-    }, 'user-1');
-    return { trigger, secret: parsed.secret! };
-  }
-
-  const gone = { error: { type: 'gone', message: 'This webhook trigger used a retired vendor preset. Recreate it as a connector trigger.', code: 'webhook_preset_retired' } };
-
-  it.each([
-    ['github', 'github_signature'],
-    ['gitlab', 'gitlab_token'],
-    ['azure_devops', 'basic'],
-  ] as const)('%s: answers 410 before authentication, whatever the request carries, and starts nothing', async (preset, auth) => {
-    const { trigger, secret } = await retiredTrigger(preset, auth);
-    const unsigned = await post(hookUrl(trigger), JSON.stringify(PR));
-    expect(unsigned.statusCode).toBe(410);
-    expect(json(unsigned)).toEqual(gone);
-    const signed = await deliver(trigger, secret, PR);
-    expect(signed.statusCode).toBe(410);
-    expect(await runsOf(String(trigger._id))).toHaveLength(0);
-    expect(hoisted.publish).not.toHaveBeenCalled();
-  });
-
-  it('is gone even for a body that is not JSON or a form body (the check precedes parsing)', async () => {
-    const { trigger } = await retiredTrigger('github', 'github_signature');
-    const res = await app.inject({ method: 'POST', url: hookUrl(trigger), headers: { 'content-type': 'application/json' }, payload: 'not json' });
-    expect(res.statusCode).toBe(410);
-  });
-
-  it('a retired trigger serializes with webhook.retired true; a generic one with false', async () => {
-    const { trigger } = await retiredTrigger('github', 'github_signature');
-    const { serializeAgentTrigger } = await import('@/lib/services/agents/agentTriggers');
-    expect((serializeAgentTrigger(trigger) as unknown as { webhook: { retired: boolean; preset: string } }).webhook).toMatchObject({ retired: true, preset: 'github' });
-    const { trigger: generic } = await webhookTrigger({});
-    expect((serializeAgentTrigger(generic) as unknown as { webhook: { retired: boolean } }).webhook.retired).toBe(false);
   });
 });
 

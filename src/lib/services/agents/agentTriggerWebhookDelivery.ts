@@ -5,13 +5,10 @@
  * allow-list, the filter, de-duplication, the run rate, the turn and
  * `fireTrigger`) is `dispatchTriggerEvent`, shared with connector events. Also
  * the same turn for a Run now with a sample payload and its dry run.
- *
- * A webhook that was stored with a retired vendor preset never gets here: its
- * URL answers 410 (`public-hooks.ts`), and the check below is the backstop.
  */
 
 import { createLogger } from '@/lib/core/logger';
-import type { AgentTriggerOfType, DatabaseProvider, IAgentTrigger, IAgentVariable } from '@/lib/database';
+import type { AgentTriggerOfType, AgentTriggerWebhookAuth, DatabaseProvider, IAgentTrigger, IAgentVariable } from '@/lib/database';
 import { type TriggerTenant, triggerAgentConfig } from './agentTriggers';
 import { apiErrorBody } from './agentRunService';
 import {
@@ -19,7 +16,6 @@ import {
   dedupMaterial,
   deliveryIdentity,
   isHeaderAuth,
-  isRetiredWebhook,
   verifyBodyAuth,
   type DeliveryIdentity,
   type HeaderBag,
@@ -132,14 +128,6 @@ export function unauthorizedAnswer(): WebhookAnswer {
   };
 }
 
-/** The answer for a webhook stored with a retired vendor preset (`public-hooks.ts` answers it before auth). */
-export function retiredWebhookAnswer(): WebhookAnswer {
-  return {
-    status: 410,
-    body: apiErrorBody('gone', 'This webhook trigger used a retired vendor preset. Recreate it as a connector trigger.', 'webhook_preset_retired'),
-  };
-}
-
 // ── The delivery ─────────────────────────────────────────────────────────
 
 export interface WebhookDeliveryInput {
@@ -169,8 +157,7 @@ export async function processWebhookDelivery(db: DatabaseProvider, input: Webhoo
     recordDelivery(db, trigger, { ...entry, identity, bytes, receivedAt });
 
   try {
-    if (isRetiredWebhook(webhook)) return retiredWebhookAnswer();
-    const auth = webhook.auth as Exclude<typeof webhook.auth, 'github_signature' | 'gitlab_token' | 'basic'>;
+    const auth = webhook.auth as AgentTriggerWebhookAuth;
 
     // 7. The body signature, over the exact bytes; a header mode was checked before the body was read.
     let authenticated = input.headerAuthenticated && isHeaderAuth(auth);

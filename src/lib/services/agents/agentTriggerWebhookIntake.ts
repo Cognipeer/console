@@ -18,11 +18,9 @@ import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import type { VariableIssue } from './agentVariables';
 import {
   DEFAULT_WEBHOOK_HEADER_NAME,
-  RETIRED_WEBHOOK_PRESETS,
   WEBHOOK_PRESET_AUTH,
   WEBHOOK_PRESETS,
   headerNameProblem,
-  isRetiredWebhook,
   standardSecretProblem,
 } from './agentTriggerWebhookAuth';
 import { parseFilterRules } from './agentTriggerWebhookView';
@@ -59,22 +57,15 @@ export type WebhookWrite =
  * one: absent fields keep its values, and its hook id and secret stay unless
  * the secret rules replace the secret: moving away from Standard Webhooks
  * generates a new one, moving to it needs the sender's `secret`. A trigger that
- * becomes a webhook one gets a new hook id and secret; so does one stored with
- * a retired vendor preset (it is rewritten as a generic webhook, not edited in place).
+ * becomes a webhook one gets a new hook id and secret.
  */
 export function parseWebhookWrite(value: Record<string, unknown>, existing: AgentTriggerWebhook | null | undefined): WebhookWrite {
-  const retired = Boolean(existing && isRetiredWebhook(existing));
-  const prev = retired ? null : existing ?? null;
+  const prev = existing ?? null;
   const errors: VariableIssue[] = [];
   const issue = (field: string, message: string) => errors.push({ field: `webhook.${field}`, message });
 
   const given = (value.preset ?? prev?.preset) as AgentTriggerWebhookPreset | undefined;
-  if (typeof given === 'string' && (RETIRED_WEBHOOK_PRESETS as readonly string[]).includes(given)) {
-    issue('preset', `preset "${given}" is retired: use a connector trigger for that service, or the "generic" preset`);
-    return { ok: false, errors };
-  }
-  // A retired trigger that is rewritten without naming the preset becomes a generic one.
-  const preset = given ?? (retired ? 'generic' : undefined);
+  const preset = given;
   if (!preset || !WEBHOOK_PRESETS.includes(preset)) {
     issue('preset', `preset must be one of: ${WEBHOOK_PRESETS.join(', ')}`);
     return { ok: false, errors };
@@ -185,8 +176,6 @@ export function serializeWebhook(webhook: AgentTriggerWebhook, tenantId: string)
     events: webhook.events ?? [],
     filter: webhook.filter ?? [],
     include_payload: webhook.includePayload,
-    // A retired vendor preset: read-only legacy, convert it to a connector or generic trigger.
-    retired: isRetiredWebhook(webhook),
   };
 }
 

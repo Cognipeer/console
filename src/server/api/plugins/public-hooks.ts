@@ -9,8 +9,7 @@
  * (checked once it is read). An unknown URL is 404 and remembered per node for
  * a minute; a found trigger is never cached, so disabling, rotating or deleting
  * applies at once on every replica. A failed lookup is 503 (senders
- * retry it) and is not remembered. A trigger stored with a retired vendor
- * preset answers 410 before anything is checked: it never runs again.
+ * retry it) and is not remembered.
  *
  * The body is kept as the exact bytes received (signatures cover them), within
  * AGENT_WEBHOOK_BODY_LIMIT_BYTES; anything but JSON is 415. Floods from many
@@ -29,8 +28,8 @@ import type { AgentTriggerOfType, AgentTriggerWebhookAuth, IAgentTrigger, ITenan
 import { authz } from '@/lib/iam/routeAuthz';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { gatePublicRequestRate } from '../publicRpmGate';
-import { isHeaderAuth, isRetiredWebhook, verifyHeaderAuth } from '@/lib/services/agents/agentTriggerWebhookAuth';
-import { processWebhookDelivery, recordDelivery, retiredWebhookAnswer, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/agentTriggerWebhookDelivery';
+import { isHeaderAuth, verifyHeaderAuth } from '@/lib/services/agents/agentTriggerWebhookAuth';
+import { processWebhookDelivery, recordDelivery, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/agentTriggerWebhookDelivery';
 import { openWebhookSecrets } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { countRequest } from '@/lib/services/auth/sharedRateCounter';
 
@@ -172,9 +171,6 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
   if (!trigger || trigger.type !== 'webhook' || trigger.webhook.hookId !== hookId || trigger.tenantId !== String(tenant._id)) {
     return miss();
   }
-
-  // A retired vendor preset answers before auth: nothing about the request is checked or run.
-  if (isRetiredWebhook(trigger.webhook)) return send(reply, retiredWebhookAnswer());
 
   const webhook = trigger.webhook;
   const auth = webhook.auth as AgentTriggerWebhookAuth;
