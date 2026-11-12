@@ -15,7 +15,10 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkBudget: hoisted.checkBudget,
   settleUsageBudget: hoisted.settleUsageBudget,
 }));
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase()),
+}));
 
 import {
   agentSpendSettler,
