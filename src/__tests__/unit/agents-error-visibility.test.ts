@@ -7,9 +7,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { FastifyRequest } from 'fastify';
 
-const authorizeServiceForRequest = vi.fn();
+const serviceActionAllowedForRequest = vi.fn();
 vi.mock('@/server/api/fastify-utils', () => ({
-  authorizeServiceForRequest: (...args: unknown[]) => authorizeServiceForRequest(...args),
+  serviceActionAllowedForRequest: (...args: unknown[]) => serviceActionAllowedForRequest(...args),
 }));
 
 import { canSeeRawProviderErrors } from '@/server/api/plugins/agents/agentsErrorVisibility';
@@ -24,20 +24,20 @@ async function messageFor(req: FastifyRequest, error: Error): Promise<string> {
 
 describe('canSeeRawProviderErrors', () => {
   beforeEach(() => {
-    authorizeServiceForRequest.mockReset();
-    authorizeServiceForRequest.mockResolvedValue({ allowed: false });
+    serviceActionAllowedForRequest.mockReset();
+    serviceActionAllowedForRequest.mockResolvedValue(false);
   });
 
   it('is true for a tenant owner or admin without asking the policy engine', async () => {
     expect(await canSeeRawProviderErrors(request({ rbacUser: { role: 'owner' } }))).toBe(true);
     expect(await canSeeRawProviderErrors(request({ apiContextHeaders: { 'x-user-role': 'admin' } }))).toBe(true);
-    expect(authorizeServiceForRequest).not.toHaveBeenCalled();
+    expect(serviceActionAllowedForRequest).not.toHaveBeenCalled();
   });
 
   it('is true for a member holding admin on the agents service', async () => {
-    authorizeServiceForRequest.mockResolvedValue({ allowed: true });
+    serviceActionAllowedForRequest.mockResolvedValue(true);
     expect(await canSeeRawProviderErrors(request({ rbacUser: { role: 'member' } }))).toBe(true);
-    expect(authorizeServiceForRequest).toHaveBeenCalledWith(expect.anything(), 'agents', { level: 'admin' });
+    expect(serviceActionAllowedForRequest).toHaveBeenCalledWith(expect.anything(), 'agents', 'admin');
   });
 
   it('is false for a member without that right', async () => {
@@ -46,12 +46,24 @@ describe('canSeeRawProviderErrors', () => {
 
   it('is false for an API-token request, whoever owns the token', async () => {
     expect(await canSeeRawProviderErrors(request({ apiTokenContext: { tenantId: 't' }, rbacUser: { role: 'owner' } }))).toBe(false);
-    expect(authorizeServiceForRequest).not.toHaveBeenCalled();
+    expect(serviceActionAllowedForRequest).not.toHaveBeenCalled();
   });
 
   it('is false when the policy engine cannot decide', async () => {
-    authorizeServiceForRequest.mockRejectedValue(new Error('engine down'));
+    serviceActionAllowedForRequest.mockRejectedValue(new Error('engine down'));
     expect(await canSeeRawProviderErrors(request({ rbacUser: { role: 'member' } }))).toBe(false);
+  });
+
+  it('leaves the request decision state as it found it', async () => {
+    const req = request({ rbacUser: { role: 'member' } }) as FastifyRequest & { iamDenial?: unknown; iamDecisionId?: string };
+    serviceActionAllowedForRequest.mockImplementation(async (r: typeof req) => {
+      r.iamDecisionId = 'dec-visibility';
+      r.iamDenial = { code: 'authorization_unavailable' };
+      throw new Error('engine down');
+    });
+    expect(await canSeeRawProviderErrors(req)).toBe(false);
+    expect(req.iamDecisionId).toBeUndefined();
+    expect(req.iamDenial).toBeUndefined();
   });
 });
 
@@ -61,8 +73,8 @@ describe('the message a viewer reads', () => {
   const failure = new Error('Cannot read properties of undefined (reading "foo") using key sk-proj-abcdefghijklmnopqrstuv');
 
   beforeEach(() => {
-    authorizeServiceForRequest.mockReset();
-    authorizeServiceForRequest.mockResolvedValue({ allowed: false });
+    serviceActionAllowedForRequest.mockReset();
+    serviceActionAllowedForRequest.mockResolvedValue(false);
   });
 
   it('is the generic line for a viewer without the right', async () => {

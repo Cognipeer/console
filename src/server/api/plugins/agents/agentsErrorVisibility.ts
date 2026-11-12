@@ -10,7 +10,7 @@
  */
 
 import type { FastifyRequest } from 'fastify';
-import { authorizeServiceForRequest } from '../../fastify-utils';
+import { serviceActionAllowedForRequest } from '../../fastify-utils';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('api:agents:error-visibility');
@@ -19,11 +19,17 @@ export async function canSeeRawProviderErrors(request: FastifyRequest): Promise<
   if (request.apiTokenContext) return false;
   const role = request.rbacUser?.role ?? request.apiContextHeaders?.['x-user-role'];
   if (role === 'owner' || role === 'admin') return true;
+  // Asked quietly: a "no" only picks which message to show, so it writes no audit row, and the
+  // request keeps the decision state it had (no X-Decision-Id for a check the caller never made).
+  const { iamDenial, iamDecisionId } = request;
   try {
-    return (await authorizeServiceForRequest(request, 'agents', { level: 'admin' })).allowed;
+    return await serviceActionAllowedForRequest(request, 'agents', 'admin');
   } catch (error) {
     // An undecidable question is a "no": the generic message is always safe.
     logger.warn('Could not decide who may see raw provider errors', { error: error instanceof Error ? error.message : String(error) });
     return false;
+  } finally {
+    request.iamDenial = iamDenial;
+    request.iamDecisionId = iamDecisionId;
   }
 }
