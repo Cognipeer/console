@@ -17,6 +17,7 @@
  *    and is decided in `@/lib/quota/targets`; this file only builds the query
  *    and reads the answer.
  */
+import { ApiError, apiGet } from '@/lib/api/client';
 import type { QuotaTargetSource } from '@/lib/quota/targets';
 import { includesFolded } from '@/lib/shared/searchFold';
 
@@ -34,6 +35,28 @@ export interface PickerOption {
 export const PICKER_LIMIT = 20;
 
 type Fetcher = (url: string) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+
+/**
+ * The default fetcher: a GET through the shared client, shaped like the part of a `Response` the sources read. A
+ * refusal is an answer (`ok: false` with its status), a lost connection rejects, and a body that is not JSON cannot be
+ * read (`json()` rejects), as with a plain `fetch`.
+ */
+async function apiFetch(url: string, init?: { signal?: AbortSignal }): ReturnType<Fetcher> {
+  try {
+    const body = await apiGet<unknown>(url, { signal: init?.signal });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => {
+        if (body === undefined || typeof body === 'string') throw new SyntaxError('The answer is not JSON');
+        return body;
+      },
+    };
+  } catch (error) {
+    if (!(error instanceof ApiError)) throw error;
+    return { ok: false, status: error.status, json: async () => error.payload };
+  }
+}
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
@@ -121,7 +144,7 @@ async function searchAgents(fetcher: Fetcher, query: string): Promise<PickerOpti
 export async function searchPickerOptions(
   type: PickerType,
   query: string,
-  fetcher: Fetcher = (url) => fetch(url, { cache: 'no-store' }),
+  fetcher: Fetcher = apiFetch,
 ): Promise<PickerOption[]> {
   if (type === 'agent') return searchAgents(fetcher, query);
 
@@ -140,7 +163,7 @@ export async function searchPickerOptions(
 export async function resolvePickerOption(
   type: PickerType,
   id: string,
-  fetcher: Fetcher = (url) => fetch(url, { cache: 'no-store' }),
+  fetcher: Fetcher = apiFetch,
 ): Promise<PickerOption | undefined> {
   if (!id) return undefined;
   if (type === 'agent') return (await searchAgents(fetcher, id)).find((option) => option.value === id);
@@ -169,8 +192,6 @@ export type FetchLike = (
   url: string,
   init?: { signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
-
-const browserFetch: FetchLike = (url, init) => fetch(url, { cache: 'no-store', ...init });
 
 /** The server clips a query here too (`SEARCH_MAX_QUERY_LENGTH`); sending more only costs bytes. */
 const MAX_QUERY_LENGTH = 100;
@@ -269,7 +290,7 @@ export type TargetSearchResult =
 export async function searchTargetOptions(
   source: QuotaTargetSource,
   query: string,
-  fetcher: FetchLike = browserFetch,
+  fetcher: FetchLike = apiFetch,
   signal?: AbortSignal,
 ): Promise<TargetSearchResult> {
   let response: Awaited<ReturnType<FetchLike>>;
@@ -315,7 +336,7 @@ export type TargetResolution =
 export async function resolveTargetOption(
   source: QuotaTargetSource,
   value: string,
-  fetcher: FetchLike = browserFetch,
+  fetcher: FetchLike = apiFetch,
   signal?: AbortSignal,
   preferProjectId?: string,
 ): Promise<TargetResolution> {

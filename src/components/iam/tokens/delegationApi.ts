@@ -3,6 +3,7 @@
  * server's code (and the problems it found in the body) so the screen can say what is wrong in the reader's language.
  */
 
+import { ApiError, apiDelete, apiGet, apiPut } from '@/lib/api/client';
 import type { DelegationView } from './delegationModel';
 
 export class DelegationApiError extends Error {
@@ -20,17 +21,15 @@ export class DelegationApiError extends Error {
   }
 }
 
-async function readBody(response: Response): Promise<Record<string, unknown>> {
-  try {
-    const body: unknown = await response.json();
-    return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+/** A response body as an object (`{}` when it is empty, not JSON or not an object). */
+function asObject(body: unknown): Record<string, unknown> {
+  return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 }
 
-async function failure(response: Response): Promise<DelegationApiError> {
-  const body = await readBody(response);
+/** A refused call as `DelegationApiError` (a lost connection keeps its own error). */
+function failure(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return error;
+  const body = asObject(error.payload);
   const problems = Array.isArray(body.problems)
     ? (body.problems as unknown[]).flatMap((item) => {
       const entry = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
@@ -38,8 +37,8 @@ async function failure(response: Response): Promise<DelegationApiError> {
     })
     : [];
   return new DelegationApiError(
-    response.status,
-    typeof body.error === 'string' ? body.error : `HTTP ${response.status}`,
+    error.status,
+    typeof body.error === 'string' ? body.error : `HTTP ${error.status}`,
     typeof body.code === 'string' ? body.code : null,
     problems,
   );
@@ -60,23 +59,26 @@ function parseState(body: Record<string, unknown>): DelegationState {
 
 export const delegationApi = {
   async get(tokenId: string, signal?: AbortSignal): Promise<DelegationState> {
-    const response = await fetch(url(tokenId), { signal });
-    if (!response.ok) throw await failure(response);
-    return parseState(await readBody(response));
+    try {
+      return parseState(asObject(await apiGet<unknown>(url(tokenId), { signal })));
+    } catch (error) {
+      throw failure(error);
+    }
   },
 
   async save(tokenId: string, payload: Record<string, unknown>): Promise<DelegationState> {
-    const response = await fetch(url(tokenId), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) throw await failure(response);
-    return parseState(await readBody(response));
+    try {
+      return parseState(asObject(await apiPut<unknown>(url(tokenId), payload)));
+    } catch (error) {
+      throw failure(error);
+    }
   },
 
   async remove(tokenId: string): Promise<void> {
-    const response = await fetch(url(tokenId), { method: 'DELETE' });
-    if (!response.ok) throw await failure(response);
+    try {
+      await apiDelete<unknown>(url(tokenId));
+    } catch (error) {
+      throw failure(error);
+    }
   },
 };

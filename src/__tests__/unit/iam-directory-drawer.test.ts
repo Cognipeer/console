@@ -12,7 +12,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   settle,
@@ -20,6 +19,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { CAPS_ADMIN, directoryRoutes, groupDetail, listHandler, personDetail } from '../helpers/iamDirectoryFixtures';
 import { ACTION_DENIAL_REASONS, reasonKey } from '@/components/iam/principals/detailParts';
 import { messages } from '@/lib/i18n/messages';
@@ -62,7 +62,7 @@ async function open(target: string, extra: Array<[string, string | RegExp, Route
   nav.search = search.replace(/^&/, '');
   window.history.replaceState(null, '', `/dashboard/iam/principals/${type}/${id}${nav.search ? `?${nav.search}` : ''}`);
   api = installApiMock([...directoryRoutes(CAPS_ADMIN), ...extra]);
-  mounted = await mount(createElement(PrincipalDetailPage, { type: type!, id: id!, canManage: true }));
+  mounted = await renderWithQuery(createElement(PrincipalDetailPage, { type: type!, id: id!, canManage: true }));
   await settle(250);
 }
 
@@ -427,7 +427,7 @@ describe('an account or a group that comes from a directory', () => {
         },
       ],
     ]);
-    mounted = await mount(createElement(PrincipalsTab, { canManage: true }));
+    mounted = await renderWithQuery(createElement(PrincipalsTab, { canManage: true }));
     await settle(250);
     const locks = qa('[data-testid="role-managed"]');
     expect(locks).toHaveLength(1);

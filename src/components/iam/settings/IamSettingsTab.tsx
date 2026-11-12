@@ -6,7 +6,8 @@ import { Alert, Button, Group, Loader, NumberInput, Paper, Stack, Switch, Text }
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconInfoCircle, IconKey, IconLock, IconNetwork, IconRefresh } from '@tabler/icons-react';
 import { IamApiError, errorMessage, iamApi, isAbortError, type IamSettings } from '@/components/iam/api';
-import { NO_POLICY, normalizeTokenPolicy, type TokenPolicyView } from '@/components/iam/tokens/tokenModel';
+import { NO_POLICY } from '@/components/iam/tokens/tokenModel';
+import { useTokenPolicyQuery } from '@/lib/api/queries/tokens';
 import { useTranslations } from '@/lib/i18n';
 
 /** The server accepts 1..3650; a workspace cannot ask for more than ten years. */
@@ -46,8 +47,8 @@ export default function IamSettingsTab({ canManage }: { canManage: boolean }) {
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // How the server resolves a caller's address, for the allowlist note (best effort).
-  const [network, setNetwork] = useState<TokenPolicyView>(NO_POLICY);
+  // How the server resolves a caller's address, for the allowlist note (best effort: a failed read shows no warning).
+  const network = useTokenPolicyQuery().data ?? NO_POLICY;
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -71,10 +72,6 @@ export default function IamSettingsTab({ canManage }: { canManage: boolean }) {
   useEffect(() => {
     const controller = new AbortController();
     void load(controller.signal);
-    fetch('/api/tokens/policy', { cache: 'no-store', signal: controller.signal })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((body) => setNetwork(normalizeTokenPolicy(body)))
-      .catch(() => undefined);
     return () => controller.abort();
   }, [load]);
 

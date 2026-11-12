@@ -22,6 +22,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { PROJECTS } from '../helpers/iamDirectoryFixtures';
 import AddToProjectShell from '@/components/iam/principals/AddToProjectShell';
 import ChangeRoleShell from '@/components/iam/principals/ChangeRoleShell';
@@ -58,7 +59,7 @@ type Route = [string, string | RegExp, RouteHandler];
 
 async function show(element: ReturnType<typeof createElement>, routes: Route[] = [], locale = 'en') {
   api = installApiMock([['GET', '/api/iam/catalog', () => jsonResponse({ error: 'not under test' }, 404)], ...routes]);
-  mounted = await mount(element, locale);
+  mounted = await renderWithQuery(element, { locale });
   await settle(80);
 }
 

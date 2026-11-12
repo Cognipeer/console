@@ -14,6 +14,15 @@ import {
   effectiveProjectIds,
   isProviderUnassigned,
 } from '@/components/providers/providerAccessModel';
+import { ApiError, errorMessage } from '@/lib/api/client';
+import {
+  useCreateTenantProvider,
+  useLoadTenantProvider,
+  usePreloadProviderDrivers,
+  useProviderDrivers,
+  useTenantProviders,
+  useUpdateTenantProvider,
+} from '@/lib/api/queries/tenantProviders';
 import { useTranslations } from '@/lib/i18n';
 import { DOMAIN_LABELS } from '@/lib/services/serviceCatalog';
 import {
@@ -38,6 +47,8 @@ type Provider = {
   projectIds?: string[];
   platform?: boolean;
 };
+
+const NO_DRIVERS: ProviderDescriptor[] = [];
 
 const DOMAIN_LABEL: Record<string, string> = {
   model: 'Model',
@@ -74,14 +85,22 @@ export default function TenantProviders() {
   const router = useRouter();
   const t = useTranslations('providerAccess.list');
   const [assignTarget, setAssignTarget] = useState<Provider | null>(null);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [forbidden, setForbidden] = useState(false);
+  const providersQuery = useTenantProviders<Provider>();
+  const providers = useMemo(() => providersQuery.data?.providers ?? [], [providersQuery.data]);
+  const loading = providersQuery.isFetching;
+  const forbidden = providersQuery.data?.forbidden ?? false;
+  const refetchProviders = providersQuery.refetch;
+  const fetchProviders = () => void refetchProviders();
+  const createProvider = useCreateTenantProvider();
+  const updateProvider = useUpdateTenantProvider();
+  const loadProvider = useLoadTenantProvider();
+  const preloadDrivers = usePreloadProviderDrivers('Providers');
 
   const [selectedDomain, setSelectedDomain] = useState<ProviderDomain | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
+  const driversQuery = useProviderDrivers(selectedDomain, 'Providers');
+  const drivers = driversQuery.data ?? NO_DRIVERS;
+  const driversLoading = selectedDomain !== null && driversQuery.isFetching;
   const [editingProvider, setEditingProvider] = useState<ProviderConfigView | null>(null);
 
   // `?domain=file` (the Document Store's "Add a file provider" link) opens the list narrowed to that domain, and the
@@ -94,82 +113,28 @@ export default function TenantProviders() {
   }, [addressDomain]);
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
-  const fetchProviders = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-      if (res.status === 403) {
-        setForbidden(true);
-        setProviders([]);
-        return;
-      }
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to load providers');
-      }
-      const data = (await res.json()) as { providers?: Provider[] };
-      setProviders(data.providers ?? []);
-      setForbidden(false);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to load providers';
-      notifications.show({ title: 'Providers', message, color: 'red' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // A failed read keeps what was shown and says so once per failure.
+  const failedAt = providersQuery.errorUpdatedAt;
+  const loadError = providersQuery.error;
   useEffect(() => {
-    void fetchProviders();
-  }, []);
-
-  const loadDrivers = async (domain: ProviderDomain) => {
-    setDriversLoading(true);
-    try {
-      const res = await fetch(
-        `/api/providers/drivers?domain=${encodeURIComponent(domain)}`,
-        { cache: 'no-store' },
-      );
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to load drivers');
-      }
-      const data = (await res.json()) as { drivers?: ProviderDescriptor[] };
-      setDrivers(data.drivers ?? []);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to load drivers';
-      notifications.show({ title: 'Providers', message, color: 'red' });
-      setDrivers([]);
-    } finally {
-      setDriversLoading(false);
+    if (loadError) {
+      notifications.show({ title: 'Providers', message: errorMessage(loadError, 'Failed to load providers'), color: 'red' });
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedAt]);
 
   const openEditModal = async (providerId: string) => {
     try {
-      const detailRes = await fetch(
-        `/api/providers/${encodeURIComponent(providerId)}?scope=tenant`,
-        { cache: 'no-store' },
-      );
-      if (!detailRes.ok) {
-        const body = await detailRes.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to load provider details');
-      }
-
-      const detailData = (await detailRes.json()) as {
-        provider?: ProviderConfigView;
-      };
-      const provider = detailData.provider;
+      const provider = await loadProvider(providerId);
       if (!provider) throw new Error('Provider not found');
 
-      await loadDrivers(provider.type as ProviderDomain);
+      // The drivers are in the cache before the form opens (a failed read says so and leaves the list empty).
+      await preloadDrivers(provider.type);
       setSelectedDomain(provider.type as ProviderDomain);
       setEditingProvider(provider);
       setConfigOpen(true);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to open provider editor';
+      const message = errorMessage(error, 'Failed to open provider editor');
       notifications.show({ title: 'Providers', message, color: 'red' });
     }
   };
@@ -179,9 +144,7 @@ export default function TenantProviders() {
     const domain = addressDomain !== null && (CREATE_DOMAINS as readonly string[]).includes(addressDomain) ? addressDomain : null;
     setEditingProvider(null);
     setSelectedDomain(domain);
-    setDrivers([]);
     setConfigOpen(true);
-    if (domain) void loadDrivers(domain);
   };
 
   const filtered = useMemo(() => {
@@ -340,7 +303,7 @@ export default function TenantProviders() {
             options: statusOptions,
           },
         ]}
-        onRefresh={() => void fetchProviders()}
+        onRefresh={fetchProviders}
         refreshing={loading}
         toolbarRight={
           <Button
@@ -391,9 +354,8 @@ export default function TenantProviders() {
         onClose={() => {
           setConfigOpen(false);
           setSelectedDomain(null);
-          setDrivers([]);
           setEditingProvider(null);
-          void fetchProviders();
+          fetchProviders();
         }}
         mode={editingProvider ? 'edit' : 'create'}
         provider={editingProvider ?? undefined}
@@ -402,8 +364,6 @@ export default function TenantProviders() {
         domain={selectedDomain}
         onDomainChange={(d) => {
           setSelectedDomain(d);
-          setDrivers([]);
-          void loadDrivers(d);
         }}
         onSubmit={async (options) => {
           if (editingProvider) {
@@ -419,20 +379,13 @@ export default function TenantProviders() {
               updatePayload.credentials = options.values.credentials;
             }
 
-            const res = await fetch(
-              `/api/providers/${encodeURIComponent(String(editingProvider._id))}?scope=tenant`,
-              {
-                method: 'PATCH',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify(updatePayload),
-              },
-            );
-
-            const body = await res.json().catch(() => null);
-            if (!res.ok) {
-              // The refusal names the form field it is about: the edit form marks it.
-              throw providerRequestError(body, 'Failed to update provider');
-            }
+            await updateProvider
+              .mutateAsync({ id: String(editingProvider._id), body: updatePayload })
+              .catch((error: unknown) => {
+                // The refusal names the form field it is about: the edit form marks it.
+                if (error instanceof ApiError) throw providerRequestError(error.payload, 'Failed to update provider');
+                throw error;
+              });
 
             notifications.show({
               title: 'Providers',
@@ -462,24 +415,17 @@ export default function TenantProviders() {
               projectIds: options.projectIds,
             };
 
-            const res = await fetch('/api/providers?scope=tenant', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(payload),
-            });
-
-            const body = await res.json().catch(() => null);
-            if (!res.ok) {
+            const body = await createProvider.mutateAsync(payload).catch((error: unknown) => {
               // The refusal names the form field it is about: the form marks it, as it does for an edit.
-              throw providerRequestError(body, 'Failed to create provider');
-            }
+              if (error instanceof ApiError) throw providerRequestError(error.payload, 'Failed to create provider');
+              throw error;
+            });
 
             notifications.show({
               title: 'Providers',
               message: 'Provider created',
               color: 'green',
             });
-            await fetchProviders();
             // The modal closes itself (after the assign step, when one is needed).
             return {
               id: String(body?.provider?._id),
@@ -491,9 +437,7 @@ export default function TenantProviders() {
 
           setConfigOpen(false);
           setSelectedDomain(null);
-          setDrivers([]);
           setEditingProvider(null);
-          await fetchProviders();
         }}
       />
 
@@ -509,7 +453,7 @@ export default function TenantProviders() {
           initialProjectIds={effectiveProjectIds(assignTarget)}
           onClose={() => {
             setAssignTarget(null);
-            void fetchProviders();
+            fetchProviders();
           }}
         />
       ) : null}

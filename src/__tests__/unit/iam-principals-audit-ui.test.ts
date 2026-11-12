@@ -13,7 +13,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -23,6 +22,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 
 const nav = vi.hoisted(() => ({
   search: '',
@@ -179,7 +179,7 @@ async function render(
 ) {
   nav.search = search;
   api = installApiMock(routes(extra));
-  mounted = await mount(element, locale);
+  mounted = await renderWithQuery(element, { locale });
   await settle(250);
 }
 

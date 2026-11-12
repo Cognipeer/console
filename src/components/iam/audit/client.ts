@@ -347,6 +347,7 @@ export interface CsvDownload {
   truncated: boolean;
 }
 
+// Raw fetch on purpose: a file download (blob) whose name and truncation flag come from response headers.
 export async function downloadAuditCsv(filters: AuditFilters): Promise<CsvDownload> {
   const res = await fetch(auditExportUrl(filters), { cache: 'no-store' });
   if (!res.ok) throw await toIamApiError(res);

@@ -78,7 +78,7 @@ describe('transport', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('/api/iam/policies');
     expect(init?.method).toBe('POST');
-    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+    expect(new Headers(init?.headers).get('Content-Type')).toBe('application/json');
     expect(JSON.parse(init?.body as string)).toMatchObject({ name: 'n', spec: { actions: ['Read'] } });
     // A policy is enabled or disabled: no mode travels with it any more.
     expect(JSON.parse(init?.body as string)).not.toHaveProperty('mode');

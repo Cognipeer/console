@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -22,6 +22,8 @@ import { IconCertificate, IconCheck, IconCopy, IconRefresh, IconTrash } from '@t
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm';
+import { errorMessage } from '@/lib/api/client';
+import { useApplyLicense, useLicense, useResetLicense } from '@/lib/api/queries/settings';
 
 type ServiceState = {
   service: string;
@@ -59,10 +61,13 @@ function formatLimit(value: number | undefined): string {
 }
 
 export default function LicenseManagement() {
-  const [data, setData] = useState<LicenseResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [resetting, setResetting] = useState(false);
+  const licenseQuery = useLicense<LicenseResponse>();
+  const applyLicenseKey = useApplyLicense();
+  const resetLicenseKey = useResetLicense();
+  const data = licenseQuery.data ?? null;
+  const loading = licenseQuery.isFetching;
+  const saving = applyLicenseKey.isPending;
+  const resetting = resetLicenseKey.isPending;
   const t = useTranslations('license');
   const tq = useTranslations('common.confirm.qos');
   const { confirmAction } = useConfirm();
@@ -79,57 +84,37 @@ export default function LicenseManagement() {
     },
   });
 
-  const fetchLicense = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await fetch('/api/license', { cache: 'no-store' });
-      const body = await response.json();
-      if (!response.ok) {
-        throw new Error(body?.error || t('errors.load'));
-      }
-      setData(body);
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        message: error instanceof Error ? error.message : t('errors.load'),
-        title: tNotifications('errorTitle'),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [t, tNotifications]);
+  const refetchLicense = licenseQuery.refetch;
+  const fetchLicense = () => void refetchLicense();
 
+  // A failed read keeps what was shown and says so once per failure.
+  const failedAt = licenseQuery.errorUpdatedAt;
+  const loadError = licenseQuery.error;
   useEffect(() => {
-    void fetchLicense();
-  }, [fetchLicense]);
+    if (!loadError) return;
+    notifications.show({
+      color: 'red',
+      message: errorMessage(loadError, t('errors.load')),
+      title: tNotifications('errorTitle'),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedAt]);
 
   const applyLicense = async (values: typeof form.values) => {
-    setSaving(true);
     try {
-      const response = await fetch('/api/license', {
-        body: JSON.stringify({ licenseKey: values.licenseKey.trim() }),
-        headers: { 'Content-Type': 'application/json' },
-        method: 'POST',
-      });
-      const body = await response.json();
-      if (!response.ok) {
-        throw new Error(body?.error || t('errors.save'));
-      }
+      await applyLicenseKey.mutateAsync(values.licenseKey.trim());
       notifications.show({
         color: 'green',
         message: t('messages.saved'),
         title: tCommon('success'),
       });
       form.reset();
-      await fetchLicense();
     } catch (error) {
       notifications.show({
         color: 'red',
-        message: error instanceof Error ? error.message : t('errors.save'),
+        message: errorMessage(error, t('errors.save')),
         title: tNotifications('errorTitle'),
       });
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -142,16 +127,9 @@ export default function LicenseManagement() {
         confirmLabel: tq('resetLicenseConfirm'),
         // The dialog shows its own progress; the button spinner only covers the request.
         action: async () => {
-          setResetting(true);
-          try {
-            const response = await fetch('/api/license', { method: 'DELETE' });
-            const body = await response.json().catch(() => ({}));
-            if (!response.ok) {
-              throw new Error(body?.error || t('errors.reset'));
-            }
-          } finally {
-            setResetting(false);
-          }
+          await resetLicenseKey.mutateAsync().catch((error: unknown) => {
+            throw new Error(errorMessage(error, t('errors.reset')));
+          });
         },
       });
       if (!done) return;
@@ -160,7 +138,6 @@ export default function LicenseManagement() {
         message: t('messages.reset'),
         title: tCommon('success'),
       });
-      await fetchLicense();
     } catch (error) {
       notifications.show({
         color: 'red',

@@ -15,12 +15,13 @@ import FormShell, {
 import { formatDateTime } from '@/components/iam/timeFormat';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { useUpdateToken } from '@/lib/api/queries/tokens';
 import ExpiryField from './ExpiryField';
 import IpAllowlistField from './IpAllowlistField';
 import TokenAccessSection from './TokenAccessSection';
 import TokenDelegationSection from './TokenDelegationSection';
 import TokenStatusBadges from './TokenStatusBadges';
-import { readErrorBody, tokenErrorMessage } from './tokenErrors';
+import { tokenCallError } from './tokenErrors';
 import {
   allowlistToText,
   expiryPayload,
@@ -60,12 +61,13 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
 
   const open = token !== null;
   const { policy } = useTokenPolicy(open);
+  const updateToken = useUpdateToken(updateUrl);
+  const saving = updateToken.isPending;
 
   const [label, setLabel] = useState('');
   const [expiry, setExpiry] = useState<ExpiryChoice>({ kind: 'keep' });
   const [ipText, setIpText] = useState('');
   const [requireUserToken, setRequireUserToken] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const tokenId = token?._id;
@@ -76,7 +78,6 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
     setIpText(allowlistToText(token.allowedIpRanges));
     setRequireUserToken(token.requireUserToken === true);
     setError(null);
-    setSaving(false);
     // Re-seed only when a different token is opened; saving replaces the object under the same id.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenId]);
@@ -108,18 +109,11 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
     if (ipChanged) body.allowedIpRanges = allowlist.ranges;
     if (requireChanged) body.requireUserToken = requireUserToken;
 
-    setSaving(true);
     setError(null);
     try {
-      const response = await fetch(updateUrl(token._id), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+      const saved = await updateToken.mutateAsync({ id: token._id, body }).catch((cause: unknown) => {
+        throw tokenCallError(cause, t, t('detail.errors.save'));
       });
-      if (!response.ok) {
-        throw new Error(tokenErrorMessage(await readErrorBody(response), t, t('detail.errors.save')));
-      }
-      const saved = (await response.json()) as ApiTokenRow;
       notifications.show({ title: tCommon('success'), message: t('detail.saved'), color: 'green' });
       onSaved({ ...token, ...saved });
       onClose();
@@ -127,8 +121,6 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
       const message = cause instanceof Error ? cause.message : t('detail.errors.save');
       setError(message);
       notifications.show({ title: tNotifications('errorTitle'), message, color: 'red' });
-    } finally {
-      setSaving(false);
     }
   };
 

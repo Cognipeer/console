@@ -28,7 +28,7 @@ import FormShell, {
 } from '@/components/common/ui/FormShell';
 import ExpiryField from '@/components/iam/tokens/ExpiryField';
 import IpAllowlistField from '@/components/iam/tokens/IpAllowlistField';
-import { readJsonObject, tokenErrorMessage } from '@/components/iam/tokens/tokenErrors';
+import { tokenCallError } from '@/components/iam/tokens/tokenErrors';
 import {
   defaultExpiryChoice,
   expiryPayload,
@@ -40,6 +40,7 @@ import {
 import { useTokenPolicy } from '@/components/iam/tokens/useTokenPolicy';
 import { formatDateTime } from '@/components/iam/timeFormat';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { useCreateToken } from '@/lib/api/queries/tokens';
 
 interface CreateTokenModalProps {
   opened: boolean;
@@ -73,7 +74,8 @@ export default function CreateTokenModal({
   extraValid = true,
 }: CreateTokenModalProps) {
   const [created, setCreated] = useState<CreatedInfo | null>(null);
-  const [loading, setLoading] = useState(false);
+  const createToken = useCreateToken(createUrl);
+  const loading = createToken.isPending;
   const t = useTranslations('settings.tokenManagement.createModal');
   const tIam = useTranslations('iamTokens');
   const tValidation = useTranslations('validation');
@@ -130,26 +132,18 @@ export default function CreateTokenModal({
     const validation = form.validate();
     if (validation.hasErrors || !ready) return;
 
-    setLoading(true);
     try {
-      const response = await fetch(createUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const result = await createToken
+        .mutateAsync({
           ...form.values,
           ...expiryPayload(expiry, 'create'),
           ...(allowlist.ranges.length > 0 ? { allowedIpRanges: allowlist.ranges } : {}),
           ...extraBody,
-        }),
-      });
-
-      const data = await readJsonObject(response);
-
-      if (!response.ok) {
-        throw new Error(tokenErrorMessage(data, tIam, t('errors.create')));
-      }
+        })
+        .catch((error: unknown) => {
+          throw tokenCallError(error, tIam, t('errors.create'));
+        });
+      const data = result && typeof result === 'object' ? result : {};
 
       setCreated({
         token: String(data.token ?? ''),
@@ -167,8 +161,6 @@ export default function CreateTokenModal({
         message: error instanceof Error ? error.message : t('errors.create'),
         color: 'red',
       });
-    } finally {
-      setLoading(false);
     }
   };
 

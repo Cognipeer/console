@@ -17,6 +17,8 @@ vi.mock('@/components/common/navigation/useNavigationFeedback', () => ({
 }));
 
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import WebhookManagement from '@/components/settings/WebhookManagement';
 import {
   eventGroups,
@@ -113,7 +115,7 @@ describe('the list', () => {
   });
 
   it('mounts with its toolbar, before any data arrives', () => {
-    const html = renderToStaticMarkup(h(MantineProvider, null, h(WebhookManagement)));
+    const html = renderToStaticMarkup(h(QueryClientProvider, { client: newTestQueryClient() }, h(MantineProvider, null, h(WebhookManagement))));
     expect(html).toContain('New webhook');
     expect(html).toContain('Search webhooks');
   });

@@ -13,6 +13,7 @@
  * test can feed it handler payloads in the node test environment.
  */
 
+import { ApiError, apiRequest } from '@/lib/api/client';
 import { normalizeServicePermissions, type UserServicePermissions } from '@/lib/security/rbac';
 import type { ApiTokenRow } from '../tokens/tokenModel';
 import { checkHref, iamHref, newPolicyHref, policyHref, principalHref } from '../links';
@@ -50,28 +51,45 @@ export class IamApiError extends Error {
   }
 }
 
+/** The error of a failed answer from its status and the `{ error, code, details }` body the server sent (if any). */
+function iamApiErrorFrom(status: number, payload: unknown): IamApiError {
+  const body = asRecord(payload);
+  return new IamApiError(
+    asString(body.error) ?? asString(body.message) ?? `HTTP ${status}`,
+    status,
+    asString(body.code) ?? undefined,
+    body.details,
+  );
+}
+
 /** Reads the `{ error, code, details }` body of a failed response. */
 export async function toIamApiError(res: Response): Promise<IamApiError> {
-  let message = `HTTP ${res.status}`;
-  let code: string | undefined;
-  let details: unknown;
+  let payload: unknown;
   try {
-    const body = asRecord(await res.json());
-    message = asString(body.error) ?? asString(body.message) ?? message;
-    code = asString(body.code) ?? undefined;
-    details = body.details;
+    payload = await res.json();
   } catch {
     /* the error body is not JSON: keep the status line */
   }
-  return new IamApiError(message, res.status, code, details);
+  return iamApiErrorFrom(res.status, payload);
 }
 
 /** JSON request helper of the IAM center. Resolves `null` for a 204. */
 export async function iamRequest(url: string, init?: RequestInit): Promise<unknown> {
-  const res = await fetch(url, { cache: 'no-store', ...init });
-  if (!res.ok) throw await toIamApiError(res);
-  if (res.status === 204) return null;
-  return res.json();
+  let result: unknown;
+  try {
+    result = await apiRequest<unknown>(url, init);
+  } catch (error) {
+    if (error instanceof ApiError) throw iamApiErrorFrom(error.status, error.payload);
+    throw error;
+  }
+  // A body not typed as JSON comes back as text: an empty one is "no content", anything else must still parse.
+  if (typeof result !== 'string') return result ?? null;
+  if (result === '') return null;
+  try {
+    return JSON.parse(result);
+  } catch {
+    throw new IamApiError('Invalid JSON in response', 200, 'invalid_response');
+  }
 }
 
 export function isAbortError(err: unknown): boolean {

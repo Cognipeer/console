@@ -17,6 +17,15 @@ import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
 import { providerRequestError } from '@/components/providers/providerFormModel';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderDomain } from '@/lib/database';
+import { ApiError, errorMessage } from '@/lib/api/client';
+import { useCreateProject } from '@/lib/api/queries/projects';
+import { useDefaultAlertRulesChoice, useProjectPeople } from '@/lib/api/queries/projectCreate';
+import {
+  useAddTenantProviderToList,
+  useCreateTenantProvider,
+  useProviderDrivers,
+  useTenantProviders,
+} from '@/lib/api/queries/tenantProviders';
 import { useTranslations } from '@/lib/i18n';
 import {
   canCreateProject,
@@ -50,10 +59,7 @@ interface Props {
   onCreated: (projectId: string) => void;
 }
 
-const errorText = async (res: Response, fallback: string): Promise<string> => {
-  const body = (await res.json().catch(() => null)) as { error?: string } | null;
-  return body?.error || fallback;
-};
+const NO_DRIVERS: ProviderDescriptor[] = [];
 
 export default function CreateProjectShell({ open, onClose, onCreated }: Props) {
   const t = useTranslations('projectsAccess.create');
@@ -67,65 +73,38 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
   const [groups, setGroups] = useState<Map<string, ProjectRoleValue>>(new Map());
   const [providerIds, setProviderIds] = useState<Set<string>>(new Set());
   const [newProviderIds, setNewProviderIds] = useState<Set<string>>(new Set());
-  const [submitting, setSubmitting] = useState(false);
+  const createProject = useCreateProject();
+  const submitting = createProject.isPending;
   // The default alert rules: on unless this installation turned the default off (read below).
   const [defaultAlerts, setDefaultAlerts] = useState(true);
   const [defaultAlertsTouched, setDefaultAlertsTouched] = useState(false);
 
-  const [people, setPeople] = useState<PersonOption[]>([]);
-  const [groupOptions, setGroupOptions] = useState<GroupOption[]>([]);
-  const [providers, setProviders] = useState<ProviderOption[]>([]);
-  const [peopleError, setPeopleError] = useState(false);
-  const [providersError, setProvidersError] = useState(false);
+  // People, groups and providers are read when the shell opens, not on every render of the list behind it.
+  const peopleQuery = useProjectPeople(open);
+  const providersQuery = useTenantProviders<ProviderOption>({ enabled: open });
+  const createProvider = useCreateTenantProvider();
+  const addProviderToList = useAddTenantProviderToList<ProviderOption & { _id: string }>();
+  const peopleError = peopleQuery.isError;
+  const providersError = providersQuery.isError || Boolean(providersQuery.data?.forbidden);
+  const providers = useMemo(() => providersQuery.data?.providers ?? [], [providersQuery.data]);
+  // Owners and admins already reach every project; a disabled or invited-only account cannot be added usefully.
+  const people = useMemo<PersonOption[]>(
+    () =>
+      ((peopleQuery.data?.users ?? []) as Array<PersonOption & { role?: string; status?: string; disabledAt?: string | null }>)
+        .filter((u) => u.role !== 'owner' && u.role !== 'admin' && !u.disabledAt && u.status !== 'disabled')
+        .map((u) => ({ _id: String(u._id), name: u.name, email: u.email })),
+    [peopleQuery.data],
+  );
+  const groupOptions = useMemo<GroupOption[]>(
+    () => ((peopleQuery.data?.groups ?? []) as GroupOption[]).map((g) => ({ _id: String(g._id), name: g.name, memberCount: g.memberCount })),
+    [peopleQuery.data],
+  );
 
   const [providerModalOpen, setProviderModalOpen] = useState(false);
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
   const [providerDomain, setProviderDomain] = useState<ProviderDomain | null>(null);
-
-  const loadProviders = useCallback(async () => {
-    try {
-      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-      if (!res.ok) throw new Error('providers');
-      const body = (await res.json()) as { providers?: ProviderOption[] };
-      setProviders(body.providers ?? []);
-      setProvidersError(false);
-    } catch {
-      setProvidersError(true);
-    }
-  }, []);
-
-  // Loaded when the shell opens, not on every render of the list behind it.
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [usersRes, groupsRes] = await Promise.all([
-          fetch('/api/users', { cache: 'no-store' }),
-          fetch('/api/groups', { cache: 'no-store' }),
-        ]);
-        if (!usersRes.ok || !groupsRes.ok) throw new Error('people');
-        const users = ((await usersRes.json()) as { users?: Array<PersonOption & { role?: string; status?: string; disabledAt?: string | null; authProvider?: string }> }).users ?? [];
-        const grps = ((await groupsRes.json()) as { groups?: GroupOption[] }).groups ?? [];
-        if (cancelled) return;
-        // Owners and admins already reach every project; a disabled or invited-only account cannot be added usefully.
-        setPeople(
-          users
-            .filter((u) => u.role !== 'owner' && u.role !== 'admin' && !u.disabledAt && u.status !== 'disabled')
-            .map((u) => ({ _id: String(u._id), name: u.name, email: u.email })),
-        );
-        setGroupOptions(grps.map((g) => ({ _id: String(g._id), name: g.name, memberCount: g.memberCount })));
-        setPeopleError(false);
-      } catch {
-        if (!cancelled) setPeopleError(true);
-      }
-    })();
-    void loadProviders();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, loadProviders]);
+  const driversQuery = useProviderDrivers(providerDomain);
+  const drivers = driversQuery.data ?? NO_DRIVERS;
+  const driversLoading = providerDomain !== null && driversQuery.isFetching;
 
   const reset = useCallback(() => {
     setName('');
@@ -147,6 +126,7 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
 
   const personById = useMemo(() => new Map(people.map((p) => [p._id, p])), [people]);
   const groupById = useMemo(() => new Map(groupOptions.map((g) => [g._id, g])), [groupOptions]);
+  const refetchProviders = providersQuery.refetch;
   const providerById = useMemo(() => new Map(providers.map((p) => [p._id, p])), [providers]);
   const providerGroups = useMemo(() => groupProvidersByDomain(providers), [providers]);
 
@@ -187,30 +167,12 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
     (provider: { id: string; name: string; domain: string }) => {
       setProviderIds((prev) => new Set(prev).add(provider.id));
       setNewProviderIds((prev) => new Set(prev).add(provider.id));
-      setProviders((prev) =>
-        prev.some((p) => p._id === provider.id)
-          ? prev
-          : [...prev, { _id: provider.id, key: provider.name, label: provider.name, type: provider.domain }],
-      );
-      void loadProviders();
+      addProviderToList({ _id: provider.id, key: provider.name, label: provider.name, type: provider.domain });
+      void refetchProviders();
     },
-    [loadProviders],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [refetchProviders],
   );
-
-  const loadDrivers = async (domain: ProviderDomain) => {
-    setDriversLoading(true);
-    try {
-      const res = await fetch(`/api/providers/drivers?domain=${encodeURIComponent(domain)}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(await errorText(res, t('providerModal.loadDriversFailed')));
-      const body = (await res.json()) as { drivers?: ProviderDescriptor[] };
-      setDrivers(body.drivers ?? []);
-    } catch (err) {
-      notifications.show({ color: 'red', message: err instanceof Error ? err.message : t('providerModal.loadDriversFailed') });
-      setDrivers([]);
-    } finally {
-      setDriversLoading(false);
-    }
-  };
 
   // The extra props are the provider form's contract for being opened from here: nothing is assigned to a
   // project yet (the project does not exist), so its own assign step is skipped and the new provider
@@ -221,52 +183,36 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
     onCreated: handleProviderCreated,
   };
 
+  const defaultAlertsChoice = useDefaultAlertRulesChoice(open && !defaultAlertsTouched).data;
   useEffect(() => {
-    if (!open || defaultAlertsTouched) return;
-    const controller = new AbortController();
-    void fetch('/api/alerts/templates', { signal: controller.signal })
-      .then((res) => (res.ok ? (res.json() as Promise<{ defaultRulesOnNewProjects?: boolean }>) : null))
-      .then((body) => {
-        if (body && typeof body.defaultRulesOnNewProjects === 'boolean') setDefaultAlerts(body.defaultRulesOnNewProjects);
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [open, defaultAlertsTouched]);
+    if (defaultAlertsChoice !== undefined && !defaultAlertsTouched) setDefaultAlerts(defaultAlertsChoice);
+  }, [defaultAlertsChoice, defaultAlertsTouched]);
 
   const submit = async () => {
     if (submitting || !canCreateProject(readiness)) return;
-    setSubmitting(true);
     try {
-      const res = await fetch('/api/projects', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          key: slug.value || undefined,
-          description: description.trim() || undefined,
-          members: roleEntries(members, 'userId'),
-          groups: roleEntries(groups, 'groupId'),
-          providerIds: [...providerIds],
-          defaultAlertRules: defaultAlerts,
-        }),
+      const body = await createProject.mutateAsync({
+        name: name.trim(),
+        key: slug.value || undefined,
+        description: description.trim() || undefined,
+        members: roleEntries(members, 'userId'),
+        groups: roleEntries(groups, 'groupId'),
+        providerIds: [...providerIds],
+        defaultAlertRules: defaultAlerts,
       });
-      if (!res.ok) throw new Error(await errorText(res, t('failed')));
-      const body = (await res.json()) as { project?: { _id?: string }; warnings?: string[] };
-      const warnings = body.warnings ?? [];
+      const warnings = body?.warnings ?? [];
       notifications.show({
         color: warnings.length > 0 ? 'yellow' : 'green',
         title: warnings.length > 0 ? t('createdWithWarnings') : t('created'),
         message: warnings.length > 0 ? warnings.join('\n') : name.trim(),
         autoClose: warnings.length > 0 ? 12000 : 4000,
       });
-      const id = body.project?._id ? String(body.project._id) : '';
+      const id = body?.project?._id ? String(body.project._id) : '';
       reset();
       if (id) onCreated(id);
       else onClose();
     } catch (err) {
-      notifications.show({ color: 'red', title: t('failed'), message: err instanceof Error ? err.message : t('failed') });
-    } finally {
-      setSubmitting(false);
+      notifications.show({ color: 'red', title: t('failed'), message: errorMessage(err, t('failed')) });
     }
   };
 
@@ -545,7 +491,6 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
         onClose={() => {
           setProviderModalOpen(false);
           setProviderDomain(null);
-          setDrivers([]);
         }}
         mode="create"
         drivers={drivers}
@@ -553,15 +498,11 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
         domain={providerDomain}
         onDomainChange={(domain) => {
           setProviderDomain(domain);
-          setDrivers([]);
-          void loadDrivers(domain);
         }}
         onSubmit={async (options) => {
           if (!providerDomain) return;
-          const res = await fetch('/api/providers?scope=tenant', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
+          const body = await createProvider
+            .mutateAsync({
               key: options.values.base.key,
               label: options.values.base.label,
               description: options.values.base.description,
@@ -575,15 +516,13 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
               ...((options as { projectIds?: string[] }).projectIds?.length
                 ? { projectIds: (options as { projectIds?: string[] }).projectIds }
                 : {}),
-            }),
-          });
-          if (!res.ok) {
-            // The refusal names the form field it is about: the form marks it, as it does for an edit.
-            const refusal = await res.json().catch(() => null);
-            throw providerRequestError(refusal, t('providerModal.createFailed'));
-          }
-          const body = (await res.json()) as { provider?: { _id?: string; label?: string; key?: string; type?: string } };
-          const created = body.provider;
+            })
+            .catch((error: unknown) => {
+              // The refusal names the form field it is about: the form marks it, as it does for an edit.
+              if (error instanceof ApiError) throw providerRequestError(error.payload, t('providerModal.createFailed'));
+              throw error;
+            });
+          const created = body?.provider;
           if (created?._id) {
             handleProviderCreated({
               id: String(created._id),
@@ -594,7 +533,6 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
           }
           setProviderModalOpen(false);
           setProviderDomain(null);
-          setDrivers([]);
         }}
         {...providerModalExtras}
       />

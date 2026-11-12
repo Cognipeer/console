@@ -162,7 +162,7 @@ describe('the Providers list', () => {
       bump = rerender;
       return h(TenantProviders);
     }
-    mounted = await mount(h(Harness));
+    mounted = await mount(h(QueryClientProvider, { client: newQueryClient() }, h(Harness)));
     await until(() => api.to('GET', '/api/providers').length > 0, 'the provider request');
     await settle(50);
     return () => act(async () => bump());
