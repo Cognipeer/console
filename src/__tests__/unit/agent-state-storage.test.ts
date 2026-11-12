@@ -10,18 +10,23 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { brotliCompressSync, constants as zlibConstants } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { reloadConfig } from '@/lib/core/config';
 import {
     MAX_STATE_BYTES,
     decodeStoredState,
+    decodeStoredStateAsync,
     encodeStoredState,
+    encodeStoredStateAsync,
     loadConversationState,
     maxStateBytes,
     saveConversationState,
     serializeCarriedState,
+    serializeCarriedStateAsync,
     serializeForStorage,
+    serializeForStorageAsync,
 } from '@/lib/services/agents/agentTurnState';
 import {
     PAUSE_UNAVAILABLE_WARNING,
@@ -139,6 +144,63 @@ describe('stored state encoding', () => {
         const carried = await loadConversationState(store, { _id: 'conv-1', messages: new Array(2) as never });
         expect(carried?.toolHistory).toHaveLength(37);
         expect(carried?.messages?.length).toBeGreaterThan(70);
+    });
+});
+
+describe('stored state encoding off the event loop', () => {
+    /** The encoder as it was before the async variant: synchronous Brotli, quality 5, prefix `br64:`. */
+    const legacyEncode = (json: string) => `br64:${brotliCompressSync(Buffer.from(json, 'utf8'), {
+        params: {
+            [zlibConstants.BROTLI_PARAM_QUALITY]: 5,
+            [zlibConstants.BROTLI_PARAM_SIZE_HINT]: Buffer.byteLength(json, 'utf8'),
+        },
+    }).toString('base64')}`;
+
+    it('round-trips, and produces the very string the sync encoder does', async () => {
+        const json = JSON.stringify({ messages: [{ role: 'user', content: 'héllo — 你好' }], summaries: [toolOutput(3, 50_000)] });
+        const stored = await encodeStoredStateAsync(json);
+        expect(stored).toBe(encodeStoredState(json));
+        expect(stored).toBe(legacyEncode(json));
+        expect(await decodeStoredStateAsync(stored)).toBe(json);
+    });
+
+    it('decodes a row the old sync encoder wrote, and a plain-JSON row older still', async () => {
+        const json = JSON.stringify({ messages: [{ role: 'user', content: 'q' }], toolHistory: [{ output: toolOutput(1, 20_000) }] });
+        expect(await decodeStoredStateAsync(legacyEncode(json))).toBe(json);
+        expect(await decodeStoredStateAsync(json)).toBe(json);
+        expect(decodeStoredState(await encodeStoredStateAsync(json))).toBe(json);
+    });
+
+    it('rejects a corrupt compressed row like the sync decoder does', async () => {
+        await expect(decodeStoredStateAsync('br64:not-brotli')).rejects.toThrow();
+        expect(() => decodeStoredState('br64:not-brotli')).toThrow();
+    });
+
+    it('serializes to exactly what the sync path does, through every shrink step', async () => {
+        const states: Record<string, unknown>[] = [
+            longRunState(),
+            { messages: [{ role: 'user', content: 'q' }], toolHistory: [{ executionId: 'e1', toolName: 't', output: 'small', rawOutput: incompressible(2_200_000) }] },
+            // Nothing to shrink: the steps change nothing and the state is over the cap.
+            { messages: Array.from({ length: 400 }, () => ({ role: 'user', content: incompressible(10_000) })) },
+            // Long tool outputs only trimming can fit (steps 2 and 3).
+            {
+                messages: [{ role: 'user', content: 'q' }, { role: 'tool', tool_call_id: 'c1', name: 't', content: incompressible(1_800_000) }],
+                toolHistory: [{ executionId: 'e1', toolName: 't', output: incompressible(1_800_000), rawOutput: { other: 1 } }],
+            },
+        ];
+        for (const state of states) {
+            const sync = serializeForStorage(state as never);
+            expect(await serializeForStorageAsync(state as never)).toBe(sync);
+        }
+        expect(serializeForStorage(states[2] as never)).toBeNull();
+        expect(serializeForStorage(states[3] as never)).not.toBeNull();
+        expect(serializeForStorage(states[3] as never)).toContain('br64:');
+    });
+
+    it('serializeCarriedStateAsync matches serializeCarriedState, and answers null for no state', async () => {
+        const state = longRunState();
+        expect(await serializeCarriedStateAsync(state as never)).toBe(serializeCarriedState(state as never));
+        expect(await serializeCarriedStateAsync(undefined)).toBeNull();
     });
 });
 
