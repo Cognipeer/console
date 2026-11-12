@@ -15,6 +15,13 @@ import { isSafePathSegment } from '@/lib/providers/pathSegments';
 import { providerRegistry } from '@/lib/providers/registry';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
 import { settingsValidatorOf, validateProviderSettings } from './providerSettingsValidation';
+import {
+  getCachedProviderRuntime,
+  invalidateProviderRuntimeCache,
+  providerRuntimeEpoch,
+  setCachedProviderRuntime,
+  clearProviderRuntimeCache,
+} from './providerRuntimeCache';
 
 const logger = createLogger('provider-service');
 
@@ -181,6 +188,9 @@ async function withTenantDb(tenantDbName: string) {
   return db;
 }
 
+/** Test only: drops the in-process copies of provider records and credentials. */
+export const clearProviderRuntimeCacheForTests = clearProviderRuntimeCache;
+
 /**
  * True when a DB write failed because a unique constraint was violated —
  * MongoDB duplicate-key (E11000) or SQLite `UNIQUE constraint failed`. Used to
@@ -345,6 +355,7 @@ export async function createProviderConfig(
     throw error;
   }
 
+  invalidateProviderRuntimeCache(tenantDbName);
   return sanitize(record);
 }
 
@@ -574,6 +585,8 @@ export async function updateProviderConfig(
   }
 
   const updated = await db.updateProvider(providerId, updates);
+  // Settings, credentials, status and project assignment all shape what a model call loads.
+  invalidateProviderRuntimeCache(tenantDbName);
   if (updated && before?.platform) {
     // The models of a platform provider follow its assignment: drop their cached lookups for every project that
     // gained or lost them.
@@ -658,6 +671,7 @@ export async function recordProviderTest(
   const db = await withTenantDb(tenantDbName);
   assertNotPlatformRecord(await db.findProviderById(providerId));
   await db.updateProvider(providerId, { lastTest });
+  invalidateProviderRuntimeCache(tenantDbName);
 }
 
 export async function listProviderConfigs(
@@ -710,7 +724,9 @@ export async function deleteProviderConfig(
     const instances = await db.listWebSearchInstances(record.tenantId, { providerKey: record.key });
     if (instances.length > 0) throw new ProviderInUseError(record.key, instances.map((i) => i.key).sort());
   }
-  return db.deleteProvider(providerId);
+  const deleted = await db.deleteProvider(providerId);
+  invalidateProviderRuntimeCache(tenantDbName);
+  return deleted;
 }
 
 export interface ProviderRuntimeData<TCredentials = Record<string, unknown>> {
@@ -728,8 +744,32 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
     tenantId: string;
     projectId?: string;
   },
-  options?: { allowManaged?: boolean; managedMessage?: string; managedConnectionId?: string },
+  options?: {
+    allowManaged?: boolean;
+    managedMessage?: string;
+    managedConnectionId?: string;
+    /**
+     * Serve a lookup by key from the in-process copy (see providerRuntimeCache.ts) and keep one for the next call.
+     * The returned object is then shared between calls: the caller must not change it or its credentials. Never
+     * applies to a managed record.
+     */
+    reuse?: boolean;
+  },
 ): Promise<ProviderRuntimeData<TCredentials>> {
+  const reuseKey = options?.reuse === true && !providerIdOrKey.id && providerIdOrKey.key
+    ? {
+      tenantDbName,
+      projectId: providerIdOrKey.projectId,
+      providerKey: providerIdOrKey.key,
+      connectionId: options.managedConnectionId,
+    }
+    : undefined;
+  if (reuseKey) {
+    const hit = getCachedProviderRuntime<ProviderRuntimeData<TCredentials>>(reuseKey);
+    if (hit && !isManagedProviderRecord(hit.record)) return hit;
+  }
+  const epoch = providerRuntimeEpoch(tenantDbName);
+
   const db = await withTenantDb(tenantDbName);
   let record: IProviderRecord | null = null;
 
@@ -807,6 +847,7 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
   }
 
   let credentials: TCredentials;
+  let healed = false;
   try {
     credentials = decryptObject<TCredentials>(record.credentialsEnc);
   } catch (error) {
@@ -825,13 +866,15 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
         credentialsEnc: encryptObject(recovered),
       })
       .catch(() => undefined);
+    invalidateProviderRuntimeCache(tenantDbName);
     credentials = recovered;
+    healed = true;
   }
 
-  return {
-    record,
-    credentials,
-  };
+  const loaded = { record, credentials };
+  // A record healed just now is read again next time, from the row that was re-encrypted.
+  if (reuseKey && !healed) setCachedProviderRuntime(reuseKey, loaded, epoch);
+  return loaded;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

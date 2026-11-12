@@ -10,6 +10,13 @@ import { runtimePool, hashRuntimeConfig } from '@/lib/core/runtimePool';
 
 const MANAGED_GATEWAY_ONLY = 'This model can only be used through the model gateway.';
 
+/**
+ * The config hash of a provider load. `loadProviderRuntimeData` hands the same object to every call that is served
+ * from its in-process copy, so keying by that object reuses one hash (a sorted JSON.stringify + sha256) until the
+ * copy is dropped; a load built afresh (every managed call) is simply hashed again.
+ */
+const configHashes = new WeakMap<object, string>();
+
 export interface ModelRuntimeContext {
   runtime: ModelProviderRuntime;
   record: IProviderRecord;
@@ -28,7 +35,7 @@ export async function buildModelRuntime(
   // internal caller (agents, RAG, evaluations) meets a switched-off service.
   await assertServiceEnabled({ tenantId, tenantDbName }, 'models');
 
-  const { record, credentials, managedConnection } = await loadProviderRuntimeData(
+  const loaded = await loadProviderRuntimeData(
     tenantDbName,
     { tenantId, key: providerKey, projectId },
     // Refused before the credentials are opened; the gateway path (allowManaged) meters the call.
@@ -36,8 +43,10 @@ export async function buildModelRuntime(
       allowManaged: options?.allowManaged === true,
       managedMessage: MANAGED_GATEWAY_ONLY,
       managedConnectionId: options?.managedConnectionId,
+      reuse: true,
     },
   );
+  const { record, credentials, managedConnection } = loaded;
 
   assertProviderEnabled(record);
 
@@ -58,7 +67,11 @@ export async function buildModelRuntime(
     : `model:${tenantId}:${record.key}`;
   // The settings (a baseUrl, a region, an API version, ...) shape the runtime as much as the credentials do: hashed
   // with the credentials only, an edited setting would go unseen until the pooled runtime expired.
-  const configHash = hashRuntimeConfig({ driver: runtimeDriver, credentials, settings: runtimeSettings });
+  let configHash = configHashes.get(loaded);
+  if (configHash === undefined) {
+    configHash = hashRuntimeConfig({ driver: runtimeDriver, credentials, settings: runtimeSettings });
+    configHashes.set(loaded, configHash);
+  }
 
   const runtime = await runtimePool.getOrCreate<ModelProviderRuntime>(
     cacheKey,
