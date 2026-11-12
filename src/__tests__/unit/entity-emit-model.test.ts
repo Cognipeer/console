@@ -6,9 +6,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IModel } from '@/lib/database';
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/services/models/dynamicRoutingState', () => ({
   recordRoutedUsage: vi.fn().mockResolvedValue(undefined),

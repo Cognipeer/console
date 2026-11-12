@@ -9,6 +9,7 @@ const hoisted = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
 }));
 
 import { registerManagedCreditsHost, resetManagedCreditsHostForTests } from '@/enterprise/managed-credits';

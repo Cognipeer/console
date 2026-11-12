@@ -17,7 +17,10 @@ const hoisted = vi.hoisted(() => ({
   createRuntime: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: async () => hoisted.db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
+}));
 vi.mock('@/lib/utils/crypto', () => ({
   encryptObject: vi.fn((value: unknown) => `enc:${JSON.stringify(value)}`),
   decryptObject: vi.fn((blob: string) => JSON.parse(blob.slice(4))),

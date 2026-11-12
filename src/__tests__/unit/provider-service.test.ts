@@ -11,9 +11,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@/lib/services/providers/providerEndpointGuard', () => ({ assertProviderEndpointsAllowed: vi.fn(async () => undefined) }));
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // Same shape as the real runWithTenantScope on a provider without runWithTenant: switch, then run.
+    runWithTenantScope: async (tenant: string, fn: (db: unknown) => unknown) => {
+      const db = await getDatabase() as { switchToTenant: (t: string) => Promise<void> };
+      await db.switchToTenant(tenant);
+      return fn(db);
+    },
+  };
+});
 
 vi.mock('@/lib/utils/crypto', () => ({
   encryptObject: vi.fn().mockReturnValue('encrypted-blob'),

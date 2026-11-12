@@ -8,9 +8,18 @@ import type { IModel, IModelPricing } from '@/lib/database';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // Same shape as the real runWithTenantScope on a provider without runWithTenant: switch, then run.
+    runWithTenantScope: async (tenant: string, fn: (db: unknown) => unknown) => {
+      const db = await getDatabase() as { switchToTenant: (t: string) => Promise<void> };
+      await db.switchToTenant(tenant);
+      return fn(db);
+    },
+  };
+});
 
 vi.mock('@/lib/services/models/dynamicRoutingState', () => ({
   recordRoutedUsage: vi.fn().mockResolvedValue(undefined),

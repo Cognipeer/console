@@ -8,7 +8,10 @@ const db = {
   createProvider: vi.fn(),
   updateProvider: vi.fn(),
 };
-vi.mock('@/lib/database', () => ({ getDatabase: async () => db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => db,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(db),
+}));
 // No name resolves except the one host of the SRV record below, which answers with a private address.
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async (host: string) => {

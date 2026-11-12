@@ -7,7 +7,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
 
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/database', async (orig) => ({ ...(await orig<typeof import('@/lib/database')>()), getDatabase: hoisted.getDatabase }));
+vi.mock('@/lib/database', async (orig) => ({
+  ...(await orig<typeof import('@/lib/database')>()),
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase()),
+}));
 
 import {
   createProviderConfig,

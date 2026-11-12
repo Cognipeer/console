@@ -1,5 +1,6 @@
 import {
-  getDatabase,
+  runWithTenantScope,
+  type DatabaseProvider,
   IProviderLastTest,
   IProviderRecord,
   ProviderDomain,
@@ -182,12 +183,6 @@ export function redactPlatformProvider<T extends ProviderConfigView>(view: T): T
   } as unknown as T;
 }
 
-async function withTenantDb(tenantDbName: string) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 /** Test only: drops the in-process copies of provider records and credentials. */
 export const clearProviderRuntimeCacheForTests = clearProviderRuntimeCache;
 
@@ -223,13 +218,14 @@ export async function resolveTenantProjectIds(
 ): Promise<{ projectIds: string[]; unknown: string[] }> {
   const wanted = [...new Set(projectIds.map(String))];
   if (wanted.length === 0) return { projectIds: [], unknown: [] };
-  const db = await withTenantDb(tenantDbName);
-  // A tenant has fewer than a hundred projects: one list read beats a lookup per id.
-  const known = new Set((await db.listProjects(tenantId)).map((project) => String(project._id)));
-  return {
-    projectIds: wanted.filter((id) => known.has(id)),
-    unknown: wanted.filter((id) => !known.has(id)),
-  };
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // A tenant has fewer than a hundred projects: one list read beats a lookup per id.
+    const known = new Set((await db.listProjects(tenantId)).map((project) => String(project._id)));
+    return {
+      projectIds: wanted.filter((id) => known.has(id)),
+      unknown: wanted.filter((id) => !known.has(id)),
+    };
+  });
 }
 
 /**
@@ -255,7 +251,7 @@ function assertDriverIsCreatable(driver: string): void {
 /** Refuses a change to a managed record. Without a registered host nothing is managed and nothing is read. */
 /** Refuses a change to a platform or managed record; returns the record it read (null when there is none). */
 async function assertNotManagedById(
-  db: Awaited<ReturnType<typeof withTenantDb>>,
+  db: DatabaseProvider,
   providerId: string,
 ): Promise<IProviderRecord | null> {
   const record = await db.findProviderById(providerId);
@@ -320,43 +316,44 @@ export async function createProviderConfig(
     ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
     : payload.settings;
 
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  // Provider keys are tenant-level; project assignment is handled via projectIds.
-  const existing = await db.findProviderByKey(tenantId, payload.key);
-  if (existing) {
-    throw new ProviderKeyExistsError(payload.key);
-  }
-
-  let record: IProviderRecord;
-  try {
-    record = await db.createProvider({
-      tenantId,
-      projectIds: initialProjectIds(payload),
-      key: payload.key,
-      type: payload.type,
-      driver: payload.driver,
-      label: payload.label,
-      description: payload.description,
-      status: payload.status ?? 'active',
-      credentialsEnc: encryptObject(payload.credentials),
-      settings: settings ?? {},
-      capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
-      metadata: withServerOwnedMarker(payload.metadata, payload.type === 'websearch'),
-      createdBy: payload.createdBy,
-      updatedBy: payload.createdBy,
-    });
-  } catch (error) {
-    // Lost the create race: another request inserted the same key between the
-    // findProviderByKey check above and this insert. Surface it as a conflict.
-    if (isDuplicateKeyError(error)) {
+    // Provider keys are tenant-level; project assignment is handled via projectIds.
+    const existing = await db.findProviderByKey(tenantId, payload.key);
+    if (existing) {
       throw new ProviderKeyExistsError(payload.key);
     }
-    throw error;
-  }
 
-  invalidateProviderRuntimeCache(tenantDbName);
-  return sanitize(record);
+    let record: IProviderRecord;
+    try {
+      record = await db.createProvider({
+        tenantId,
+        projectIds: initialProjectIds(payload),
+        key: payload.key,
+        type: payload.type,
+        driver: payload.driver,
+        label: payload.label,
+        description: payload.description,
+        status: payload.status ?? 'active',
+        credentialsEnc: encryptObject(payload.credentials),
+        settings: settings ?? {},
+        capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
+        metadata: withServerOwnedMarker(payload.metadata, payload.type === 'websearch'),
+        createdBy: payload.createdBy,
+        updatedBy: payload.createdBy,
+      });
+    } catch (error) {
+      // Lost the create race: another request inserted the same key between the
+      // findProviderByKey check above and this insert. Surface it as a conflict.
+      if (isDuplicateKeyError(error)) {
+        throw new ProviderKeyExistsError(payload.key);
+      }
+      throw error;
+    }
+
+    invalidateProviderRuntimeCache(tenantDbName);
+    return sanitize(record);
+  });
 }
 
 /** Order-insensitive deep equality for JSON-shaped values (settings, credentials). */
@@ -493,110 +490,111 @@ export async function updateProviderConfig(
     allowPlatformAssignment?: boolean;
   },
 ): Promise<ProviderConfigView | null> {
-  const db = await withTenantDb(tenantDbName);
-  const before = await db.findProviderById(providerId);
-  if (before?.platform) {
-    if (!(options?.allowPlatformAssignment === true && isAssignmentOnlyPayload(payload))) {
-      throw new PlatformRecordReadOnlyError();
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const before = await db.findProviderById(providerId);
+    if (before?.platform) {
+      if (!(options?.allowPlatformAssignment === true && isAssignmentOnlyPayload(payload))) {
+        throw new PlatformRecordReadOnlyError();
+      }
+    } else if (before && getManagedCreditsHost() && isManagedProviderRecord(before)) {
+      throw new ManagedProviderReadOnlyError();
     }
-  } else if (before && getManagedCreditsHost() && isManagedProviderRecord(before)) {
-    throw new ManagedProviderReadOnlyError();
-  }
-  const updates: Partial<IProviderRecord> = {};
+    const updates: Partial<IProviderRecord> = {};
 
-  // The stored "last test" describes the connection as it was tested: once the connection settings or
-  // the credentials actually change it no longer says anything, so it is dropped (a re-test writes a new one).
-  let connectionChanged = false;
-  let hadLastTest = false;
-  // Set when the update changes the credentials.
-  let credentialMerge: CredentialMerge | undefined;
+    // The stored "last test" describes the connection as it was tested: once the connection settings or
+    // the credentials actually change it no longer says anything, so it is dropped (a re-test writes a new one).
+    let connectionChanged = false;
+    let hadLastTest = false;
+    // Set when the update changes the credentials.
+    let credentialMerge: CredentialMerge | undefined;
 
-  if (payload.settings !== undefined || payload.credentials !== undefined) {
-    const target = await db.findProviderById(providerId);
-    hadLastTest = Boolean(target?.lastTest);
-    if (payload.credentials !== undefined) {
-      credentialMerge = mergeCredentials(target, payload.credentials);
-    }
-    await validateUpdatedProvider(target, payload, credentialMerge?.merged);
-    await assertProviderEndpointsAllowed(target?.type, { tenantId: target?.tenantId }, payload.credentials, payload.settings);
-    if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
-      connectionChanged = true;
-    }
-  }
-
-  if (payload.projectIds !== undefined) {
-    updates.projectIds = payload.projectIds;
-    // `projectIds` is the whole assignment: a legacy single `projectId` is folded into it (callers send the
-    // effective set), otherwise a project dropped from the list would stay assigned through the old field.
-    const target = await db.findProviderById(providerId);
-    if (target?.projectId) {
-      updates.projectId = null as unknown as undefined;
-    }
-  }
-
-  if (payload.label !== undefined) {
-    updates.label = payload.label;
-  }
-
-  if (payload.description !== undefined) {
-    updates.description = payload.description;
-  }
-
-  if (payload.status !== undefined) {
-    updates.status = payload.status;
-  }
-
-  if (payload.settings !== undefined) {
-    updates.settings = payload.settings;
-    if (payload.settings.cache !== undefined) {
+    if (payload.settings !== undefined || payload.credentials !== undefined) {
       const target = await db.findProviderById(providerId);
-      if (target?.type === 'websearch') {
-        updates.settings = await validateWebSearchSettings(
-          tenantDbName,
-          target.tenantId,
-          options?.projectId,
-          payload.settings,
-        );
+      hadLastTest = Boolean(target?.lastTest);
+      if (payload.credentials !== undefined) {
+        credentialMerge = mergeCredentials(target, payload.credentials);
+      }
+      await validateUpdatedProvider(target, payload, credentialMerge?.merged);
+      await assertProviderEndpointsAllowed(target?.type, { tenantId: target?.tenantId }, payload.credentials, payload.settings);
+      if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
+        connectionChanged = true;
       }
     }
-  }
 
-  if (payload.capabilitiesOverride !== undefined) {
-    updates.capabilitiesOverride = payload.capabilitiesOverride;
-  }
-
-  if (payload.metadata !== undefined) {
-    updates.metadata = withServerOwnedMarker(payload.metadata, before?.metadata?.[BEHAVIOR_ON_INSTANCES] === true);
-  }
-
-  if (credentialMerge) {
-    if (!credentialMerge.hadStored || !sameJson(credentialMerge.merged, credentialMerge.current)) {
-      connectionChanged = true;
+    if (payload.projectIds !== undefined) {
+      updates.projectIds = payload.projectIds;
+      // `projectIds` is the whole assignment: a legacy single `projectId` is folded into it (callers send the
+      // effective set), otherwise a project dropped from the list would stay assigned through the old field.
+      const target = await db.findProviderById(providerId);
+      if (target?.projectId) {
+        updates.projectId = null as unknown as undefined;
+      }
     }
-    updates.credentialsEnc = encryptObject(credentialMerge.merged);
-  }
 
-  if (connectionChanged && hadLastTest) {
-    updates.lastTest = null;
-  }
+    if (payload.label !== undefined) {
+      updates.label = payload.label;
+    }
 
-  if (payload.updatedBy) {
-    updates.updatedBy = payload.updatedBy;
-  }
+    if (payload.description !== undefined) {
+      updates.description = payload.description;
+    }
 
-  const updated = await db.updateProvider(providerId, updates);
-  // Settings, credentials, status and project assignment all shape what a model call loads.
-  invalidateProviderRuntimeCache(tenantDbName);
-  if (updated && before?.platform) {
-    // The models of a platform provider follow its assignment: drop their cached lookups for every project that
-    // gained or lost them.
-    const { invalidatePlatformProviderModelCaches } = await import('@/lib/services/models/modelService');
-    await invalidatePlatformProviderModelCaches(tenantDbName, before.key, [
-      ...assignedProjectIds(before),
-      ...assignedProjectIds(updated),
-    ]);
-  }
-  return updated ? sanitize(updated) : null;
+    if (payload.status !== undefined) {
+      updates.status = payload.status;
+    }
+
+    if (payload.settings !== undefined) {
+      updates.settings = payload.settings;
+      if (payload.settings.cache !== undefined) {
+        const target = await db.findProviderById(providerId);
+        if (target?.type === 'websearch') {
+          updates.settings = await validateWebSearchSettings(
+            tenantDbName,
+            target.tenantId,
+            options?.projectId,
+            payload.settings,
+          );
+        }
+      }
+    }
+
+    if (payload.capabilitiesOverride !== undefined) {
+      updates.capabilitiesOverride = payload.capabilitiesOverride;
+    }
+
+    if (payload.metadata !== undefined) {
+      updates.metadata = withServerOwnedMarker(payload.metadata, before?.metadata?.[BEHAVIOR_ON_INSTANCES] === true);
+    }
+
+    if (credentialMerge) {
+      if (!credentialMerge.hadStored || !sameJson(credentialMerge.merged, credentialMerge.current)) {
+        connectionChanged = true;
+      }
+      updates.credentialsEnc = encryptObject(credentialMerge.merged);
+    }
+
+    if (connectionChanged && hadLastTest) {
+      updates.lastTest = null;
+    }
+
+    if (payload.updatedBy) {
+      updates.updatedBy = payload.updatedBy;
+    }
+
+    const updated = await db.updateProvider(providerId, updates);
+    // Settings, credentials, status and project assignment all shape what a model call loads.
+    invalidateProviderRuntimeCache(tenantDbName);
+    if (updated && before?.platform) {
+      // The models of a platform provider follow its assignment: drop their cached lookups for every project that
+      // gained or lost them.
+      const { invalidatePlatformProviderModelCaches } = await import('@/lib/services/models/modelService');
+      await invalidatePlatformProviderModelCaches(tenantDbName, before.key, [
+        ...assignedProjectIds(before),
+        ...assignedProjectIds(updated),
+      ]);
+    }
+    return updated ? sanitize(updated) : null;
+  });
 }
 
 /** Values a "Test connection" of a saved provider may carry instead of what is stored (the edit form's unsaved edits). */
@@ -651,15 +649,16 @@ export async function resolveProviderTestTarget(
     return { record, credentials, settings: overrides.settings ?? record.settings ?? {} };
   }
 
-  const db = await withTenantDb(tenantDbName);
-  const record = await db.findProviderById(provider.id);
-  if (!record || record.tenantId !== provider.tenantId) {
-    throw new Error(`Provider configuration "${provider.id}" not found.`);
-  }
-  assertNotPlatformRecord(record);
-  if (isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
-  const { merged } = mergeCredentials(record, overrides.credentials ?? {});
-  return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findProviderById(provider.id);
+    if (!record || record.tenantId !== provider.tenantId) {
+      throw new Error(`Provider configuration "${provider.id}" not found.`);
+    }
+    assertNotPlatformRecord(record);
+    if (isManagedProviderRecord(record)) throw new ManagedProviderReadOnlyError();
+    const { merged } = mergeCredentials(record, overrides.credentials ?? {});
+    return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
+  });
 }
 
 /** Stores the outcome of a "Test connection" on the provider record. */
@@ -668,10 +667,11 @@ export async function recordProviderTest(
   providerId: string,
   lastTest: IProviderLastTest,
 ): Promise<void> {
-  const db = await withTenantDb(tenantDbName);
-  assertNotPlatformRecord(await db.findProviderById(providerId));
-  await db.updateProvider(providerId, { lastTest });
-  invalidateProviderRuntimeCache(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    assertNotPlatformRecord(await db.findProviderById(providerId));
+    await db.updateProvider(providerId, { lastTest });
+    invalidateProviderRuntimeCache(tenantDbName);
+  });
 }
 
 export async function listProviderConfigs(
@@ -685,9 +685,10 @@ export async function listProviderConfigs(
   },
   options?: ProviderViewOptions,
 ): Promise<ProviderConfigView[]> {
-  const db = await withTenantDb(tenantDbName);
-  const records = await db.listProviders(tenantId, filters);
-  return records.map((record) => sanitize(record, options));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const records = await db.listProviders(tenantId, filters);
+    return records.map((record) => sanitize(record, options));
+  });
 }
 
 export async function getProviderConfigById(
@@ -695,9 +696,10 @@ export async function getProviderConfigById(
   providerId: string,
   options?: ProviderViewOptions,
 ): Promise<ProviderConfigView | null> {
-  const db = await withTenantDb(tenantDbName);
-  const record = await db.findProviderById(providerId);
-  return record ? sanitize(record, options) : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findProviderById(providerId);
+    return record ? sanitize(record, options) : null;
+  });
 }
 
 export async function getProviderConfigByKey(
@@ -707,26 +709,28 @@ export async function getProviderConfigByKey(
   projectId?: string,
   options?: ProviderViewOptions,
 ): Promise<ProviderConfigView | null> {
-  const db = await withTenantDb(tenantDbName);
-  const record = await db.findProviderByKey(tenantId, key, projectId);
-  return record ? sanitize(record, options) : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findProviderByKey(tenantId, key, projectId);
+    return record ? sanitize(record, options) : null;
+  });
 }
 
 export async function deleteProviderConfig(
   tenantDbName: string,
   providerId: string,
 ): Promise<boolean> {
-  const db = await withTenantDb(tenantDbName);
-  // One read serves the platform check and the in-use check.
-  const record = await assertNotManagedById(db, providerId);
-  if (record?.type === 'websearch') {
-    // Instances keep their behavior on top of this connection: they must not be left pointing at nothing.
-    const instances = await db.listWebSearchInstances(record.tenantId, { providerKey: record.key });
-    if (instances.length > 0) throw new ProviderInUseError(record.key, instances.map((i) => i.key).sort());
-  }
-  const deleted = await db.deleteProvider(providerId);
-  invalidateProviderRuntimeCache(tenantDbName);
-  return deleted;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // One read serves the platform check and the in-use check.
+    const record = await assertNotManagedById(db, providerId);
+    if (record?.type === 'websearch') {
+      // Instances keep their behavior on top of this connection: they must not be left pointing at nothing.
+      const instances = await db.listWebSearchInstances(record.tenantId, { providerKey: record.key });
+      if (instances.length > 0) throw new ProviderInUseError(record.key, instances.map((i) => i.key).sort());
+    }
+    const deleted = await db.deleteProvider(providerId);
+    invalidateProviderRuntimeCache(tenantDbName);
+    return deleted;
+  });
 }
 
 export interface ProviderRuntimeData<TCredentials = Record<string, unknown>> {
@@ -770,111 +774,112 @@ export async function loadProviderRuntimeData<TCredentials = Record<string, unkn
   }
   const epoch = providerRuntimeEpoch(tenantDbName);
 
-  const db = await withTenantDb(tenantDbName);
-  let record: IProviderRecord | null = null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    let record: IProviderRecord | null = null;
 
-  if (providerIdOrKey.id) {
-    record = await db.findProviderById(providerIdOrKey.id);
-  } else if (providerIdOrKey.key) {
-    record = await db.findProviderByKey(
-      providerIdOrKey.tenantId,
-      providerIdOrKey.key,
-      providerIdOrKey.projectId,
-    );
-  }
-
-  if (!record) {
-    // Providers are strictly project-scoped, so the common cause of this miss is
-    // a provider that exists but was never assigned to the active project. Saying
-    // "not found" sent operators looking for a deleted record instead.
-    if (providerIdOrKey.key && providerIdOrKey.projectId) {
-      const unscoped = await db.findProviderByKey(
+    if (providerIdOrKey.id) {
+      record = await db.findProviderById(providerIdOrKey.id);
+    } else if (providerIdOrKey.key) {
+      record = await db.findProviderByKey(
         providerIdOrKey.tenantId,
         providerIdOrKey.key,
+        providerIdOrKey.projectId,
       );
-      if (unscoped) {
-        throw new Error(
-          `Provider "${providerIdOrKey.key}" exists but is not assigned to project `
-          + `${providerIdOrKey.projectId}. Assign it from the provider's Projects tab.`,
+    }
+
+    if (!record) {
+      // Providers are strictly project-scoped, so the common cause of this miss is
+      // a provider that exists but was never assigned to the active project. Saying
+      // "not found" sent operators looking for a deleted record instead.
+      if (providerIdOrKey.key && providerIdOrKey.projectId) {
+        const unscoped = await db.findProviderByKey(
+          providerIdOrKey.tenantId,
+          providerIdOrKey.key,
         );
+        if (unscoped) {
+          throw new Error(
+            `Provider "${providerIdOrKey.key}" exists but is not assigned to project `
+            + `${providerIdOrKey.projectId}. Assign it from the provider's Projects tab.`,
+          );
+        }
       }
+
+      throw new Error(
+        `Provider configuration "${providerIdOrKey.key ?? providerIdOrKey.id}" not found.`,
+      );
     }
 
-    throw new Error(
-      `Provider configuration "${providerIdOrKey.key ?? providerIdOrKey.id}" not found.`,
-    );
-  }
+    // Fail closed before any decryption: every credential-reading door refuses a managed record unless its caller
+    // meters the call itself. No host registered: never managed.
+    if (options?.allowManaged !== true && isManagedProviderRecord(record)) {
+      throw new ManagedProviderError(options?.managedMessage);
+    }
 
-  // Fail closed before any decryption: every credential-reading door refuses a managed record unless its caller
-  // meters the call itself. No host registered: never managed.
-  if (options?.allowManaged !== true && isManagedProviderRecord(record)) {
-    throw new ManagedProviderError(options?.managedMessage);
-  }
+    // A managed record never opens its stored credentials: the operator supplies the connection of the chosen route.
+    // No connection id, a missing method, null, a throw or a malformed result refuses the call with a generic message.
+    if (options?.allowManaged === true && isManagedProviderRecord(record)) {
+      const connectionId = options.managedConnectionId;
+      if (!connectionId) throw new ManagedProviderError('This provider is not available right now.');
+      let connection: unknown = null;
+      try {
+        connection = getManagedCreditsHost()?.resolveConnection?.(record, connectionId) ?? null;
+      } catch (error) {
+        logger.error('Managed connection could not be resolved', {
+          providerKey: record.key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const resolved = connection as { driver?: unknown; settings?: unknown; credentials?: unknown } | null;
+      if (
+        !resolved
+        || typeof resolved.driver !== 'string'
+        || !resolved.driver
+        || !isPlainRecord(resolved.credentials)
+        || (resolved.settings !== undefined && !isPlainRecord(resolved.settings))
+      ) {
+        throw new ManagedProviderError('This provider is not available right now.');
+      }
+      return {
+        record,
+        credentials: resolved.credentials as TCredentials,
+        managedConnection: {
+          id: connectionId,
+          driver: resolved.driver,
+          settings: (resolved.settings as Record<string, unknown> | undefined) ?? {},
+        },
+      };
+    }
 
-  // A managed record never opens its stored credentials: the operator supplies the connection of the chosen route.
-  // No connection id, a missing method, null, a throw or a malformed result refuses the call with a generic message.
-  if (options?.allowManaged === true && isManagedProviderRecord(record)) {
-    const connectionId = options.managedConnectionId;
-    if (!connectionId) throw new ManagedProviderError('This provider is not available right now.');
-    let connection: unknown = null;
+    let credentials: TCredentials;
+    let healed = false;
     try {
-      connection = getManagedCreditsHost()?.resolveConnection?.(record, connectionId) ?? null;
+      credentials = decryptObject<TCredentials>(record.credentialsEnc);
     } catch (error) {
-      logger.error('Managed connection could not be resolved', {
-        providerKey: record.key,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // Legacy auto-heal: an earlier version of the GPU-fleet auto-register
+      // path persisted credentialsEnc as PLAINTEXT JSON instead of running it
+      // through encryptObject. Those rows fail decrypt with the Node AES-GCM
+      // "Unsupported state or unable to authenticate data" error. When the
+      // field happens to parse as JSON with usable credentials, recover it
+      // and re-encrypt in place so subsequent loads use the proper format.
+      const recovered = tryRecoverLegacyPlaintextCredentials<TCredentials>(record.credentialsEnc);
+      if (!recovered) {
+        throw new ProviderCredentialDecryptError(record.key, record.driver, error);
+      }
+      await db
+        .updateProvider(String(record._id), {
+          credentialsEnc: encryptObject(recovered),
+        })
+        .catch(() => undefined);
+      invalidateProviderRuntimeCache(tenantDbName);
+      credentials = recovered;
+      healed = true;
     }
-    const resolved = connection as { driver?: unknown; settings?: unknown; credentials?: unknown } | null;
-    if (
-      !resolved
-      || typeof resolved.driver !== 'string'
-      || !resolved.driver
-      || !isPlainRecord(resolved.credentials)
-      || (resolved.settings !== undefined && !isPlainRecord(resolved.settings))
-    ) {
-      throw new ManagedProviderError('This provider is not available right now.');
-    }
-    return {
-      record,
-      credentials: resolved.credentials as TCredentials,
-      managedConnection: {
-        id: connectionId,
-        driver: resolved.driver,
-        settings: (resolved.settings as Record<string, unknown> | undefined) ?? {},
-      },
-    };
-  }
 
-  let credentials: TCredentials;
-  let healed = false;
-  try {
-    credentials = decryptObject<TCredentials>(record.credentialsEnc);
-  } catch (error) {
-    // Legacy auto-heal: an earlier version of the GPU-fleet auto-register
-    // path persisted credentialsEnc as PLAINTEXT JSON instead of running it
-    // through encryptObject. Those rows fail decrypt with the Node AES-GCM
-    // "Unsupported state or unable to authenticate data" error. When the
-    // field happens to parse as JSON with usable credentials, recover it
-    // and re-encrypt in place so subsequent loads use the proper format.
-    const recovered = tryRecoverLegacyPlaintextCredentials<TCredentials>(record.credentialsEnc);
-    if (!recovered) {
-      throw new ProviderCredentialDecryptError(record.key, record.driver, error);
-    }
-    await db
-      .updateProvider(String(record._id), {
-        credentialsEnc: encryptObject(recovered),
-      })
-      .catch(() => undefined);
-    invalidateProviderRuntimeCache(tenantDbName);
-    credentials = recovered;
-    healed = true;
-  }
-
-  const loaded = { record, credentials };
-  // A record healed just now is read again next time, from the row that was re-encrypted.
-  if (reuseKey && !healed) setCachedProviderRuntime(reuseKey, loaded, epoch);
-  return loaded;
+    const loaded = { record, credentials };
+    // A record healed just now is read again next time, from the row that was re-encrypted.
+    if (reuseKey && !healed) setCachedProviderRuntime(reuseKey, loaded, epoch);
+    return loaded;
+  });
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
