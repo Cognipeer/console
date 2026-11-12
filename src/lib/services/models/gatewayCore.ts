@@ -826,6 +826,39 @@ function isCacheableConversation(request: ModelCallInput['request'], wire: AnyRe
 }
 
 /**
+ * `outputGuardrailPolicyVersions` for the semantic-cache variant key, remembered for a few seconds: an agent step
+ * with output guardrails bound asks the same question on every call, and each answer is a (TTL'd) record lookup per
+ * bound key. A guardrail edit changes the version stamp within `OUTPUT_GUARDRAIL_VERSIONS_TTL_MS` on this node.
+ */
+const OUTPUT_GUARDRAIL_VERSIONS_TTL_MS = 3_000;
+const OUTPUT_GUARDRAIL_VERSIONS_MAX_ENTRIES = 200;
+const outputGuardrailVersionsMemo = new Map<string, { versions: string[]; expiresAt: number }>();
+
+async function memoizedOutputGuardrailVersions(
+  tenantDbName: string,
+  projectId: string | undefined,
+  keys: readonly string[],
+): Promise<string[]> {
+  const memoKey = [tenantDbName, projectId ?? '', ...keys].join('\u0000');
+  const hit = outputGuardrailVersionsMemo.get(memoKey);
+  if (hit && hit.expiresAt > Date.now()) return hit.versions;
+  const versions = await outputGuardrailPolicyVersions(tenantDbName, projectId, keys);
+  outputGuardrailVersionsMemo.delete(memoKey);
+  outputGuardrailVersionsMemo.set(memoKey, { versions, expiresAt: Date.now() + OUTPUT_GUARDRAIL_VERSIONS_TTL_MS });
+  while (outputGuardrailVersionsMemo.size > OUTPUT_GUARDRAIL_VERSIONS_MAX_ENTRIES) {
+    const oldest = outputGuardrailVersionsMemo.keys().next().value;
+    if (oldest === undefined) break;
+    outputGuardrailVersionsMemo.delete(oldest);
+  }
+  return versions;
+}
+
+/** Test only. */
+export function clearOutputGuardrailVersionsMemoForTests(): void {
+  outputGuardrailVersionsMemo.clear();
+}
+
+/**
  * One model call. With reversible PII protection on (the caller's or the
  * model's `piiProtection`), the core below sees tokens only and the caller gets
  * the values back: see `gatewayPii.ts`.
@@ -966,7 +999,7 @@ async function executeCoreCall(input: ModelCallInput): Promise<ModelCallOutcome>
     // text the operator (or this caller) hid, nor hide what a caller asked for.
     __returnReasoning: includeReasoning,
     ...(cacheEnabled
-      ? { __outputGuardrails: await outputGuardrailPolicyVersions(tenantDbName, projectId, outputGuardrailKeys) }
+      ? { __outputGuardrails: await memoizedOutputGuardrailVersions(tenantDbName, projectId, outputGuardrailKeys) }
       : {}),
   });
 

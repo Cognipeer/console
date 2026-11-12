@@ -834,6 +834,32 @@ function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string)
 }
 
 /**
+ * A few seconds of in-process memory in front of the shared cache for `getModelByKey`. An agent turn looks the same
+ * model up on every step; with a networked shared cache each of those is a round trip plus a JSON parse of the whole
+ * record. Dropped at the place the shared entries are dropped (`invalidateModelMetaCache`); a node that did not see
+ * the edit serves the old record for at most `MODEL_MEMO_TTL_MS`.
+ */
+const MODEL_MEMO_TTL_MS = 3_000;
+const MODEL_MEMO_MAX_ENTRIES = 500;
+const modelMemo = new Map<string, { model: IModel; expiresAt: number }>();
+
+function rememberModel(cacheKey: string, model: IModel): void {
+  // Re-inserting moves the key to the end, so the first key is always the oldest entry.
+  modelMemo.delete(cacheKey);
+  modelMemo.set(cacheKey, { model, expiresAt: Date.now() + MODEL_MEMO_TTL_MS });
+  while (modelMemo.size > MODEL_MEMO_MAX_ENTRIES) {
+    const oldest = modelMemo.keys().next().value;
+    if (oldest === undefined) break;
+    modelMemo.delete(oldest);
+  }
+}
+
+/** Test only: empties the in-process memo of `getModelByKey`. */
+export function clearModelMemoForTests(): void {
+  modelMemo.clear();
+}
+
+/**
  * Drops the `getModelByKey` cache entries for a model so an edit (pricing,
  * routing config, guardrail bindings, provider) or a delete takes effect on
  * the next request instead of up to two minutes later. Also drops the AI App
@@ -847,6 +873,9 @@ export async function invalidateModelMetaCache(
   projectId: string,
   keys: Array<string | undefined>,
 ): Promise<void> {
+  for (const key of keys) {
+    if (key) modelMemo.delete(modelMetaCacheKey(tenantDbName, projectId, key));
+  }
   try {
     const cache = await getCache();
     await Promise.all(
@@ -886,16 +915,25 @@ export async function getModelByKey(
   projectId: string,
 ): Promise<IModel | null> {
   const cacheKey = modelMetaCacheKey(tenantDbName, projectId, key);
+  const memoized = modelMemo.get(cacheKey);
+  if (memoized) {
+    if (memoized.expiresAt > Date.now()) return memoized.model;
+    modelMemo.delete(cacheKey);
+  }
   try {
     const cache = await getCache();
     const cached = await cache.get<IModel>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      rememberModel(cacheKey, cached);
+      return cached;
+    }
   } catch { /* cache miss / unavailable — fall through to DB */ }
 
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const model = await db.findModelByKey(key, projectId);
   if (model) {
+    rememberModel(cacheKey, model);
     try {
       const cache = await getCache();
       await cache.set(cacheKey, model, 120);
