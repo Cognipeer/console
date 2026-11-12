@@ -2,7 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 import { runWithRequestContext } from '@/lib/core/requestContext';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_tenant: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 vi.mock('@cognipeer/to-markdown', () => ({
   convertToMarkdown: vi.fn().mockResolvedValue('## Converted markdown content'),
 }));

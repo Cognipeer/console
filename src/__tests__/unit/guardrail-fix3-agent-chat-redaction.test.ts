@@ -35,7 +35,13 @@ const hoisted = vi.hoisted(() => ({
   providerCalls: [] as Array<Array<{ role: string; content: unknown }>>,
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_tenant: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
