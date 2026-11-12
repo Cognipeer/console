@@ -1,6 +1,6 @@
 import slugify from 'slugify';
 import { randomUUID } from 'crypto';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };
 const MAX_KEY_ATTEMPTS = 50;
 
@@ -18,21 +18,21 @@ export async function generateUniqueKey(
   desiredKey: string,
   excludeId?: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const base = normalizeKey(desiredKey);
-  let attempt = 0;
-  let candidate = base;
+    const base = normalizeKey(desiredKey);
+    let attempt = 0;
+    let candidate = base;
 
-  while (attempt < MAX_KEY_ATTEMPTS) {
-    const existing = await db.findMcpServerByKey(candidate, projectId);
-    if (!existing || String(existing._id) === excludeId) return candidate;
-    attempt++;
-    candidate = `${base}-${attempt}`;
-  }
+    while (attempt < MAX_KEY_ATTEMPTS) {
+      const existing = await db.findMcpServerByKey(candidate, projectId);
+      if (!existing || String(existing._id) === excludeId) return candidate;
+      attempt++;
+      candidate = `${base}-${attempt}`;
+    }
 
-  throw new Error(`Could not generate a unique key for MCP server "${desiredKey}"`);
+    throw new Error(`Could not generate a unique key for MCP server "${desiredKey}"`);
+  });
 }
 
 function generateEndpointSlug(): string {
@@ -72,11 +72,11 @@ export async function resolveEndpointSlug(
 ): Promise<string> {
   if (!desired?.trim()) return generateEndpointSlug();
   const slug = normalizeCustomEndpointSlug(desired);
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const existing = await db.findMcpServerByEndpointSlug(slug);
-  if (existing && String(existing._id) !== excludeId) {
-    throw new Error(`The path "${slug}" is already used by another MCP server. Choose a different one.`);
-  }
-  return slug;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findMcpServerByEndpointSlug(slug);
+    if (existing && String(existing._id) !== excludeId) {
+      throw new Error(`The path "${slug}" is already used by another MCP server. Choose a different one.`);
+    }
+    return slug;
+  });
 }

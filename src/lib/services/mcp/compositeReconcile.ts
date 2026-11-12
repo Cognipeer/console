@@ -1,5 +1,5 @@
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { DatabaseProvider, IMcpServer, IMcpTool } from '@/lib/database';
 import { normalizeMcpInstructions } from './discovery';
 import { defaultAnnotationsForSource } from './toolAnnotations';
@@ -181,33 +181,33 @@ export async function reconcileCompositesForMember(
   memberId: string,
   opts: { removed?: boolean } = {},
 ): Promise<void> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  // Every composite, agents' own ones included: a member that changes must reach each of them.
-  const all = await db.listMcpServers({ owned: 'include' });
-  const composites = all.filter((s) => resolveSourceType(s) === 'composite'
-    && getCompositeConfig(s).members.some((m) => m.serverId === memberId));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // Every composite, agents' own ones included: a member that changes must reach each of them.
+    const all = await db.listMcpServers({ owned: 'include' });
+    const composites = all.filter((s) => resolveSourceType(s) === 'composite'
+      && getCompositeConfig(s).members.some((m) => m.serverId === memberId));
 
-  for (const composite of composites) {
-    try {
-      if (opts.removed) {
-        const prunedMembers = getCompositeConfig(composite).members.filter((m) => m.serverId !== memberId);
-        await db.updateMcpServer(String(composite._id), {
-          metadata: metadataWithComposite(
-            composite.metadata,
-            { members: prunedMembers, hasInternalMember: getCompositeConfig(composite).hasInternalMember },
-            getCompositeMemberSummaries(composite),
-          ),
-        });
-        const refreshed = await db.findMcpServerById(String(composite._id));
-        if (refreshed) await reconcileOneComposite(db, refreshed);
-      } else {
-        await reconcileOneComposite(db, composite);
+    for (const composite of composites) {
+      try {
+        if (opts.removed) {
+          const prunedMembers = getCompositeConfig(composite).members.filter((m) => m.serverId !== memberId);
+          await db.updateMcpServer(String(composite._id), {
+            metadata: metadataWithComposite(
+              composite.metadata,
+              { members: prunedMembers, hasInternalMember: getCompositeConfig(composite).hasInternalMember },
+              getCompositeMemberSummaries(composite),
+            ),
+          });
+          const refreshed = await db.findMcpServerById(String(composite._id));
+          if (refreshed) await reconcileOneComposite(db, refreshed);
+        } else {
+          await reconcileOneComposite(db, composite);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await db.updateMcpServer(String(composite._id), { lastError: lastErrorRecord(composite, message) });
+        logger.warn('Composite reconcile failed', { compositeKey: composite.key, memberId, error: message });
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await db.updateMcpServer(String(composite._id), { lastError: lastErrorRecord(composite, message) });
-      logger.warn('Composite reconcile failed', { compositeKey: composite.key, memberId, error: message });
     }
-  }
+  });
 }

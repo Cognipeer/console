@@ -1,6 +1,6 @@
 import { createLogger } from '@/lib/core/logger';
 import { createHash } from 'crypto';
-import { getDatabase, runWithTenantScope } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { IMcpAuditLog, IMcpRequestLog, IMcpServer, McpLogServerScope } from '@/lib/database';
 import { getConfig } from '@/lib/core/config';
 import { authConfigSecretValues, DEFAULT_MAX_STRING_CHARS, maskSecretValues, redactLogPayload, redactLogString } from '@/lib/services/logRedaction';
@@ -308,9 +308,9 @@ export async function listMcpRequestLogs(
     keyword?: string;
   },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listMcpRequestLogs(mcpLogScope(server), options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listMcpRequestLogs(mcpLogScope(server), options);
+  });
 }
 
 export async function countMcpRequestLogs(
@@ -318,9 +318,9 @@ export async function countMcpRequestLogs(
   server: IMcpServer,
   options?: { from?: Date; to?: Date; status?: string; keyword?: string },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.countMcpRequestLogs(mcpLogScope(server), options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.countMcpRequestLogs(mcpLogScope(server), options);
+  });
 }
 
 export async function aggregateMcpRequestLogs(
@@ -328,9 +328,9 @@ export async function aggregateMcpRequestLogs(
   server: IMcpServer,
   options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.aggregateMcpRequestLogs(mcpLogScope(server), options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.aggregateMcpRequestLogs(mcpLogScope(server), options);
+  });
 }
 
 // ── Audit logging ─────────────────────────────────────────────────────────
@@ -340,9 +340,7 @@ export async function logMcpAudit(
   entry: Omit<IMcpAuditLog, '_id' | 'createdAt'>,
 ): Promise<void> {
   try {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    await db.createMcpAuditLog(entry);
+    await runWithTenantScope(tenantDbName, (db) => db.createMcpAuditLog(entry));
   } catch (err) {
     logger.error('Failed to write MCP audit log', { serverKey: entry.serverKey, error: err });
   }
@@ -352,7 +350,7 @@ export async function listMcpAuditLogs(
   tenantDbName: string,
   options?: { projectId?: string; serverKey?: string; action?: string; limit?: number; skip?: number },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listMcpAuditLogs(options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listMcpAuditLogs(options);
+  });
 }

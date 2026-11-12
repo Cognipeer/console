@@ -24,9 +24,8 @@
 
 import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
-import { getDatabase } from '@/lib/database';
-import { runInTenant } from '@/lib/database/runInTenant';
+import type { IMcpServer, ITenant } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getConfig } from '@/lib/core/config';
 import { gatePublicRequestRate } from '../publicRpmGate';
@@ -84,14 +83,6 @@ const USER_AGENT_MAX_CHARS = 256;
 /** A caller turned away for load may retry after this long. */
 const BUSY_RETRY_AFTER_SECONDS = 5;
 
-async function withTenantDb<T>(
-  db: DatabaseProvider,
-  tenantDbName: string,
-  fn: () => T | Promise<T>,
-): Promise<T> {
-  return runInTenant(db, tenantDbName, () => fn());
-}
-
 /**
  * Resolve tenant + public server for a request. Returns null (→ 404) when the
  * tenant or slug is unknown, the server is disabled, or it is not public.
@@ -107,15 +98,15 @@ async function resolvePublicServer(
   // A switched-off MCP service answers like an unknown server.
   if (!(await isServiceEnabled({ tenantId: String(tenant._id) }, 'mcp'))) return null;
 
-  const server = await withTenantDb(db, tenant.dbName, async () =>
-    db.findMcpServerByEndpointSlug(endpointSlug));
+  const server = await runWithTenantScope(tenant.dbName, (scoped) =>
+    scoped.findMcpServerByEndpointSlug(endpointSlug));
 
   if (!server || server.status !== 'active') return null;
   // An agent's own server is used only inside that agent, never through a public endpoint.
   if (server.owner) return null;
   if (resolveExposure(server).accessMode !== 'public') return null;
   // A browser or a sandbox is served with a token only, whatever the stored settings say.
-  if (await withTenantDb(db, tenant.dbName, () => reachesTokenOnlyServer(db, server))) return null;
+  if (await runWithTenantScope(tenant.dbName, (scoped) => reachesTokenOnlyServer(scoped, server))) return null;
   return { tenant, server };
 }
 
@@ -164,7 +155,6 @@ async function runPublicToolCall(
   /** The address quota limits count: this route runs outside the request-context wrapper. */
   authzClientIp?: string,
 ): Promise<PublicToolOutcome> {
-  const db = await getDatabase();
   // Public surface forwards no runtime headers, but the server's own static
   // upstream credential can still be echoed back — scrub it from the log.
   const secretValues = mcpRequestSecretValues(server);
@@ -175,7 +165,7 @@ async function runPublicToolCall(
     // An anonymous caller's arguments are held to the tool's advertised schema.
     const inputSchema = listMcpToolDescriptors(server).find((tool) => tool.name === toolName)?.inputSchema;
     const fittedArgs = fitPublicToolArguments(inputSchema, args, getConfig().mcp.public.maxArgumentChars);
-    const { result, latencyMs } = await withTenantDb(db, tenant.dbName, () =>
+    const { result, latencyMs } = await runWithTenantScope(tenant.dbName, () =>
       executeMcpTool(server, toolName, fittedArgs, undefined, undefined, { clientIp: authzClientIp }));
     void logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,

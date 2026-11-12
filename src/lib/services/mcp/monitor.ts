@@ -1,5 +1,5 @@
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { IMcpAuditLog, IMcpRequestLog, IMcpServer } from '@/lib/database';
 import type { McpServerView } from './types';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
@@ -39,104 +39,104 @@ export async function getMcpMonitorSnapshot(
   recentLogs: IMcpRequestLog[];
   recentAudit: IMcpAuditLog[];
 }> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const servers = await db.listMcpServers({ projectId });
-  const from = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const servers = await db.listMcpServers({ projectId });
+    const from = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const entries: McpServerMonitorEntry[] = [];
-  for (const server of servers) {
-    const aggregate = await db.aggregateMcpRequestLogs(mcpLogScope(server), { from, groupBy: 'hour' });
+    const entries: McpServerMonitorEntry[] = [];
+    for (const server of servers) {
+      const aggregate = await db.aggregateMcpRequestLogs(mcpLogScope(server), { from, groupBy: 'hour' });
 
-    const sourceType = resolveSourceType(server);
-    let kind: McpServerMonitorEntry['runtime']['kind'] = 'openapi';
-    let state: McpServerMonitorEntry['runtime']['state'] = 'ready';
-    let detail: string | undefined;
+      const sourceType = resolveSourceType(server);
+      let kind: McpServerMonitorEntry['runtime']['kind'] = 'openapi';
+      let state: McpServerMonitorEntry['runtime']['state'] = 'ready';
+      let detail: string | undefined;
 
-    if (server.status !== 'active') {
-      state = 'disabled';
-    }
+      if (server.status !== 'active') {
+        state = 'disabled';
+      }
 
-    if (sourceType === 'remote') {
-      kind = 'remote';
-    } else if (sourceType === 'stdio') {
-      if (server.stdioConfig?.executionMode === 'sandbox') {
-        kind = 'stdio-sandbox';
-        const runner = mcpSandboxRunner.current;
-        if (!runner) {
-          state = 'unavailable';
-          detail = 'Sandbox module not available';
-        } else {
-          try {
-            const status = await runner.status(
-              {
-                tenantDbName,
-                tenantId: server.tenantId,
-                projectId: server.projectId,
-                serverId: String(server._id ?? ''),
-                serverKey: server.key,
-              },
-              server.stdioConfig.sandbox?.instanceId,
-            );
-            if (status.state !== 'running') {
-              state = status.state === 'failed' ? 'degraded' : 'unavailable';
-              detail = status.detail ?? `Sandbox ${status.state}`;
+      if (sourceType === 'remote') {
+        kind = 'remote';
+      } else if (sourceType === 'stdio') {
+        if (server.stdioConfig?.executionMode === 'sandbox') {
+          kind = 'stdio-sandbox';
+          const runner = mcpSandboxRunner.current;
+          if (!runner) {
+            state = 'unavailable';
+            detail = 'Sandbox module not available';
+          } else {
+            try {
+              const status = await runner.status(
+                {
+                  tenantDbName,
+                  tenantId: server.tenantId,
+                  projectId: server.projectId,
+                  serverId: String(server._id ?? ''),
+                  serverKey: server.key,
+                },
+                server.stdioConfig.sandbox?.instanceId,
+              );
+              if (status.state !== 'running') {
+                state = status.state === 'failed' ? 'degraded' : 'unavailable';
+                detail = status.detail ?? `Sandbox ${status.state}`;
+              }
+            } catch (error) {
+              state = 'degraded';
+              detail = error instanceof Error ? error.message : 'Sandbox status probe failed';
             }
-          } catch (error) {
-            state = 'degraded';
-            detail = error instanceof Error ? error.message : 'Sandbox status probe failed';
+          }
+        } else {
+          kind = 'stdio-subprocess';
+          if (!isStdioRunnerEnabled()) {
+            state = 'unavailable';
+            detail = 'Stdio execution disabled (MCP_STDIO_ENABLED=false)';
           }
         }
-      } else {
-        kind = 'stdio-subprocess';
-        if (!isStdioRunnerEnabled()) {
-          state = 'unavailable';
-          detail = 'Stdio execution disabled (MCP_STDIO_ENABLED=false)';
+      } else if (sourceType === 'internal') {
+        kind = 'internal';
+      } else if (sourceType === 'composite') {
+        kind = 'composite';
+        const config = getCompositeConfig(server);
+        const inactiveMembers = config.members.length
+          ? await Promise.all(config.members.map(async (m) => {
+            const member = await db.findMcpServerById(m.serverId);
+            return !member || member.status !== 'active';
+          }))
+          : [];
+        const inactiveCount = inactiveMembers.filter(Boolean).length;
+        if (inactiveCount > 0 && state === 'ready') {
+          state = 'degraded';
+          detail = `${inactiveCount} of ${config.members.length} member(s) inactive or missing`;
         }
       }
-    } else if (sourceType === 'internal') {
-      kind = 'internal';
-    } else if (sourceType === 'composite') {
-      kind = 'composite';
-      const config = getCompositeConfig(server);
-      const inactiveMembers = config.members.length
-        ? await Promise.all(config.members.map(async (m) => {
-          const member = await db.findMcpServerById(m.serverId);
-          return !member || member.status !== 'active';
-        }))
-        : [];
-      const inactiveCount = inactiveMembers.filter(Boolean).length;
-      if (inactiveCount > 0 && state === 'ready') {
+
+      if (server.lastError && state === 'ready') {
         state = 'degraded';
-        detail = `${inactiveCount} of ${config.members.length} member(s) inactive or missing`;
+        detail = server.lastError.message;
       }
+
+      entries.push({
+        server: serializeMcpServer(server),
+        aggregate: {
+          totalRequests: aggregate.totalRequests,
+          successCount: aggregate.successCount,
+          errorCount: aggregate.errorCount,
+          avgLatencyMs: aggregate.avgLatencyMs,
+          timeseries: aggregate.timeseries,
+        },
+        runtime: { kind, state, detail },
+      });
     }
 
-    if (server.lastError && state === 'ready') {
-      state = 'degraded';
-      detail = server.lastError.message;
-    }
+    const [recentLogs, recentAudit] = await Promise.all([
+      db.listRecentMcpRequestLogs({ projectId, limit: 50 }),
+      db.listMcpAuditLogs({ projectId, limit: 50 }),
+    ]);
 
-    entries.push({
-      server: serializeMcpServer(server),
-      aggregate: {
-        totalRequests: aggregate.totalRequests,
-        successCount: aggregate.successCount,
-        errorCount: aggregate.errorCount,
-        avgLatencyMs: aggregate.avgLatencyMs,
-        timeseries: aggregate.timeseries,
-      },
-      runtime: { kind, state, detail },
-    });
-  }
-
-  const [recentLogs, recentAudit] = await Promise.all([
-    db.listRecentMcpRequestLogs({ projectId, limit: 50 }),
-    db.listMcpAuditLogs({ projectId, limit: 50 }),
-  ]);
-
-  return { servers: entries, recentLogs, recentAudit };
+    return { servers: entries, recentLogs, recentAudit };
+  });
 }
 
 /**
