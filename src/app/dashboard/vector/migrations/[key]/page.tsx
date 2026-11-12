@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -21,6 +21,14 @@ import {
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import {
+  useCancelVectorMigration,
+  useDeleteVectorMigration,
+  useStartVectorMigration,
+  useVectorMigration,
+  useVectorMigrationRunLogs,
+} from '@/lib/api/queries/vector';
 import {
   IconArrowLeft,
   IconArrowRight,
@@ -30,12 +38,7 @@ import {
 } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import type {
-  IVectorMigration,
-  IVectorMigrationLog,
-  IVectorMigrationRunSummary,
-  VectorMigrationStatus,
-} from '@/lib/database/provider/types.base';
+import type { VectorMigrationStatus } from '@/lib/database/provider/types.base';
 
 const POLL_INTERVAL_MS = 2500;
 const LOGS_LIMIT = 50;
@@ -79,140 +82,76 @@ function formatMs(ms?: number | null): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
-interface MigrationDetailResponse {
-  migration: IVectorMigration;
-  logs: IVectorMigrationLog[];
-  totalLogs: number;
-  runs: IVectorMigrationRunSummary[];
-}
-
-interface RunLogsState {
-  attempt: number;
-  logs: IVectorMigrationLog[];
-  total: number;
-  offset: number;
-  loading: boolean;
-}
-
 export default function VectorMigrationDetailPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
   const { key } = useParams<{ key: string }>()!;
   const router = useRouter();
-  const [detail, setDetail] = useState<MigrationDetailResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [runLogs, setRunLogs] = useState<RunLogsState | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const runLogsRef = useRef<RunLogsState | null>(null);
+  const detailQuery = useVectorMigration(key, POLL_INTERVAL_MS);
+  const detail = detailQuery.data ?? null;
+  /** The run whose logs are open in the modal, and the page of them. */
+  const [openRun, setOpenRun] = useState<{ attempt: number; offset: number } | null>(null);
+  // The open run is refreshed while it is the running one.
+  const runIsLive = Boolean(
+    detail
+    && openRun
+    && isActive(detail.migration.status)
+    && openRun.attempt === detail.migration.attempt,
+  );
+  const runLogsQuery = useVectorMigrationRunLogs(key, openRun, LOGS_LIMIT, runIsLive, POLL_INTERVAL_MS);
+  const runLogs = openRun
+    ? {
+        attempt: openRun.attempt,
+        offset: openRun.offset,
+        logs: runLogsQuery.data?.logs ?? [],
+        total: runLogsQuery.data?.totalLogs ?? 0,
+        loading: runLogsQuery.isPending || runLogsQuery.isPlaceholderData,
+      }
+    : null;
+  const startMigration = useStartVectorMigration();
+  const cancelMigration = useCancelVectorMigration();
+  const deleteMigration = useDeleteVectorMigration();
 
+  // A missing migration sends the user back to the list; the first load that fails otherwise is told (poll failures are not).
+  const loadError = detailQuery.isError && detailQuery.data === undefined ? detailQuery.error : null;
   useEffect(() => {
-    runLogsRef.current = runLogs;
-  }, [runLogs]);
-
-  const loadDetail = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      const res = await fetch(
-        `/api/vector/migrations/${encodeURIComponent(key)}`,
-        { cache: 'no-store' },
-      );
-      if (!res.ok) {
-        if (res.status === 404) {
-          router.replace('/dashboard/vector/migrations');
-          return;
-        }
-        throw new Error('Failed to load migration');
-      }
-      const data = await res.json() as MigrationDetailResponse;
-      setDetail(data);
-    } catch (err) {
-      if (!silent) {
-        notifications.show({
-          color: 'red',
-          title: 'Unable to load migration',
-          message: err instanceof Error ? err.message : 'Unexpected error',
-        });
-      }
-    } finally {
-      setLoading(false);
+    if (!loadError) return;
+    if (isApiError(loadError) && loadError.status === 404) {
+      router.replace('/dashboard/vector/migrations');
+      return;
     }
-  }, [key, router]);
+    notifications.show({
+      color: 'red',
+      title: 'Unable to load migration',
+      message: errorMessage(loadError, 'Unexpected error'),
+    });
+  }, [loadError, router]);
 
-  const loadRunLogs = useCallback(async (attempt: number, offset: number, silent = false) => {
-    setRunLogs((prev) => (
-      prev && prev.attempt === attempt
-        ? { ...prev, offset, loading: !silent || prev.logs.length === 0 }
-        : { attempt, logs: [], total: 0, offset, loading: true }
-    ));
-    try {
-      const res = await fetch(
-        `/api/vector/migrations/${encodeURIComponent(key)}?attempt=${attempt}&logsLimit=${LOGS_LIMIT}&logsOffset=${offset}`,
-        { cache: 'no-store' },
-      );
-      if (!res.ok) throw new Error('Failed to load run logs');
-      const data = await res.json() as MigrationDetailResponse;
-      setRunLogs({ attempt, logs: data.logs, total: data.totalLogs, offset, loading: false });
-    } catch (err) {
-      if (!silent) {
-        notifications.show({
-          color: 'red',
-          title: 'Unable to load run logs',
-          message: err instanceof Error ? err.message : 'Unexpected error',
-        });
-      }
-      setRunLogs((prev) => (prev && prev.attempt === attempt ? { ...prev, loading: false } : prev));
-    }
-  }, [key]);
-
+  const runLogsError = openRun && runLogsQuery.isError && runLogsQuery.data === undefined ? runLogsQuery.error : null;
   useEffect(() => {
-    void loadDetail();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-
-  // Poll while running — also refreshes the open run's log modal, if any.
-  useEffect(() => {
-    const status = detail?.migration.status;
-    const currentAttempt = detail?.migration.attempt;
-    if (status && isActive(status)) {
-      pollRef.current = setInterval(() => {
-        void loadDetail(true);
-        const open = runLogsRef.current;
-        if (open && open.attempt === currentAttempt) {
-          void loadRunLogs(open.attempt, open.offset, true);
-        }
-      }, POLL_INTERVAL_MS);
-    } else {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [detail?.migration.status, detail?.migration.attempt, loadDetail, loadRunLogs]);
+    if (!runLogsError) return;
+    notifications.show({
+      color: 'red',
+      title: 'Unable to load run logs',
+      message: errorMessage(runLogsError, 'Unexpected error'),
+    });
+  }, [runLogsError]);
 
   const handleStart = async () => {
     try {
-      const res = await fetch(`/api/vector/migrations/${encodeURIComponent(key)}/start`, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to start');
+      await startMigration.mutateAsync(key);
       notifications.show({ color: 'teal', title: 'Migration started', message: detail?.migration.name });
-      await loadDetail();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Unable to start', message: err instanceof Error ? err.message : 'Unexpected error' });
+      notifications.show({ color: 'red', title: 'Unable to start', message: errorMessage(err, 'Unexpected error') });
     }
   };
 
   const handleCancel = async () => {
     try {
-      const res = await fetch(`/api/vector/migrations/${encodeURIComponent(key)}/cancel`, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to cancel');
+      await cancelMigration.mutateAsync(key);
       notifications.show({ color: 'yellow', title: 'Migration cancelled', message: detail?.migration.name });
-      await loadDetail();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Unable to cancel', message: err instanceof Error ? err.message : 'Unexpected error' });
+      notifications.show({ color: 'red', title: 'Unable to cancel', message: errorMessage(err, 'Unexpected error') });
     }
   };
 
@@ -221,26 +160,27 @@ export default function VectorMigrationDetailPage() {
       noun: tSafe('nouns.vectorMigration'),
       name: detail?.migration.name ?? key,
       action: async () => {
-        const res = await fetch(`/api/vector/migrations/${encodeURIComponent(key)}`, { method: 'DELETE' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error ?? 'Failed to delete');
+        try {
+          await deleteMigration.mutateAsync(key);
+        } catch (err) {
+          throw new Error(errorMessage(err, 'Failed to delete'));
+        }
         notifications.show({ color: 'green', title: 'Migration deleted', message: key });
         router.push('/dashboard/vector/migrations');
       },
     });
 
   const handleOpenRun = (attempt: number) => {
-    void loadRunLogs(attempt, 0);
+    setOpenRun({ attempt, offset: 0 });
   };
 
-  const handleCloseRunLogs = () => setRunLogs(null);
+  const handleCloseRunLogs = () => setOpenRun(null);
 
   const handleRunLogsPageChange = (offset: number) => {
-    if (!runLogs) return;
-    void loadRunLogs(runLogs.attempt, offset);
+    setOpenRun((current) => (current ? { ...current, offset } : current));
   };
 
-  if (loading && !detail) {
+  if (detailQuery.isPending) {
     return (
       <Center py="xl">
         <Loader size="sm" color="teal" />

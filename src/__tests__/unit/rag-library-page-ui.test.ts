@@ -9,7 +9,8 @@
 import { act, createElement as h } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import RagModulePage from '@/app/dashboard/rag/[key]/page';
-import { buttonByText, click, installDomStubs, jsonResponse, mount, q, qa, setInput, settle, text, wait, type ApiMock, type Mounted, type RecordedCall } from '../helpers/iamCenterUi';
+import { buttonByText, click, installDomStubs, jsonResponse, q, qa, setInput, settle, text, wait, type ApiMock, type Mounted, type RecordedCall } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { makeFile, until } from '../helpers/filesUploadDetailHarness';
 import { ALL_FOLDERS, HANDBOOK, HOLIDAY, LEAVE_DOC, SALARY, SITE_DOC, doc, installKbApi, type FixtureDoc, type KbApiOptions } from '../helpers/ragLibraryFixtures';
 
@@ -107,7 +108,7 @@ async function open(options: OpenOptions = {}) {
   const { tab, ...kb } = options;
   nav.search = new URLSearchParams(tab ? `tab=${tab}` : '');
   api = installKbApi(kb);
-  mounted = await mount(h(RagModulePage));
+  mounted = await renderWithQuery(h(RagModulePage));
   await until(() => text().includes('HR Policies'), 'the page');
 }
 
@@ -287,7 +288,7 @@ describe('the Documents tab asks for one place at a time', () => {
     expect(text()).not.toContain('parental-leave.docx');
   });
 
-  it('shows a slow answer when no newer one is behind it, and drops one that arrives after a newer answer', async () => {
+  it('shows the newest read of a place: a superseded slower read is dropped, and one arriving late never replaces a newer answer', async () => {
     await open({ level: 'admin' });
     await documentsTab();
     // Every read of the documents waits until the test answers it.
@@ -295,7 +296,8 @@ describe('the Documents tab asks for one place at a time', () => {
     api.on('GET', DOCUMENTS, () => new Promise((resolve) => {
       pending.push((rowsOf) => resolve({ documents: rowsOf, total: rowsOf.length, limit: 25, offset: 0 }));
     }));
-    // Two reads of the same place in flight: one from Refresh, one after a permission save.
+    // Two reads of the same place in flight: one from Refresh, one after a permission save. The query cache keeps
+    // the newer one and drops the answer of the one it superseded.
     const issueTwo = async () => {
       const base = pending.length;
       await click(q('button[aria-label="Refresh"]'));
@@ -307,13 +309,13 @@ describe('the Documents tab asks for one place at a time', () => {
       await until(() => pending.length === base + 2, 'the second read');
     };
 
-    // The older read answers first, with no newer answer yet: it is shown (a server slower than the poll must not
-    // leave the list frozen), and the newer one then replaces it.
+    // The older read answers first: the list keeps what it showed, and the newer one then replaces it.
     await issueTwo();
     pending[0]!([HOLIDAY]);
-    await until(() => text().includes('holiday-calendar-2026.xlsx') && !text().includes('employee-handbook-2026.pdf'), 'the older answer');
+    await wait(80);
+    expect(text()).toContain('employee-handbook-2026.pdf');
     pending[1]!([SALARY]);
-    await until(() => text().includes('salary-bands-2026.xlsx') && !text().includes('holiday-calendar-2026.xlsx'), 'the newer answer');
+    await until(() => text().includes('salary-bands-2026.xlsx') && !text().includes('employee-handbook-2026.pdf'), 'the newer answer');
 
     // The newer read answers first: the older one, arriving late, must not bring back what it saw.
     await issueTwo();
@@ -360,8 +362,9 @@ describe('the Documents tab asks for one place at a time', () => {
     await click(q('button[aria-label="Open folder Policies"]'));
     await until(() => lastDocumentRequest().query.folderId === 'f-policies', 'the folder');
 
-    // Someone deleted it meanwhile.
+    // Someone deleted it meanwhile. (Refresh is offered once the folder's own list has been read.)
     api.on('GET', FOLDERS, () => ({ folders: ALL_FOLDERS.filter((f) => f._id !== 'f-policies' && f._id !== 'f-leave') }));
+    await until(() => q('button[aria-label="Refresh"]')?.hasAttribute('disabled') === false, 'the folder\'s list');
     await click(q('button[aria-label="Refresh"]'));
     await until(() => lastDocumentRequest().query.folderId === 'root', 'the top level');
     await until(() => text().includes('employee-handbook-2026.pdf'), 'the top level\'s documents');

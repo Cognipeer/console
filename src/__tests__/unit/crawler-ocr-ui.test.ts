@@ -8,7 +8,8 @@
 import { createElement as h } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import CrawlerDetailPage from '@/app/dashboard/crawler/[crawlerId]/page';
-import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, mount, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { until } from '../helpers/filesUploadDetailHarness';
 
 const notify = vi.hoisted(() => ({ show: vi.fn() }));
@@ -51,7 +52,7 @@ async function open(markdownOptions?: Record<string, unknown>) {
     ['GET', '/api/models', () => ({ models: [] })],
     ['PATCH', '/api/crawler/crawlers/docs-site', () => jsonResponse({ crawler: crawler(markdownOptions) })],
   ]);
-  mounted = await mount(h(CrawlerDetailPage));
+  mounted = await renderWithQuery(h(CrawlerDetailPage));
   await until(() => text().includes('Docs site'), 'the page');
   const tab = qa<HTMLButtonElement>('[role="tab"], button').find((b) => b.textContent?.trim() === 'HTTP');
   await click(tab);

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Button,
@@ -14,6 +14,8 @@ import {
   Textarea,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { errorMessage } from '@/lib/api/client';
+import { useOcrJob, useSendOcrJobFiles, useSetOcrJobPaused } from '@/lib/api/queries/ocrJobs';
 import {
   IconArrowLeft,
   IconCopy,
@@ -30,12 +32,14 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import {
   fileToBase64,
   formatCost,
-  ocrJobsApi,
+  ocrJobExportUrl,
   STATUS_BADGE,
   type ItemSourceDraft,
   type OcrJobItemView,
-  type OcrJobView,
 } from '../_lib/api';
+
+/** How often the job is reread while a document is still being processed. */
+const POLL_MS = 2500;
 
 const preStyle: React.CSSProperties = {
   whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 320, overflow: 'auto', fontSize: 12, margin: 0,
@@ -49,6 +53,8 @@ function MetricRow({ label, value }: { label: string; value: React.ReactNode }) 
     </Group>
   );
 }
+
+const EMPTY_ITEMS: OcrJobItemView[] = [];
 
 function num(v?: number): string {
   return (v ?? 0).toLocaleString();
@@ -74,39 +80,21 @@ export default function OcrJobDetailPage() {
   const jobId = params.jobId;
   const router = useRouter();
 
-  const [job, setJob] = useState<OcrJobView | null>(null);
-  const [items, setItems] = useState<OcrJobItemView[]>([]);
-  const [loading, setLoading] = useState(true);
+  const jobQuery = useOcrJob(jobId, POLL_MS);
+  const job = jobQuery.data?.job ?? null;
+  const items = jobQuery.data?.items ?? EMPTY_ITEMS;
+  const loading = jobQuery.isPending;
+  const sendFiles = useSendOcrJobFiles(jobId);
+  const setPaused = useSetOcrJobPaused(jobId);
+  const sending = sendFiles.isPending;
   const [files, setFiles] = useState<File[]>([]);
   const [urls, setUrls] = useState('');
-  const [sending, setSending] = useState(false);
   const [viewItem, setViewItem] = useState<OcrJobItemView | null>(null);
   const [origin, setOrigin] = useState('https://your-console');
 
   useEffect(() => {
     if (typeof window !== 'undefined') setOrigin(window.location.origin);
   }, []);
-
-  const load = useCallback(async () => {
-    try {
-      const [j, its] = await Promise.all([ocrJobsApi.get(jobId), ocrJobsApi.items(jobId)]);
-      setJob(j);
-      setItems(its);
-    } catch (err) {
-      notifications.show({ message: err instanceof Error ? err.message : 'Failed to load job', color: 'red' });
-    } finally {
-      setLoading(false);
-    }
-  }, [jobId]);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const hasActive = useMemo(() => items.some((i) => i.status === 'pending' || i.status === 'running'), [items]);
-  useEffect(() => {
-    if (!hasActive) return;
-    const t = setInterval(() => void load(), 2500);
-    return () => clearInterval(t);
-  }, [hasActive, load]);
 
   const handleSend = async () => {
     const drafts: ItemSourceDraft[] = [];
@@ -121,27 +109,22 @@ export default function OcrJobDetailPage() {
       notifications.show({ message: 'Add files or URLs to send', color: 'red' });
       return;
     }
-    setSending(true);
     try {
-      await ocrJobsApi.sendFiles(jobId, drafts, 'async');
+      await sendFiles.mutateAsync({ items: drafts });
       notifications.show({ message: `${drafts.length} document(s) queued`, color: 'green' });
       setFiles([]);
       setUrls('');
-      await load();
     } catch (err) {
-      notifications.show({ message: err instanceof Error ? err.message : 'Send failed', color: 'red' });
-    } finally {
-      setSending(false);
+      notifications.show({ message: errorMessage(err, 'Send failed'), color: 'red' });
     }
   };
 
   const toggleStatus = async () => {
     if (!job) return;
     try {
-      const updated = job.status === 'active' ? await ocrJobsApi.pause(jobId) : await ocrJobsApi.resume(jobId);
-      setJob(updated);
+      await setPaused.mutateAsync(job.status === 'active');
     } catch (err) {
-      notifications.show({ message: err instanceof Error ? err.message : 'Failed', color: 'red' });
+      notifications.show({ message: errorMessage(err, 'Failed'), color: 'red' });
     }
   };
 
@@ -174,8 +157,8 @@ export default function OcrJobDetailPage() {
             <Button variant="light" leftSection={job.status === 'active' ? <IconPlayerPause size={15} /> : <IconPlayerPlay size={15} />} onClick={() => void toggleStatus()}>
               {job.status === 'active' ? 'Pause' : 'Resume'}
             </Button>
-            <Button variant="light" leftSection={<IconDownload size={15} />} onClick={() => window.open(ocrJobsApi.exportUrl(jobId, 'json'), '_blank')}>JSON</Button>
-            <Button variant="light" leftSection={<IconDownload size={15} />} onClick={() => window.open(ocrJobsApi.exportUrl(jobId, 'csv'), '_blank')}>CSV</Button>
+            <Button variant="light" leftSection={<IconDownload size={15} />} onClick={() => window.open(ocrJobExportUrl(jobId, 'json'), '_blank')}>JSON</Button>
+            <Button variant="light" leftSection={<IconDownload size={15} />} onClick={() => window.open(ocrJobExportUrl(jobId, 'csv'), '_blank')}>CSV</Button>
           </Group>
         ) : undefined}
       />
@@ -215,7 +198,7 @@ export default function OcrJobDetailPage() {
             rowKey={(it) => it.id}
             columns={columns}
             loading={loading}
-            onRefresh={() => void load()}
+            onRefresh={() => void jobQuery.refetch()}
             onRowClick={(it) => setViewItem(it)}
             rowActions={(it) => [{ id: 'view', label: 'View result', onClick: () => setViewItem(it) }]}
             empty={{ title: 'No documents yet', description: 'Send documents to this job to start processing.' }}

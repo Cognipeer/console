@@ -5,6 +5,8 @@ import { NumberInput, Select, Switch, TextInput, Textarea } from '@mantine/core'
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import { useCreateVectorIndex } from '@/lib/api/queries/vector';
 import { IconDatabase, IconPlus } from '@tabler/icons-react';
 import FormShell, {
 	Checklist,
@@ -58,7 +60,8 @@ export default function CreateVectorIndexModal({
 }: CreateVectorIndexModalProps) {
 	const tPlatform = useTranslations('platformStorage');
 	const [availableProviders, setAvailableProviders] = useState<VectorProviderView[]>(providers);
-	const [submitting, setSubmitting] = useState(false);
+	const createIndex = useCreateVectorIndex();
+	const submitting = createIndex.isPending;
 	const [needsManualDetails, setNeedsManualDetails] = useState(false);
 	const wasOpenedRef = useRef(false);
 
@@ -205,38 +208,16 @@ export default function CreateVectorIndexModal({
 		// user filled in.
 		const sendManualDetails = values.createInProvider || needsManualDetails;
 
-		setSubmitting(true);
 		try {
-			const response = await fetch('/api/vector/indexes', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					providerKey: values.providerKey,
-					name: values.name,
-					createInProvider: values.createInProvider,
-					dimension: sendManualDetails && values.dimension !== '' ? Number(values.dimension) : undefined,
-					metric: sendManualDetails ? (values.metric || undefined) : undefined,
-					externalId: needsManualDetails ? (values.externalId || undefined) : undefined,
-					metadata: values.description ? { description: values.description } : undefined,
-				}),
+			const data = await createIndex.mutateAsync({
+				providerKey: values.providerKey,
+				name: values.name,
+				createInProvider: values.createInProvider,
+				dimension: sendManualDetails && values.dimension !== '' ? Number(values.dimension) : undefined,
+				metric: sendManualDetails ? (values.metric || undefined) : undefined,
+				externalId: needsManualDetails ? (values.externalId || undefined) : undefined,
+				metadata: values.description ? { description: values.description } : undefined,
 			});
-
-			if (!response.ok) {
-				const errorBody = await response.json().catch(() => ({ error: 'Unknown error' }));
-				if (errorBody.code === 'VECTOR_ATTACH_REQUIRES_DETAILS') {
-					setNeedsManualDetails(true);
-					notifications.show({
-						color: 'yellow',
-						title: 'Provider details needed',
-						message: errorBody.error ?? 'Console could not read this index from the provider. Fill in the external ID, dimension and metric below, then try again.',
-						autoClose: 8000,
-					});
-					return;
-				}
-				throw new Error(errorBody.error ?? 'Failed to create index');
-			}
-
-			const data = await response.json();
 			notifications.show({
 				color: 'green',
 				title: values.createInProvider ? 'Vector index created' : 'Vector index attached',
@@ -247,14 +228,22 @@ export default function CreateVectorIndexModal({
 			reset();
 			setNeedsManualDetails(false);
 		} catch (error: unknown) {
+			if (isApiError(error) && error.code === 'VECTOR_ATTACH_REQUIRES_DETAILS') {
+				setNeedsManualDetails(true);
+				notifications.show({
+					color: 'yellow',
+					title: 'Provider details needed',
+					message: error.message || 'Console could not read this index from the provider. Fill in the external ID, dimension and metric below, then try again.',
+					autoClose: 8000,
+				});
+				return;
+			}
 			console.error(error);
 			notifications.show({
 				color: 'red',
 				title: 'Unable to create index',
-				message: error instanceof Error ? error.message : 'Unexpected error',
+				message: errorMessage(error, 'Unexpected error'),
 			});
-		} finally {
-			setSubmitting(false);
 		}
 	};
 

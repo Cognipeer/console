@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActionIcon, Badge, Button, Code, Loader, Modal, Pagination, Select, Tooltip } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
@@ -16,10 +16,11 @@ import {
 } from '@tabler/icons-react';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import type { CrawlJobView, CrawlResultPageView, CrawlResultView } from '@/lib/services/crawler';
+import { errorMessage } from '@/lib/api/client';
+import { useCrawlJobResult, useCrawlJobResults } from '@/lib/api/queries/crawler';
 
 const PAGE_SIZE = 50;
 /** Bodies kept in memory per open run — enough to flip back and forth cheaply. */
-const BODY_CACHE_LIMIT = 50;
 const EMPTY_PAGE: CrawlResultPageView = { results: [], total: 0, counts: { html: 0, file: 0, error: 0 } };
 
 interface RunDetailModalProps {
@@ -69,15 +70,6 @@ function formatDuration(ms: number): string {
   return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
 }
 
-async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store', signal });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `Server returned ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
-
 export default function RunDetailModal({
   job,
   refreshKey,
@@ -95,15 +87,25 @@ export default function RunDetailModal({
   const [typeFilter, setTypeFilter] = useState<'all' | 'html' | 'file' | 'error'>('all');
   const [ragFilter, setRagFilter] = useState<'all' | 'indexed' | 'pending' | 'skipped' | 'failed' | 'none'>('all');
   const [page, setPage] = useState(1);
-  const [listing, setListing] = useState<CrawlResultPageView>(EMPTY_PAGE);
-  const [listLoading, setListLoading] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<CrawlResultView | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
   const [syncModuleKey, setSyncModuleKey] = useState<string | null>(null);
-  const bodyCache = useRef(new Map<string, CrawlResultView>());
+
+  // One page of rows, filtered and searched server-side, without markdown bodies. The previous page stays on
+  // screen while the next one loads; a failed read shows no rows.
+  const listQuery = useCrawlJobResults(
+    jobId,
+    {
+      limit: PAGE_SIZE,
+      skip: (page - 1) * PAGE_SIZE,
+      type: typeFilter !== 'all' ? typeFilter : undefined,
+      ragStatus: ragFilter !== 'all' ? ragFilter : undefined,
+      search: debouncedQuery || undefined,
+    },
+    refreshKey,
+  );
+  const listing: CrawlResultPageView = listQuery.data ?? EMPTY_PAGE;
+  const listLoading = Boolean(jobId) && listQuery.isFetching;
+  const listError = listQuery.isError ? errorMessage(listQuery.error, 'Failed to load results') : null;
 
   // Reset transient view state whenever a different job is opened.
   useEffect(() => {
@@ -111,7 +113,6 @@ export default function RunDetailModal({
     setTypeFilter('all');
     setRagFilter('all');
     setPage(1);
-    setListing(EMPTY_PAGE);
     setSelectedId(null);
   }, [jobId]);
 
@@ -124,38 +125,6 @@ export default function RunDetailModal({
   useEffect(() => {
     setPage(1);
   }, [debouncedQuery]);
-
-  // Bodies are re-read after a refresh (a sync can change ragStatus/errorMessage).
-  useEffect(() => {
-    bodyCache.current.clear();
-  }, [jobId, refreshKey]);
-
-  // One page of rows, filtered and searched server-side, without markdown bodies.
-  useEffect(() => {
-    if (!jobId) return;
-    const controller = new AbortController();
-    const params = new URLSearchParams({
-      limit: String(PAGE_SIZE),
-      skip: String((page - 1) * PAGE_SIZE),
-    });
-    if (typeFilter !== 'all') params.set('type', typeFilter);
-    if (ragFilter !== 'all') params.set('ragStatus', ragFilter);
-    if (debouncedQuery) params.set('search', debouncedQuery);
-    setListLoading(true);
-    setListError(null);
-    fetchJson<CrawlResultPageView>(`/api/crawler/jobs/${jobId}/results?${params}`, controller.signal)
-      .then((data) => {
-        setListing(data);
-        setListLoading(false);
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        setListing(EMPTY_PAGE);
-        setListError(err instanceof Error ? err.message : 'Failed to load results');
-        setListLoading(false);
-      });
-    return () => controller.abort();
-  }, [jobId, debouncedQuery, typeFilter, ragFilter, page, refreshKey]);
 
   const rows = listing.results;
   const totalPages = Math.max(1, Math.ceil(listing.total / PAGE_SIZE));
@@ -177,41 +146,11 @@ export default function RunDetailModal({
     }
   }, [rows, selectedId]);
 
-  // The selected row's markdown body, loaded on demand.
-  useEffect(() => {
-    setDetailError(null);
-    if (!jobId || !selectedId) {
-      setDetail(null);
-      setDetailLoading(false);
-      return;
-    }
-    const cached = bodyCache.current.get(selectedId);
-    if (cached) {
-      setDetail(cached);
-      setDetailLoading(false);
-      return;
-    }
-    setDetail(null);
-    setDetailLoading(true);
-    const controller = new AbortController();
-    fetchJson<{ result: CrawlResultView }>(
-      `/api/crawler/jobs/${jobId}/results/${selectedId}`,
-      controller.signal,
-    )
-      .then(({ result }) => {
-        const cache = bodyCache.current;
-        cache.set(selectedId, result);
-        if (cache.size > BODY_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
-        setDetail(result);
-        setDetailLoading(false);
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        setDetailError(err instanceof Error ? err.message : 'Failed to load page content');
-        setDetailLoading(false);
-      });
-    return () => controller.abort();
-  }, [jobId, selectedId, refreshKey]);
+  // The selected row's markdown body, loaded on demand (and kept by the query cache while it is open).
+  const detailQuery = useCrawlJobResult(jobId, selectedId, refreshKey);
+  const detail = detailQuery.data ?? null;
+  const detailLoading = Boolean(jobId && selectedId) && detailQuery.isFetching && !detailQuery.data;
+  const detailError = detailQuery.isError ? errorMessage(detailQuery.error, 'Failed to load page content') : null;
 
   const selected = rows.find((r) => r.id === selectedId) ?? null;
   const body = detail?.id === selectedId ? detail?.bodyMarkdown : undefined;

@@ -9,7 +9,7 @@
  * Nothing here talks to React.
  */
 
-import { ApiError } from '@/lib/api/client';
+import { ApiError, apiRequest } from '@/lib/api/client';
 import type { IRagIdentityUserMatchRule } from '@/lib/database';
 import type { RagPrincipalKind } from '@/lib/services/rag/access/principals';
 import type {
@@ -209,28 +209,18 @@ function query(params: Record<string, string | number | undefined | null>): stri
 }
 
 async function call<T>(url: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
-  const init: RequestInit = { method, cache: 'no-store', credentials: 'same-origin', signal };
-  if (method !== 'GET' && method !== 'DELETE') {
-    init.headers = { 'Content-Type': 'application/json' };
-    init.body = JSON.stringify(body ?? {});
-  }
-  const response = await fetch(url, init);
-  let payload: unknown;
+  const hasBody = method !== 'GET' && method !== 'DELETE';
   try {
-    payload = await response.json();
-  } catch {
-    payload = undefined;
+    return await apiRequest<T>(url, {
+      method,
+      signal,
+      ...(hasBody ? { body: JSON.stringify(body ?? {}) } : {}),
+    });
+  } catch (error) {
+    // The module's own error type: the access screens branch on its status.
+    if (error instanceof ApiError) throw new RagApiError(error.message || `Request failed (${error.status})`, error.status, error.payload);
+    throw error;
   }
-  if (!response.ok) {
-    const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
-    const message = typeof record.error === 'string' && record.error.trim()
-      ? record.error
-      : typeof record.message === 'string' && record.message.trim()
-        ? record.message
-        : response.statusText || `Request failed (${response.status})`;
-    throw new RagApiError(message, response.status, payload);
-  }
-  return payload as T;
 }
 
 /* ── Calls ───────────────────────────────────────────────────────────────── */

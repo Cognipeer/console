@@ -1,6 +1,5 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
 import {
   Loader,
   NumberInput,
@@ -22,19 +21,10 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
-
-interface VectorProviderOption {
-  key: string;
-  name?: string;
-  driver?: string;
-  status?: string;
-}
-
-interface ModelOption {
-  key: string;
-  name?: string;
-  modelId?: string;
-}
+import { errorMessage } from '@/lib/api/client';
+import { useCreateMemoryStore } from '@/lib/api/queries/memory';
+import { useModelsByCategory } from '@/lib/api/queries/rag';
+import { useVectorProviders } from '@/lib/api/queries/vector';
 
 /** What `POST /api/memory/stores` answers with: the store. */
 export interface CreatedMemoryStore {
@@ -68,11 +58,14 @@ export default function CreateMemoryStoreModal({
   onCreated,
 }: CreateMemoryStoreModalProps) {
   const t = useTranslations('memory');
-  const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
-  const [embeddingModels, setEmbeddingModels] = useState<ModelOption[]>([]);
-  const [loadingProviders, setLoadingProviders] = useState(false);
-  const [loadingModels, setLoadingModels] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const providersQuery = useVectorProviders(opened);
+  const modelsQuery = useModelsByCategory('embedding', opened);
+  const createStore = useCreateMemoryStore();
+  const vectorProviders = providersQuery.data ?? [];
+  const embeddingModels = modelsQuery.data ?? [];
+  const loadingProviders = providersQuery.isLoading;
+  const loadingModels = modelsQuery.isLoading;
+  const submitting = createStore.isPending;
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -94,86 +87,32 @@ export default function CreateMemoryStoreModal({
 
   const { values: formValues, setFieldValue } = form;
 
-  const loadVectorProviders = useCallback(async () => {
-    setLoadingProviders(true);
-    try {
-      const res = await fetch('/api/vector/providers', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setVectorProviders(data.providers ?? data ?? []);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoadingProviders(false);
-    }
-  }, []);
-
-  const loadEmbeddingModels = useCallback(async () => {
-    setLoadingModels(true);
-    try {
-      const res = await fetch('/api/models?category=embedding', {
-        cache: 'no-store',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setEmbeddingModels(data.models ?? data ?? []);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoadingModels(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (opened) {
-      loadVectorProviders();
-      loadEmbeddingModels();
-    }
-  }, [opened, loadVectorProviders, loadEmbeddingModels]);
-
   const handleSubmit = async () => {
     const validation = form.validate();
     if (validation.hasErrors) return;
     const values = form.getValues();
 
-    setSubmitting(true);
     try {
-      const res = await fetch('/api/memory/stores', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name.trim(),
-          description: values.description.trim() || undefined,
-          vectorProviderKey: values.vectorProviderKey,
-          embeddingModelKey: values.embeddingModelKey,
-          config: {
-            deduplication: values.deduplication,
-            autoEmbed: values.autoEmbed,
-            defaultTopK: values.defaultTopK,
-            defaultMinScore: values.defaultMinScore,
-          },
-        }),
+      const created = await createStore.mutateAsync({
+        name: values.name.trim(),
+        description: values.description.trim() || undefined,
+        vectorProviderKey: values.vectorProviderKey,
+        embeddingModelKey: values.embeddingModelKey,
+        config: {
+          deduplication: values.deduplication,
+          autoEmbed: values.autoEmbed,
+          defaultTopK: values.defaultTopK,
+          defaultMinScore: values.defaultMinScore,
+        },
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        throw new Error(err?.error || 'Failed to create store');
-      }
-
-      const created = (await res.json().catch(() => null)) as CreatedMemoryStore | null;
       form.reset();
-      onCreated(created && typeof created.key === 'string' ? created : undefined);
+      onCreated(created && typeof created.key === 'string' ? (created as CreatedMemoryStore) : undefined);
     } catch (error) {
       notifications.show({
         title: t('error'),
-        message:
-          error instanceof Error ? error.message : t('createError'),
+        message: errorMessage(error, t('createError')),
         color: 'red',
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -181,7 +120,7 @@ export default function CreateMemoryStoreModal({
     .filter((p) => p.status === 'active')
     .map((p) => ({
       value: p.key,
-      label: p.name || p.key,
+      label: p.label || p.key,
     }));
 
   const modelOptions = embeddingModels.map((m) => ({

@@ -16,8 +16,9 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconAlertCircle } from '@tabler/icons-react';
 import FormShell, { FormSection } from '@/components/common/ui/FormShell';
-import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
 import type { VectorProviderView } from '@/lib/services/vector';
+import { errorMessage } from '@/lib/api/client';
+import { useCreateVectorProvider, useVectorDriverForm, useVectorDrivers } from '@/lib/api/queries/vector';
 import ProviderFormRenderer from '../providers/ProviderFormRenderer';
 import { partitionProviderValues } from '../providers/providerFormModel';
 
@@ -40,13 +41,16 @@ export default function VectorProviderModal({
   onClose,
   onCreated,
 }: VectorProviderModalProps) {
-  const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
-  const [driversLoading, setDriversLoading] = useState(false);
-  const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
-  const [schemaLoading, setSchemaLoading] = useState(false);
-  const [schemaError, setSchemaError] = useState<string | null>(null);
   const [selectedDriver, setSelectedDriver] = useState<string>('');
-  const [submitting, setSubmitting] = useState(false);
+  const driversQuery = useVectorDrivers(opened);
+  const formQuery = useVectorDriverForm(selectedDriver, opened);
+  const createProvider = useCreateVectorProvider();
+  const drivers = useMemo(() => driversQuery.data ?? [], [driversQuery.data]);
+  const driversLoading = driversQuery.isLoading;
+  const schema = opened && selectedDriver ? (formQuery.data ?? null) : null;
+  const schemaLoading = formQuery.isLoading;
+  const schemaError = opened && selectedDriver && formQuery.isError ? errorMessage(formQuery.error, 'Unable to load form schema') : null;
+  const submitting = createProvider.isPending;
   const formRef = useRef<HTMLFormElement>(null);
 
   const form = useForm<FormValues>({
@@ -69,94 +73,27 @@ export default function VectorProviderModal({
     [drivers],
   );
 
+  // Each time the modal opens (and the drivers arrive) the first driver is selected.
   useEffect(() => {
-    if (!opened) {
-      return;
-    }
-    let aborted = false;
-    async function loadDrivers() {
-      setDriversLoading(true);
-      try {
-        const response = await fetch('/api/vector/providers/drivers');
-        if (!response.ok) {
-          throw new Error('Failed to load vector provider drivers');
-        }
-        const data = await response.json();
-        if (!aborted) {
-          setDrivers(data.drivers ?? []);
-          const defaultDriver = data.drivers?.[0]?.id ?? '';
-          setSelectedDriver(defaultDriver);
-          setFieldValue('driver', defaultDriver);
-        }
-      } catch (error) {
-        console.error(error);
-        if (!aborted) {
-          notifications.show({
-            color: 'red',
-            title: 'Unable to load drivers',
-            message: error instanceof Error ? error.message : 'Unexpected error',
-          });
-        }
-      } finally {
-        if (!aborted) {
-          setDriversLoading(false);
-        }
-      }
-    }
+    if (!opened || drivers.length === 0) return;
+    const defaultDriver = drivers[0]?.id ?? '';
+    setSelectedDriver(defaultDriver);
+    setFieldValue('driver', defaultDriver);
+  }, [opened, drivers, setFieldValue]);
 
-    loadDrivers();
-    return () => {
-      aborted = true;
-    };
-  }, [opened, setFieldValue]);
-
+  const driversError = driversQuery.error;
   useEffect(() => {
-    if (!opened || !selectedDriver) {
-      setSchema(null);
-      return;
-    }
-
-    let aborted = false;
-    async function loadSchema() {
-      setSchemaError(null);
-      setSchemaLoading(true);
-      try {
-        const response = await fetch(
-          `/api/vector/providers/drivers/${selectedDriver}/form`,
-        );
-        if (!response.ok) {
-          throw new Error('Failed to load provider form schema');
-        }
-        const data = await response.json();
-        if (!aborted) {
-          setSchema(data.schema ?? null);
-        }
-      } catch (error) {
-        console.error(error);
-        if (!aborted) {
-          setSchemaError(
-            error instanceof Error ? error.message : 'Unable to load form schema',
-          );
-          setSchema(null);
-        }
-      } finally {
-        if (!aborted) {
-          setSchemaLoading(false);
-        }
-      }
-    }
-
-    loadSchema();
-    return () => {
-      aborted = true;
-    };
-  }, [opened, selectedDriver]);
+    if (!opened || !driversError) return;
+    notifications.show({
+      color: 'red',
+      title: 'Unable to load drivers',
+      message: errorMessage(driversError, 'Unexpected error'),
+    });
+  }, [opened, driversError]);
 
   const handleClose = () => {
     onClose();
     reset();
-    setSchema(null);
-    setSchemaError(null);
   };
 
   const handleSubmit = form.onSubmit(async (values) => {
@@ -171,45 +108,32 @@ export default function VectorProviderModal({
 
     const buckets = partitionProviderValues(schema, values);
 
-    setSubmitting(true);
     try {
-      const response = await fetch('/api/vector/providers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          key: values.key,
-          label: values.label,
-          description: values.description,
-          driver: selectedDriver,
-          status: values.status ? 'active' : 'disabled',
-          credentials: buckets.credentials,
-          settings: buckets.settings,
-          metadata: buckets.metadata,
-        }),
+      const provider = await createProvider.mutateAsync({
+        key: values.key,
+        label: values.label,
+        description: values.description,
+        driver: selectedDriver,
+        status: values.status ? 'active' : 'disabled',
+        credentials: buckets.credentials,
+        settings: buckets.settings,
+        metadata: buckets.metadata,
       });
 
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to create provider');
-      }
-
-      const data = await response.json();
       notifications.show({
         color: 'green',
         title: 'Provider created',
         message: `${values.label} is ready to use`,
       });
-      onCreated(data.provider as VectorProviderView);
+      onCreated(provider);
       handleClose();
     } catch (error) {
       console.error(error);
       notifications.show({
         color: 'red',
         title: 'Unable to create provider',
-        message: error instanceof Error ? error.message : 'Unexpected error occurred',
+        message: errorMessage(error, 'Unexpected error occurred'),
       });
-    } finally {
-      setSubmitting(false);
     }
   });
 

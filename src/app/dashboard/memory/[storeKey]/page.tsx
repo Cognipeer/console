@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { MemoryScope } from '@/lib/database';
 import { useParams, useRouter } from 'next/navigation';
 import {
@@ -38,49 +38,19 @@ import {
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
-
-interface MemoryStoreDetail {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  vectorProviderKey: string;
-  vectorIndexKey?: string;
-  embeddingModelKey: string;
-  status: string;
-  memoryCount: number;
-  createdAt?: string;
-  lastActivityAt?: string;
-}
-
-interface MemoryItem {
-  _id: string;
-  content: string;
-  scope: MemoryScope;
-  scopeId?: string;
-  tags?: string[];
-  importance?: number;
-  source?: 'chat' | 'api' | 'agent' | 'manual';
-  createdAt?: string;
-}
-
-interface SearchMatch {
-  id: string;
-  content: string;
-  score: number;
-  scope: MemoryScope;
-  scopeId?: string;
-  tags: string[];
-  importance: number;
-  source?: 'chat' | 'api' | 'agent' | 'manual';
-  createdAt?: string;
-}
-
-interface RecallResult {
-  context: string;
-  memories: SearchMatch[];
-  storeKey: string;
-}
+import { errorMessage } from '@/lib/api/client';
+import {
+  useClearMemoryContext,
+  useDeleteMemoryItem,
+  useDeleteMemoryStore,
+  useMemoryItems,
+  useMemoryStore,
+  useRecallMemories,
+  useSearchMemories,
+  type MemoryItem,
+  type MemoryRecallResult as RecallResult,
+  type MemorySearchMatch as SearchMatch,
+} from '@/lib/api/queries/memory';
 
 type ScopeFilterValue = MemoryScope | 'all';
 
@@ -123,15 +93,6 @@ function formatDate(value?: string | Date) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleString();
-}
-
-function appendFilterParams(params: URLSearchParams, filter: { scope?: MemoryScope; scopeId?: string }) {
-  if (filter.scope) {
-    params.set('scope', filter.scope);
-  }
-  if (filter.scopeId) {
-    params.set('scopeId', filter.scopeId);
-  }
 }
 
 function getScopeLabel(t: ReturnType<typeof useTranslations>, scope?: string) {
@@ -194,16 +155,7 @@ export default function MemoryStoreDetailPage() {
   const { confirmAction } = useConfirm();
   const storeKey = params.storeKey as string;
 
-  const [store, setStore] = useState<MemoryStoreDetail | null>(null);
-  const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [loadingStore, setLoadingStore] = useState(true);
-  const [loadingMemories, setLoadingMemories] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [deletingStore, setDeletingStore] = useState(false);
-  const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
-  const [clearingContext, setClearingContext] = useState(false);
   const [addModalOpen, setAddModalOpen] = useState(false);
 
   const [draftScope, setDraftScope] = useState<ScopeFilterValue>('all');
@@ -212,74 +164,42 @@ export default function MemoryStoreDetailPage() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchMatch[] | null>(null);
-  const [searching, setSearching] = useState(false);
 
   const [recallQuery, setRecallQuery] = useState('');
   const [recallResult, setRecallResult] = useState<RecallResult | null>(null);
-  const [recalling, setRecalling] = useState(false);
 
   const currentContextLabel = useMemo(() => formatContextLabel(t, filter), [filter, t]);
   const hasContextFilter = Boolean(filter.scope || filter.scopeId);
+  const storeQuery = useMemoryStore(storeKey);
+  const itemsQuery = useMemoryItems(storeKey, page, PAGE_SIZE, filter);
+  const searchMutation = useSearchMemories(storeKey);
+  const recallMutation = useRecallMemories(storeKey);
+  const deleteStoreMutation = useDeleteMemoryStore(storeKey);
+  const deleteMemoryMutation = useDeleteMemoryItem(storeKey);
+  const clearContextMutation = useClearMemoryContext(storeKey);
+
+  const store = storeQuery.data ?? null;
+  const memories = useMemo<MemoryItem[]>(() => itemsQuery.data?.items ?? [], [itemsQuery.data]);
+  const total = itemsQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const loadingStore = storeQuery.isPending;
+  // The grid shows its loading state for the first load and while another page loads (its rows stay meanwhile).
+  const loadingMemories = itemsQuery.isPending || itemsQuery.isPlaceholderData;
+  const [refreshing, setRefreshing] = useState(false);
+  const searching = searchMutation.isPending;
+  const recalling = recallMutation.isPending;
+  const deletingStore = deleteStoreMutation.isPending;
+  const deletingMemoryId = deleteMemoryMutation.isPending ? (deleteMemoryMutation.variables ?? null) : null;
+  const clearingContext = clearContextMutation.isPending;
 
-  const loadStore = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/memory/stores/${storeKey}`, { cache: 'no-store' });
-      if (!res.ok) {
-        throw new Error('Failed to load store');
-      }
-
-      setStore(await res.json());
-    } catch (error) {
-      console.error('Failed to load memory store', error);
-    } finally {
-      setLoadingStore(false);
-    }
-  }, [storeKey]);
-
-  const loadMemories = useCallback(async () => {
-    setLoadingMemories(true);
-
-    try {
-      const params = new URLSearchParams();
-      params.set('page', String(page));
-      params.set('limit', String(PAGE_SIZE));
-      appendFilterParams(params, filter);
-
-      const res = await fetch(`/api/memory/stores/${storeKey}/memories?${params.toString()}`, {
-        cache: 'no-store',
-      });
-
-      if (!res.ok) {
-        throw new Error('Failed to load memories');
-      }
-
-      const data = await res.json();
-      setMemories(data.items || []);
-      setTotal(data.total || 0);
-    } catch (error) {
-      console.error('Failed to load memories', error);
-    } finally {
-      setLoadingMemories(false);
-    }
-  }, [filter, page, storeKey]);
-
-  const refreshAll = useCallback(async () => {
+  const refreshAll = async () => {
     setRefreshing(true);
     try {
-      await Promise.all([loadStore(), loadMemories()]);
+      await Promise.all([storeQuery.refetch(), itemsQuery.refetch()]);
     } finally {
       setRefreshing(false);
     }
-  }, [loadMemories, loadStore]);
-
-  useEffect(() => {
-    void loadStore();
-  }, [loadStore]);
-
-  useEffect(() => {
-    void loadMemories();
-  }, [loadMemories]);
+  };
 
   const handleApplyFilter = () => {
     const trimmedScopeId = draftScopeId.trim();
@@ -308,32 +228,14 @@ export default function MemoryStoreDetailPage() {
       return;
     }
 
-    setSearching(true);
-
     try {
-      const params = new URLSearchParams();
-      params.set('query', searchQuery.trim());
-      params.set('limit', String(SEARCH_LIMIT));
-      appendFilterParams(params, filter);
-
-      const res = await fetch(`/api/memory/stores/${storeKey}/memories?${params.toString()}`, {
-        cache: 'no-store',
-      });
-
-      if (!res.ok) {
-        throw new Error(t('searchError'));
-      }
-
-      const data = await res.json();
-      setSearchResults(data.memories || []);
-    } catch (error) {
+      setSearchResults(await searchMutation.mutateAsync({ query: searchQuery.trim(), limit: SEARCH_LIMIT, filter }));
+    } catch {
       notifications.show({
         color: 'red',
-        message: error instanceof Error ? error.message : t('searchError'),
+        message: t('searchError'),
         title: t('error'),
       });
-    } finally {
-      setSearching(false);
     }
   };
 
@@ -343,35 +245,22 @@ export default function MemoryStoreDetailPage() {
       return;
     }
 
-    setRecalling(true);
-
     try {
-      const res = await fetch(`/api/memory/stores/${storeKey}/recall`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      setRecallResult(
+        await recallMutation.mutateAsync({
           maxTokens: 2000,
           query: recallQuery.trim(),
           scope: filter.scope,
           scopeId: filter.scopeId,
           topK: RECALL_LIMIT,
         }),
-      });
-
-      if (!res.ok) {
-        const error = await res.json().catch(() => null);
-        throw new Error(error?.error || t('searchError'));
-      }
-
-      setRecallResult(await res.json());
+      );
     } catch (error) {
       notifications.show({
         color: 'red',
-        message: error instanceof Error ? error.message : t('searchError'),
+        message: errorMessage(error, t('searchError')),
         title: t('error'),
       });
-    } finally {
-      setRecalling(false);
     }
   };
 
@@ -383,25 +272,18 @@ export default function MemoryStoreDetailPage() {
       id: store?._id,
       extraWarning: tSafe('memoryStoreExtra'),
       action: async () => {
-        setDeletingStore(true);
         try {
-          const res = await fetch(`/api/memory/stores/${storeKey}`, {
-            method: 'DELETE',
-          });
-
-          if (!res.ok) {
-            throw new Error(t('deleteError'));
-          }
-
-          notifications.show({
-            color: 'teal',
-            message: t('storeDeletedMessage'),
-            title: t('storeDeleted'),
-          });
-          router.push('/dashboard/memory');
-        } finally {
-          setDeletingStore(false);
+          await deleteStoreMutation.mutateAsync();
+        } catch {
+          throw new Error(t('deleteError'));
         }
+
+        notifications.show({
+          color: 'teal',
+          message: t('storeDeletedMessage'),
+          title: t('storeDeleted'),
+        });
+        router.push('/dashboard/memory');
       },
     });
   };
@@ -411,30 +293,21 @@ export default function MemoryStoreDetailPage() {
       noun: tSafe('nouns.memoryItem'),
       name: memoryId,
       action: async () => {
-        setDeletingMemoryId(memoryId);
         try {
-          const res = await fetch(`/api/memory/stores/${storeKey}/memories/${memoryId}`, {
-            method: 'DELETE',
-          });
+          await deleteMemoryMutation.mutateAsync(memoryId);
+        } catch (error) {
+          throw new Error(errorMessage(error, t('addMemoryError')));
+        }
 
-          if (!res.ok) {
-            const error = await res.json().catch(() => null);
-            throw new Error(error?.error || t('addMemoryError'));
-          }
+        notifications.show({
+          color: 'teal',
+          message: t('memoryDeletedMessage'),
+          title: t('memoryDeleted'),
+        });
 
-          notifications.show({
-            color: 'teal',
-            message: t('memoryDeletedMessage'),
-            title: t('memoryDeleted'),
-          });
-
-          if (memories.length === 1 && page > 1) {
-            setPage((currentPage) => currentPage - 1);
-          } else {
-            await Promise.all([loadStore(), loadMemories()]);
-          }
-        } finally {
-          setDeletingMemoryId(null);
+        // The mutation already reread the store and its pages; when the page is now empty, step back one.
+        if (memories.length === 1 && page > 1) {
+          setPage((currentPage) => currentPage - 1);
         }
       },
     });
@@ -451,33 +324,21 @@ export default function MemoryStoreDetailPage() {
       confirmLabel: tSafe('clearContext.confirm'),
       tone: 'danger',
       action: async () => {
-        setClearingContext(true);
         try {
-          const params = new URLSearchParams();
-          appendFilterParams(params, filter);
-
-          const res = await fetch(`/api/memory/stores/${storeKey}/memories?${params.toString()}`, {
-            method: 'DELETE',
-          });
-
-          if (!res.ok) {
-            const error = await res.json().catch(() => null);
-            throw new Error(error?.error || t('clearContextError'));
-          }
-
-          setSearchResults(null);
-          setRecallResult(null);
-          setPage(1);
-          await Promise.all([loadStore(), loadMemories()]);
-
-          notifications.show({
-            color: 'teal',
-            message: t('clearContextSuccessMessage'),
-            title: t('clearContextSuccess'),
-          });
-        } finally {
-          setClearingContext(false);
+          await clearContextMutation.mutateAsync(filter);
+        } catch (error) {
+          throw new Error(errorMessage(error, t('clearContextError')));
         }
+
+        setSearchResults(null);
+        setRecallResult(null);
+        setPage(1);
+
+        notifications.show({
+          color: 'teal',
+          message: t('clearContextSuccessMessage'),
+          title: t('clearContextSuccess'),
+        });
       },
     });
   };
@@ -992,10 +853,8 @@ export default function MemoryStoreDetailPage() {
         defaultScope={filter.scope}
         defaultScopeId={filter.scopeId}
         onClose={() => setAddModalOpen(false)}
-        onCreated={() => {
-          setAddModalOpen(false);
-          void refreshAll();
-        }}
+        // The add mutation already reread the store and its memory pages.
+        onCreated={() => setAddModalOpen(false)}
       />
     </>
   );

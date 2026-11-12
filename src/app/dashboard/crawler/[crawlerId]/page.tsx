@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import {
   Badge,
@@ -22,6 +22,19 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { ResourceUsageSection, useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useAddCrawlerUrls,
+  useCancelCrawlJob,
+  useCrawlJobs,
+  useCrawler,
+  useCrawlUrls,
+  useRemoveCrawlerUrls,
+  useRunCrawler,
+  useSyncCrawlJobToRag,
+  useUpdateCrawler,
+} from '@/lib/api/queries/crawler';
+import { useRagModuleOptions } from '@/lib/api/queries/rag';
 import {
   IconAlertTriangle,
   IconClock,
@@ -106,6 +119,10 @@ interface ScheduleForm {
   cron: string;
 }
 
+/** How often the runs are reread while one is queued or running. */
+const JOBS_POLL_MS = 2000;
+const EMPTY_RAG_MODULES: Array<{ key: string; name: string }> = [];
+
 type TabId = 'overview' | 'urls' | 'plan' | 'http' | 'integration' | 'schedule' | 'runs';
 
 export default function CrawlerDetailPage() {
@@ -114,22 +131,28 @@ export default function CrawlerDetailPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
 
-  const [crawler, setCrawler] = useState<CrawlerView | null>(null);
-  const [jobs, setJobs] = useState<CrawlJobView[]>([]);
-  const [ragModules, setRagModules] = useState<Array<{ key: string; name: string }>>([]);
-  const [loading, setLoading] = useState(true);
+  const crawlerQuery = useCrawler(crawlerId);
+  const crawler: CrawlerView | null = crawlerQuery.data ?? null;
+  const jobsQuery = useCrawlJobs(crawler?.key, JOBS_POLL_MS);
+  const jobs = useMemo<CrawlJobView[]>(() => jobsQuery.data ?? [], [jobsQuery.data]);
+  const ragModules = useRagModuleOptions('active').data ?? EMPTY_RAG_MODULES;
+  const loading = crawlerQuery.isPending;
+  const updateCrawler = useUpdateCrawler(crawlerId);
+  const addUrlsMutation = useAddCrawlerUrls(crawlerId);
+  const removeUrlsMutation = useRemoveCrawlerUrls(crawlerId);
+  const runCrawler = useRunCrawler(crawlerId);
+  const crawlUrls = useCrawlUrls(crawlerId);
+  const cancelJobMutation = useCancelCrawlJob();
+  const syncToRag = useSyncCrawlJobToRag();
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [savingPlan, setSavingPlan] = useState(false);
   const [savingHttp, setSavingHttp] = useState(false);
   const [savingIntegration, setSavingIntegration] = useState(false);
   const [savingSchedule, setSavingSchedule] = useState(false);
-  const [running, setRunning] = useState(false);
   const [newUrl, setNewUrl] = useState('');
   const [singleCrawlUrl, setSingleCrawlUrl] = useState('');
   const [openJob, setOpenJob] = useState<CrawlJobView | null>(null);
-  const [cancelingJob, setCancelingJob] = useState(false);
   const [resultsRefreshKey, setResultsRefreshKey] = useState(0);
-  const [syncingToRag, setSyncingToRag] = useState(false);
   const [jobQuery, setJobQuery] = useState('');
   const [jobStatusFilter, setJobStatusFilter] = useState('all');
   const [jobTriggerFilter, setJobTriggerFilter] = useState('all');
@@ -209,144 +232,80 @@ export default function CrawlerDetailPage() {
   });
 
   /**
-   * One-shot fetch for the crawler config. Resets every form to the latest
-   * persisted values. Called ONLY on initial mount and after the user saves
-   * — never from the polling loop, which would clobber in-progress edits.
+   * Copies the persisted crawler into every form. Runs when the crawler is read — on the first visit and after a
+   * save (which rereads it) — and never because of the jobs polling, which would clobber in-progress edits.
    */
-  const loadCrawler = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error('Crawler not found');
-      const data = await res.json();
-      const c = data.crawler as CrawlerView;
-      setCrawler(c);
+  const crawlerReadAt = crawlerQuery.dataUpdatedAt;
+  useEffect(() => {
+    const c = crawlerQuery.data;
+    if (!c) return;
+    planForm.setValues({
+      name: c.name,
+      description: c.description ?? '',
+      engine: c.engine,
+      maxDepth: c.maxDepth,
+      maxPages: c.maxPages,
+      autoCrawl: c.autoCrawl,
+      sameDomainOnly: c.scope.sameDomainOnly,
+      includeSubdomains: c.scope.includeSubdomains,
+      allowList: (c.scope.allowList ?? []).join('\n'),
+      blockList: (c.scope.blockList ?? []).join('\n'),
+    });
 
-      planForm.setValues({
-        name: c.name,
-        description: c.description ?? '',
-        engine: c.engine,
-        maxDepth: c.maxDepth,
-        maxPages: c.maxPages,
-        autoCrawl: c.autoCrawl,
-        sameDomainOnly: c.scope.sameDomainOnly,
-        includeSubdomains: c.scope.includeSubdomains,
-        allowList: (c.scope.allowList ?? []).join('\n'),
-        blockList: (c.scope.blockList ?? []).join('\n'),
-      });
+    httpForm.setValues({
+      userAgent: c.http.userAgent ?? '',
+      acceptLanguage: c.http.acceptLanguage ?? '',
+      timeoutMs: c.http.timeoutMs ?? 30000,
+      maxConcurrency: c.http.maxConcurrency ?? 5,
+      bearerToken: c.http.bearerToken ?? '',
+      basicUsername: c.http.basicAuth?.username ?? '',
+      basicPassword: c.http.basicAuth?.password ?? '',
+      headers: c.http.headers ? JSON.stringify(c.http.headers, null, 2) : '',
+      cookies: c.http.cookies ? JSON.stringify(c.http.cookies, null, 2) : '',
+      allowPrivateNetwork: c.http.allowPrivateNetwork ?? false,
+      allowInsecureTls: c.http.allowInsecureTls ?? false,
+      blockTrackers: c.http.blockTrackers ?? false,
+      blockedHosts: (c.http.blockedHosts ?? []).join('\n'),
+      outputFormat: c.markdownOptions?.outputFormat ?? 'markdown',
+      cleanup: c.markdownOptions?.cleanup ?? true,
+      stripDataImages: c.markdownOptions?.stripDataImages ?? true,
+      readability: c.markdownOptions?.readability ?? true,
+      mainContentOnly: c.markdownOptions?.mainContentOnly ?? false,
+      contentSelector: c.markdownOptions?.contentSelector ?? '',
+      removeSelectors: (c.markdownOptions?.removeSelectors ?? []).join('\n'),
+      maxBodyChars: c.markdownOptions?.maxBodyChars ?? 0,
+      ocr: crawlerOcrToSettings(c.markdownOptions?.ocr),
+    });
 
-      httpForm.setValues({
-        userAgent: c.http.userAgent ?? '',
-        acceptLanguage: c.http.acceptLanguage ?? '',
-        timeoutMs: c.http.timeoutMs ?? 30000,
-        maxConcurrency: c.http.maxConcurrency ?? 5,
-        bearerToken: c.http.bearerToken ?? '',
-        basicUsername: c.http.basicAuth?.username ?? '',
-        basicPassword: c.http.basicAuth?.password ?? '',
-        headers: c.http.headers ? JSON.stringify(c.http.headers, null, 2) : '',
-        cookies: c.http.cookies ? JSON.stringify(c.http.cookies, null, 2) : '',
-        allowPrivateNetwork: c.http.allowPrivateNetwork ?? false,
-        allowInsecureTls: c.http.allowInsecureTls ?? false,
-        blockTrackers: c.http.blockTrackers ?? false,
-        blockedHosts: (c.http.blockedHosts ?? []).join('\n'),
-        outputFormat: c.markdownOptions?.outputFormat ?? 'markdown',
-        cleanup: c.markdownOptions?.cleanup ?? true,
-        stripDataImages: c.markdownOptions?.stripDataImages ?? true,
-        readability: c.markdownOptions?.readability ?? true,
-        mainContentOnly: c.markdownOptions?.mainContentOnly ?? false,
-        contentSelector: c.markdownOptions?.contentSelector ?? '',
-        removeSelectors: (c.markdownOptions?.removeSelectors ?? []).join('\n'),
-        maxBodyChars: c.markdownOptions?.maxBodyChars ?? 0,
-        ocr: crawlerOcrToSettings(c.markdownOptions?.ocr),
-      });
+    intForm.setValues({
+      ragEnabled: c.rag?.enabled ?? false,
+      ragModuleKey: c.rag?.ragModuleKey ?? '',
+      webhookEnabled: Boolean(c.webhook?.url),
+      webhookUrl: c.webhook?.url ?? '',
+      webhookSecret: c.webhook?.secret ?? '',
+      webhookEventPage: c.webhook?.events?.includes('page') ?? true,
+      webhookEventCompleted: c.webhook?.events?.includes('completed') ?? true,
+      webhookEventFailed: c.webhook?.events?.includes('failed') ?? true,
+    });
 
-      intForm.setValues({
-        ragEnabled: c.rag?.enabled ?? false,
-        ragModuleKey: c.rag?.ragModuleKey ?? '',
-        webhookEnabled: Boolean(c.webhook?.url),
-        webhookUrl: c.webhook?.url ?? '',
-        webhookSecret: c.webhook?.secret ?? '',
-        webhookEventPage: c.webhook?.events?.includes('page') ?? true,
-        webhookEventCompleted: c.webhook?.events?.includes('completed') ?? true,
-        webhookEventFailed: c.webhook?.events?.includes('failed') ?? true,
-      });
-
-      schedForm.setValues({
-        enabled: c.schedule?.enabled ?? false,
-        mode: c.schedule?.mode ?? 'interval',
-        intervalSeconds: c.schedule?.intervalSeconds ?? 3600,
-        cron: c.schedule?.cron ?? '0 * * * *',
-      });
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    } finally {
-      setLoading(false);
-    }
+    schedForm.setValues({
+      enabled: c.schedule?.enabled ?? false,
+      mode: c.schedule?.mode ?? 'interval',
+      intervalSeconds: c.schedule?.intervalSeconds ?? 3600,
+      cron: c.schedule?.cron ?? '0 * * * *',
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [crawlerId]);
+  }, [crawlerReadAt]);
 
-  /**
-   * Polled separately from `loadCrawler`. Touches ONLY the jobs list — does
-   * NOT mutate form state so a user editing the RAG / Webhook / Schedule
-   * panels while a job is running won't see their toggles reset.
-   */
-  const loadJobs = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/crawler/jobs?limit=50`, { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
-      const list = (data.jobs ?? []) as CrawlJobView[];
-      setJobs((prev) => {
-        // Filter to this crawler. Use crawler from state if available; else
-        // accept all (first load before crawler is set will be replaced on next tick).
-        const current = crawler;
-        if (!current) return prev;
-        return list.filter((j) => j.crawlerKey === current.key);
-      });
-    } catch {
-      // Network errors during polling are non-fatal; the next tick retries.
-    }
-  }, [crawler]);
-
-  const loadRagModules = useCallback(async () => {
-    try {
-      const res = await fetch('/api/rag/modules?status=active', { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
-      const modules = (data.modules ?? []) as Array<{ key: string; name: string }>;
-      setRagModules(modules.map((m) => ({ key: m.key, name: m.name })));
-    } catch {
-      // Non-fatal — Select will just be empty.
-    }
-  }, []);
-
-  // Initial load: crawler config + jobs list + available RAG modules.
+  const crawlerError = crawlerQuery.error;
   useEffect(() => {
-    void loadCrawler();
-    void loadRagModules();
-  }, [loadCrawler, loadRagModules]);
+    if (!crawlerError) return;
+    notifications.show({ color: 'red', title: 'Error', message: 'Crawler not found' });
+  }, [crawlerError]);
 
-  // Once we know the crawler, load jobs for it.
-  useEffect(() => {
-    if (!crawler) return;
-    void loadJobs();
-  }, [crawler, loadJobs]);
-
-  // Polling for live job status — does NOT touch the form.
-  useEffect(() => {
-    if (!crawler) return;
-    const hasActive = jobs.some(
-      (j) => j.status === 'queued' || j.status === 'running',
-    );
-    if (!hasActive) return;
-    const id = setInterval(() => {
-      void loadJobs();
-    }, 2000);
-    return () => clearInterval(id);
-  }, [crawler, jobs, loadJobs]);
+  const running = runCrawler.isPending;
+  const cancelingJob = cancelJobMutation.isPending;
+  const syncingToRag = syncToRag.isPending;
 
   const summary = useMemo(() => {
     const last = jobs[0];
@@ -399,10 +358,7 @@ export default function CrawlerDetailPage() {
   async function savePlan(values: PlanForm) {
     setSavingPlan(true);
     try {
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+      await updateCrawler.mutateAsync({
           name: values.name,
           description: values.description || undefined,
           engine: values.engine,
@@ -415,19 +371,13 @@ export default function CrawlerDetailPage() {
             allowList: values.allowList.split('\n').map((s) => s.trim()).filter(Boolean),
             blockList: values.blockList.split('\n').map((s) => s.trim()).filter(Boolean),
           },
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to save');
-      }
+        });
       notifications.show({ color: 'teal', title: 'Saved', message: 'Plan updated' });
-      await loadCrawler();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     } finally {
       setSavingPlan(false);
@@ -488,22 +438,13 @@ export default function CrawlerDetailPage() {
         ...(ocr ? { ocr } : {}),
       };
 
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ http, markdownOptions }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to save');
-      }
+      await updateCrawler.mutateAsync({ http, markdownOptions });
       notifications.show({ color: 'teal', title: 'Saved', message: 'HTTP settings updated' });
-      await loadCrawler();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     } finally {
       setSavingHttp(false);
@@ -529,22 +470,13 @@ export default function CrawlerDetailPage() {
             }
           : null,
       };
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to save');
-      }
+      await updateCrawler.mutateAsync(body);
       notifications.show({ color: 'teal', title: 'Saved', message: 'Integration updated' });
-      await loadCrawler();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     } finally {
       setSavingIntegration(false);
@@ -565,22 +497,13 @@ export default function CrawlerDetailPage() {
             }
           : null,
       };
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to save schedule');
-      }
+      await updateCrawler.mutateAsync(body);
       notifications.show({ color: 'teal', title: 'Saved', message: 'Schedule updated' });
-      await loadCrawler();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     } finally {
       setSavingSchedule(false);
@@ -594,27 +517,18 @@ export default function CrawlerDetailPage() {
       .filter(Boolean);
     if (urls.length === 0) return;
     try {
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}/urls`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ urls }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to add');
-      }
+      await addUrlsMutation.mutateAsync(urls);
       notifications.show({
         color: 'teal',
         title: 'Added',
         message: `${urls.length} URL${urls.length === 1 ? '' : 's'} added`,
       });
       setNewUrl('');
-      await loadCrawler();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     }
   }
@@ -624,93 +538,50 @@ export default function CrawlerDetailPage() {
       noun: tSafe('nouns.crawlerUrl'),
       name: url,
       action: async () => {
-        const res = await fetch(`/api/crawler/crawlers/${crawlerId}/urls`, {
-          method: 'DELETE',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ urls: [url] }),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || 'Failed to remove');
-        }
-        await loadCrawler();
+        await removeUrlsMutation.mutateAsync([url]);
       },
     });
   }
 
   async function runAll() {
-    setRunning(true);
     try {
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}/run`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: '{}',
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to run');
-      }
+      await runCrawler.mutateAsync();
       notifications.show({
         color: 'teal',
         title: 'Run started',
         message: 'Crawl job queued',
       });
-      await loadJobs();
       setActiveTab('runs');
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setRunning(false);
     }
   }
 
   async function cancelJob(jobId: string) {
-    setCancelingJob(true);
     try {
-      const res = await fetch(`/api/crawler/jobs/${jobId}/cancel`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: '{}',
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to cancel');
-      }
+      await cancelJobMutation.mutateAsync(jobId);
       notifications.show({
         color: 'teal',
         title: 'Job canceled',
         message: 'The crawl job was canceled',
       });
       setOpenJob(null);
-      await loadJobs();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setCancelingJob(false);
     }
   }
 
   async function syncJobToRag(jobId: string, ragModuleKey: string) {
-    setSyncingToRag(true);
     try {
-      const res = await fetch(`/api/crawler/jobs/${jobId}/sync-to-rag`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ragModuleKey }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to sync to Knowledge Engine');
-      }
-      const summary = await res.json();
+      const summary = await syncToRag.mutateAsync({ jobId, ragModuleKey });
       notifications.show({
         color: summary.failed > 0 ? 'orange' : 'teal',
         title: 'Sent to Knowledge Engine',
@@ -723,36 +594,25 @@ export default function CrawlerDetailPage() {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setSyncingToRag(false);
     }
   }
 
   async function runOne(url: string) {
     try {
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}/crawl`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ urls: [url] }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to crawl');
-      }
+      await crawlUrls.mutateAsync([url]);
       notifications.show({
         color: 'teal',
         title: 'Run started',
         message: `Crawling ${url}`,
       });
-      await loadJobs();
       setActiveTab('runs');
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     }
   }
@@ -1406,7 +1266,7 @@ Content-Type: application/json
             rowKey={(j) => j.id}
             onRowClick={(j) => setOpenJob(j)}
             columns={jobColumns}
-            onRefresh={loadJobs}
+            onRefresh={() => void jobsQuery.refetch()}
             search={{
               value: jobQuery,
               onChange: setJobQuery,

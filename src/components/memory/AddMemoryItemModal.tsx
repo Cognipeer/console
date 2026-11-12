@@ -1,12 +1,14 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import type { MemoryScope } from '@/lib/database';
 import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconBraces } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useAddMemoryItem } from '@/lib/api/queries/memory';
 import FormShell, {
   Checklist,
   FormField,
@@ -55,7 +57,8 @@ export default function AddMemoryItemModal({
   onCreated,
 }: AddMemoryItemModalProps) {
   const t = useTranslations('memory');
-  const [submitting, setSubmitting] = useState(false);
+  const addMemory = useAddMemoryItem(storeKey);
+  const submitting = addMemory.isPending;
   const wasOpenedRef = useRef(false);
 
   const form = useForm<FormValues>({
@@ -103,31 +106,20 @@ export default function AddMemoryItemModal({
   }, [defaultScope, defaultScopeId, opened]);
 
   const handleSubmit = async (values: FormValues) => {
-    setSubmitting(true);
-
     try {
       const tags = values.tags
         .split(',')
         .map((tag) => tag.trim())
         .filter(Boolean);
 
-      const res = await fetch(`/api/memory/stores/${storeKey}/memories`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          content: values.content.trim(),
-          importance: values.importance,
-          scope: values.scope,
-          scopeId: values.scope === 'global' ? undefined : values.scopeId.trim(),
-          source: values.source,
-          tags,
-        }),
+      await addMemory.mutateAsync({
+        content: values.content.trim(),
+        importance: values.importance,
+        scope: values.scope,
+        scopeId: values.scope === 'global' ? undefined : values.scopeId.trim(),
+        source: values.source,
+        tags,
       });
-
-      if (!res.ok) {
-        const error = await res.json().catch(() => null);
-        throw new Error(error?.error || t('addMemoryError'));
-      }
 
       form.reset();
       notifications.show({
@@ -139,11 +131,9 @@ export default function AddMemoryItemModal({
     } catch (error) {
       notifications.show({
         color: 'red',
-        message: error instanceof Error ? error.message : t('addMemoryError'),
+        message: errorMessage(error, t('addMemoryError')),
         title: t('error'),
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 

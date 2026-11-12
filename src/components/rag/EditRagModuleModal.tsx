@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   Alert,
   NumberInput,
@@ -13,6 +13,14 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import {
+  useActiveRerankers,
+  useModelsByCategory,
+  useStartRagReindex,
+  useUpdateRagModule,
+} from '@/lib/api/queries/rag';
+import { useVectorIndexes, useVectorProviders } from '@/lib/api/queries/vector';
 import { IconAlertTriangle, IconCheck, IconBook } from '@tabler/icons-react';
 import FormShell, {
   Checklist,
@@ -129,23 +137,23 @@ interface FormValues {
  * not rebuild), and the banner's "Re-index now" is how the operator starts the
  * one they actually want — so say that plainly rather than showing a tick.
  */
-async function startReindexRun(key: string, reason: RagReindexReason): Promise<string | null> {
+async function startReindexRun(
+  start: (reason: RagReindexReason) => Promise<unknown>,
+  reason: RagReindexReason,
+): Promise<string | null> {
   try {
-    const res = await fetch(`/api/rag/modules/${encodeURIComponent(key)}/reindex`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason }),
-    });
-    if (res.ok) return null;
-    if (res.status === 409) {
+    await start(reason);
+    return null;
+  } catch (error) {
+    if (isApiError(error) && error.status === 409) {
       return 'A re-index started earlier is still running, so it is rebuilding the previous '
         + 'settings. This module still needs a rebuild — use "Re-index now" once that run finishes.';
     }
-    const err = await res.json().catch(() => ({}));
-    return typeof (err as { error?: unknown }).error === 'string'
-      ? (err as { error: string }).error
-      : `The re-index endpoint answered ${res.status}.`;
-  } catch (error) {
+    if (isApiError(error)) {
+      return error.payload && typeof (error.payload as { error?: unknown }).error === 'string'
+        ? (error.payload as { error: string }).error
+        : `The re-index endpoint answered ${error.status}.`;
+    }
     return error instanceof Error ? error.message : 'Unexpected error';
   }
 }
@@ -171,11 +179,9 @@ function formValuesFromModule(module: RagModuleData): FormValues {
 }
 
 export default function EditRagModuleModal({ opened, onClose, module, onUpdated }: EditRagModuleModalProps) {
-  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
-  const [vectorProviders, setVectorProviders] = useState<VectorProvider[]>([]);
-  const [vectorIndexes, setVectorIndexes] = useState<VectorIndex[]>([]);
-  const [rerankers, setRerankers] = useState<RerankerOption[]>([]);
-  const [submitting, setSubmitting] = useState(false);
+  const updateModule = useUpdateRagModule(module.key);
+  const startReindex = useStartRagReindex(module.key);
+  const submitting = updateModule.isPending || startReindex.isPending;
 
   const form = useForm<FormValues>({
     initialValues: formValuesFromModule(module),
@@ -209,86 +215,44 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
   const patchRetrieval = (patch: Partial<RetrievalFormValues>) =>
     form.setFieldValue('retrieval', { ...form.getValues().retrieval, ...patch });
 
-  const loadEmbeddingModels = useCallback(async () => {
-    try {
-      const res = await fetch('/api/models?category=embedding', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setEmbeddingModels((data.models ?? []).map((m: Record<string, string>) => ({ key: m.key, name: m.name })));
-      }
-    } catch (err) {
-      console.error('Failed to load embedding models', err);
-    }
-  }, []);
+  const modelsQuery = useModelsByCategory('embedding', opened);
+  const providersQuery = useVectorProviders(opened);
+  const indexesQuery = useVectorIndexes(selectedProvider || undefined, opened);
+  const rerankersQuery = useActiveRerankers(opened);
 
-  const loadVectorProviders = useCallback(async () => {
-    try {
-      const res = await fetch('/api/vector/providers', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setVectorProviders((data.providers ?? []).map((p: Record<string, unknown>) => ({
-          key: p.key as string,
-          label: (p.label as string) || (p.key as string),
-          status: p.status as string,
-          driverCapabilities: p.driverCapabilities as Record<string, unknown> | undefined,
-        })));
-      }
-    } catch (err) {
-      console.error('Failed to load vector providers', err);
-    }
-  }, []);
-
-  const loadRerankers = useCallback(async () => {
-    try {
-      const res = await fetch('/api/reranker?status=active', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setRerankers(
-          (data.rerankers ?? []).map((r: Record<string, string>) => ({
-            key: r.key,
-            name: r.name,
-          })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load rerankers', err);
-    }
-  }, []);
-
-  const loadVectorIndexes = useCallback(async () => {
-    if (!selectedProvider) {
-      setVectorIndexes([]);
-      return;
-    }
-    try {
-      const res = await fetch(`/api/vector/indexes?providerKey=${encodeURIComponent(selectedProvider)}`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setVectorIndexes((data.indexes ?? []).map((i: Record<string, unknown>) => ({
-          key: i.key as string,
-          name: i.name as string,
-          dimension: i.dimension as number,
-        })));
-      }
-    } catch (err) {
-      console.error('Failed to load vector indexes', err);
-    }
-  }, [selectedProvider]);
+  const embeddingModels = useMemo<EmbeddingModel[]>(
+    () => (modelsQuery.data ?? []).map((m) => ({ key: m.key, name: m.name ?? '' })),
+    [modelsQuery.data],
+  );
+  const vectorProviders = useMemo<VectorProvider[]>(
+    () =>
+      (providersQuery.data ?? []).map((p) => ({
+        key: p.key,
+        label: p.label || p.key,
+        status: p.status,
+        driverCapabilities: p.driverCapabilities as Record<string, unknown> | undefined,
+      })),
+    [providersQuery.data],
+  );
+  const vectorIndexes = useMemo<VectorIndex[]>(
+    () =>
+      selectedProvider
+        ? (indexesQuery.data ?? []).map((i) => ({ key: i.key, name: i.name, dimension: i.dimension }))
+        : [],
+    [indexesQuery.data, selectedProvider],
+  );
+  const rerankers = useMemo<RerankerOption[]>(
+    () => (rerankersQuery.data ?? []).map((r) => ({ key: r.key, name: r.name })),
+    [rerankersQuery.data],
+  );
 
   // Reset form to current module values each time modal opens
   useEffect(() => {
     if (opened) {
       form.setValues(formValuesFromModule(module));
-      void loadEmbeddingModels();
-      void loadVectorProviders();
-      void loadRerankers();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
-
-  useEffect(() => {
-    void loadVectorIndexes();
-  }, [loadVectorIndexes]);
 
   const selectedVectorProvider = useMemo(
     () => vectorProviders.find((p) => p.key === form.values.vectorProviderKey),
@@ -329,12 +293,9 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
 
   const handleSubmit = form.onSubmit(async (values) => {
     if (hasChunkFieldErrors(chunkErrors)) return;
-    setSubmitting(true);
     try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(module.key)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const updated = await updateModule.mutateAsync(
+{
           name: values.name,
           description: values.description || clearedValue(MODE),
           embeddingModelKey: values.embeddingModelKey,
@@ -356,20 +317,13 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
           filterableFields:
             values.filterableFields.length > 0 ? values.filterableFields : clearedValue(MODE),
           responseDetail: values.responseDetail,
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to update Knowledge Engine module');
-      }
-
-      const data = await res.json();
+        }
+      );
 
       // The PATCH only marks the module stale; the rebuild is a separate run,
       // and the alert above has already promised it.
       const reason = reindexReasonFor(chunkingChanged, embeddingChanged);
-      const reindexError = reason ? await startReindexRun(module.key, reason) : null;
+      const reindexError = reason ? await startReindexRun((r) => startReindex.mutateAsync(r), reason) : null;
 
       if (reindexError) {
         notifications.show({
@@ -389,17 +343,15 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         });
       }
 
-      onUpdated(data.module);
+      onUpdated(updated as unknown as Record<string, unknown>);
       onClose();
     } catch (error) {
       console.error(error);
       notifications.show({
         color: 'red',
         title: 'Failed to update Knowledge Engine module',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setSubmitting(false);
     }
   });
 

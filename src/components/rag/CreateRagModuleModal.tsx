@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Button,
   NumberInput,
@@ -16,7 +17,17 @@ import { IconBook, IconCheck, IconPlus } from '@tabler/icons-react';
 import InlineModelCreate from '@/components/models/InlineModelCreate';
 import VectorProviderModal from '@/components/vector/VectorProviderModal';
 import CreateVectorIndexModal from '@/components/vector/CreateVectorIndexModal';
-import type { VectorProviderView } from '@/lib/services/vector';
+import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
+import { errorMessage } from '@/lib/api/client';
+import { useProjectScope } from '@/lib/api/queries/projectScope';
+import {
+  ragKeys,
+  useActiveRerankers,
+  useCreateRagModule,
+  useModelsByCategory,
+  type ModelLookup,
+} from '@/lib/api/queries/rag';
+import { useVectorIndexes, useVectorProviders, vectorKeys } from '@/lib/api/queries/vector';
 import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import { englishOcrText } from '@/components/extraction/ocrEnglish';
 import { describeOcr, type OcrSettings } from '@/components/extraction/ocrForm';
@@ -106,11 +117,10 @@ interface FormValues {
 }
 
 export default function CreateRagModuleModal({ opened, onClose, onCreated }: CreateRagModuleModalProps) {
-  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
-  const [vectorProviders, setVectorProviders] = useState<VectorProvider[]>([]);
-  const [vectorIndexes, setVectorIndexes] = useState<VectorIndex[]>([]);
-  const [rerankers, setRerankers] = useState<RerankerOption[]>([]);
-  const [submitting, setSubmitting] = useState(false);
+  const queryClient = useQueryClient();
+  const project = useProjectScope();
+  const createModule = useCreateRagModule();
+  const submitting = createModule.isPending;
   // The dependencies this form can create in place, each for someone who can add it (the API decides anyway):
   // an embedding model (Model Hub), a vector provider and an index (Knowledge Index).
   const canAddModel = useCanWriteService('models');
@@ -118,8 +128,6 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
   const [addModelOpen, setAddModelOpen] = useState(false);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [addIndexOpen, setAddIndexOpen] = useState(false);
-  // The providers as the API sent them: the index form needs their capabilities.
-  const [providerViews, setProviderViews] = useState<VectorProviderView[]>([]);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -169,85 +177,43 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
   const patchRetrieval = (patch: Partial<RetrievalFormValues>) =>
     form.setFieldValue('retrieval', { ...form.getValues().retrieval, ...patch });
 
-  const loadEmbeddingModels = useCallback(async () => {
-    try {
-      const res = await fetch('/api/models?category=embedding', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setEmbeddingModels((data.models ?? []).map((m: Record<string, string>) => ({ key: m.key, name: m.name })));
-      }
-    } catch (err) {
-      console.error('Failed to load embedding models', err);
-    }
-  }, []);
+  const modelsQuery = useModelsByCategory('embedding', opened);
+  const providersQuery = useVectorProviders(opened);
+  const indexesQuery = useVectorIndexes(selectedProvider || undefined, opened);
+  const rerankersQuery = useActiveRerankers(opened);
 
-  const loadVectorProviders = useCallback(async () => {
-    try {
-      const res = await fetch('/api/vector/providers', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setProviderViews((data.providers ?? []) as VectorProviderView[]);
-        setVectorProviders((data.providers ?? []).map((p: Record<string, unknown>) => ({
-          key: p.key as string,
-          label: (p.label as string) || (p.key as string),
-          status: p.status as string,
-          driverCapabilities: p.driverCapabilities as Record<string, unknown> | undefined,
-        })));
-      }
-    } catch (err) {
-      console.error('Failed to load vector providers', err);
-    }
-  }, []);
-
-  const loadVectorIndexes = useCallback(async () => {
-    if (!selectedProvider) {
-      setVectorIndexes([]);
-      return;
-    }
-    try {
-      const res = await fetch(`/api/vector/indexes?providerKey=${encodeURIComponent(selectedProvider)}`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setVectorIndexes((data.indexes ?? []).map((i: Record<string, unknown>) => ({
-          key: i.key as string,
-          name: i.name as string,
-          providerKey: i.providerKey as string,
-          dimension: i.dimension as number,
-        })));
-      }
-    } catch (err) {
-      console.error('Failed to load vector indexes', err);
-    }
-  }, [selectedProvider]);
-
-  const loadRerankers = useCallback(async () => {
-    try {
-      const res = await fetch('/api/reranker?status=active', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setRerankers(
-          (data.rerankers ?? []).map((r: Record<string, string>) => ({
-            key: r.key,
-            name: r.name,
-          })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load rerankers', err);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (opened) {
-      void loadEmbeddingModels();
-      void loadVectorProviders();
-      void loadRerankers();
-    }
-  }, [opened, loadEmbeddingModels, loadVectorProviders, loadRerankers]);
-
-  useEffect(() => {
-    void loadVectorIndexes();
-  }, [loadVectorIndexes]);
+  const embeddingModels = useMemo<EmbeddingModel[]>(
+    () => (modelsQuery.data ?? []).map((m) => ({ key: m.key, name: m.name ?? '' })),
+    [modelsQuery.data],
+  );
+  // The providers as the API sent them: the index form needs their capabilities.
+  const providerViews = useMemo<VectorProviderView[]>(() => providersQuery.data ?? [], [providersQuery.data]);
+  const vectorProviders = useMemo<VectorProvider[]>(
+    () =>
+      providerViews.map((p) => ({
+        key: p.key,
+        label: p.label || p.key,
+        status: p.status,
+        driverCapabilities: p.driverCapabilities as Record<string, unknown> | undefined,
+      })),
+    [providerViews],
+  );
+  const vectorIndexes = useMemo<VectorIndex[]>(
+    () =>
+      selectedProvider
+        ? (indexesQuery.data ?? []).map((i) => ({
+            key: i.key,
+            name: i.name,
+            providerKey: i.providerKey,
+            dimension: i.dimension,
+          }))
+        : [],
+    [indexesQuery.data, selectedProvider],
+  );
+  const rerankers = useMemo<RerankerOption[]>(
+    () => (rerankersQuery.data ?? []).map((r) => ({ key: r.key, name: r.name })),
+    [rerankersQuery.data],
+  );
 
   // The index form creates on the provider chosen here.
   const indexProviders = useMemo(
@@ -279,12 +245,9 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
     if (validation.hasErrors || hasChunkFieldErrors(chunkErrors)) return;
     const values = form.getValues();
 
-    setSubmitting(true);
     try {
-      const res = await fetch('/api/rag/modules', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const created = await createModule.mutateAsync(
+{
           name: values.name,
           description: values.description || clearedValue(MODE),
           embeddingModelKey: values.embeddingModelKey,
@@ -309,31 +272,22 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
           filterableFields:
             values.filterableFields.length > 0 ? values.filterableFields : clearedValue(MODE),
           responseDetail: values.responseDetail,
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to create Knowledge Engine module');
-      }
-
-      const data = await res.json();
+        }
+      );
       notifications.show({
         color: 'green',
         title: 'Knowledge Engine Module Created',
         message: `${values.name} has been created successfully.`,
       });
       form.reset();
-      onCreated(data.module);
+      onCreated(created);
     } catch (error) {
       console.error(error);
       notifications.show({
         color: 'red',
         title: 'Failed to create Knowledge Engine module',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -745,8 +699,8 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
         category="embedding"
         onCreated={(model) => {
           if (model.category && model.category !== 'embedding') return;
-          setEmbeddingModels((current) => [
-            ...current.filter((m) => m.key !== model.key),
+          queryClient.setQueryData<ModelLookup[]>(ragKeys.models(project, 'embedding'), (current) => [
+            ...(current ?? []).filter((m) => m.key !== model.key),
             { key: model.key, name: model.name },
           ]);
           form.setFieldValue('embeddingModelKey', model.key);
@@ -758,15 +712,9 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             opened={addProviderOpen}
             onClose={() => setAddProviderOpen(false)}
             onCreated={(provider) => {
-              setProviderViews((current) => [...current.filter((p) => p.key !== provider.key), provider]);
-              setVectorProviders((current) => [
-                ...current.filter((p) => p.key !== provider.key),
-                {
-                  key: provider.key,
-                  label: provider.label || provider.key,
-                  status: provider.status ?? 'active',
-                  driverCapabilities: provider.driverCapabilities as Record<string, unknown> | undefined,
-                },
+              queryClient.setQueryData<VectorProviderView[]>(vectorKeys.providerList(project), (current) => [
+                ...(current ?? []).filter((p) => p.key !== provider.key),
+                provider,
               ]);
               form.setFieldValue('vectorProviderKey', provider.key);
               form.setFieldValue('vectorIndexKey', '');
@@ -777,10 +725,10 @@ export default function CreateRagModuleModal({ opened, onClose, onCreated }: Cre
             onClose={() => setAddIndexOpen(false)}
             providers={indexProviders}
             onCreated={({ index }) => {
-              setVectorIndexes((current) => [
-                ...current.filter((i) => i.key !== index.key),
-                { key: index.key, name: index.name, providerKey: index.providerKey, dimension: index.dimension },
-              ]);
+              queryClient.setQueryData<VectorIndexRecord[]>(
+                vectorKeys.indexList(project, index.providerKey),
+                (current) => [...(current ?? []).filter((i) => i.key !== index.key), index as VectorIndexRecord],
+              );
               form.setFieldValue('vectorIndexKey', index.key);
             }}
           />

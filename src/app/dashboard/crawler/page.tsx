@@ -1,12 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useCrawlers, useDeleteCrawler } from '@/lib/api/queries/crawler';
 import {
   IconEye,
   IconPlus,
@@ -24,35 +26,14 @@ export default function CrawlersListPage() {
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
-  const [crawlers, setCrawlers] = useState<CrawlerView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const crawlersQuery = useCrawlers();
+  const deleteCrawler = useDeleteCrawler();
+  const crawlers = useMemo<CrawlerView[]>(() => crawlersQuery.data ?? [], [crawlersQuery.data]);
+  const loading = crawlersQuery.isPending;
+  const refreshing = crawlersQuery.isFetching;
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [query, setQuery] = useState('');
   const [createOpened, createHandlers] = useDisclosure(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const res = await fetch('/api/crawler/crawlers', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load crawlers');
-      const data = await res.json();
-      setCrawlers(data.crawlers ?? []);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   const summary = useMemo(() => {
     const active = crawlers.filter((c) => c.status === 'active').length;
@@ -84,12 +65,12 @@ export default function CrawlersListPage() {
       id: target.id,
       extraWarning: tSafe('crawlerExtra'),
       action: async () => {
-        const res = await fetch(`/api/crawler/crawlers/${target.id}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) throw new Error('Failed to delete');
+        try {
+          await deleteCrawler.mutateAsync(target.id);
+        } catch (error) {
+          throw new Error(errorMessage(error, 'Failed to delete'));
+        }
         notifications.show({ color: 'teal', title: 'Deleted', message: 'Crawler removed' });
-        await load();
       },
     });
   }
@@ -213,7 +194,7 @@ export default function CrawlersListPage() {
             ],
           },
         ]}
-        onRefresh={load}
+        onRefresh={() => void crawlersQuery.refetch()}
         refreshing={refreshing}
         empty={{
           icon: <IconWorld size={26} stroke={1.7} />,
@@ -249,7 +230,6 @@ export default function CrawlersListPage() {
         onClose={createHandlers.close}
         onCreated={(crawler) => {
           createHandlers.close();
-          void load();
           router.push(`/dashboard/crawler/${crawler.id}`);
         }}
       />
