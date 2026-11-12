@@ -466,10 +466,13 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   // Tracing. Upserting a session on (projectId, sessionId) only collapses concurrent inserts if the key is unique,
   // otherwise two simultaneous /start requests both create one and every aggregation counts the session twice.
   // Best-effort: a tenant that already accumulated duplicates keeps the old double-count until they are merged.
+  // MongoDB holds one index per key pattern, so only one of the two (projectId, sessionId) entries can exist:
+  // the unique one on a new tenant, the plain one on a tenant indexed before it. Both are best-effort, so the
+  // one that is refused does not keep the collection from memoising.
   agent_tracing_sessions: [
     { key: { projectId: 1, sessionId: 1 }, options: { name: 'uniq_project_sessionId', unique: true }, bestEffort: true },
     { key: { sessionId: 1 }, options: { name: 'idx_sessionId' } },
-    { key: { projectId: 1, sessionId: 1 }, options: { name: 'idx_project_sessionId' } },
+    { key: { projectId: 1, sessionId: 1 }, options: { name: 'idx_project_sessionId' }, bestEffort: true },
     { key: { projectId: 1, startedAt: -1 }, options: { name: 'idx_project_startedAt' } },
     { key: { projectId: 1, threadId: 1, startedAt: -1 }, options: { name: 'idx_project_thread_startedAt' } },
     { key: { projectId: 1, status: 1, startedAt: -1 }, options: { name: 'idx_project_status_startedAt' } },
@@ -508,6 +511,15 @@ export const TENANT_INDEX_RECHECK_MS = 15 * 60_000;
 
 /** Per tenant DB: the manifest collections already indexed, and when the last pass ran. */
 const tenantPasses = new Map<string, { indexed: Set<string>; checkedAt: number }>();
+
+/**
+ * How long a tenant collection whose required index failed waits before a write
+ * tries it again (instead of every write re-running the whole set).
+ */
+export const TENANT_COLLECTION_RETRY_MS = 60_000;
+
+/** Per tenant collection whose required index failed: when the next attempt may run. */
+const collectionRetryAt = new Map<string, number>();
 
 /**
  * The retention engine (src/lib/retention) selects expired rows by their age
@@ -657,14 +669,20 @@ export function ensureTenantDbIndexes(db: Db, dbName: string): Promise<void> {
  * before that write: the indexes come from
  * the manifest itself, so the two paths can never disagree.
  *
- * Best-effort like the tenant pass: the returned promise never rejects, a
- * failure is logged, and nothing is memoised, so the next write tries again.
+ * Best-effort like the tenant pass: the returned promise never rejects and a
+ * failure is logged. A required index that fails leaves the collection
+ * un-memoised: the first write after TENANT_COLLECTION_RETRY_MS tries again
+ * (the next write already, when the client was not connected yet).
  */
 export function ensureTenantCollectionIndexes(db: Db, collection: string): Promise<void> {
   const defs = TENANT_DB_INDEXES[collection];
   if (!defs || defs.length === 0) return Promise.resolve();
-  return ensureOnce(`tenant-collection:${db.databaseName}:${collection}`, async () => {
+  const memoKey = `tenant-collection:${db.databaseName}:${collection}`;
+  const retryAt = collectionRetryAt.get(memoKey);
+  if (retryAt !== undefined && Date.now() < retryAt) return Promise.resolve();
+  return ensureOnce(memoKey, async () => {
     const failed: string[] = [];
+    let onlyNotConnected = true;
     for (const def of defs) {
       try {
         await db.collection(collection).createIndex(def.key, def.options);
@@ -673,11 +691,17 @@ export function ensureTenantCollectionIndexes(db: Db, collection: string): Promi
           logger.warn('createIndex skipped', { coll: collection, name: def.options.name, error: String(error) });
         } else {
           failed.push(`${def.options.name ?? 'unnamed'}: ${String(error)}`);
+          if (!isNotConnected(error)) onlyNotConnected = false;
         }
       }
     }
+    if (failed.length === 0) {
+      collectionRetryAt.delete(memoKey);
+      return;
+    }
+    if (!onlyNotConnected) collectionRetryAt.set(memoKey, Date.now() + TENANT_COLLECTION_RETRY_MS);
     // Rejecting keeps the collection un-memoised (ensureOnce logs it once).
-    if (failed.length > 0) throw new Error(`createIndex failed on ${collection}: ${failed.join('; ')}`);
+    throw new Error(`createIndex failed on ${collection}: ${failed.join('; ')}`);
   });
 }
 
