@@ -459,17 +459,14 @@ export interface IMcpAuditLog {
 }
 
 /**
- * Scopes an MCP request-log query to one server. `serverId` is the primary
- * match; `serverKey`/`projectId`/`createdAt` only extend the match to rows
- * written before `serverId` existed, and only up to this server's own
- * `createdAt` — so a deleted-and-recreated server's recycled key can't pull
- * in the predecessor's history. See `mcpLogScope` in mcpService.ts.
+ * Scopes an MCP request-log query to one server by its durable `serverId`.
+ * `serverKey` only labels the aggregate result; it is never matched, so a
+ * deleted-and-recreated server's recycled key can't pull in the
+ * predecessor's history. See `mcpLogScope` in mcp/requestLog.ts.
  */
 export interface McpLogServerScope {
   serverId: string;
   serverKey: string;
-  projectId?: string;
-  createdAt?: Date;
 }
 
 export interface IMcpRequestAggregate {

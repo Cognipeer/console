@@ -1146,8 +1146,7 @@ export class SQLiteProviderBase {
     // the server's name) as the log-query scope. serverKey is recycled when
     // a server is deleted and recreated under the same name, which used to
     // make a new server's Logs tab show its predecessor's history — see
-    // mcpLogScopeClause in mcp-server.mixin.ts. Rows written before this
-    // column existed are matched by the legacy fallback in that clause.
+    // mcpLogScopeClause in mcp-server.mixin.ts.
     this.ensureTableColumn(db, TABLES.mcpRequestLogs, 'serverId', 'serverId TEXT');
 
     // Evaluation: dataset items moved to their own table; the denormalised

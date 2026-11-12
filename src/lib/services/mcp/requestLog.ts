@@ -14,19 +14,12 @@ const logger = createLogger('mcp-service');
 // ── Request logging ───────────────────────────────────────────────────────
 
 /**
- * Scope a request-log query to `server`. `serverId` is the durable match;
- * the rest only extend it to rows written before `serverId` existed, capped
- * at this server's own `createdAt` so a deleted-and-recreated server (which
- * regenerates the same name-derived `key`) can't pull in its predecessor's
- * history.
+ * Scope a request-log query to `server` by its durable id, so a
+ * deleted-and-recreated server (which regenerates the same name-derived
+ * `key`) can't pull in its predecessor's history.
  */
 export function mcpLogScope(server: IMcpServer): McpLogServerScope {
-  return {
-    serverId: String(server._id),
-    serverKey: server.key,
-    projectId: server.projectId,
-    createdAt: server.createdAt,
-  };
+  return { serverId: String(server._id), serverKey: server.key };
 }
 
 /** Values of the server's static upstream credential, opened from the vault. */

@@ -18,24 +18,15 @@ import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, escapeRegex, ownedResourceCondition } from './base';
 
 /**
- * Match a server's request logs by durable `serverId` primarily. The second
- * `$or` branch only extends the match to rows written before `serverId`
- * existed (`serverId` absent) — scoped to this server's own `serverKey` +
- * `projectId`, and no older than this server's own `createdAt`, so a
- * deleted-and-recreated server can never adopt its predecessor's logs just
- * because they share the same name-derived key.
+ * Match a server's request logs by its durable `serverId`. `serverKey` is
+ * never matched: a deleted-and-recreated server regenerates the same
+ * name-derived key and must not adopt its predecessor's logs.
  */
 function mcpLogScopeFilter(scope: McpLogServerScope): Record<string, unknown> {
-  const legacy: Record<string, unknown> = {
-    serverId: { $exists: false },
-    serverKey: scope.serverKey,
-  };
-  if (scope.projectId !== undefined) legacy.projectId = scope.projectId;
-  if (scope.createdAt) legacy.createdAt = { $gte: scope.createdAt };
-  return { $or: [{ serverId: scope.serverId }, legacy] };
+  return { serverId: scope.serverId };
 }
 
-/** Combine the scope filter with the caller's own query options via `$and` (the scope filter already uses `$or`, which can't be merged by object-spread without colliding keys). */
+/** Combine the scope filter with the caller's own query options via `$and` (the keyword option uses `$or`, which can't be merged by object-spread without colliding keys). */
 function buildMcpLogFilter(
   scope: McpLogServerScope,
   options?: { status?: string; from?: Date; to?: Date; keyword?: string },

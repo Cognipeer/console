@@ -21,29 +21,14 @@ import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
 /**
- * Build the WHERE clause matching a server's request logs by durable
- * `serverId` primarily. The `OR` branch only extends the match to rows
- * written before `serverId` existed (`serverId IS NULL`) — scoped to this
- * server's own `serverKey` + `projectId`, and no older than this server's
- * own `createdAt`, so a deleted-and-recreated server can never adopt its
- * predecessor's logs just because they share the same name-derived key.
- * Mutates `params` with the scope's bound parameters.
+ * Build the WHERE clause matching a server's request logs by its durable
+ * `serverId`. `serverKey` is never matched: a deleted-and-recreated server
+ * regenerates the same name-derived key and must not adopt its predecessor's
+ * logs. Mutates `params` with the scope's bound parameter.
  */
 function mcpLogScopeClause(scope: McpLogServerScope, params: Record<string, unknown>): string {
   params.scopeServerId = scope.serverId;
-  params.scopeServerKey = scope.serverKey;
-  const legacyParts = ['serverId IS NULL', 'serverKey = @scopeServerKey'];
-  if (scope.projectId !== undefined) {
-    params.scopeProjectId = scope.projectId;
-    legacyParts.push('projectId = @scopeProjectId');
-  } else {
-    legacyParts.push('projectId IS NULL');
-  }
-  if (scope.createdAt) {
-    params.scopeCreatedAt = scope.createdAt.toISOString();
-    legacyParts.push('createdAt >= @scopeCreatedAt');
-  }
-  return `(serverId = @scopeServerId OR (${legacyParts.join(' AND ')}))`;
+  return 'serverId = @scopeServerId';
 }
 
 export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
