@@ -26,7 +26,9 @@ import {
   type PlatformProviderView,
 } from '@/components/models/catalog/platformProviders';
 import type { ModelProviderView } from '@/lib/services/models/types';
-import { buttonByText, click, installDomStubs, wait } from '../helpers/iamCenterUi';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
+import { buttonByText, click, jsonResponse, installDomStubs, wait } from '../helpers/iamCenterUi';
 
 type Loose = ComponentType<{ locale?: string; children?: ReactNode; env?: string }>;
 const Mantine = MantineProvider as unknown as Loose;
@@ -63,7 +65,7 @@ const platformCatalog = (assigned: boolean): PlatformCatalogData => ({
   ],
 });
 
-const reply = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const reply = (status: number, body: unknown) => jsonResponse(body, status);
 
 let fetchMock: ReturnType<typeof vi.fn>;
 let hostedCatalog: PlatformCatalogData;
@@ -85,7 +87,7 @@ beforeEach(() => {
     const path = String(url);
     if (path === '/api/models/providers/hosted/catalog') return reply(200, hostedCatalog);
     if (path === '/api/projects') return reply(200, { projects: [], activeProjectId: 'p-active' });
-    if (path === '/api/providers?scope=tenant' && !init?.method) {
+    if (path === '/api/providers?scope=tenant' && (!init?.method || init.method === 'GET')) {
       return routeOptions.listFails
         ? reply(500, { error: 'down' })
         : reply(200, { providers: [{ _id: 'prov-hosted', key: 'hosted', projectIds: routeOptions.fresh ?? ['p-default'] }] });
@@ -110,6 +112,7 @@ beforeEach(() => {
 
 let root: Root | undefined;
 let host: HTMLElement | undefined;
+const queryClient = newTestQueryClient();
 
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
@@ -117,6 +120,7 @@ afterEach(async () => {
   root = undefined;
   host = undefined;
   document.body.innerHTML = '';
+  queryClient.clear();
   vi.unstubAllGlobals();
 });
 
@@ -127,7 +131,7 @@ async function render(element: ReactNode, locale = 'en') {
     root = createRoot(host);
   }
   await act(async () => {
-    root!.render(h(Mantine, { env: 'test' }, h(I18n, { locale }, h(Confirm, null, element))));
+    root!.render(h(QueryClientProvider, { client: queryClient }, h(Mantine, { env: 'test' }, h(I18n, { locale }, h(Confirm, null, element)))));
   });
   await wait(0);
   await wait(0);

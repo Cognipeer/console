@@ -1,6 +1,5 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
@@ -39,58 +38,17 @@ import FormShell, { FormField, FormSection } from '@/components/common/ui/FormSh
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
 import {
+  useCreateInferenceServer,
+  useInferenceDashboard,
+  useInferenceServers,
+  type InferenceServerView,
+} from '@/lib/api/queries/inference';
+import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
 
 dayjs.extend(relativeTime);
-
-interface InferenceServer {
-  _id: string;
-  key: string;
-  name: string;
-  type: string;
-  baseUrl: string;
-  status: 'active' | 'disabled' | 'errored';
-  pollIntervalSeconds: number;
-  lastPolledAt?: string;
-  lastError?: string;
-  createdAt: string;
-}
-
-interface LatestMetrics {
-  gpuCacheUsagePercent?: number;
-  numRequestsRunning?: number;
-  numRequestsWaiting?: number;
-  promptTokensThroughput?: number;
-  generationTokensThroughput?: number;
-  requestsPerSecond?: number;
-  runningModels?: string[];
-  timestamp?: string;
-}
-
-interface InferenceDashboardData {
-  overview: {
-    totalServers: number;
-    activeServers: number;
-    erroredServers: number;
-    disabledServers: number;
-    avgGpuCacheUsage: number | null;
-    totalRunningRequests: number;
-    totalWaitingRequests: number;
-    runningModelsCount: number;
-  };
-  typeBreakdown: Array<{ type: string; count: number }>;
-  servers: Array<{
-    key: string;
-    name: string;
-    type: string;
-    status: string;
-    lastPolledAt?: string;
-    lastError?: string;
-    latestMetrics: LatestMetrics | null;
-  }>;
-}
 
 function statusColor(status: string): string {
   switch (status) {
@@ -112,31 +70,25 @@ function StatusIcon({ status }: { status: string }) {
   }
 }
 
+const NO_SERVERS: InferenceServerView[] = [];
+
 export default function InferenceMonitoringPage() {
   const router = useRouter();
   const t = useTranslations('inferenceMonitoring');
   const tNav = useTranslations('navigation');
-  const [servers, setServers] = useState<InferenceServer[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [addOpened, addHandlers] = useDisclosure(false);
-  const [creating, setCreating] = useState(false);
-  const [dashboardData, setDashboardData] = useState<InferenceDashboardData | null>(null);
-  const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
-
-  const loadDashboard = useCallback(async () => {
-    setDashboardLoading(true);
-    try {
-      const params = buildDashboardDateSearchParams(dateFilter);
-      const res = await fetch(`/api/inference-monitoring/dashboard?${params.toString()}`, { cache: 'no-store' });
-      if (res.ok) setDashboardData(await res.json() as InferenceDashboardData);
-    } catch (err) {
-      console.error('Failed to load inference dashboard', err);
-    } finally {
-      setDashboardLoading(false);
-    }
-  }, [dateFilter]);
+  const serversQuery = useInferenceServers();
+  const servers = serversQuery.data ?? NO_SERVERS;
+  const loading = serversQuery.isPending;
+  const refreshing = serversQuery.isFetching && !serversQuery.isPending;
+  const dashboardQuery = useInferenceDashboard(buildDashboardDateSearchParams(dateFilter).toString());
+  const dashboardData = dashboardQuery.data ?? null;
+  const dashboardLoading = dashboardQuery.isFetching;
+  const createServer = useCreateInferenceServer();
+  const creating = createServer.isPending;
+  const { refetch: refetchServers } = serversQuery;
+  const { refetch: refetchDashboard } = dashboardQuery;
 
   const form = useForm({
     initialValues: {
@@ -160,48 +112,9 @@ export default function InferenceMonitoringPage() {
     },
   });
 
-  const fetchServers = useCallback(async (isRefresh = false) => {
-    try {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
-
-      const res = await fetch('/api/inference-monitoring/servers');
-      if (res.ok) {
-        const data = await res.json();
-        setServers(data.servers || []);
-      }
-    } catch (err) {
-      console.error('Failed to fetch servers:', err);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void fetchServers();
-    void loadDashboard();
-  }, [fetchServers, loadDashboard]);
-
-  // Silent background refresh every 30 s so status / lastPolledAt stays current.
-  useEffect(() => {
-    const id = setInterval(() => { void fetchServers(true); void loadDashboard(); }, 30_000);
-    return () => clearInterval(id);
-  }, [fetchServers, loadDashboard]);
-
   const handleCreate = async (values: typeof form.values) => {
     try {
-      setCreating(true);
-      const res = await fetch('/api/inference-monitoring/servers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Failed to create server');
-      }
+      await createServer.mutateAsync(values);
 
       notifications.show({
         title: 'Success',
@@ -210,15 +123,12 @@ export default function InferenceMonitoringPage() {
       });
       form.reset();
       addHandlers.close();
-      await fetchServers();
     } catch (err) {
       notifications.show({
         title: 'Error',
         message: err instanceof Error ? err.message : 'Failed to create server',
         color: 'red',
       });
-    } finally {
-      setCreating(false);
     }
   };
 
@@ -254,7 +164,7 @@ export default function InferenceMonitoringPage() {
             <Button
               variant="default"
               size="sm"
-              onClick={() => fetchServers(true)}
+              onClick={() => void refetchServers()}
               loading={refreshing}
               leftSection={<IconRefresh size={14} stroke={1.7} />}
             >
@@ -334,7 +244,7 @@ export default function InferenceMonitoringPage() {
               </Badge>
             </Group>
             <Button variant="subtle" size="xs" leftSection={<IconRefresh size={14} />}
-              loading={dashboardLoading} onClick={() => void loadDashboard()}>
+              loading={dashboardLoading} onClick={() => void refetchDashboard()}>
               Refresh
             </Button>
           </Group>

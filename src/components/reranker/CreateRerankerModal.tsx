@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   NumberInput,
   Select,
@@ -19,6 +19,9 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import { errorMessage } from '@/lib/api/client';
+import { NO_MODEL_OPTIONS, useModelOptions } from '@/lib/api/queries/models';
+import { useCreateReranker } from '@/lib/api/queries/reranker';
 
 type Strategy = 'dedicated-model' | 'llm-judge' | 'llm-listwise' | 'heuristic';
 
@@ -28,12 +31,6 @@ const STRATEGY_LABEL: Record<Strategy, string> = {
   'llm-listwise': 'LLM listwise (RankGPT)',
   heuristic: 'Heuristic (no model)',
 };
-
-interface ModelOption {
-  key: string;
-  name: string;
-  category: string;
-}
 
 interface CreateRerankerModalProps {
   opened: boolean;
@@ -59,8 +56,8 @@ export default function CreateRerankerModal({
   onClose,
   onCreated,
 }: CreateRerankerModalProps) {
-  const [models, setModels] = useState<ModelOption[]>([]);
-  const [submitting, setSubmitting] = useState(false);
+  const createReranker = useCreateReranker();
+  const submitting = createReranker.isPending;
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -91,31 +88,7 @@ export default function CreateRerankerModal({
   };
   const requiredCategory = modelCategoryForStrategy[form.values.strategy];
 
-  const loadModels = useCallback(async () => {
-    if (!requiredCategory) {
-      setModels([]);
-      return;
-    }
-    try {
-      const res = await fetch(`/api/models?category=${requiredCategory}`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setModels(
-          (data.models ?? []).map((m: Record<string, string>) => ({
-            key: m.key,
-            name: m.name,
-            category: m.category,
-          })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load models', err);
-    }
-  }, [requiredCategory]);
-
-  useEffect(() => {
-    if (opened) void loadModels();
-  }, [opened, loadModels]);
+  const models = useModelOptions(requiredCategory, opened).data ?? NO_MODEL_OPTIONS;
 
   // Reset model selection when strategy changes if the model no longer matches.
   useEffect(() => {
@@ -134,7 +107,6 @@ export default function CreateRerankerModal({
     if (validation.hasErrors) return;
     const values = form.getValues();
 
-    setSubmitting(true);
     try {
       const config: Record<string, unknown> = {};
       if (values.modelKey) config.modelKey = values.modelKey;
@@ -149,36 +121,25 @@ export default function CreateRerankerModal({
       if (values.scoreNormalization !== 'none') config.scoreNormalization = values.scoreNormalization;
       if (values.promptTemplate.trim()) config.promptTemplate = values.promptTemplate;
 
-      const res = await fetch('/api/reranker', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          description: values.description || undefined,
-          strategy: values.strategy,
-          config,
-        }),
+      const reranker = await createReranker.mutateAsync({
+        name: values.name,
+        description: values.description || undefined,
+        strategy: values.strategy,
+        config,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to create reranker');
-      }
-      const data = await res.json();
       notifications.show({
         color: 'green',
         title: 'Reranker created',
         message: `${values.name} is ready to use.`,
       });
       form.reset();
-      onCreated(data.reranker);
+      onCreated(reranker as unknown as Record<string, unknown>);
     } catch (error) {
       notifications.show({
         color: 'red',
         title: 'Failed to create reranker',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 

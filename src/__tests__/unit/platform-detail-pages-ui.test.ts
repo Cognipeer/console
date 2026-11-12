@@ -9,7 +9,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
 import ModelDetailPage from '@/app/dashboard/models/[id]/page';
 import ProviderDetailPage from '@/app/dashboard/providers/[providerId]/page';
-import { installApiMock, installDomStubs, mount, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { installApiMock, installDomStubs, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),

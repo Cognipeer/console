@@ -11,22 +11,12 @@ import { createElement } from 'react';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buttonByText,
-  click,
-  installApiMock,
-  installDomStubs,
-  jsonResponse,
-  mount,
-  q,
-  qa,
-  setInput,
-  settle,
-  wait,
-  type ApiMock,
-  type Mounted,
-  type RouteHandler,
-} from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, q, qa, setInput, settle, wait, type ApiMock, type Mounted, type RouteHandler } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import CreateProjectShell from '@/components/projects/CreateProjectShell';
 import { DashboardUserProvider } from '@/components/layout/DashboardUserContext';
 import TenantProviders from '@/components/settings/TenantProviders';

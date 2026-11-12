@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useMemo } from 'react';
 import { MultiSelect, TagsInput } from '@mantine/core';
 import type { DynamicRoutingSignal } from '@/lib/database';
+import { useIdentityPickerRows } from '@/lib/api/queries/models';
 
 /** Caller-context signals a Dynamic LLM rule can test (compared with in / not_in). */
 export const CALLER_SIGNAL_VALUES: ReadonlyArray<DynamicRoutingSignal> = [
@@ -44,53 +45,34 @@ export interface IdentityOptions {
 const EMPTY: IdentityOptions = { userId: [], groupIds: [], agentKey: [], apiTokenId: [], projectId: [] };
 
 type Row = Record<string, unknown>;
+const NO_ROWS: Row[] = [];
 const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
-
-async function load(url: string, listKey: string): Promise<Row[]> {
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) return [];
-  const data = (await res.json()) as Row;
-  return Array.isArray(data[listKey]) ? (data[listKey] as Row[]) : [];
-}
 
 /** Loads the pickers' options from the existing dashboard APIs (each failure just leaves that list empty). */
 export function useIdentityOptions(enabled: boolean): IdentityOptions {
-  const [options, setOptions] = useState<IdentityOptions>(EMPTY);
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    void Promise.allSettled([
-      load('/api/users', 'users'),
-      load('/api/groups', 'groups'),
-      load('/api/agents', 'agents'),
-      load('/api/tokens?scope=project', 'tokens'),
-      load('/api/projects', 'projects'),
-    ]).then(([users, groups, agents, tokens, projects]) => {
-      if (cancelled) return;
-      const rows = (r: PromiseSettledResult<Row[]>) => (r.status === 'fulfilled' ? r.value : []);
-      const pick = (list: Row[], idKeys: string[], labelKeys: string[]): IdentityOption[] =>
-        list.flatMap((row) => {
-          const value = idKeys.map((k) => (row[k] == null ? undefined : String(row[k]))).find(Boolean);
-          if (!value) return [];
-          const label = labelKeys.map((k) => str(row[k])).find(Boolean) ?? value;
-          return [{ value, label: label === value ? value : `${label} (${value.slice(0, 8)})` }];
-        });
-      setOptions({
-        userId: pick(rows(users), ['_id', 'id'], ['name', 'email']),
-        groupIds: pick(rows(groups), ['_id', 'id'], ['name']),
-        agentKey: rows(agents).flatMap((a) => {
-          const key = str(a.key);
-          return key ? [{ value: key, label: str(a.name) ? `${a.name as string} (${key})` : key }] : [];
-        }),
-        apiTokenId: pick(rows(tokens), ['_id', 'id'], ['label', 'name']),
-        projectId: pick(rows(projects), ['_id', 'id'], ['name']),
+  const results = useIdentityPickerRows(enabled);
+  // `data` of every list keeps its identity until a list is read again, so this is as stable as the lists are.
+  const [users, groups, agents, tokens, projects] = results.map((r) => r.data ?? NO_ROWS);
+  return useMemo(() => {
+    if (!enabled) return EMPTY;
+    const pick = (list: Row[], idKeys: string[], labelKeys: string[]): IdentityOption[] =>
+      list.flatMap((row) => {
+        const value = idKeys.map((k) => (row[k] == null ? undefined : String(row[k]))).find(Boolean);
+        if (!value) return [];
+        const label = labelKeys.map((k) => str(row[k])).find(Boolean) ?? value;
+        return [{ value, label: label === value ? value : `${label} (${value.slice(0, 8)})` }];
       });
-    });
-    return () => {
-      cancelled = true;
+    return {
+      userId: pick(users, ['_id', 'id'], ['name', 'email']),
+      groupIds: pick(groups, ['_id', 'id'], ['name']),
+      agentKey: agents.flatMap((a) => {
+        const key = str(a.key);
+        return key ? [{ value: key, label: str(a.name) ? `${a.name as string} (${key})` : key }] : [];
+      }),
+      apiTokenId: pick(tokens, ['_id', 'id'], ['label', 'name']),
+      projectId: pick(projects, ['_id', 'id'], ['name']),
     };
-  }, [enabled]);
-  return options;
+  }, [enabled, users, groups, agents, tokens, projects]);
 }
 
 const splitValue = (value: string) => value.split(',').map((v) => v.trim()).filter(Boolean);

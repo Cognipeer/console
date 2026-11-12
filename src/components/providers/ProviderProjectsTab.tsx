@@ -1,45 +1,33 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Alert, Center, Loader, Switch } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertCircle } from '@tabler/icons-react';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import ConfirmModal from '@/components/common/ui/ConfirmModal';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import { serverErrorText } from '@/lib/api/queries/models';
+import { useProviderUsageQuery, useUpdateProvider } from '@/lib/api/queries/providers';
 import { unassignImpact, type ProviderUsageEntry } from './providerAccessModel';
+
+const NO_ENTRIES: ProviderUsageEntry[] = [];
 
 /** `GET /api/providers/:id/usage`: every tenant project, with what uses the provider in it. */
 export function useProviderUsage(providerId: string | undefined) {
-  const [entries, setEntries] = useState<ProviderUsageEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
+  const query = useProviderUsageQuery(providerId);
+  const { refetch } = query;
   const reload = useCallback(async () => {
     if (!providerId) return;
-    try {
-      const res = await fetch(`/api/providers/${encodeURIComponent(providerId)}/usage`, {
-        cache: 'no-store',
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to load usage');
-      }
-      const data = (await res.json()) as { projects?: ProviderUsageEntry[] };
-      setEntries(data.projects ?? []);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load usage');
-    } finally {
-      setLoading(false);
-    }
-  }, [providerId]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  return { entries, loading, error, reload };
+    await refetch();
+  }, [providerId, refetch]);
+  return {
+    entries: query.data ?? NO_ENTRIES,
+    loading: query.isPending,
+    error: query.isError ? errorMessage(query.error, 'Failed to load usage') : null,
+    reload,
+  };
 }
 
 export interface ProviderProjectsTabProps {
@@ -65,6 +53,7 @@ export default function ProviderProjectsTab({
   onChanged,
 }: ProviderProjectsTabProps) {
   const t = useTranslations('providerAccess.detail');
+  const updateProvider = useUpdateProvider();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<ProviderUsageEntry | null>(null);
 
@@ -79,21 +68,13 @@ export default function ProviderProjectsTab({
       .map((e) => e.projectId);
     setBusyId(projectId);
     try {
-      const res = await fetch(`/api/providers/${encodeURIComponent(providerId)}?scope=tenant`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectIds: ids }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || t('updateFailed'));
-      }
+      await updateProvider.mutateAsync({ id: providerId, body: { projectIds: ids } });
       await onChanged();
     } catch (e) {
       notifications.show({
         color: 'red',
         title: t('updateFailed'),
-        message: e instanceof Error ? e.message : t('updateFailed'),
+        message: serverErrorText(e) || (isApiError(e) ? t('updateFailed') : e instanceof Error ? e.message : t('updateFailed')),
       });
     } finally {
       setBusyId(null);

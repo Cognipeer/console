@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { Button } from '@mantine/core';
 import { IconEdit, IconExternalLink } from '@tabler/icons-react';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { useProvidersOfType } from '@/lib/api/queries/providers';
 import type { WebSearchProviderSummary } from '@/lib/services/webSearch/webSearchInstanceView';
 import { allFields } from '@/components/providers/providerFormModel';
 import { useInstanceOptionsForm } from './useInstanceOptionsForm';
@@ -71,26 +72,10 @@ export function SearchOptionsCard({
 
 /** The `_id` of a project provider, for a link to its page (null until found, or when `key` is null). */
 function useProviderId(key: string | null): string | null {
-  const [found, setFound] = useState<{ key: string; id: string } | null>(null);
-  useEffect(() => {
-    if (!key) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch('/api/providers?type=websearch', { cache: 'no-store' });
-        if (!res.ok) return;
-        const body = (await res.json()) as { providers?: Array<{ _id?: string; key: string }> };
-        const match = body.providers?.find((candidate) => candidate.key === key);
-        if (!cancelled && match?._id) setFound({ key, id: String(match._id) });
-      } catch {
-        // No link then: the card still names the provider.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [key]);
-  return found && found.key === key ? found.id : null;
+  // No link when the lookup fails: the card still names the provider.
+  const providers = useProvidersOfType<{ _id?: string; key: string }>('websearch', Boolean(key)).data;
+  const match = key ? providers?.find((candidate) => candidate.key === key) : undefined;
+  return match?._id ? String(match._id) : null;
 }
 
 /**

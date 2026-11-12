@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useReducer } from 'react';
 import { useTranslations } from '@/lib/i18n';
+import { apiGet, isApiError } from '@/lib/api/client';
+import { serverErrorText } from '@/lib/api/queries/models';
 import type { ProviderModelCatalog } from '@/lib/services/models/catalog/types';
 
 /**
@@ -15,6 +17,9 @@ import type { ProviderModelCatalog } from '@/lib/services/models/catalog/types';
  * lists again. Models created on the page are added to the remembered listing (`noteCatalogModelsCreated`); a model
  * deleted or re-pointed makes it stale (`invalidateProviderModelCatalog`). The memo lives as long as the page does;
  * switching projects reloads the page, which drops it.
+ *
+ * This memo is a store of its own (shared by callers outside React, aborting a replaced request, a different
+ * lifetime for failed listings), so it stays out of React Query; its requests go through the shared API client.
  */
 
 const TTL_MS = 5 * 60_000;
@@ -84,19 +89,9 @@ function load(providerKey: string, force: boolean) {
 
   void (async () => {
     try {
-      const response = await fetch(`/api/models/providers/${encodeURIComponent(providerKey)}/catalog`, {
-        cache: 'no-store',
+      const body: unknown = await apiGet(`/api/models/providers/${encodeURIComponent(providerKey)}/catalog`, {
         signal: controller.signal,
       });
-      if (!response.ok) {
-        const body = await response.json().catch(() => null) as { error?: unknown } | null;
-        settle({
-          errorStatus: response.status,
-          errorMessage: typeof body?.error === 'string' && body.error.trim() ? body.error : undefined,
-        });
-        return;
-      }
-      const body: unknown = await response.json();
       if (!looksLikeCatalog(body)) {
         settle({ errorStatus: 0, errorMessage: undefined });
         return;
@@ -104,6 +99,10 @@ function load(providerKey: string, force: boolean) {
       settle({ data: body, loadedAt: Date.now(), errorStatus: undefined, errorMessage: undefined });
     } catch (error) {
       if (controller.signal.aborted) return;
+      if (isApiError(error)) {
+        settle({ errorStatus: error.status, errorMessage: serverErrorText(error) });
+        return;
+      }
       settle({ errorStatus: 0, errorMessage: error instanceof Error && error.message ? error.message : undefined });
     }
   })();

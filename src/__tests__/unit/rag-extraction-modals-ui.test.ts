@@ -10,6 +10,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import CreateRagModuleModal from '@/components/rag/CreateRagModuleModal';
 import EditRagModuleModal from '@/components/rag/EditRagModuleModal';
 import { buttonByText, click, installApiMock, installDomStubs, mount, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { until } from '../helpers/filesUploadDetailHarness';
 
 const notify = vi.hoisted(() => ({ show: vi.fn() }));
@@ -70,7 +71,8 @@ async function save() {
 describe('the Extraction section', () => {
   it('sits after Chunking in the create screen and starts with OCR off', async () => {
     install();
-    mounted = await mount(h(CreateRagModuleModal, { opened: true, onClose: vi.fn(), onCreated: vi.fn() }));
+    // The create screen's "+ Add model" reads the project's providers through React Query.
+    mounted = await renderWithQuery(h(CreateRagModuleModal, { opened: true, onClose: vi.fn(), onCreated: vi.fn() }));
     await until(() => text().includes('Extraction'), 'the section');
     const page = text();
     expect(page.indexOf('Chunking')).toBeLessThan(page.indexOf('Extraction'));

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
@@ -34,6 +34,14 @@ import FormShell, { FormField, FormSection } from '@/components/common/ui/FormSh
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
+import {
+  useDeleteInferenceServer,
+  useInferenceMetrics,
+  useInferenceServer,
+  usePollInferenceServer,
+  useUpdateInferenceServer,
+  type InferenceMetricsRecord,
+} from '@/lib/api/queries/inference';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import {
   buildDashboardDateSearchParams,
@@ -41,36 +49,6 @@ import {
 } from '@/lib/utils/dashboardDateFilter';
 
 dayjs.extend(relativeTime);
-
-interface InferenceServer {
-  _id: string;
-  key: string;
-  name: string;
-  type: string;
-  baseUrl: string;
-  apiKey?: string;
-  status: 'active' | 'disabled' | 'errored';
-  pollIntervalSeconds: number;
-  lastPolledAt?: string;
-  lastError?: string;
-  createdAt: string;
-}
-
-interface MetricsRecord {
-  _id: string;
-  timestamp: string;
-  numRequestsRunning?: number;
-  numRequestsWaiting?: number;
-  gpuCacheUsagePercent?: number;
-  cpuCacheUsagePercent?: number;
-  promptTokensThroughput?: number;
-  generationTokensThroughput?: number;
-  timeToFirstTokenSeconds?: number;
-  timePerOutputTokenSeconds?: number;
-  e2eRequestLatencySeconds?: number;
-  requestsPerSecond?: number;
-  runningModels?: string[];
-}
 
 function statusVariant(status: string) {
   switch (status) {
@@ -95,6 +73,8 @@ function fmtPct(n: number | undefined | null): string {
   return `${(n * 100).toFixed(1)}%`;
 }
 
+const NO_METRICS: InferenceMetricsRecord[] = [];
+
 export default function InferenceServerDetailPage() {
   const { serverKey } = useParams<{ serverKey: string }>()!;
   const router = useRouter();
@@ -102,13 +82,24 @@ export default function InferenceServerDetailPage() {
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
 
-  const [server, setServer] = useState<InferenceServer | null>(null);
-  const [metrics, setMetrics] = useState<MetricsRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [polling, setPolling] = useState(false);
   const [editOpened, editHandlers] = useDisclosure(false);
-  const [saving, setSaving] = useState(false);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
+  const serverQuery = useInferenceServer(serverKey);
+  const server = serverQuery.data ?? null;
+  const metricsParams = useMemo(() => {
+    const params = buildDashboardDateSearchParams(dateFilter);
+    params.append('limit', '500');
+    return params.toString();
+  }, [dateFilter]);
+  const metricsQuery = useInferenceMetrics(serverKey, metricsParams, server?.pollIntervalSeconds);
+  const metrics = metricsQuery.data ?? NO_METRICS;
+  const loading = serverQuery.isPending || metricsQuery.isPending;
+  const pollServer = usePollInferenceServer(serverKey);
+  const polling = pollServer.isPending;
+  const updateServer = useUpdateInferenceServer(serverKey);
+  const saving = updateServer.isPending;
+  const deleteServer = useDeleteInferenceServer(serverKey);
+  const { refetch: refetchMetrics } = metricsQuery;
 
   const editForm = useForm({
     initialValues: {
@@ -125,107 +116,32 @@ export default function InferenceServerDetailPage() {
     },
   });
 
-  const fetchServer = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setServer(data.server);
-      }
-    } catch (err) {
-      console.error('Failed to fetch server:', err);
-    }
-  }, [serverKey]);
-
-  const fetchMetrics = useCallback(async () => {
-    try {
-      const params = buildDashboardDateSearchParams(dateFilter);
-      params.append('limit', '500');
-
-      const res = await fetch(
-        `/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}/metrics?${params}`,
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setMetrics(data.metrics || []);
-      }
-    } catch (err) {
-      console.error('Failed to fetch metrics:', err);
-    }
-  }, [serverKey, dateFilter]);
-
-  useEffect(() => {
-    const load = async () => {
-      setLoading(true);
-      await Promise.all([fetchServer(), fetchMetrics()]);
-      setLoading(false);
-    };
-    void load();
-  }, [fetchServer, fetchMetrics]);
-
-  // Silent background refresh: use the server's poll interval (min 15 s) so
-  // the UI stays in sync with the scheduler without hammering the API.
-  useEffect(() => {
-    const intervalMs = Math.max(15, server?.pollIntervalSeconds ?? 30) * 1000;
-    const id = setInterval(
-      () => void Promise.all([fetchServer(), fetchMetrics()]),
-      intervalMs,
-    );
-    return () => clearInterval(id);
-  }, [server?.pollIntervalSeconds, fetchServer, fetchMetrics]);
-
   const handlePoll = async () => {
-    setPolling(true);
     try {
-      const res = await fetch(
-        `/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}/poll`,
-        { method: 'POST' },
-      );
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || t('pollError'));
-      }
+      await pollServer.mutateAsync();
       notifications.show({ title: 'Success', message: t('pollSuccess'), color: 'teal' });
-      await Promise.all([fetchServer(), fetchMetrics()]);
+      await refetchMetrics();
     } catch (err) {
       notifications.show({
         title: 'Error',
         message: err instanceof Error ? err.message : t('pollError'),
         color: 'red',
       });
-      // Still refresh server to show updated error state
-      await fetchServer();
-    } finally {
-      setPolling(false);
+      // The server is read again either way, to show its updated error state (usePollInferenceServer).
     }
   };
 
   const handleEdit = async (values: typeof editForm.values) => {
-    setSaving(true);
     try {
-      const res = await fetch(
-        `/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(values),
-        },
-      );
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Failed to update');
-      }
+      await updateServer.mutateAsync(values);
       notifications.show({ title: 'Success', message: t('serverUpdated'), color: 'teal' });
       editHandlers.close();
-      await fetchServer();
     } catch (err) {
       notifications.show({
         title: 'Error',
         message: err instanceof Error ? err.message : 'Failed to update',
         color: 'red',
       });
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -237,14 +153,7 @@ export default function InferenceServerDetailPage() {
         type: server?._id ? 'inference-server' : undefined,
         id: server?._id ? String(server._id) : undefined,
         action: async () => {
-          const res = await fetch(
-            `/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}`,
-            { method: 'DELETE' },
-          );
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.error || 'Failed to delete');
-          }
+          await deleteServer.mutateAsync();
         },
       });
       if (!deleted) return;
@@ -524,7 +433,7 @@ export default function InferenceServerDetailPage() {
             variant="light"
             size="xs"
             leftSection={<IconRefresh size={14} />}
-            onClick={() => fetchMetrics()}
+            onClick={() => void refetchMetrics()}
           >
             Refresh
           </Button>

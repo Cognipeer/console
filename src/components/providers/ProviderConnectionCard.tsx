@@ -6,6 +6,8 @@ import { notifications } from '@mantine/notifications';
 import { IconPlayerPlay } from '@tabler/icons-react';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { failureText } from '@/lib/api/queries/models';
+import { useTestProvider } from '@/lib/api/queries/providers';
 import ProviderTestSteps from './ProviderTestSteps';
 import {
   formatLatency,
@@ -35,28 +37,22 @@ export default function ProviderConnectionCard({
 }: ProviderConnectionCardProps) {
   const t = useTranslations('providerAccess');
   const locale = useLocale();
-  const [testing, setTesting] = useState(false);
+  const testProvider = useTestProvider<ProviderTestResult>();
+  const testing = testProvider.isPending;
   // The steps of the test run from this page. They are not stored with the provider, so a reload forgets them.
   const [steps, setSteps] = useState<ProviderTestStep[] | null>(null);
 
   const retest = async () => {
-    setTesting(true);
     try {
-      const res = await fetch(`/api/providers/${encodeURIComponent(providerId)}/test`, {
-        method: 'POST',
-      });
-      const body = (await res.json().catch(() => null)) as (ProviderTestResult & { error?: string }) | null;
-      if (!res.ok) throw new Error(body?.error || t('test.requestFailed'));
+      const body = await testProvider.mutateAsync({ id: providerId });
       setSteps(body?.details?.steps ?? null);
       await onTested();
     } catch (error) {
       notifications.show({
         color: 'red',
         title: t('detail.connection'),
-        message: error instanceof Error ? error.message : t('test.requestFailed'),
+        message: failureText(error, t('test.requestFailed')),
       });
-    } finally {
-      setTesting(false);
     }
   };
 

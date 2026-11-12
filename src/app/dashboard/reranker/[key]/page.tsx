@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useCallback, useEffect, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -16,57 +16,21 @@ import {
   IconDeviceFloppy,
   IconPlayerPlay,
 } from '@tabler/icons-react';
+import { errorMessage } from '@/lib/api/client';
+import { NO_MODEL_OPTIONS, useModelOptions } from '@/lib/api/queries/models';
+import {
+  useReranker,
+  useRerankerRuns,
+  useRunReranker,
+  useUpdateReranker,
+  type RerankerView,
+  type RerankerRunResult as RunResult,
+} from '@/lib/api/queries/reranker';
 import { ResourceUsageSection } from '@/components/common/confirm';
 import DetailShell, {
   DetailCard,
   DetailTwoCol,
 } from '@/components/common/ui/DetailShell';
-
-interface RerankerView {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  strategy: 'dedicated-model' | 'llm-judge' | 'llm-listwise' | 'heuristic' | 'fusion';
-  config: {
-    modelKey?: string;
-    topN?: number;
-    scoreThreshold?: number;
-    batchSize?: number;
-    temperature?: number;
-    promptTemplate?: string;
-    scoreNormalization?: 'none' | 'minmax';
-  };
-  status: 'active' | 'disabled';
-  totalRuns?: number;
-  avgLatencyMs?: number;
-  lastUsedAt?: string;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-interface RunResultItem {
-  index: number;
-  id?: string;
-  score: number;
-  originalScore?: number;
-  content: string;
-}
-
-interface RunResult {
-  rerankerKey: string;
-  strategy: string;
-  modelKey?: string;
-  results: RunResultItem[];
-  latencyMs: number;
-  inputCount: number;
-  outputCount: number;
-}
-
-interface ModelOption {
-  key: string;
-  name: string;
-}
 
 const STRATEGY_LABEL: Record<string, string> = {
   'dedicated-model': 'Dedicated rerank model',
@@ -89,10 +53,12 @@ export default function RerankerDetailPage({
 }) {
   const { key } = use(params);
 
+  const { data: serverReranker, isPending: loading } = useReranker(key);
+  // The editable copy: it starts from the server's reranker and is replaced when a save returns.
   const [reranker, setReranker] = useState<RerankerView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [models, setModels] = useState<ModelOption[]>([]);
+  const updateReranker = useUpdateReranker();
+  const runReranker = useRunReranker();
+  const saving = updateReranker.isPending;
   const [tab, setTab] = useState<'config' | 'playground' | 'runs'>('config');
 
   // Playground state
@@ -106,125 +72,40 @@ export default function RerankerDetailPage({
     ].join('\n---\n'),
   );
   const [pgTopN, setPgTopN] = useState<number | ''>(3);
-  const [pgRunning, setPgRunning] = useState(false);
+  const pgRunning = runReranker.isPending;
   const [pgResult, setPgResult] = useState<RunResult | null>(null);
 
-  // Runs tab
-  const [runs, setRuns] = useState<
-    Array<{
-      _id: string;
-      query: string;
-      inputCount: number;
-      outputCount: number;
-      latencyMs?: number;
-      status: string;
-      errorMessage?: string;
-      createdAt?: string;
-    }>
-  >([]);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/reranker/${encodeURIComponent(key)}`, {
-        cache: 'no-store',
-      });
-      if (!res.ok) throw new Error('Failed to load reranker');
-      const data = await res.json();
-      setReranker(data.reranker);
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        title: 'Unable to load reranker',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [key]);
-
-  const loadModels = useCallback(
-    async (category: string) => {
-      if (!category) {
-        setModels([]);
-        return;
-      }
-      const res = await fetch(`/api/models?category=${category}`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setModels(
-          (data.models ?? []).map((m: Record<string, string>) => ({
-            key: m.key,
-            name: m.name,
-          })),
-        );
-      }
-    },
-    [],
-  );
-
-  const loadRuns = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/reranker/${encodeURIComponent(key)}/runs?limit=50`, {
-        cache: 'no-store',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setRuns(data.logs ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load runs', err);
-    }
-  }, [key]);
+  const { data: runs = [] } = useRerankerRuns(key, tab === 'runs');
+  const models = useModelOptions(reranker ? modelCategoryFor(reranker.strategy) : '').data ?? NO_MODEL_OPTIONS;
 
   useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    if (reranker) void loadModels(modelCategoryFor(reranker.strategy));
-  }, [reranker, loadModels]);
-
-  useEffect(() => {
-    if (tab === 'runs') void loadRuns();
-  }, [tab, loadRuns]);
+    if (serverReranker) setReranker(serverReranker);
+  }, [serverReranker]);
 
   const handleSave = async () => {
     if (!reranker) return;
-    setSaving(true);
     try {
-      const res = await fetch(`/api/reranker/${encodeURIComponent(reranker.key)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: reranker.name,
-          description: reranker.description,
-          strategy: reranker.strategy,
-          config: reranker.config,
-          status: reranker.status,
-        }),
+      const saved = await updateReranker.mutateAsync({
+        key: reranker.key,
+        name: reranker.name,
+        description: reranker.description,
+        strategy: reranker.strategy,
+        config: reranker.config,
+        status: reranker.status,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to save');
-      }
-      const data = await res.json();
-      setReranker(data.reranker);
+      setReranker(saved);
       notifications.show({ color: 'green', title: 'Saved', message: 'Reranker updated.' });
     } catch (error) {
       notifications.show({
         color: 'red',
         title: 'Save failed',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setSaving(false);
     }
   };
 
   const handleRun = async () => {
     if (!reranker) return;
-    setPgRunning(true);
     setPgResult(null);
     try {
       const docs = pgDocs
@@ -235,29 +116,19 @@ export default function RerankerDetailPage({
       if (docs.length === 0) {
         throw new Error('Add at least one document (separate documents with `---` on its own line).');
       }
-      const res = await fetch(`/api/reranker/${encodeURIComponent(reranker.key)}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: pgQuery,
-          documents: docs,
-          topN: pgTopN === '' ? undefined : Number(pgTopN),
-        }),
+      const result = await runReranker.mutateAsync({
+        key: reranker.key,
+        query: pgQuery,
+        documents: docs,
+        topN: pgTopN === '' ? undefined : Number(pgTopN),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Run failed');
-      }
-      const data = await res.json();
-      setPgResult(data.result);
+      setPgResult(result);
     } catch (error) {
       notifications.show({
         color: 'red',
         title: 'Run failed',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setPgRunning(false);
     }
   };
 

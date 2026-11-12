@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { SegmentedControl, Text } from '@mantine/core';
 import { AreaChart } from '@mantine/charts';
 import {
@@ -12,7 +12,8 @@ import {
   IconStopwatch,
 } from '@tabler/icons-react';
 import StatTile from '@/components/common/ui/StatTile';
-import type { RoutingAnalytics } from '@/lib/services/models/routingAnalytics';
+import { errorMessage } from '@/lib/api/client';
+import { useRoutingAnalytics } from '@/lib/api/queries/models';
 
 const WINDOWS = [
   { value: '1', label: '24h' },
@@ -53,33 +54,10 @@ function deciderShare(perRequest: number | null, total: number | null): string |
  */
 export default function RoutingAnalyticsPanel({ modelId }: { modelId: string }) {
   const [days, setDays] = useState('7');
-  const [data, setData] = useState<RoutingAnalytics | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    fetch(`/api/models/${modelId}/routing-analytics?days=${days}`)
-      .then(async (response) => {
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error ?? 'Failed to load routing analytics');
-        return body.analytics as RoutingAnalytics;
-      })
-      .then((analytics) => {
-        if (!cancelled) setData(analytics);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load routing analytics');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [modelId, days]);
+  const analytics = useRoutingAnalytics(modelId, days);
+  const data = analytics.data ?? null;
+  const error = analytics.isError ? errorMessage(analytics.error, 'Failed to load routing analytics') : null;
+  const loading = analytics.isPending;
 
   const totals = data?.totals;
   const savingsDir = totals ? (totals.savingsUsd > 0 ? 'up' : totals.savingsUsd < 0 ? 'down' : null) : null;

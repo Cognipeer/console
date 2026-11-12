@@ -3,6 +3,7 @@ import { resolveUpstreamApi, supportsUpstreamApiChoice, type UpstreamApi } from 
 import { Button, NumberInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useCreateModel } from '@/lib/api/queries/models';
 import { IconArrowLeft, IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm/ConfirmProvider';
@@ -203,7 +204,8 @@ export default function CreateModelModal({
   const { confirm } = useConfirm();
   const [availableProviders, setAvailableProviders] =
     useState<ModelProviderView[]>(providers);
-  const [submitting, setSubmitting] = useState(false);
+  const createModel = useCreateModel();
+  const submitting = createModel.isPending;
   const wasOpenedRef = useRef(false);
   // The prefill already written into the form for this opening (it is applied once, not on every providers change).
   const appliedPrefillRef = useRef<CreateModelPrefill | null>(null);
@@ -541,12 +543,8 @@ export default function CreateModelModal({
       return;
     }
 
-    setSubmitting(true);
     try {
-      const response = await fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await createModel.mutateAsync({
           providerKey: values.providerKey,
           name: values.name,
           key: values.key,
@@ -635,17 +633,8 @@ export default function CreateModelModal({
                 }
               : {}),
           },
-        }),
       });
 
-      if (!response.ok) {
-        const error = await response
-          .json()
-          .catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to create model');
-      }
-
-      const data = await response.json();
       notifications.show({
         color: 'green',
         title: 'Model created',
@@ -661,8 +650,6 @@ export default function CreateModelModal({
         title: 'Unable to create model',
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 

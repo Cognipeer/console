@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -18,20 +18,7 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateRerankerModal from '@/components/reranker/CreateRerankerModal';
-
-interface RerankerView {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  strategy: string;
-  config?: { modelKey?: string };
-  status: string;
-  totalRuns?: number;
-  avgLatencyMs?: number;
-  lastUsedAt?: string;
-  createdAt?: string;
-}
+import { useDeleteReranker, useRerankerList, type RerankerView } from '@/lib/api/queries/reranker';
 
 const STRATEGY_LABEL: Record<string, string> = {
   'dedicated-model': 'Dedicated model',
@@ -57,35 +44,11 @@ export default function RerankerDashboardPage() {
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
-  const [rerankers, setRerankers] = useState<RerankerView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const { data: rerankers = [], isPending: loading, isFetching: refreshing, refetch } = useRerankerList();
+  const deleteReranker = useDeleteReranker();
   const [createOpen, setCreateOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const res = await fetch('/api/reranker', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load rerankers');
-      const data = await res.json();
-      setRerankers(data.rerankers ?? []);
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        title: 'Unable to load rerankers',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   const confirmDelete = (target: RerankerView) =>
     deleteResource({
@@ -95,19 +58,12 @@ export default function RerankerDashboardPage() {
       id: target._id,
       extraWarning: tSafe('rerankerExtra'),
       action: async () => {
-        const res = await fetch(`/api/reranker/${encodeURIComponent(target.key)}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(err.error ?? 'Failed to delete reranker');
-        }
+        await deleteReranker.mutateAsync(target.key);
         notifications.show({
           color: 'green',
           title: 'Reranker deleted',
           message: `${target.name} has been removed.`,
         });
-        setRerankers((prev) => prev.filter((r) => r.key !== target.key));
       },
     });
 
@@ -271,7 +227,7 @@ export default function RerankerDashboardPage() {
             ],
           },
         ]}
-        onRefresh={load}
+        onRefresh={() => void refetch()}
         refreshing={refreshing}
         empty={{
           icon: <IconArrowsSort size={26} stroke={1.7} />,

@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react';
 import Link from 'next/link';
@@ -56,7 +55,6 @@ import type { PlatformProviderView } from '@/components/models/catalog/platformP
 import type { CreateModelPrefill } from '@/components/models/catalog/catalogPrefill';
 import { invalidateProviderModelCatalog, noteCatalogModelsCreated } from '@/components/models/catalog/useProviderModelCatalog';
 import EditModelModal from '@/components/models/EditModelModal';
-import { fetchCreditSpend } from '@/components/usage/creditsApi';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { modelTakesImages } from '@/components/models/inputModalities';
 import CreateDynamicModelModal, {
@@ -66,60 +64,20 @@ import CreateDynamicModelModal, {
 import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
 import type { IDynamicRoutingConfig, IModel } from '@/lib/database';
 import {
+  useDeleteModel,
+  useModelCreditSpend,
+  useModelsDashboard,
+  useModelsListCache,
+  useModelsPageData,
+  type ModelDto,
+  type ModelsDashboardData,
+  type ModelTopEntry,
+  type ModelPricing,
+} from '@/lib/api/queries/models';
+import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
-
-interface ModelsDashboardOverview {
-  totalModels: number;
-  llmCount: number;
-  embeddingCount: number;
-  providerCount: number;
-  totalCalls: number;
-  successCalls: number;
-  errorCalls: number;
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  /** Prompt-cache READ tokens, a subset of totalInputTokens. */
-  totalCachedInputTokens?: number;
-  /** Prompt-cache WRITE tokens, a subset of totalInputTokens. */
-  totalCachedWriteTokens?: number;
-  totalTokens: number;
-  totalToolCalls: number;
-  /** Semantic (response) cache hits. */
-  cacheHits: number;
-  /** Semantic cache hit rate (cacheHits / totalCalls), not the prompt cache. */
-  cacheHitRate: number;
-  /** Prompt cache: cached input tokens / input tokens. */
-  promptCacheHitRate?: number;
-  avgLatencyMs: number | null;
-  totalCost: number;
-  currency: string;
-  errorRate: number;
-}
-
-interface ModelTopEntry {
-  key: string;
-  name: string;
-  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
-  callCount: number;
-  totalTokens: number;
-  totalCost: number;
-  errorRate: number;
-  avgLatencyMs: number | null;
-}
-
-interface DailyEntry {
-  period: string;
-  callCount: number;
-  totalTokens: number;
-}
-
-interface ModelsDashboardData {
-  overview: ModelsDashboardOverview;
-  topModels: ModelTopEntry[];
-  daily: DailyEntry[];
-}
 
 function fmtNum(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -150,39 +108,6 @@ function fmtCost(cost: number, currency = 'USD'): string {
   }).format(cost);
 }
 
-interface ModelPricing {
-  currency?: string;
-  inputTokenPer1M: number;
-  outputTokenPer1M: number;
-  cachedTokenPer1M?: number;
-}
-
-interface ModelDto {
-  _id: string;
-  name: string;
-  description?: string;
-  key: string;
-  provider?: string;
-  providerKey: string;
-  providerDriver: string;
-  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
-  modelId: string;
-  isMultimodal?: boolean;
-  /** Set on a platform model an operator switched off: listed, but it cannot be called. */
-  unavailable?: boolean;
-  /** A platform model: deleting it takes it out of this project. */
-  platform?: boolean;
-  /** A platform model's credit price (it has no per-token price). */
-  credits?: { perCall?: number; perMillionTokens?: number };
-  /** What the model resolves to (an explicit choice, else detected from its id). */
-  capabilities?: { inputModalities?: string[] };
-  supportsToolCalls?: boolean;
-  pricing: ModelPricing;
-  settings: Record<string, unknown>;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
 type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
 type CategoryFilter = 'all' | ModelCategory;
 type CapabilityFilter = 'all' | 'multimodal' | 'tools';
@@ -203,16 +128,27 @@ const TYPE_LABELS: Record<CategoryFilter, string> = {
   decision: 'Decision',
 };
 
+const NO_MODELS: ModelDto[] = [];
+const NO_PROVIDERS: ModelProviderView[] = [];
+const NO_PLATFORM_PROVIDERS: PlatformProviderView[] = [];
+
 export default function ModelsPage() {
-  const [models, setModels] = useState<ModelDto[]>([]);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [providers, setProviders] = useState<ModelProviderView[]>([]);
-  const [platformProviders, setPlatformProviders] = useState<PlatformProviderView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
+  const modelsQuery = useModelsPageData();
+  const models = modelsQuery.data?.models ?? NO_MODELS;
+  const providers = modelsQuery.data?.providers ?? NO_PROVIDERS;
+  const platformProviders = modelsQuery.data?.platformProviders ?? NO_PLATFORM_PROVIDERS;
+  const modelsLoaded = !modelsQuery.isPending;
+  const loading = modelsQuery.isPending;
+  const modelsListCache = useModelsListCache();
+  const deleteModel = useDeleteModel();
+  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
+  const dashboardParams = buildDashboardDateSearchParams(dateFilter).toString();
+  const dashboardQuery = useModelsDashboard(dashboardParams);
+  const dashboardData = dashboardQuery.data ?? null;
+  const dashboardLoading = dashboardQuery.isFetching;
   /** Credits spent per platform model in the selected period; null where credits do not apply. */
-  const [creditSpend, setCreditSpend] = useState<{ total: number; byModel: Map<string, number> } | null>(null);
-  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const creditSpendQuery = useModelCreditSpend(dashboardParams);
+  const creditSpend = creditSpendQuery.data ?? null;
   const [createModalOpen, setCreateModalOpen] = useState(false);
   // "Add model" opens the provider catalog first; a pick (or "Enter custom model") opens the create form.
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -226,7 +162,6 @@ export default function ModelsPage() {
   const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
-  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
   const [capability, setCapability] = useState<CapabilityFilter>('all');
   const [query, setQuery] = useState('');
@@ -242,9 +177,6 @@ export default function ModelsPage() {
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
   const searchParams = useSearchParams()!;
-  // Latest request wins for both loaders.
-  const modelsRequestRef = useRef(0);
-  const dashboardRequestRef = useRef<AbortController | null>(null);
 
   // The model type is driven by the left sub-nav via the `?type=` query param.
   const typeParam = searchParams.get('type');
@@ -269,80 +201,14 @@ export default function ModelsPage() {
     setDynamicModalOpen(true);
   }, [dynamicCreateRequested]);
 
-  const loadModels = useCallback(async () => {
-    const requestId = ++modelsRequestRef.current;
-    setLoading(true);
-    try {
-      const response = await fetch('/api/models?includeProviders=true&includePlatform=true&includeUnavailable=true', {
-        cache: 'no-store',
-      });
-      if (!response.ok) throw new Error('Failed to load models');
-      const data = await response.json();
-      if (requestId !== modelsRequestRef.current) return;
-      setModels((data.models ?? []) as ModelDto[]);
-      setProviders((data.providers ?? []) as ModelProviderView[]);
-      setPlatformProviders((data.platformProviders ?? []) as PlatformProviderView[]);
-    } catch (error) {
-      if (requestId !== modelsRequestRef.current) return;
-      console.error('Failed to load models', error);
-    } finally {
-      if (requestId === modelsRequestRef.current) {
-        setLoading(false);
-        setModelsLoaded(true);
-      }
-    }
-  }, []);
-
-  const loadDashboard = useCallback(async () => {
-    dashboardRequestRef.current?.abort();
-    const controller = new AbortController();
-    dashboardRequestRef.current = controller;
-    setDashboardLoading(true);
-    try {
-      const params = buildDashboardDateSearchParams(dateFilter);
-      // Platform models are paid with credits: their spend comes from the credit ledger (hosted plans only;
-      // elsewhere, or without access to it, the request fails and the column falls back to cost).
-      void fetchCreditSpend(new URLSearchParams(params))
-        .then((spend) => {
-          if (controller.signal.aborted) return;
-          const byModel = new Map<string, number>();
-          for (const row of spend.models) if (row.model) byModel.set(row.model, row.credits);
-          setCreditSpend({ total: spend.total, byModel });
-        })
-        .catch(() => {
-          if (!controller.signal.aborted) setCreditSpend(null);
-        });
-      const res = await fetch(`/api/models/dashboard?${params.toString()}`, {
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-      if (res.ok) {
-        const data = (await res.json()) as ModelsDashboardData;
-        if (!controller.signal.aborted) setDashboardData(data);
-      }
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      console.error('Failed to load models dashboard', err);
-    } finally {
-      if (dashboardRequestRef.current === controller) {
-        dashboardRequestRef.current = null;
-        setDashboardLoading(false);
-      }
-    }
-  }, [dateFilter]);
-
-  useEffect(() => {
-    void loadModels();
-    void loadDashboard();
-  }, [loadModels, loadDashboard]);
-
-  useEffect(
-    () => () => {
-      modelsRequestRef.current += 1;
-      dashboardRequestRef.current?.abort();
-    },
-    [],
-  );
+  const { refetch: refetchModels } = modelsQuery;
+  const { refetch: refetchDashboard } = dashboardQuery;
+  const { refetch: refetchCreditSpend } = creditSpendQuery;
+  const loadModels = useCallback(() => void refetchModels(), [refetchModels]);
+  const loadDashboard = useCallback(() => {
+    void refetchDashboard();
+    void refetchCreditSpend();
+  }, [refetchDashboard, refetchCreditSpend]);
 
   const handleModelCreated = ({
     model,
@@ -369,13 +235,8 @@ export default function ModelsPage() {
       createdAt: model.createdAt ? String(model.createdAt) : undefined,
       updatedAt: model.updatedAt ? String(model.updatedAt) : undefined,
     };
-    setModels((current) => [
-      normalized,
-      ...current.filter((m) => m._id !== normalized._id),
-    ]);
-    setProviders((current) =>
-      current.some((p) => p.key === provider.key) ? current : [...current, provider],
-    );
+    modelsListCache.addModel(normalized);
+    modelsListCache.addProvider(provider);
     // The catalog's "Added" badge follows without listing the provider again.
     noteCatalogModelsCreated(model.providerKey, [{ modelId: model.modelId, key: model.key }]);
     void loadModels();
@@ -387,9 +248,7 @@ export default function ModelsPage() {
   };
 
   const handleProviderCreated = (provider: ModelProviderView) => {
-    setProviders((current) =>
-      current.some((p) => p.key === provider.key) ? current : [...current, provider],
-    );
+    modelsListCache.addProvider(provider);
     // Added from the model form ("Enter custom model"): that form is still open under the provider form, and
     // selects the new provider. Otherwise chain straight into the freshly-added provider's model catalog.
     if (providerReturnTo === 'model') {
@@ -493,11 +352,7 @@ export default function ModelsPage() {
     try {
       const action = async () => {
         setDeletingModelId(model._id);
-        const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
-          throw new Error(error.error ?? 'Failed to delete model');
-        }
+        await deleteModel.mutateAsync(model._id);
       };
       // A platform model is never deleted: it leaves this project and can be added again from the catalog.
       const deleted = model.platform
@@ -516,10 +371,8 @@ export default function ModelsPage() {
             action,
           });
       if (!deleted) return;
-      setModels((current) => current.filter((m) => m._id !== model._id));
       // The catalog's remembered listing still marks the model "Added": it is listed again on its next opening.
       invalidateProviderModelCatalog(model.providerKey);
-      void loadDashboard();
       notifications.show({
         color: 'green',
         title: model.platform ? t('actions.removeFromProject') : t('actions.delete'),

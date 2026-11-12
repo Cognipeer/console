@@ -8,6 +8,8 @@ import { IconAlertCircle, IconPlus, IconWorldSearch } from '@tabler/icons-react'
 import type { ProviderFormSchema } from '@/lib/providers/types';
 import type { WebSearchInstanceView } from '@/lib/services/webSearch/webSearchInstanceView';
 import { useTranslations } from '@/lib/i18n';
+import { isApiError } from '@/lib/api/client';
+import { useCreateWebSearchInstance, useUpdateWebSearchInstance } from '@/lib/api/queries/websearch';
 import ProviderFormRenderer from '@/components/providers/ProviderFormRenderer';
 import { allFields, providerRequestError, ProviderRequestError } from '@/components/providers/providerFormModel';
 import FormShell, {
@@ -78,6 +80,8 @@ export default function WebSearchInstanceFormModal({
   const [tenantWide, setTenantWide] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<IdentityField, string>>>({});
   const [saving, setSaving] = useState(false);
+  const createInstance = useCreateWebSearchInstance();
+  const updateInstance = useUpdateWebSearchInstance();
   const options = useForm<Record<string, unknown>>({ initialValues: {} });
 
   const provider: WebSearchProviderOption | null = useMemo(() => {
@@ -149,11 +153,10 @@ export default function WebSearchInstanceFormModal({
     const status = active ? 'active' : 'disabled';
     setSaving(true);
     try {
-      const res = isCreate
-        ? await fetch('/api/websearch/instances', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
+      let saved: WebSearchInstanceView;
+      try {
+        saved = isCreate
+          ? await createInstance.mutateAsync({
             key: key.trim(),
             name: name.trim(),
             description: description.trim() || undefined,
@@ -161,20 +164,17 @@ export default function WebSearchInstanceFormModal({
             status,
             settings,
             tenantWide: canSetTenantWide && tenantWide,
-          }),
-        })
-        : await fetch(`/api/websearch/instances/${encodeURIComponent(instance!.key)}`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ name: name.trim(), description: description.trim(), status, settings }),
-        });
-      const body = await res.json().catch(() => null);
-      if (!res.ok) {
-        const refusal = providerRequestError(body, t(isCreate ? 'createFailed' : 'saveFailed'));
+          })
+          : await updateInstance.mutateAsync({
+            key: instance!.key,
+            body: { name: name.trim(), description: description.trim(), status, settings },
+          });
+      } catch (failure) {
+        if (!isApiError(failure)) throw failure;
+        const refusal = providerRequestError(failure.payload, t(isCreate ? 'createFailed' : 'saveFailed'));
         // A taken key is refused without naming a field: it is the key that was typed.
-        throw isCreate && res.status === 409 ? new ProviderRequestError(refusal.message, 'key') : refusal;
+        throw isCreate && failure.status === 409 ? new ProviderRequestError(refusal.message, 'key') : refusal;
       }
-      const saved = (body as { instance: WebSearchInstanceView }).instance;
       notifications.show({ color: 'teal', title: t(isCreate ? 'created' : 'saved'), message: saved.name });
       onSaved(saved);
     } catch (error) {

@@ -16,6 +16,9 @@ import ProviderFormRenderer from './ProviderFormRenderer';
 import ProviderTestSteps from './ProviderTestSteps';
 import ProviderAssignStep, { ProjectPicker, useTenantProjects } from './ProviderAssignStep';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import { failureText } from '@/lib/api/queries/models';
+import { useProviderDriverForm, useTestProvider } from '@/lib/api/queries/providers';
 import {
   foundCount,
   formatLatency,
@@ -176,23 +179,25 @@ export default function ProviderConfigModal({
   hideProjects = false,
 }: ProviderConfigModalProps) {
   const t = useTranslations('providerAccess');
-  const [loadedSchema, setSchema] = useState<ProviderFormSchema | null>(null);
+  const [selectedDriver, setSelectedDriver] = useState<string>(
+    provider?.driver ?? drivers[0]?.id ?? '',
+  );
+  const schemaQuery = useProviderDriverForm<ProviderFormSchema>(selectedDriver, opened);
+  const loadedSchema = opened && selectedDriver ? (schemaQuery.data ?? null) : null;
   // A driver that splits its record in two layers (web search) shows the connection here; the behavior is edited on
   // the instances that point at the provider.
   const schema = useMemo(() => (loadedSchema ? formForLayer(loadedSchema, 'connection') : null), [loadedSchema]);
   const layered = isLayeredForm(loadedSchema);
-  const [schemaLoading, setSchemaLoading] = useState(false);
-  const [schemaError, setSchemaError] = useState<string | null>(null);
+  const schemaLoading = opened && Boolean(selectedDriver) && schemaQuery.isPending;
+  const schemaError = schemaQuery.isError ? errorMessage(schemaQuery.error, 'Unable to load form') : null;
   const [submitting, setSubmitting] = useState(false);
   const [selectedService, setSelectedService] =
     useState<ServiceCatalogEntry | null>(null);
   const [catalogQuery, setCatalogQuery] = useState('');
-  const [selectedDriver, setSelectedDriver] = useState<string>(
-    provider?.driver ?? drivers[0]?.id ?? '',
-  );
 
   const [projectIds, setProjectIds] = useState<Set<string>>(new Set(initialProjectIds ?? []));
-  const [testing, setTesting] = useState(false);
+  const testProvider = useTestProvider<ProviderTestResult>();
+  const testing = testProvider.isPending;
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [assignTarget, setAssignTarget] = useState<CreatedProviderSummary | null>(null);
@@ -284,43 +289,6 @@ export default function ProviderConfigModal({
   };
 
   useEffect(() => {
-    if (!opened || !selectedDriver) {
-      setSchema(null);
-      return;
-    }
-
-    let aborted = false;
-
-    async function loadSchema() {
-      setSchemaError(null);
-      setSchemaLoading(true);
-      try {
-        const response = await fetch(
-          `/api/providers/drivers/${selectedDriver}/form`,
-        );
-        if (!response.ok) throw new Error('Failed to load provider form schema');
-        const data = await response.json();
-        if (!aborted) setSchema(data.schema);
-      } catch (error) {
-        if (!aborted) {
-          console.error(error);
-          setSchemaError(
-            error instanceof Error ? error.message : 'Unable to load form',
-          );
-          setSchema(null);
-        }
-      } finally {
-        if (!aborted) setSchemaLoading(false);
-      }
-    }
-
-    void loadSchema();
-    return () => {
-      aborted = true;
-    };
-  }, [opened, selectedDriver]);
-
-  useEffect(() => {
     if (!schema) return;
     const fieldValues: Record<string, FormValues[keyof FormValues]> = {};
     schema.sections.forEach((section) => {
@@ -384,42 +352,32 @@ export default function ProviderConfigModal({
       return;
     }
     const buckets = partitionProviderValues(schema, form.getValues(), storedValues);
-    setTesting(true);
     setTestError(null);
     setTestResult(null);
     try {
       // A saved provider is tested through its own route: what is typed here is laid over what is stored (a blank
       // secret keeps the stored one), and nothing is saved. A new provider has nothing stored to fall back on.
-      const res = savedProviderId
-        ? await fetch(`/api/providers/${encodeURIComponent(savedProviderId)}/test`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ credentials: buckets.credentials, settings: buckets.settings }),
-        })
-        : await fetch('/api/providers/test', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            type: effectiveDomain,
-            driver: selectedDriver,
-            credentials: buckets.credentials,
-            settings: buckets.settings,
-          }),
-        });
-      const body = await res.json().catch(() => null);
-      if (!res.ok) {
-        // A refused setting names its form field: mark it where it was typed.
-        const field = typeof body?.field === 'string' ? body.field : null;
-        if (field && allFieldNames.has(field) && typeof body?.error === 'string') {
-          form.setFieldError(field, body.error);
-        }
-        throw new Error(body?.error || t('test.requestFailed'));
-      }
-      setTestResult(body as ProviderTestResult);
+      const body = await testProvider.mutateAsync(
+        savedProviderId
+          ? { id: savedProviderId, body: { credentials: buckets.credentials, settings: buckets.settings } }
+          : {
+            body: {
+              type: effectiveDomain,
+              driver: selectedDriver,
+              credentials: buckets.credentials,
+              settings: buckets.settings,
+            },
+          },
+      );
+      setTestResult(body);
     } catch (error) {
-      setTestError(error instanceof Error ? error.message : t('test.requestFailed'));
-    } finally {
-      setTesting(false);
+      const refusal = isApiError(error) ? (error.payload as { field?: unknown; error?: unknown } | null) : null;
+      // A refused setting names its form field: mark it where it was typed.
+      const field = typeof refusal?.field === 'string' ? refusal.field : null;
+      if (field && allFieldNames.has(field) && typeof refusal?.error === 'string') {
+        form.setFieldError(field, refusal.error);
+      }
+      setTestError(failureText(error, t('test.requestFailed')));
     }
   };
 
@@ -427,7 +385,6 @@ export default function ProviderConfigModal({
     setAssignTarget(null);
     onClose();
     form.reset();
-    setSchema(null);
     setTestResult(null);
   };
 

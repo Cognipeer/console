@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Alert,
@@ -36,6 +36,21 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  failureText,
+  useModelOptions,
+  useVectorIndexPickerRows,
+  useVectorProviderPickerRows,
+} from '@/lib/api/queries/models';
+import {
+  useDeleteWebSearchInstance,
+  useRunWebSearch,
+  useUpdateWebSearchInstance,
+  useWebSearchLogs,
+  useWebSearchTarget,
+  type WebSearchTarget,
+} from '@/lib/api/queries/websearch';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import WebSearchInstanceCreate from '@/components/websearch/WebSearchInstanceCreate';
@@ -45,9 +60,7 @@ import {
   canManageWebSearch,
   isUnavailable,
   providerOfRow,
-  type WebSearchListRow,
 } from '@/components/websearch/webSearchModel';
-import type { WebSearchInstanceView } from '@/lib/services/webSearch/webSearchInstanceView';
 import type {
   WebSearchAiAnswerSettings,
   WebSearchCacheSettings,
@@ -57,6 +70,14 @@ import type {
 import type { IWebSearchRunLog } from '@/lib/database';
 
 const LOGS_FETCH_LIMIT = 200;
+const NO_LOGS: IWebSearchRunLog[] = [];
+
+/** A date input's day as the ISO instant the logs route takes; '' for none (or a date the browser cannot read). */
+function dayBoundary(day: string, time: string): string {
+  if (!day) return '';
+  const date = new Date(`${day}${time}`);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
 
 type TabId = 'playground' | 'usage' | 'logs' | 'config';
 
@@ -70,25 +91,6 @@ function aiAnswerOf(p: WithSettings): WebSearchAiAnswerSettings {
 function cacheOf(p: WithSettings): WebSearchCacheSettings {
   const raw = p?.settings?.cache;
   return raw && typeof raw === 'object' ? (raw as WebSearchCacheSettings) : { enabled: false };
-}
-
-/**
- * What the page is about: an instance, or a provider that has no instance yet (the compatible read answers for it;
- * searches through its key use the provider's own settings).
- */
-type Loaded =
-  | { kind: 'instance'; instance: WebSearchInstanceView }
-  | { kind: 'provider'; provider: WebSearchListRow };
-
-async function fetchLoaded(key: string): Promise<Loaded | null> {
-  const res = await fetch(`/api/websearch/instances/${encodeURIComponent(key)}`, { cache: 'no-store' });
-  if (res.ok) return { kind: 'instance', instance: ((await res.json()) as { instance: WebSearchInstanceView }).instance };
-  if (res.status !== 404) throw new Error(`HTTP ${res.status}`);
-  const compat = await fetch(`/api/websearch/providers/${encodeURIComponent(key)}`, { cache: 'no-store' });
-  if (compat.status === 404) return null;
-  if (!compat.ok) throw new Error(`HTTP ${compat.status}`);
-  const body = (await compat.json()) as { provider: WebSearchListRow; instance?: WebSearchInstanceView };
-  return body.instance ? { kind: 'instance', instance: body.instance } : { kind: 'provider', provider: body.provider };
 }
 
 /** Cache outcome recorded on a run log (metadata.cache). */
@@ -145,15 +147,18 @@ export default function WebSearchInstancePage() {
   const key = params.key;
 
   const [tab, setTab] = useState<TabId>('playground');
-  const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [loading, setLoading] = useState(true);
+  const targetQuery = useWebSearchTarget(key);
+  const loaded: WebSearchTarget | null = targetQuery.data ?? null;
+  const loading = targetQuery.isPending;
+  const { refetch: refetchTarget } = targetQuery;
+  const updateInstance = useUpdateWebSearchInstance();
+  const deleteInstance = useDeleteWebSearchInstance();
+  const runWebSearch = useRunWebSearch();
   const instance = loaded?.kind === 'instance' ? loaded.instance : null;
   // A platform instance is the deployment's: it is searched and inspected here, never changed.
   const canEdit = canManage && instance !== null && !instance.platform;
 
   // Logs
-  const [logs, setLogs] = useState<IWebSearchRunLog[]>([]);
-  const [logsLoading, setLogsLoading] = useState(false);
   const [logQuery, setLogQuery] = useState('');
   const [logFrom, setLogFrom] = useState('');
   const [logTo, setLogTo] = useState('');
@@ -169,7 +174,7 @@ export default function WebSearchInstancePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchCount, setSearchCount] = useState<number | ''>(10);
   const [withAnswer, setWithAnswer] = useState(false);
-  const [searching, setSearching] = useState(false);
+  const searching = runWebSearch.isPending;
   const [searchResult, setSearchResult] = useState<WebSearchResult | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
 
@@ -178,7 +183,6 @@ export default function WebSearchInstancePage() {
   const [aiModelKey, setAiModelKey] = useState<string | null>(null);
   const [aiInstructions, setAiInstructions] = useState('');
   const [aiSaving, setAiSaving] = useState(false);
-  const [models, setModels] = useState<Array<{ value: string; label: string }>>([]);
 
   // Semantic cache settings (Configuration tab)
   const [cacheEnabled, setCacheEnabled] = useState(false);
@@ -187,158 +191,75 @@ export default function WebSearchInstancePage() {
   const [cacheEmbeddingModel, setCacheEmbeddingModel] = useState<string | null>(null);
   const [cacheThreshold, setCacheThreshold] = useState<number | string>(0.8);
   const [cacheSaving, setCacheSaving] = useState(false);
-  const [vectorProviders, setVectorProviders] = useState<Array<{ value: string; label: string }>>([]);
-  const [vectorIndexes, setVectorIndexes] = useState<Array<{ value: string; label: string }>>([]);
-  const [embeddingModels, setEmbeddingModels] = useState<Array<{ value: string; label: string }>>([]);
 
-  const load = useCallback(async () => {
-    try {
-      const next = await fetchLoaded(key);
-      if (!next) {
-        notifications.show({ color: 'red', title: t('notFound'), message: key });
-        router.push('/dashboard/websearch');
-        return;
-      }
-      setLoaded(next);
-      const own = next.kind === 'instance' ? next.instance : null;
-      const ai = aiAnswerOf(own);
-      setAiEnabled(ai.enabled === true);
-      setAiModelKey(ai.modelKey ?? null);
-      setAiInstructions(ai.instructions ?? '');
-      const cache = cacheOf(own);
-      setCacheEnabled(cache.enabled === true);
-      setCacheVectorProvider(cache.vectorProviderKey ?? null);
-      setCacheVectorIndex(cache.vectorIndexKey ?? null);
-      setCacheEmbeddingModel(cache.embeddingModelKey ?? null);
-      setCacheThreshold(cache.similarityThreshold ?? 0.8);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: t('loadFailed'),
-        message: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [key, router, t]);
+  // The page's subject is gone (or never was): say so and leave.
+  useEffect(() => {
+    if (!targetQuery.isSuccess || targetQuery.data !== null) return;
+    notifications.show({ color: 'red', title: t('notFound'), message: key });
+    router.push('/dashboard/websearch');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetQuery.isSuccess, targetQuery.data]);
+
+  useEffect(() => {
+    if (!targetQuery.isError) return;
+    notifications.show({
+      color: 'red',
+      title: t('loadFailed'),
+      message: errorMessage(targetQuery.error, String(targetQuery.error)),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetQuery.isError]);
+
+  // The settings forms start from what is stored, and follow every read of it.
+  useEffect(() => {
+    const next = targetQuery.data;
+    if (!next) return;
+    const own = next.kind === 'instance' ? next.instance : null;
+    const ai = aiAnswerOf(own);
+    setAiEnabled(ai.enabled === true);
+    setAiModelKey(ai.modelKey ?? null);
+    setAiInstructions(ai.instructions ?? '');
+    const cache = cacheOf(own);
+    setCacheEnabled(cache.enabled === true);
+    setCacheVectorProvider(cache.vectorProviderKey ?? null);
+    setCacheVectorIndex(cache.vectorIndexKey ?? null);
+    setCacheEmbeddingModel(cache.embeddingModelKey ?? null);
+    setCacheThreshold(cache.similarityThreshold ?? 0.8);
+  }, [targetQuery.data]);
 
   // An instance's runs are read through its own route; a provider without an instance through the compatible one.
-  const loadedKind = loaded?.kind ?? null;
-  const loadLogs = useCallback(async () => {
-    if (!loadedKind) return;
-    setLogsLoading(true);
-    try {
-      const searchParams = new URLSearchParams({ limit: String(LOGS_FETCH_LIMIT) });
-      if (logFrom) searchParams.set('from', new Date(`${logFrom}T00:00:00`).toISOString());
-      if (logTo) searchParams.set('to', new Date(`${logTo}T23:59:59.999`).toISOString());
-      const base = loadedKind === 'instance' ? '/api/websearch/instances' : '/api/websearch/providers';
-      const res = await fetch(
-        `${base}/${encodeURIComponent(key)}/logs?${searchParams.toString()}`,
-        { cache: 'no-store' },
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setLogs(data.logs ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load logs', err);
-    } finally {
-      setLogsLoading(false);
-    }
-  }, [key, logFrom, logTo, loadedKind]);
+  const logsQuery = useWebSearchLogs(
+    key,
+    loaded?.kind ?? null,
+    dayBoundary(logFrom, 'T00:00:00'),
+    dayBoundary(logTo, 'T23:59:59.999'),
+    LOGS_FETCH_LIMIT,
+  );
+  const logs = logsQuery.data ?? NO_LOGS;
+  const logsLoading = logsQuery.isFetching;
+  const { refetch: refetchLogs } = logsQuery;
 
-  const loadModels = useCallback(async () => {
-    try {
-      const res = await fetch('/api/models?category=llm', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setModels(
-          (data.models ?? []).map((m: { key: string; name?: string }) => ({
-            value: m.key,
-            label: m.name ? `${m.name} (${m.key})` : m.key,
-          })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load models', err);
-    }
-  }, []);
-
-  const loadCacheOptions = useCallback(async () => {
-    try {
-      const [providersRes, embeddingRes] = await Promise.all([
-        fetch('/api/vector/providers', { cache: 'no-store' }),
-        fetch('/api/models?category=embedding', { cache: 'no-store' }),
-      ]);
-      if (providersRes.ok) {
-        const data = await providersRes.json();
-        setVectorProviders(
-          (data.providers ?? []).map((p: { key: string; label?: string }) => ({
-            value: p.key,
-            label: p.label ? `${p.label} (${p.key})` : p.key,
-          })),
-        );
-      }
-      if (embeddingRes.ok) {
-        const data = await embeddingRes.json();
-        setEmbeddingModels(
-          (data.models ?? []).map((m: { key: string; name?: string }) => ({
-            value: m.key,
-            label: m.name ? `${m.name} (${m.key})` : m.key,
-          })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load cache options', err);
-    }
-  }, []);
-
-  const loadCacheIndexes = useCallback(async (providerKey: string | null) => {
-    if (!providerKey) {
-      setVectorIndexes([]);
-      return;
-    }
-    try {
-      const res = await fetch(
-        `/api/vector/indexes?providerKey=${encodeURIComponent(providerKey)}`,
-        { cache: 'no-store' },
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setVectorIndexes(
-          (data.indexes ?? []).map((idx: { key: string; name?: string }) => ({
-            value: idx.key,
-            label: idx.name ? `${idx.name} (${idx.key})` : idx.key,
-          })),
-        );
-      } else {
-        setVectorIndexes([]);
-      }
-    } catch (err) {
-      console.error('Failed to load vector indexes', err);
-      setVectorIndexes([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    if (tab === 'config') void loadCacheOptions();
-  }, [tab, loadCacheOptions]);
-
-  useEffect(() => {
-    if (tab === 'config') void loadCacheIndexes(cacheVectorProvider);
-  }, [tab, cacheVectorProvider, loadCacheIndexes]);
-
-  useEffect(() => {
-    void loadLogs();
-  }, [loadLogs]);
-
-  useEffect(() => {
-    if (tab === 'config') void loadModels();
-  }, [tab, loadModels]);
+  const configTab = tab === 'config';
+  const modelRows = useModelOptions('llm', configTab).data;
+  const models = useMemo(
+    () => (modelRows ?? []).map((m) => ({ value: m.key, label: m.name ? `${m.name} (${m.key})` : m.key })),
+    [modelRows],
+  );
+  const vectorProviderRows = useVectorProviderPickerRows<{ key: string; label?: string }>(configTab).data;
+  const vectorProviders = useMemo(
+    () => (vectorProviderRows ?? []).map((p) => ({ value: p.key, label: p.label ? `${p.label} (${p.key})` : p.key })),
+    [vectorProviderRows],
+  );
+  const embeddingRows = useModelOptions('embedding', configTab).data;
+  const embeddingModels = useMemo(
+    () => (embeddingRows ?? []).map((m) => ({ value: m.key, label: m.name ? `${m.name} (${m.key})` : m.key })),
+    [embeddingRows],
+  );
+  const vectorIndexRows = useVectorIndexPickerRows<{ key: string; name?: string }>(configTab ? (cacheVectorProvider ?? '') : '').data;
+  const vectorIndexes = useMemo(
+    () => (vectorIndexRows ?? []).map((idx) => ({ value: idx.key, label: idx.name ? `${idx.name} (${idx.key})` : idx.key })),
+    [vectorIndexRows],
+  );
 
   const filteredLogs = useMemo(() => {
     return logs.filter((l) => {
@@ -401,30 +322,19 @@ export default function WebSearchInstancePage() {
 
   async function runSearch() {
     if (!searchQuery.trim()) return;
-    setSearching(true);
     setSearchError(null);
     try {
-      const res = await fetch('/api/websearch/search', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          query: searchQuery.trim(),
-          // A provider without an instance is searched through its own key.
-          ...(instance ? { instance: key } : { provider: key }),
-          count: typeof searchCount === 'number' ? searchCount : undefined,
-          includeAnswer: withAnswer,
-        }),
+      const result = await runWebSearch.mutateAsync({
+        query: searchQuery.trim(),
+        // A provider without an instance is searched through its own key.
+        ...(instance ? { instance: key } : { provider: key }),
+        count: typeof searchCount === 'number' ? searchCount : undefined,
+        includeAnswer: withAnswer,
       });
-      const body = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(body?.error || 'Search failed');
-      setSearchResult(body.result as WebSearchResult);
-      void loadLogs();
+      setSearchResult(result);
     } catch (err) {
       setSearchResult(null);
-      setSearchError(err instanceof Error ? err.message : 'Search failed');
-      void loadLogs();
-    } finally {
-      setSearching(false);
+      setSearchError(failureText(err, 'Search failed'));
     }
   }
 
@@ -436,14 +346,10 @@ export default function WebSearchInstancePage() {
   /** The settings replace the stored ones: every setting the change leaves alone is sent as it is. */
   async function patchInstanceSettings(change: Record<string, unknown>, fallback: string) {
     if (!instance) return;
-    const res = await fetch(`/api/websearch/instances/${encodeURIComponent(instance.key)}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ settings: { ...instance.settings, ...change } }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => null);
-      throw new Error(body?.error || fallback);
+    try {
+      await updateInstance.mutateAsync({ key: instance.key, body: { settings: { ...instance.settings, ...change } } });
+    } catch (error) {
+      throw new Error(failureText(error, fallback));
     }
   }
 
@@ -477,7 +383,6 @@ export default function WebSearchInstancePage() {
       };
       await patchInstanceSettings({ cache }, 'Failed to save cache settings');
       notifications.show({ color: 'teal', title: 'Cache', message: 'Settings saved' });
-      await load();
     } catch (err) {
       notifications.show({
         color: 'red',
@@ -508,7 +413,6 @@ export default function WebSearchInstancePage() {
       };
       await patchInstanceSettings({ aiAnswer }, 'Failed to save AI settings');
       notifications.show({ color: 'teal', title: 'AI Answer', message: 'Settings saved' });
-      await load();
     } catch (err) {
       notifications.show({
         color: 'red',
@@ -531,12 +435,10 @@ export default function WebSearchInstancePage() {
         id: String(instance._id),
         extraWarning: tConfirm('extras.websearchKeyFails'),
         action: async () => {
-          const res = await fetch(`/api/websearch/instances/${encodeURIComponent(instance.key)}`, {
-            method: 'DELETE',
-          });
-          if (!res.ok) {
-            const body = await res.json().catch(() => null);
-            throw new Error(body?.error || t('deleteFailed'));
+          try {
+            await deleteInstance.mutateAsync(instance.key);
+          } catch (error) {
+            throw new Error(failureText(error, t('deleteFailed')));
           }
         },
       });
@@ -878,7 +780,7 @@ export default function WebSearchInstancePage() {
               variant="subtle"
               size="xs"
               leftSection={<IconRefresh size={13} stroke={1.7} />}
-              onClick={() => void loadLogs()}
+              onClick={() => void refetchLogs()}
               loading={logsLoading}
             >
               Refresh
@@ -1117,7 +1019,6 @@ export default function WebSearchInstancePage() {
           resetKey={editResetKey}
           onSaved={() => {
             setEditOpen(false);
-            void load();
           }}
         />
       ) : null}
@@ -1130,7 +1031,7 @@ export default function WebSearchInstancePage() {
           onCreated={(created) => {
             setCreateOpen(false);
             // An instance that took this provider's key is now what this page shows.
-            if (created.key === key) void load();
+            if (created.key === key) void refetchTarget();
             else router.push(`/dashboard/websearch/${encodeURIComponent(created.key)}`);
           }}
         />
