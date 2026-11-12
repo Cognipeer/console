@@ -26,6 +26,8 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import { errorMessage } from '@/lib/api/client';
+import { useAgentOptions, useDecisionModelOptions, useSaveAnalysisDefinition } from '@/lib/api/queries/analysis';
 import { FIELD_TYPE_LABELS, isDecisionType } from './decisionUi';
 import type {
   AnalysisDefinitionView,
@@ -34,10 +36,14 @@ import type {
   ModelOption,
 } from './types';
 
+const NO_DECISION_MODELS: DecisionModelOption[] = [];
+const NO_AGENTS: ModelOption[] = [];
+
 interface CreateDefinitionModalProps {
   opened: boolean;
   onClose: () => void;
-  onCreated: (definition: AnalysisDefinitionView) => void;
+  /** Called with the stored definition; the cached definitions are already refreshed by the save. */
+  onCreated?: (definition: AnalysisDefinitionView) => void;
   models?: ModelOption[];
   /** When set, the modal edits this definition (PATCH) instead of creating one. */
   editing?: AnalysisDefinitionView | null;
@@ -76,12 +82,6 @@ const emptyField = (): FieldRow => ({ key: '', type: 'string', required: false, 
 
 const splitList = (value: string): string[] => value.split(',').map((v) => v.trim()).filter(Boolean);
 
-interface ApiModel {
-  key: string;
-  name: string;
-  settings?: { decision?: { mode?: string } };
-}
-
 export default function CreateDefinitionModal({ opened, onClose, onCreated, models = [], editing = null }: CreateDefinitionModalProps) {
   const isEdit = Boolean(editing);
   const [loading, setLoading] = useState(false);
@@ -107,8 +107,12 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleCron, setScheduleCron] = useState('0 2 * * *');
   const [error, setError] = useState<string | null>(null);
-  const [decisionModels, setDecisionModels] = useState<DecisionModelOption[]>([]);
-  const [agents, setAgents] = useState<ModelOption[]>([]);
+  // Decision models and the project's agents are only needed while the editor is open.
+  const decisionModelsQuery = useDecisionModelOptions(opened);
+  const agentsQuery = useAgentOptions(opened);
+  const decisionModels = decisionModelsQuery.data ?? NO_DECISION_MODELS;
+  const agents = agentsQuery.data ?? NO_AGENTS;
+  const saveDefinition = useSaveAnalysisDefinition();
 
   useEffect(() => {
     if (!opened) {
@@ -160,37 +164,6 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
       setError(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened]);
-
-  // Decision models and the project's agents are only needed while the editor is open.
-  useEffect(() => {
-    if (!opened) return;
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const [mRes, aRes] = await Promise.all([
-          fetch('/api/models?category=decision', { cache: 'no-store' }),
-          fetch('/api/agents', { cache: 'no-store' }),
-        ]);
-        if (cancelled) return;
-        if (mRes.ok) {
-          const data = await mRes.json();
-          setDecisionModels(((data.models ?? []) as ApiModel[]).map((m) => ({
-            value: m.key,
-            label: m.name,
-            selfReported: m.settings?.decision?.mode !== 'native',
-          })));
-        }
-        if (aRes.ok) {
-          const data = await aRes.json();
-          setAgents(((data.agents ?? []) as Array<{ key: string; name: string }>).map((a) => ({ value: a.key, label: a.name })));
-        }
-      } catch (err) {
-        console.error('Failed to load decision models / agents', err);
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
   }, [opened]);
 
   const updateField = (idx: number, patch: Partial<FieldRow>) => {
@@ -266,37 +239,28 @@ export default function CreateDefinitionModal({ opened, onClose, onCreated, mode
       const source = sourceKind === 'agent_sessions'
         ? { kind: 'agent_sessions' as const, agentKeys, minMessages, idleMinutes, days: lookBackDays }
         : { kind: 'conversations' as const };
-      const res = await fetch(
-        isEdit ? `/api/analysis/definitions/${editing!.id}` : '/api/analysis/definitions',
-        {
-          method: isEdit ? 'PATCH' : 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: name.trim(),
-            description: description || undefined,
-            fieldSet,
-            extractionInstructions: instructions || undefined,
-            modes,
-            source,
-            extractionModelKey: extractionModelKey || undefined,
-            // null clears a decision model that an edit removed.
-            decisionModelKey: hasDecisionModel ? decisionModelKey : isEdit && editing?.decisionModelKey ? null : undefined,
-            review: hasDecisionModel ? { threshold, spotCheckPct } : undefined,
-            judgeModelKey: modeJudge ? judgeModelKey : undefined,
-            schedule: scheduleEnabled ? { cron: scheduleCron.trim(), enabled: true } : { enabled: false, cron: scheduleCron.trim() },
-          }),
+      const definition = await saveDefinition.mutateAsync({
+        id: isEdit ? editing!.id : undefined,
+        body: {
+          name: name.trim(),
+          description: description || undefined,
+          fieldSet,
+          extractionInstructions: instructions || undefined,
+          modes,
+          source,
+          extractionModelKey: extractionModelKey || undefined,
+          // null clears a decision model that an edit removed.
+          decisionModelKey: hasDecisionModel ? decisionModelKey : isEdit && editing?.decisionModelKey ? null : undefined,
+          review: hasDecisionModel ? { threshold, spotCheckPct } : undefined,
+          judgeModelKey: modeJudge ? judgeModelKey : undefined,
+          schedule: scheduleEnabled ? { cron: scheduleCron.trim(), enabled: true } : { enabled: false, cron: scheduleCron.trim() },
         },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `Failed to ${isEdit ? 'update' : 'create'} definition`);
-      }
-      const data = await res.json();
-      notifications.show({ title: isEdit ? 'Definition updated' : 'Definition created', message: `"${data.definition.name}" was ${isEdit ? 'updated' : 'created'}`, color: 'teal' });
-      onCreated(data.definition);
+      });
+      notifications.show({ title: isEdit ? 'Definition updated' : 'Definition created', message: `"${definition.name}" was ${isEdit ? 'updated' : 'created'}`, color: 'teal' });
+      onCreated?.(definition);
       onClose();
     } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to create', color: 'red' });
+      notifications.show({ title: 'Error', message: errorMessage(err, `Failed to ${isEdit ? 'update' : 'create'} definition`), color: 'red' });
     } finally {
       setLoading(false);
     }

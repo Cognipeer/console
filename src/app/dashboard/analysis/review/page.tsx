@@ -1,16 +1,18 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Group, Loader, Text } from '@mantine/core';
 import { IconListCheck } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
-import type { AnalysisDefinitionView, AnalysisResultRowView } from '@/components/analysis/types';
+import type { AnalysisResultRowView } from '@/components/analysis/types';
+import { useAnalysisDefinitions, useAnalysisResults } from '@/lib/api/queries/analysis';
 import { decisionBadgeClass, formatAnswer, pct } from '@/components/analysis/decisionUi';
 
 const PAGE_SIZE = 50;
 const MAX_CHIPS = 3;
+const NO_ROWS: AnalysisResultRowView[] = [];
 
 function fmtDate(value?: string): string {
   if (!value) return '—';
@@ -29,59 +31,37 @@ export default function AnalysisReviewQueuePage() {
   const searchParams = useSearchParams();
   const preselect = searchParams?.get('definition') ?? '';
 
-  const [definitions, setDefinitions] = useState<AnalysisDefinitionView[]>([]);
-  const [definitionKey, setDefinitionKey] = useState('');
-  const [defsLoading, setDefsLoading] = useState(true);
-  const [rows, setRows] = useState<AnalysisResultRowView[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(false);
-
+  const definitionsQuery = useAnalysisDefinitions();
   // Only definitions with a decision model produce answers to review.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/analysis/definitions', { cache: 'no-store' });
-        if (!res.ok || cancelled) return;
-        const list = ((await res.json()).definitions ?? []) as AnalysisDefinitionView[];
-        const withDecisions = list.filter((d) => d.decisionModelKey);
-        setDefinitions(withDecisions);
-        setDefinitionKey((current) => {
-          if (current) return current;
-          if (preselect && withDecisions.some((d) => d.key === preselect)) return preselect;
-          return withDecisions[0]?.key ?? '';
-        });
-      } finally {
-        if (!cancelled) setDefsLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [preselect]);
+  const definitions = useMemo(
+    () => (definitionsQuery.data ?? []).filter((d) => d.decisionModelKey),
+    [definitionsQuery.data],
+  );
+  const [picked, setPicked] = useState('');
+  const [page, setPage] = useState(1);
+  const defsLoading = definitionsQuery.isPending;
 
-  const load = useCallback(async (key: string, pageNo: number) => {
-    setLoading(true);
-    try {
-      const qs = new URLSearchParams({
-        definitionKey: key,
-        needsReview: 'true',
-        sort: 'confidence',
-        limit: String(PAGE_SIZE),
-        skip: String((pageNo - 1) * PAGE_SIZE),
-      });
-      const res = await fetch(`/api/analysis/results?${qs.toString()}`, { cache: 'no-store' });
-      if (!res.ok) { setRows([]); setTotal(0); return; }
-      const body = await res.json();
-      setRows(body.results ?? []);
-      setTotal(typeof body.total === 'number' ? body.total : 0);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // The picked definition, else the preselected one, else the first.
+  const definitionKey = useMemo(() => {
+    if (picked) return picked;
+    if (preselect && definitions.some((d) => d.key === preselect)) return preselect;
+    return definitions[0]?.key ?? '';
+  }, [picked, preselect, definitions]);
 
-  useEffect(() => {
-    if (definitionKey) void load(definitionKey, page);
-  }, [definitionKey, page, load]);
+  const resultsQuery = useAnalysisResults(
+    definitionKey
+      ? {
+          definitionKey,
+          needsReview: true,
+          sort: 'confidence',
+          limit: PAGE_SIZE,
+          skip: (page - 1) * PAGE_SIZE,
+        }
+      : null,
+  );
+  const rows = definitionKey && !resultsQuery.isError ? resultsQuery.data?.results ?? NO_ROWS : NO_ROWS;
+  const total = definitionKey && !resultsQuery.isError ? resultsQuery.data?.total ?? 0 : 0;
+  const loading = Boolean(definitionKey) && resultsQuery.isFetching;
 
   const columns: DataGridColumn<AnalysisResultRowView>[] = [
     { key: 'title', label: 'Conversation', render: (r) => <span>{r.title || 'Untitled session'}</span> },
@@ -132,12 +112,12 @@ export default function AnalysisReviewQueuePage() {
           rowHref={resultHref}
           filters={[{
             value: definitionKey,
-            onChange: (v) => { setDefinitionKey(v); setPage(1); },
+            onChange: (v) => { setPicked(v); setPage(1); },
             options: definitions.map((d) => ({ value: d.key, label: d.name })),
             width: 240,
             ariaLabel: 'Definition',
           }]}
-          onRefresh={() => void load(definitionKey, page)}
+          onRefresh={() => void resultsQuery.refetch()}
           refreshing={loading}
           pagination={{ page, onPageChange: setPage, pageSize: PAGE_SIZE, total, hasMore: page * PAGE_SIZE < total }}
           footerLeft={total > 0 ? `${total} to review` : undefined}

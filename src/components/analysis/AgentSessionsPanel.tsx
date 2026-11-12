@@ -6,18 +6,21 @@
  * shows each session's latest analysis, and lets the user analyze a selection.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button, Group } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconClipboardText, IconPlayerPlay, IconPlus } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { errorMessage } from '@/lib/api/client';
+import { useAgentSessions, useRunAnalysisDefinition } from '@/lib/api/queries/analysis';
 import { decisionBadgeClass, formatAnswer, pct } from './decisionUi';
 import type { AgentSessionRowView, AnalysisDefinitionView } from './types';
 
 const PAGE_LIMIT = 50;
 const MAX_CHIPS = 3;
+const NO_ROWS: AgentSessionRowView[] = [];
 
 const WINDOW_OPTIONS = [
   { value: '1', label: 'Last 24 hours' },
@@ -75,10 +78,6 @@ export default function AgentSessionsPanel({ definitions, onNewDefinition }: Age
   const [definitionKey, setDefinitionKey] = useState('');
   const [agentKey, setAgentKey] = useState('');
   const [days, setDays] = useState('7');
-  const [rows, setRows] = useState<AgentSessionRowView[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | undefined>();
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   // Keep a valid definition selected as the list loads or changes.
@@ -98,82 +97,54 @@ export default function AgentSessionsPanel({ definitions, onNewDefinition }: Age
   const definition = sessionDefinitions.find((d) => d.key === definitionKey) ?? null;
   const definitionAgents = definition?.source?.kind === 'agent_sessions' ? definition.source.agentKeys : [];
 
-  const query = useCallback(
-    (cursor?: string) => {
-      const params = new URLSearchParams({ definitionKey, days, limit: String(PAGE_LIMIT) });
-      if (agentKey) params.set('agentKey', agentKey);
-      if (cursor) params.set('cursor', cursor);
-      return fetch(`/api/analysis/sources/agent-sessions?${params.toString()}`, { cache: 'no-store' });
-    },
-    [definitionKey, agentKey, days],
+  const sessionsQuery = useAgentSessions(
+    definitionKey ? { definitionKey, agentKey: agentKey || undefined, days, limit: PAGE_LIMIT } : null,
   );
+  const runDefinition = useRunAnalysisDefinition();
 
-  const loadFirstPage = useCallback(async () => {
-    if (!definitionKey) {
-      setRows([]);
-      setNextCursor(undefined);
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await query();
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        notifications.show({ title: 'Failed to load sessions', message: data.error || 'Failed to load sessions', color: 'red' });
-        setRows([]);
-        setNextCursor(undefined);
-        return;
-      }
-      setRows(data.rows ?? []);
-      setNextCursor(data.nextCursor || undefined);
-      setSelected(new Set());
-    } catch (err) {
-      console.error('Failed to load agent sessions', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [definitionKey, query]);
+  // The rows of every page loaded so far, without a session that two pages both listed.
+  const pages = sessionsQuery.data?.pages;
+  const rows = useMemo(() => {
+    if (!definitionKey || !pages) return NO_ROWS;
+    const seen = new Set<string>();
+    return pages.flatMap((page) => page.rows).filter((r) => !seen.has(r.id) && seen.add(r.id));
+  }, [definitionKey, pages]);
+  const nextCursor = definitionKey ? pages?.[pages.length - 1]?.nextCursor : undefined;
+  const loading = Boolean(definitionKey) && sessionsQuery.isFetching && !sessionsQuery.isFetchingNextPage;
+  const loadingMore = sessionsQuery.isFetchingNextPage;
 
+  // A new page of filters starts a new selection.
   useEffect(() => {
-    void loadFirstPage();
-  }, [loadFirstPage]);
+    setSelected(new Set());
+  }, [definitionKey, agentKey, days]);
+
+  const sessionsError = sessionsQuery.error;
+  useEffect(() => {
+    if (!sessionsError) return;
+    notifications.show({ title: 'Failed to load sessions', message: errorMessage(sessionsError, 'Failed to load sessions'), color: 'red' });
+  }, [sessionsError]);
 
   const loadMore = async () => {
     if (!nextCursor) return;
-    setLoadingMore(true);
-    try {
-      const res = await query(nextCursor);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        notifications.show({ title: 'Failed to load sessions', message: data.error || 'Failed to load sessions', color: 'red' });
-        return;
-      }
-      setRows((prev) => {
-        const seen = new Set(prev.map((r) => r.id));
-        return [...prev, ...((data.rows ?? []) as AgentSessionRowView[]).filter((r) => !seen.has(r.id))];
-      });
-      setNextCursor(data.nextCursor || undefined);
-    } finally {
-      setLoadingMore(false);
-    }
+    await sessionsQuery.fetchNextPage();
   };
 
   const analyzeSelected = async (ids: string[]) => {
     if (!definitionKey || ids.length === 0) return;
-    const res = await fetch(`/api/analysis/definitions/${encodeURIComponent(definitionKey)}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        target: { kind: 'agent_sessions' },
-        selection: { strategy: 'keys', conversationKeys: ids },
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      notifications.show({ title: 'Run failed', message: data.error || 'Run failed', color: 'red' });
+    let data;
+    try {
+      data = await runDefinition.mutateAsync({
+        definitionKey,
+        payload: {
+          target: { kind: 'agent_sessions' },
+          selection: { strategy: 'keys', conversationKeys: ids },
+        },
+      });
+    } catch (err) {
+      notifications.show({ title: 'Run failed', message: errorMessage(err, 'Run failed'), color: 'red' });
       return;
     }
-    const runId = data.run?.id as string | undefined;
+    const runId = data.run?.id;
     notifications.show({
       title: 'Run started',
       message: runId ? (
@@ -238,7 +209,7 @@ export default function AgentSessionsPanel({ definitions, onNewDefinition }: Age
       loading={loading}
       rowKey={(r) => r.id}
       columns={columns}
-      onRefresh={() => void loadFirstPage()}
+      onRefresh={() => { setSelected(new Set()); void sessionsQuery.refetch(); }}
       refreshing={loading}
       selectable
       selected={selected}

@@ -8,7 +8,7 @@
  * switching in-page tabs.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Group, SegmentedControl } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -38,6 +38,21 @@ import type {
   AnalysisRunView,
   ModelOption,
 } from '@/components/analysis/types';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useAnalysisConversations,
+  useAnalysisDefinitions,
+  useAnalysisRuns,
+  useDeleteAnalysisConversation,
+  useDeleteAnalysisDefinition,
+  useLlmModelOptions,
+  useRunAnalysisDefinition,
+} from '@/lib/api/queries/analysis';
+
+const NO_DEFINITIONS: AnalysisDefinitionView[] = [];
+const NO_CONVERSATIONS: AnalysisConversationView[] = [];
+const NO_RUNS: AnalysisRunView[] = [];
+const NO_MODELS: ModelOption[] = [];
 
 export type AnalysisSection = 'definitions' | 'conversations' | 'runs';
 
@@ -65,12 +80,19 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tq = useTranslations('common.confirm.qos');
-  const [definitions, setDefinitions] = useState<AnalysisDefinitionView[]>([]);
-  const [conversations, setConversations] = useState<AnalysisConversationView[]>([]);
-  const [runs, setRuns] = useState<AnalysisRunView[]>([]);
-  const [models, setModels] = useState<ModelOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const definitionsQuery = useAnalysisDefinitions();
+  const conversationsQuery = useAnalysisConversations();
+  const runsQuery = useAnalysisRuns();
+  const modelsQuery = useLlmModelOptions();
+  const definitions = definitionsQuery.data ?? NO_DEFINITIONS;
+  const conversations = conversationsQuery.data ?? NO_CONVERSATIONS;
+  const runs = runsQuery.data ?? NO_RUNS;
+  const models = modelsQuery.data ?? NO_MODELS;
+  const loading = definitionsQuery.isPending || conversationsQuery.isPending || runsQuery.isPending;
+  const refreshing = definitionsQuery.isFetching || conversationsQuery.isFetching || runsQuery.isFetching;
+  const runDefinition = useRunAnalysisDefinition();
+  const deleteDefinition = useDeleteAnalysisDefinition();
+  const deleteConversation = useDeleteAnalysisConversation();
 
   const [definitionModal, setDefinitionModal] = useState(false);
   const [editDefinition, setEditDefinition] = useState<AnalysisDefinitionView | null>(null);
@@ -79,72 +101,48 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
   const [conversationSource, setConversationSource] = useState<ConversationSource>('imported');
 
   const loadAll = async () => {
-    setRefreshing(true);
-    try {
-      const [dRes, cRes, rRes, mRes] = await Promise.all([
-        fetch('/api/analysis/definitions', { cache: 'no-store' }),
-        fetch('/api/analysis/conversations', { cache: 'no-store' }),
-        fetch('/api/analysis/runs', { cache: 'no-store' }),
-        fetch('/api/models?category=llm', { cache: 'no-store' }),
-      ]);
-      if (dRes.ok) setDefinitions((await dRes.json()).definitions ?? []);
-      if (cRes.ok) setConversations((await cRes.json()).conversations ?? []);
-      if (rRes.ok) setRuns((await rRes.json()).runs ?? []);
-      if (mRes.ok) setModels(((await mRes.json()).models ?? []).map((m: { key: string; name: string }) => ({ value: m.key, label: m.name })));
-    } catch (err) {
-      console.error('Failed to load analysis', err);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    await Promise.all([
+      definitionsQuery.refetch(),
+      conversationsQuery.refetch(),
+      runsQuery.refetch(),
+      modelsQuery.refetch(),
+    ]);
   };
-
-  const loadRuns = async () => {
-    const res = await fetch('/api/analysis/runs', { cache: 'no-store' });
-    if (res.ok) setRuns((await res.json()).runs ?? []);
-  };
-
-  useEffect(() => {
-    void loadAll();
-  }, []);
 
   // Kick off a run with an explicit selection and target (from the Run modal).
   // Returns the new run id (and navigates to its live view) or null on failure.
   const runWithSelection = async (definitionKey: string, payload: RunPayload): Promise<string | null> => {
-    const res = await fetch(`/api/analysis/definitions/${encodeURIComponent(definitionKey)}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      notifications.show({ title: 'Run failed', message: data.error || 'Run failed', color: 'red' });
+    let data;
+    try {
+      data = await runDefinition.mutateAsync({ definitionKey, payload });
+    } catch (err) {
+      notifications.show({ title: 'Run failed', message: errorMessage(err, 'Run failed'), color: 'red' });
       return null;
     }
     notifications.show({ title: 'Run started', message: 'Analysis is running in the background.', color: 'teal' });
     if (data.run?.id) {
       router.push(`/dashboard/analysis/runs/${data.run.id}`);
-      return data.run.id as string;
+      return data.run.id;
     }
-    await loadRuns();
     return null;
   };
 
   const confirmDelete = async (item: { kind: AnalysisSection; id: string; name: string }) => {
-    const path = item.kind === 'definitions' ? 'definitions' : 'conversations';
     const isDefinition = item.kind === 'definitions';
     const done = await deleteResource({
       noun: tq(isDefinition ? 'nouns.analysisDefinition' : 'nouns.conversation'),
       name: item.name,
       ...(isDefinition ? { type: 'analysis-definition', id: item.id } : {}),
       action: async () => {
-        const res = await fetch(`/api/analysis/${path}/${item.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(tq('deleteFailed'));
+        try {
+          await (isDefinition ? deleteDefinition : deleteConversation).mutateAsync(item.id);
+        } catch {
+          throw new Error(tq('deleteFailed'));
+        }
       },
     });
     if (!done) return;
     notifications.show({ title: 'Deleted', message: `"${item.name}" was deleted`, color: 'red' });
-    await loadAll();
   };
 
   const definitionsCtl = useTableControls(definitions, {
@@ -335,9 +333,8 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
         editing={editDefinition}
         onClose={() => { setDefinitionModal(false); setEditDefinition(null); }}
         models={models}
-        onCreated={() => void loadAll()}
       />
-      <IngestConversationsModal opened={ingestModal} onClose={() => setIngestModal(false)} onIngested={() => void loadAll()} />
+      <IngestConversationsModal opened={ingestModal} onClose={() => setIngestModal(false)} />
       <RunDefinitionModal
         opened={runModalDef !== null}
         definition={runModalDef}

@@ -1,13 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { Button, Group, Loader, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconExternalLink } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import ResultDetail from '@/components/analysis/ResultDetail';
-import type { AnalysisResultDetailResponse, AnalysisResultRowView } from '@/components/analysis/types';
+import { errorMessage } from '@/lib/api/client';
+import { useAnalysisResult, useLoadAnalysisResults, useReviewAnalysisResult } from '@/lib/api/queries/analysis';
 
 function fmtDate(value?: string): string {
   if (!value) return '—';
@@ -28,32 +29,15 @@ export default function AnalysisResultDetailPage() {
   const queueKey = searchParams?.get('queue') || null;
   const skippedParam = searchParams?.get('skipped') ?? null;
 
-  const [data, setData] = useState<AnalysisResultDetailResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
+  const resultQuery = useAnalysisResult(resultId);
+  const reviewResult = useReviewAnalysisResult();
+  const loadResults = useLoadAnalysisResults();
+  const data = resultQuery.data ?? null;
+  // The previous item is not kept while the next loads, so a quick Save cannot post its draft to the next one.
+  const loading = resultQuery.isPending;
+  const notFound = resultQuery.isError;
+  // Stays on until the queue has moved on, not only until the review is stored.
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!resultId) return;
-    let cancelled = false;
-    // Drop the previous item so a quick Save cannot post its draft to the next one.
-    setData(null);
-    setLoading(true);
-    setNotFound(false);
-    (async () => {
-      try {
-        const res = await fetch(`/api/analysis/results/${encodeURIComponent(resultId)}`, { cache: 'no-store' });
-        if (cancelled) return;
-        if (!res.ok) { setNotFound(true); return; }
-        setData(await res.json());
-      } catch {
-        if (!cancelled) setNotFound(true);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [resultId]);
 
   const queueHref = queueKey ? `/dashboard/analysis/review?definition=${encodeURIComponent(queueKey)}` : '/dashboard/analysis/review';
 
@@ -61,16 +45,18 @@ export default function AnalysisResultDetailPage() {
   const goNext = useCallback(async (skipped: string[]) => {
     if (!queueKey || !resultId) return;
     const exclude = new Set([resultId, ...skipped]);
-    const qs = new URLSearchParams({
-      definitionKey: queueKey,
-      needsReview: 'true',
-      sort: 'confidence',
-      limit: String(Math.min(200, 2 + skipped.length)),
-    });
-    const res = await fetch(`/api/analysis/results?${qs.toString()}`, { cache: 'no-store' });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || 'Could not load the next item');
-    const next = ((body.results ?? []) as AnalysisResultRowView[]).find((r) => !exclude.has(r.id));
+    let page;
+    try {
+      page = await loadResults({
+        definitionKey: queueKey,
+        needsReview: true,
+        sort: 'confidence',
+        limit: Math.min(200, 2 + skipped.length),
+      });
+    } catch (err) {
+      throw new Error(errorMessage(err, 'Could not load the next item'));
+    }
+    const next = page.results.find((r) => !exclude.has(r.id));
     if (!next) {
       notifications.show({ title: 'Queue is empty', message: 'Nothing left to review.', color: 'teal' });
       router.push(queueHref);
@@ -79,27 +65,19 @@ export default function AnalysisResultDetailPage() {
     const nextQs = new URLSearchParams({ queue: queueKey });
     if (skipped.length > 0) nextQs.set('skipped', skipped.join(','));
     router.push(`/dashboard/analysis/results/${next.id}?${nextQs.toString()}`);
-  }, [queueKey, resultId, router, queueHref]);
+  }, [queueKey, resultId, router, queueHref, loadResults]);
 
   const onSave = async (values: Record<string, string | boolean>) => {
     if (!resultId) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/analysis/results/${encodeURIComponent(resultId)}/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || 'Could not save the review');
+      await reviewResult.mutateAsync({ id: resultId, values });
       notifications.show({ title: 'Review saved', message: 'Your answers were recorded.', color: 'teal' });
       if (queueKey) {
         await goNext(parseSkipped(skippedParam));
-      } else if (body.result) {
-        setData((prev) => (prev ? { ...prev, result: body.result } : prev));
       }
     } catch (err) {
-      notifications.show({ title: 'Save failed', message: err instanceof Error ? err.message : 'Save failed', color: 'red' });
+      notifications.show({ title: 'Save failed', message: errorMessage(err, 'Save failed'), color: 'red' });
     } finally {
       setSaving(false);
     }
@@ -110,7 +88,7 @@ export default function AnalysisResultDetailPage() {
     try {
       await goNext([...parseSkipped(skippedParam), resultId]);
     } catch (err) {
-      notifications.show({ title: 'Skip failed', message: err instanceof Error ? err.message : 'Skip failed', color: 'red' });
+      notifications.show({ title: 'Skip failed', message: errorMessage(err, 'Skip failed'), color: 'red' });
     }
   };
 

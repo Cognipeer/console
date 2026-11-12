@@ -8,7 +8,7 @@ import { useTranslations } from '@/lib/i18n';
 import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import CreatePiiPolicyModal from './CreatePiiPolicyModal';
 import { piiPolicyState, type PiiPolicyOption, type PiiPolicyOptions } from './piiProtectionForm';
-import { usePiiPolicyOptions } from './usePiiPolicyOptions';
+import { usePiiPolicyOptions } from '@/lib/api/queries/pii';
 
 export interface PiiProtectionFieldProps {
   /** The chosen PII policy key; `null` is off. */

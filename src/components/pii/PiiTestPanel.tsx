@@ -15,6 +15,8 @@ import {
 import { notifications } from '@mantine/notifications';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { usePiiScan } from '@/lib/api/queries/pii';
 import type { PiiAction, PiiEngine } from '@/lib/services/pii/types';
 import type { PiiCustomPatternForm } from './PiiPolicyEditor';
 
@@ -72,17 +74,17 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
   const [ranThreshold, setRanThreshold] = useState(0);
   const [activeAction, setActiveAction] = useState<'detect' | 'redact' | 'mask' | 'tokenize' | null>(null);
   const [running, setRunning] = useState(false);
+  const scan = usePiiScan<ScanResult>();
 
   const run = async (action: 'detect' | 'redact' | 'mask' | 'tokenize') => {
     if (!text.trim()) return;
     setRunning(true);
     setActiveAction(action);
     try {
-      const post = async (op: string, threshold: number) => {
-        const res = await fetch(`/api/pii/${op}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+      const post = (op: string, threshold: number) =>
+        scan.mutateAsync({
+          op,
+          body: {
             text,
             categories,
             customPatterns,
@@ -90,14 +92,8 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
             locale,
             engine,
             detection: { minConfidence: threshold, contextBoost },
-          }),
+          },
         });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error ?? 'Failed');
-        }
-        return (await res.json()) as ScanResult;
-      };
       const [data, unfiltered] = await Promise.all([
         post(action, minConfidence),
         minConfidence > 0 ? post('detect', 0) : Promise.resolve(null),
@@ -109,7 +105,7 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
     } catch (err) {
       notifications.show({
         title: 'PII',
-        message: err instanceof Error ? err.message : '',
+        message: errorMessage(err, ''),
         color: 'red',
       });
     } finally {

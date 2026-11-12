@@ -2,7 +2,7 @@
 
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -21,6 +21,10 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateMcpModal from '@/components/mcp/CreateMcpModal';
 import type { McpServerView } from '@/lib/services/mcp';
+import { errorMessage } from '@/lib/api/client';
+import { useDeleteMcpServer, useMcpServerList, useUpdateMcpServer } from '@/lib/api/queries/mcp';
+
+const NO_SERVERS: McpServerView[] = [];
 
 const AUTH_LABELS: Record<string, string> = {
   none: 'None',
@@ -38,8 +42,11 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 export default function McpServersPage() {
-  const [servers, setServers] = useState<McpServerView[]>([]);
-  const [loading, setLoading] = useState(true);
+  const serversQuery = useMcpServerList();
+  const servers = serversQuery.data ?? NO_SERVERS;
+  const loading = serversQuery.isPending;
+  const updateServer = useUpdateMcpServer();
+  const deleteServer = useDeleteMcpServer();
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -48,43 +55,22 @@ export default function McpServersPage() {
   const deleteResource = useDeleteResource();
 
   const loadServers = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/mcp', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setServers(data.servers ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load MCP servers', err);
-    } finally {
-      setLoading(false);
-    }
+    await serversQuery.refetch();
   };
-
-  useEffect(() => {
-    void loadServers();
-  }, []);
 
   const handleToggleStatus = async (s: McpServerView) => {
     try {
       const newStatus = s.status === 'active' ? 'disabled' : 'active';
-      const res = await fetch(`/api/mcp/${s.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (!res.ok) throw new Error('Failed to update server');
+      await updateServer.mutateAsync({ id: s.id, status: newStatus });
       notifications.show({
         title: newStatus === 'active' ? 'Server enabled' : 'Server disabled',
         message: `"${s.name}" has been ${newStatus === 'active' ? 'enabled' : 'disabled'}`,
         color: newStatus === 'active' ? 'teal' : 'orange',
       });
-      await loadServers();
     } catch (err) {
       notifications.show({
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to update',
+        message: errorMessage(err, 'Failed to update'),
         color: 'red',
       });
     }
@@ -97,8 +83,7 @@ export default function McpServersPage() {
       type: 'mcp-server',
       id: target.id,
       action: async () => {
-        const res = await fetch(`/api/mcp/${target.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to delete');
+        await deleteServer.mutateAsync(target.id);
       },
     });
     if (!deleted) return;
@@ -107,7 +92,6 @@ export default function McpServersPage() {
       message: `"${target.name}" was deleted`,
       color: 'red',
     });
-    await loadServers();
   };
 
   const filtered = useMemo(() => {
@@ -337,7 +321,6 @@ export default function McpServersPage() {
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         onCreated={(s) => {
-          void loadServers();
           router.push(`/dashboard/mcp/${s.id}`);
         }}
       />

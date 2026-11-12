@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -20,21 +20,13 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreatePiiPolicyModal from '@/components/pii/CreatePiiPolicyModal';
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-
-interface PiiPolicyView {
-  id: string;
-  tenantId: string;
-  projectId?: string;
-  key: string;
-  name: string;
-  description?: string;
-  defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
-  categories: Record<string, boolean>;
-  languages?: string[];
-  enabled: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-}
+import { errorMessage } from '@/lib/api/client';
+import {
+  useDeletePiiPolicy,
+  usePiiPolicyList,
+  useTogglePiiPolicy,
+  type PiiPolicyView,
+} from '@/lib/api/queries/pii';
 
 const ACTION_BADGE: Record<string, string> = {
   detect: 'ds-badge-info',
@@ -52,56 +44,33 @@ export default function PiiPoliciesPage() {
   const tAct = useTranslations('pii.actions');
   const tLang = useTranslations('pii.languages');
 
-  const [policies, setPolicies] = useState<PiiPolicyView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const policiesQuery = usePiiPolicyList({ loadErrorTitle: t('notifications.loadError') });
+  const toggleMutation = useTogglePiiPolicy();
+  const deleteMutation = useDeletePiiPolicy();
+  const policies = useMemo<PiiPolicyView[]>(() => policiesQuery.data ?? [], [policiesQuery.data]);
+  // Only the first load shows the table's loading state; a refresh keeps the rows.
+  const loading = policiesQuery.isPending;
+  const refreshing = policiesQuery.isFetching;
   const [createOpen, setCreateOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [enabledFilter, setEnabledFilter] = useState('all');
 
   const loadPolicies = async () => {
-    setRefreshing(true);
-    try {
-      const res = await fetch('/api/pii/policies', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setPolicies(data.policies ?? []);
-      } else {
-        notifications.show({ title: t('notifications.loadError'), message: '', color: 'red' });
-      }
-    } catch (err) {
-      console.error('Failed to load PII policies', err);
-      notifications.show({
-        title: t('notifications.loadError'),
-        message: err instanceof Error ? err.message : '',
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    await policiesQuery.refetch();
   };
-
-  useEffect(() => { void loadPolicies(); }, []);
 
   const handleToggleEnabled = async (p: PiiPolicyView) => {
     try {
-      const res = await fetch(`/api/pii/policies/${p.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !p.enabled }),
-      });
-      if (!res.ok) throw new Error('Failed to update');
+      await toggleMutation.mutateAsync({ id: p.id, enabled: !p.enabled });
       notifications.show({
         title: t('notifications.updated'),
         message: p.name,
         color: p.enabled ? 'orange' : 'teal',
       });
-      await loadPolicies();
     } catch (err) {
       notifications.show({
         title: t('notifications.saveError'),
-        message: err instanceof Error ? err.message : '',
+        message: errorMessage(err, ''),
         color: 'red',
       });
     }
@@ -114,14 +83,12 @@ export default function PiiPoliciesPage() {
       type: 'pii-policy',
       id: target.id,
       action: async () => {
-        const res = await fetch(`/api/pii/policies/${target.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to delete');
+        await deleteMutation.mutateAsync(target.id);
         notifications.show({
           title: t('notifications.deleted'),
           message: target.name,
           color: 'red',
         });
-        await loadPolicies();
       },
     });
 
@@ -306,7 +273,6 @@ export default function PiiPoliciesPage() {
         opened={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={(p) => {
-          void loadPolicies();
           router.push(`/dashboard/pii/${p.id}`);
         }}
       />

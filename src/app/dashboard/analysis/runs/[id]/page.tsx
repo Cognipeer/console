@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button, Group, Loader, Paper, Progress, Stack, Text } from '@mantine/core';
@@ -9,7 +8,8 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
-import type { AnalysisDecisionAggregateView, AnalysisRunItemView, AnalysisRunView } from '@/components/analysis/types';
+import type { AnalysisDecisionAggregateView, AnalysisRunItemView } from '@/components/analysis/types';
+import { useAnalysisRun } from '@/lib/api/queries/analysis';
 import { downloadFile, fieldDistributions, itemsToCsv } from '@/components/analysis/analysisReport';
 import { decisionBadgeClass, formatAnswer, pct as pctOf } from '@/components/analysis/decisionUi';
 
@@ -78,40 +78,11 @@ export default function AnalysisRunDetailPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const runId = params?.id;
-  const [run, setRun] = useState<AnalysisRunView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
-
-  useEffect(() => {
-    if (!runId) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/analysis/runs/${runId}`, { cache: 'no-store' });
-        if (res.status === 404) { if (!cancelled) setNotFound(true); return; }
-        const data = await res.json();
-        const r = data.run ?? null;
-        if (cancelled) return;
-        setRun(r);
-        // Keep polling while the run is still being processed in the background.
-        if (r && (r.status === 'pending' || r.status === 'running')) {
-          timer = setTimeout(() => void poll(), 2000);
-        }
-      } catch {
-        if (!cancelled) setNotFound(true);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [runId]);
+  // Rereads every 2 s while the run is pending or running (see `useAnalysisRun`).
+  const runQuery = useAnalysisRun(runId);
+  const run = runQuery.data ?? null;
+  const loading = runQuery.isPending;
+  const notFound = runQuery.isError;
 
   const itemColumns: DataGridColumn<AnalysisRunItemView>[] = [
     { key: 'conv', label: 'Conversation', render: (i) => <span className="ds-mono" style={{ fontSize: 12 }}>{i.conversationKey}</span> },

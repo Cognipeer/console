@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Button,
@@ -30,22 +30,19 @@ import PiiPolicyEditor, { type PiiCustomPatternForm } from '@/components/pii/Pii
 import PiiTestPanel from '@/components/pii/PiiTestPanel';
 import PiiApiUsage from '@/components/pii/PiiApiUsage';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import {
+  useDeletePiiPolicy,
+  useLoadPiiCatalog,
+  usePiiCatalog,
+  usePiiPolicy,
+  useTogglePiiPolicy,
+  useUpdatePiiPolicy,
+} from '@/lib/api/queries/pii';
 import type { CategoryCatalogEntry, PiiAction, PiiEngine } from '@/lib/services/pii/types';
 
-interface PolicyView {
-  id: string;
-  key: string;
-  name: string;
-  description?: string;
-  defaultAction: PiiAction;
-  /** Absent on any policy created before this field existed = 'regex'. */
-  engine?: PiiEngine;
-  categories: Record<string, boolean>;
-  customPatterns?: PiiCustomPatternForm[];
-  languages?: string[];
-  enabled: boolean;
-  detection?: { minConfidence?: number; contextBoost?: boolean };
-}
+const NO_CATALOG: CategoryCatalogEntry[] = [];
+const NO_DEFAULTS: Record<string, boolean> = {};
 
 export default function PiiPolicyDetailPage() {
   const params = useParams<{ id: string }>()!;
@@ -57,11 +54,15 @@ export default function PiiPolicyDetailPage() {
   const tEngine = useTranslations('pii.engines');
   const locale = useLocale();
 
-  const [policy, setPolicy] = useState<PolicyView | null>(null);
-  const [catalog, setCatalog] = useState<CategoryCatalogEntry[]>([]);
-  const [defaultCategories, setDefaultCategories] = useState<Record<string, boolean>>({});
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const policyQuery = usePiiPolicy(params.id);
+  const policy = policyQuery.data ?? null;
+  /** The policy the form below was last filled from: the form is ready once it matches the loaded policy. */
+  const [filledFrom, setFilledFrom] = useState<typeof policy>(null);
+  const ready = policy !== null && filledFrom === policy;
+  const updatePolicy = useUpdatePiiPolicy();
+  const togglePolicy = useTogglePiiPolicy();
+  const deletePolicy = useDeletePiiPolicy();
+  const loadCatalog = useLoadPiiCatalog();
   const [activeTab, setActiveTab] = useState<string>('config');
 
   // editable state
@@ -76,59 +77,57 @@ export default function PiiPolicyDetailPage() {
   const [minConfidence, setMinConfidence] = useState(0);
   const [contextBoost, setContextBoost] = useState(true);
 
-  /** Fetch `forEngine`'s catalog in the current locale; returns its defaults, or null on a non-OK response. */
-  const loadCatalog = async (forEngine: PiiEngine): Promise<Record<string, boolean> | null> => {
-    const res = await fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}&engine=${forEngine}`, { cache: 'no-store' });
-    if (!res.ok) return null;
-    const data = await res.json();
-    setCatalog(data.categories ?? []);
-    setDefaultCategories(data.defaults ?? {});
-    return data.defaults ?? {};
-  };
+  const catalogQuery = usePiiCatalog(locale, ready ? engine : undefined);
+  const catalog = useMemo(() => catalogQuery.data?.categories ?? NO_CATALOG, [catalogQuery.data]);
+  const defaultCategories = catalogQuery.data?.defaults ?? NO_DEFAULTS;
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      const polRes = await fetch(`/api/pii/policies/${params.id}`, { cache: 'no-store' });
-      if (!polRes.ok) {
-        if (polRes.status === 404) {
-          router.replace('/dashboard/pii');
-          return;
-        }
-        throw new Error('Failed to load policy');
-      }
-      const polData = await polRes.json();
-      const p: PolicyView = polData.policy;
-      const loadedEngine = p.engine ?? 'regex';
-      setPolicy(p);
-      setName(p.name);
-      setDescription(p.description ?? '');
-      setEnabled(p.enabled);
-      setDefaultAction(p.defaultAction);
-      setEngine(loadedEngine);
-      setCategories(p.categories ?? {});
-      setCustomPatterns(
-        (p.customPatterns ?? []).map((cp) => ({
-          ...cp,
-          id: cp.id ?? Math.random().toString(36).slice(2),
-        })),
-      );
-      setLanguages(p.languages ?? []);
-      setMinConfidence(p.detection?.minConfidence ?? 0);
-      setContextBoost(p.detection?.contextBoost !== false);
-      await loadCatalog(loadedEngine);
-    } catch (err) {
-      notifications.show({
-        title: t('notifications.loadError'),
-        message: err instanceof Error ? err.message : '',
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
+  // The form starts from the policy the server has now, and starts over whenever the policy is read again with
+  // different content (after a save).
+  useEffect(() => {
+    if (!policy) return;
+    setName(policy.name);
+    setDescription(policy.description ?? '');
+    setEnabled(policy.enabled);
+    setDefaultAction(policy.defaultAction);
+    setEngine(policy.engine ?? 'regex');
+    setCategories(policy.categories ?? {});
+    setCustomPatterns(
+      (policy.customPatterns ?? []).map((cp) => ({
+        ...cp,
+        id: cp.id ?? Math.random().toString(36).slice(2),
+      })),
+    );
+    setLanguages(policy.languages ?? []);
+    setMinConfidence(policy.detection?.minConfidence ?? 0);
+    setContextBoost(policy.detection?.contextBoost !== false);
+    setFilledFrom(policy);
+  }, [policy]);
+
+  const loadError = policyQuery.error;
+  useEffect(() => {
+    if (!loadError) return;
+    if (isApiError(loadError) && loadError.status === 404) {
+      router.replace('/dashboard/pii');
+      return;
     }
-  };
+    notifications.show({
+      title: t('notifications.loadError'),
+      message: errorMessage(loadError, ''),
+      color: 'red',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadError]);
 
-  useEffect(() => { void load(); }, [params.id, locale]); // eslint-disable-line react-hooks/exhaustive-deps
+  const catalogError = catalogQuery.error;
+  useEffect(() => {
+    if (!catalogError) return;
+    notifications.show({
+      title: t('notifications.loadError'),
+      message: errorMessage(catalogError, ''),
+      color: 'red',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogError]);
 
   /**
    * Switching engines is a full reset of category selection, not a merge —
@@ -141,15 +140,10 @@ export default function PiiPolicyDetailPage() {
   const handleEngineChange = async (next: PiiEngine) => {
     setEngine(next);
     try {
-      const defaults = await loadCatalog(next);
-      if (!defaults) throw new Error('Failed to load catalog');
+      const { defaults } = await loadCatalog(locale, next);
       setCategories(defaults);
-    } catch (err) {
-      notifications.show({
-        title: t('notifications.loadError'),
-        message: err instanceof Error ? err.message : '',
-        color: 'red',
-      });
+    } catch {
+      // The catalog query of the new engine reports the failure (see `catalogError`).
     }
   };
 
@@ -167,45 +161,34 @@ export default function PiiPolicyDetailPage() {
       }
       return changed ? next : prev;
     });
-  }, [catalog, defaultCategories]);
+  }, [catalog, defaultCategories, filledFrom]);
 
   const save = async () => {
     if (!policy) return;
-    setSaving(true);
     try {
-      const res = await fetch(`/api/pii/policies/${policy.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          description,
-          enabled,
-          defaultAction,
-          engine,
-          categories,
-          customPatterns,
-          languages,
-          detection: { minConfidence, contextBoost },
-        }),
+      await updatePolicy.mutateAsync({
+        id: policy.id,
+        name,
+        description,
+        enabled,
+        defaultAction,
+        engine,
+        categories,
+        customPatterns,
+        languages,
+        detection: { minConfidence, contextBoost },
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? 'Failed');
-      }
       notifications.show({
         title: t('notifications.updated'),
         message: name,
         color: 'teal',
       });
-      await load();
     } catch (err) {
       notifications.show({
         title: t('notifications.saveError'),
-        message: err instanceof Error ? err.message : '',
+        message: errorMessage(err, ''),
         color: 'red',
       });
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -217,8 +200,7 @@ export default function PiiPolicyDetailPage() {
       type: 'pii-policy',
       id: policy.id,
       action: async () => {
-        const res = await fetch(`/api/pii/policies/${policy.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed');
+        await deletePolicy.mutateAsync(policy.id);
         notifications.show({ title: t('notifications.deleted'), message: name, color: 'red' });
         router.push('/dashboard/pii');
       },
@@ -229,17 +211,13 @@ export default function PiiPolicyDetailPage() {
     if (!policy) return;
     setEnabled(!enabled);
     try {
-      await fetch(`/api/pii/policies/${policy.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !enabled }),
-      });
+      await togglePolicy.mutateAsync({ id: policy.id, enabled: !enabled });
     } catch {
       setEnabled(enabled);
     }
   };
 
-  if (loading || !policy) {
+  if (!policy || !ready || (catalogQuery.isPending && !catalogQuery.isError)) {
     return (
       <PageContainer>
         <Center mih={240}><Loader /></Center>
@@ -372,8 +350,8 @@ export default function PiiPolicyDetailPage() {
           />
 
           <Group justify="flex-end">
-            <Button color="teal" onClick={() => void save()} loading={saving}>
-              {saving ? t('detail.actions.saving') : t('detail.actions.save')}
+            <Button color="teal" onClick={() => void save()} loading={updatePolicy.isPending}>
+              {updatePolicy.isPending ? t('detail.actions.saving') : t('detail.actions.save')}
             </Button>
           </Group>
 

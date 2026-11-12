@@ -12,6 +12,8 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import { errorMessage } from '@/lib/api/client';
+import { useIngestAnalysisConversations } from '@/lib/api/queries/analysis';
 import type { AnalysisConversationView } from './types';
 import {
   downloadConversationTemplate,
@@ -24,12 +26,14 @@ import {
 interface IngestConversationsModalProps {
   opened: boolean;
   onClose: () => void;
-  onIngested: (conversations: AnalysisConversationView[]) => void;
+  /** The conversations are added to the cached lists by the ingest call; this is for a host that wants to know. */
+  onIngested?: (conversations: AnalysisConversationView[]) => void;
 }
 
 type InputMode = 'file' | 'json';
 
 export default function IngestConversationsModal({ opened, onClose, onIngested }: IngestConversationsModalProps) {
+  const ingest = useIngestAnalysisConversations();
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<InputMode>('file');
   const [jsonText, setJsonText] = useState('');
@@ -75,21 +79,12 @@ export default function IngestConversationsModal({ opened, onClose, onIngested }
     if (!valid) return;
     setLoading(true);
     try {
-      const res = await fetch('/api/analysis/conversations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversations, tags: tags.length > 0 ? tags : undefined }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to ingest conversations');
-      }
-      const data = await res.json();
-      notifications.show({ title: 'Conversations ingested', message: `${data.conversations.length} added`, color: 'teal' });
-      onIngested(data.conversations);
+      const added = await ingest.mutateAsync({ conversations, tags: tags.length > 0 ? tags : undefined });
+      notifications.show({ title: 'Conversations ingested', message: `${added.length} added`, color: 'teal' });
+      onIngested?.(added);
       onClose();
     } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to ingest', color: 'red' });
+      notifications.show({ title: 'Error', message: errorMessage(err, 'Failed to ingest'), color: 'red' });
     } finally {
       setLoading(false);
     }

@@ -1,14 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Button, Code, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { isApiError } from '@/lib/api/client';
 import { IconArrowLeft, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import type { AnalysisConversationView } from '@/components/analysis/types';
+import { useAnalysisConversation, useDeleteAnalysisConversation } from '@/lib/api/queries/analysis';
 import { LinkifiedText } from '@/components/common/ui/ExternalLinks';
 
 function fmtDate(value?: string): string {
@@ -23,22 +23,11 @@ export default function AnalysisConversationDetailPage() {
   const tq = useTranslations('common.confirm.qos');
   const params = useParams<{ id: string }>();
   const id = params?.id;
-  const [convo, setConvo] = useState<AnalysisConversationView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
-
-  useEffect(() => {
-    if (!id) return;
-    (async () => {
-      try {
-        const res = await fetch(`/api/analysis/conversations/${id}`, { cache: 'no-store' });
-        if (res.status === 404) { setNotFound(true); return; }
-        if (res.ok) setConvo((await res.json()).conversation ?? null);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [id]);
+  const convoQuery = useAnalysisConversation(id);
+  const deleteConversation = useDeleteAnalysisConversation();
+  const convo = convoQuery.data ?? null;
+  const loading = convoQuery.isPending;
+  const notFound = isApiError(convoQuery.error) && convoQuery.error.status === 404;
 
   const onDelete = async () => {
     if (!convo) return;
@@ -46,8 +35,11 @@ export default function AnalysisConversationDetailPage() {
       noun: tq('nouns.conversation'),
       name: convo.name || convo.key,
       action: async () => {
-        const res = await fetch(`/api/analysis/conversations/${convo.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(tq('deleteFailed'));
+        try {
+          await deleteConversation.mutateAsync(convo.id);
+        } catch {
+          throw new Error(tq('deleteFailed'));
+        }
       },
     });
     if (!done) return;
