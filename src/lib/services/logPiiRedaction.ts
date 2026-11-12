@@ -43,20 +43,54 @@ function needsNoScan(str: string): boolean {
  * Bounded LRU: a hit moves the entry to the end, the first key is the least recently used.
  */
 const MEMO_MAX_ENTRIES = 2000;
+/** Upper bound on the characters the memo holds (redacted values and inline keys), about 16 MB of UTF-16. */
+const MEMO_MAX_CHARS = 8_000_000;
+/** A redacted value larger than this is not kept: one long document must not push out the rest of the history. */
+const MEMO_MAX_VALUE_CHARS = 500_000;
 /** Strings shorter than this are their own key; longer ones are keyed by digest so the map does not hold a copy. */
 const MEMO_INLINE_KEY_CHARS = 256;
 /** The value of a string the detector left as it was: nothing to store beside the key. */
 const UNCHANGED = null;
 const memo = new Map<string, string | typeof UNCHANGED>();
+let memoChars = 0;
 
 /** The prefixes keep the two kinds of key apart: no short string can spell a digest key. */
 function memoKeyOf(str: string): string {
-  return str.length < MEMO_INLINE_KEY_CHARS ? `s:${str}` : `h:${createHash('sha1').update(str).digest('hex')}`;
+  return str.length < MEMO_INLINE_KEY_CHARS ? `s:${str}` : `h:${createHash('sha256').update(str).digest('hex')}`;
+}
+
+function memoEntryChars(key: string, value: string | typeof UNCHANGED): number {
+  return key.length + (value === UNCHANGED ? 0 : value.length);
+}
+
+function memoDelete(key: string): void {
+  const value = memo.get(key);
+  if (value === undefined) return;
+  memo.delete(key);
+  memoChars -= memoEntryChars(key, value);
+}
+
+function memoStore(key: string, value: string | typeof UNCHANGED): void {
+  if (value !== UNCHANGED && value.length > MEMO_MAX_VALUE_CHARS) return;
+  memoDelete(key);
+  memo.set(key, value);
+  memoChars += memoEntryChars(key, value);
+  while (memo.size > MEMO_MAX_ENTRIES || memoChars > MEMO_MAX_CHARS) {
+    const oldest = memo.keys().next().value;
+    if (oldest === undefined) break;
+    memoDelete(oldest);
+  }
 }
 
 /** Test only. */
 export function clearLogPiiMemoForTests(): void {
   memo.clear();
+  memoChars = 0;
+}
+
+/** Test only. */
+export function logPiiMemoStatsForTests(): { entries: number; chars: number } {
+  return { entries: memo.size, chars: memoChars };
 }
 
 async function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): Promise<unknown> {
@@ -101,17 +135,14 @@ export async function redactPiiFromLogString(str: string | undefined): Promise<s
   const memoKey = memoKeyOf(str);
   const known = memo.get(memoKey);
   if (known !== undefined) {
+    // Re-inserting moves the key to the end: the Map's first key is the least recently used.
     memo.delete(memoKey);
     memo.set(memoKey, known);
     return known === UNCHANGED ? str : known;
   }
   try {
     const redacted = (await redactPii({ text: str })).outputText;
-    memo.set(memoKey, redacted === str ? UNCHANGED : redacted);
-    if (memo.size > MEMO_MAX_ENTRIES) {
-      const oldest = memo.keys().next().value;
-      if (oldest !== undefined) memo.delete(oldest);
-    }
+    memoStore(memoKey, redacted === str ? UNCHANGED : redacted);
     return redacted;
   } catch {
     // A detector failure must never block or corrupt the write path --

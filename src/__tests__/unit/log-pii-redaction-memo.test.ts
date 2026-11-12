@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hoisted = vi.hoisted(() => ({ calls: 0, fail: false }));
+const hoisted = vi.hoisted(() => ({ calls: 0, fail: false, cheap: false }));
 
 vi.mock('@/lib/services/pii/piiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/pii/piiService')>();
@@ -16,6 +16,8 @@ vi.mock('@/lib/services/pii/piiService', async (importOriginal) => {
     redactPii: async (input: Parameters<typeof actual.redactPii>[0]) => {
       hoisted.calls += 1;
       if (hoisted.fail) throw new Error('detector down');
+      // A stand-in answer for the size tests, so they do not run the real detector over megabytes of text.
+      if (hoisted.cheap) return { outputText: `[R]${input.text}` } as Awaited<ReturnType<typeof actual.redactPii>>;
       return actual.redactPii(input);
     },
   };
@@ -24,6 +26,7 @@ vi.mock('@/lib/services/pii/piiService', async (importOriginal) => {
 import { redactPii } from '@/lib/services/pii/piiService';
 import {
   clearLogPiiMemoForTests,
+  logPiiMemoStatsForTests,
   redactPiiFromLogPayload,
   redactPiiFromLogString,
 } from '@/lib/services/logPiiRedaction';
@@ -50,6 +53,7 @@ beforeEach(() => {
   clearLogPiiMemoForTests();
   hoisted.calls = 0;
   hoisted.fail = false;
+  hoisted.cheap = false;
 });
 
 /** The detector's own answer: what the pass stored before the memo existed. */
@@ -131,7 +135,7 @@ describe('memo parity', () => {
   it('keeps a short string from spelling the key of a long one', async () => {
     const long = `${LONG_FILLER} write to long.tail@example.com`;
     await redactPiiFromLogString(long);
-    const lookalike = `h:${createHash('sha1').update(long).digest('hex')}`;
+    const lookalike = `h:${createHash('sha256').update(long).digest('hex')}`;
     expect(await redactPiiFromLogString(lookalike)).toBe(await detectorAnswer(lookalike));
   });
 
@@ -155,6 +159,41 @@ describe('memo parity', () => {
     expect(hoisted.calls).toBe(0);
     await redactPiiFromLogString('filler number 0 for the memo bound');
     expect(hoisted.calls).toBe(1);
+  });
+});
+
+describe('memo size', () => {
+  it('holds at most 8M characters: large answers push out the oldest ones', async () => {
+    hoisted.cheap = true;
+    const texts = Array.from({ length: 20 }, (_, i) => `${i}:`.padEnd(450_000, 'x'));
+    for (const text of texts) await redactPiiFromLogString(text);
+    const stats = logPiiMemoStatsForTests();
+    expect(stats.chars).toBeLessThanOrEqual(8_000_000);
+    expect(stats.entries).toBeLessThan(texts.length);
+
+    hoisted.calls = 0;
+    await redactPiiFromLogString(texts[texts.length - 1]);
+    expect(hoisted.calls).toBe(0); // the newest is still held
+    await redactPiiFromLogString(texts[0]);
+    expect(hoisted.calls).toBe(1); // the oldest was pushed out
+  });
+
+  it('does not keep an answer longer than 500K characters', async () => {
+    hoisted.cheap = true;
+    const text = 'y'.repeat(600_000);
+    expect(await redactPiiFromLogString(text)).toBe(`[R]${text}`);
+    expect(await redactPiiFromLogString(text)).toBe(`[R]${text}`);
+    expect(hoisted.calls).toBe(2);
+    expect(logPiiMemoStatsForTests()).toEqual({ entries: 0, chars: 0 });
+  });
+
+  it('keeps its character count in step with what it holds across renewals and evictions', async () => {
+    for (let i = 0; i < 2010; i += 1) await redactPiiFromLogString(`entry ${i} mail jane${i}@example.com`);
+    await redactPiiFromLogString('entry 2005 mail jane2005@example.com');
+    const stats = logPiiMemoStatsForTests();
+    expect(stats.entries).toBe(2000);
+    clearLogPiiMemoForTests();
+    expect(logPiiMemoStatsForTests()).toEqual({ entries: 0, chars: 0 });
   });
 });
 
