@@ -108,8 +108,8 @@ describeForEachProvider('Resource registry listResources', (getDb) => {
       status: 'active', endpointSlug: `mcp-${slug}`, createdBy: by,
     } as never);
     await db.createGuardrail({
-      tenantId, key: 'guard-wide', name: 'Wide guardrail', type: 'custom', target: 'input', action: 'block',
-      enabled: true, customPrompt: 'NEVER-EXPOSE', createdBy: by,
+      tenantId, key: 'guard-wide', name: 'Wide guardrail', type: 'preset', target: 'input', action: 'block',
+      enabled: true, metadata: { secret: 'NEVER-EXPOSE' }, createdBy: by,
     });
   });
 

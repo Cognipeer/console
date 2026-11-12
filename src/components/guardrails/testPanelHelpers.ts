@@ -3,9 +3,9 @@
  *
  * ── WHAT THIS FILE MAY IMPORT ─────────────────────────────────────────────
  * `hooks/contract` only — the leaf of the hook plane (type-only imports plus
- * pure constants). `hooks/engine`, `hooks/streamGate` and `hooks/legacy` all
- * reach the `@/lib/database` barrel, which constructs providers the moment it
- * loads, so none of them can be pulled into a client bundle. Where a rule
+ * pure constants). `hooks/engine` and `hooks/streamGate` reach the
+ * `@/lib/database` barrel, which constructs providers the moment it loads, so
+ * neither can be pulled into a client bundle. Where a rule
  * below MIRRORS one of those files it says so and names the source, because a
  * mirror that drifts is worse than no mirror at all: this panel exists to tell
  * an operator what the server did, and a wrong prediction is a lie with a
@@ -60,7 +60,7 @@ import type {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * `hookVerdictResponse()` in `server/api/plugins/guardrails.ts`, verbatim.
+ * `hookVerdictResponse()` in `server/api/guardrails/hookVerdict.ts`, verbatim.
  *
  * The finding element is `SafetyFinding` itself rather than a restatement of
  * it: the route serialises the verdict's findings untouched, so a second
@@ -89,7 +89,7 @@ export interface HookVerdictResponse {
   /** Rendered end-user message. Present ONLY on an enforcing block — see
    *  `blockMessageGap()`. */
   blocked_message: RenderedBlockMessage | null;
-  /** The legacy one-line summary. Kept because the route still sends it. */
+  /** The one-line summary. Kept because the route still sends it. */
   message: string | null;
   guardrail_key: string;
   guardrail_keys: string[];
@@ -723,8 +723,7 @@ export interface GuardrailShape {
   /**
    * `hooks.shortCircuit`, defaulted the way the engine defaults it (TRUE): a
    * blocking finding from a sync policy stops everything after it. False means
-   * every policy runs whatever the one above it found, which is the shape every
-   * lifted legacy config has.
+   * every policy runs whatever the one above it found.
    */
   stopsOnBlock: boolean;
   total: number;

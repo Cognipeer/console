@@ -1040,15 +1040,12 @@ export const TENANT_SCHEMA_SQL = `
     enabled INTEGER NOT NULL DEFAULT 1,
     failMode TEXT NOT NULL DEFAULT 'open',
     modelKey TEXT,
-    policy TEXT DEFAULT '{}',
-    customPrompt TEXT,
     metadata TEXT DEFAULT '{}',
-    -- v2 hook plane, ONE JSON blob (checks + bindings + stream + message +
-    -- visibility). '{}' is the "no authored config" sentinel: the row mapper
-    -- turns it into undefined so ensureHooks() re-derives from the legacy
-    -- columns above, which stay populated for older readers.
+    -- The guardrail's configuration, ONE JSON blob (policies + bindings +
+    -- stream + message + visibility). '{}' is the "no config" sentinel: the row
+    -- mapper turns it into undefined, which enforces nothing.
     hooks TEXT DEFAULT '{}',
-    -- 0 = derived (re-derive on every read); >= 1 = operator-authored.
+    -- The contract version the hooks blob was written under. Informational.
     hooksVersion INTEGER NOT NULL DEFAULT 0,
     mode TEXT NOT NULL DEFAULT 'enforce',
     createdBy TEXT NOT NULL,

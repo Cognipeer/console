@@ -412,9 +412,8 @@ export async function runSecretsPolicy(
       findings.push({
         type: LEGACY_FINDING_TYPE.secrets,
         category: SECRET_FINDING_CATEGORY,
-        // Unchanged from the legacy detector, including for the generic
-        // heuristic: lowering that one to 'medium' would quietly reduce the
-        // risk score of every guardrail lifted from an existing record.
+        // Including for the generic heuristic: lowering that one to 'medium'
+        // would quietly reduce the risk score of every guardrail running it.
         severity: 'high',
         message: `${match.label} detected`,
         action,
@@ -424,7 +423,7 @@ export async function runSecretsPolicy(
         // stored sample — so this is the shape the log layer expects, not a
         // leak. `critical` is deliberately NOT set: it would force 'block'
         // regardless of the configured action and silently escalate every
-        // guardrail lifted from a legacy record.
+        // guardrail running the secrets policy.
         value: match.value,
         family: 'secrets',
         hook: input.hook,

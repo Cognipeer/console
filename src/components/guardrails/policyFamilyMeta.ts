@@ -24,10 +24,9 @@
  * deliberately does not hold).
  *
  * ── WHAT THIS FILE MAY NOT IMPORT ────────────────────────────────────────────
- * `hooks/contract` only, exactly like `GuardrailHooksMatrix`. `hooks/legacy`
- * (which owns the authoritative `validateGuardrailHooks`) and `hooks/engine`
- * both import the `@/lib/database` barrel, which constructs providers on load;
- * pulling either into a client bundle is a build failure.
+ * `hooks/contract` only, exactly like `GuardrailHooksMatrix`. `hooks/engine`
+ * imports the `@/lib/database` barrel, which constructs providers on load;
+ * pulling it into a client bundle is a build failure.
  *
  * This module has no JSX and no React state, so it is importable from a plain
  * unit test.

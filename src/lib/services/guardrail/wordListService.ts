@@ -1,5 +1,5 @@
-import { getDatabase } from '@/lib/database';
-import type { IGuardrailWordList } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
+import type { DatabaseProvider, IGuardrailWordList } from '@/lib/database';
 import type { ResolvedWordList } from './wordFilter';
 import { generateUniqueSlugKey } from './keyGeneration';
 
@@ -125,12 +125,10 @@ export function serializeWordList(record: IGuardrailWordList, includeWords = tru
 // ── Key generation ────────────────────────────────────────────────────────
 
 async function generateUniqueListKey(
-  tenantDbName: string,
+  db: DatabaseProvider,
   projectId: string | undefined,
   desiredKey: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
   return generateUniqueSlugKey(desiredKey, 'word-list', async (candidate) => {
     if (await db.findGuardrailWordListByKey(candidate, projectId)) return true;
     // Same rule as guardrail keys: a project-scoped list must not shadow a
@@ -157,22 +155,21 @@ export async function createWordList(
     projectId?: string;
   },
 ): Promise<WordListView> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = await generateUniqueListKey(db, input.projectId, input.name);
+    const record = await db.createGuardrailWordList({
+      tenantId,
+      projectId: input.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      language: input.language,
+      words: input.words,
+      createdBy,
+    });
 
-  const key = await generateUniqueListKey(tenantDbName, input.projectId, input.name);
-  const record = await db.createGuardrailWordList({
-    tenantId,
-    projectId: input.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    language: input.language,
-    words: input.words,
-    createdBy,
+    return serializeWordList(record);
   });
-
-  return serializeWordList(record);
 }
 
 export async function updateWordList(
@@ -186,41 +183,40 @@ export async function updateWordList(
     words?: string[];
   },
 ): Promise<WordListView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-
-  const updated = await db.updateGuardrailWordList(id, { ...input, updatedBy });
-  if (!updated) return null;
-  invalidateWordListCache(tenantDbName, updated.key);
-  return serializeWordList(updated);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const updated = await db.updateGuardrailWordList(id, { ...input, updatedBy });
+    if (!updated) return null;
+    invalidateWordListCache(tenantDbName, updated.key);
+    return serializeWordList(updated);
+  });
 }
 
 export async function deleteWordList(tenantDbName: string, id: string): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailWordListById(id);
-  const deleted = await db.deleteGuardrailWordList(id);
-  if (deleted && record) invalidateWordListCache(tenantDbName, record.key);
-  return deleted;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findGuardrailWordListById(id);
+    const deleted = await db.deleteGuardrailWordList(id);
+    if (deleted && record) invalidateWordListCache(tenantDbName, record.key);
+    return deleted;
+  });
 }
 
 export async function getWordList(tenantDbName: string, id: string): Promise<WordListView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailWordListById(id);
-  if (!record) return null;
-  return serializeWordList(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findGuardrailWordListById(id);
+    if (!record) return null;
+    return serializeWordList(record);
+  });
 }
 
 export async function listWordLists(
   tenantDbName: string,
   filters?: { projectId?: string; search?: string },
 ): Promise<WordListView[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const records = await db.listGuardrailWordLists(filters);
-  // Summaries only — full word arrays are fetched per-list.
-  return records.map((record) => serializeWordList(record, false));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const records = await db.listGuardrailWordLists(filters);
+    // Summaries only — full word arrays are fetched per-list.
+    return records.map((record) => serializeWordList(record, false));
+  });
 }
 
 // ── Evaluation-time resolver (cached) ─────────────────────────────────────
@@ -251,29 +247,28 @@ export async function resolveCustomWordLists(
 ): Promise<ResolvedWordList[]> {
   if (!listKeys.length) return [];
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const now = Date.now();
 
-  const now = Date.now();
-
-  // Cache misses run concurrently so N referenced lists cost one round-trip of
-  // latency, not N. Each key's lookup keeps its project → tenant-wide fallback.
-  return Promise.all(
-    listKeys.map(async (listKey) => {
-      const cached = listCache.get(cacheKey(tenantDbName, listKey));
-      if (cached && cached.expiresAt > now) {
-        return { key: listKey, words: cached.words };
-      }
-      const record =
-        (await db.findGuardrailWordListByKey(listKey, projectId)) ??
-        // Fall back to the TENANT-WIDE list (`null`) so lists created without a
-        // project still resolve from project-scoped guardrails. Not
-        // `undefined`: that would answer with the first list of ANY project
-        // carrying this key, i.e. another project's words.
-        (projectId !== undefined ? await db.findGuardrailWordListByKey(listKey, null) : null);
-      const words = record?.words ?? [];
-      listCache.set(cacheKey(tenantDbName, listKey), { words, expiresAt: now + CACHE_TTL_MS });
-      return { key: listKey, words };
-    }),
-  );
+    // Cache misses run concurrently so N referenced lists cost one round-trip of
+    // latency, not N. Each key's lookup keeps its project → tenant-wide fallback.
+    return Promise.all(
+      listKeys.map(async (listKey) => {
+        const cached = listCache.get(cacheKey(tenantDbName, listKey));
+        if (cached && cached.expiresAt > now) {
+          return { key: listKey, words: cached.words };
+        }
+        const record =
+          (await db.findGuardrailWordListByKey(listKey, projectId)) ??
+          // Fall back to the TENANT-WIDE list (`null`) so lists created without a
+          // project still resolve from project-scoped guardrails. Not
+          // `undefined`: that would answer with the first list of ANY project
+          // carrying this key, i.e. another project's words.
+          (projectId !== undefined ? await db.findGuardrailWordListByKey(listKey, null) : null);
+        const words = record?.words ?? [];
+        listCache.set(cacheKey(tenantDbName, listKey), { words, expiresAt: now + CACHE_TTL_MS });
+        return { key: listKey, words };
+      }),
+    );
+  });
 }

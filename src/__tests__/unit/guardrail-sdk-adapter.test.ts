@@ -220,15 +220,13 @@ async function loadAdapter(options: AdapterOptions) {
     resolveGuardrail: vi.fn(async () => record),
   }));
 
-  vi.doMock('@/lib/services/guardrail/hooks/legacy', () => ({
-    ensureHooks: vi.fn(() => ({
-      hooksVersion: 1,
-      hooks: {
+  vi.doMock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+    ...(await orig<Record<string, unknown>>()),
+    readHooks: vi.fn(() => ({
         contractVersion: 2,
         policies: options.policies ?? [policy('secrets', ['tool.pre'])],
         bindings,
-      },
-    })),
+      })),
   }));
 
   const adapter = await import('@/lib/services/guardrail/sdkAdapter');
@@ -239,7 +237,7 @@ async function loadAdapter(options: AdapterOptions) {
 afterEach(() => {
   vi.doUnmock('@cognipeer/agent-sdk');
   vi.doUnmock('@/lib/services/guardrail/hooks/engine');
-  vi.doUnmock('@/lib/services/guardrail/hooks/legacy');
+  vi.doUnmock('@/lib/services/guardrail/hooks/contract');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

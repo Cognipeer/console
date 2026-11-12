@@ -46,9 +46,7 @@
  *
  * ── WHERE THE CONFIG COMES FROM ───────────────────────────────────────────
  * `GET /guardrails/:key/compiled`, fetched here rather than taken as a prop.
- * That endpoint has already run `ensureHooks`, so a LEGACY row (no `hooks`
- * column) arrives lifted and its `legacy:*` policies appear in the plan like any
- * other. It is also the SAVED config, which is the only one the server will
+ * That endpoint serves the SAVED config, which is the only one the server will
  * evaluate against — handing this panel the Config tab's unsaved draft would
  * make it describe a policy that does not exist yet.
  */
@@ -723,8 +721,6 @@ function PolicyBreakdown({
 interface CompiledConfig {
   hooks: GuardrailHooksConfig | null;
   mode: GuardrailMode;
-  /** 0 means the config was DERIVED from the legacy columns on read. */
-  hooksVersion: number;
   enabled: boolean;
 }
 
@@ -816,7 +812,7 @@ export default function GuardrailEvaluatePanel({
         if (!res.ok) throw new Error(`compiled policy unavailable (${res.status})`);
         return (await res.json()) as {
           hooks?: GuardrailHooksConfig;
-          guardrail?: { mode?: GuardrailMode | null; hooksVersion?: number; enabled?: boolean };
+          guardrail?: { mode?: GuardrailMode | null; enabled?: boolean };
         };
       })
       .then((data) => {
@@ -827,7 +823,6 @@ export default function GuardrailEvaluatePanel({
           // The same fold `toGuardrailMode` applies: a disabled record is
           // 'disabled' whatever its mode column says.
           mode: !enabled ? 'disabled' : (data.guardrail?.mode ?? 'enforce'),
-          hooksVersion: data.guardrail?.hooksVersion ?? 0,
           enabled,
         });
         setConfigError(null);
@@ -1145,17 +1140,6 @@ export default function GuardrailEvaluatePanel({
               <Badge variant="light" color={effectiveMode === 'enforce' ? 'teal' : 'orange'}>
                 mode: {effectiveMode}
               </Badge>
-              {compiled && compiled.hooksVersion === 0 && (
-                <Tooltip
-                  multiline
-                  w={280}
-                  label="This guardrail predates the hook plane. Its policies are lifted from the legacy columns on every read, so they appear below with legacy: ids."
-                >
-                  <Badge variant="light" color="blue">
-                    derived config
-                  </Badge>
-                </Tooltip>
-              )}
             </Group>
           </Group>
 

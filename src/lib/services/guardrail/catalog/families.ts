@@ -48,7 +48,7 @@
  *   · `components/guardrails/GuardrailHooksMatrix.tsx` — `defaultPolicyFor` is
  *     its own family switch, built before `defaults()` existed here and still
  *     hook-aware in a way `defaults()` is not. Compile error if you forget.
- *   · `hooks/legacy.ts` `validateGuardrailHooks` — its `switch (policy.family)`
+ *   · `hooks/validate.ts` `validateGuardrailHooks` — its `switch (policy.family)`
  *     has a hand-written arm per family, and a family with no arm FALLS THROUGH
  *     SILENTLY. A `required` field declared here is then enforced in the editor
  *     and nowhere on the server, so an incomplete policy saves. No compile
@@ -84,7 +84,7 @@
  * `services/guardrail/constants` — plus `families/secrets` for its pattern
  * TABLE, which is admitted under the same test the other three pass: it reaches
  * neither the database barrel nor React, importing `hooks/contract` and nothing
- * else. Never `hooks/legacy`, `hooks/engine` or `@/lib/database`. `icon` is a
+ * else. Never `hooks/engine` or `@/lib/database`. `icon` is a
  * NAME, not a component, so nothing here pulls React into the server or a plain
  * unit test.
  *
@@ -184,7 +184,7 @@ export interface PolicyFamilySpec<F extends PolicyFamily = PolicyFamily> {
   fields: readonly PolicyFieldSpec[];
   defaults: () => GuardrailPolicyConfigFor<F>;
   /** The card's one-line summary of a CONFIGURED policy. Must survive a partial
-   *  or legacy config, and must never echo a secret. */
+   *  config, and must never echo a secret. */
   summarise: (policy: GuardrailPolicyConfigFor<F>) => string;
   /**
    * Whether `failMode` is a real question here.
@@ -286,9 +286,8 @@ function defaultHooksFor(family: PolicyFamily): HookId[] {
 
 /**
  * The base every `defaults()` spreads. `{ timing: 'sync', onFail: 'block' }` —
- * the stored shape the enforcement control calls BLOCK — matching both the
- * legacy lift and what an operator adding a policy means by it: a policy that
- * only observes cannot stop anything, and nobody adds a guardrail policy hoping
+ * the stored shape the enforcement control calls BLOCK — matching what an
+ * operator adding a policy means by it: a policy that only observes cannot stop anything, and nobody adds a guardrail policy hoping
  * it will not.
  */
 function base<F extends PolicyFamily>(
@@ -378,7 +377,7 @@ const hostOf = (value: unknown): string => {
  * the field it belongs in — a validator that merely said "invalid" would leave
  * the operator with the same question they started with.
  *
- * A HINT, NOT A GATE. `validateGuardrailHooks` (hooks/legacy.ts) is the save-time
+ * A HINT, NOT A GATE. `validateGuardrailHooks` (hooks/validate.ts) is the save-time
  * authority and knows nothing about this, so a policy carrying a misplaced entry
  * still saves — which is right, because the entry is useless rather than
  * illegal. The drawer surfaces it beside the control; see the handover note.
@@ -574,15 +573,6 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         // expert trade — it is also what makes a PII policy stream-eligible.
         advanced: true,
         help: 'A second pass over normalised text, so “j.doe (at) example.com” still matches. It scans a string of a different length, so its findings carry no position — which is also why a policy with this on cannot run on a stream.',
-      },
-      {
-        kind: 'flag_map',
-        key: 'legacyCategories',
-        label: 'Categories carried over from the old configuration',
-        readOnly: true,
-        advanced: true,
-        defaultValue: false,
-        help: 'Written only by the upgrade from the pre-hook configuration, never by this screen. It is the database-free fallback: if the PII policy above cannot be read, the scan runs statelessly with exactly these categories instead of failing.',
       },
     ]),
     defaults: () => ({ ...base('pii'), piiPolicyKey: '' }),

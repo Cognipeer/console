@@ -724,8 +724,8 @@ function FlagMapControl({
   const fallback = spec.defaultValue ?? false;
 
   // `options` present = a closed, labelled key set. Absent = the keys are
-  // whatever is stored (a lifted `legacyCategories` map), and all the control
-  // can honestly do is list and toggle them.
+  // whatever is stored, and all the control can honestly do is list and toggle
+  // them.
   const rows: PolicyFieldOption[] = spec.options
     ? [...spec.options]
     : map.map(([key]) => ({ value: key, label: key }));

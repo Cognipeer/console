@@ -118,7 +118,7 @@ vi.mock('@/lib/services/guardrail/families/wordFilter', () => ({
   runWordFilterPolicy: hoisted.positionalAdapter,
 }));
 
-import { GUARDRAIL_CONTRACT_VERSION } from '@/lib/services/guardrail/hooks/contract';
+import { GUARDRAIL_CONTRACT_VERSION, readHooks } from '@/lib/services/guardrail/hooks/contract';
 import type {
   GuardrailPolicy,
   HookAbortSignal,
@@ -129,7 +129,7 @@ import type {
 } from '@/lib/services/guardrail/hooks/contract';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { runHook } from '@/lib/services/guardrail/hooks/engine';
-import { ensureHooks, validateGuardrailHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 import { resetRecordCaches } from '@/lib/services/guardrail/hooks/recordCache';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -727,7 +727,7 @@ describe('a stored row written while lanes existed', () => {
   });
 
   it('comes back off the read path without them, and saves again without them', () => {
-    const { hooks } = ensureHooks(JSON.parse(JSON.stringify(lanedRow())));
+    const hooks = readHooks(JSON.parse(JSON.stringify(lanedRow())));
 
     // Ignored, not rejected: the policies themselves survive intact.
     expect(hooks.policies.map((entry) => entry.id)).toEqual(['sender', 'scanner']);

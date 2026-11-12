@@ -546,8 +546,7 @@ export function readPolicyList(hooks: unknown): unknown[] | undefined {
  * `hooks.checks`, the tool gate `family: 'tool_policy'`, and the PII policy's
  * reference `policyKey`. Every guardrail authored before it still carries those
  * names on disk. Read through code that only knows `hooks.policies`, such a row
- * has NO policies — `ensureHooks` then treats it as unauthored and lifts the
- * legacy columns instead, so an operator's whole configuration silently stops
+ * has NO policies, so an operator's whole configuration silently stops
  * running while the UI keeps saying it saved. That is the failure this function
  * exists to make impossible.
  *
@@ -560,7 +559,7 @@ export function readPolicyList(hooks: unknown): unknown[] | undefined {
  * route. They were persisted inside this blob while the policy-lane model
  * existed, so stored rows carry them; a policy declares WHERE it runs with
  * `hooks` and there is nothing left to read them. Dropping them HERE rather
- * than in the engine covers both directions at once: `ensureHooks` runs a
+ * than in the engine covers both directions at once: `readHooks` runs a
  * stored row through this before the engine ever sees it, and
  * `readHooksField` runs the request body through it before the store does — so
  * a PATCH that round-trips a GET response cannot write them back, which is the
@@ -615,6 +614,51 @@ export function normalizeHooksConfig<T>(hooks: T): T {
   delete next.checks;
   delete next.layerSettings;
   return next as T;
+}
+
+/**
+ * A newly authored configuration with nothing in it: no policies, no bindings.
+ * Newly authored configs opt INTO real-time streaming enforcement and into
+ * stopping at the first blocking finding.
+ */
+export function emptyHooksConfig(): GuardrailHooksConfig {
+  return {
+    contractVersion: GUARDRAIL_CONTRACT_VERSION,
+    policies: [],
+    bindings: {},
+    stream: { enabled: true },
+    shortCircuit: true,
+  };
+}
+
+/**
+ * The hook config a record is evaluated with, and the ONLY way the engine,
+ * the stream gate, the SDK adapter and the API read one off a record.
+ *
+ * `hooks` is the only stored guardrail shape. A record whose `hooks` is absent
+ * or has no usable `policies` array carries nothing to enforce, so it resolves
+ * to an empty config (no policies, no bindings) rather than being trusted or
+ * guessed at: the alternative is a guardrail that evaluates whatever a half
+ * written column happens to hold.
+ *
+ * Pure, synchronous and non-mutating: the record comes out of a shared TTL
+ * cache, and every call gets its own empty config, never a shared reference.
+ */
+export function readHooks(record: { hooks?: GuardrailHooksConfig | null }): GuardrailHooksConfig {
+  const hooks = normalizeHooksConfig(record.hooks);
+  if (hooks && Array.isArray(hooks.policies)) return hooks;
+  return { contractVersion: GUARDRAIL_CONTRACT_VERSION, policies: [], bindings: {} };
+}
+
+/**
+ * Whether a record carries a `hooks` config `readHooks` can use. A record
+ * without one enforces nothing (see `readHooks`); the record cache logs a
+ * warning when it loads such a record that is enabled, so the gap is visible
+ * instead of silent.
+ */
+export function hasUsableHooks(record: { hooks?: GuardrailHooksConfig | null }): boolean {
+  const hooks = normalizeHooksConfig(record.hooks);
+  return Boolean(hooks && Array.isArray(hooks.policies));
 }
 
 /**
@@ -971,8 +1015,8 @@ export function toggleGuardrailFields(record: {
  * `prompt_shield` on `output.pre` is NOT a relaxation, it is today's behaviour.
  * `evaluateGuardrail` runs the prompt shield in whichever phase it was called
  * in, so a guardrail attached through `outputGuardrailKey` shields the model's
- * output right now, and `liftLegacyPolicies` binds every lifted policy to both
- * `input.pre` and `output.pre`. Anything narrower here would reject a
+ * output right now, and stored guardrails bind it to both `input.pre` and
+ * `output.pre`. Anything narrower here would reject a
  * configuration the fleet is already running and — because the engine read a
  * widened copy of this table — would have rejected it at save time while
  * running it at evaluation time.

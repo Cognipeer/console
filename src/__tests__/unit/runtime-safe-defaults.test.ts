@@ -63,18 +63,35 @@ describe('stdio runner default', () => {
 });
 
 describe('guardrail default fail mode', () => {
-  const pii = { pii: { enabled: true } } as never;
-  const none = { pii: { enabled: false }, promptShield: { enabled: false } } as never;
+  const base = { schedule: { timing: 'sync', onFail: 'block' }, hooks: ['input.pre'] } as const;
+  const withPii = {
+    contractVersion: 2,
+    bindings: {},
+    policies: [{ id: 'p', family: 'pii', enabled: true, piiPolicyKey: 'k', ...base }],
+  } as never;
+  const withShield = {
+    contractVersion: 2,
+    bindings: {},
+    policies: [{ id: 's', family: 'prompt_shield', enabled: true, ...base }],
+  } as never;
+  const disabledPii = {
+    contractVersion: 2,
+    bindings: {},
+    policies: [{ id: 'p', family: 'pii', enabled: false, piiPolicyKey: 'k', ...base }],
+  } as never;
+  const none = { contractVersion: 2, bindings: {}, policies: [] } as never;
 
-  it('is closed for presets running PII or prompt-shield checks', () => {
+  it('is closed for configs running PII or prompt-shield policies', () => {
     use({});
-    expect(resolveDefaultFailMode('preset', pii)).toBe('closed');
-    expect(resolveDefaultFailMode('preset', none)).toBe('open');
-    expect(resolveDefaultFailMode('custom', undefined)).toBe('open');
+    expect(resolveDefaultFailMode(withPii)).toBe('closed');
+    expect(resolveDefaultFailMode(withShield)).toBe('closed');
+    expect(resolveDefaultFailMode(disabledPii)).toBe('open');
+    expect(resolveDefaultFailMode(none)).toBe('open');
+    expect(resolveDefaultFailMode(undefined)).toBe('open');
   });
 
   it('can be set back to open', () => {
     use({ GUARDRAIL_DEFAULT_FAIL_MODE: 'open' });
-    expect(resolveDefaultFailMode('preset', pii)).toBe('open');
+    expect(resolveDefaultFailMode(withPii)).toBe('open');
   });
 });

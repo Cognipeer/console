@@ -184,7 +184,6 @@ describe('generateUniqueKey (through createGuardrail)', () => {
 
     const view = await createGuardrail(dbName, TENANT_ID, 'user-1', {
       name: 'PII basic',
-      type: 'preset',
       action: 'block',
       projectId: 'proj-a',
     });
@@ -197,7 +196,6 @@ describe('generateUniqueKey (through createGuardrail)', () => {
   it('never hands out the pinned default tool guardrail key', async () => {
     const scoped = await createGuardrail(dbName, TENANT_ID, 'user-1', {
       name: 'Tool safety (default)',
-      type: 'preset',
       action: 'block',
       projectId: 'proj-a',
     });
@@ -207,7 +205,6 @@ describe('generateUniqueKey (through createGuardrail)', () => {
     // project row above (an `undefined` lookup already means "any project").
     const wide = await createGuardrail(dbName, TENANT_ID, 'user-1', {
       name: 'Tool safety (default)',
-      type: 'preset',
       action: 'block',
     });
     expect(wide.key).toBe(`${DEFAULT_TOOL_GUARDRAIL_KEY}-2`);

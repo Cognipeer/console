@@ -27,7 +27,7 @@
  *
  * ── WHAT THIS COMPONENT MAY NOT IMPORT ────────────────────────────────────
  * `hooks/contract` only — the leaf of the hook plane (types plus pure
- * constants). `hooks/legacy`, `hooks/engine` and `sdkAdapter` all reach the
+ * constants). `hooks/engine` and `sdkAdapter` both reach the
  * `@/lib/database` barrel, which constructs providers and registers shutdown
  * handlers the moment it loads. So every wire fact below is either IMPORTED
  * from the contract (hook ids, subject kinds, header names, status codes,
@@ -105,15 +105,6 @@ const HOOK_LABEL: Readonly<Record<HookId, string>> = {
   'tool.post': 'After a tool',
 };
 
-/**
- * What a guardrail written before the hook plane covers. Mirrors
- * `liftLegacyHooks()`: a legacy row was bindable to the two direction slots and
- * nothing else, so those are the hooks it declares once lifted. Rendering such
- * a guardrail as covering NOTHING would show an empty screen for the guardrails
- * most consumers are actually bound to.
- */
-const LEGACY_DECLARED_HOOKS: readonly HookId[] = ['input.pre', 'output.pre'];
-
 /** The consumers a guardrail can be bound to from the dashboard. */
 export type UsageSurface = 'model' | 'agent' | 'mcp';
 
@@ -178,22 +169,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * A record whose `hooks` were DERIVED from the legacy columns rather than
- * authored. Same fail-safe as `ensureHooks`: a config with no usable `policies`
- * array is treated as absent rather than trusted.
- */
-export function isLegacyConfig(hooks: GuardrailHooksConfig | undefined): boolean {
-  return !hooks || !Array.isArray(hooks.policies);
-}
-
-/**
  * Hooks this guardrail will ACTUALLY do something on: the hook needs an enabled
  * binding AND an enabled policy naming it. Either half missing is the
  * "configured and never runs" state, and listing it here would tell an operator
  * they are protected on a hook nothing fires on.
  */
 export function declaredHooks(hooks: GuardrailHooksConfig | undefined): HookId[] {
-  if (isLegacyConfig(hooks) || !hooks) return [...LEGACY_DECLARED_HOOKS];
+  if (!hooks || !Array.isArray(hooks.policies)) return [];
   const policies = hooks.policies;
   return HOOK_IDS.filter(
     (hook) =>
@@ -568,9 +550,7 @@ export interface GuardrailUsagePanelProps {
   guardrailName: string;
   /**
    * The guardrail's hook config as stored. `undefined` — or any config without
-   * a usable `policies` array — is a LEGACY row: the panel then reports the two
-   * hooks a legacy record lifts onto, and says so, rather than rendering a
-   * guardrail that covers nothing.
+   * a usable `policies` array — declares no hooks.
    */
   hooks: GuardrailHooksConfig | undefined;
   /**
@@ -660,7 +640,6 @@ export default function GuardrailUsagePanel({
   }, [guardrailKey]);
 
   const declared = useMemo(() => declaredHooks(hooks), [hooks]);
-  const legacy = isLegacyConfig(hooks);
   const visibility = useMemo(() => resolveVisibility(hooks), [hooks]);
   const streaming = streamingEnforced(hooks);
   const declaresToolHook = declared.some((hook) => hook === 'tool.pre' || hook === 'tool.post');
@@ -738,24 +717,6 @@ export default function GuardrailUsagePanel({
           the token is what selects the tenant, so no request body ever names one.
         </Text>
       </Paper>
-
-      {legacy ? (
-        <Alert
-          color="yellow"
-          variant="light"
-          icon={<IconInfoCircle size={16} />}
-          title="This guardrail predates the hook plane"
-        >
-          <Text size="xs">
-            It has no authored hook config, so it is lifted on every read onto{' '}
-            <Code fz="xs">input.pre</Code> and <Code fz="xs">output.pre</Code>, and its policies
-            carry <Code fz="xs">legacy:</Code> ids. Everything on this screen works against it —
-            the endpoints, the gateway binding and the compiled policy all lift it the same way —
-            but the hook list above is derived, not authored, and a later fix to that derivation
-            reaches this guardrail without an edit.
-          </Text>
-        </Alert>
-      ) : null}
 
       <Tabs defaultValue="gateway" variant="pills" radius="md" keepMounted={false}>
         <Tabs.List mb="md">

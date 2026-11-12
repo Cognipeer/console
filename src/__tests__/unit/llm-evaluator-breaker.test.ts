@@ -22,7 +22,13 @@ vi.mock('@/lib/core/logger', () => ({
 }));
 vi.mock('@/lib/services/models/gatewayCore', () => ({ executeModelCall: vi.fn() }));
 vi.mock('@/enterprise/managed-credits', () => ({ isManagedModel: () => false }));
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: vi.fn() }));
 vi.mock('@/lib/core/asyncTask', () => ({ fireAndForget: vi.fn() }));
 vi.mock('@/lib/services/models/usageLogger', () => ({ logModelUsage: vi.fn() }));

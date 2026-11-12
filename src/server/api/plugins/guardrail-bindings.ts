@@ -18,8 +18,8 @@
  * per-plugin copy of the validator is how a dashboard write and an API write
  * end up accepting different payloads, and the field that one of them silently
  * drops is a guardrail that stops running with a green UI. `guardrails.ts`
- * already exports `guardrailByKeyInScope` for exactly this kind of cross-plugin
- * reuse (`client-guardrails.ts:202`).
+ * `../guardrails/scope.ts` holds `guardrailByKeyInScope`, the shared key-scoped
+ * lookup the route plugins reuse (`client-guardrails.ts:202`).
  */
 
 import type { IAgentConfig, IUser } from '@/lib/database';
@@ -28,11 +28,10 @@ import type {
   IGuardrailBinding,
 } from '@/lib/database/provider/types.domain';
 import { createLogger } from '@/lib/core/logger';
-import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
+import { HOOK_IDS, readHooks } from '@/lib/services/guardrail/hooks/contract';
 import { projectBindingsToLegacy } from '@/lib/services/guardrail/hooks/binding';
-import { ensureHooks } from '@/lib/services/guardrail/hooks/legacy';
 import type { GuardrailView } from '@/lib/services/guardrail';
-import { guardrailByKeyInScope, toGuardrailRecord } from './guardrails';
+import { guardrailByKeyInScope } from '../guardrails/scope';
 
 const HOOK_LIST = HOOK_IDS.join(', ');
 const logger = createLogger('api:guardrail-bindings');
@@ -140,17 +139,11 @@ export function readGuardrailBindingsField(raw: unknown): GuardrailBindingsField
 /**
  * Which hooks a guardrail will ACTUALLY do something on: the hook needs an
  * enabled binding in the guardrail's own config AND an enabled policy naming it.
- * This is the same test `projectHooksToLegacy` applies (`activeHooks`,
- * legacy.ts:578) — a policy with no enabled binding, or a binding with no
- * enabled policy, is the "configured and never runs" state the hook matrix
- * exists to make visible.
- *
- * `ensureHooks` lifts a legacy row on the way through, so a guardrail written
- * before the hook plane reports `input.pre` + `output.pre` — exactly the two
- * slots it was bindable to — rather than nothing at all.
+ * A policy with no enabled binding, or a binding with no enabled policy, is
+ * the "configured and never runs" state the hook matrix exists to make visible.
  */
 export function declaredGuardrailHooks(view: GuardrailView): GuardrailHookId[] {
-  const { hooks } = ensureHooks(toGuardrailRecord(view));
+  const hooks = readHooks(view);
   const policies = hooks.policies ?? [];
   return HOOK_IDS.filter(
     (hook) =>

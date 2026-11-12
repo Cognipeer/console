@@ -28,7 +28,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 // Sync factory only: an async `vi.mock` factory does not intercept in this
-// repo. `hooks/legacy` reaches the barrel, which constructs providers and
+// repo. The guardrail modules reach the barrel, which constructs providers and
 // registers shutdown handlers the moment it loads. The catalog itself reaches
 // nothing behind it — that is a rule, and `catalog/index.ts` states it.
 vi.mock('@/lib/database', () => ({
@@ -82,7 +82,7 @@ import {
 // The engine reaches the `@/lib/database` barrel, which is why the mock above
 // has to be in place before this import. `policyOwnMessage` itself is pure.
 import { policyOwnMessage } from '@/lib/services/guardrail/hooks/engine';
-import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 import { familyMeta, familyLabel } from '@/components/guardrails/policyFamilyMeta';
 import {
   COMMON_POLICY_FIELDS,
@@ -241,7 +241,6 @@ const PII_KEYS = [
   'actionOverride',
   'locale',
   'detectObfuscated',
-  'legacyCategories',
 ] as const;
 const SECRETS_KEYS = ['known', 'genericHighEntropy', 'minEntropy', 'allowValues'] as const;
 const WORD_FILTER_KEYS = ['builtinLists', 'customListKeys', 'words', 'regexes'] as const;

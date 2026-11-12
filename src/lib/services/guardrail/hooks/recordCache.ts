@@ -5,7 +5,7 @@
  * every agent turn and every MCP/sandbox tool invocation, and a single streamed
  * answer runs it once per hold-back window (~17 times for a 4K answer at the
  * 256-char default). Without a cache each of those windows pays a
- * `findGuardrailByKey` round trip, and a lifted PII policy pays a
+ * `findGuardrailByKey` round trip, and a PII policy pays a
  * `findPiiPolicyByKey` on top — so the guardrail's own latency would be
  * dominated by re-reading a row nobody changed. This is the same trade
  * `wordListService.ts:219-268` already made for word lists, with the same TTL
@@ -15,8 +15,8 @@
  *
  * THE CACHED VALUE IS SHARED. Callers get the SAME object on every hit, so it
  * must be treated as immutable: writing `record.hooks` in place would publish a
- * derived config to every other holder, and `hooks/legacy.ts#ensureHooks` is
- * deliberately non-mutating for exactly this reason. Outside production the
+ * changed config to every other holder, and `readHooks` is deliberately
+ * non-mutating for exactly this reason. Outside production the
  * entry is shallow-frozen so that mistake throws in dev and in tests instead of
  * becoming a cross-request bug in prod.
  *
@@ -37,6 +37,7 @@ import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IGuardrail, IPiiPolicy, ITenant } from '@/lib/database';
+import { hasUsableHooks } from './contract';
 
 /** Same window as the word-list cache, deliberately: one staleness story. */
 export const RECORD_CACHE_TTL_MS = 60_000;
@@ -44,8 +45,8 @@ export const RECORD_CACHE_TTL_MS = 60_000;
 /**
  * Negative results expire fast. A miss usually means "not created yet", and a
  * minute of remembering that a guardrail does not exist would make a freshly
- * created one look broken for a minute. Mirrors the failure TTL
- * `hooks/legacy.ts` uses for the same reason.
+ * created one look broken for a minute. The same reasoning gives the PII
+ * policy lookups their short miss TTL.
  */
 export const RECORD_CACHE_MISS_TTL_MS = 5_000;
 
@@ -308,7 +309,14 @@ export async function getCachedGuardrail(
   projectId?: string | null,
 ): Promise<IGuardrail | null> {
   return guardrailCache.get(recordKey(tenantDbName, key, projectId), () =>
-    runWithTenantScope(tenantDbName, (db) => db.findGuardrailByKey(key, projectId)),
+    runWithTenantScope(tenantDbName, async (db) => {
+      const record = await db.findGuardrailByKey(key, projectId);
+      // Logged once per load (at most once per cache TTL per replica), not per evaluation.
+      if (record?.enabled && !hasUsableHooks(record)) {
+        logger.warn('Enabled guardrail has no usable hooks and enforces nothing', { key, projectId: projectId ?? null });
+      }
+      return record;
+    }),
   );
 }
 
@@ -364,8 +372,7 @@ export function invalidateGuardrailCache(tenantDbName?: string, key?: string): v
   guardrailCache.invalidate(recordPrefix(tenantDbName, key));
 }
 
-/** Call from every PII policy save/delete, including the generated
- *  `pii-migrated-<guardrailKey>` policies the legacy lift provisions. */
+/** Call from every PII policy save/delete. */
 export function invalidatePiiPolicyCache(tenantDbName?: string, key?: string): void {
   piiPolicyCache.invalidate(recordPrefix(tenantDbName, key));
 }

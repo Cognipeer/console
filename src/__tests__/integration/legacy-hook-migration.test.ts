@@ -73,10 +73,30 @@ describe('legacy tenant DB gains the hook-plane columns', () => {
     expect(idx).toContain('idx_guardrail_eval_hook');
     db.close();
 
-    // The pre-existing row reads back as "not authored", not as an empty config.
+    // The pre-existing row carries no hooks config, so it reads back as having
+    // none (not as an empty one). Its unused `policy` column is not served.
     const found = await provider.findGuardrailByKey('legacy-key');
     expect(found?.hooks).toBeUndefined();
     expect(found?.hooksVersion).toBe(0);
     expect(found?.mode).toBe('enforce');
+    expect((found as unknown as Record<string, unknown>).policy).toBeUndefined();
+  });
+
+  it('writes a new guardrail into the old table without the retired columns', async () => {
+    const created = await provider.createGuardrail({
+      tenantId: 't1',
+      key: 'fresh-key',
+      name: 'Fresh',
+      type: 'preset',
+      target: 'input',
+      action: 'block',
+      enabled: true,
+      hooks: { contractVersion: 2, policies: [], bindings: {} },
+      hooksVersion: 2,
+      createdBy: 'u1',
+    });
+    const found = await provider.findGuardrailById(String(created._id));
+    expect(found?.hooks?.policies).toEqual([]);
+    expect(found?.hooksVersion).toBe(2);
   });
 });

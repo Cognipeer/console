@@ -16,12 +16,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { IGuardrail, IPiiPolicy } from '@/lib/database/provider.interface';
+import type { IGuardrail } from '@/lib/database/provider.interface';
 
 const hoisted = vi.hoisted(() => ({
   findGuardrailByKey: vi.fn(),
-  findPiiPolicyByKey: vi.fn(),
-  createPiiPolicy: vi.fn(),
   findMcpServerByKey: vi.fn(),
   findTenantById: vi.fn(),
   runHook: vi.fn(),
@@ -29,8 +27,6 @@ const hoisted = vi.hoisted(() => ({
 
 const fakeDb = {
   findGuardrailByKey: hoisted.findGuardrailByKey,
-  findPiiPolicyByKey: hoisted.findPiiPolicyByKey,
-  createPiiPolicy: hoisted.createPiiPolicy,
   findMcpServerByKey: hoisted.findMcpServerByKey,
   findTenantById: hoisted.findTenantById,
 };
@@ -55,10 +51,6 @@ vi.mock('@/enterprise/registry', () => ({ mcpGuardrailHook: { current: null } })
 import type { McpGuardrailContext } from '@/enterprise/registry';
 import { allowVerdict } from '@/lib/services/guardrail/hooks/contract';
 import type { HookCall } from '@/lib/services/guardrail/hooks/contract';
-import {
-  ensureLiftedPiiPolicy,
-  invalidateLiftedPiiPolicyCache,
-} from '@/lib/services/guardrail/hooks/legacy';
 import {
   consoleMcpGuardrailHook,
   invalidateMcpGuardrailBinding,
@@ -104,13 +96,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetRecordCaches();
   invalidateMcpGuardrailBinding();
-  invalidateLiftedPiiPolicyCache();
 });
 
 afterEach(() => {
   resetRecordCaches();
   invalidateMcpGuardrailBinding();
-  invalidateLiftedPiiPolicyCache();
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -267,44 +257,5 @@ describe('MCP server binding cache (mcpHook)', () => {
 
     await consoleMcpGuardrailHook.beforeToolCall(ctx, {});
     expect(lastKeys()).toEqual(['wide-guard']);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('lifted PII policy memo (legacy.ensureLiftedPiiPolicy)', () => {
-  const record: IGuardrail = {
-    ...guardrailRow('legacy'),
-    key: 'legacy-pii',
-    policy: { pii: { enabled: true, action: 'redact', categories: { email: true } } },
-  };
-  const liftedKey = 'pii-migrated-legacy-pii';
-  const policyRow = { key: liftedKey } as IPiiPolicy;
-
-  it('does not let a provisioning run that started before an invalidation repopulate the memo', async () => {
-    const load = deferred<IPiiPolicy | null>();
-    hoisted.findPiiPolicyByKey.mockReturnValueOnce(load.promise);
-
-    const first = ensureLiftedPiiPolicy('t_db', 'tenant-a', record);
-    await settle();
-
-    invalidateLiftedPiiPolicyCache('t_db', 'legacy-pii');
-    load.resolve(policyRow);
-    expect(await first).toBe(liftedKey);
-
-    // A memo hit would return before touching the database at all; the
-    // provisioning path being reached (project miss, tenant-wide miss, create)
-    // is the proof that the stale run did not write itself back.
-    hoisted.findPiiPolicyByKey.mockResolvedValue(null);
-    hoisted.createPiiPolicy.mockResolvedValue(policyRow);
-    expect(await ensureLiftedPiiPolicy('t_db', 'tenant-a', record)).toBe(liftedKey);
-    expect(hoisted.createPiiPolicy).toHaveBeenCalledTimes(1);
-    // The fallback asks for the TENANT-WIDE policy by name.
-    expect(hoisted.findPiiPolicyByKey).toHaveBeenLastCalledWith(liftedKey, null);
-
-    // Control: the second run's answer IS memoised.
-    expect(await ensureLiftedPiiPolicy('t_db', 'tenant-a', record)).toBe(liftedKey);
-    expect(hoisted.createPiiPolicy).toHaveBeenCalledTimes(1);
-    expect(hoisted.findPiiPolicyByKey).toHaveBeenCalledTimes(3);
   });
 });

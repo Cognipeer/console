@@ -50,7 +50,7 @@ function hooksConfig(bound: HookId[], checked: HookId[]): GuardrailHooksConfig {
 
 /** A guardrail whose config declares exactly `hooks`. */
 function guardrail(key: string, hooks: HookId[]): GuardrailBindingOption {
-  return { key, name: key, enabled: true, hooksVersion: 1, hooks: hooksConfig(hooks, hooks) };
+  return { key, name: key, enabled: true, hooks: hooksConfig(hooks, hooks) };
 }
 
 describe('bindingRowsFromStored', () => {
@@ -126,7 +126,6 @@ describe('declaredHooks', () => {
     const halfConfigured: GuardrailBindingOption = {
       key: 'half',
       name: 'half',
-      hooksVersion: 1,
       hooks: hooksConfig(['input.pre', 'output.pre'], ['input.pre']),
     };
     expect(declaredHooks(halfConfigured)).toEqual(['input.pre']);
@@ -136,29 +135,23 @@ describe('declaredHooks', () => {
       declaredHooks({
         key: 'other-half',
         name: 'other-half',
-        hooksVersion: 1,
         hooks: hooksConfig(['input.pre'], ['input.pre', 'output.pre']),
       }),
     ).toEqual(['input.pre']);
   });
 
-  it('lifts a pre-hook-plane guardrail to the two slots it was bindable to', () => {
-    // Rendering such a guardrail as covering NOTHING would disable every
-    // checkbox on the one guardrail most consumers are actually bound to.
-    expect(declaredHooks({ key: 'legacy', name: 'legacy' })).toEqual([
-      'input.pre',
-      'output.pre',
-    ]);
+  it('declares nothing for a record with no hooks', () => {
+    // No config means no policy can run at any hook, so no checkbox is offered.
+    expect(declaredHooks({ key: 'bare', name: 'bare' })).toEqual([]);
   });
 
-  it('treats a version marker with no usable policies as absent', () => {
+  it('declares nothing when the config has no usable policies', () => {
     expect(
       declaredHooks({
         key: 'broken',
         name: 'broken',
-        hooksVersion: 1,
         hooks: { contractVersion: 2, bindings: {} } as GuardrailHooksConfig,
       }),
-    ).toEqual(['input.pre', 'output.pre']);
+    ).toEqual([]);
   });
 });

@@ -19,11 +19,10 @@ const hoisted = vi.hoisted(() => ({
   guardrailByKeyInScope: vi.fn(),
 }));
 
-// The record reader lives in the guardrails route plugin; the validator is
-// what is under test, so the plugin's DB reach is stubbed.
-vi.mock('@/server/api/plugins/guardrails', () => ({
+// The key-scoped record reader lives in the shared guardrail route helpers;
+// the validator is what is under test, so its DB reach is stubbed.
+vi.mock('@/server/api/guardrails/scope', () => ({
   guardrailByKeyInScope: hoisted.guardrailByKeyInScope,
-  toGuardrailRecord: (view: unknown) => view,
 }));
 
 import {

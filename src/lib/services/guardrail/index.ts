@@ -7,8 +7,6 @@ export {
   listGuardrails,
   evaluateGuardrail,
   serializeGuardrail,
-  buildDefaultPresetPolicy,
-  buildDefaultPolicy,
   PII_CATEGORIES,
   MODERATION_CATEGORIES,
   PROMPT_SHIELD_ISSUES,

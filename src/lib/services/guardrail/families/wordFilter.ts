@@ -40,11 +40,10 @@
  * engine already folded (`policy.action ?? record.action`); it is handed straight
  * to `runWordFilter` as the policy action so the legacy `action`/`block` fields
  * come out byte-identical, and the engine folds the resulting findings into the
- * verdict. In particular this file does NOT re-apply the legacy
- * `wordFilter.action ?? 'block'` default: that default belongs to the legacy
- * lift (hooks/legacy.ts writes it onto the lifted policy), and re-applying it
- * here would silently re-block a v2 config whose operator chose 'flag' at record
- * level and left the policy inheriting.
+ * verdict. In particular this file does NOT re-apply an
+ * `action ?? 'block'` default of its own: doing so would silently re-block a
+ * config whose operator chose 'flag' at record level and left the policy
+ * inheriting.
  */
 
 import type { IGuardrailWordFilterPolicy } from '@/lib/database/provider/types.domain';
@@ -256,8 +255,8 @@ export async function runWordFilterPolicy(
         op: 'replace_value',
         path,
         value: finding.value,
-        // Byte-identical to redactFindings, so a lifted guardrail's redacted
-        // output does not change spelling on upgrade.
+        // Byte-identical to redactFindings, so redacted output keeps one
+        // spelling across the word filter and `redactFindings`.
         replacement: `[REDACTED:${finding.category}]`,
         family: FAMILY,
         policyId: policy.id,

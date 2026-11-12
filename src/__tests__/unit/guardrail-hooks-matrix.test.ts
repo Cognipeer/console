@@ -5,11 +5,9 @@ import {
   cellState,
   policyDisplayName,
   describeIssues,
-  emptyHooksConfig,
   estimateStreamCost,
   isCellOn,
   isPolicyOn,
-  isLiftedPolicy,
   matrixColumns,
   setCell,
   setPolicyHook,
@@ -20,7 +18,7 @@ import type {
   GuardrailHooksConfig,
   HookId,
 } from '@/lib/services/guardrail/hooks/contract';
-import { GUARDRAIL_CONTRACT_VERSION } from '@/lib/services/guardrail/hooks/contract';
+import { GUARDRAIL_CONTRACT_VERSION, emptyHooksConfig } from '@/lib/services/guardrail/hooks/contract';
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -182,13 +180,12 @@ describe('the column model', () => {
   });
 });
 
-// ── legacy rows ───────────────────────────────────────────────────────────
+// ── columns ───────────────────────────────────────────────────────────────
 
-describe('a lifted legacy guardrail', () => {
-  /** Exactly what `liftLegacyPolicies` emits for `policy.wordFilter.enabled`. */
-  const lifted = configOf([
+describe('a stored policy without a label', () => {
+  const stored = configOf([
     {
-      id: 'legacy:word_filter',
+      id: 'word_filter:1',
       family: 'word_filter',
       enabled: true,
       hooks: ['input.pre', 'output.pre'],
@@ -199,21 +196,15 @@ describe('a lifted legacy guardrail', () => {
   ]);
 
   it('renders as columns rather than as an empty grid', () => {
-    const columns = matrixColumns(lifted);
+    const columns = matrixColumns(stored);
     expect(columns).toHaveLength(1);
-    expect(columns[0].lifted).toBe(true);
     // The shared display name puts the family in front of a policy that was
-    // never given one, which is what a lifted policy always is.
-    expect(columns[0].name).toBe('Word filter · legacy:word_filter');
+    // never given one.
+    expect(columns[0].name).toBe('Word filter · word_filter:1');
   });
 
   it('is valid as it stands, so the screen shows no manufactured errors', () => {
-    expect(describeIssues(lifted)).toEqual([]);
-  });
-
-  it('marks only lifted ids as lifted', () => {
-    expect(isLiftedPolicy(lifted.policies[0])).toBe(true);
-    expect(isLiftedPolicy(regexPolicy('regex:sqli', ['tool.pre']))).toBe(false);
+    expect(describeIssues(stored)).toEqual([]);
   });
 });
 

@@ -65,9 +65,9 @@
  *
  * ── WHAT THIS FILE MAY NOT IMPORT ───────────────────────────────────────────
  * The catalog, `hooks/contract`, `hooks/messages` and `./policyFamilyMeta`.
- * Never `hooks/legacy` or `hooks/engine`: both import the `@/lib/database`
- * barrel, which constructs providers on load, and pulling either into a client
- * bundle is a build failure. The consequence is that `collectPolicyIssues` is a
+ * Never `hooks/engine`: it imports the `@/lib/database` barrel, which
+ * constructs providers on load, and pulling it into a client bundle is a build
+ * failure. The consequence is that `collectPolicyIssues` is a
  * SUBSET of `validateGuardrailHooks` and the server's errors are the ones that
  * decide a save.
  *
@@ -1123,8 +1123,6 @@ export interface GuardrailPolicyDrawerProps {
    *  outranks the workspace's own wording — see `resolveBlockMessageTemplate`. */
   templates?: BlockMessageTemplates;
   locale?: string;
-  /** `hooksVersion === 0`: lifted from the legacy columns, not authored. */
-  derived?: boolean;
   /** Added in this session and not yet persisted, so the id may still change.
    *  Once saved it is fixed: findings and evaluation-log rows reference it. */
   isNew?: boolean;
@@ -1145,7 +1143,6 @@ export default function GuardrailPolicyDrawer({
   blockedMessage,
   templates,
   locale,
-  derived,
   isNew,
   readOnly,
 }: GuardrailPolicyDrawerProps) {
@@ -1509,17 +1506,6 @@ export default function GuardrailPolicyDrawer({
         }
       >
         <Stack gap="md">
-          {derived && (
-            <Alert color="blue" variant="light" icon={<IconInfoCircle size={15} />} p="xs">
-              <Text size="xs">
-                This policy was derived from the guardrail&apos;s legacy fields by the migration, not
-                authored. It runs exactly as it does today; applying an edit and saving promotes the
-                whole hook configuration to an authored one, and from then on this screen decides
-                what runs.
-              </Text>
-            </Alert>
-          )}
-
           {/* ── 1. Name ── */}
           <FormSection
             number={1}

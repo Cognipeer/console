@@ -1,4 +1,10 @@
-import type { IGuardrail, GuardrailAction, GuardrailFailMode, GuardrailType } from '@/lib/database';
+import type {
+  IGuardrail,
+  IGuardrailPresetPolicy,
+  GuardrailAction,
+  GuardrailFailMode,
+  GuardrailType,
+} from '@/lib/database';
 // TYPE-ONLY, and it has to stay that way. `hooks/contract.ts` imports
 // `GuardrailFinding` back from this file, so a value import in either
 // direction would be a genuine module cycle over two files that both hold
@@ -325,33 +331,23 @@ export interface GuardrailEvaluationResult {
 
 // ── Service input/output types ────────────────────────────────────────────
 //
-// The three hook-plane fields below are declared with indexed access into
-// `IGuardrail` rather than by naming `GuardrailHooksConfig` / `GuardrailMode`
-// directly. That is the idiom this file already uses for `target`, `failMode`
-// and `policy`, and it matters more here than there: `hooks` is a large
-// structural blob that is written through these inputs and read back through
-// the view, so a second description of it would be free to drift and would
-// break assignment in exactly one direction — the direction nobody tests.
-//
-// All three are OPTIONAL everywhere. A legacy record carries none of them, and
-// a create/update that omits them must keep behaving exactly as it does today.
+// `hooks` and `mode` are declared with indexed access into `IGuardrail` rather
+// than by naming `GuardrailHooksConfig` / `GuardrailMode` directly: `hooks` is a
+// large structural blob that is written through these inputs and read back
+// through the view, so a second description of it would be free to drift and
+// would break assignment in exactly one direction — the direction nobody tests.
 
 export interface CreateGuardrailInput {
   name: string;
   description?: string;
-  type: GuardrailType;
-  target?: IGuardrail['target'];
+  /** The default action of a policy that states none of its own. */
   action: GuardrailAction;
   enabled?: boolean;
   failMode?: IGuardrail['failMode'];
   modelKey?: string;
-  policy?: IGuardrail['policy'];
-  customPrompt?: string;
   projectId?: string;
-  /** The hook-plane config. Absent = the record is created legacy-shaped and
-   *  is lifted on first read. */
+  /** What the guardrail enforces. Absent = an empty config. */
   hooks?: IGuardrail['hooks'];
-  hooksVersion?: IGuardrail['hooksVersion'];
   /** enforce | monitor | disabled. Absent behaves as 'enforce'. */
   mode?: IGuardrail['mode'];
 }
@@ -363,10 +359,7 @@ export interface UpdateGuardrailInput {
   enabled?: boolean;
   failMode?: IGuardrail['failMode'];
   modelKey?: string;
-  policy?: IGuardrail['policy'];
-  customPrompt?: string;
   hooks?: IGuardrail['hooks'];
-  hooksVersion?: IGuardrail['hooksVersion'];
   mode?: IGuardrail['mode'];
 }
 
@@ -383,8 +376,12 @@ export interface GuardrailView {
   enabled: boolean;
   failMode?: IGuardrail['failMode'];
   modelKey?: string;
-  policy?: IGuardrail['policy'];
-  customPrompt?: string;
+  /**
+   * Read-only summary of which policy families `hooks` enables, derived on
+   * every read for consumers that decide from `policy.<family>.enabled`. Never
+   * stored and never accepted on write.
+   */
+  policy?: IGuardrailPresetPolicy;
   hooks?: IGuardrail['hooks'];
   hooksVersion?: IGuardrail['hooksVersion'];
   mode?: IGuardrail['mode'];

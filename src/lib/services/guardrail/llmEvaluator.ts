@@ -5,7 +5,7 @@ import type {
   IGuardrailModerationPolicy,
   IGuardrailPromptShieldPolicy,
 } from '@/lib/database';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
@@ -75,127 +75,127 @@ function isFilteredEmptyReply(
 }
 
 async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: string): Promise<LlmCallResult> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
-  const model = await db.findModelByKey(ctx.modelKey, ctx.projectId);
-  if (!model) {
-    throw new Error(`Model with key "${ctx.modelKey}" not found`);
-  }
-  if (model.category !== 'llm') {
-    throw new Error(`Model "${ctx.modelKey}" is not an LLM model`);
-  }
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const model = await db.findModelByKey(ctx.modelKey, ctx.projectId);
+    if (!model) {
+      throw new Error(`Model with key "${ctx.modelKey}" not found`);
+    }
+    if (model.category !== 'llm') {
+      throw new Error(`Model "${ctx.modelKey}" is not an LLM model`);
+    }
 
-  // A managed model may only run through the model gateway: it picks the route,
-  // fails over and reserves/settles credits, and writes the usage row. The judge
-  // asks for no guardrails of the model's own (that would recurse).
-  if (isManagedModel(model)) {
-    const { executeModelCall } = await import('@/lib/services/models/gatewayCore');
-    let outcome: Awaited<ReturnType<typeof executeModelCall>>;
+    // A managed model may only run through the model gateway: it picks the route,
+    // fails over and reserves/settles credits, and writes the usage row. The judge
+    // asks for no guardrails of the model's own (that would recurse).
+    if (isManagedModel(model)) {
+      const { executeModelCall } = await import('@/lib/services/models/gatewayCore');
+      let outcome: Awaited<ReturnType<typeof executeModelCall>>;
+      try {
+        outcome = await withResilience(
+        () => executeModelCall({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: model.tenantId,
+          projectId: ctx.projectId ?? model.projectId ?? '',
+          modelKey: ctx.modelKey,
+          request: {
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+          } as GatewayChatRequest,
+          context: {
+            route: 'guardrail',
+            skipModelGuardrails: true,
+            requestTags: { purpose: 'guardrail-judge' },
+            logPrompt: false,
+            logFailures: true,
+          },
+        }),
+        { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
+        );
+      } catch (error) {
+        if (isContentFilterError(error)) throw new JudgeContentFilteredError();
+        throw error;
+      }
+      const managedResponse = outcome.result?.response;
+      if (isFilteredEmptyReply(
+        managedResponse?.finishReason,
+        outcome.result?.wireFinishReason,
+        managedResponse?.content,
+        managedResponse?.toolCalls,
+      )) {
+        throw new JudgeContentFilteredError();
+      }
+      return {
+        content: outcome.result?.response.content ?? '',
+        usage: outcome.usage ?? {},
+      };
+    }
+
+    const { runtime } = await buildModelRuntime(
+      ctx.tenantDbName,
+      model.tenantId,
+      model.providerKey,
+      ctx.projectId,
+    );
+
+    if (!runtime.createNativeChatClient) {
+      throw new Error('Model provider does not support chat completions');
+    }
+
+    // The judge talks to the native client directly, not the gateway pipeline:
+    // routing it through the model's own guardrails would recurse.
+    const client = await runtime.createNativeChatClient({
+      modelId: model.modelId,
+      category: model.category,
+      modelSettings: model.settings,
+      options: { maxRetries: 0 },
+    });
+
+    const startedAt = Date.now();
+    let response: Awaited<ReturnType<typeof client.complete>>;
     try {
-      outcome = await withResilience(
-      () => executeModelCall({
-        tenantDbName: ctx.tenantDbName,
-        tenantId: model.tenantId,
-        projectId: ctx.projectId ?? model.projectId ?? '',
-        modelKey: ctx.modelKey,
-        request: {
+      response = await withResilience(
+        () => client.complete({
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-        } as GatewayChatRequest,
-        context: {
-          route: 'guardrail',
-          skipModelGuardrails: true,
-          requestTags: { purpose: 'guardrail-judge' },
-          logPrompt: false,
-          logFailures: true,
-        },
-      }),
-      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
+        }),
+        { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
       );
     } catch (error) {
       if (isContentFilterError(error)) throw new JudgeContentFilteredError();
       throw error;
     }
-    const managedResponse = outcome.result?.response;
+
+    const usage = toGatewayUsage(client.driver, response.usage);
+
+    // Metering only: the judge bypasses the gateway, so write its usage row here.
+    // No quota enforcement, and a failed write never touches the verdict.
+    fireAndForget('log-guardrail-judge-usage', () =>
+      logModelUsage(ctx.tenantDbName, model, {
+        requestId: randomUUID(),
+        route: 'guardrail',
+        status: 'success',
+        providerRequest: { model: ctx.modelKey, purpose: 'guardrail-judge' },
+        providerResponse: { finish_reason: response.finishReason },
+        latencyMs: Date.now() - startedAt,
+        usage,
+        finishReason: response.finishReason,
+      }),
+    );
+
     if (isFilteredEmptyReply(
-      managedResponse?.finishReason,
-      outcome.result?.wireFinishReason,
-      managedResponse?.content,
-      managedResponse?.toolCalls,
+      response.finishReason,
+      (response as { rawFinishReason?: unknown }).rawFinishReason,
+      response.content,
+      (response as { toolCalls?: unknown }).toolCalls,
     )) {
       throw new JudgeContentFilteredError();
     }
-    return {
-      content: outcome.result?.response.content ?? '',
-      usage: outcome.usage ?? {},
-    };
-  }
-
-  const { runtime } = await buildModelRuntime(
-    ctx.tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    ctx.projectId,
-  );
-
-  if (!runtime.createNativeChatClient) {
-    throw new Error('Model provider does not support chat completions');
-  }
-
-  // The judge talks to the native client directly, not the gateway pipeline:
-  // routing it through the model's own guardrails would recurse.
-  const client = await runtime.createNativeChatClient({
-    modelId: model.modelId,
-    category: model.category,
-    modelSettings: model.settings,
-    options: { maxRetries: 0 },
+    return { content: response.content ?? '', usage };
   });
-
-  const startedAt = Date.now();
-  let response: Awaited<ReturnType<typeof client.complete>>;
-  try {
-    response = await withResilience(
-      () => client.complete({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-      }),
-      { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}`, countFailure: (error) => !isContentFilterError(error) },
-    );
-  } catch (error) {
-    if (isContentFilterError(error)) throw new JudgeContentFilteredError();
-    throw error;
-  }
-
-  const usage = toGatewayUsage(client.driver, response.usage);
-
-  // Metering only: the judge bypasses the gateway, so write its usage row here.
-  // No quota enforcement, and a failed write never touches the verdict.
-  fireAndForget('log-guardrail-judge-usage', () =>
-    logModelUsage(ctx.tenantDbName, model, {
-      requestId: randomUUID(),
-      route: 'guardrail',
-      status: 'success',
-      providerRequest: { model: ctx.modelKey, purpose: 'guardrail-judge' },
-      providerResponse: { finish_reason: response.finishReason },
-      latencyMs: Date.now() - startedAt,
-      usage,
-      finishReason: response.finishReason,
-    }),
-  );
-
-  if (isFilteredEmptyReply(
-    response.finishReason,
-    (response as { rawFinishReason?: unknown }).rawFinishReason,
-    response.content,
-    (response as { toolCalls?: unknown }).toolCalls,
-  )) {
-    throw new JudgeContentFilteredError();
-  }
-  return { content: response.content ?? '', usage };
 }
 
 /**

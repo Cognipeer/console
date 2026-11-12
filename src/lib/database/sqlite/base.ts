@@ -909,10 +909,9 @@ export class SQLiteProviderBase {
       "failMode TEXT NOT NULL DEFAULT 'open'",
     );
     // Guardrail hook plane (v2). The whole configuration is ONE JSON blob so
-    // adding a check family later costs no further migration. '{}' is the
-    // "not authored" sentinel — mapGuardrailRow turns it into undefined so
-    // ensureHooks() re-derives from the legacy columns, which stay populated.
-    // hooksVersion 0 means exactly that; >= 1 means an operator authored it.
+    // adding a policy family later costs no further migration. '{}' is the
+    // "no config" sentinel — mapGuardrailRow turns it into undefined.
+    // hooksVersion is the contract version the blob was written under.
     this.ensureTableColumn(
       db,
       TABLES.guardrails,

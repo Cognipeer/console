@@ -23,7 +23,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
-  ensureHooks: vi.fn(),
+  readHooks: vi.fn(),
   fireAndForget: vi.fn(),
 }));
 
@@ -31,8 +31,9 @@ vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
   runHook: hoisted.runHook,
   resolveGuardrail: hoisted.resolveGuardrail,
 }));
-vi.mock('@/lib/services/guardrail/hooks/legacy', () => ({
-  ensureHooks: hoisted.ensureHooks,
+vi.mock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  readHooks: hoisted.readHooks,
 }));
 // The terminal audit is fire-and-forget through the (mocked) engine; kept out
 // of the call counts so every `runHook` call below is a WINDOW.
@@ -156,30 +157,27 @@ function bigChunk(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.resolveGuardrail.mockResolvedValue({ key: KEY, name: 'Stream guard', mode: 'enforce', enabled: true });
-  hoisted.ensureHooks.mockReturnValue({
-    hooksVersion: 1,
-    hooks: {
-      contractVersion: GUARDRAIL_CONTRACT_VERSION,
-      stream: {
-        enabled: true,
-        holdBackChars: 256,
-        overlapChars: 64,
-        maxHeldChars: MAX_HELD,
-        onBudgetExceeded: 'release',
-        onBlock: 'truncate',
-      },
-      bindings: { 'output.stream.delta': { enabled: true } },
-      policies: [
-        {
-          id: 'sec',
-          family: 'secrets',
-          enabled: true,
-          hooks: ['output.stream.delta'],
-          schedule: { timing: 'sync', onFail: 'block' },
-          known: true,
-        },
-      ],
+  hoisted.readHooks.mockReturnValue({
+    contractVersion: GUARDRAIL_CONTRACT_VERSION,
+    stream: {
+      enabled: true,
+      holdBackChars: 256,
+      overlapChars: 64,
+      maxHeldChars: MAX_HELD,
+      onBudgetExceeded: 'release',
+      onBlock: 'truncate',
     },
+    bindings: { 'output.stream.delta': { enabled: true } },
+    policies: [
+      {
+        id: 'sec',
+        family: 'secrets',
+        enabled: true,
+        hooks: ['output.stream.delta'],
+        schedule: { timing: 'sync', onFail: 'block' },
+        known: true,
+      },
+    ],
   });
 });
 

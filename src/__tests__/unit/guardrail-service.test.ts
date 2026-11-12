@@ -1,7 +1,6 @@
 /**
  * Unit tests — GuardrailService
- * Tests: serializeGuardrail (pure), buildDefaultPresetPolicy (pure),
- *        createGuardrail, updateGuardrail, deleteGuardrail, getGuardrail,
+ * Tests: serializeGuardrail (pure), createGuardrail, updateGuardrail, deleteGuardrail, getGuardrail,
  *        listGuardrails, evaluateGuardrail
  */
 
@@ -39,7 +38,6 @@ import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { createMockDb } from '../helpers/db.mock';
 import {
   serializeGuardrail,
-  buildDefaultPresetPolicy,
   createGuardrail,
   updateGuardrail,
   deleteGuardrail,
@@ -47,7 +45,8 @@ import {
   listGuardrails,
   evaluateGuardrail,
 } from '@/lib/services/guardrail/guardrailService';
-import type { IGuardrail } from '@/lib/database/provider.interface';
+import type { IGuardrail, IPiiPolicy } from '@/lib/database/provider.interface';
+import type { GuardrailHooksConfig, GuardrailPolicy } from '@/lib/services/guardrail/hooks/contract';
 import { resetRecordCaches } from '@/lib/services/guardrail/hooks/recordCache';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -56,6 +55,69 @@ const TENANT_DB = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
 const USER_ID = 'user-1';
 const PROJECT_ID = 'proj-1';
+
+const SYNC_BLOCK = { timing: 'sync', onFail: 'block' } as const;
+
+/** A hooks config running `policies` on both model-facing hooks. */
+function hooksOf(...policies: GuardrailPolicy[]): GuardrailHooksConfig {
+  return {
+    contractVersion: 2,
+    policies,
+    bindings: {
+      'input.pre': { enabled: true, schedule: SYNC_BLOCK },
+      'output.pre': { enabled: true, schedule: SYNC_BLOCK },
+    },
+  };
+}
+
+function piiPolicy(action: 'block' | 'redact'): GuardrailPolicy {
+  return {
+    id: 'pii:1',
+    family: 'pii',
+    enabled: true,
+    hooks: ['input.pre', 'output.pre'],
+    schedule: SYNC_BLOCK,
+    action,
+    piiPolicyKey: 'pii-default',
+  };
+}
+
+function wordFilterPolicy(extra: Record<string, unknown> = {}): GuardrailPolicy {
+  return {
+    id: 'wf:1',
+    family: 'word_filter',
+    enabled: true,
+    hooks: ['input.pre', 'output.pre'],
+    schedule: SYNC_BLOCK,
+    action: 'block',
+    ...extra,
+  } as GuardrailPolicy;
+}
+
+function moderationPolicy(): GuardrailPolicy {
+  return {
+    id: 'mod:1',
+    family: 'moderation',
+    enabled: true,
+    hooks: ['input.pre', 'output.pre'],
+    schedule: SYNC_BLOCK,
+    categories: { hate: true },
+  } as GuardrailPolicy;
+}
+
+/** The PII service's policy row the `pii` family reads. */
+function piiPolicyRow(): IPiiPolicy {
+  return {
+    _id: 'pii-row-1',
+    tenantId: TENANT_ID,
+    key: 'pii-default',
+    name: 'Default',
+    defaultAction: 'detect',
+    categories: { email: true },
+    enabled: true,
+    createdBy: USER_ID,
+  } as unknown as IPiiPolicy;
+}
 
 function makeGuardrail(overrides: Partial<IGuardrail> = {}): IGuardrail {
   return {
@@ -69,13 +131,7 @@ function makeGuardrail(overrides: Partial<IGuardrail> = {}): IGuardrail {
     action: 'block',
     enabled: true,
     createdBy: USER_ID,
-    policy: {
-      pii: {
-        enabled: true,
-        action: 'block',
-        categories: { email: true, phone: false },
-      },
-    },
+    hooks: hooksOf(piiPolicy('block')),
     ...overrides,
   };
 }
@@ -107,40 +163,27 @@ describe('serializeGuardrail', () => {
   });
 });
 
-// ── buildDefaultPresetPolicy (pure function) ──────────────────────────────────
+describe('serializeGuardrail read shape', () => {
+  it('derives a read-only policy summary from the hooks and drops retired columns', () => {
+    const record = makeGuardrail({
+      hooks: hooksOf(piiPolicy('redact'), wordFilterPolicy({ words: ['x'] })),
+    });
+    // An older database row may still carry the retired columns.
+    (record as unknown as Record<string, unknown>).customPrompt = 'old';
+    (record as unknown as Record<string, unknown>).policy = { pii: { enabled: false } };
 
-describe('buildDefaultPresetPolicy', () => {
-  it('returns an object with pii, moderation, and promptShield sections', () => {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const policy = buildDefaultPresetPolicy()!;
-    expect(policy.pii).toBeDefined();
-    expect(policy.moderation).toBeDefined();
-    expect(policy.promptShield).toBeDefined();
+    const view = serializeGuardrail(record) as unknown as Record<string, unknown>;
+    expect(view.customPrompt).toBeUndefined();
+    const summary = view.policy as { pii?: { enabled: boolean; action: string }; wordFilter?: { enabled: boolean } };
+    // The summary carries the record's own action; per-policy actions live in hooks.
+    expect(summary.pii).toMatchObject({ enabled: true, action: 'block' });
+    expect(summary.wordFilter?.enabled).toBe(true);
   });
 
-  it('pii section is enabled with block action', () => {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const { pii } = buildDefaultPresetPolicy()!;
-    expect(pii!.enabled).toBe(true);
-    expect(pii!.action).toBe('block');
-  });
-
-  it('moderation section is disabled by default', () => {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const { moderation } = buildDefaultPresetPolicy()!;
-    expect(moderation!.enabled).toBe(false);
-  });
-
-  it('promptShield section is disabled by default', () => {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const { promptShield } = buildDefaultPresetPolicy()!;
-    expect(promptShield!.enabled).toBe(false);
-  });
-
-  it('pii categories is a non-empty object', () => {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const { pii } = buildDefaultPresetPolicy()!;
-    expect(Object.keys(pii!.categories).length).toBeGreaterThan(0);
+  it('serves no policy summary for a record without hooks', () => {
+    const view = serializeGuardrail(makeGuardrail({ hooks: undefined }));
+    expect(view.hooks).toBeUndefined();
+    expect(view.policy).toBeUndefined();
   });
 });
 
@@ -160,7 +203,6 @@ describe('createGuardrail', () => {
   it('creates a guardrail and returns a serialized view', async () => {
     const result = await createGuardrail(TENANT_DB, TENANT_ID, USER_ID, {
       name: 'My Guardrail',
-      type: 'preset',
       action: 'block',
       projectId: PROJECT_ID,
     });
@@ -170,34 +212,30 @@ describe('createGuardrail', () => {
     expect(result.key).toBe('my-guardrail');
   });
 
-  it('auto-builds policy for preset type when not provided', async () => {
+  it('stores an empty hooks config when none is given', async () => {
     await createGuardrail(TENANT_DB, TENANT_ID, USER_ID, {
-      name: 'Auto Policy',
-      type: 'preset',
+      name: 'No Policies Yet',
       action: 'warn',
     });
 
     const call = db.createGuardrail.mock.calls[0][0];
-    expect(call.policy).toBeDefined();
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    expect(call.policy!.pii).toBeDefined();
+    expect(call.hooks?.policies).toEqual([]);
+    expect(call.hooksVersion).toBe(2);
+    expect('policy' in call).toBe(false);
+    expect('customPrompt' in call).toBe(false);
   });
 
-  it('does not add policy for custom type', async () => {
-    db.createGuardrail.mockResolvedValue(
-      makeGuardrail({ type: 'custom', policy: undefined, customPrompt: 'Check for hate speech' }),
-    );
-
+  it('stores the given hooks and writes no legacy columns', async () => {
     await createGuardrail(TENANT_DB, TENANT_ID, USER_ID, {
-      name: 'Custom Guardrail',
-      type: 'custom',
+      name: 'Hooked',
       action: 'block',
-      customPrompt: 'Check for hate speech',
+      hooks: hooksOf(wordFilterPolicy({ words: ['forbidden'] })),
     });
 
     const call = db.createGuardrail.mock.calls[0][0];
-    expect(call.policy).toBeUndefined();
-    expect(call.customPrompt).toBe('Check for hate speech');
+    expect(call.hooks?.policies).toHaveLength(1);
+    expect('policy' in call).toBe(false);
+    expect('customPrompt' in call).toBe(false);
   });
 });
 
@@ -339,6 +377,7 @@ describe('evaluateGuardrail', () => {
     // against the first one's cached row — the disabled guardrail, which runs
     // nothing. Production is invalidated on save; a test suite has no save.
     resetRecordCaches();
+    db.findPiiPolicyByKey.mockResolvedValue(piiPolicyRow());
   });
 
   it('returns passed=true, disabled=true, and no findings when guardrail is disabled', async () => {
@@ -346,7 +385,7 @@ describe('evaluateGuardrail', () => {
       makeGuardrail({
         enabled: false,
         // Even with a PII match in the text, a disabled guardrail runs nothing.
-        policy: { pii: { enabled: true, action: 'block', categories: { email: true } } },
+        hooks: hooksOf(piiPolicy('block')),
       }),
     );
 
@@ -392,15 +431,8 @@ describe('evaluateGuardrail', () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
         enabled: true,
-        type: 'preset',
         action: 'block',
-        policy: {
-          pii: {
-            enabled: true,
-            action: 'block',
-            categories: { email: true },
-          },
-        },
+        hooks: hooksOf(piiPolicy('block')),
       }),
     );
 
@@ -421,15 +453,8 @@ describe('evaluateGuardrail', () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
         enabled: true,
-        type: 'preset',
         action: 'block',
-        policy: {
-          pii: {
-            enabled: true,
-            action: 'block',
-            categories: { email: true },
-          },
-        },
+        hooks: hooksOf(piiPolicy('block')),
       }),
     );
 
@@ -448,14 +473,12 @@ describe('evaluateGuardrail', () => {
     const listKey = `custom-list-${Date.now()}`;
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
-        policy: {
-          wordFilter: {
-            enabled: true,
-            action: 'block',
+        hooks: hooksOf(
+          wordFilterPolicy({
             builtinLists: { 'profanity-en': false, 'profanity-tr': false },
             customListKeys: [listKey],
-          },
-        },
+          }),
+        ),
       }),
     );
     db.findGuardrailWordListByKey.mockResolvedValue({ key: listKey, words: ['forbiddenbrand'], tenantId: TENANT_ID, name: 'List', createdBy: USER_ID });
@@ -474,9 +497,7 @@ describe('evaluateGuardrail', () => {
   it('blocks profanity via the word filter policy', async () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
-        policy: {
-          wordFilter: { enabled: true, action: 'block' },
-        },
+        hooks: hooksOf(wordFilterPolicy()),
       }),
     );
 
@@ -494,9 +515,7 @@ describe('evaluateGuardrail', () => {
   it('returns redactedText and passes when PII action is redact', async () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
-        policy: {
-          pii: { enabled: true, action: 'redact', categories: { email: true } },
-        },
+        hooks: hooksOf(piiPolicy('redact')),
       }),
     );
 
@@ -524,9 +543,7 @@ describe('evaluateGuardrail', () => {
       makeGuardrail({
         modelKey: undefined,
         failMode: 'closed',
-        policy: {
-          moderation: { enabled: true, categories: { hate: true } },
-        },
+        hooks: hooksOf(moderationPolicy()),
       }),
     );
 
@@ -545,9 +562,7 @@ describe('evaluateGuardrail', () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
         modelKey: undefined,
-        policy: {
-          moderation: { enabled: true, categories: { hate: true } },
-        },
+        hooks: hooksOf(moderationPolicy()),
       }),
     );
 
@@ -567,9 +582,7 @@ describe('evaluateGuardrail', () => {
   it('writes an evaluation log with masked values', async () => {
     db.findGuardrailByKey.mockResolvedValue(
       makeGuardrail({
-        policy: {
-          pii: { enabled: true, action: 'block', categories: { email: true } },
-        },
+        hooks: hooksOf(piiPolicy('block')),
       }),
     );
 

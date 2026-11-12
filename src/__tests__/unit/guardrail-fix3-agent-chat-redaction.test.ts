@@ -55,16 +55,14 @@ vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
   assertContractVersion: vi.fn(),
 }));
 
-vi.mock('@/lib/services/guardrail/hooks/legacy', () => ({
-  ensureHooks: () => ({
-    hooksVersion: 1,
-    hooks: {
-      contractVersion: 2,
-      policies: [
-        { id: 'pii:1', family: 'pii', enabled: true, hooks: ['input.pre'], schedule: { timing: 'sync', onFail: 'block' } },
-      ],
-      bindings: { 'input.pre': { enabled: true } },
-    },
+vi.mock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  readHooks: () => ({
+    contractVersion: 2,
+    policies: [
+      { id: 'pii:1', family: 'pii', enabled: true, hooks: ['input.pre'], schedule: { timing: 'sync', onFail: 'block' } },
+    ],
+    bindings: { 'input.pre': { enabled: true } },
   }),
 }));
 

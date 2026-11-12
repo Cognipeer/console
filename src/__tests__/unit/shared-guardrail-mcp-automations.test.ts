@@ -15,25 +15,45 @@ import { automationHandlers } from '@/server/api/plugins/automations-shared';
 describe('guardrail-write parsers', () => {
   it('validates the create body before anything else', () => {
     expect(parseGuardrailCreateBody({})).toMatchObject({ ok: false, status: 400, error: 'name is required' });
-    expect(parseGuardrailCreateBody({ name: 'g', type: 'x' })).toMatchObject({
-      error: 'type must be "preset" or "custom"',
-    });
-    expect(parseGuardrailCreateBody({ name: 'g', type: 'preset', action: 'nope' })).toMatchObject({ ok: false });
-    expect(parseGuardrailCreateBody({ name: 'g', type: 'custom' })).toMatchObject({
-      error: 'customPrompt is required for custom guardrails',
-    });
-    expect(parseGuardrailCreateBody({ name: 'g', type: 'preset', failMode: 'x' })).toMatchObject({
+    expect(parseGuardrailCreateBody({ name: 'g', action: 'nope' })).toMatchObject({ ok: false });
+    expect(parseGuardrailCreateBody({ name: 'g', failMode: 'x' })).toMatchObject({
       error: 'failMode must be "open" or "closed"',
     });
   });
 
+  it('refuses the retired fields with a 400 on create and patch', () => {
+    for (const parse of [parseGuardrailCreateBody, parseGuardrailPatchBody]) {
+      const base = parse === parseGuardrailCreateBody ? { name: 'g' } : {};
+      expect(parse({ ...base, policy: { pii: { enabled: true } } })).toMatchObject({
+        ok: false,
+        status: 400,
+        error: expect.stringContaining('policy is no longer supported'),
+      });
+      expect(parse({ ...base, customPrompt: 'judge this' })).toMatchObject({
+        ok: false,
+        status: 400,
+        error: expect.stringContaining('customPrompt is no longer supported'),
+      });
+      expect(parse({ ...base, type: 'custom' })).toMatchObject({
+        ok: false,
+        status: 400,
+        error: expect.stringContaining('type is no longer supported'),
+      });
+    }
+  });
+
+  it('still accepts `type: "preset"` from an older client', () => {
+    expect(parseGuardrailCreateBody({ name: 'g', type: 'preset' })).toMatchObject({ ok: true });
+    expect(parseGuardrailPatchBody({ type: 'preset' })).toMatchObject({ ok: true });
+  });
+
   it('defaults action and enabled and trims the name', () => {
-    const parsed = parseGuardrailCreateBody({ name: '  g  ', type: 'preset' });
+    const parsed = parseGuardrailCreateBody({ name: '  g  ' });
     expect(parsed).toMatchObject({ ok: true, value: { name: 'g', action: 'block', enabled: true } });
   });
 
   it('reports the first hook error and the full list', () => {
-    const parsed = parseGuardrailCreateBody({ name: 'g', type: 'preset', hooks: 'nope' });
+    const parsed = parseGuardrailCreateBody({ name: 'g', hooks: 'nope' });
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) {
       expect(guardrailWriteErrorBody(parsed)).toEqual({
@@ -46,7 +66,6 @@ describe('guardrail-write parsers', () => {
   it('explains an invalid regex rule on both create and patch', () => {
     const body = () => ({
       name: 'g',
-      type: 'preset',
       hooks: { policies: [{ id: 'p', family: 'regex', enabled: true, rules: [{ id: 'r', pattern: '(' }] }] },
     });
     expect(findRegexRuleError(body())).toMatch(/^Regex rule "r": /);

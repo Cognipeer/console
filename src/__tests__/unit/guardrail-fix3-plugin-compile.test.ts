@@ -28,7 +28,7 @@ import type {
 const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
-  ensureHooks: vi.fn(),
+  readHooks: vi.fn(),
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -40,8 +40,9 @@ vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
   assertContractVersion: vi.fn(),
 }));
 
-vi.mock('@/lib/services/guardrail/hooks/legacy', () => ({
-  ensureHooks: hoisted.ensureHooks,
+vi.mock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  readHooks: hoisted.readHooks,
 }));
 
 import { __testables } from '@/lib/services/agents/agentService';
@@ -110,12 +111,12 @@ function script(records: Record<string, Fixture>) {
     if (fixture === undefined || fixture === null) return null;
     return { key, name: key, mode: 'enforce', enabled: true, failMode: fixture.failMode, __broken: fixture.broken, __policies: fixture.policies };
   });
-  hoisted.ensureHooks.mockImplementation((record: { key: string; __broken?: boolean; __policies?: GuardrailPolicy[] }) => {
+  hoisted.readHooks.mockImplementation((record: { key: string; __broken?: boolean; __policies?: GuardrailPolicy[] }) => {
     if (record.__broken) throw new Error(`config of ${record.key} is unreadable`);
     const policies = record.__policies ?? [policy('pii', ['input.pre', 'output.pre'])];
     const bindings: Record<string, { enabled: boolean }> = {};
     for (const p of policies) for (const h of p.hooks ?? []) bindings[h] = { enabled: true };
-    return { hooksVersion: 1, hooks: { contractVersion: 2, policies, bindings } };
+    return { contractVersion: 2, policies, bindings };
   });
 }
 

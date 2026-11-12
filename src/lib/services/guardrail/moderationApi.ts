@@ -9,10 +9,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
+import type { IGuardrail } from '@/lib/database';
 import { evaluateGuardrail } from './guardrailService';
 import { handleModerationRequest } from '@/lib/services/models/inferenceService';
 import type { ModerationClassification } from '@/lib/providers';
+import { readHooks } from './hooks/contract';
 import { MODERATION_CATEGORIES } from './types';
 import type { GuardrailFinding } from './types';
 
@@ -81,6 +83,14 @@ export type ModerationTarget =
   | { kind: 'guardrail'; key: string }
   | { kind: 'model'; key: string };
 
+/** True when the guardrail has an enabled moderation policy: the /v1/moderations
+ *  fallback picks the first enabled guardrail that does. */
+function runsModeration(record: IGuardrail): boolean {
+  return readHooks(record).policies.some(
+    (policy) => policy.enabled && policy.family === 'moderation',
+  );
+}
+
 /**
  * Decide what `model` names.
  *
@@ -99,36 +109,33 @@ export async function resolveModerationTarget(
   ctx: ModerationContext,
   explicitKey?: string,
 ): Promise<ModerationTarget> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    if (explicitKey) {
+      const guardrail = await db.findGuardrailByKey(explicitKey, ctx.projectId);
+      if (guardrail) return { kind: 'guardrail', key: guardrail.key };
 
-  if (explicitKey) {
-    const guardrail = await db.findGuardrailByKey(explicitKey, ctx.projectId);
+      const model = await db.findModelByKey(explicitKey, ctx.projectId);
+      if (model && model.category === 'moderation') {
+        return { kind: 'model', key: model.key };
+      }
+      throw new ModerationRequestError(
+        `"${explicitKey}" matches no guardrail and no moderation model. Pass a guardrail key, or the key of a model whose category is "moderation".`,
+      );
+    }
+
+    const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
+    const guardrail = guardrails.find(runsModeration);
     if (guardrail) return { kind: 'guardrail', key: guardrail.key };
 
-    const model = await db.findModelByKey(explicitKey, ctx.projectId);
-    if (model && model.category === 'moderation') {
-      return { kind: 'model', key: model.key };
-    }
+    const models = await db.listModels(ctx.projectId ? { projectId: ctx.projectId } : {});
+    const model = models.find((record) => record.category === 'moderation');
+    if (model) return { kind: 'model', key: model.key };
+
     throw new ModerationRequestError(
-      `"${explicitKey}" matches no guardrail and no moderation model. Pass a guardrail key, or the key of a model whose category is "moderation".`,
+      'No moderation detector configured. Either add a model with category "moderation", '
+      + 'or create an enabled guardrail with the moderation policy — then pass its key as `model`.',
     );
-  }
-
-  const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
-  const guardrail = guardrails.find(
-    (record) => record.type === 'preset' && record.policy?.moderation?.enabled,
-  );
-  if (guardrail) return { kind: 'guardrail', key: guardrail.key };
-
-  const models = await db.listModels(ctx.projectId ? { projectId: ctx.projectId } : {});
-  const model = models.find((record) => record.category === 'moderation');
-  if (model) return { kind: 'model', key: model.key };
-
-  throw new ModerationRequestError(
-    'No moderation detector configured. Either add a model with category "moderation", '
-    + 'or create an enabled guardrail with the moderation policy — then pass its key as `model`.',
-  );
+  });
 }
 
 /**
@@ -140,27 +147,24 @@ export async function resolveModerationGuardrailKey(
   ctx: ModerationContext,
   explicitKey?: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
-
-  if (explicitKey) {
-    const record = await db.findGuardrailByKey(explicitKey, ctx.projectId);
-    if (!record) {
-      throw new ModerationRequestError(`Guardrail with key "${explicitKey}" not found`);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    if (explicitKey) {
+      const record = await db.findGuardrailByKey(explicitKey, ctx.projectId);
+      if (!record) {
+        throw new ModerationRequestError(`Guardrail with key "${explicitKey}" not found`);
+      }
+      return record.key;
     }
-    return record.key;
-  }
 
-  const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
-  const fallback = guardrails.find(
-    (record) => record.type === 'preset' && record.policy?.moderation?.enabled,
-  );
-  if (!fallback) {
-    throw new ModerationRequestError(
-      'No moderation guardrail configured. Create an enabled guardrail with the moderation policy, or pass its key as `model`.',
-    );
-  }
-  return fallback.key;
+    const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
+    const fallback = guardrails.find(runsModeration);
+    if (!fallback) {
+      throw new ModerationRequestError(
+        'No moderation guardrail configured. Create an enabled guardrail with the moderation policy, or pass its key as `model`.',
+      );
+    }
+    return fallback.key;
+  });
 }
 
 function toResult(findings: GuardrailFinding[]): ModerationResult {

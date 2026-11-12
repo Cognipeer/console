@@ -16,7 +16,7 @@
  *   · a webhook policy's bearer token, url and secret refs never leave the
  *     server;
  *   · `hooksSummary.servable` answers "can I evaluate tool.pre against this
- *     one?" without a second request, for authored AND legacy rows.
+ *     one?" without a second request.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -49,8 +49,7 @@ vi.mock('@/lib/database', () => {
 
 // The whole barrel, because the client plugin imports the dashboard plugin for
 // the shared half of this surface and that one reaches for far more of it.
-// `hooks/legacy` (the lift) and `families/regex` (the diagnostic) are NOT
-// mocked — they are the logic under test.
+// `families/regex` (the diagnostic) is NOT mocked — it is the logic under test.
 vi.mock('@/lib/services/guardrail', () => ({
   buildDefaultPresetPolicy: vi.fn(),
   createGuardrail: vi.fn(),
@@ -101,7 +100,7 @@ const AUTH_CTX = {
 const WEBHOOK_BEARER = 'sk-partner-do-not-leak';
 const SYNC_BLOCK = { timing: 'sync', onFail: 'block' } as const;
 
-/** An AUTHORED config: hooksVersion >= 1, so `ensureHooks` uses it verbatim. */
+/** A stored config, used verbatim. */
 const AUTHORED_GUARDRAIL = {
   id: 'gr-1',
   tenantId: 'tenant-1',
@@ -165,9 +164,9 @@ const AUTHORED_GUARDRAIL = {
   },
 };
 
-/** A LEGACY row: no `hooks`, no `hooksVersion`, and no project — the shape the
- *  key-scoped routes reach through their workspace-level fallback. */
-const WORKSPACE_LEGACY_GUARDRAIL = {
+/** A workspace-level row: no project — the shape the key-scoped routes reach
+ *  through their workspace-level fallback. It has no `mode` column. */
+const WORKSPACE_GUARDRAIL = {
   id: 'gr-2',
   tenantId: 'tenant-1',
   key: 'workspace-pii',
@@ -178,9 +177,38 @@ const WORKSPACE_LEGACY_GUARDRAIL = {
   enabled: true,
   createdBy: 'user-1',
   createdAt: '2026-07-01T10:00:00.000Z',
-  policy: {
-    pii: { enabled: true, action: 'block', categories: { email: true } },
+  hooksVersion: 2,
+  hooks: {
+    contractVersion: 2,
+    policies: [
+      {
+        id: 'pii-1',
+        family: 'pii',
+        enabled: true,
+        hooks: ['input.pre', 'output.pre'],
+        schedule: SYNC_BLOCK,
+        piiPolicyKey: 'default-pii',
+      },
+    ],
+    bindings: {
+      'input.pre': { enabled: true, schedule: SYNC_BLOCK },
+      'output.pre': { enabled: true, schedule: SYNC_BLOCK },
+    },
   },
+};
+
+/** A row with no `hooks` at all (an older database): nothing is configured. */
+const NO_HOOKS_GUARDRAIL = {
+  id: 'gr-4',
+  tenantId: 'tenant-1',
+  key: 'bare',
+  name: 'Bare',
+  type: 'preset',
+  target: 'input',
+  action: 'block',
+  enabled: true,
+  createdBy: 'user-1',
+  createdAt: '2026-07-02T10:00:00.000Z',
 };
 
 const OTHER_PROJECT_GUARDRAIL = {
@@ -210,7 +238,6 @@ interface ListedGuardrail {
   effectiveMode: string;
   hooksSummary: {
     contractVersion: number;
-    authored: boolean;
     servable: string[];
     bindings: Record<string, { enabled: boolean; timing: string; onFail: string }>;
     policies: Array<Record<string, unknown>>;
@@ -227,7 +254,7 @@ describe('GET /api/client/v1/guardrails', () => {
     mockFn(getDatabase).mockResolvedValue(createMockDb());
     mockFn(listGuardrails).mockResolvedValue([
       AUTHORED_GUARDRAIL,
-      WORKSPACE_LEGACY_GUARDRAIL,
+      WORKSPACE_GUARDRAIL,
       OTHER_PROJECT_GUARDRAIL,
     ]);
     app = await createFastifyApiTestApp(clientGuardrailsApiPlugin);
@@ -320,7 +347,6 @@ describe('GET /api/client/v1/guardrails', () => {
     });
     expect(guardrail.effectiveMode).toBe('monitor');
     expect(guardrail.hooksSummary.contractVersion).toBe(2);
-    expect(guardrail.hooksSummary.authored).toBe(true);
   });
 
   it('answers "can I evaluate tool.pre against this one?" without a second request', async () => {
@@ -339,17 +365,25 @@ describe('GET /api/client/v1/guardrails', () => {
     });
   });
 
-  it('summarises a legacy row from the lift, exactly as the engine would resolve it', async () => {
+  it('summarises a workspace-level row from its own hooks', async () => {
     const body = parseJsonBody<{ guardrails: ListedGuardrail[] }>((await list()).body);
-    const legacy = body.guardrails.find((guardrail) => guardrail.key === 'workspace-pii');
+    const workspace = body.guardrails.find((guardrail) => guardrail.key === 'workspace-pii');
 
-    expect(legacy).toBeDefined();
-    // Derived on read, not authored — a caller must be able to tell.
-    expect(legacy?.hooksSummary.authored).toBe(false);
-    expect(legacy?.hooksSummary.servable).toEqual(['input.pre', 'output.pre']);
-    expect(legacy?.hooksSummary.policies.some((policy) => policy.family === 'pii')).toBe(true);
-    // No mode column on a legacy row: `enabled` is what makes it enforcing.
-    expect(legacy?.effectiveMode).toBe('enforce');
+    expect(workspace).toBeDefined();
+    expect(workspace?.hooksSummary.servable).toEqual(['input.pre', 'output.pre']);
+    expect(workspace?.hooksSummary.policies.some((policy) => policy.family === 'pii')).toBe(true);
+    // No mode column: `enabled` is what makes it enforcing.
+    expect(workspace?.effectiveMode).toBe('enforce');
+  });
+
+  it('summarises a row with no hooks as serving nothing, not as a derived config', async () => {
+    mockFn(listGuardrails).mockResolvedValue([NO_HOOKS_GUARDRAIL]);
+
+    const body = parseJsonBody<{ guardrails: ListedGuardrail[] }>((await list()).body);
+    const bare = body.guardrails[0];
+
+    expect(bare.hooksSummary.servable).toEqual([]);
+    expect(bare.hooksSummary.policies).toEqual([]);
   });
 
   it('folds `enabled` into effectiveMode', async () => {

@@ -106,15 +106,13 @@ async function compile(onMessageRewrite?: (rewrite: PluginMessageRewrite) => voi
     runHook,
     resolveGuardrail: vi.fn(async () => ({ key: KEY, name: 'PII redact', mode: 'enforce', enabled: true })),
   }));
-  vi.doMock('@/lib/services/guardrail/hooks/legacy', () => ({
-    ensureHooks: vi.fn(() => ({
-      hooksVersion: 1,
-      hooks: {
+  vi.doMock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+    ...(await orig<Record<string, unknown>>()),
+    readHooks: vi.fn(() => ({
         contractVersion: 2,
         policies: [policy('pii', ['input.pre'])],
         bindings: { 'input.pre': { enabled: true } },
-      },
-    })),
+      })),
   }));
 
   const adapter = await import('@/lib/services/guardrail/sdkAdapter');
@@ -125,7 +123,7 @@ async function compile(onMessageRewrite?: (rewrite: PluginMessageRewrite) => voi
 
 afterEach(() => {
   vi.doUnmock('@/lib/services/guardrail/hooks/engine');
-  vi.doUnmock('@/lib/services/guardrail/hooks/legacy');
+  vi.doUnmock('@/lib/services/guardrail/hooks/contract');
 });
 
 const PRE_MODEL_CALL = SDK_CONSOLE_HOOK_MAP['input.pre'] as string;
@@ -243,11 +241,9 @@ describe('preModelCall redaction lands per message', () => {
       ),
       resolveGuardrail: vi.fn(async () => ({ key: KEY, name: 'PII redact', mode: 'enforce', enabled: true })),
     }));
-    vi.doMock('@/lib/services/guardrail/hooks/legacy', () => ({
-      ensureHooks: vi.fn(() => ({
-        hooksVersion: 1,
-        hooks: { contractVersion: 2, policies: [policy('pii', ['input.pre'])], bindings: { 'input.pre': { enabled: true } } },
-      })),
+    vi.doMock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+      ...(await orig<Record<string, unknown>>()),
+      readHooks: vi.fn(() => ({ contractVersion: 2, policies: [policy('pii', ['input.pre'])], bindings: { 'input.pre': { enabled: true } } })),
     }));
     const adapter = await import('@/lib/services/guardrail/sdkAdapter');
     adapter.resetSdkCapabilityCacheForTests();

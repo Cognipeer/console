@@ -170,10 +170,6 @@ export interface GuardrailDefaultMessagesProps {
   /** The guardrail's policies, so a row can say how many of them have taken
    *  themselves out of this layer with a message of their own. */
   policies?: readonly GuardrailPolicy[];
-  /** `hooksVersion === 0`: saving anything here also promotes a derived
-   *  configuration to an authored one, which is not a side effect anyone should
-   *  meet by surprise. */
-  derived?: boolean;
   readOnly?: boolean;
   /** Open on first render. The panel is collapsed by default — it is a setting
    *  most guardrails never touch, sitting above the policies most of them do. */
@@ -185,7 +181,6 @@ export default function GuardrailDefaultMessages({
   onChange,
   activeFamilies = [],
   policies,
-  derived,
   readOnly,
   defaultOpen,
 }: GuardrailDefaultMessagesProps) {
@@ -284,14 +279,6 @@ export default function GuardrailDefaultMessages({
             {' '}— that wins over the default here. These are the guardrail-wide defaults, and the
             only place one sentence covers every policy that blocks for the same reason at once.
           </Text>
-
-          {derived && (
-            <Text size="xs" c="dimmed" maw={760}>
-              This guardrail&apos;s configuration is still derived from its legacy fields. Saving a
-              message here promotes it to an authored one — from then on the policy cards decide
-              what runs, not those columns.
-            </Text>
-          )}
 
           <Group gap="md" align="flex-end" wrap="wrap">
             <Select

@@ -61,8 +61,6 @@ import { policyDraftIsDirty } from '@/components/guardrails/GuardrailPolicyDrawe
 // it — which is the whole difference between "the helpers agree with each
 // other" and "a stored row survives a visit".
 import { readHooksField } from '@/server/api/plugins/guardrails';
-import { projectHooksToLegacy } from '@/lib/services/guardrail/hooks/legacy';
-import type { IGuardrail } from '@/lib/database/provider/types.domain';
 
 // ── The three schedules that can legally be stored ──────────────────────────
 
@@ -373,10 +371,8 @@ function storedConfig(): GuardrailHooksConfig {
         runIf: 'always',
         // NOT decoration, and the fixture was wrong without it: an enabled
         // LLM-backed policy with no `modelKey` is refused by
-        // `validateGuardrailHooks` (hooks/legacy.ts:1052), which never consults
-        // the record-level key — `liftLegacyHooks` copies
-        // `moderation.modelKey ?? record.modelKey` down into the policy
-        // precisely so it does not have to. Until the server half of this file
+        // `validateGuardrailHooks` (hooks/validate.ts), which never consults
+        // the record-level key. Until the server half of this file
         // existed, every assertion here was client-side, so a fixture the PATCH
         // route would have rejected with a 400 read as a configuration that
         // "survives being opened and saved untouched".
@@ -419,13 +415,11 @@ describe('a stored configuration survives being opened and saved untouched', () 
     expect(JSON.stringify(body.hooks)).toBe(before);
   });
 
-  it('carries no `action` and no `failMode`, so the projection owns those columns', () => {
+  it('carries no `action` and no `failMode`', () => {
     // The Default Action control came off the screen. The proof that it came
-    // off CLEANLY is negative: the body must not carry the field at all.
-    // Sending `action: undefined` and omitting it are the same on the wire, but
-    // only omission survives `JSON.stringify` — and a body that DID carry a
-    // stale value would beat the server's projection at
-    // `legacy?.action ?? body.action`.
+    // off CLEANLY is negative: the body must not carry the field at all, so the
+    // stored defaults are left alone. Sending `action: undefined` and omitting
+    // it are the same on the wire, but only omission survives `JSON.stringify`.
     const body: Record<string, unknown> = {
       name: 'Guard',
       description: '',
@@ -518,38 +512,14 @@ describe('a stored configuration survives being opened and saved untouched', () 
  * whether they agree with each other. That is necessary and it is not
  * sufficient: the body those screens assemble is then handed to
  * `readHooksField` (which re-spells legacy keys, stamps defaults and runs
- * `validateGuardrailHooks`, a function that MUTATES `stream.holdBackChars`) and
- * to `projectHooksToLegacy` (which recomputes six legacy columns). Either one
+ * `validateGuardrailHooks`, a function that MUTATES `stream.holdBackChars`). It
  * could rewrite a configuration nobody edited, and no assertion above would
  * notice.
  *
- * The two claims under test are deliberately different in kind:
- *
- *   · the `hooks` BLOB must come back byte-identical. It is the authored
- *     document; a save that reshapes it is the failure this whole pass would be
- *     judged by.
- *   · the legacy COLUMNS must not. They are projections, and now that no human
- *     sets `action`, "unchanged" is the wrong guarantee for them — "recomputed
- *     from the policies, every time" is the one that keeps them honest.
+ * The claim under test: the `hooks` BLOB must come back byte-identical. It is
+ * the authored document; a save that reshapes it is the failure this whole pass
+ * would be judged by.
  */
-
-/** A record in the shape the route hands the projection. */
-function storedRecord(over: Partial<IGuardrail> = {}): IGuardrail {
-  return {
-    tenantId: 'tenant-1',
-    projectId: 'proj-1',
-    key: 'guard',
-    name: 'Guard',
-    type: 'preset',
-    target: 'input',
-    action: 'block',
-    enabled: true,
-    failMode: 'open',
-    hooks: storedConfig(),
-    hooksVersion: 2,
-    ...over,
-  } as IGuardrail;
-}
 
 /** What the detail page sends for a save that changed only the name: the whole
  *  stored config, straight back, with the mode pair beside it. */
@@ -557,7 +527,6 @@ function untouchedPatchBody(config: GuardrailHooksConfig, mode: GuardrailMode) {
   return {
     name: 'Guard',
     hooks: JSON.parse(JSON.stringify(config)) as GuardrailHooksConfig,
-    hooksVersion: 2,
     ...writeGuardrailMode(mode),
   } as Record<string, unknown>;
 }
@@ -581,9 +550,9 @@ describe('the PATCH route leaves an untouched configuration alone', () => {
     expect(webhook?.budgetMs).toBe(750);
   });
 
-  it('carries no `action` and no `failMode` for the projection to lose to', () => {
-    // `action: legacy?.action ?? body.action` — a body that still carried a
-    // stale value would win wherever the projection declines to derive one.
+  it('carries no `action` and no `failMode`', () => {
+    // A body that still carried a stale value would overwrite the stored
+    // default.
     const body = untouchedPatchBody(storedConfig(), 'monitor');
     expect(Object.keys(body)).not.toContain('action');
     expect(Object.keys(body)).not.toContain('failMode');
@@ -621,101 +590,5 @@ describe('the PATCH route leaves an untouched configuration alone', () => {
     const body = untouchedPatchBody(storedConfig(), readGuardrailMode(stored));
     expect(body.enabled).toBe(body.mode !== 'disabled');
     expect(toGuardrailMode(body.mode, body.enabled as boolean)).toBe(readGuardrailMode(stored));
-  });
-});
-
-describe('the `action` column is projected, not preserved', () => {
-  /**
-   * THE FACT THAT RETIRES THE "DEFAULT ACTION" CONTROL, and the reason removing
-   * it took nothing away: it was never authoritative. `projectHooksToLegacy`
-   * has always folded the column out of the enabled policies, and
-   * `action: legacy?.action ?? body.action` has always let that fold win — so
-   * the select showed one value and the save stored another the moment a policy
-   * disagreed with it. What changed is that a human is no longer asked for a
-   * number the server was going to overwrite.
-   */
-  it('folds a stale column up to what the policies actually do', () => {
-    const config = storedConfig(); // redact + warn enabled, webhook disabled
-    const legacy = projectHooksToLegacy(config, storedRecord({ action: 'block' }));
-    // Not 'block'. The column catches up with the policies on this save, with
-    // or without a control on the screen.
-    expect(legacy.action).toBe('redact');
-  });
-
-  it('keeps writing the column its readers depend on', () => {
-    // The readers verified in this tree: the guardrails list (filter, block
-    // KPI, per-row badge), the detail header, `GET /api/guardrails/:id`,
-    // `client-guardrails`, and `evaluateGuardrail`, which returns
-    // `action: record.action` on the evaluation RESULT — so the value is on the
-    // wire every caller reads, including the EE gateway's response object.
-    const legacy = projectHooksToLegacy(storedConfig(), storedRecord());
-    expect(legacy.action).toBeDefined();
-    expect(typeof legacy.action).toBe('string');
-  });
-
-  it('falls back to the stored column when nothing is enabled to derive from', () => {
-    // A guardrail whose policies are all switched off must not have its column
-    // churned to a default — that is an operator's setting, and there is
-    // nothing on the screen that would explain the change.
-    const config: GuardrailHooksConfig = {
-      ...storedConfig(),
-      policies: storedConfig().policies.map((policy) => ({ ...policy, enabled: false })),
-    };
-    const legacy = projectHooksToLegacy(config, storedRecord({ action: 'warn' }));
-    expect(legacy.action).toBe('warn');
-    expect(legacy.type).toBe('preset');
-  });
-
-  it('leaves `failMode` where it was unless a policy declares one', () => {
-    // The guardrail-level "Default for policies that cannot run" control is
-    // gone. `foldFailModes` returns `current.failMode` when no enabled policy
-    // names one, so a legacy row's column survives a visit; when one does,
-    // 'closed' wins, because over-blocking on an outage is the recoverable half
-    // of that trade.
-    const bare: GuardrailHooksConfig = {
-      ...storedConfig(),
-      policies: storedConfig().policies.map((policy) => {
-        const copy = { ...policy };
-        delete copy.failMode;
-        return copy;
-      }),
-    };
-    expect(projectHooksToLegacy(bare, storedRecord({ failMode: 'closed' })).failMode).toBe('closed');
-    expect(projectHooksToLegacy(bare, storedRecord({ failMode: 'open' })).failMode).toBe('open');
-    // The stored fixture has one 'closed' policy and one 'open' one.
-    expect(projectHooksToLegacy(storedConfig(), storedRecord({ failMode: 'open' })).failMode).toBe(
-      'closed',
-    );
-  });
-
-  /**
-   * THE ONE PROJECTED COLUMN THE PATCH ROUTE CANNOT WRITE, pinned so the gap is
-   * a documented fact rather than something the next reader rediscovers.
-   *
-   * `UpdateGuardrailInput` (services/guardrail/types.ts) has no `type` slot, so
-   * the value computed here is dropped on every save. `POST /api/guardrails`
-   * does write it (`type: legacy?.type ?? body.type`) — but the create modal no
-   * longer offers the fork, so a console-created guardrail is `type: 'preset'`
-   * for life. `type: 'custom'` remains legal, remains stored, and remains
-   * reachable through `POST /api/client/v1/guardrails`.
-   */
-  it('computes `type` from the policies even though PATCH has nowhere to put it', () => {
-    const soleCustom: GuardrailHooksConfig = {
-      ...storedConfig(),
-      policies: [
-        {
-          id: 'pol-custom',
-          family: 'custom',
-          enabled: true,
-          hooks: ['input.pre'],
-          schedule: { timing: 'sync', onFail: 'block' },
-          prompt: 'Refuse anything about internal pricing.',
-          modelKey: 'judge',
-        } as GuardrailPolicy,
-      ],
-    };
-    const legacy = projectHooksToLegacy(soleCustom, storedRecord({ type: 'preset' }));
-    expect(legacy.type).toBe('custom');
-    expect(legacy.customPrompt).toBe('Refuse anything about internal pricing.');
   });
 });

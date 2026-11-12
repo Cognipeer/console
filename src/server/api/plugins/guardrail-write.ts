@@ -9,13 +9,10 @@
  */
 import type {
   GuardrailAction,
-  GuardrailPolicy,
   GuardrailHooksConfig,
   GuardrailMode,
   GuardrailType,
-  IGuardrail,
 } from '@/lib/database';
-import { getPiiPolicyByKey } from '@/lib/services/pii';
 import { createGuardrail, updateGuardrail } from '@/lib/services/guardrail';
 import type { GuardrailView } from '@/lib/services/guardrail';
 import {
@@ -25,11 +22,7 @@ import {
   readPolicyList,
 } from '@/lib/services/guardrail/hooks/contract';
 import type { PolicyFamily } from '@/lib/services/guardrail/hooks/contract';
-import {
-  projectHooksToLegacy,
-  validateGuardrailHooks,
-} from '@/lib/services/guardrail/hooks/legacy';
-import type { LegacyProjectionContext } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 // Reached at its own path, like the hook-plane modules above: this is the
 // family's own account of why a pattern will not run, and a configuration
 // surface that rejects a rule owes its author that account rather than a
@@ -37,14 +30,12 @@ import type { LegacyProjectionContext } from '@/lib/services/guardrail/hooks/leg
 import { explainRegexRuleError } from '@/lib/services/guardrail/families/regex';
 
 /**
- * 'redact' has always been part of `GuardrailAction`, and the hook plane makes
- * it a first-class rung: `projectHooksToLegacy` folds a redacting policy down
- * onto this column, so a guardrail saved with one comes back carrying
- * `action: 'redact'`. Leaving it off this list made the round trip fail — the
- * edit screen re-sends the action it was given and gets a 400 for a value the
- * server itself wrote.
+ * 'redact' is a first-class rung of the hook plane. Leaving it off this list
+ * would make a round trip fail: the edit screen re-sends the action it was
+ * given and would get a 400 for a value the server itself wrote.
  */
 const VALID_ACTIONS: GuardrailAction[] = ['block', 'warn', 'flag', 'redact'];
+/** The values the list routes accept for `?type=`: a stored label, not an input to create. */
 export const VALID_TYPES: GuardrailType[] = ['preset', 'custom'];
 const VALID_FAIL_MODES = ['open', 'closed'];
 const VALID_MODES: GuardrailMode[] = ['enforce', 'monitor', 'disabled'];
@@ -55,42 +46,6 @@ const LLM_POLICY_FAMILIES: ReadonlySet<string> = new Set<PolicyFamily>([
   'prompt_shield',
   'custom',
 ]);
-
-/**
- * `GuardrailView` back to the record shape the hook plane's pure helpers take.
- *
- * `serializeGuardrail` swaps `_id` for `id` and widens the timestamps to
- * `Date | string`, so a view is not assignable to `IGuardrail` even though it
- * carries every field these helpers read. The timestamps are omitted rather
- * than coerced: nothing in `projectHooksToLegacy` or `ensureHooks` reads them,
- * and `policyVersionOf`'s job is done here by `policyVersionOfView`.
- *
- * `metadata` is NOT on `GuardrailView`, so it cannot be carried across — see
- * the note on the update route about what that costs.
- */
-export function toGuardrailRecord(view: GuardrailView): IGuardrail {
-  return {
-    _id: view.id,
-    tenantId: view.tenantId,
-    projectId: view.projectId,
-    key: view.key,
-    name: view.name,
-    description: view.description,
-    type: view.type,
-    target: view.target,
-    action: view.action,
-    enabled: view.enabled,
-    failMode: view.failMode,
-    modelKey: view.modelKey,
-    policy: view.policy,
-    customPrompt: view.customPrompt,
-    hooks: view.hooks,
-    hooksVersion: view.hooksVersion,
-    mode: view.mode,
-    createdBy: view.createdBy,
-    updatedBy: view.updatedBy,
-  };
-}
 
 // ── Hook config on the write path ─────────────────────────────────────────
 
@@ -172,24 +127,6 @@ export function readHooksField(body: Record<string, unknown>): HooksFieldResult 
   return errors.length > 0 ? { errors } : { hooks: raw };
 }
 
-/**
- * `hooksVersion` 0 means "derived from the legacy columns, re-derive on every
- * read". An API caller can never mean that: the config it is sending was
- * authored by someone. Accepting a 0 here would write the config to the row and
- * have `ensureHooks` throw it away on every evaluation while the edit screen
- * kept showing it — with no error anywhere in the loop.
- */
-export function readHooksVersionField(
-  body: Record<string, unknown>,
-): { hooksVersion?: number; error?: string } {
-  const raw = body.hooksVersion;
-  if (raw === undefined) return {};
-  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
-    return { error: 'hooksVersion must be an integer >= 1' };
-  }
-  return { hooksVersion: raw };
-}
-
 export function readModeField(
   body: Record<string, unknown>,
 ): { mode?: GuardrailMode; error?: string } {
@@ -202,87 +139,15 @@ export function readModeField(
 }
 
 /**
- * The resolved PII policy the downward projection needs.
- *
- * `projectHooksToLegacy` is synchronous and DB-free by design, so it cannot
- * fetch this itself; without it the projection preserves whatever category map
- * the legacy blob already carried, which on a freshly authored config is
- * nothing at all — leaving an older console binary with
- * `policy.pii.enabled: true` and an empty category map, i.e. a PII guardrail
- * that scans for nothing.
- *
- * The context holds ONE policy, so this is the FIRST enabled pii policy's. A
- * config with two pii policies projects the first one's categories downward; the
- * hook plane still runs both.
- */
-async function resolveProjectionPiiPolicy(
-  tenantDbName: string,
-  hooks: GuardrailHooksConfig,
-  projectId: string,
-): Promise<LegacyProjectionContext['piiPolicy']> {
-  const piiPolicy = (hooks.policies ?? []).find(
-    (policy): policy is Extract<GuardrailPolicy, { family: 'pii' }> =>
-      policy.enabled && policy.family === 'pii',
-  );
-  const key = piiPolicy?.piiPolicyKey?.trim();
-  if (!key) return undefined;
-
-  const scoped = await getPiiPolicyByKey(tenantDbName, key, projectId);
-  if (scoped) return scoped;
-  // `findPiiPolicyByKey` has the same NULL-excluding projectId predicate the
-  // guardrail lookup does, so a workspace-level policy needs the same fallback.
-  // `null` = the row NO project owns; an unscoped lookup could return another
-  // project's same-key policy first and hide the tenant-wide one.
-  return (await getPiiPolicyByKey(tenantDbName, key, null)) ?? undefined;
-}
-
-/**
- * Recompute the legacy columns from an authored hook config.
- *
- * This is what keeps `type` / `target` / `action` / `failMode` / `modelKey` /
- * `policy` / `customPrompt` permanently populated, and it has to run on EVERY
- * save that touches `hooks`. The readers that depend on those columns are not
- * hypothetical: `moderationApi`'s discovery scan matches on
- * `type === 'preset' && policy.moderation.enabled`, the AI App Gateway filters
- * findings by the legacy shape, and an older console binary sharing the tenant
- * database reads nothing else.
- */
-export async function projectLegacyColumns(
-  tenantDbName: string,
-  hooks: GuardrailHooksConfig,
-  current: IGuardrail,
-  projectId: string,
-): Promise<ReturnType<typeof projectHooksToLegacy>> {
-  return projectHooksToLegacy(hooks, current, {
-    piiPolicy: await resolveProjectionPiiPolicy(tenantDbName, hooks, projectId),
-  });
-}
-
-/**
  * LLM-backed policies silently no-op without a model, which reads as "guardrail
  * active" while nothing runs. Reject configurations that enable an LLM policy
  * with no model to run it on.
  */
 export function findLlmModelConfigError(body: Record<string, unknown>): string | null {
   const modelKey = typeof body.modelKey === 'string' && body.modelKey.trim() !== '' ? body.modelKey : undefined;
-  if (body.type === 'custom' && !modelKey) {
-    return 'modelKey is required for custom guardrails (the rule is evaluated by an LLM)';
-  }
-  const policy = body.policy as {
-    moderation?: { enabled?: boolean; modelKey?: string };
-    promptShield?: { enabled?: boolean; modelKey?: string };
-  } | undefined;
-  if (policy?.moderation?.enabled && !policy.moderation.modelKey && !modelKey) {
-    return 'Content moderation is enabled but no model is configured (set policy.moderation.modelKey or the guardrail modelKey)';
-  }
-  if (policy?.promptShield?.enabled && !policy.promptShield.modelKey && !modelKey) {
-    return 'Prompt shield is enabled but no model is configured (set policy.promptShield.modelKey or the guardrail modelKey)';
-  }
 
-  // The same rule over the hook plane's own shape. An authored config keeps its
-  // LLM families in `hooks.policies` and may carry no legacy `policy` at all, so
-  // without this a guardrail saved through the hook editor skips the gate
-  // entirely and reads as active while its moderation policy evaluates nothing.
+  // An enabled LLM family with no model reads as active while it evaluates
+  // nothing, so it is refused here.
   //
   // The record-level `modelKey` counts as a model here because that is how the
   // ENGINE resolves one (`llmPolicyModelKey`, families/llm.ts:420 —
@@ -387,24 +252,38 @@ export interface ParsedGuardrailCreate {
   enabled: boolean;
   mode?: GuardrailMode;
   hooks?: GuardrailHooksConfig;
-  hooksVersion?: number;
 }
 
 export type GuardrailCreateParseResult = { ok: true; value: ParsedGuardrailCreate } | GuardrailWriteError;
+
+/**
+ * Fields of the pre-hook guardrail model. Each one described what to enforce,
+ * so a body that still carries one must fail loudly: ignoring it would store a
+ * guardrail that enforces nothing while the caller believes it is configured.
+ */
+const RETIRED_BODY_FIELDS = ['policy', 'customPrompt'] as const;
+
+function findRetiredField(body: Record<string, unknown>): string | null {
+  for (const field of RETIRED_BODY_FIELDS) {
+    if (body[field] !== undefined) {
+      return `${field} is no longer supported: describe what the guardrail enforces in hooks.policies`;
+    }
+  }
+  if (body.type !== undefined && body.type !== 'preset') {
+    return 'type is no longer supported: omit it, or send "preset". A rule judged by an LLM is a custom policy in hooks.policies';
+  }
+  return null;
+}
 
 /** Validates a create body. Does not touch the database. */
 export function parseGuardrailCreateBody(body: Record<string, unknown>): GuardrailCreateParseResult {
   if (typeof body.name !== 'string' || body.name.trim() === '') {
     return fail('name is required');
   }
-  if (!VALID_TYPES.includes(body.type as GuardrailType)) {
-    return fail('type must be "preset" or "custom"');
-  }
+  const retired = findRetiredField(body);
+  if (retired) return fail(retired);
   if (body.action !== undefined && !VALID_ACTIONS.includes(body.action as GuardrailAction)) {
     return fail('action must be "block", "warn", "flag", or "redact"');
-  }
-  if (body.type === 'custom' && (typeof body.customPrompt !== 'string' || body.customPrompt.trim() === '')) {
-    return fail('customPrompt is required for custom guardrails');
   }
   if (body.failMode !== undefined && !VALID_FAIL_MODES.includes(body.failMode as string)) {
     return fail('failMode must be "open" or "closed"');
@@ -412,8 +291,6 @@ export function parseGuardrailCreateBody(body: Record<string, unknown>): Guardra
 
   const modeField = readModeField(body);
   if (modeField.error) return fail(modeField.error);
-  const hooksVersionField = readHooksVersionField(body);
-  if (hooksVersionField.error) return fail(hooksVersionField.error);
   // Ahead of the shared validator, which rejects the same rule with a message
   // that does not say why. See findRegexRuleError.
   const regexRuleError = findRegexRuleError(body);
@@ -433,7 +310,6 @@ export function parseGuardrailCreateBody(body: Record<string, unknown>): Guardra
       enabled: typeof body.enabled === 'boolean' ? body.enabled : true,
       mode: modeField.mode,
       hooks: hooksField.hooks,
-      hooksVersion: hooksVersionField.hooksVersion,
     },
   };
 }
@@ -442,56 +318,18 @@ export async function createGuardrailFromRequest(
   ctx: GuardrailWriteContext,
   parsed: ParsedGuardrailCreate,
 ): Promise<GuardrailView> {
-  const { body, name, action, enabled, mode, hooks, hooksVersion } = parsed;
-
-  // With `hooks` in the body the legacy columns are DERIVED from it rather
-  // than taken from the request, so the two descriptions of one policy can
-  // never be saved disagreeing. The draft is the row this create would have
-  // produced without hooks: the projection reads it for what it cannot derive
-  // (a preserved category selection, the operator's `type` when nothing is
-  // enabled).
-  const legacy = hooks
-    ? await projectLegacyColumns(
-        ctx.tenantDbName,
-        hooks,
-        {
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
-          // Assigned by createGuardrail from the name; never read by the
-          // projection.
-          key: '',
-          name,
-          type: body.type as GuardrailType,
-          // createGuardrail's own default, so the projection's "nothing
-          // enabled" branch preserves the same value the row would get.
-          target: 'input',
-          action,
-          enabled,
-          failMode: body.failMode as 'open' | 'closed' | undefined,
-          modelKey: body.modelKey as string | undefined,
-          policy: body.policy as IGuardrail['policy'],
-          customPrompt: body.customPrompt as string | undefined,
-          createdBy: ctx.actorId,
-        },
-        ctx.projectId,
-      )
-    : undefined;
+  const { body, name, action, enabled, mode, hooks } = parsed;
 
   return createGuardrail(ctx.tenantDbName, ctx.tenantId, ctx.actorId, {
-    action: legacy?.action ?? action,
-    customPrompt: legacy?.customPrompt ?? (body.customPrompt as string | undefined),
+    action,
     description: typeof body.description === 'string' ? body.description.trim() : undefined,
     enabled,
-    failMode: legacy?.failMode ?? (body.failMode as 'open' | 'closed' | undefined),
+    failMode: body.failMode as 'open' | 'closed' | undefined,
     hooks,
-    hooksVersion,
-    modelKey: legacy?.modelKey ?? (body.modelKey as string | undefined),
+    modelKey: body.modelKey as string | undefined,
     mode,
     name,
-    policy: (legacy?.policy ?? body.policy) as Record<string, unknown> | undefined,
     projectId: ctx.projectId,
-    target: legacy?.target,
-    type: legacy?.type ?? (body.type as GuardrailType),
   });
 }
 
@@ -500,7 +338,6 @@ export interface ParsedGuardrailPatch {
   body: Record<string, unknown>;
   mode?: GuardrailMode;
   hooks?: GuardrailHooksConfig;
-  hooksVersion?: number;
 }
 
 export type GuardrailPatchParseResult = { ok: true; value: ParsedGuardrailPatch } | GuardrailWriteError;
@@ -511,6 +348,8 @@ export type GuardrailPatchParseResult = { ok: true; value: ParsedGuardrailPatch 
  * `updateGuardrailFromRequest`.
  */
 export function parseGuardrailPatchBody(body: Record<string, unknown>): GuardrailPatchParseResult {
+  const retired = findRetiredField(body);
+  if (retired) return fail(retired);
   if (body.action !== undefined && !VALID_ACTIONS.includes(body.action as GuardrailAction)) {
     return fail('action must be "block", "warn", "flag", or "redact"');
   }
@@ -520,8 +359,6 @@ export function parseGuardrailPatchBody(body: Record<string, unknown>): Guardrai
 
   const modeField = readModeField(body);
   if (modeField.error) return fail(modeField.error);
-  const hooksVersionField = readHooksVersionField(body);
-  if (hooksVersionField.error) return fail(hooksVersionField.error);
   const regexRuleError = findRegexRuleError(body);
   if (regexRuleError) return fail(regexRuleError);
   const hooksField = readHooksField(body);
@@ -533,7 +370,6 @@ export function parseGuardrailPatchBody(body: Record<string, unknown>): Guardrai
       body,
       mode: modeField.mode,
       hooks: hooksField.hooks,
-      hooksVersion: hooksVersionField.hooksVersion,
     },
   };
 }
@@ -547,7 +383,7 @@ export async function updateGuardrailFromRequest(
   existing: GuardrailView,
   parsed: ParsedGuardrailPatch,
 ): Promise<GuardrailUpdateResult> {
-  const { body, mode, hooks, hooksVersion } = parsed;
+  const { body, mode, hooks } = parsed;
 
   // The LLM-model gate needs the record's own modelKey when the body does not
   // restate it, or a PATCH that only edits `hooks` would be rejected for a
@@ -558,41 +394,15 @@ export async function updateGuardrailFromRequest(
   });
   if (modelConfigError) return fail(modelConfigError);
 
-  // Projected against the record AS IT WILL BE, not as it is: the fields this
-  // PATCH also changes are the ones the projection falls back to for anything
-  // it cannot derive, so folding them in first is what stops a combined edit
-  // ("soften the action AND change a policy") from projecting the old action.
-  const legacy = hooks
-    ? await projectLegacyColumns(
-        ctx.tenantDbName,
-        hooks,
-        {
-          ...toGuardrailRecord(existing),
-          action: (body.action as GuardrailAction | undefined) ?? existing.action,
-          enabled: typeof body.enabled === 'boolean' ? body.enabled : existing.enabled,
-          failMode: (body.failMode as 'open' | 'closed' | undefined) ?? existing.failMode,
-          modelKey: (body.modelKey as string | undefined) ?? existing.modelKey,
-          policy: (body.policy as IGuardrail['policy']) ?? existing.policy,
-          customPrompt: (body.customPrompt as string | undefined) ?? existing.customPrompt,
-        },
-        ctx.projectId,
-      )
-    : undefined;
-
-  // `type`, `target` and `metadata` are computed by the projection but have no
-  // slot on UpdateGuardrailInput, so they cannot be written here.
   const guardrail = await updateGuardrail(ctx.tenantDbName, existing.id, ctx.actorId, {
-    action: legacy?.action ?? (body.action as GuardrailAction | undefined),
-    customPrompt: legacy?.customPrompt ?? (body.customPrompt as string | undefined),
+    action: body.action as GuardrailAction | undefined,
     description: body.description as string | undefined,
     enabled: body.enabled as boolean | undefined,
-    failMode: legacy?.failMode ?? (body.failMode as 'open' | 'closed' | undefined),
+    failMode: body.failMode as 'open' | 'closed' | undefined,
     hooks,
-    hooksVersion,
-    modelKey: legacy?.modelKey ?? (body.modelKey as string | undefined),
+    modelKey: body.modelKey as string | undefined,
     mode,
     name: body.name as string | undefined,
-    policy: (legacy?.policy ?? body.policy) as Record<string, unknown> | undefined,
   });
 
   return { ok: true, guardrail };

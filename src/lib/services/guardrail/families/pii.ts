@@ -56,15 +56,9 @@
 
 import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { runWithTenantScope } from '@/lib/database';
-import { createLogger } from '@/lib/core/logger';
 import type { PiiAction } from '@/lib/database/provider/types.domain';
 import { scanWithPolicy } from '../../pii/piiService';
-// The stateless twin of `scanWithPolicy`, used ONLY by the legacy fallback
-// below. It is the same detector the policy path ends up calling; what it
-// skips is the policy READ, which is precisely the step that can fail on a row
-// whose lifted policy was never provisioned.
 import {
-  detect as detectPiiSpans,
   withCustomPatternBudget,
   type CustomPatternSkip,
 } from '../../pii/detector';
@@ -90,8 +84,6 @@ import {
 } from '../hooks/contract';
 
 const FAMILY: PolicyFamily = 'pii';
-
-const logger = createLogger('guardrail:pii');
 
 /**
  * Machine codes on the emitted findings. Append-only, and deliberately
@@ -247,12 +239,8 @@ function resolveScanAction(policy: PiiPolicyConfig, action: SafetyAction): PiiAc
 // ── Finding construction ───────────────────────────────────────────────────
 
 /**
- * `category` is the PII SERVICE's id (`tc_kimlik`), not the legacy detector's
- * (`tckn`). It is the truth about which pattern matched, and mapping back
- * through `LEGACY_PII_CATEGORY_MAP` would be lossy in one direction anyway:
- * `tr_phone`, `tr_iban`, `de_phone` and every tenant custom pattern have no
- * legacy counterpart and would have to fall through as service ids regardless,
- * producing a category column with two spellings in it.
+ * `category` is the PII SERVICE's id (`tc_kimlik`). It is the truth about which
+ * pattern matched.
  *
  * `type` stays `'pii'` (via LEGACY_FINDING_TYPE) so the AI App Gateway's
  * PII-dimension filter and both providers' `findingsByType` aggregations keep
@@ -366,33 +354,6 @@ export async function runPiiPolicy(input: FamilyRunInput<PiiPolicyConfig>): Prom
       locale: policy.locale,
     });
 
-  // Present only on a lifted legacy row (see `legacyCategories` on the config).
-  const legacyCategories =
-    policy.legacyCategories && Object.keys(policy.legacyCategories).length > 0
-      ? policy.legacyCategories
-      : undefined;
-
-  /**
-   * The DB-free twin of `policyScan`. `scanWithPolicy` is exactly
-   * `detect(text, config, action)` plus a policy read and, for `'block'`, a
-   * pass that stamps `block: true`; reproducing those two steps here is what
-   * lets a legacy guardrail keep detecting when its lifted policy row is
-   * missing. `'tokenize'` is unreachable: it has no legacy action that maps to
-   * it, so no lifted policy can ask for it.
-   */
-  const statelessScan: PiiScanFn | undefined = legacyCategories
-    ? async (value) => {
-        const found = detectPiiSpans(
-          value,
-          { categories: legacyCategories, locale: policy.locale },
-          scanAction,
-        );
-        return {
-          findings: scanAction === 'block' ? found.map((f) => ({ ...f, block: true })) : found,
-        };
-      }
-    : undefined;
-
   const runPasses = async (scanText: PiiScanFn): Promise<void> => {
       // ── Pass 1: the policy scan, over the flattened subject text ────────
       // One round trip for the whole subject rather than one per segment: the
@@ -453,13 +414,12 @@ export async function runPiiPolicy(input: FamilyRunInput<PiiPolicyConfig>): Prom
           return;
         }
         if (unit.text.length === 0) continue;
-        // `deobfuscateEmails` is applied unconditionally, where the legacy
-        // detector gated it on the `email` category being enabled. That gate
-        // cost nothing there because the legacy loop already had the category
-        // list in hand; here it would cost a second read of the policy purely
-        // to decide whether to collapse "(at)". The rewrite only touches
-        // bracketed/spelled-out `at`/`dot` forms, so on text with no such
-        // construct it is the identity and the whole pass is skipped below.
+        // `deobfuscateEmails` is applied unconditionally rather than gated on
+        // the `email` category being enabled: that gate would cost a second
+        // read of the policy purely to decide whether to collapse "(at)". The
+        // rewrite only touches bracketed/spelled-out `at`/`dot` forms, so on
+        // text with no such construct it is the identity and the whole pass is
+        // skipped below.
         const normalized = deobfuscateEmails(normalizeText(unit.text));
         if (normalized === unit.text) continue;
 
@@ -537,54 +497,13 @@ export async function runPiiPolicy(input: FamilyRunInput<PiiPolicyConfig>): Prom
     reportSkips(skipped);
   } catch (error) {
     // The policy is missing, disabled-and-deleted, or the tenant DB is
-    // unreachable. `scanWithPolicy` throws on a missing key, and a lifted
-    // legacy policy deliberately points at a deterministic key that may not
-    // have been provisioned yet — so this is a live path, not a can't-happen.
+    // unreachable. `scanWithPolicy` throws on a missing key, so this is a live
+    // path, not a can't-happen.
     const reason = error instanceof Error ? error.message : String(error);
 
-    if (statelessScan) {
-      // A lifted legacy row. Its category list travelled with the policy for
-      // exactly this moment: re-run both passes with no database at all rather
-      // than report a policy that could not run. Provisioning the policy is a
-      // WRITE, and a write failure on a guardrail the operator never touched
-      // must not turn its PII enforcement off.
-      //
-      // Everything pass 1 collected is discarded first. Those findings came
-      // from a scan that threw partway, so keeping them would mix a partial
-      // policy scan with a complete stateless one and double-report whatever
-      // both saw — `seen` is keyed per value, but the mutation list is not.
-      findings.length = 0;
-      mutations.length = 0;
-      seen.clear();
-      try {
-        // The stateless scan has no custom patterns (a lifted policy carries
-        // categories only), so this reports nothing today; wrapped anyway so
-        // the two paths stay the same shape.
-        const { skipped } = await withCustomPatternBudget(() => runPasses(statelessScan));
-        reportSkips(skipped);
-        logger.warn('PII policy unavailable; scanned with the lifted legacy categories', {
-          policyId: policy.id,
-          piiPolicyKey,
-          reason,
-        });
-        return degraded.length > 0 ? { findings, mutations, degraded } : { findings, mutations };
-      } catch (fallbackError) {
-        degraded.push({
-          policyId: policy.id,
-          family: FAMILY,
-          reason:
-            `PII policy "${piiPolicyKey}" could not be scanned (${reason}) and the ` +
-            `legacy-category fallback also failed: ${
-              fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
-            }`,
-        });
-        return { findings, mutations, degraded };
-      }
-    }
-
-    // An authored config: there is no inline category list to fall back on, by
-    // design. Findings already collected are kept — a partial scan that found
-    // something real must not lose it because a later pass failed.
+    // There is no inline category list to fall back on, by design. Findings
+    // already collected are kept — a partial scan that found something real
+    // must not lose it because a later pass failed.
     degraded.push({
       policyId: policy.id,
       family: FAMILY,

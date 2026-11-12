@@ -69,6 +69,7 @@ import {
   GUARDRAIL_CONTRACT_VERSION,
   STREAM_ELIGIBLE_FAMILIES,
   policyMaxMatchChars,
+  readHooks,
   textSubject,
   toGuardrailMode,
 } from './contract';
@@ -82,7 +83,6 @@ import type {
   StreamGuardSettings,
 } from './contract';
 import { runHook, resolveGuardrail } from './engine';
-import { ensureHooks } from './legacy';
 import { resolveBlockMessage } from './messages';
 import { applyMutations } from './mutations';
 
@@ -334,7 +334,7 @@ async function foldStreamSettings(
     // terminal audit, which is also the only place it would ever be logged.
     if (toGuardrailMode(record.mode, record.enabled) !== 'enforce') continue;
 
-    const { hooks } = ensureHooks(record);
+    const hooks = readHooks(record);
     if (hooks.stream?.enabled !== true) continue;
     if (hooks.bindings?.['output.stream.delta']?.enabled !== true) continue;
 

@@ -1,5 +1,5 @@
 /**
- * The guardrail service — CRUD, plus the LEGACY DOOR into the hook plane.
+ * The guardrail service — CRUD, plus the text-in, result-out DOOR into the hook plane.
  *
  * `evaluateGuardrail` no longer evaluates anything. It resolves the record,
  * builds a `HookCall` and hands it to `runHook`; detection, ordering, fail
@@ -20,8 +20,8 @@ import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
-import type { IGuardrail, GuardrailType } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
+import type { DatabaseProvider, IGuardrail, IGuardrailPresetPolicy, GuardrailType } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { generateUniqueSlugKey } from './keyGeneration';
 import type {
@@ -31,12 +31,10 @@ import type {
   GuardrailEvaluationResult,
 } from './types';
 import {
-  PII_CATEGORIES,
-  MODERATION_CATEGORIES,
-  WORD_FILTER_BUILTIN_LISTS,
-} from './types';
-import {
   GUARDRAIL_CONTRACT_VERSION,
+  HOOK_IDS,
+  emptyHooksConfig,
+  hookDirection,
   normalizeHooksConfig,
   textSubject,
 } from './hooks/contract';
@@ -52,32 +50,98 @@ import { invalidateGuardrailCache } from './hooks/recordCache';
 
 // ── Serialization ─────────────────────────────────────────────────────────
 
+/** The hooks that are switched on and run at least one enabled policy. */
+function activeHooks(hooks: GuardrailHooksConfig): HookId[] {
+  const policies = hooks.policies ?? [];
+  return HOOK_IDS.filter(
+    (hook) =>
+      hooks.bindings?.[hook]?.enabled === true &&
+      policies.some((policy) => policy.enabled && policy.hooks?.includes(hook)),
+  );
+}
+
+/**
+ * The direction a hook config protects, always derived from the hooks, never
+ * authored: `input` when any active hook runs on the input side, `output` when
+ * only output-side hooks are active, and `fallback` when nothing is active.
+ * Consumers pick guardrails by it (the AI App Gateway offers `input` ones as
+ * request protection), so it must never claim a side no active hook covers.
+ */
+export function deriveGuardrailTarget(
+  hooks: GuardrailHooksConfig | undefined,
+  fallback: IGuardrail['target'],
+): IGuardrail['target'] {
+  const active = hooks ? activeHooks(hooks) : [];
+  if (active.length === 0) return fallback;
+  return active.some((hook) => hookDirection(hook) === 'input') ? 'input' : 'output';
+}
+
+/**
+ * A read-only, legacy-shaped summary of which policy families a hook config
+ * enforces IN THE DIRECTION `target` NAMES: a family counts only when an
+ * enabled policy of it runs on an active hook of that side. Nothing stored and
+ * nothing the engine reads: it exists for consumers that decide from
+ * `view.target` and `view.policy.<family>.enabled` together (the AI App
+ * Gateway's guardrail picker), which must never see PII protection on a side
+ * where none runs. Flags only; the PII categories live on the referenced PII
+ * policy, so `pii.categories` is empty except for the `apiKey` a secrets
+ * policy stands for.
+ */
+function summarizePolicyFamilies(
+  hooks: GuardrailHooksConfig | undefined,
+  action: IGuardrail['action'],
+  target: IGuardrail['target'],
+): IGuardrailPresetPolicy | undefined {
+  if (!hooks) return undefined;
+  const onThisSide = new Set(activeHooks(hooks).filter((hook) => hookDirection(hook) === target));
+  const enabled = (family: PolicyFamily): boolean =>
+    (hooks.policies ?? []).some(
+      (policy) => policy.enabled && policy.family === family && (policy.hooks ?? []).some((hook) => onThisSide.has(hook)),
+    );
+  return {
+    pii: {
+      enabled: enabled('pii') || enabled('secrets'),
+      action,
+      categories: enabled('secrets') ? { apiKey: true } : {},
+    },
+    wordFilter: { enabled: enabled('word_filter') },
+    moderation: { enabled: enabled('moderation'), categories: {} },
+    promptShield: { enabled: enabled('prompt_shield'), sensitivity: 'balanced' },
+  };
+}
+
 export function serializeGuardrail(record: IGuardrail): GuardrailView {
+  // `policy` and `customPrompt` are columns of the pre-hook model. A row that
+  // still carries them (an older database) must not hand them to the API.
   const { _id, ...rest } = record;
   const view = {
     ...rest,
     id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
   } as GuardrailView;
-  // The other read chokepoint for the `check` -> `policy` rename (the engine's
-  // is `ensureHooks`). Every view the dashboard and both API surfaces return
-  // comes through here, and the guardrail list counts `hooks.policies` off the
-  // raw view — so without this a guardrail authored before the rename renders
-  // as "0 policies" and its edit screen would save that back. Assigned in place
-  // rather than spread so an absent config stays absent instead of becoming an
-  // explicit `hooks: undefined`.
-  if (view.hooks !== undefined) view.hooks = normalizeHooksConfig(view.hooks);
+  delete view.policy;
+  delete (view as { customPrompt?: unknown }).customPrompt;
+  // The read chokepoint for the `check` -> `policy` rename. Every view the
+  // dashboard and both API surfaces return comes through here, and the
+  // guardrail list counts `hooks.policies` off the raw view — so without this
+  // a guardrail authored before the rename renders as "0 policies" and its edit
+  // screen would save that back. Assigned in place rather than spread so an
+  // absent config stays absent instead of becoming an explicit
+  // `hooks: undefined`.
+  if (view.hooks !== undefined) {
+    view.hooks = normalizeHooksConfig(view.hooks);
+    view.target = deriveGuardrailTarget(view.hooks, view.target);
+    view.policy = summarizePolicyFamilies(view.hooks, view.action, view.target);
+  }
   return view;
 }
 
 // ── Key generation ────────────────────────────────────────────────────────
 
 async function generateUniqueKey(
-  tenantDbName: string,
+  db: DatabaseProvider,
   projectId: string | undefined,
   desiredKey: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
   return generateUniqueSlugKey(desiredKey, 'guardrail', async (candidate) => {
     // RESERVED. The default tool guardrail is pinned to this literal and
     // `ensureDefaultToolGuardrail` materialises it lazily as a tenant-wide row,
@@ -96,70 +160,17 @@ async function generateUniqueKey(
   });
 }
 
-// ── Default policy builder ────────────────────────────────────────────────
-
-export function buildDefaultPresetPolicy(): IGuardrail['policy'] {
-  const piiCategories: Record<string, boolean> = {};
-  for (const cat of PII_CATEGORIES) {
-    piiCategories[cat.id] = cat.defaultEnabled;
-  }
-
-  const moderationCategories: Record<string, boolean> = {};
-  for (const cat of MODERATION_CATEGORIES) {
-    moderationCategories[cat.id] = cat.defaultEnabled;
-  }
-
-  const builtinLists: Record<string, boolean> = {};
-  for (const list of WORD_FILTER_BUILTIN_LISTS) {
-    builtinLists[list.id] = list.defaultEnabled;
-  }
-
-  return {
-    pii: {
-      enabled: true,
-      action: 'block',
-      categories: piiCategories,
-    },
-    wordFilter: {
-      enabled: false,
-      action: 'block',
-      builtinLists,
-      words: [],
-      regexes: [],
-    },
-    moderation: {
-      enabled: false,
-      categories: moderationCategories,
-    },
-    promptShield: {
-      enabled: false,
-      sensitivity: 'balanced',
-    },
-  };
-}
-
 // ── Hook config on the write path ─────────────────────────────────────────
 
 /**
- * Normalises an AUTHORED hook config on its way into the store.
+ * Normalises a hook config on its way into the store.
  *
- * Two things are stamped here rather than left to the caller, because getting
- * either wrong is silent:
- *
- * 1. `hooksVersion`. `ensureHooks` re-derives the whole config from the legacy
- *    policy columns whenever the stored version is 0 — so a config saved with
- *    `hooks` but no `hooksVersion` would be written to the row, read back, and
- *    then thrown away on every evaluation while the edit screen kept showing
- *    it. There is no error anywhere in that loop.
- *
- * 2. `stream.enabled`. `DEFAULT_STREAM_SETTINGS.enabled` is FALSE — the right
- *    default for a LIFTED legacy row, which is what that constant exists for
- *    (a fleet of existing guardrails must not silently start holding back
- *    streamed tokens on upgrade). A newly AUTHORED guardrail is the opposite
- *    case: someone chose these policies now, and real-time blocking is the
- *    behaviour they expect. Only `create` applies it — re-defaulting on update
- *    would turn streaming back on for an operator who deliberately switched it
- *    off, which is the more expensive mistake of the two.
+ * `contractVersion` is stamped here rather than left to the caller, and so is
+ * `stream.enabled` on create: `DEFAULT_STREAM_SETTINGS.enabled` is FALSE, which
+ * is not what someone who just chose these policies expects — real-time
+ * blocking is. Only `create` applies it: re-defaulting on update would turn
+ * streaming back on for an operator who deliberately switched it off, which is
+ * the more expensive mistake of the two.
  */
 function normalizeAuthoredHooks(
   hooks: GuardrailHooksConfig,
@@ -178,13 +189,12 @@ const logger = createLogger('guardrail-service');
 let warnedLegacyFailMode = false;
 
 /**
- * Fail mode for a guardrail created without one. Presets that run PII or
- * prompt-shield checks default to `closed`; `GUARDRAIL_DEFAULT_FAIL_MODE=open`
+ * Fail mode for a guardrail created without one. Configs that run PII or
+ * prompt-shield policies default to `closed`; `GUARDRAIL_DEFAULT_FAIL_MODE=open`
  * restores `open` for everything.
  */
 export function resolveDefaultFailMode(
-  type: GuardrailType,
-  policy: IGuardrail['policy'],
+  hooks: GuardrailHooksConfig | undefined,
 ): 'open' | 'closed' {
   if (getConfig().guardrail.defaultFailMode === 'open') {
     if (!warnedLegacyFailMode) {
@@ -193,10 +203,10 @@ export function resolveDefaultFailMode(
     }
     return 'open';
   }
-  if (type === 'preset' && (policy?.pii?.enabled || policy?.promptShield?.enabled)) {
-    return 'closed';
-  }
-  return 'open';
+  const runsPiiOrShield = (hooks?.policies ?? []).some(
+    (policy) => policy.enabled && (policy.family === 'pii' || policy.family === 'prompt_shield'),
+  );
+  return runsPiiOrShield ? 'closed' : 'open';
 }
 
 // ── CRUD operations ───────────────────────────────────────────────────────
@@ -207,51 +217,43 @@ export async function createGuardrail(
   createdBy: string,
   input: CreateGuardrailInput,
 ): Promise<GuardrailView> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = await generateUniqueKey(db, input.projectId, input.name);
 
-  const key = await generateUniqueKey(tenantDbName, input.projectId, input.name);
+    // A create with no `hooks` is a guardrail with nothing configured yet: an
+    // empty config, which enforces nothing until policies are added.
+    const hooks = normalizeAuthoredHooks(input.hooks ?? emptyHooksConfig(), {
+      defaultStreamEnabled: true,
+    });
 
-  let policy = input.policy;
-  if (input.type === 'preset' && !policy) {
-    policy = buildDefaultPresetPolicy();
-  }
+    const guardrail = await db.createGuardrail({
+      tenantId,
+      projectId: input.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      // Nothing reads these to decide what to enforce. `type` is a stored label;
+      // `target` follows the hooks (views derive it again on every read).
+      type: 'preset',
+      target: deriveGuardrailTarget(hooks, 'input'),
+      action: input.action,
+      enabled: input.enabled ?? true,
+      failMode: input.failMode ?? resolveDefaultFailMode(hooks),
+      modelKey: input.modelKey,
+      hooks,
+      hooksVersion: GUARDRAIL_CONTRACT_VERSION,
+      mode: input.mode,
+      createdBy,
+    });
 
-  // A create with no `hooks` stays legacy-shaped on disk and is lifted on first
-  // read. That is not a transitional wart: the legacy policy columns are still
-  // what the preset editor writes, and a row that carries both would need the
-  // two kept in sync by every future writer.
-  const hooks = input.hooks
-    ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: true })
-    : undefined;
+    // The read path caches MISSES for 5s, so a key someone evaluated moments
+    // before creating it would otherwise report "not found" — and the facade
+    // turns that into a thrown error and a 404 — for several seconds after the
+    // UI said the guardrail exists.
+    invalidateGuardrailCache(tenantDbName, guardrail.key);
 
-  const guardrail = await db.createGuardrail({
-    tenantId,
-    projectId: input.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    type: input.type,
-    target: input.target ?? 'input',
-    action: input.action,
-    enabled: input.enabled ?? true,
-    failMode: input.failMode ?? resolveDefaultFailMode(input.type, policy),
-    modelKey: input.modelKey,
-    policy: input.type === 'preset' ? policy : undefined,
-    customPrompt: input.type === 'custom' ? input.customPrompt : undefined,
-    hooks,
-    hooksVersion: hooks ? (input.hooksVersion ?? GUARDRAIL_CONTRACT_VERSION) : undefined,
-    mode: input.mode,
-    createdBy,
+    return serializeGuardrail(guardrail);
   });
-
-  // The read path caches MISSES for 5s, so a key someone evaluated moments
-  // before creating it would otherwise report "not found" — and the facade
-  // turns that into a thrown error and a 404 — for several seconds after the
-  // UI said the guardrail exists.
-  invalidateGuardrailCache(tenantDbName, guardrail.key);
-
-  return serializeGuardrail(guardrail);
 }
 
 export async function updateGuardrail(
@@ -260,66 +262,61 @@ export async function updateGuardrail(
   updatedBy: string,
   input: UpdateGuardrailInput,
 ): Promise<GuardrailView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // `hooks` is spread through verbatim when absent, so an update that only
+    // renames a guardrail cannot clear its hook config.
+    const hooks = input.hooks
+      ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: false })
+      : undefined;
 
-  // `hooks` is spread through verbatim when absent, so an update that only
-  // renames a guardrail cannot clear its hook config. When it IS present the
-  // version marker is stamped alongside it — writing the config without the
-  // marker is the same silent discard described on `normalizeAuthoredHooks`.
-  const hooks = input.hooks
-    ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: false })
-    : undefined;
+    const updated = await db.updateGuardrail(id, {
+      ...input,
+      ...(hooks ? { hooks, hooksVersion: GUARDRAIL_CONTRACT_VERSION, target: deriveGuardrailTarget(hooks, 'input') } : {}),
+      updatedBy,
+    });
 
-  const updated = await db.updateGuardrail(id, {
-    ...input,
-    ...(hooks
-      ? { hooks, hooksVersion: input.hooksVersion ?? GUARDRAIL_CONTRACT_VERSION }
-      : {}),
-    updatedBy,
+    if (!updated) return null;
+
+    // THE invalidation that matters. The engine resolves records through a 60s
+    // TTL cache, so without this an operator who disables a guardrail, softens
+    // its action or edits its policies watches the old policy keep enforcing for
+    // up to a minute with a UI that says otherwise. It lives here rather than in
+    // the API plugin so every caller of this function is covered — including the
+    // ones that do not exist yet.
+    invalidateGuardrailCache(tenantDbName, updated.key);
+
+    return serializeGuardrail(updated);
   });
-
-  if (!updated) return null;
-
-  // THE invalidation that matters. The engine resolves records through a 60s
-  // TTL cache, so without this an operator who disables a guardrail, softens
-  // its action or edits its policies watches the old policy keep enforcing for
-  // up to a minute with a UI that says otherwise. It lives here rather than in
-  // the API plugin so every caller of this function is covered — including the
-  // ones that do not exist yet.
-  invalidateGuardrailCache(tenantDbName, updated.key);
-
-  return serializeGuardrail(updated);
 }
 
 export async function deleteGuardrail(
   tenantDbName: string,
   id: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const deleted = await db.deleteGuardrail(id);
-  if (deleted) {
-    // The whole TENANT, not one key: this signature takes an id and the row is
-    // gone by the time we could ask it for its key. Reading the record first
-    // purely to name it would add a round trip to every delete, and clearing a
-    // tenant's slice of a 500-entry cache costs one re-read per guardrail that
-    // is actually in use. A guardrail that keeps enforcing after it was
-    // deleted is the failure worth paying that for.
-    invalidateGuardrailCache(tenantDbName);
-  }
-  return deleted;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const deleted = await db.deleteGuardrail(id);
+    if (deleted) {
+      // The whole TENANT, not one key: this signature takes an id and the row is
+      // gone by the time we could ask it for its key. Reading the record first
+      // purely to name it would add a round trip to every delete, and clearing a
+      // tenant's slice of a 500-entry cache costs one re-read per guardrail that
+      // is actually in use. A guardrail that keeps enforcing after it was
+      // deleted is the failure worth paying that for.
+      invalidateGuardrailCache(tenantDbName);
+    }
+    return deleted;
+  });
 }
 
 export async function getGuardrail(
   tenantDbName: string,
   id: string,
 ): Promise<GuardrailView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailById(id);
-  if (!record) return null;
-  return serializeGuardrail(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findGuardrailById(id);
+    if (!record) return null;
+    return serializeGuardrail(record);
+  });
 }
 
 /** `projectId` keeps the provider contract's three-way meaning: a string for
@@ -330,11 +327,11 @@ export async function getGuardrailByKey(
   key: string,
   projectId?: string | null,
 ): Promise<GuardrailView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailByKey(key, projectId);
-  if (!record) return null;
-  return serializeGuardrail(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findGuardrailByKey(key, projectId);
+    if (!record) return null;
+    return serializeGuardrail(record);
+  });
 }
 
 export async function listGuardrails(
@@ -346,10 +343,10 @@ export async function listGuardrails(
     search?: string;
   },
 ): Promise<GuardrailView[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const records = await db.listGuardrails(filters);
-  return records.map(serializeGuardrail);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const records = await db.listGuardrails(filters);
+    return records.map(serializeGuardrail);
+  });
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────────
@@ -532,4 +529,3 @@ export async function evaluateGuardrail(params: {
 // ── Re-exports ────────────────────────────────────────────────────────────
 
 export { PII_CATEGORIES, MODERATION_CATEGORIES, PROMPT_SHIELD_ISSUES, WORD_FILTER_BUILTIN_LISTS } from './types';
-export { buildDefaultPresetPolicy as buildDefaultPolicy };
