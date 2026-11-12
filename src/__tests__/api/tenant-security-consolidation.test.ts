@@ -102,9 +102,15 @@ const SANCTIONED_LOCAL_WRAPPERS = new Set(['appgw-data-plane.ts']);
   });
 
   it('the canonical wrappers are all exported from the single fastify-utils module', () => {
-    const utils = read(path.join(process.cwd(), 'src/server/api/fastify-utils.ts'));
-    expect(utils).toMatch(/export function withApiRequestContext/);
-    expect(utils).toMatch(/export function withClientApiRequestContext/);
-    expect(utils).toMatch(/export function withOpenAiApiRequestContext/);
+    // fastify-utils.ts is the facade; the wrappers are implemented in src/server/api/utils/*.
+    const apiDir = path.join(process.cwd(), 'src/server/api');
+    const facade = read(path.join(apiDir, 'fastify-utils.ts'));
+    const impl = readdirSync(path.join(apiDir, 'utils'))
+      .map((file) => read(path.join(apiDir, 'utils', file)))
+      .join('\n');
+    for (const name of ['withApiRequestContext', 'withClientApiRequestContext', 'withOpenAiApiRequestContext']) {
+      expect(impl).toMatch(new RegExp(`export function ${name}\\b`));
+      expect(facade).toMatch(new RegExp(`\\b${name}\\b`));
+    }
   });
 });
