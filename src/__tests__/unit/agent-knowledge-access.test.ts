@@ -1,5 +1,5 @@
 /**
- * Agent knowledge tools and document-level access control (agentService.ts).
+ * Agent knowledge tools and document-level access control (agentKnowledgeTools.ts).
  *
  *   - the tools read for the caller of the run (a person, a token, a trigger,
  *     nobody) and hand it to the query, together with the caller's scope;

@@ -15,7 +15,7 @@
  * which config answered" is reference data that should stay put while you
  * scroll. History and debug detail (tool steps, token usage, structured
  * output, cost, which config version answered) persist server-side — see
- * `agentService.ts#persistSessionTurn` — so reopening a session shows what
+ * `agentPlaygroundRun.ts#persistSessionTurn` — so reopening a session shows what
  * actually happened, not just the last answer.
  */
 

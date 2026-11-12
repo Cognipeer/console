@@ -1,5 +1,5 @@
 /**
- * Who the knowledge tools of a real run read for (agentService.ts, through
+ * Who the knowledge tools of a real run read for (agentKnowledgeTools.ts, through
  * `buildLocalAgentRun`): the chat and playground entries, a trigger run, an API
  * token, and the sub-agents of a run. The builders themselves are covered by
  * agent-knowledge-access.test.ts.

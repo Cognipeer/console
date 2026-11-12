@@ -4,7 +4,18 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The fallback of the real `runWithTenantScope` for a database without `runWithTenant`.
+    runWithTenantScope: async (tenantDbName: string, fn: (db: unknown) => unknown) => {
+      const db = (await getDatabase()) as { switchToTenant: (name: string) => Promise<unknown> };
+      await db.switchToTenant(tenantDbName);
+      return fn(db);
+    },
+  };
+});
 
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';

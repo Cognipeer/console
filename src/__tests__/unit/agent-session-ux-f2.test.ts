@@ -200,7 +200,7 @@ describe('sdkContextWindow: what the SDK sends to the model', () => {
   });
 
   it('the live and the playground paths hand the agent’s own context settings to the carry', () => {
-    const service = source('lib/services/agents/agentService.ts');
+    const service = source('lib/services/agents/agentAttachments.ts');
     expect(service).toContain('resolveAgentRuntimeOptions(input.config).context');
     expect(service).toMatch(/\.\.\.\(window \? \{ window \} : \{\}\)/);
   });
