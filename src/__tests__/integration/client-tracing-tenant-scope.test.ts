@@ -3,6 +3,11 @@
  * ingesting (and reading threads) concurrently through the live Fastify plugin each see only
  * their own data, on both real backends. Both tenants use the SAME session and thread ids, so a
  * write or read bound to the wrong tenant would collide or leak.
+ *
+ * The routes, including their background writes, never move the shared handle
+ * (`switchToTenant`) themselves; reverting them to a bare switch fails every case.
+ * Services further down the same path (thread reads, quota, pricing) are moved off
+ * the shared handle in their own changes, so the check looks at the direct caller.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -52,6 +57,21 @@ import { describeForEachProvider } from './db-parity.helper';
 
 type Seeded = { token: string; dbName: string; tenantId: string; projectId: string; agent: string };
 
+/** Records the frame that called `switchToTenant` directly: the first one outside node_modules and this file. */
+function recordSwitchCallers(target: DatabaseProvider): string[] {
+  const callers: string[] = [];
+  const original = target.switchToTenant.bind(target);
+  vi.spyOn(target, 'switchToTenant').mockImplementation(async (tenantDbName: string) => {
+    const frames = (new Error().stack ?? '').split('\n').slice(1);
+    const caller = frames.find((frame) => !frame.includes('node_modules') && !frame.includes('client-tracing-tenant-scope.test'));
+    callers.push(caller?.trim() ?? '<unknown>');
+    return original(tenantDbName);
+  });
+  return callers;
+}
+
+const fromTracingRoutes = (callers: string[]) => callers.filter((frame) => frame.includes('plugins/client-tracing/'));
+
 describeForEachProvider('client tracing routes are tenant-scoped', (getDb) => {
   let db: DatabaseProvider;
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
@@ -63,11 +83,12 @@ describeForEachProvider('client tracing routes are tenant-scoped', (getDb) => {
     const dbName = `tenant_${slug}`;
     const tenant = await db.createTenant({ companyName: label, slug, dbName, licenseType: 'ENTERPRISE', ownerId: 'pending' });
     const tenantId = String(tenant._id);
-    await db.switchToTenant(dbName);
-    const owner = await db.createUser({
-      tenantId, email: `owner@${label}.io`, name: 'Owner', password: '$2b$10$x', role: 'owner', licenseId: 'ENTERPRISE', features: [],
-    });
-    const projectId = String((await db.createProject({ tenantId, key: 'main', name: 'Main', createdBy: 'test' }))._id);
+    const { owner, projectId } = await db.runWithTenant!(dbName, async () => ({
+      owner: await db.createUser({
+        tenantId, email: `owner@${label}.io`, name: 'Owner', password: '$2b$10$x', role: 'owner', licenseId: 'ENTERPRISE', features: [],
+      }),
+      projectId: String((await db.createProject({ tenantId, key: 'main', name: 'Main', createdBy: 'test' }))._id),
+    }));
     const token = `tok-${label}-${run}`;
     hoisted.tokens.set(token, {
       token,
@@ -96,6 +117,7 @@ describeForEachProvider('client tracing routes are tenant-scoped', (getDb) => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await app.close();
     await drainPendingTasks();
     await flushUsageRollup();
@@ -125,6 +147,7 @@ describeForEachProvider('client tracing routes are tenant-scoped', (getDb) => {
 
   it('batch ingest and stream ingest from two tenants at once land only in their own tenant', async () => {
     const [a, b] = tenants;
+    const switchCallers = recordSwitchCallers(db);
     const sharedBatchId = `batch-shared-${run}`;
     const sharedStreamId = `stream-shared-${run}`;
     const startedAt = new Date().toISOString();
@@ -177,10 +200,12 @@ describeForEachProvider('client tracing routes are tenant-scoped', (getDb) => {
       const stored = await db.runWithTenant!(tenant.dbName, () => db.findAgentTracingSessionById(sharedStreamId, tenant.projectId));
       expect(stored).toMatchObject({ agentName: tenant.agent, status: 'success', totalEvents: 1 });
     }
+    expect(fromTracingRoutes(switchCallers)).toEqual([]);
   });
 
   it('thread reads from two tenants at once return only their own threads', async () => {
     const [a, b] = tenants;
+    const switchCallers = recordSwitchCallers(db);
     const startedAt = new Date().toISOString();
     await Promise.all(tenants.map((tenant, index) =>
       call(tenant, 'POST', '/api/client/v1/tracing/sessions', {
@@ -202,6 +227,7 @@ describeForEachProvider('client tracing routes are tenant-scoped', (getDb) => {
       (JSON.parse(response.body).threads as Array<{ threadId: string }>).map((thread) => thread.threadId);
     expect(threadIds(reads[0])).toEqual([`thread-${a.agent}`]);
     expect(threadIds(reads[1])).toEqual([`thread-${b.agent}`]);
+    expect(fromTracingRoutes(switchCallers)).toEqual([]);
   });
 
   async function settleAll() {
