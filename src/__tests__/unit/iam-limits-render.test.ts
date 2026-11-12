@@ -6,6 +6,7 @@
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({ limits: { current: null as unknown } }));
@@ -28,6 +29,7 @@ vi.mock('@/components/common/confirm', () => ({
   useConfirm: () => ({}),
 }));
 
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import LimitsTab from '@/components/iam/limits/LimitsTab';
 import { parseLimitRows } from '@/components/iam/limits/limitsModel';
 
@@ -47,7 +49,13 @@ function stub(policies: unknown[], overrides: Record<string, unknown> = {}) {
 }
 
 const render = (canManage: boolean) =>
-  renderToString(createElement(MantineProvider, null, createElement(LimitsTab, { canManage })));
+  renderToString(
+    createElement(
+      QueryClientProvider,
+      { client: newTestQueryClient() },
+      createElement(MantineProvider, null, createElement(LimitsTab, { canManage })),
+    ),
+  );
 
 const policies = [
   {

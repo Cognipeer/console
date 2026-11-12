@@ -30,6 +30,7 @@ import { isSameTargetKind, quotaTargetSource } from '@/lib/quota/targets';
 import CidrInput from '@/components/iam/pickers/CidrInput';
 import { tryTranslate } from '@/components/resources/i18nLookup';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { useQuotaDefaults } from '@/lib/api/queries/quota';
 import { ScopeIdSelector } from './ScopeIdSelector';
 import { SearchableSelect } from './SearchableSelect';
 
@@ -242,26 +243,18 @@ export function QuotaPolicyModal({
 
   // What this install guards (the core's services plus what the enterprise
   // overlay registered), from GET /api/quota/defaults; the core's list until it answers.
-  const [served, setServed] = useState<{ domains?: QuotaDomain[]; jobKinds?: string[] }>({});
-  useEffect(() => {
-    if (!opened) return;
-    let cancelled = false;
-    fetch('/api/quota/defaults', { credentials: 'same-origin' })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((body) => {
-        if (cancelled || !body) return;
-        setTrustedProxiesUnset(body.ipScope?.trustedProxiesUnset === true);
-        setServed({
-          domains: Array.isArray(body.domains) ? body.domains : undefined,
-          jobKinds: Array.isArray(body.jobKinds) ? body.jobKinds : undefined,
-        });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [opened]);
-
+  const defaultsQuery = useQuotaDefaults(opened);
+  const defaultsBody = defaultsQuery.data;
+  const served = useMemo<{ domains?: QuotaDomain[]; jobKinds?: string[] }>(
+    () =>
+      defaultsBody
+        ? {
+            domains: Array.isArray(defaultsBody.domains) ? (defaultsBody.domains as QuotaDomain[]) : undefined,
+            jobKinds: Array.isArray(defaultsBody.jobKinds) ? (defaultsBody.jobKinds as string[]) : undefined,
+          }
+        : {},
+    [defaultsBody],
+  );
   // Services grouped as the registry groups them; only those with a guarded call site
   // (and the one an existing limit already names, so it still shows).
   const baseDomains = allowedDomains || served.domains || [...ENFORCED_QUOTA_DOMAINS];
@@ -302,6 +295,10 @@ export function QuotaPolicyModal({
 
   // Behind a reverse proxy with no TRUSTED_PROXIES every caller has the proxy's address: say so on an IP limit.
   const [trustedProxiesUnset, setTrustedProxiesUnset] = useState(false);
+  useEffect(() => {
+    if (!defaultsBody) return;
+    setTrustedProxiesUnset(defaultsBody.ipScope?.trustedProxiesUnset === true);
+  }, [defaultsBody]);
 
   // Where the limit lives. Group and agent-run limits may be tenant-wide; every
   // other kind only exists inside a project (see isTenantWideKind).

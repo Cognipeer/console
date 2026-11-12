@@ -67,6 +67,14 @@ import FormShell, {
 } from '@/components/common/ui/FormShell';
 import StatTile from '@/components/common/ui/StatTile';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useCreateSnapshot,
+  usePreviewSnapshot,
+  useSnapshotFilters,
+  useSnapshotJob,
+  useSnapshotPiiCategories,
+} from '@/lib/api/queries/snapshots';
 import { parseLocalDate } from '@/lib/utils/dashboardDateFilter';
 import type {
   CreateSnapshotResult,
@@ -131,29 +139,38 @@ export default function SnapshotWizard() {
     const raw = searchParams.get('status');
     return raw === 'success' || raw === 'error' ? raw : 'all';
   });
-  const [models, setModels] = useState<Array<{ value: string; label: string }>>([]);
-  const [agents, setAgents] = useState<string[]>([]);
+  // Filter dropdown options, fed from observability (usage rollup): agents = tracing agent names actually seen,
+  // models = gateway-served model keys. A failed read leaves them empty.
+  const filtersQuery = useSnapshotFilters();
+  const models = useMemo(
+    () => (filtersQuery.data?.gatewayModels ?? []).map((key) => ({ value: key, label: key })),
+    [filtersQuery.data],
+  );
+  const agents = useMemo(() => filtersQuery.data?.agents ?? [], [filtersQuery.data]);
 
   // ── 2. Sampling ──
   const [samplePct, setSamplePct] = useState(100);
   const [maxItems, setMaxItems] = useState<number | string>(SNAPSHOT_MAX_ITEMS);
 
   // ── 3. Anonymization (required) ──
-  const [catalog, setCatalog] = useState<PiiCategoryOption[]>([]);
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const catalogQuery = useSnapshotPiiCategories<PiiCategoryOption>(locale);
+  const catalog = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data]);
+  const catalogLoading = catalogQuery.isPending;
   const [selectedCategories, setSelectedCategories] = useState<Set<string>>(new Set());
   const [strategy, setStrategy] = useState<Strategy>('mask');
   const [salt, setSalt] = useState('');
 
   // ── 4. Preview ──
   const [preview, setPreview] = useState<SnapshotPreview | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
+  const previewSnapshot = usePreviewSnapshot<SnapshotPreview>();
+  const previewLoading = previewSnapshot.isPending;
 
   // ── 5. Create ──
   const [name, setName] = useState('');
   const [nameEdited, setNameEdited] = useState(false);
   const [description, setDescription] = useState('');
-  const [creating, setCreating] = useState(false);
+  const createSnapshot = useCreateSnapshot();
+  const creating = createSnapshot.isPending;
   const [created, setCreated] = useState<CreateSnapshotResult | null>(null);
   // Background job tracking: creation runs on the queue; we poll the dataset's
   // metadata.snapshot.status until it goes ready/failed.
@@ -161,99 +178,63 @@ export default function SnapshotWizard() {
   const [jobStatus, setJobStatus] = useState<'pending' | 'running' | 'failed'>('pending');
   const [jobError, setJobError] = useState<string | null>(null);
 
+  // The job's dataset is read every 2.5 s until it goes ready or failed; a failed read is tried again at the next tick.
+  const jobQuery = useSnapshotJob(jobDatasetId, !created && jobStatus !== 'failed');
   useEffect(() => {
     if (!jobDatasetId || created || jobStatus === 'failed') return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/evaluation/datasets/${jobDatasetId}`, { cache: 'no-store' });
-        if (!res.ok) return;
-        const payload = await res.json();
-        const dataset = payload?.dataset;
-        const snap = dataset?.metadata?.snapshot;
-        if (cancelled || !snap) return;
-        if (snap.status === 'ready') {
-          setCreated({
-            dataset: {
-              id: dataset.id ?? jobDatasetId,
-              key: dataset.key ?? '',
-              name: dataset.name ?? '',
-            },
-            source: snap.source,
-            matching: snap.counts?.matching ?? 0,
-            sampled: snap.counts?.sampled ?? 0,
-            created: snap.counts?.created ?? 0,
-            skipped: snap.counts?.skipped ?? { truncatedPayload: 0, missingMessages: 0, unmappable: 0, sizeCapped: 0 },
-            piiFindings: snap.piiFindings ?? 0,
-          });
-        } else if (snap.status === 'failed') {
-          setJobStatus('failed');
-          setJobError(typeof snap.error === 'string' ? snap.error : null);
-        } else if (snap.status === 'running' || snap.status === 'pending') {
-          setJobStatus(snap.status);
+    const dataset = jobQuery.data;
+    const snap = dataset?.metadata?.snapshot as
+      | {
+          status?: string;
+          source?: CreateSnapshotResult['source'];
+          error?: unknown;
+          piiFindings?: number;
+          counts?: {
+            matching?: number;
+            sampled?: number;
+            created?: number;
+            skipped?: CreateSnapshotResult['skipped'];
+          };
         }
-      } catch {
-        // Transient poll failure — next tick retries.
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => { void tick(); }, 2500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [jobDatasetId, created, jobStatus]);
+      | undefined;
+    if (!dataset || !snap) return;
+    if (snap.status === 'ready') {
+      setCreated({
+        dataset: {
+          id: dataset.id ?? jobDatasetId,
+          key: dataset.key ?? '',
+          name: dataset.name ?? '',
+        },
+        source: snap.source as CreateSnapshotResult['source'],
+        matching: snap.counts?.matching ?? 0,
+        sampled: snap.counts?.sampled ?? 0,
+        created: snap.counts?.created ?? 0,
+        skipped: snap.counts?.skipped ?? { truncatedPayload: 0, missingMessages: 0, unmappable: 0, sizeCapped: 0 },
+        piiFindings: snap.piiFindings ?? 0,
+      });
+    } else if (snap.status === 'failed') {
+      setJobStatus('failed');
+      setJobError(typeof snap.error === 'string' ? snap.error : null);
+    } else if (snap.status === 'running' || snap.status === 'pending') {
+      setJobStatus(snap.status);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobQuery.dataUpdatedAt]);
 
   // Built-in PII category catalog (localized labels; defaults preselected).
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setCatalogLoading(true);
-      try {
-        const res = await fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}`);
-        const payload = await res.json();
-        if (!res.ok) throw new Error(payload.error ?? 'Failed to load PII categories');
-        if (cancelled) return;
-        const categories: PiiCategoryOption[] = payload.categories ?? [];
-        setCatalog(categories);
-        setSelectedCategories(
-          new Set(categories.filter((c) => c.defaultEnabled).map((c) => c.id)),
-        );
-      } catch (error) {
-        if (!cancelled) {
-          notifications.show({
-            color: 'red',
-            title: t('piiCategories'),
-            message: error instanceof Error ? error.message : 'Unknown error',
-          });
-        }
-      } finally {
-        if (!cancelled) setCatalogLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [locale, t]);
-
-  // Filter dropdown options, fed from observability (usage rollup): agents =
-  // tracing agent names actually seen, models = gateway-served model keys.
+    if (!catalogQuery.data) return;
+    setSelectedCategories(new Set(catalogQuery.data.filter((c) => c.defaultEnabled).map((c) => c.id)));
+  }, [catalogQuery.data]);
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/snapshots/filters', { cache: 'no-store' });
-        if (!res.ok) return;
-        const payload = await res.json();
-        if (cancelled) return;
-        setModels(
-          (payload.gatewayModels ?? []).map((key: string) => ({ value: key, label: key })),
-        );
-        setAgents(payload.agents ?? []);
-      } catch {
-        // Non-fatal: the filters simply stay empty.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    if (!catalogQuery.isError) return;
+    notifications.show({
+      color: 'red',
+      title: t('piiCategories'),
+      message: errorMessage(catalogQuery.error, 'Unknown error'),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogQuery.errorUpdatedAt]);
 
   // Any filter change invalidates a previously fetched preview.
   const filterKey = useMemo(
@@ -293,24 +274,14 @@ export default function SnapshotWizard() {
   const effectiveName = nameEdited ? name : suggestedName;
 
   const runPreview = async () => {
-    setPreviewLoading(true);
     try {
-      const res = await fetch('/api/snapshots/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildFilterBody()),
-      });
-      const payload = await res.json();
-      if (!res.ok) throw new Error(payload.error ?? 'Preview failed');
-      setPreview(payload as SnapshotPreview);
+      setPreview(await previewSnapshot.mutateAsync(buildFilterBody()));
     } catch (error) {
       notifications.show({
         color: 'red',
         title: t('preview'),
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message: errorMessage(error, 'Unknown error'),
       });
-    } finally {
-      setPreviewLoading(false);
     }
   };
 
@@ -319,25 +290,18 @@ export default function SnapshotWizard() {
 
   const create = async () => {
     if (!canCreate) return;
-    setCreating(true);
     try {
-      const res = await fetch('/api/snapshots', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...buildFilterBody(),
-          name: effectiveName.trim(),
-          ...(description.trim() ? { description: description.trim() } : {}),
-          anonymize: {
-            categories: Array.from(selectedCategories),
-            strategy,
-            // Empty ⇒ omitted ⇒ the server generates a per-request salt.
-            ...(salt.trim() ? { salt: salt.trim() } : {}),
-          },
-        }),
+      const payload = await createSnapshot.mutateAsync({
+        ...buildFilterBody(),
+        name: effectiveName.trim(),
+        ...(description.trim() ? { description: description.trim() } : {}),
+        anonymize: {
+          categories: Array.from(selectedCategories),
+          strategy,
+          // Empty ⇒ omitted ⇒ the server generates a per-request salt.
+          ...(salt.trim() ? { salt: salt.trim() } : {}),
+        },
       });
-      const payload = await res.json();
-      if (!res.ok) throw new Error(payload.error ?? 'Snapshot creation failed');
       // 202: the job runs in the background — start polling the dataset.
       setJobStatus('pending');
       setJobError(null);
@@ -346,10 +310,8 @@ export default function SnapshotWizard() {
       notifications.show({
         color: 'red',
         title: t('create'),
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message: errorMessage(error, 'Unknown error'),
       });
-    } finally {
-      setCreating(false);
     }
   };
 

@@ -12,7 +12,6 @@ import {
   click,
   installApiMock,
   installDomStubs,
-  mount,
   q,
   qa,
   setInput,
@@ -21,6 +20,7 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { QuotaPolicyModal, type QuotaPolicyFormData } from '@/components/quota/QuotaPolicyModal';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 import type { QuotaDomain } from '@/lib/quota/types';
@@ -91,7 +91,7 @@ async function open({ policy = null, seed = null, defaultDomain = 'llm', princip
     ['GET', '/api/resources', () => ({ items: REGISTRY.agent, projects: [{ id: 'proj-1', name: 'Retail' }] })],
     ['GET', '/api/iam/principals', () => ({ items: principals, nextCursor: null })],
   ]);
-  mounted = await mount(
+  mounted = await renderWithQuery(
     createElement(QuotaPolicyModal, {
       opened: true,
       onClose: () => {},
