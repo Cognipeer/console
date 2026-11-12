@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -14,14 +14,20 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconRestore } from '@tabler/icons-react';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useComparePromptVersions,
+  usePromptDeploymentAction,
+  usePromptDeployments,
+  usePromptVersionHistory,
+  useRestorePromptVersion,
+} from '@/lib/api/queries/promptVersions';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
 import SectionCard from '@/components/common/SectionCard';
 import classes from './PromptVersionHistoryModal.module.css';
 import type {
   PromptCompareView,
-  PromptDeploymentEventView,
-  PromptDeploymentStateView,
   PromptEnvironment,
   PromptView,
   PromptVersionView,
@@ -47,98 +53,57 @@ export default function PromptVersionHistoryModal({
   prompt,
   onVersionRestored,
 }: PromptVersionHistoryModalProps) {
-  const [versions, setVersions] = useState<PromptVersionView[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [restoring, setRestoring] = useState<string | null>(null);
   const [selectedVersion, setSelectedVersion] = useState<PromptVersionView | null>(null);
   const [selectedEnvironment, setSelectedEnvironment] = useState<PromptEnvironment>('dev');
   const [deployNote, setDeployNote] = useState('');
-  const [deployments, setDeployments] = useState<
-    Partial<Record<PromptEnvironment, PromptDeploymentStateView>>
-  >({});
-  const [deploymentHistory, setDeploymentHistory] = useState<PromptDeploymentEventView[]>([]);
-  const [deployingAction, setDeployingAction] = useState<string | null>(null);
   const [compareWithVersionId, setCompareWithVersionId] = useState<string | null>(null);
   const [comparison, setComparison] = useState<PromptCompareView | null>(null);
-  const [comparing, setComparing] = useState(false);
 
-  const loadDeployments = useCallback(async () => {
-    if (!prompt) return;
+  const active = opened && Boolean(prompt);
+  const versionsQuery = usePromptVersionHistory(prompt?.id, active);
+  const deploymentsQuery = usePromptDeployments(prompt?.id, active);
+  const restoreVersion = useRestorePromptVersion(prompt?.id);
+  const deploymentAction = usePromptDeploymentAction(prompt?.id);
+  const compareVersions = useComparePromptVersions(prompt?.id);
 
-    const response = await fetch(`/api/prompts/${prompt.id}/deployments`, { cache: 'no-store' });
-    if (!response.ok) {
-      return;
-    }
+  // Closed, the modal shows nothing of the prompt it last held.
+  const versions = useMemo(() => (active ? versionsQuery.data ?? [] : []), [active, versionsQuery.data]);
+  const deployments = active ? deploymentsQuery.data?.deployments ?? {} : {};
+  const deploymentHistory = active ? deploymentsQuery.data?.history ?? [] : [];
+  const loading = active && versionsQuery.isFetching;
+  const restoring = restoreVersion.isPending ? restoreVersion.variables ?? null : null;
+  const deployingAction = deploymentAction.isPending
+    ? `${deploymentAction.variables?.action}-${deploymentAction.variables?.environment}`
+    : null;
+  const comparing = compareVersions.isPending;
 
-    const data = await response.json();
-    setDeployments(data.deployments ?? {});
-    setDeploymentHistory(data.history ?? []);
-  }, [prompt]);
-
-  const loadVersions = useCallback(async () => {
-    if (!prompt) return;
-    
-    setLoading(true);
-    try {
-      const response = await fetch(`/api/prompts/${prompt.id}/versions`, { cache: 'no-store' });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Failed to load versions' }));
-        throw new Error(error.error ?? 'Failed to load versions');
-      }
-      const data = await response.json();
-      setVersions((data.versions ?? []) as PromptVersionView[]);
-      setCompareWithVersionId(null);
-      setComparison(null);
-      
-      // Select the latest version by default
-      const latestVersion = (data.versions ?? []).find((v: PromptVersionView) => v.isLatest);
-      if (latestVersion) {
-        setSelectedVersion(latestVersion);
-      } else if ((data.versions ?? []).length > 0) {
-        setSelectedVersion(data.versions[0]);
-      }
-    } catch (error) {
-      console.error(error);
-      notifications.show({
-        title: 'Unable to load versions',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [prompt]);
+  // Every time the versions land (opening, after a restore or a deployment): the latest one is selected, a comparison is dropped.
+  const versionsUpdatedAt = versionsQuery.dataUpdatedAt;
+  useEffect(() => {
+    if (!active || !versionsUpdatedAt) return;
+    const list = versionsQuery.data ?? [];
+    setCompareWithVersionId(null);
+    setComparison(null);
+    const latestVersion = list.find((version) => version.isLatest);
+    if (latestVersion) setSelectedVersion(latestVersion);
+    else if (list.length > 0) setSelectedVersion(list[0]!);
+    // `versionsUpdatedAt` is the signal: an answer equal to the last one still resets the selection
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, versionsUpdatedAt]);
 
   useEffect(() => {
-    if (opened && prompt) {
-      void loadVersions();
-      void loadDeployments();
-    } else {
-      setVersions([]);
-      setSelectedVersion(null);
-      setDeployments({});
-      setDeploymentHistory([]);
-      setDeployNote('');
-      setCompareWithVersionId(null);
-      setComparison(null);
-    }
-  }, [opened, prompt, loadDeployments, loadVersions]);
+    if (active) return;
+    setSelectedVersion(null);
+    setDeployNote('');
+    setCompareWithVersionId(null);
+    setComparison(null);
+  }, [active]);
 
   const handleRestoreVersion = async (version: PromptVersionView) => {
     if (!prompt || version.isLatest) return;
-    
-    setRestoring(version.id);
-    try {
-      const response = await fetch(`/api/prompts/${prompt.id}/versions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ versionId: version.id }),
-      });
 
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Failed to restore version' }));
-        throw new Error(error.error ?? 'Failed to restore version');
-      }
+    try {
+      await restoreVersion.mutateAsync(version.id);
 
       notifications.show({
         title: 'Version restored',
@@ -146,18 +111,13 @@ export default function PromptVersionHistoryModal({
         color: 'teal',
       });
 
-      // Reload versions to update isLatest flags
-      await loadVersions();
-      await loadDeployments();
       onVersionRestored?.();
     } catch (error) {
       notifications.show({
         title: 'Unable to restore version',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
         color: 'red',
       });
-    } finally {
-      setRestoring(null);
     }
   };
 
@@ -176,70 +136,39 @@ export default function PromptVersionHistoryModal({
       return;
     }
 
-    const actionKey = `${action}-${selectedEnvironment}`;
-    setDeployingAction(actionKey);
-
     try {
-      const response = await fetch(`/api/prompts/${prompt.id}/deployments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          environment: selectedEnvironment,
-          versionId: action === 'promote' ? selectedVersion?.id : undefined,
-          note: deployNote.trim() || undefined,
-        }),
+      await deploymentAction.mutateAsync({
+        action,
+        environment: selectedEnvironment,
+        versionId: action === 'promote' ? selectedVersion?.id : undefined,
+        note: deployNote.trim() || undefined,
       });
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Deployment action failed' }));
-        throw new Error(error.error ?? 'Deployment action failed');
-      }
 
       notifications.show({
         title: 'Deployment updated',
         message: `${action} completed for ${selectedEnvironment}.`,
         color: 'teal',
       });
-
-      await Promise.all([loadVersions(), loadDeployments()]);
     } catch (error) {
       notifications.show({
         title: 'Deployment action failed',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
         color: 'red',
       });
-    } finally {
-      setDeployingAction(null);
     }
   };
 
   const handleCompareVersions = async () => {
     if (!prompt || !selectedVersion || !compareWithVersionId) return;
-    setComparing(true);
 
     try {
-      const params = new URLSearchParams({
-        fromVersionId: selectedVersion.id,
-        toVersionId: compareWithVersionId,
-      });
-      const response = await fetch(`/api/prompts/${prompt.id}/compare?${params.toString()}`);
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Compare failed' }));
-        throw new Error(error.error ?? 'Compare failed');
-      }
-
-      const data = await response.json();
-      setComparison((data.comparison ?? null) as PromptCompareView | null);
+      setComparison(await compareVersions.mutateAsync({ fromVersionId: selectedVersion.id, toVersionId: compareWithVersionId }));
     } catch (error) {
       notifications.show({
         title: 'Compare failed',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
         color: 'red',
       });
-    } finally {
-      setComparing(false);
     }
   };
 
