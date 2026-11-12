@@ -225,6 +225,11 @@ export async function requireApiTokenFromHeader(
     licenseType: effectiveLicense.licenseType,
   };
 
+  // Kept on purpose: routes that authenticate through getApiTokenContextForRequest run
+  // without a request-bound tenant scope and still reach the tenant database through
+  // this binding. Remove it once those routes open their own scope.
+  await db.switchToTenant(resolvedTenant.dbName);
+
   // Everything below reads the tenant database; this runs before the request-bound
   // tenant scope exists, so it opens its own (a process-global switch could be
   // overwritten by a concurrent request for another tenant).
