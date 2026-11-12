@@ -9,7 +9,8 @@ import { createElement as h } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import CreateRagModuleModal from '@/components/rag/CreateRagModuleModal';
 import EditRagModuleModal from '@/components/rag/EditRagModuleModal';
-import { buttonByText, click, installApiMock, installDomStubs, mount, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { until } from '../helpers/filesUploadDetailHarness';
 
 const notify = vi.hoisted(() => ({ show: vi.fn() }));
@@ -52,7 +53,7 @@ function install(patchAnswer: (body: unknown) => unknown = () => ({ module: { ke
 async function openEdit(module: Record<string, unknown>) {
   install();
   const onUpdated = vi.fn();
-  mounted = await mount(h(EditRagModuleModal, { opened: true, onClose: vi.fn(), onUpdated, module: module as never }));
+  mounted = await renderWithQuery(h(EditRagModuleModal, { opened: true, onClose: vi.fn(), onUpdated, module: module as never }));
   await until(() => text().includes('Edit Knowledge Engine module'), 'the screen');
   await until(() => api.to('GET', '/api/vector/indexes').length > 0, 'the lists');
   await wait(20);
@@ -70,7 +71,7 @@ async function save() {
 describe('the Extraction section', () => {
   it('sits after Chunking in the create screen and starts with OCR off', async () => {
     install();
-    mounted = await mount(h(CreateRagModuleModal, { opened: true, onClose: vi.fn(), onCreated: vi.fn() }));
+    mounted = await renderWithQuery(h(CreateRagModuleModal, { opened: true, onClose: vi.fn(), onCreated: vi.fn() }));
     await until(() => text().includes('Extraction'), 'the section');
     const page = text();
     expect(page.indexOf('Chunking')).toBeLessThan(page.indexOf('Extraction'));
