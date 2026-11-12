@@ -9,7 +9,7 @@
 import { ObjectId, type Filter } from 'mongodb';
 import type { IUsageDaily, IUsageDailyIncrement } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { ensureTenantCollectionIndexes } from './indexManifest';
 
 const COUNTER_FIELDS = [
@@ -30,33 +30,10 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
   Base: TBase,
 ) {
   return class UsageRollupOps extends Base {
-    private usageDailyIndexReady = new Set<string>();
-
-    private async ensureUsageDailyIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.usageDailyIndexReady.has(dbName)) return;
-      this.usageDailyIndexReady.add(dbName);
-      try {
-        const col = db.collection(COLLECTIONS.usageDaily);
-        // v2 adds the agentKey dimension — drop the pre-agent unique index,
-        // which would otherwise reject rows differing only in agentKey.
-        await col.dropIndex('uniq_usage_daily_dims').catch(() => undefined);
-        // v3 adds the metadataKey dimension (free-form caller-supplied
-        // attribution tags) — drop v2, which would otherwise reject rows
-        // differing only in metadataKey.
-        await col.dropIndex('uniq_usage_daily_dims_v2').catch(() => undefined);
-        // The v3 unique key and the report indexes come from the manifest.
-        await ensureTenantCollectionIndexes(db, COLLECTIONS.usageDaily);
-      } catch (error) {
-        logger.warn('Could not ensure usage_daily indexes', { dbName, error });
-      }
-    }
-
     async incrementUsageDaily(rows: IUsageDailyIncrement[]): Promise<void> {
       if (rows.length === 0) return;
-      await this.ensureUsageDailyIndexes();
       const db = this.getTenantDb();
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.usageDaily);
 
       const ops = rows.map((row) => {
         // Every counter is always $inc'd (0 when omitted) so first-insert rows

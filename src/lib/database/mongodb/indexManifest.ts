@@ -515,8 +515,8 @@ const tenantPasses = new Map<string, { indexed: Set<string>; checkedAt: number }
  * (and every preview count) is a collection scan. One ascending index per
  * engine target, added only where no manifest index already leads on the
  * field; retention-registry-coverage.test.ts keeps the list in step with the
- * registry. `incidents` is left out: a handful of rows per alert, and its
- * mixin owns the collection's index set (mongodb-index-manifest-entity-health).
+ * registry. `incidents` is left out: it holds a handful of rows per alert,
+ * so its retention batches stay cheap without one.
  */
 export const RETENTION_AGE_INDEXES: ReadonlyArray<readonly [collection: string, field: string]> = [
   ['model_usage_logs', 'createdAt'],

@@ -69,7 +69,7 @@ describe('retention registry coverage', () => {
 
   it('every engine target has a MongoDB index leading on its age field', () => {
     const listed = new Set(RETENTION_AGE_INDEXES.map(([collection, field]) => `${collection}.${field}`));
-    // A few rows per alert; the incident mixin owns that collection's indexes.
+    // A few rows per alert; incidents are left out of RETENTION_AGE_INDEXES.
     for (const target of getRetentionTargets().filter((t) => t.edition === 'core' && t.collection !== 'incidents')) {
       expect(listed.has(`${target.collection}.${target.timeField}`), `${target.collection}.${target.timeField}`).toBe(true);
       const leads = (TENANT_DB_INDEXES[target.collection] ?? []).some((def) => Object.keys(def.key as object)[0] === target.timeField);
