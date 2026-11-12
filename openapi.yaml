@@ -16175,7 +16175,12 @@ paths:
                       model:
                         type: object
                         additionalProperties: true
-                        description: Console model record with sensitive settings masked and resolved `capabilities`.
+                        description: Console model record with sensitive settings masked and resolved `capabilities`. A model with reversible PII protection carries `piiProtection`.
+                        properties:
+                          piiProtection:
+                            nullable: true
+                            allOf:
+                              - $ref: '#/components/schemas/ModelPiiProtection'
                   - $ref: '#/components/schemas/OpenAIAgentDiscoveryEntry'
               examples:
                 agent:
@@ -30346,6 +30351,16 @@ components:
               description: Provider-facing model identifier. It is metadata, not a public routing key.
             capabilities:
               $ref: '#/components/schemas/ModelCapabilities'
+    ModelPiiProtection:
+      type: object
+      description: |-
+        Reversible PII protection of a model. When set, text sent through the model is scanned with the named PII policy: detected values are replaced by tokens before the provider sees them, and the tokens are restored in the answer. A caller-level setting (an agent's own `config.piiProtection`) outranks the model's. The field is absent or `null` when protection is off. It is written through `PUT /models/{id}` (an object, or `null` to turn it off); a missing policy key or a policy that does not exist in the project is a `400`.
+      required:
+        - policyKey
+      properties:
+        policyKey:
+          type: string
+          description: Key of a PII policy of the same project (see `/pii/policies`).
     OpenAIAgentDiscoveryEntry:
       type: object
       description: An active agent of the project, listed like a model so an OpenAI client's picker shows it. `id` is the `model` value of `POST /chat/completions` and `POST /responses`.
@@ -30411,10 +30426,15 @@ components:
               - $ref: '#/components/schemas/OpenAIAgentDiscoveryEntry'
         models:
           type: array
-          description: Backward-compatible Console model records (every category the filters allow) with sensitive settings masked. Never holds agents.
+          description: Backward-compatible Console model records (every category the filters allow) with sensitive settings masked. Never holds agents. A model with reversible PII protection carries `piiProtection`.
           items:
             type: object
             additionalProperties: true
+            properties:
+              piiProtection:
+                nullable: true
+                allOf:
+                  - $ref: '#/components/schemas/ModelPiiProtection'
         providers:
           type: array
           description: 'Present with `includeProviders=true`: the project''s model providers, credentials reduced to `hasCredentials`.'
