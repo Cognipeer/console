@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { IconWebhook } from '@tabler/icons-react';
 
 vi.mock('next/navigation', () => ({
@@ -48,8 +49,12 @@ import { tr } from '@/lib/i18n/messages/tr';
 
 (globalThis as { React?: typeof React }).React = React;
 
+/** The dashboard layout provides the query client; a page rendered on its own needs one too. */
 const render = (node: ReactNode, locale: 'en' | 'tr' = 'en') =>
-  renderToStaticMarkup(h(MantineProvider, null, h(I18nProvider, { locale, children: node })));
+  renderToStaticMarkup(
+    h(QueryClientProvider, { client: new QueryClient({ defaultOptions: { queries: { retry: false } } }) },
+      h(MantineProvider, null, h(I18nProvider, { locale, children: node }))),
+  );
 const noop = () => undefined;
 const search = new URLSearchParams();
 
