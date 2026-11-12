@@ -44,7 +44,10 @@ export async function callRerankProvider(
   const { runtime, credentials } = await resolveProviderInfo(ctx);
   const driver = runtime.driver;
   const apiKey = (credentials as Record<string, unknown>).apiKey as string | undefined;
-  const baseUrl = (credentials as Record<string, unknown>).baseUrl as string | undefined;
+  const settings = (runtime.settings ?? {}) as Record<string, unknown>;
+  // The provider form stores baseUrl under settings; older records kept it in credentials.
+  const baseUrl = asNonEmptyString(settings.baseUrl)
+    ?? asNonEmptyString((credentials as Record<string, unknown>).baseUrl);
 
   switch (driver) {
     case 'cohere':
@@ -60,6 +63,10 @@ export async function callRerankProvider(
         `Provider driver "${driver}" does not support reranking. Use Cohere, Jina AI, Voyage AI, or an OpenAI-compatible rerank server.`,
       );
   }
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 async function resolveProviderInfo(ctx: ProviderCallContext) {
@@ -205,7 +212,7 @@ async function callOpenAICompatibleRerank(input: {
   topN?: number;
 }): Promise<RerankCallResult> {
   if (!input.baseUrl) {
-    throw new Error('OpenAI-compatible rerank requires a baseUrl credential.');
+    throw new Error('OpenAI-compatible rerank requires a baseUrl.');
   }
   const url = `${input.baseUrl.replace(/\/$/, '')}/rerank`;
   const body = {
