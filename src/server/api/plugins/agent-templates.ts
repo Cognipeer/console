@@ -35,7 +35,7 @@ import { prepareTriggerWrite } from './agent-triggers';
 import { requestCanNameBucket } from './files-permission';
 import { requestHasConfigRead } from './config-permission';
 import { requestHasSandboxWrite } from './sandbox-permission';
-import { guardrailByKeyInScope } from './guardrails';
+import { guardrailByKeyInScope } from '../guardrails/scope';
 
 const logger = createLogger('api:agent-templates');
 

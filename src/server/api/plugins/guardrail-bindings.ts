@@ -18,8 +18,8 @@
  * per-plugin copy of the validator is how a dashboard write and an API write
  * end up accepting different payloads, and the field that one of them silently
  * drops is a guardrail that stops running with a green UI. `guardrails.ts`
- * already exports `guardrailByKeyInScope` for exactly this kind of cross-plugin
- * reuse (`client-guardrails.ts:202`).
+ * `../guardrails/scope.ts` holds `guardrailByKeyInScope`, the shared key-scoped
+ * lookup the route plugins reuse (`client-guardrails.ts:202`).
  */
 
 import type { IAgentConfig, IUser } from '@/lib/database';
@@ -31,7 +31,7 @@ import { createLogger } from '@/lib/core/logger';
 import { HOOK_IDS, readHooks } from '@/lib/services/guardrail/hooks/contract';
 import { projectBindingsToLegacy } from '@/lib/services/guardrail/hooks/binding';
 import type { GuardrailView } from '@/lib/services/guardrail';
-import { guardrailByKeyInScope } from './guardrails';
+import { guardrailByKeyInScope } from '../guardrails/scope';
 
 const HOOK_LIST = HOOK_IDS.join(', ');
 const logger = createLogger('api:guardrail-bindings');

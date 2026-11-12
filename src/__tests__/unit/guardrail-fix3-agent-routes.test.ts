@@ -101,7 +101,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   executePlaygroundChat: hoisted.executePlaygroundChat,
 }));
 
-vi.mock('@/server/api/plugins/guardrails', () => ({
+vi.mock('@/server/api/guardrails/scope', () => ({
   guardrailByKeyInScope: hoisted.guardrailByKeyInScope,
 }));
 

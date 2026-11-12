@@ -60,7 +60,7 @@ import type {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * `hookVerdictResponse()` in `server/api/plugins/guardrails.ts`, verbatim.
+ * `hookVerdictResponse()` in `server/api/guardrails/hookVerdict.ts`, verbatim.
  *
  * The finding element is `SafetyFinding` itself rather than a restatement of
  * it: the route serialises the verdict's findings untouched, so a second

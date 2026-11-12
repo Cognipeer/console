@@ -26,21 +26,21 @@ import type {
   HookId,
   SafetyAction,
 } from '@/lib/services/guardrail/hooks/contract';
-// The dashboard plugin owns the shared half of this surface. These two files
-// are the TWO DOORS onto one hook plane, and a remote enforcement point is
-// expected to work against either: if the request shapes, the verdict keys or
-// the response headers drifted apart, a point written against one would
+// `../guardrails/` owns the shared half of this surface. The dashboard plugin
+// and this one are the TWO DOORS onto one hook plane, and a remote enforcement
+// point is expected to work against either: if the request shapes, the verdict
+// keys or the response headers drifted apart, a point written against one would
 // silently mis-parse the other. Everything load-bearing on the wire is shared by
 // import.
+import { guardrailByKeyInScope } from '../guardrails/scope';
 import {
   applyVerdictHeaders,
   buildHookSubject,
-  guardrailByKeyInScope,
   parseHookId,
   readHookEvaluationOptions,
   resolveVerdictVisibility,
   respondWithHookVerdict,
-} from './guardrails';
+} from '../guardrails/hookVerdict';
 import {
   VALID_TYPES,
   buildUserMessage,
