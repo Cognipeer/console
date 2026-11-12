@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import slugify from 'slugify';
 import {
-  getDatabase,
-  type DatabaseProvider,
+  runWithTenantScope,
   type IConfigItem,
   type IConfigGroup,
 } from '@/lib/database';
@@ -92,12 +91,6 @@ function generateItemKey(name: string): string {
   return slug.length > 0 ? `cfg-${slug}` : `cfg-${Date.now()}`;
 }
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 function maskSecretValue(item: IConfigItem): ConfigItemView {
   return {
     ...item,
@@ -113,28 +106,28 @@ export async function createConfigGroup(
   projectId: string,
   request: CreateConfigGroupRequest,
 ): Promise<IConfigGroup> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = request.key || generateGroupKey(request.name);
 
-  const key = request.key || generateGroupKey(request.name);
+    const existing = await db.findConfigGroupByKey(key, projectId);
+    if (existing) {
+      throw new ConfigServiceError(`Config group with key "${key}" already exists.`, 409);
+    }
 
-  const existing = await db.findConfigGroupByKey(key, projectId);
-  if (existing) {
-    throw new ConfigServiceError(`Config group with key "${key}" already exists.`, 409);
-  }
+    const group = await db.createConfigGroup({
+      tenantId,
+      projectId,
+      key,
+      name: request.name,
+      description: request.description,
+      tags: request.tags,
+      metadata: request.metadata,
+      createdBy: request.createdBy,
+    });
 
-  const group = await db.createConfigGroup({
-    tenantId,
-    projectId,
-    key,
-    name: request.name,
-    description: request.description,
-    tags: request.tags,
-    metadata: request.metadata,
-    createdBy: request.createdBy,
+    logger.info('Config group created', { key, projectId });
+    return group;
   });
-
-  logger.info('Config group created', { key, projectId });
-  return group;
 }
 
 export async function updateConfigGroup(
@@ -144,28 +137,28 @@ export async function updateConfigGroup(
   groupId: string,
   request: UpdateConfigGroupRequest,
 ): Promise<IConfigGroup> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findConfigGroupById(groupId);
+    if (!existing) throw new ConfigServiceError('Config group not found.', 404);
+    if (existing.projectId && existing.projectId !== projectId) {
+      throw new ConfigServiceError('Config group does not belong to this project.', 404);
+    }
 
-  const existing = await db.findConfigGroupById(groupId);
-  if (!existing) throw new ConfigServiceError('Config group not found.', 404);
-  if (existing.projectId && existing.projectId !== projectId) {
-    throw new ConfigServiceError('Config group does not belong to this project.', 404);
-  }
+    const updateData: Record<string, unknown> = {
+      updatedBy: request.updatedBy,
+    };
 
-  const updateData: Record<string, unknown> = {
-    updatedBy: request.updatedBy,
-  };
+    if (request.name !== undefined) updateData.name = request.name;
+    if (request.description !== undefined) updateData.description = request.description;
+    if (request.tags !== undefined) updateData.tags = request.tags;
+    if (request.metadata !== undefined) updateData.metadata = request.metadata;
 
-  if (request.name !== undefined) updateData.name = request.name;
-  if (request.description !== undefined) updateData.description = request.description;
-  if (request.tags !== undefined) updateData.tags = request.tags;
-  if (request.metadata !== undefined) updateData.metadata = request.metadata;
+    const updated = await db.updateConfigGroup(groupId, updateData);
+    if (!updated) throw new Error('Failed to update config group.');
 
-  const updated = await db.updateConfigGroup(groupId, updateData);
-  if (!updated) throw new Error('Failed to update config group.');
-
-  logger.info('Config group updated', { key: existing.key });
-  return updated;
+    logger.info('Config group updated', { key: existing.key });
+    return updated;
+  });
 }
 
 export async function deleteConfigGroup(
@@ -175,31 +168,31 @@ export async function deleteConfigGroup(
   groupId: string,
   performedBy: string,
 ): Promise<void> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findConfigGroupById(groupId);
+    if (!existing) throw new ConfigServiceError('Config group not found.', 404);
+    if (existing.projectId && existing.projectId !== projectId) {
+      throw new ConfigServiceError('Config group does not belong to this project.', 404);
+    }
 
-  const existing = await db.findConfigGroupById(groupId);
-  if (!existing) throw new ConfigServiceError('Config group not found.', 404);
-  if (existing.projectId && existing.projectId !== projectId) {
-    throw new ConfigServiceError('Config group does not belong to this project.', 404);
-  }
+    // Cascade delete: remove all items under this group
+    await db.deleteConfigItemsByGroupId(groupId);
 
-  // Cascade delete: remove all items under this group
-  await db.deleteConfigItemsByGroupId(groupId);
+    const deleted = await db.deleteConfigGroup(groupId);
+    if (!deleted) throw new Error('Failed to delete config group.');
 
-  const deleted = await db.deleteConfigGroup(groupId);
-  if (!deleted) throw new Error('Failed to delete config group.');
+    // Audit log for group deletion
+    await db.createConfigAuditLog({
+      tenantId,
+      projectId,
+      configKey: existing.key,
+      action: 'delete',
+      version: 0,
+      performedBy,
+    });
 
-  // Audit log for group deletion
-  await db.createConfigAuditLog({
-    tenantId,
-    projectId,
-    configKey: existing.key,
-    action: 'delete',
-    version: 0,
-    performedBy,
+    logger.info('Config group deleted (with items)', { key: existing.key });
   });
-
-  logger.info('Config group deleted (with items)', { key: existing.key });
 }
 
 export async function getConfigGroup(
@@ -208,11 +201,12 @@ export async function getConfigGroup(
   projectId: string,
   groupId: string,
 ): Promise<IConfigGroup | null> {
-  const db = await withTenantDb(tenantDbName);
-  const group = await db.findConfigGroupById(groupId);
-  if (!group) return null;
-  if (group.projectId && group.projectId !== projectId) return null;
-  return group;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const group = await db.findConfigGroupById(groupId);
+    if (!group) return null;
+    if (group.projectId && group.projectId !== projectId) return null;
+    return group;
+  });
 }
 
 export async function getConfigGroupByKey(
@@ -221,8 +215,9 @@ export async function getConfigGroupByKey(
   projectId: string,
   key: string,
 ): Promise<IConfigGroup | null> {
-  const db = await withTenantDb(tenantDbName);
-  return db.findConfigGroupByKey(key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findConfigGroupByKey(key, projectId);
+  });
 }
 
 export async function listConfigGroups(
@@ -234,8 +229,9 @@ export async function listConfigGroups(
     search?: string;
   },
 ): Promise<IConfigGroup[]> {
-  const db = await withTenantDb(tenantDbName);
-  return db.listConfigGroups({ projectId, ...filters });
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listConfigGroups({ projectId, ...filters });
+  });
 }
 
 export async function countConfigGroups(
@@ -243,8 +239,9 @@ export async function countConfigGroups(
   _tenantId: string,
   projectId: string,
 ): Promise<number> {
-  const db = await withTenantDb(tenantDbName);
-  return db.countConfigGroups(projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.countConfigGroups(projectId);
+  });
 }
 
 /**
@@ -256,17 +253,17 @@ export async function getConfigGroupWithItems(
   projectId: string,
   groupId: string,
 ): Promise<ConfigGroupView | null> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const group = await db.findConfigGroupById(groupId);
+    if (!group) return null;
+    if (group.projectId && group.projectId !== projectId) return null;
 
-  const group = await db.findConfigGroupById(groupId);
-  if (!group) return null;
-  if (group.projectId && group.projectId !== projectId) return null;
-
-  const items = await db.listConfigItems({ projectId, groupId });
-  return {
-    ...group,
-    items: items.map(maskSecretValue),
-  };
+    const items = await db.listConfigItems({ projectId, groupId });
+    return {
+      ...group,
+      items: items.map(maskSecretValue),
+    };
+  });
 }
 
 // ── Config Item operations ───────────────────────────────────────────────
@@ -278,53 +275,53 @@ export async function createConfigItem(
   groupId: string,
   request: CreateConfigItemRequest,
 ): Promise<ConfigItemView> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // Validate group exists
+    const group = await db.findConfigGroupById(groupId);
+    if (!group) throw new ConfigServiceError('Config group not found.', 404);
+    if (group.projectId && group.projectId !== projectId) {
+      throw new ConfigServiceError('Config group does not belong to this project.', 404);
+    }
 
-  // Validate group exists
-  const group = await db.findConfigGroupById(groupId);
-  if (!group) throw new ConfigServiceError('Config group not found.', 404);
-  if (group.projectId && group.projectId !== projectId) {
-    throw new ConfigServiceError('Config group does not belong to this project.', 404);
-  }
+    const key = request.key || generateItemKey(request.name);
 
-  const key = request.key || generateItemKey(request.name);
+    // Check uniqueness within group
+    const existing = await db.findConfigItemByKey(key, projectId);
+    if (existing && existing.groupId === groupId) {
+      throw new ConfigServiceError(`Config item with key "${key}" already exists in this group.`, 409);
+    }
 
-  // Check uniqueness within group
-  const existing = await db.findConfigItemByKey(key, projectId);
-  if (existing && existing.groupId === groupId) {
-    throw new ConfigServiceError(`Config item with key "${key}" already exists in this group.`, 409);
-  }
+    const storedValue = request.isSecret ? encrypt(request.value) : request.value;
 
-  const storedValue = request.isSecret ? encrypt(request.value) : request.value;
+    const item = await db.createConfigItem({
+      tenantId,
+      projectId,
+      groupId,
+      key,
+      name: request.name,
+      description: request.description,
+      value: storedValue,
+      valueType: request.valueType ?? 'string',
+      isSecret: request.isSecret ?? false,
+      tags: request.tags,
+      version: 1,
+      metadata: request.metadata,
+      createdBy: request.createdBy,
+    });
 
-  const item = await db.createConfigItem({
-    tenantId,
-    projectId,
-    groupId,
-    key,
-    name: request.name,
-    description: request.description,
-    value: storedValue,
-    valueType: request.valueType ?? 'string',
-    isSecret: request.isSecret ?? false,
-    tags: request.tags,
-    version: 1,
-    metadata: request.metadata,
-    createdBy: request.createdBy,
+    await db.createConfigAuditLog({
+      tenantId,
+      projectId,
+      configKey: key,
+      action: 'create',
+      newValue: request.isSecret ? MASK : request.value,
+      version: 1,
+      performedBy: request.createdBy,
+    });
+
+    logger.info('Config item created', { key, groupId, projectId, isSecret: request.isSecret });
+    return maskSecretValue(item);
   });
-
-  await db.createConfigAuditLog({
-    tenantId,
-    projectId,
-    configKey: key,
-    action: 'create',
-    newValue: request.isSecret ? MASK : request.value,
-    version: 1,
-    performedBy: request.createdBy,
-  });
-
-  logger.info('Config item created', { key, groupId, projectId, isSecret: request.isSecret });
-  return maskSecretValue(item);
 }
 
 export async function updateConfigItem(
@@ -334,52 +331,52 @@ export async function updateConfigItem(
   itemId: string,
   request: UpdateConfigItemRequest,
 ): Promise<ConfigItemView> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findConfigItemById(itemId);
+    if (!existing) throw new ConfigServiceError('Config item not found.', 404);
+    if (existing.projectId && existing.projectId !== projectId) {
+      throw new ConfigServiceError('Config item does not belong to this project.', 404);
+    }
 
-  const existing = await db.findConfigItemById(itemId);
-  if (!existing) throw new ConfigServiceError('Config item not found.', 404);
-  if (existing.projectId && existing.projectId !== projectId) {
-    throw new ConfigServiceError('Config item does not belong to this project.', 404);
-  }
+    const updateData: Record<string, unknown> = {
+      updatedBy: request.updatedBy,
+    };
 
-  const updateData: Record<string, unknown> = {
-    updatedBy: request.updatedBy,
-  };
+    if (request.name !== undefined) updateData.name = request.name;
+    if (request.description !== undefined) updateData.description = request.description;
+    if (request.valueType !== undefined) updateData.valueType = request.valueType;
+    if (request.isSecret !== undefined) updateData.isSecret = request.isSecret;
+    if (request.tags !== undefined) updateData.tags = request.tags;
+    if (request.metadata !== undefined) updateData.metadata = request.metadata;
 
-  if (request.name !== undefined) updateData.name = request.name;
-  if (request.description !== undefined) updateData.description = request.description;
-  if (request.valueType !== undefined) updateData.valueType = request.valueType;
-  if (request.isSecret !== undefined) updateData.isSecret = request.isSecret;
-  if (request.tags !== undefined) updateData.tags = request.tags;
-  if (request.metadata !== undefined) updateData.metadata = request.metadata;
+    if (request.value !== undefined) {
+      const isSecret = request.isSecret ?? existing.isSecret;
+      updateData.value = isSecret ? encrypt(request.value) : request.value;
+      updateData.version = existing.version + 1;
+    }
 
-  if (request.value !== undefined) {
-    const isSecret = request.isSecret ?? existing.isSecret;
-    updateData.value = isSecret ? encrypt(request.value) : request.value;
-    updateData.version = existing.version + 1;
-  }
+    const updated = await db.updateConfigItem(itemId, updateData);
+    if (!updated) throw new Error('Failed to update config item.');
 
-  const updated = await db.updateConfigItem(itemId, updateData);
-  if (!updated) throw new Error('Failed to update config item.');
+    const previousValue = existing.isSecret ? MASK : existing.value;
+    const newValue = request.value !== undefined
+      ? (request.isSecret ?? existing.isSecret ? MASK : request.value)
+      : undefined;
 
-  const previousValue = existing.isSecret ? MASK : existing.value;
-  const newValue = request.value !== undefined
-    ? (request.isSecret ?? existing.isSecret ? MASK : request.value)
-    : undefined;
+    await db.createConfigAuditLog({
+      tenantId,
+      projectId,
+      configKey: existing.key,
+      action: 'update',
+      previousValue,
+      newValue,
+      version: updated.version,
+      performedBy: request.updatedBy,
+    });
 
-  await db.createConfigAuditLog({
-    tenantId,
-    projectId,
-    configKey: existing.key,
-    action: 'update',
-    previousValue,
-    newValue,
-    version: updated.version,
-    performedBy: request.updatedBy,
+    logger.info('Config item updated', { key: existing.key, version: updated.version });
+    return maskSecretValue(updated);
   });
-
-  logger.info('Config item updated', { key: existing.key, version: updated.version });
-  return maskSecretValue(updated);
 }
 
 export async function deleteConfigItem(
@@ -389,28 +386,28 @@ export async function deleteConfigItem(
   itemId: string,
   performedBy: string,
 ): Promise<void> {
-  const db = await withTenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findConfigItemById(itemId);
+    if (!existing) throw new ConfigServiceError('Config item not found.', 404);
+    if (existing.projectId && existing.projectId !== projectId) {
+      throw new ConfigServiceError('Config item does not belong to this project.', 404);
+    }
 
-  const existing = await db.findConfigItemById(itemId);
-  if (!existing) throw new ConfigServiceError('Config item not found.', 404);
-  if (existing.projectId && existing.projectId !== projectId) {
-    throw new ConfigServiceError('Config item does not belong to this project.', 404);
-  }
+    const deleted = await db.deleteConfigItem(itemId);
+    if (!deleted) throw new Error('Failed to delete config item.');
 
-  const deleted = await db.deleteConfigItem(itemId);
-  if (!deleted) throw new Error('Failed to delete config item.');
+    await db.createConfigAuditLog({
+      tenantId,
+      projectId,
+      configKey: existing.key,
+      action: 'delete',
+      previousValue: existing.isSecret ? MASK : existing.value,
+      version: existing.version,
+      performedBy,
+    });
 
-  await db.createConfigAuditLog({
-    tenantId,
-    projectId,
-    configKey: existing.key,
-    action: 'delete',
-    previousValue: existing.isSecret ? MASK : existing.value,
-    version: existing.version,
-    performedBy,
+    logger.info('Config item deleted', { key: existing.key });
   });
-
-  logger.info('Config item deleted', { key: existing.key });
 }
 
 export async function getConfigItem(
@@ -419,10 +416,11 @@ export async function getConfigItem(
   projectId: string,
   key: string,
 ): Promise<ConfigItemView | null> {
-  const db = await withTenantDb(tenantDbName);
-  const item = await db.findConfigItemByKey(key, projectId);
-  if (!item) return null;
-  return maskSecretValue(item);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const item = await db.findConfigItemByKey(key, projectId);
+    if (!item) return null;
+    return maskSecretValue(item);
+  });
 }
 
 export async function getConfigItemById(
@@ -431,11 +429,12 @@ export async function getConfigItemById(
   projectId: string,
   itemId: string,
 ): Promise<ConfigItemView | null> {
-  const db = await withTenantDb(tenantDbName);
-  const item = await db.findConfigItemById(itemId);
-  if (!item) return null;
-  if (item.projectId && item.projectId !== projectId) return null;
-  return maskSecretValue(item);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const item = await db.findConfigItemById(itemId);
+    if (!item) return null;
+    if (item.projectId && item.projectId !== projectId) return null;
+    return maskSecretValue(item);
+  });
 }
 
 export async function listConfigItems(
@@ -449,12 +448,13 @@ export async function listConfigItems(
     search?: string;
   },
 ): Promise<ConfigItemView[]> {
-  const db = await withTenantDb(tenantDbName);
-  const items = await db.listConfigItems({
-    projectId,
-    ...filters,
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const items = await db.listConfigItems({
+      projectId,
+      ...filters,
+    });
+    return items.map(maskSecretValue);
   });
-  return items.map(maskSecretValue);
 }
 
 /**
@@ -468,42 +468,43 @@ export async function resolveConfigValues(
   request: ResolveConfigRequest,
   performedBy: string,
 ): Promise<ResolvedConfigMap> {
-  const db = await withTenantDb(tenantDbName);
-  const result: ResolvedConfigMap = {};
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const result: ResolvedConfigMap = {};
 
-  for (const key of request.keys) {
-    const item = await db.findConfigItemByKey(key, projectId);
-    if (!item) continue;
+    for (const key of request.keys) {
+      const item = await db.findConfigItemByKey(key, projectId);
+      if (!item) continue;
 
-    let value = item.value;
-    if (item.isSecret) {
-      try {
-        value = decrypt(value);
-      } catch (err) {
-        logger.error('Failed to decrypt config secret', { key, error: err });
-        continue;
+      let value = item.value;
+      if (item.isSecret) {
+        try {
+          value = decrypt(value);
+        } catch (err) {
+          logger.error('Failed to decrypt config secret', { key, error: err });
+          continue;
+        }
+      }
+
+      result[key] = {
+        value,
+        valueType: item.valueType,
+        version: item.version,
+      };
+
+      if (item.isSecret) {
+        await db.createConfigAuditLog({
+          tenantId,
+          projectId,
+          configKey: key,
+          action: 'read',
+          version: item.version,
+          performedBy,
+        });
       }
     }
 
-    result[key] = {
-      value,
-      valueType: item.valueType,
-      version: item.version,
-    };
-
-    if (item.isSecret) {
-      await db.createConfigAuditLog({
-        tenantId,
-        projectId,
-        configKey: key,
-        action: 'read',
-        version: item.version,
-        performedBy,
-      });
-    }
-  }
-
-  return result;
+    return result;
+  });
 }
 
 export async function listConfigAuditLogs(
@@ -512,8 +513,9 @@ export async function listConfigAuditLogs(
   configKey: string,
   options?: { limit?: number; skip?: number; from?: Date; to?: Date },
 ) {
-  const db = await withTenantDb(tenantDbName);
-  return db.listConfigAuditLogs(configKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listConfigAuditLogs(configKey, options);
+  });
 }
 
 export async function countConfigItems(
@@ -521,6 +523,7 @@ export async function countConfigItems(
   _tenantId: string,
   projectId: string,
 ): Promise<number> {
-  const db = await withTenantDb(tenantDbName);
-  return db.countConfigItems(projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.countConfigItems(projectId);
+  });
 }

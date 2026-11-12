@@ -36,6 +36,10 @@ import { runWithTenantScope } from '@/lib/database';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import type { HealthIssueKind, HealthSeverity } from '@/lib/resources/types';
 import { authorizeServiceForRequest, requireSessionContext, resolveSessionRbacContext, sendProjectContextError, withApiRequestContext } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "resources" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('resources') } as const;
 
 const logger = createLogger('api:resources');
 
@@ -87,7 +91,7 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
   // Before the first request: the per-type RBAC resolver for the usage route.
   registerResourceUsageAccess();
 
-  app.get('/resources', withApiRequestContext(async (request, reply) => {
+  app.get('/resources', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const query = (request.query ?? {}) as Record<string, unknown>;
@@ -130,7 +134,7 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
   // best match first, never more than SEARCH_MAX_LIMIT rows. Same registry
   // snapshot, same tenant guard and the SAME gate as the list above (the
   // `resources` service), so it shows exactly what the registry would.
-  app.get('/resources/search', withApiRequestContext(async (request, reply) => {
+  app.get('/resources/search', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const query = (request.query ?? {}) as Record<string, unknown>;
@@ -162,7 +166,7 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Registered next to the list route; `health` is one path segment so it can
   // never collide with `/resources/:type/:id`.
-  app.get('/resources/health', withApiRequestContext(async (request, reply) => {
+  app.get('/resources/health', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const query = (request.query ?? {}) as Record<string, unknown>;
@@ -186,7 +190,7 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/resources/:type/:id', withApiRequestContext(async (request, reply) => {
+  app.get('/resources/:type/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { type, id } = request.params as { type: string; id: string };

@@ -22,7 +22,7 @@
  * person asked to keep is kept. A page already in hand is finished.
  */
 
-import { getDatabase, type DatabaseProvider, type IFileBucketRecord } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IFileBucketRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import type { FileProviderRuntime } from '@/lib/providers';
 import {
@@ -51,12 +51,6 @@ const MAX_PASSES = 5;
 /** Logged when a run finds the bucket removed, replaced or given up on by another run: it removes nothing more. */
 const BUCKET_NO_LONGER_DELETED = 'Bucket deletion ended: the bucket was removed or changed while the job ran';
 
-async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 function filesFailedMessage(failed: number, reason: string | undefined): string {
   const files = failed === 1 ? '1 file' : `${failed} files`;
   return `${files} could not be deleted from the storage provider${reason ? `: ${reason}` : '.'}`;
@@ -77,35 +71,36 @@ export async function startBucketDeletion(input: {
   const bucketId = bucket._id?.toString();
   if (!bucketId) throw new Error('Bucket identifier missing.');
 
-  const db = await tenantDb(input.tenantDbName);
-  // Before anything is marked or queued: a location shared with another bucket cannot be emptied.
-  if ((await findBucketsSharingStorage(db, input.tenantId, bucket)).length > 0) {
-    throw storageLocationSharedError('delete');
-  }
-  const otherMetadata = withoutReservedBucketMetadata(bucket.metadata ?? {});
-  await db.updateFileBucket(bucketId, {
-    status: 'disabled',
-    metadata: { ...otherMetadata, [BUCKET_DELETING_KEY]: true },
-    updatedBy: input.actor,
-  });
-
-  try {
-    await publishDeleteBucketJob({
-      tenantDbName: input.tenantDbName,
-      tenantId: input.tenantId,
-      projectId: input.projectId,
-      bucketKey: bucket.key,
-      actor: input.actor,
-    });
-  } catch (error) {
-    // Nothing started: the bucket goes back to what it was, with the reason on it.
+  return runWithTenantScope(input.tenantDbName, async (db) => {
+    // Before anything is marked or queued: a location shared with another bucket cannot be emptied.
+    if ((await findBucketsSharingStorage(db, input.tenantId, bucket)).length > 0) {
+      throw storageLocationSharedError('delete');
+    }
+    const otherMetadata = withoutReservedBucketMetadata(bucket.metadata ?? {});
     await db.updateFileBucket(bucketId, {
-      status: bucket.status,
-      metadata: { ...otherMetadata, [BUCKET_DELETE_ERROR_KEY]: describeFailure(error) },
+      status: 'disabled',
+      metadata: { ...otherMetadata, [BUCKET_DELETING_KEY]: true },
       updatedBy: input.actor,
-    }).catch(() => undefined);
-    throw error;
-  }
+    });
+
+    try {
+      await publishDeleteBucketJob({
+        tenantDbName: input.tenantDbName,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        bucketKey: bucket.key,
+        actor: input.actor,
+      });
+    } catch (error) {
+      // Nothing started: the bucket goes back to what it was, with the reason on it.
+      await db.updateFileBucket(bucketId, {
+        status: bucket.status,
+        metadata: { ...otherMetadata, [BUCKET_DELETE_ERROR_KEY]: describeFailure(error) },
+        updatedBy: input.actor,
+      }).catch(() => undefined);
+      throw error;
+    }
+  });
 }
 
 /** Leaves the bucket switched off and no longer `deleting`, with why on it. */
@@ -209,11 +204,12 @@ async function removeRecordsOnce(
 async function recordStoppedRun(payload: DeleteBucketJobPayload, reason: string): Promise<void> {
   const { tenantDbName, tenantId, projectId, bucketKey, actor } = payload;
   try {
-    const db = await tenantDb(tenantDbName);
-    const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
-    const bucketId = bucket?._id?.toString();
-    if (!bucket || !bucketId || !isBucketDeleting(bucket)) return;
-    await leaveBucketBecause(db, bucket, bucketId, actor, reason);
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+      const bucketId = bucket?._id?.toString();
+      if (!bucket || !bucketId || !isBucketDeleting(bucket)) return;
+      await leaveBucketBecause(db, bucket, bucketId, actor, reason);
+    });
   } catch (writeError) {
     logger.error('Could not record why a bucket deletion stopped', {
       bucketKey,
@@ -235,49 +231,52 @@ export async function runBucketDeletionJob(payload: DeleteBucketJobPayload): Pro
   let leaveBecause: ((reason: string) => Promise<void>) | undefined;
 
   try {
-    const db = await tenantDb(tenantDbName);
-    const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
-    const bucketId = bucket?._id?.toString();
-    // Gone, or not (any more) to be deleted: an earlier run of the same request ended it.
-    if (!bucket || !bucketId || !isBucketDeleting(bucket)) return;
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+      const bucketId = bucket?._id?.toString();
+      // Gone, or not (any more) to be deleted: an earlier run of the same request ended it.
+      if (!bucket || !bucketId || !isBucketDeleting(bucket)) return;
 
-    leaveBecause = (reason) => leaveBucketBecause(db, bucket, bucketId, actor, reason);
+      // Called from the catch below as well, after this scope has ended: it opens a scope of its own.
+      leaveBecause = (reason) =>
+        runWithTenantScope(tenantDbName, (scoped) => leaveBucketBecause(scoped, bucket, bucketId, actor, reason));
 
-    // Built when the first file needs it: a bucket with no files is deleted even when its provider is gone.
-    let runtime: FileProviderRuntime | undefined;
-    const filesOnce = async (): Promise<FileProviderRuntime> => {
-      runtime ??= (await requireBucketContext(tenantDbName, tenantId, projectId, bucketKey, 'read')).runtime;
-      return runtime;
-    };
+      // Built when the first file needs it: a bucket with no files is deleted even when its provider is gone.
+      let runtime: FileProviderRuntime | undefined;
+      const filesOnce = async (): Promise<FileProviderRuntime> => {
+        runtime ??= (await requireBucketContext(tenantDbName, tenantId, projectId, bucketKey, 'read')).runtime;
+        return runtime;
+      };
 
-    for (let pass = 1; ; pass += 1) {
-      // Asked again before every pass: a bucket added since the deletion was asked for may share the location.
-      if ((await findBucketsSharingStorage(db, tenantId, bucket)).length > 0) {
-        await leaveBecause(storageLocationSharedError('delete').message);
-        return;
+      for (let pass = 1; ; pass += 1) {
+        // Asked again before every pass: a bucket added since the deletion was asked for may share the location.
+        if ((await findBucketsSharingStorage(db, tenantId, bucket)).length > 0) {
+          await leaveBecause(storageLocationSharedError('delete').message);
+          return;
+        }
+
+        const { failed, firstReason, ended } = await removeRecordsOnce(db, bucket, bucketId, payload, filesOnce);
+        if (ended) {
+          logger.info(BUCKET_NO_LONGER_DELETED, { bucketKey });
+          return;
+        }
+        if (failed > 0) {
+          await leaveBecause(filesFailedMessage(failed, firstReason));
+          return;
+        }
+
+        const remaining = await db.listFileRecords({ providerKey: bucket.providerKey, bucketKey: bucket.key, projectId, limit: 1 });
+        if (remaining.items.length === 0) break;
+        if (pass >= MAX_PASSES) {
+          await leaveBecause('Files were still being added to the bucket while it was deleted. Delete it again.');
+          return;
+        }
       }
 
-      const { failed, firstReason, ended } = await removeRecordsOnce(db, bucket, bucketId, payload, filesOnce);
-      if (ended) {
-        logger.info(BUCKET_NO_LONGER_DELETED, { bucketKey });
-        return;
-      }
-      if (failed > 0) {
-        await leaveBecause(filesFailedMessage(failed, firstReason));
-        return;
-      }
-
-      const remaining = await db.listFileRecords({ providerKey: bucket.providerKey, bucketKey: bucket.key, projectId, limit: 1 });
-      if (remaining.items.length === 0) break;
-      if (pass >= MAX_PASSES) {
-        await leaveBecause('Files were still being added to the bucket while it was deleted. Delete it again.');
-        return;
-      }
-    }
-
-    // `false`: the bucket was removed (with `force`) after the last page was read, which is where this run was going.
-    if (await db.deleteFileBucket(bucketId)) logger.info('Bucket deleted with its files', { bucketKey });
-    else logger.info(BUCKET_NO_LONGER_DELETED, { bucketKey });
+      // `false`: the bucket was removed (with `force`) after the last page was read, which is where this run was going.
+      if (await db.deleteFileBucket(bucketId)) logger.info('Bucket deleted with its files', { bucketKey });
+      else logger.info(BUCKET_NO_LONGER_DELETED, { bucketKey });
+    });
   } catch (error) {
     logger.warn('Deleting a bucket with its files stopped', {
       bucketKey,

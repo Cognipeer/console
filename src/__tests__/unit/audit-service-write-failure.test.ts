@@ -8,7 +8,18 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // Mirrors the real helper's fallback for a provider without runWithTenant: switch, then run.
+    runWithTenantScope: async (tenantDbName: string, fn: (db: unknown) => unknown) => {
+      const db = (await getDatabase()) as { switchToTenant: (name: string) => Promise<void> };
+      await db.switchToTenant(tenantDbName);
+      return fn(db);
+    },
+  };
+});
 
 import { getDatabase } from '@/lib/database';
 import { recordAuditLog } from '@/lib/services/audit/auditService';

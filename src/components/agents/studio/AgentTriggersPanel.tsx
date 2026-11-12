@@ -11,8 +11,7 @@
  * card (the secret is shown there once) and the Test / Deliveries tabs; a saved
  * connector trigger's with the subscription's status and the same two tabs. The
  * connector choice is offered only where the Connectors module is (the
- * enterprise parts behind `EnterpriseConnectorTriggerUi`). A webhook trigger of
- * a retired vendor preset is marked and can be converted to a connector trigger.
+ * enterprise parts behind `EnterpriseConnectorTriggerUi`).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -47,7 +46,6 @@ import {
     IconPencil,
     IconPlayerPlay,
     IconPlug,
-    IconPlugConnected,
     IconPlus,
     IconRefresh,
     IconRepeat,
@@ -73,12 +71,9 @@ import {
     CONNECTOR_TEMPLATE_VARIABLES,
     CRON_PRESETS,
     TRIGGER_TYPES,
-    connectorFormFromRetired,
     connectorTriggerLabel,
     emptyTriggerForm,
     formFromTrigger,
-    isRetiredWebhook,
-    rowsOnWebhookOnlyData,
     triggerBodyFromForm,
     timezoneOptions,
     webhookVariableText,
@@ -169,7 +164,7 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
     const [triggers, setTriggers] = useState<TriggerRow[] | null>(null);
     const [loadFailed, setLoadFailed] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
-    const [editing, setEditing] = useState<{ trigger: TriggerRow | null; convert?: boolean } | null>(null);
+    const [editing, setEditing] = useState<{ trigger: TriggerRow | null } | null>(null);
     const catalog = useConnectorTriggerCatalog();
 
     const load = useCallback(async () => {
@@ -280,7 +275,6 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                         const last = fromEpoch(trigger.last_fire_at);
                         const triggerType: TriggerType = trigger.type in TYPE_LABEL_KEY ? trigger.type : 'manual';
                         const summary = typeSummary(trigger);
-                        const retired = isRetiredWebhook(trigger);
                         const connectorKind = trigger.type === 'connector' && trigger.connector.kind === 'poll' ? 'poll' : 'webhook';
                         const typeLabel = trigger.type === 'connector' ? t(connectorKind === 'poll' ? 'kindConnectorPoll' : 'kindConnectorWebhook') : t(TYPE_LABEL_KEY[triggerType]);
                         const typeIcon = trigger.type === 'connector' ? (connectorKind === 'poll' ? <IconRefresh size={14} /> : <IconWebhook size={14} />) : TYPE_ICON[triggerType];
@@ -298,11 +292,6 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                                 <Stack gap={2} style={{ flex: '1 1 220px', minWidth: 0 }}>
                                     <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
                                         <Text size="sm" fw={500} truncate title={trigger.name}>{trigger.name}</Text>
-                                        {retired ? (
-                                            <Tooltip label={t('retiredHint')} withArrow multiline maw={320}>
-                                                <Badge color="orange" variant="light" size="sm" style={{ flexShrink: 0 }}>{t('retired')}</Badge>
-                                            </Tooltip>
-                                        ) : null}
                                         {connectorGone ? (
                                             <Tooltip label={t('connectorUnavailable')} withArrow multiline maw={320}>
                                                 <Badge color="gray" variant="light" size="sm" style={{ flexShrink: 0 }}>{t('connectorUnavailableBadge')}</Badge>
@@ -350,14 +339,7 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                                         onChange={(event) => void toggle(trigger, event.currentTarget.checked)}
                                     />
                                     <Group gap={2} wrap="nowrap">
-                                        {retired && catalog.available ? (
-                                            <Tooltip label={t('convert')} withArrow>
-                                                <ActionIcon size="sm" variant="subtle" color="orange" aria-label={t('convert')} onClick={() => setEditing({ trigger, convert: true })}>
-                                                    <IconPlugConnected size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                        ) : null}
-                                        {retired || connectorGone ? null : (
+                                        {connectorGone ? null : (
                                             <Tooltip label={t('runNow')} withArrow>
                                                 <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === trigger.id} aria-label={t('runNow')} onClick={() => void runNow(trigger)}>
                                                     <IconPlayerPlay size={14} />
@@ -392,7 +374,6 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredVariabl
                     agentId={agentId}
                     agentName={agentName}
                     trigger={editing.trigger}
-                    convert={editing.convert}
                     catalog={catalog}
                     declaredVariables={declaredVariables}
                     versions={versions}
@@ -416,8 +397,6 @@ interface TriggerEditorProps {
     agentId: string;
     agentName: string;
     trigger: TriggerRow | null;
-    /** Edit a retired vendor webhook trigger as the connector trigger that replaces it. */
-    convert?: boolean;
     catalog: ConnectorTriggerCatalogState;
     declaredVariables?: IAgentVariable[];
     versions: number[];
@@ -428,10 +407,10 @@ interface TriggerEditorProps {
 
 type EditorTab = 'settings' | 'test' | 'deliveries';
 
-function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declaredVariables, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
+function TriggerEditor({ agentId, agentName, trigger, catalog, declaredVariables, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
     const t = useTranslations('agents.triggers');
     const locale = useLocale();
-    const [form, setForm] = useState<TriggerForm>(() => (trigger ? (convert ? connectorFormFromRetired(trigger) : formFromTrigger(trigger)) : emptyTriggerForm()));
+    const [form, setForm] = useState<TriggerForm>(() => (trigger ? formFromTrigger(trigger) : emptyTriggerForm()));
     const [problem, setProblem] = useState<TriggerFormProblem | null>(null);
     /** Field errors the server named for the connector part (`connector.params.<key>`) and the callback, keyed like its answer. */
     const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
@@ -439,9 +418,7 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
     const [tab, setTab] = useState<EditorTab>('settings');
     /** The webhook secret from the last save / rotation: shown once, never read back. */
     const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
-    const retired = trigger ? isRetiredWebhook(trigger) : false;
-    // A retired trigger receives nothing: no Connect card, no Test, no deliveries.
-    const storedWebhook = trigger?.type === 'webhook' && !retired ? trigger.webhook as Parameters<typeof WebhookConnectCard>[0]['webhook'] : null;
+    const storedWebhook = trigger?.type === 'webhook' ? trigger.webhook as Parameters<typeof WebhookConnectCard>[0]['webhook'] : null;
     const savedConnector = trigger?.type === 'connector' ? trigger : null;
     const savedId = trigger?.id;
     /** The subscription of a saved connector trigger. Lists do not carry it; a create / update answer does (with the secret, once). */
@@ -560,8 +537,6 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                     : t('typeManual');
     const webhook = form.type === 'webhook';
     const connector = form.type === 'connector';
-    /** A converted trigger's filter rows on data a connector event lacks: the ones that match nothing and the ones that match everything. */
-    const webhookOnlyRows = convert ? rowsOnWebhookOnlyData(form.webhookFilter) : null;
     /** A webhook's and a connector trigger's prompt is a template over the event, and its variables a mapping. */
     const eventDriven = webhook || connector;
     const declared = declaredVariables ?? [];
@@ -581,8 +556,6 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
             </FormSection>
 
             <FormSection number={2} title={t('sectionType')} description={t('sectionTypeDescription')}>
-                {retired && !convert ? <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('retiredNotice')}</Alert> : null}
-                {convert && form.type === 'connector' ? <Alert color="orange" variant="light" icon={<IconAlertTriangle size={14} />}>{t('convertNotice')}</Alert> : null}
                 <SegmentedControl
                     value={form.type}
                     onChange={(value) => set('type', value as TriggerType)}
@@ -684,10 +657,6 @@ function TriggerEditor({ agentId, agentName, trigger, convert, catalog, declared
                                     form={form}
                                     set={set}
                                     errorOf={errorOf}
-                                    flagged={webhookOnlyRows ? [
-                                        { rows: webhookOnlyRows.never, reason: t('convertRowHint') },
-                                        { rows: webhookOnlyRows.always, reason: t('convertRowAlwaysHint') },
-                                    ] : undefined}
                                 />
                                 <WebhookIncludePayload form={form} set={set} />
                             </>

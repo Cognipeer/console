@@ -9,7 +9,7 @@
 
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { ICrawlJob, ICrawlPlanSnapshot } from '@/lib/database';
 import { addMonthlyUsage, checkMonthlyAllowance, resolveTenantPlan } from '@/lib/limits';
 import { crawl } from './engine';
@@ -29,27 +29,6 @@ const cancelRequested = new Set<string>();
 
 export function markJobCancelRequested(jobId: string): void {
   cancelRequested.add(jobId);
-}
-
-/**
- * Bind `fn` to the tenant DB for its whole (sync + async) execution.
- *
- * A crawl job runs for minutes; using the bare `switchToTenant` (which relies
- * on `enterWith` + a process-global `this.tenantDb` fallback) meant that ANY
- * request for a different tenant arriving mid-crawl flipped the global pointer
- * and redirected this job's writes (results, counters, finalize, RAG ingest)
- * into the wrong tenant's database. `runWithTenant` pins the binding in a real
- * AsyncLocalStorage scope that survives `await` and is immune to concurrent
- * overwrites. See [[tenant-db-global-race]] and the sandbox isolation fix.
- */
-async function runWithTenantDb<T>(
-  tenantDbName: string,
-  fn: (db: DatabaseProvider) => T | Promise<T>,
-): Promise<T> {
-  const db = await getDatabase();
-  if (db.runWithTenant) return db.runWithTenant(tenantDbName, () => fn(db));
-  await db.switchToTenant(tenantDbName);
-  return fn(db);
 }
 
 export function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
@@ -101,7 +80,7 @@ export async function runCrawlJobLocal(
   ctx: CrawlerContext,
   jobId: string,
 ): Promise<void> {
-  return runWithTenantDb(ctx.tenantDbName, (db) =>
+  return runWithTenantScope(ctx.tenantDbName, (db) =>
     runCrawlJobInner(db, ctx, jobId));
 }
 

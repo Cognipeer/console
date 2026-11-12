@@ -29,6 +29,10 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "projects" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('projects') } as const;
 
 const logger = createLogger('api:quota');
 
@@ -37,7 +41,7 @@ function isQuotaAdmin(role: string | undefined): boolean {
 }
 
 export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/quota/defaults', withApiRequestContext(async (request, reply) => {
+  app.get('/quota/defaults', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
 
@@ -64,7 +68,7 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/quota/policies', withApiRequestContext(async (request, reply) => {
+  app.get('/quota/policies', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const query = (request.query ?? {}) as {
@@ -110,7 +114,7 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/quota/policies', withApiRequestContext(async (request, reply) => {
+  app.post('/quota/policies', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!isQuotaAdmin(session.userRole)) {
@@ -170,7 +174,7 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/quota/policies/:id', withApiRequestContext(async (request, reply) => {
+  app.patch('/quota/policies/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const session = requireSessionContext(request);
@@ -217,7 +221,7 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/quota/policies/:id', withApiRequestContext(async (request, reply) => {
+  app.delete('/quota/policies/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
       const session = requireSessionContext(request);

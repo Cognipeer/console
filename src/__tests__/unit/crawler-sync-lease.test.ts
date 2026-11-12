@@ -13,9 +13,8 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota: vi.fn(async () => null) }));
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
-    switchToTenant: vi.fn().mockResolvedValue(undefined),
+vi.mock('@/lib/database', () => {
+  const db = {
     findCrawlerById: vi.fn().mockResolvedValue(null),
     findCrawlerByKey: vi.fn().mockResolvedValue({
       _id: 'c1', key: 'docs', tenantId: 't1', projectId: 'p1', status: 'active', seeds: ['https://a.test/'],
@@ -23,8 +22,12 @@ vi.mock('@/lib/database', () => ({
     }),
     createCrawlJob: vi.fn().mockResolvedValue({ _id: 'job1' }),
     updateCrawlJob: h.updateCrawlJob,
-  }),
-}));
+  };
+  return {
+    getDatabase: vi.fn().mockResolvedValue(db),
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
+  };
+});
 vi.mock('@/lib/services/availability/serviceAvailability', () => ({ assertServiceEnabled: vi.fn() }));
 vi.mock('@/lib/core/cluster', () => ({
   routeInstanceCall: (_target: unknown, _payload: unknown, local: () => Promise<void>) => local(),

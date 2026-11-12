@@ -17,7 +17,10 @@ const hoisted = vi.hoisted(() => ({
   reingestDocument: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: async () => hoisted.db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
+}));
 vi.mock('@/lib/services/rag', () => ({
   ingestDocument: hoisted.ingestDocument,
   reingestDocument: hoisted.reingestDocument,

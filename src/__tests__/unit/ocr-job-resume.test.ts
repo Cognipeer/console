@@ -15,7 +15,10 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => mocks.db) }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => mocks.db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(mocks.db)),
+}));
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: mocks.publish })) }));
 vi.mock('@/lib/services/files/fileService', () => ({ uploadFile: vi.fn() }));
 vi.mock('@/lib/services/ocrJobs/ocrJobRunner', () => ({ processOcrItem: vi.fn(), OCR_ITEM_HELD_WHILE_PAUSED: 'held' }));

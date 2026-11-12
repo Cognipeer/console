@@ -5,7 +5,7 @@
  * lookup hands back the records and the delete works on the ones the route let through.
  */
 
-import { getDatabase, type DatabaseProvider, type IFileRecord } from '@/lib/database';
+import { runWithTenantScope, type IFileRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { mapLimit } from './concurrency';
 import { describeFailure } from './errors';
@@ -19,12 +19,6 @@ const DELETE_CONCURRENCY = 4;
 
 /** The most keys one batch names. */
 export const BATCH_MAX_KEYS = 100;
-
-async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
 
 /**
  * The records of these keys in one read, in the order the keys were named (a key named twice counts once), and the
@@ -44,28 +38,29 @@ export async function findFileRecordsByKeys(
 ): Promise<{ found: FileRecordView[]; missing: string[]; duplicates: FileRecordView[] }> {
   const bucket = await requireBucketRecord(tenantDbName, tenantId, projectId, bucketKey);
   const wanted = [...new Set(keys)];
-  const db = await tenantDb(tenantDbName);
-  const records = await db.listFileRecordsByKeys({
-    providerKey: bucket.providerKey,
-    bucketKey: bucket.key,
-    projectId,
-    keys: wanted,
-  });
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const records = await db.listFileRecordsByKeys({
+      providerKey: bucket.providerKey,
+      bucketKey: bucket.key,
+      projectId,
+      keys: wanted,
+    });
 
-  const byKey = new Map<string, IFileRecord>();
-  const duplicates: FileRecordView[] = [];
-  for (const record of records) {
-    if (byKey.has(record.key)) duplicates.push(serializeFileRecord(record));
-    else byKey.set(record.key, record);
-  }
-  const found: FileRecordView[] = [];
-  const missing: string[] = [];
-  for (const key of wanted) {
-    const record = byKey.get(key);
-    if (record) found.push(serializeFileRecord(record));
-    else missing.push(key);
-  }
-  return { found, missing, duplicates };
+    const byKey = new Map<string, IFileRecord>();
+    const duplicates: FileRecordView[] = [];
+    for (const record of records) {
+      if (byKey.has(record.key)) duplicates.push(serializeFileRecord(record));
+      else byKey.set(record.key, record);
+    }
+    const found: FileRecordView[] = [];
+    const missing: string[] = [];
+    for (const key of wanted) {
+      const record = byKey.get(key);
+      if (record) found.push(serializeFileRecord(record));
+      else missing.push(key);
+    }
+    return { found, missing, duplicates };
+  });
 }
 
 /**
@@ -82,26 +77,26 @@ export async function deleteFileRecords(
   deletedBy: string,
 ): Promise<BatchDeleteResult> {
   const { bucket, runtime } = await requireBucketContext(tenantDbName, tenantId, projectId, bucketKey, 'write');
-  const db = await tenantDb(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const outcomes = await mapLimit(records, DELETE_CONCURRENCY, async (record): Promise<{ key: string; error?: string }> => {
+      try {
+        await removeStoredObjects(runtime, bucket, record);
+        await db.deleteFileRecord(record.id);
+        logger.debug('Deleted file record', { bucketKey: bucket.key, key: record.key, deletedBy });
+        return { key: record.key };
+      } catch (error) {
+        logger.warn('A file of a batch could not be deleted', {
+          bucketKey: bucket.key,
+          key: record.key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { key: record.key, error: describeFailure(error) };
+      }
+    });
 
-  const outcomes = await mapLimit(records, DELETE_CONCURRENCY, async (record): Promise<{ key: string; error?: string }> => {
-    try {
-      await removeStoredObjects(runtime, bucket, record);
-      await db.deleteFileRecord(record.id);
-      logger.debug('Deleted file record', { bucketKey: bucket.key, key: record.key, deletedBy });
-      return { key: record.key };
-    } catch (error) {
-      logger.warn('A file of a batch could not be deleted', {
-        bucketKey: bucket.key,
-        key: record.key,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return { key: record.key, error: describeFailure(error) };
-    }
+    return {
+      deleted: outcomes.filter((outcome) => outcome.error === undefined).map((outcome) => outcome.key),
+      failed: outcomes.flatMap((outcome) => (outcome.error === undefined ? [] : [{ key: outcome.key, error: outcome.error }])),
+    };
   });
-
-  return {
-    deleted: outcomes.filter((outcome) => outcome.error === undefined).map((outcome) => outcome.key),
-    failed: outcomes.flatMap((outcome) => (outcome.error === undefined ? [] : [{ key: outcome.key, error: outcome.error }])),
-  };
 }

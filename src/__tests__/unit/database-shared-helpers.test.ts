@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { clampLimit, clampSkip } from '@/lib/database/provider/paging';
 import { distinctStrings, normalizeBetaAccessCode } from '@/lib/database/provider/normalize';
-import { assertUniqueItemIds, sanitizeLegacyItemIds } from '@/lib/database/provider/evaluationItems';
+import { assertUniqueItemIds } from '@/lib/database/provider/evaluationItems';
 import { isDuplicateKeyError } from '@/lib/database/mongodb/errors';
 import { toIdString, toObjectIdOrThrow } from '@/lib/database/mongodb/docIds';
 
@@ -29,10 +29,6 @@ describe('provider/normalize', () => {
 
 describe('provider/evaluationItems', () => {
   const item = (id?: string) => ({ id } as never);
-  it('sanitizes missing and duplicate ids', () => {
-    const out = sanitizeLegacyItemIds([item('a'), item('a'), item(undefined)]);
-    expect(out.map((i) => i.id)).toEqual(['a', 'a-2', 'item-3']);
-  });
   it('rejects repeated ids', () => {
     expect(() => assertUniqueItemIds([item('a'), item('a')])).toThrow(/already exists/);
     expect(() => assertUniqueItemIds([item('a'), item('b')])).not.toThrow();

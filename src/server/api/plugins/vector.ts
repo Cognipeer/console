@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { providerRegistry } from '@/lib/providers';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
@@ -699,28 +699,29 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-      const maxVectorsTotal = quotaResult.effectiveLimits.quotas?.maxVectorsTotal;
-      if (maxVectorsTotal !== undefined && maxVectorsTotal !== -1) {
-        const currentApprox = await db.getProjectVectorCountApprox(projectId);
-        const projected = currentApprox + vectorCount;
-        if (projected > maxVectorsTotal) {
-          return reply.code(429).send({
-            error: `vectorsTotal limit exceeded (${projected}/${maxVectorsTotal})`,
-          });
+      const { providerKey } = query;
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const maxVectorsTotal = quotaResult.effectiveLimits.quotas?.maxVectorsTotal;
+        if (maxVectorsTotal !== undefined && maxVectorsTotal !== -1) {
+          const currentApprox = await db.getProjectVectorCountApprox(projectId);
+          const projected = currentApprox + vectorCount;
+          if (projected > maxVectorsTotal) {
+            return reply.code(429).send({
+              error: `vectorsTotal limit exceeded (${projected}/${maxVectorsTotal})`,
+            });
+          }
         }
-      }
 
-      await upsertVectors(session.tenantDbName, session.tenantId, projectId, {
-        indexKey: externalId,
-        providerKey: query.providerKey,
-        updatedBy: session.userId,
-        vectors: body.vectors as Array<{ id: string; values: number[] }>,
+        await upsertVectors(session.tenantDbName, session.tenantId, projectId, {
+          indexKey: externalId,
+          providerKey,
+          updatedBy: session.userId,
+          vectors: body.vectors as Array<{ id: string; values: number[] }>,
+        });
+
+        await db.incrementProjectVectorCountApprox(projectId, vectorCount);
+        return reply.code(200).send({ success: true });
       });
-
-      await db.incrementProjectVectorCountApprox(projectId, vectorCount);
-      return reply.code(200).send({ success: true });
     } catch (error) {
       // A storage limit refusal (a platform provider's upsert) answers with its own status and envelope.
       const refused = sendPlanLimitRefusal(reply, error);
@@ -784,11 +785,11 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
         updatedBy: session.userId,
       });
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-      await db.incrementProjectVectorCountApprox(projectId, -ids.length);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        await db.incrementProjectVectorCountApprox(projectId, -ids.length);
 
-      return reply.code(200).send({ success: true });
+        return reply.code(200).send({ success: true });
+      });
     } catch (error) {
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       if (isNotFoundError(error)) {

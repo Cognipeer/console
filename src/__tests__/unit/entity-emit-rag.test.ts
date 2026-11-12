@@ -7,7 +7,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 import type { IRagModule, IRagQueryLog } from '@/lib/database';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 vi.mock('@cognipeer/to-markdown', () => ({ convertToMarkdown: vi.fn() }));
 vi.mock('@/lib/services/models/inferenceService', () => ({
   handleEmbeddingRequest: vi.fn(),

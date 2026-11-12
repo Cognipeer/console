@@ -11,12 +11,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/services/files/fileService', () => ({ downloadFile: vi.fn(), uploadFile: vi.fn() }));
 vi.mock('@/lib/quota/quotaGuard', () => ({ checkRateLimit: mocks.checkRateLimit }));
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(async () => ({
-    switchToTenant: vi.fn(async () => {}),
-    createBatchJob: mocks.createBatchJob,
-  })),
-}));
+vi.mock('@/lib/database', () => {
+  const db = { createBatchJob: mocks.createBatchJob };
+  return {
+    getDatabase: vi.fn(async () => db),
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
+  };
+});
 
 import { createBatch } from '@/lib/services/batch/batchService';
 

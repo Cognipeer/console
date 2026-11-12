@@ -11,13 +11,17 @@ const { createWebSearchRunLog, listWebSearchRunLogsDb } = vi.hoisted(() => ({
   listWebSearchRunLogsDb: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
+vi.mock('@/lib/database', () => {
+  const db = {
     switchToTenant: vi.fn().mockResolvedValue(undefined),
     createWebSearchRunLog,
     listWebSearchRunLogs: listWebSearchRunLogsDb,
-  }),
-}));
+  };
+  return {
+    getDatabase: vi.fn().mockResolvedValue(db),
+    runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(db),
+  };
+});
 
 vi.mock('@/lib/core/asyncTask', () => ({
   // Run inline so assertions see the write synchronously.

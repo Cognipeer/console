@@ -422,7 +422,7 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
     expect(created.webhook).toEqual({
       url: created.webhook.url, preset: 'generic', auth: 'bearer', header_name: null,
       secret, secret_hint: secret.slice(-4), secret_source: 'generated', previous_secret_valid_until: null,
-      events: ['pull_request'], filter: WEBHOOK.filter, include_payload: true, retired: false,
+      events: ['pull_request'], filter: WEBHOOK.filter, include_payload: true,
     });
     expect(['schedule', 'once'].some((key) => key in created)).toBe(false);
     const read = await client('GET', `/${created.id}`);

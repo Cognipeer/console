@@ -1,15 +1,15 @@
 // @vitest-environment jsdom
 /**
- * The project members screen and its permission editor, rendered for real
- * (jsdom). Project levels are enforced now: each service is either Inherit (the
- * member's workspace level stands) or an explicit level, "No access" included.
- * The editor never shows an unset service as "None", shows the member's
- * workspace level next to the choice and saves only what was chosen.
+ * The project permission editor, rendered for real (jsdom). Project levels are
+ * enforced: each service is either Inherit (the member's workspace level stands)
+ * or an explicit level, "No access" included. The editor never shows an unset
+ * service as "None", shows the member's workspace level next to the choice and
+ * saves only what was chosen.
  */
 
-import { act, createElement, Fragment } from 'react';
+import { act, createElement, Fragment, useState } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { Notifications } from '@mantine/notifications';
+import { Notifications, notifications } from '@mantine/notifications';
 import {
   buttonByText,
   click,
@@ -33,7 +33,7 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/dashboard/projects/proj-a',
 }));
 
-import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
+import ProjectPermissionsEditor, { type PermissionsEditorMember } from '@/components/projects/ProjectPermissionsEditor';
 
 let api: ApiMock;
 let mounted: Mounted;
@@ -48,16 +48,6 @@ afterEach(async () => {
 
 // These render whole component trees (jsdom + Mantine); on a busy machine the default 5 s is too tight.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
-
-const ALL = {
-  canAssignMembers: true,
-  canInviteMembers: true,
-  canManagePermissions: true,
-  canManageRoles: true,
-  canRemoveMembers: true,
-  isProjectAdmin: false,
-  isTenantAdmin: true,
-};
 
 const MEMBERS = [
   { userId: 'u-owner', email: 'olive@example.com', name: 'Olive Owner', role: 'owner', projectRole: null, servicePermissions: null, implicit: true },
@@ -85,9 +75,8 @@ const workspaceDetail = (levels: Record<string, string>) => ({
   policies: [],
 });
 
-function routes(extra: Array<[string, string | RegExp, RouteHandler]> = [], capabilities = ALL): Array<[string, string | RegExp, RouteHandler]> {
+function routes(extra: Array<[string, string | RegExp, RouteHandler]> = []): Array<[string, string | RegExp, RouteHandler]> {
   return [
-    ['GET', '/api/projects/proj-a/members', () => ({ capabilities, members: MEMBERS })],
     [
       'GET',
       /^\/api\/iam\/principals\/user\/u-ann$/,
@@ -129,27 +118,46 @@ function routes(extra: Array<[string, string | RegExp, RouteHandler]> = [], capa
   ];
 }
 
-async function render(options: { extra?: Array<[string, string | RegExp, RouteHandler]>; capabilities?: typeof ALL; openMemberId?: string; readOnly?: boolean; locale?: string } = {}) {
-  api = installApiMock(routes(options.extra, options.capabilities));
-  mounted = await mount(
-    createElement(
-      Fragment,
-      null,
-      createElement(Notifications, null),
-      createElement(ProjectMembersManager, { projectId: 'proj-a', openMemberId: options.openMemberId, readOnly: options.readOnly }),
-    ),
-    options.locale ?? 'en',
-  );
-  await settle(200);
+/** Stands in for the screen that opens the editor: it saves through the members API and closes on success. */
+function Harness({ member }: { member: PermissionsEditorMember }) {
+  const [open, setOpen] = useState(true);
+  const [saving, setSaving] = useState(false);
+  if (!open) return null;
+  return createElement(ProjectPermissionsEditor, {
+    member,
+    projectId: 'proj-a',
+    saving,
+    onClose: () => setOpen(false),
+    onSave: (servicePermissions) => {
+      setSaving(true);
+      void fetch('/api/projects/proj-a/members/permissions', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: member.userId, servicePermissions }),
+      }).then(async (res) => {
+        setSaving(false);
+        if (res.ok) setOpen(false);
+        else notifications.show({ color: 'red', message: ((await res.json()) as { error?: string }).error ?? 'failed' });
+      });
+    },
+  });
 }
 
-const rowOf = (name: string) => qa('tr').find((r) => r.textContent?.includes(name))!;
+let locale = 'en';
+
+/** Installs the API answers; the editor of a member opens with `openEditor`. */
+async function render(options: { extra?: Array<[string, string | RegExp, RouteHandler]>; locale?: string } = {}) {
+  api = installApiMock(routes(options.extra));
+  locale = options.locale ?? 'en';
+}
 
 async function openEditor(name: string) {
-  const row = rowOf(name);
-  const buttons = qa<HTMLButtonElement>('button', row);
-  await click(buttons[buttons.length - 1]);
-  await click(qa('[role="menuitem"]').find((m) => m.textContent === 'Project service permissions'));
+  await mounted?.unmount();
+  const member = MEMBERS.find((m) => m.name === name)!;
+  mounted = await mount(
+    createElement(Fragment, null, createElement(Notifications, null), createElement(Harness, { member: member as unknown as PermissionsEditorMember, key: member.userId })),
+    locale,
+  );
   await settle(250);
 }
 
@@ -161,44 +169,6 @@ async function choose(serviceId: string, choice: 'inherit' | 'none' | 'read' | '
   expect(radio, `${serviceId} ${choice}`).toBeTruthy();
   await click(radio);
 }
-
-describe('the members table', () => {
-  it('says what a project limits for each member, in plain words', async () => {
-    await render();
-    const cell = (name: string) => rowOf(name).textContent ?? '';
-    // workspace owners and admins are never limited by a project
-    expect(cell('Olive Owner')).toContain('Inherited from workspace role');
-    expect(cell('Ann Lee')).toContain('2 project limits');
-    // an old "No access" the engine ignores is not a limit; the real one is
-    expect(cell('Bob Ray')).toContain('Prompt Studio: No access');
-    expect(cell('Bob Ray')).not.toContain('Agent Tools');
-    // nothing stored: the workspace level stands
-    expect(cell('Cy Dunn')).toContain('Same as the workspace level');
-    // columns speak of the workspace, not the tenant
-    const headers = qa('th').map((h) => h.textContent?.trim());
-    expect(headers).toEqual(expect.arrayContaining(['Member', 'Workspace role', 'Project role', 'Project limits']));
-    expect(text()).not.toMatch(/Tenant/);
-  });
-
-  it('never offers the permission editor for a workspace owner or admin, whoever is looking', async () => {
-    await render();
-    // an owner is not limited by projects: no row menu at all
-    expect(qa<HTMLButtonElement>('button', rowOf('Olive Owner'))).toHaveLength(0);
-    // an ordinary member has the menu, with the editor in it
-    const row = rowOf('Ann Lee');
-    const buttons = qa<HTMLButtonElement>('button', row);
-    await click(buttons[buttons.length - 1]);
-    expect(qa('[role="menuitem"]').map((m) => m.textContent)).toContain('Project service permissions');
-  });
-
-  it('only offers the permission editor to people who may edit permissions', async () => {
-    await render({ capabilities: { ...ALL, canManagePermissions: false } });
-    const row = rowOf('Ann Lee');
-    const buttons = qa<HTMLButtonElement>('button', row);
-    await click(buttons[buttons.length - 1]);
-    expect(qa('[role="menuitem"]').map((m) => m.textContent)).not.toContain('Project service permissions');
-  });
-});
 
 describe('the permission editor', () => {
   it('is a full-screen form with a choice per service: Inherit, No access, Read, Write, Admin', async () => {
@@ -254,9 +224,8 @@ describe('the permission editor', () => {
     const patches = api.to('PATCH', '/api/projects/proj-a/members/permissions');
     expect(patches).toHaveLength(1);
     expect(patches[0].body).toEqual({ userId: 'u-ann', servicePermissions: { agents: 'none', tools: 'write' } });
-    // the editor closed and the list was reloaded
+    // the editor closed
     expect(q('.form-overlay')).toBeNull();
-    expect(api.to('GET', '/api/projects/proj-a/members').length).toBeGreaterThan(1);
   });
 
   it('a service touched and put back to Inherit saves as nothing, not as an explicit "No access"', async () => {
@@ -480,42 +449,10 @@ describe('a "No access" saved before project levels were enforced', () => {
   });
 });
 
-describe('the deep link of an access check', () => {
-  it('opens the editor of that member as soon as the list has loaded', async () => {
-    await render({ openMemberId: 'u-ann' });
-    await settle(250);
-    expect(q('.form-overlay')!.textContent).toContain('Project permissions: Ann Lee');
-  });
-
-  it('does not open an editor for a member who cannot be edited, or when the person may not edit', async () => {
-    await render({ openMemberId: 'u-owner' });
-    expect(q('.form-overlay')).toBeNull();
-    await mounted.unmount();
-    await render({ openMemberId: 'u-ann', capabilities: { ...ALL, canManagePermissions: false } });
-    expect(q('.form-overlay')).toBeNull();
-  });
-
-  it('opens only once: closing it leaves it closed', async () => {
-    await render({ openMemberId: 'u-ann' });
-    await settle(250);
-    await click(buttonByText('Cancel', q('.form-footer')!));
-    await settle(80);
-    expect(q('.form-overlay')).toBeNull();
-  });
-});
-
 describe('Turkish', () => {
-  it('renders the table and the editor in Turkish with no raw translation keys', async () => {
+  it('renders the editor in Turkish with no raw translation keys', async () => {
     await render({ locale: 'tr' });
-    expect(text()).toContain('Çalışma alanı rolü');
-    expect(text()).toContain('Proje sınırları');
-    expect(rowOf('Ann Lee').textContent).toContain('2 proje sınırı');
-    expect(rowOf('Cy Dunn').textContent).toContain('Çalışma alanı düzeyiyle aynı');
-    const row = rowOf('Ann Lee');
-    const buttons = qa<HTMLButtonElement>('button', row);
-    await click(buttons[buttons.length - 1]);
-    await click(qa('[role="menuitem"]').find((m) => m.textContent === 'Proje servis izinleri'));
-    await settle(250);
+    await openEditor('Ann Lee');
     const overlay = q('.form-overlay')!.textContent ?? '';
     expect(overlay).toContain('Proje izinleri: Ann Lee');
     expect(overlay).toContain('Proje düzeyleri uygulanır');

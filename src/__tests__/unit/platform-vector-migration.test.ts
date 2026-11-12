@@ -14,7 +14,10 @@ const h = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: async () => h.db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => h.db,
+  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(h.db),
+}));
 vi.mock('@/lib/services/vector/vectorMigrationJob', () => ({
   enqueueVectorMigration: vi.fn(),
   requestVectorMigrationCancel: vi.fn(),

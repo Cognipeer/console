@@ -6,13 +6,17 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
+vi.mock('@/lib/database', () => {
+  const db = {
     switchToTenant: vi.fn().mockResolvedValue(undefined),
     createWebSearchRunLog: vi.fn(),
     listWebSearchRunLogs: vi.fn(),
-  }),
-}));
+  };
+  return {
+    getDatabase: vi.fn().mockResolvedValue(db),
+    runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(db),
+  };
+});
 vi.mock('@/lib/core/asyncTask', () => ({ fireAndForget: vi.fn() }));
 vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: vi.fn(() => ({})) }));
 vi.mock('@/lib/services/providers/providerService', () => ({
